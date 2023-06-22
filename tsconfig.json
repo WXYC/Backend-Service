@@ -2,16 +2,16 @@
   "display": "Node LTS",
 
   "compilerOptions": {
-    "outDir": "./build",
+    "outDir": "dist",
     "lib": ["es2022"],
-    "module": "node16",
+    "module": "commonjs",
     "target": "es2022",
     "strict": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "moduleResolution": "node16",
+    "moduleResolution": "node",
     "typeRoots": ["node_modules/@types"]
   },
   "include": ["src"],

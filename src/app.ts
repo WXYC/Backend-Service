@@ -1,15 +1,15 @@
-import { thingy } from './thing.js';
-import fetch, { Response as Fetch_Response } from 'node-fetch';
+//import { thingy } from './thing.js';
+//import fetch, { Response as Fetch_Response } from 'node-fetch';
 import express from 'express';
 
-const res: Fetch_Response = await fetch('https://cat-fact.herokuapp.com/facts');
+//const res: Fetch_Response = await fetch('https://cat-fact.herokuapp.com/facts');
 
-if (res.ok) {
-  const data = await res.json();
-  console.log(data);
-}
+// if (res.ok) {
+//   const data = await res.json();
+//   console.log(data);
+// }
 
-thingy();
+//thingy();
 
 const app = express();
 const port = 3000;

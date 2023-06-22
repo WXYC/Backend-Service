@@ -1,11 +1,10 @@
 {
   "name": "playlist_api",
-  "type": "module",
   "version": "1.0.0",
   "description": "An API service for the flowsheet database of WXYC",
   "main": "./build/app.js",
   "scripts": {
-    "start": "tsc && node build/app.js",
+    "start": "tsc && node dist/app.js",
     "dev": "nodemon -w src -e ts --exec \"npm run start\"",
     "lint": "eslint . --ext .ts",
     "test": "echo \"no tests specified\""
