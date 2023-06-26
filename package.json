@@ -1,13 +1,16 @@
 {
   "name": "playlist_api",
+  "type": "module",
   "version": "1.0.0",
   "description": "An API service for the flowsheet database of WXYC",
   "main": "./build/app.js",
   "scripts": {
-    "start": "tsc && node dist/app.js",
+    "start": "tsc && node dist/src/app.js",
     "dev": "nodemon -w src -e ts --exec \"npm run start\"",
     "lint": "eslint . --ext .ts",
-    "test": "echo \"no tests specified\""
+    "test": "echo \"no tests specified\"",
+    "generate": "drizzle-kit generate:pg --schema ./drizzle/schema.ts --out ./drizzle/migrations",
+    "migrate": "node drizzle/migration_script.js"
   },
   "author": "AyBruno",
   "license": "ISC",
@@ -17,6 +20,7 @@
     "@types/node-fetch": "^2.6.4",
     "@typescript-eslint/eslint-plugin": "^5.59.9",
     "@typescript-eslint/parser": "^5.59.9",
+    "drizzle-kit": "^0.19.2",
     "eslint": "^8.42.0",
     "eslint-config-prettier": "^8.8.0",
     "eslint-plugin-prettier": "^4.2.1",
@@ -25,8 +29,11 @@
     "ts-node": "^10.9.1"
   },
   "dependencies": {
+    "dotenv": "^16.3.1",
+    "drizzle-orm": "^0.27.0",
     "express": "^4.18.2",
     "node-fetch": "^3.3.1",
+    "postgres": "^3.3.5",
     "typescript": "^5.0.4"
   }
 }
