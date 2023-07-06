@@ -1,0 +1,1 @@
+ALTER TABLE "wxyc_schema"."schedule" ADD COLUMN "id" serial NOT NULL;
