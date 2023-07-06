@@ -1,19 +1,14 @@
 {
-  "display": "Node LTS",
-
   "compilerOptions": {
     "outDir": "dist",
-    "lib": ["es2022"],
-    "module": "es2022",
-    "target": "es2022",
-    "strict": true,
+    "lib": ["ES2022"],
+    "module": "CommonJS",
+    "target": "ES2022",
+    "moduleResolution": "Node",
     "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "moduleResolution": "node",
-    "typeRoots": ["node_modules/@types"]
+    "strict": true
   },
-  "include": ["src", "drizzle"],
-  "exclude": ["node_modules", "drizzle/migrations"]
+  "exclude": ["./node_modules", "**/node_modules/*"],
+  "include": ["./src"]
 }
