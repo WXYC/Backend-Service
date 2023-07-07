@@ -127,8 +127,8 @@ export const rotation = wxyc_schema.table('rotation', {
   is_active: boolean('is_active').notNull(),
 });
 
-export type newTrack = InferModel<typeof flowsheet, 'insert'>;
-export type Track = InferModel<typeof flowsheet, 'select'>;
+export type NewFSEntry = InferModel<typeof flowsheet, 'insert'>;
+export type FSEntry = InferModel<typeof flowsheet, 'select'>;
 export const flowsheet = wxyc_schema.table('flowsheet', {
   id: serial('id').primaryKey(),
   show_id: integer('show_id')

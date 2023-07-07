@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import * as djsController from '../contollers/djs.controller';
+import * as djsController from '../controllers/djs.controller';
 
 export const dj_route = Router();
 

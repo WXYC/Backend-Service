@@ -1,6 +1,6 @@
 import { RequestHandler } from 'express';
-import { insertNewDJ, getDJInfo, DJQueryParams } from '../services/djs_service';
-import { DJ, NewDJ, djs } from '../db/schema';
+import { insertNewDJ, getDJInfo, DJQueryParams } from '../services/djs.service';
+import { DJ, NewDJ } from '../db/schema';
 
 export const register: RequestHandler = async (req, res, next) => {
   console.log('registering new user');
@@ -36,35 +36,18 @@ export const info: RequestHandler = async (req, res, next) => {
   console.log(query);
   try {
     const dj_info: DJ[] = await getDJInfo(query);
-
-    console.log(dj_info[0]);
-    res.status(200);
-    res.send(dj_info);
+    if (dj_info.length) {
+      console.log(dj_info[0]);
+      res.status(200);
+      res.send(dj_info);
+    } else {
+      console.error('DJ not found');
+      res.status(404);
+      res.send('DJ not found');
+    }
   } catch (e) {
     console.error('Error, looking up DJ');
     console.error(`Error: ${e}`);
     next(e);
   }
-
-  //   try {
-  //    // getDJInfo()
-  //     // const dj_info: DJ[] = await db
-  //     //   .select()
-  //     //   .from(djs)
-  //     //   .where(sql`lower(${djs.dj_name}) = lower(${req.params.dj_name})`);
-  //     // if (dj_info.length) {
-  //     //   console.log(dj_info);
-  //     //   res.status(200);
-  //     //   res.json(dj_info);
-  //     // } else {
-  //     //   console.log('DJ not found');
-  //     //   res.status(404);
-  //     //   res.send('DJ not found');
-  //     // }
-  //   } catch (e) {
-  //     console.error('Failed to fetch DJ info');
-  //     console.error(e);
-  //     res.status(500);
-  //     res.send('Failed to fetch DJ info');
-  //   }
 };
