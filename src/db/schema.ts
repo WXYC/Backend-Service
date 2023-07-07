@@ -1,7 +1,6 @@
 import { InferModel } from 'drizzle-orm';
 import {
   pgSchema,
-  pgTable,
   integer,
   smallint,
   varchar,
