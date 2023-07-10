@@ -21,7 +21,7 @@ export const get: RequestHandler = async (req, res, next) => {
       if (tracks.length) {
         console.log(tracks);
         res.status(200);
-        res.json(latest);
+        res.json(tracks);
       } else {
         console.error('No Tracks found');
         res.status(404);
@@ -38,7 +38,7 @@ export const get: RequestHandler = async (req, res, next) => {
   }
 };
 
-export const latest: RequestHandler = async (req, res, next) => {
+export const getLatest: RequestHandler = async (req, res, next) => {
   try {
     const latest: FSEntry[] = await getTracks(0, 1);
     if (latest.length) {
@@ -57,4 +57,13 @@ export const latest: RequestHandler = async (req, res, next) => {
   }
 };
 
-export const add_entry: RequestHandler = async (req, res, next) => {};
+export const add_entry: RequestHandler = async (req, res, next) => {
+  //check for things that MUST be sent by the client
+  if (!(req.body.show_id && req.body.rotation_id && req.body.track_title)) {
+    console.error('Missing required entry parameters parameters');
+    res.status(400);
+    res.send('Missing required entry parameters: show_id, rotation_id, or track_title');
+  } else {
+    res.send('placeholder');
+  }
+};
