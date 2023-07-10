@@ -1,8 +1,8 @@
 {
-  "name": "playlist_api",
+  "name": "wxyc_backend",
   "version": "1.0.0",
   "description": "An API service for the flowsheet database of WXYC",
-  "main": "./build/app.js",
+  "main": "./dist/app.js",
   "scripts": {
     "start": "tsc && node dist/app.js",
     "dev": "nodemon -w src -e ts --exec \"npm run start\"",
