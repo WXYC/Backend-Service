@@ -1,5 +1,5 @@
 import { RequestHandler } from 'express';
-import { insertNewDJ, getDJInfo, DJQueryParams } from '../services/djs.service';
+import { insertDJ, getDJInfo, DJQueryParams } from '../services/djs.service';
 import { DJ, NewDJ } from '../db/schema';
 
 export const register: RequestHandler = async (req, res, next) => {
@@ -17,15 +17,15 @@ export const register: RequestHandler = async (req, res, next) => {
     };
 
     try {
-      const dj_obj = await insertNewDJ(new_dj);
+      const dj_obj = await insertDJ(new_dj);
       res.status(200);
       res.json(dj_obj);
     } catch (e) {
       console.error(`Failed To Create DJ`);
       console.error(`Error: ${e}`);
       next(e);
-      //   res.status(500);
-      //   res.send('Failed to create DJ');
+      // res.status(500);
+      // res.send('Server Error: Failed to create DJ');
     }
   }
   console.log('----------------------------');
@@ -46,8 +46,10 @@ export const info: RequestHandler = async (req, res, next) => {
       res.send('DJ not found');
     }
   } catch (e) {
-    console.error('Error, looking up DJ');
+    console.error('Error looking up DJ');
     console.error(`Error: ${e}`);
     next(e);
+    // res.status(500);
+    // res.send('Server Error: DJ Lookup Failed');
   }
 };

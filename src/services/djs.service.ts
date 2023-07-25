@@ -2,7 +2,7 @@ import { db } from '../db/drizzle_client';
 import { NewDJ, DJ, djs } from '../db/schema';
 import { sql } from 'drizzle-orm';
 
-export const insertNewDJ = async (new_dj: NewDJ) => {
+export const insertDJ = async (new_dj: NewDJ) => {
   const response = await db.insert(djs).values(new_dj).returning();
   return response[0];
 };
@@ -35,7 +35,7 @@ export const getDJInfo = async (items: DJQueryParams) /*:Promise<schema.DJ>*/ =>
 
   console.log(query_value);
   console.log('------------------------');
-
+  console.log(typeof query_value);
   const dj_obj: DJ[] = await db
     .select()
     .from(djs)
