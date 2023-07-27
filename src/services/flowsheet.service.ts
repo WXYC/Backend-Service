@@ -17,5 +17,5 @@ export const getTracks = async (offset: number, limit: number) => {
 export const addTrack = async (entry: NewFSEntry) => {
   const response = await db.insert(flowsheet).values(entry);
   console.log(response);
-  //return response;
+  return response;
 };
