@@ -73,6 +73,7 @@ export const artists = wxyc_schema.table(
       artistNameTrgmIdx: index('artist_name_trgm_idx')
         .on(table.artist_name)
         .using(sql`gin (${table.artist_name} gin_trgm_ops)`),
+      codeLettersIdx: index('code_letters_idx').on(table.code_letters),
     };
   }
 );
