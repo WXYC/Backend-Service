@@ -9,7 +9,7 @@ export const insertAlbum = async (new_album: NewAlbum) => {
 
 //based on artist name and album title, retrieve n best matches from db
 //let's build the where statement using drizzle's sql object
-export const fuzzySearch = async (artist_name?: string, album_title?: string, n = 5) => {
+export const fuzzySearchLibrary = async (artist_name?: string, album_title?: string, n = 5) => {
   const query = sql`SELECT *, 
                     similarity(${library_artist_view.artist_name}, ${artist_name || ''}) AS artist_sml,
                     similarity(${library_artist_view.album_title}, ${album_title || ''}) AS album_sml
@@ -78,4 +78,19 @@ export const generateAlbumCodeNumber = async (artist_id: number): Promise<number
     code_number = response[0].code_number + 1; //otherwise we increment on the last value
   }
   return code_number;
+};
+
+export const generateArtistNumber = async (code_letters: string): Promise<number> => {
+  const response = await db
+    .select({ code_artist_number: artists.code_artist_number })
+    .from(artists)
+    .where(sql`${artists.code_artist_number} = ${code_letters}`)
+    .orderBy(({ code_artist_number }) => desc(code_artist_number))
+    .limit(1);
+
+  let code_artist_number = 1;
+  if (response.length) {
+    code_artist_number = response[0].code_artist_number + 1; //otherwise we increment on the last value
+  }
+  return code_artist_number;
 };

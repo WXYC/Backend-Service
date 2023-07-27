@@ -1,5 +1,5 @@
 import { RequestHandler, Request } from 'express';
-import { NewAlbum, Album, NewArtist } from '../db/schema';
+import { NewAlbum, Album, NewArtist, Artist } from '../db/schema';
 import * as libraryService from '../services/library.service';
 
 type NewAlbumRequest = {
@@ -39,31 +39,29 @@ export const post: RequestHandler = async (req: Request<object, object, NewAlbum
       res.send("Artist doesn't exist. Add a new artist to the library");
     } else {
       try {
-        const code_number = await libraryService.generateAlbumCodeNumber(artist_id);
         const new_album: NewAlbum = {
           artist_id: artist_id,
           genre_id: body.genre_id,
           format_id: body.format_id,
           album_title: body.album_title,
           label: body.label,
-          code_number: code_number,
+          code_number: await libraryService.generateAlbumCodeNumber(artist_id),
           alternate_artist_name: body.alternate_artist_name,
           disc_quantity: body.disc_quantity,
         };
-        const inserted_album = await libraryService.insertAlbum(new_album);
+        const inserted_album: Album = await libraryService.insertAlbum(new_album);
         res.status(200);
         res.json(inserted_album);
       } catch (e) {
         console.error('Error: Could not insert new album');
         console.error(e);
-        res.status(500);
-        res.send(e);
+        next(e);
       }
     }
   }
 };
 
-type LibraryQueryParams = {
+type AlbumQueryParams = {
   artist_name?: string;
   album_title?: string;
   code_letters?: string;
@@ -73,7 +71,7 @@ type LibraryQueryParams = {
   page?: number;
 };
 
-export const get: RequestHandler = async (req: Request<object, object, object, LibraryQueryParams>, res, next) => {
+export const get: RequestHandler = async (req: Request<object, object, object, AlbumQueryParams>, res, next) => {
   const { query } = req;
   if (
     query.artist_name === undefined &&
@@ -89,8 +87,40 @@ export const get: RequestHandler = async (req: Request<object, object, object, L
     res.status(501);
     res.send('todo');
   } else {
-    const response = await libraryService.fuzzySearch(query.artist_name, query.album_title, query.n);
-    console.log(response);
-    res.json(response);
+    try {
+      const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n);
+      console.log(response);
+      res.json(response);
+    } catch (e) {
+      console.log("Error: Couldn't get album");
+      console.log(e);
+      next(e);
+    }
+  }
+};
+
+type NewArtistRequest = {
+  artist_name: string;
+  code_letters: string;
+};
+export const add_artist: RequestHandler = async (req: Request<object, object, NewArtistRequest>, res, next) => {
+  const { body } = req;
+  //TODO auto_generate artist code letters and make it an optional parameter
+  if (body.artist_name === undefined || body.code_letters === undefined) {
+    res.status(400);
+    res.send('Missing Request Parameters: artist_name or code_letters');
+  } else {
+    try {
+      const new_artist: NewArtist = {
+        artist_name: body.artist_name,
+        code_letters: body.code_letters,
+        code_artist_number: await libraryService.generateArtistNumber(body.code_letters),
+      };
+      const response: Artist = await libraryService.insertArtist(new_artist);
+      res.status(200);
+      res.send(response);
+    } catch (e) {
+      next(e);
+    }
   }
 };
