@@ -20,7 +20,11 @@ export const addTrack = async (entry: NewFSEntry) => {
   return response;
 };
 
-export const join_show = async (req_dj_id: number, req_show_name?: string, req_specialty_id?: number): Show => {
+export const join_show = async (
+  req_dj_id: number,
+  req_show_name?: string,
+  req_specialty_id?: number
+): Promise<Show> => {
   const current_show = (await db.select().from(shows).orderBy(desc(shows.id)).limit(1))[0];
   console.log(current_show);
 
