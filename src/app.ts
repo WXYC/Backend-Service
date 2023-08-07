@@ -5,7 +5,7 @@ import { dj_route } from './routes/djs.route';
 import { flowsheet_route } from './routes/flowsheet.route';
 import { library_route } from './routes/library.route';
 
-const port = process.env.PORT;
+const port = process.env.PORT || 8080;
 const app = express();
 app.use(express.json());
 
