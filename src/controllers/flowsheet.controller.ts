@@ -1,6 +1,6 @@
 import { Request, RequestHandler } from 'express';
 import { NewFSEntry, FSEntry } from '../db/schema';
-import { getTracks /*addTrack*/ } from '../services/flowsheet.service';
+import * as flowsheet_service from '../services/flowsheet.service';
 
 type QueryParams = {
   page: number;
@@ -17,7 +17,7 @@ export const get: RequestHandler = async (req, res, next) => {
     const limit = query.limit;
 
     try {
-      const tracks: FSEntry[] = await getTracks(offset, limit);
+      const tracks: FSEntry[] = await flowsheet_service.getTracks(offset, limit);
       if (tracks.length) {
         console.log(tracks);
         res.status(200);
@@ -40,7 +40,7 @@ export const get: RequestHandler = async (req, res, next) => {
 
 export const getLatest: RequestHandler = async (req, res, next) => {
   try {
-    const latest: FSEntry[] = await getTracks(0, 1);
+    const latest: FSEntry[] = await flowsheet_service.getTracks(0, 1);
     if (latest.length) {
       console.log(latest[0]);
       res.status(200);
@@ -67,7 +67,7 @@ export type FSEntryRequestBody = {
   requst_flag?: boolean;
 };
 
-//either an id is provided (meaning it came from the user's bin or was fuzzy found)
+// either an id is provided (meaning it came from the user's bin or was fuzzy found)
 // or it's not provided in which case whe just throw the data provided into the table w/ album_id 0
 export const add_entry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res, next) => {
   //check for things that MUST be sent by the client
@@ -92,8 +92,25 @@ export const add_entry: RequestHandler = async (req: Request<object, object, FSE
   res.send('TODO');
 };
 
-/*Minimum info:
-Always: show_id, rotation_id, track_title
-Sometimes: request_flag
-Album_identifier: rotation_id, album_id, or (album_title & artist_name)
-*/
+export type JoinRequestBody = {
+  dj_id: number;
+  show_name?: string;
+  specialty_id?: number;
+};
+
+//POST
+export const join_show: RequestHandler = async (req: Request<object, object, JoinRequestBody>, res, next) => {
+  if (req.body.dj_id === undefined) {
+    res.status(400).send('Error: Must include a dj_id to join show');
+  } else {
+    try {
+      const show_session = flowsheet_service.join_show(req.body.dj_id, req.body.show_name, req.body.specialty_id);
+      res.status(200);
+      res.json(show_session);
+    } catch (e) {
+      console.error('--------------------------------');
+      console.error(e);
+      next(e);
+    }
+  }
+};
