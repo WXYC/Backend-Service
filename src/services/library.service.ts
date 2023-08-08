@@ -1,6 +1,10 @@
 import { desc, eq, sql } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
-import { NewAlbum, NewArtist, library, artists, library_artist_view } from '../db/schema';
+import { NewAlbum, NewArtist, library, artists, library_artist_view, rotation } from '../db/schema';
+
+// export const getRotationFromDB = async () => {
+//   const albums = db.select().from(rotation).where(eq(rotation.is_active, true));
+// };
 
 export const insertAlbum = async (new_album: NewAlbum) => {
   const response = await db.insert(library).values(new_album).returning();
