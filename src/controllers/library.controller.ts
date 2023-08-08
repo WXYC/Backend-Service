@@ -132,7 +132,7 @@ export const getRotation: RequestHandler = (req, res, next) => {
 
 export const getFormats: RequestHandler = async (req, res, next) => {
   try {
-    const formats = libraryService.getFormatsFromDB();
+    const formats = await libraryService.getFormatsFromDB();
     res.status(200).json(formats);
   } catch (e) {
     console.error('Error retrieving formats from DB');
