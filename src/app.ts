@@ -9,6 +9,12 @@ const port = process.env.PORT || 8080;
 const app = express();
 app.use(express.json());
 
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  next();
+});
+
 /* TODO
 -Accept jwt and verify that user is part of mgmt.
 -Use cognito api to update user store as well.
