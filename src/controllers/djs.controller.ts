@@ -1,5 +1,5 @@
 import { RequestHandler } from 'express';
-import { insertDJ, getDJInfo, DJQueryParams } from '../services/djs.service';
+import * as DJService from '../services/djs.service';
 import { DJ, NewDJ } from '../db/schema';
 
 export const register: RequestHandler = async (req, res, next) => {
@@ -17,7 +17,7 @@ export const register: RequestHandler = async (req, res, next) => {
     };
 
     try {
-      const dj_obj = await insertDJ(new_dj);
+      const dj_obj = await DJService.insertDJ(new_dj);
       res.status(200);
       res.json(dj_obj);
     } catch (e) {
@@ -31,25 +31,50 @@ export const register: RequestHandler = async (req, res, next) => {
   console.log('----------------------------');
 };
 
-export const info: RequestHandler = async (req, res, next) => {
-  const query = req.query as unknown as DJQueryParams;
-  console.log(query);
+export type DJQueryParams = {
+  id: number;
+  email: string;
+  dj_name: string;
+  real_name: string;
+};
+
+export const info: RequestHandler<object, unknown, object, DJQueryParams> = async (req, res, next) => {
+  const query = req.query;
   try {
-    const dj_info: DJ[] = await getDJInfo(query);
+    const dj_info: DJ[] = await DJService.getDJInfo(query);
     if (dj_info.length) {
       console.log(dj_info[0]);
       res.status(200);
       res.send(dj_info);
     } else {
       console.error('DJ not found');
-      res.status(404);
-      res.send('DJ not found');
+      res.status(404).send('DJ not found');
     }
   } catch (e) {
     console.error('Error looking up DJ');
     console.error(`Error: ${e}`);
     next(e);
-    // res.status(500);
-    // res.send('Server Error: DJ Lookup Failed');
   }
 };
+
+export type binQueryString = {
+  method: string;
+};
+
+export type binBody = {
+  dj_id: number;
+  album_id: number;
+  song_title?: string;
+};
+
+export const binUpdater: RequestHandler<object, unknown, object, binQueryString, binBody> = async (req, res, next) => {
+  if (req.query.method === 'remove') {
+    console.log('todo');
+  } else {
+    //assume we're adding an album/song to bin
+    console.log('todo');
+  }
+  res.status(501).send('todo');
+};
+
+// export const getBin: RequestHandler = async

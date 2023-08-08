@@ -1,17 +1,11 @@
 import { db } from '../db/drizzle_client';
 import { NewDJ, DJ, djs } from '../db/schema';
 import { sql } from 'drizzle-orm';
+import { DJQueryParams } from '../controllers/djs.controller';
 
 export const insertDJ = async (new_dj: NewDJ) => {
   const response = await db.insert(djs).values(new_dj).returning();
   return response[0];
-};
-
-export type DJQueryParams = {
-  id: number;
-  email: string;
-  dj_name: string;
-  real_name: string;
 };
 
 export const getDJInfo = async (items: DJQueryParams) /*:Promise<schema.DJ>*/ => {
