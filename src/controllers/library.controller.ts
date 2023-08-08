@@ -103,6 +103,7 @@ type NewArtistRequest = {
   artist_name: string;
   code_letters: string;
 };
+
 export const addArtist: RequestHandler = async (req: Request<object, object, NewArtistRequest>, res, next) => {
   const { body } = req;
   //TODO auto_generate artist code letters and make it an optional parameter
@@ -129,10 +130,12 @@ export const getRotation: RequestHandler = (req, res, next) => {
   res.status(501).send('todo');
 };
 
-export const addToBin: RequestHandler = (req, res, next) => {
-  res.status(501).send('todo');
-};
-
-export const removeFromBin: RequestHandler = (req, res, next) => {
-  res.status(501).send('todo');
+export const getFormats: RequestHandler = async (req, res, next) => {
+  try {
+    const formats = libraryService.getFormatsFromDB();
+    res.status(200).json(formats);
+  } catch (e) {
+    console.error('Error retrieving formats from DB');
+    next(e);
+  }
 };
