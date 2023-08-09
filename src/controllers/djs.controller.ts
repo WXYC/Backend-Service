@@ -1,6 +1,6 @@
 import { RequestHandler } from 'express';
 import * as DJService from '../services/djs.service';
-import { DJ, NewDJ } from '../db/schema';
+import { DJ, NewDJ, NewBinEntry } from '../db/schema';
 
 export const register: RequestHandler = async (req, res, next) => {
   console.log('registering new user');
@@ -18,8 +18,7 @@ export const register: RequestHandler = async (req, res, next) => {
 
     try {
       const dj_obj = await DJService.insertDJ(new_dj);
-      res.status(200);
-      res.json(dj_obj);
+      res.status(200).json(dj_obj);
     } catch (e) {
       console.error(`Failed To Create DJ`);
       console.error(`Error: ${e}`);
@@ -28,7 +27,6 @@ export const register: RequestHandler = async (req, res, next) => {
       // res.send('Server Error: Failed to create DJ');
     }
   }
-  console.log('----------------------------');
 };
 
 export type DJQueryParams = {
@@ -57,24 +55,50 @@ export const info: RequestHandler<object, unknown, object, DJQueryParams> = asyn
   }
 };
 
-export type binQueryString = {
-  method: string;
-};
-
-export type binBody = {
+export type binQuery = {
   dj_id: number;
-  album_id: number;
-  song_title?: string;
+  bin_entry_id?: number;
+  album_id?: number;
+  track_title?: string;
 };
 
-export const binUpdater: RequestHandler<object, unknown, object, binQueryString, binBody> = async (req, res, next) => {
-  if (req.query.method === 'remove') {
-    console.log('todo');
+export const addToBin: RequestHandler<object, unknown, object, binQuery> = async (req, res, next) => {
+  if (req.query.album_id === undefined || req.query.dj_id === undefined) {
+    console.error('Error Missing Album Identifier: album_id');
+    res.send(400).send('Error Missing DJ or album identifier: dj_id or album_id');
   } else {
-    //assume we're adding an album/song to bin
-    console.log('todo');
+    const bin_entry: NewBinEntry = {
+      dj_id: req.query.dj_id,
+      album_id: req.query.album_id,
+      track_title: req.query.track_title === undefined ? null : req.query.track_title,
+    };
+    try {
+      const added_bin_item = await DJService.addToBin(bin_entry);
+      res.status(200).json(added_bin_item);
+    } catch (e) {
+      console.error('Server error: Failed to insert into bin');
+      console.error(e);
+      next(e);
+    }
   }
-  res.status(501).send('todo');
 };
 
-// export const getBin: RequestHandler = async
+export const deleteFromBin: RequestHandler<object, unknown, object, binQuery> = async (req, res, next) => {
+  if (req.query.bin_entry_id === undefined || req.query.dj_id) {
+    console.error('Error, Missing Bin Entry Identifier: bin_entry_id');
+    res.send(400).send('Error, Missing Bin Entry Identifier: bin_entry_id');
+  } else {
+    try {
+      //check that the dj_id === dj_id of bin entry
+      const removed_bin_item = await DJService.removeFromBin(req.query.bin_entry_id, req.query.dj_id);
+      res.send(200).json(removed_bin_item);
+    } catch (e) {
+      console.error(e);
+      next(e);
+    }
+  }
+};
+
+export const getBin: RequestHandler = async (req, res, next) => {
+  res.send('todo');
+};
