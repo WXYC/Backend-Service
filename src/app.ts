@@ -7,6 +7,7 @@ import { library_route } from './routes/library.route';
 
 const port = process.env.PORT || 8080;
 const app = express();
+
 app.use(express.json());
 
 app.use((req, res, next) => {
@@ -20,6 +21,8 @@ app.use((req, res, next) => {
 -Use cognito api to update user store as well.
 */
 
+//the '/playlist' route is for backward compatibility with the old api
+app.use('/playlist', flowsheet_route);
 app.use('/flowsheet', flowsheet_route);
 
 app.use('/djs', dj_route);
