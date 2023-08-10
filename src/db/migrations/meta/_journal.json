@@ -22,6 +22,20 @@
       "when": 1690319148223,
       "tag": "0002_glossy_satana",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1691528003949,
+      "tag": "0003_real_nico_minoru",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1691621609255,
+      "tag": "0004_thin_alice",
+      "breakpoints": true
     }
   ]
 }
