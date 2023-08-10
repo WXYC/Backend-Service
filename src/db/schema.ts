@@ -62,6 +62,9 @@ export const artists = wxyc_schema.table(
   'artists',
   {
     id: serial('id').primaryKey(),
+    genre_id: integer('genre_id')
+      .references(() => genres.id)
+      .notNull(),
     artist_name: varchar('artist_name', { length: 128 }).notNull(),
     code_letters: varchar('code_letters', { length: 2 }).notNull(),
     code_artist_number: smallint('code_artist_number').notNull(),
@@ -190,6 +193,7 @@ export const bins = wxyc_schema.table('bins', {
   album_id: integer('album_id')
     .references(() => library.id)
     .notNull(),
+  track_title: varchar('track_title', { length: 128 }),
 });
 
 export type NewShow = InferModel<typeof shows, 'insert'>;

@@ -17,8 +17,8 @@ type NewAlbumRequest = {
 //If not, add the artist (TODO: do this automatically).
 //Add new album to library
 
-export const post: RequestHandler = async (req: Request<object, object, NewAlbumRequest>, res, next) => {
-  const body = req.body;
+export const addAlbum: RequestHandler = async (req: Request<object, object, NewAlbumRequest>, res, next) => {
+  const { body } = req;
   if (
     body.album_title === undefined ||
     body.label === undefined ||
@@ -31,12 +31,19 @@ export const post: RequestHandler = async (req: Request<object, object, NewAlbum
   } else {
     let artist_id = body.artist_id;
     if (artist_id === undefined && body.artist_name !== undefined) {
-      artist_id = await libraryService.artistIdFromName(body.artist_name);
+      try {
+        artist_id = await libraryService.artistIdFromName(body.artist_name, body.genre_id);
+      } catch (e) {
+        console.error('Error: Failed to get artist_id from name');
+        console.error(e);
+        next(e);
+      }
     }
     if (!artist_id) {
-      //TODO: Automatically add artist: Optional parameters artist_name & code letters?
       res.status(400);
-      res.send("Artist doesn't exist. Add a new artist to the library");
+      res.send(
+        "Artist doesn't exist or hasn't released an album in this genre before. Add a new artist entry to the library"
+      );
     } else {
       try {
         const new_album: NewAlbum = {
@@ -49,9 +56,9 @@ export const post: RequestHandler = async (req: Request<object, object, NewAlbum
           alternate_artist_name: body.alternate_artist_name,
           disc_quantity: body.disc_quantity,
         };
+
         const inserted_album: Album = await libraryService.insertAlbum(new_album);
-        res.status(200);
-        res.json(inserted_album);
+        res.status(200).json(inserted_album);
       } catch (e) {
         console.error('Error: Could not insert new album');
         console.error(e);
@@ -71,7 +78,7 @@ type AlbumQueryParams = {
   page?: number;
 };
 
-export const get: RequestHandler = async (req: Request<object, object, object, AlbumQueryParams>, res, next) => {
+export const getAlbum: RequestHandler = async (req: Request<object, object, object, AlbumQueryParams>, res, next) => {
   const { query } = req;
   if (
     query.artist_name === undefined &&
@@ -102,25 +109,32 @@ export const get: RequestHandler = async (req: Request<object, object, object, A
 type NewArtistRequest = {
   artist_name: string;
   code_letters: string;
+  genre_id: number;
 };
 
 export const addArtist: RequestHandler = async (req: Request<object, object, NewArtistRequest>, res, next) => {
   const { body } = req;
   //TODO auto_generate artist code letters and make it an optional parameter
-  if (body.artist_name === undefined || body.code_letters === undefined) {
+  if (body.artist_name === undefined || body.code_letters === undefined || body.genre_id === undefined) {
     res.status(400);
-    res.send('Missing Request Parameters: artist_name or code_letters');
+    res.send('Missing Request Parameters: artist_name, code_letters, or genre_id');
   } else {
     try {
+      const generatedArtistNumber = await libraryService.generateArtistNumber(body.code_letters, body.genre_id);
+
       const new_artist: NewArtist = {
         artist_name: body.artist_name,
         code_letters: body.code_letters,
-        code_artist_number: await libraryService.generateArtistNumber(body.code_letters),
+        code_artist_number: generatedArtistNumber,
+        genre_id: body.genre_id,
       };
+
       const response: Artist = await libraryService.insertArtist(new_artist);
       res.status(200);
       res.send(response);
     } catch (e) {
+      console.error('Error: Failed to add new artist');
+      console.error(e);
       next(e);
     }
   }

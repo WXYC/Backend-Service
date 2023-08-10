@@ -60,11 +60,11 @@ export const fuzzySearchLibrary = async (artist_name?: string, album_title?: str
   // console.log(query1);
 };
 
-export const artistIdFromName = async (artist_name: string): Promise<number> => {
+export const artistIdFromName = async (artist_name: string, genre_id: number): Promise<number> => {
   const response = await db
     .select({ id: artists.id })
     .from(artists)
-    .where(sql`lower(${artists.artist_name}) = lower(${artist_name})`)
+    .where(sql`lower(${artists.artist_name}) = lower(${artist_name}) AND ${artists.genre_id} = ${genre_id}`)
     .limit(1);
   if (response[0].id === undefined) {
     return 0;
@@ -93,11 +93,11 @@ export const generateAlbumCodeNumber = async (artist_id: number): Promise<number
   return code_number;
 };
 
-export const generateArtistNumber = async (code_letters: string): Promise<number> => {
+export const generateArtistNumber = async (code_letters: string, genre_id: number): Promise<number> => {
   const response = await db
     .select({ code_artist_number: artists.code_artist_number })
     .from(artists)
-    .where(sql`${artists.code_artist_number} = ${code_letters}`)
+    .where(sql`${artists.code_artist_number} = ${code_letters} AND ${artists.genre_id} = ${genre_id}`)
     .orderBy(({ code_artist_number }) => desc(code_artist_number))
     .limit(1);
 
