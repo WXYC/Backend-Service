@@ -240,3 +240,19 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
     .innerJoin(format, eq(format.id, library.format_id))
     .innerJoin(genres, eq(genres.id, library.genre_id));
 });
+
+export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {
+  return qb
+    .select({
+      library_id: library.id,
+      rotation_id: rotation.id,
+      label: library.label,
+      play_freq: rotation.play_freq,
+      album_title: library.album_title,
+      artist_name: artists.artist_name,
+      is_active: rotation.is_active,
+    })
+    .from(library)
+    .innerJoin(rotation, eq(library.id, rotation.album_id))
+    .innerJoin(artists, eq(artists.id, library.artist_id));
+});

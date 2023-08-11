@@ -1,6 +1,6 @@
 {
-  "id": "616e24ce-848a-4837-89f8-eccbd794a936",
-  "prevId": "3dc2e415-0577-43a0-81b8-0f7d81a96225",
+  "id": "1cb3e7c2-7220-4832-89e8-bed2f9407e8a",
+  "prevId": "5817e01e-bfb0-40d8-b174-6c8354c6e0d9",
   "version": "5",
   "dialect": "pg",
   "tables": {
@@ -12,6 +12,12 @@
           "name": "id",
           "type": "serial",
           "primaryKey": true,
+          "notNull": true
+        },
+        "genre_id": {
+          "name": "genre_id",
+          "type": "integer",
+          "primaryKey": false,
           "notNull": true
         },
         "artist_name": {
@@ -54,9 +60,30 @@
             "artist_name"
           ],
           "isUnique": false
+        },
+        "code_letters_idx": {
+          "name": "code_letters_idx",
+          "columns": [
+            "code_letters"
+          ],
+          "isUnique": false
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "artists_genre_id_genres_id_fk": {
+          "name": "artists_genre_id_genres_id_fk",
+          "tableFrom": "artists",
+          "columnsFrom": [
+            "genre_id"
+          ],
+          "tableTo": "genres",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
@@ -81,6 +108,12 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
+        },
+        "track_title": {
+          "name": "track_title",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -557,6 +590,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "author": {
+          "name": "author",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
