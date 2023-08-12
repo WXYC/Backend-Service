@@ -4,43 +4,42 @@ import * as flowsheet_service from '../services/flowsheet.service';
 
 type QueryParams = {
   page: number;
-  limit: number;
+  n: number;
   start_date: string;
   end_date: string;
 };
 
-export const get: RequestHandler = async (req, res, next) => {
-  console.log('Get Flowsheet Data');
-  const query = req.query as unknown as QueryParams;
-  if (!(query.page === undefined || query.limit === undefined)) {
-    const offset = query.page * query.limit;
-    const limit = query.limit;
+export interface IFSEntry extends FSEntry {
+  rotation_play_freq: string;
+}
 
-    try {
-      const tracks: FSEntry[] = await flowsheet_service.getTracks(offset, limit);
-      if (tracks.length) {
-        console.log(tracks);
-        res.status(200);
-        res.json(tracks);
-      } else {
-        console.error('No Tracks found');
-        res.status(404);
-        res.send('Error: No Tracks found');
-      }
-    } catch (e) {
-      console.error('Failed to retrieve tracks');
-      console.error(`Error: ${e}`);
-      next(e);
+export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
+  const { query } = req;
+  const page = query.page || 0;
+  const limit = query.n || 5;
+  const offset = page * query.n;
+
+  try {
+    const entries: IFSEntry[] = await flowsheet_service.getEntriesFromDB(offset, limit);
+    if (entries.length) {
+      console.log(entries);
+      res.status(200);
+      res.json(entries);
+    } else {
+      console.error('No Tracks found');
+      res.status(404);
+      res.send('Error: No Tracks found');
     }
-  } else {
-    res.status(400);
-    res.send('Error: page and limit parameters required');
+  } catch (e) {
+    console.error('Failed to retrieve tracks');
+    console.error(`Error: ${e}`);
+    next(e);
   }
 };
 
 export const getLatest: RequestHandler = async (req, res, next) => {
   try {
-    const latest: FSEntry[] = await flowsheet_service.getTracks(0, 1);
+    const latest: FSEntry[] = await flowsheet_service.getEntriesFromDB(0, 1);
     if (latest.length) {
       console.log(latest[0]);
       res.status(200);
@@ -69,7 +68,7 @@ export type FSEntryRequestBody = {
 
 // either an id is provided (meaning it came from the user's bin or was fuzzy found)
 // or it's not provided in which case whe just throw the data provided into the table w/ album_id 0
-export const add_entry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res, next) => {
+export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res, next) => {
   //check for things that MUST be sent by the client
   // const body = req.body;
   // if (body.show_id === undefined || body.rotation_id === undefined || body.track_title === undefined) {
@@ -99,16 +98,16 @@ export type JoinRequestBody = {
 };
 
 //POST
-export const join_show: RequestHandler = async (req: Request<object, object, JoinRequestBody>, res, next) => {
+export const joinShow: RequestHandler = async (req: Request<object, object, JoinRequestBody>, res, next) => {
   if (req.body.dj_id === undefined) {
     res.status(400).send('Error: Must include a dj_id to join show');
   } else {
     try {
-      const show_session = flowsheet_service.join_show(req.body.dj_id, req.body.show_name, req.body.specialty_id);
+      const show_session = flowsheet_service.addDJToShow(req.body.dj_id, req.body.show_name, req.body.specialty_id);
       res.status(200);
       res.json(show_session);
     } catch (e) {
-      console.error('--------------------------------');
+      console.error('Error: Failed to join show');
       console.error(e);
       next(e);
     }

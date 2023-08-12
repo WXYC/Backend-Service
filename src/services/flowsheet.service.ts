@@ -1,11 +1,26 @@
 import { desc, eq } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
-import { NewFSEntry, FSEntry, flowsheet, shows, Show, NewShow } from '../db/schema';
+import { NewFSEntry, flowsheet, shows, Show, NewShow, rotation } from '../db/schema';
+import { IFSEntry } from '../controllers/flowsheet.controller';
 
-export const getTracks = async (offset: number, limit: number) => {
-  const response: FSEntry[] = await db
-    .select()
+export const getEntriesFromDB = async (offset: number, limit: number) => {
+  const response: IFSEntry[] = await db
+    .select({
+      id: flowsheet.id,
+      show_id: flowsheet.show_id,
+      album_id: flowsheet.album_id,
+      artist_name: flowsheet.artist_name,
+      album_title: flowsheet.album_title,
+      track_title: flowsheet.track_title,
+      record_label: flowsheet.record_label,
+      rotation_id: flowsheet.rotation_id,
+      rotation_play_freq: rotation.play_freq,
+      request_flag: flowsheet.request_flag,
+      message: flowsheet.message,
+      play_order: flowsheet.play_order,
+    })
     .from(flowsheet)
+    .innerJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .orderBy(desc(flowsheet.show_id), desc(flowsheet.play_order))
     .offset(offset)
     .limit(limit);
@@ -20,7 +35,7 @@ export const addTrack = async (entry: NewFSEntry) => {
   return response;
 };
 
-export const join_show = async (
+export const addDJToShow = async (
   req_dj_id: number,
   req_show_name?: string,
   req_specialty_id?: number
