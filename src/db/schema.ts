@@ -20,9 +20,8 @@ export type NewDJ = InferModel<typeof djs, 'insert'>;
 export type DJ = InferModel<typeof djs, 'select'>;
 export const djs = wxyc_schema.table('djs', {
   id: serial('id').primaryKey(),
-  dj_name: varchar('dj_name').notNull().unique(),
-  real_name: varchar('real_name').notNull(),
-  email: varchar('email').notNull().unique(),
+  cognito_user_name: varchar('cognito_user_name').notNull().unique(),
+  real_name: varchar('real_name'),
   shows_covered: smallint('shows_covered').default(0).notNull(),
   add_date: date('add_date').defaultNow().notNull(),
 });
@@ -163,6 +162,7 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   record_label: varchar('record_label', { length: 128 }),
   play_order: serial('play_order').notNull(),
   request_flag: boolean('request_flag').default(false).notNull(),
+  message: varchar('message', { length: 64 }),
 });
 
 export type NewGenre = InferModel<typeof genres, 'insert'>;
