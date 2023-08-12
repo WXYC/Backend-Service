@@ -9,9 +9,9 @@ library_route.get('/', libraryController.getAlbum);
 //secure: mgmt
 library_route.post('/', libraryController.addAlbum);
 
-library_route.get('/get-rotation', libraryController.getRotation);
+library_route.get('/rotation', libraryController.getRotation);
 
 //secure: mgmt
-library_route.post('/add-artist', libraryController.addArtist);
+library_route.post('/artists', libraryController.addArtist);
 
 library_route.get('/formats', libraryController.getFormats);

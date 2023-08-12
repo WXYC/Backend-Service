@@ -1,5 +1,5 @@
 import { RequestHandler, Request } from 'express';
-import { NewAlbum, Album, NewArtist, Artist } from '../db/schema';
+import { NewAlbum, Album, NewArtist, Artist, NewRotationRelease, RotationRelease } from '../db/schema';
 import * as libraryService from '../services/library.service';
 
 type NewAlbumRequest = {
@@ -14,7 +14,6 @@ type NewAlbumRequest = {
 };
 
 //Check if artist exists.
-//If not, add the artist (TODO: do this automatically).
 //Add new album to library
 
 export const addAlbum: RequestHandler = async (req: Request<object, object, NewAlbumRequest>, res, next) => {
@@ -96,11 +95,10 @@ export const getAlbum: RequestHandler = async (req: Request<object, object, obje
   } else {
     try {
       const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n);
-      console.log(response);
-      res.json(response);
+      res.status(200).json(response);
     } catch (e) {
-      console.log("Error: Couldn't get album");
-      console.log(e);
+      console.error("Error: Couldn't get album");
+      console.error(e);
       next(e);
     }
   }
@@ -140,8 +138,30 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   }
 };
 
-export const getRotation: RequestHandler = (req, res, next) => {
-  res.status(501).send('todo');
+export const getRotation: RequestHandler = async (req, res, next) => {
+  try {
+    const rotation = await libraryService.getRotationFromDB();
+    res.status(200).json(rotation);
+  } catch (e) {
+    console.error('Error retrieving rotation form DB');
+    console.error(e);
+    next(e);
+  }
+};
+
+export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
+export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res, next) => {
+  if (req.body.album_id === undefined || req.body.play_freq === undefined) {
+    res.status(400).send('Missing Parameters: album_id or play_freq');
+  } else {
+    try {
+      const rotationRelease: RotationRelease = await libraryService.addToRotation(req.body);
+      res.status(200).json(rotationRelease);
+    } catch (e) {
+      console.error(e);
+      next(e);
+    }
+  }
 };
 
 export const getFormats: RequestHandler = async (req, res, next) => {
@@ -150,6 +170,7 @@ export const getFormats: RequestHandler = async (req, res, next) => {
     res.status(200).json(formats);
   } catch (e) {
     console.error('Error retrieving formats from DB');
+    console.error(e);
     next(e);
   }
 };

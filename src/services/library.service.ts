@@ -1,6 +1,17 @@
 import { desc, eq, sql } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
-import { NewAlbum, NewArtist, library, artists, library_artist_view, rotation, format } from '../db/schema';
+import {
+  NewAlbum,
+  NewArtist,
+  library,
+  artists,
+  library_artist_view,
+  rotation,
+  format,
+  rotation_library_view,
+  RotationRelease,
+} from '../db/schema';
+import { RotationAddRequest } from '../controllers/library.controller';
 
 export const getFormatsFromDB = async () => {
   const formats = await db
@@ -11,12 +22,20 @@ export const getFormatsFromDB = async () => {
 };
 
 export const getRotationFromDB = async () => {
-  const rotation_albums = await db.select().from(rotation).where(eq(rotation.is_active, true));
+  const rotation_albums = await db
+    .select()
+    .from(rotation_library_view)
+    .where(sql`${rotation_library_view.kill_date} < CURRENT_DATE OR ${rotation_library_view.kill_date} IS NULL`);
   return rotation_albums;
 };
 
-export const insertAlbum = async (new_album: NewAlbum) => {
-  const response = await db.insert(library).values(new_album).returning();
+export const addToRotation = async (newRotation: RotationAddRequest) => {
+  const insertedRotation: RotationRelease[] = await db.insert(rotation).values(newRotation).returning();
+  return insertedRotation[0];
+};
+
+export const insertAlbum = async (newAlbum: NewAlbum) => {
+  const response = await db.insert(library).values(newAlbum).returning();
   return response[0];
 };
 
@@ -33,10 +52,11 @@ export const fuzzySearchLibrary = async (artist_name?: string, album_title?: str
                       LIMIT ${n}`;
 
   const response = await db.execute(query);
-  console.log(response);
   return response;
 
-  // trying to get something like this working, but having type issues on orderBy method
+  // trying to get something like this working, but having type issues using orderBy method with 2 computed columns
+  // maybe at some point for more type safety 🤷
+
   // const query1 = db
   //   .select({
   //     library_id: library_artist_view.library_id,
@@ -66,7 +86,8 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
     .from(artists)
     .where(sql`lower(${artists.artist_name}) = lower(${artist_name}) AND ${artists.genre_id} = ${genre_id}`)
     .limit(1);
-  if (response[0].id === undefined) {
+
+  if (!response.length) {
     return 0;
   } else {
     return response[0].id;
@@ -97,7 +118,7 @@ export const generateArtistNumber = async (code_letters: string, genre_id: numbe
   const response = await db
     .select({ code_artist_number: artists.code_artist_number })
     .from(artists)
-    .where(sql`${artists.code_artist_number} = ${code_letters} AND ${artists.genre_id} = ${genre_id}`)
+    .where(sql`${artists.code_letters} = ${code_letters} AND ${artists.genre_id} = ${genre_id}`)
     .orderBy(({ code_artist_number }) => desc(code_artist_number))
     .limit(1);
 
