@@ -130,16 +130,23 @@ export const library = wxyc_schema.table(
 export type NewRotationRelease = InferModel<typeof rotation, 'insert'>;
 export type RotationRelease = InferModel<typeof rotation, 'select'>;
 export const freqEnum = pgEnum('freq_enum', ['S', 'L', 'M', 'H']);
-export const rotation = wxyc_schema.table('rotation', {
-  id: serial('id').primaryKey(), //need to create an entry w/ id 0 for items not currently on rotation and items from outside the station
-  album_id: integer('album_id')
-    .references(() => library.id)
-    .notNull(),
-  play_freq: freqEnum('play_freq').notNull(),
-  add_date: date('add_date').notNull(),
-  kill_date: date('kill_date'),
-  is_active: boolean('is_active').notNull(),
-});
+export const rotation = wxyc_schema.table(
+  'rotation',
+  {
+    id: serial('id').primaryKey(), //need to create an entry w/ id 0 for items not currently on rotation and items from outside the station
+    album_id: integer('album_id')
+      .references(() => library.id)
+      .notNull(),
+    play_freq: freqEnum('play_freq').notNull(),
+    add_date: date('add_date').defaultNow().notNull(),
+    kill_date: date('kill_date'),
+  },
+  (table) => {
+    return {
+      albumIdIdx: index('album_id_idx').on(table.album_id),
+    };
+  }
+);
 
 export type NewFSEntry = InferModel<typeof flowsheet, 'insert'>;
 export type FSEntry = InferModel<typeof flowsheet, 'select'>;
@@ -227,18 +234,24 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
   return qb
     .select({
       library_id: library.id,
-      album_title: library.album_title,
-      artist_name: artists.artist_name,
       code_letters: artists.code_letters,
       code_artist_number: artists.code_artist_number,
       code_number: library.code_number,
+      artist_name: artists.artist_name,
+      album_title: library.album_title,
       format_name: format.format_name,
       genre_name: genres.genre_name,
+      rotation: rotation.play_freq,
+      add_date: library.add_date,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
     .innerJoin(format, eq(format.id, library.format_id))
-    .innerJoin(genres, eq(genres.id, library.genre_id));
+    .innerJoin(genres, eq(genres.id, library.genre_id))
+    .leftJoin(
+      rotation,
+      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} < CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
+    );
 });
 
 export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {
@@ -250,7 +263,7 @@ export const rotation_library_view = wxyc_schema.view('rotation_library_view').a
       play_freq: rotation.play_freq,
       album_title: library.album_title,
       artist_name: artists.artist_name,
-      is_active: rotation.is_active,
+      kill_date: rotation.kill_date,
     })
     .from(library)
     .innerJoin(rotation, eq(library.id, rotation.album_id))

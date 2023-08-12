@@ -1,0 +1,1 @@
+ALTER TABLE "wxyc_schema"."rotation" DROP COLUMN IF EXISTS "is_active";
