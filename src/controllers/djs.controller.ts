@@ -98,6 +98,18 @@ export const deleteFromBin: RequestHandler<object, unknown, object, binQuery> = 
   }
 };
 
-export const getBin: RequestHandler = async (req, res, next) => {
-  res.send('todo');
+export const getBin: RequestHandler<object, unknown, object, { dj_id: number }> = async (req, res, next) => {
+  if (req.query.dj_id === undefined) {
+    console.error('Bad Request, Missing DJ Identifier: dj_id');
+    res.status(400).send('Bad Request, Missing DJ Identifier: dj_id');
+  } else {
+    try {
+      const dj_bin = await DJService.getBinFromDB(req.query.dj_id);
+      res.status(200).json(dj_bin);
+    } catch (e) {
+      console.error("Error: Failed to retrieve dj's bin");
+      console.error(e);
+      next(e);
+    }
+  }
 };
