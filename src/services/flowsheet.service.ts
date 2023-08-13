@@ -1,6 +1,6 @@
 import { sql, desc, eq } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
-import { NewFSEntry, flowsheet, shows, Show, NewShow, rotation } from '../db/schema';
+import { NewFSEntry, flowsheet, shows, Show, NewShow, rotation, library, artists } from '../db/schema';
 import { IFSEntry } from '../controllers/flowsheet.controller';
 
 export const getEntriesFromDB = async (offset: number, limit: number) => {
@@ -82,4 +82,19 @@ export const endShow = async (show_id: number) => {
 export const getLatestShow = async (): Promise<Show> => {
   const latest_show = (await db.select().from(shows).orderBy(desc(shows.id)).limit(1))[0];
   return latest_show;
+};
+
+export const getAlbumFromDB = async (album_id: number) => {
+  const album = await db
+    .select({
+      artist_name: artists.artist_name,
+      album_title: library.album_title,
+      record_label: library.label,
+    })
+    .from(library)
+    .innerJoin(artists, eq(artists.id, library.artist_id))
+    .where(eq(library.id, album_id))
+    .limit(1);
+
+  return album[0];
 };

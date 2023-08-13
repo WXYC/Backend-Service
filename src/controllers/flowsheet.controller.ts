@@ -1,7 +1,6 @@
 import { Request, RequestHandler } from 'express';
 import { NewFSEntry, FSEntry } from '../db/schema';
 import * as flowsheet_service from '../services/flowsheet.service';
-import { getAlbumFromDB } from '../services/library.service';
 
 type QueryParams = {
   page: number;
@@ -19,14 +18,10 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   const page = query.page || 0;
   const limit = query.limit || 5;
   const offset = page * query.limit;
-  console.log(limit);
-  console.log(offset);
   try {
     const entries: IFSEntry[] = await flowsheet_service.getEntriesFromDB(offset, limit);
     if (entries.length) {
-      console.log(entries);
-      res.status(200);
-      res.json(entries);
+      res.status(200).json(entries);
     } else {
       console.error('No Tracks found');
       res.status(404);
@@ -98,7 +93,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
         try {
           if (body.album_id !== undefined) {
             //backfill album info from library before adding to flowsheet
-            const albumInfo = await getAlbumFromDB(body.album_id);
+            const albumInfo = await flowsheet_service.getAlbumFromDB(body.album_id);
 
             const fsEntry: NewFSEntry = {
               album_id: body.album_id,
