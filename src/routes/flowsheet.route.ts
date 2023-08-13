@@ -10,3 +10,5 @@ flowsheet_route.post('/', flowsheetController.addEntry);
 flowsheet_route.get('/latest', flowsheetController.getLatest);
 
 flowsheet_route.post('/join', flowsheetController.joinShow);
+
+flowsheet_route.get('/end', flowsheetController.endShow);

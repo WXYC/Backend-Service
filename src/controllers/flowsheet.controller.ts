@@ -1,6 +1,7 @@
 import { Request, RequestHandler } from 'express';
 import { NewFSEntry, FSEntry } from '../db/schema';
 import * as flowsheet_service from '../services/flowsheet.service';
+import { getAlbumFromDB } from '../services/library.service';
 
 type QueryParams = {
   page: number;
@@ -58,12 +59,13 @@ export const getLatest: RequestHandler = async (req, res, next) => {
 
 export type FSEntryRequestBody = {
   show_id: number;
-  track_title: string;
-  rotation_id?: number;
-  album_id?: number;
   artist_name: string;
   album_title: string;
-  requst_flag?: boolean;
+  track_title: string;
+  album_id?: number;
+  rotation_id?: number;
+  record_label: string;
+  request_flag?: boolean;
   message?: string;
 };
 
@@ -72,25 +74,83 @@ export type FSEntryRequestBody = {
 export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res, next) => {
   //check for things that MUST be sent by the client
   const { body } = req;
-  if (body.show_id === undefined) {
-    console.error('Bad Request, Missing show identifier: show_id');
-    res.status(400).send('Bad Request, Missing show identifier: show_id');
-  } else if (body.message === undefined) {
-    // no message passed, so we assume we're adding a track to the flowsheet
-    if (body.album_id !== undefined) {
-      //backfill album info from library before adding to flowsheet
-      console.log('todo');
-    } else if (body.album_title !== undefined || body.artist_name === undefined || body.track_title === undefined) {
-      console.error('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
-      res.status(400).send('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
-    } else {
-      // todo: add raw info into the fs
-    }
-  } else {
-    //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
+  let latestShow;
+  try {
+    latestShow = await flowsheet_service.getLatestShow();
+  } catch (e) {
+    console.error('Error: Failed to retrieve most recent show ');
+    console.error(e);
   }
-  res.status(200);
-  res.send('TODO');
+  if (latestShow === undefined || latestShow.end_time !== null) {
+    console.error('Bad Request, There are no active shows');
+    res.status(400).send('Bad Request, There are no active shows');
+  } else {
+    if (body.show_id === undefined) {
+      console.error('Bad Request, Missing show identifier: show_id');
+      res.status(400).send('Bad Request, Missing show identifier: show_id');
+    } else if (body.message === undefined) {
+      // no message passed, so we assume we're adding a track to the flowsheet
+      if (body.track_title === undefined) {
+        console.error('Bad Request, Missing query parameter: track_title');
+        res.status(400).send('Bad Request, Missing query parameter: track_title');
+      } else {
+        try {
+          if (body.album_id !== undefined) {
+            //backfill album info from library before adding to flowsheet
+            const albumInfo = await getAlbumFromDB(body.album_id);
+
+            const fsEntry: NewFSEntry = {
+              album_id: body.album_id,
+              show_id: body.show_id,
+              ...albumInfo,
+              track_title: body.track_title,
+              rotation_id: body.rotation_id,
+              request_flag: body.request_flag,
+            };
+
+            const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+
+            res.status(200).json(completedEntry);
+          } else if (
+            body.album_title === undefined ||
+            body.artist_name === undefined ||
+            body.track_title === undefined
+          ) {
+            console.error('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
+            res.status(400).send('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
+          } else {
+            const fsEntry: NewFSEntry = {
+              ...body,
+            };
+
+            const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+            res.status(200).json(completedEntry);
+          }
+        } catch (e) {
+          console.error('Error: Failed to add track to flowsheet');
+          console.error(e);
+          next(e);
+        }
+      }
+    } else {
+      //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
+      const fsEntry: NewFSEntry = {
+        show_id: body.show_id,
+        artist_name: '',
+        album_title: '',
+        track_title: '',
+        message: body.message,
+      };
+      try {
+        const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+        res.status(200).json(completedEntry);
+      } catch (e) {
+        console.error('Error: Failed to add message to flowsheet');
+        console.error(e);
+        next(e);
+      }
+    }
+  }
 };
 
 export type JoinRequestBody = {
@@ -105,13 +165,29 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     res.status(400).send('Error: Must include a dj_id to join show');
   } else {
     try {
-      const show_session = flowsheet_service.addDJToShow(req.body.dj_id, req.body.show_name, req.body.specialty_id);
-      res.status(200);
-      res.json(show_session);
+      const show_session = await flowsheet_service.addDJToShow(
+        req.body.dj_id,
+        req.body.show_name,
+        req.body.specialty_id
+      );
+      res.status(200).json(show_session);
     } catch (e) {
       console.error('Error: Failed to join show');
       console.error(e);
       next(e);
     }
+  }
+};
+
+//GET
+//TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
+export const endShow: RequestHandler<object, unknown, object, { show_id: number }> = async (req, res, next) => {
+  try {
+    const finalizedShow = await flowsheet_service.endShow(req.query.show_id);
+    res.status(200).json(finalizedShow);
+  } catch (e) {
+    console.error('Error: Failed to end show');
+    console.error(e);
+    next(e);
   }
 };
