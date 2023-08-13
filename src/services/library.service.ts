@@ -23,9 +23,25 @@ export const getFormatsFromDB = async () => {
 
 export const getRotationFromDB = async () => {
   const rotation_albums = await db
-    .select()
-    .from(rotation_library_view)
-    .where(sql`${rotation_library_view.kill_date} < CURRENT_DATE OR ${rotation_library_view.kill_date} IS NULL`);
+    .select({
+      library_id: library.id,
+      rotation_id: rotation.id,
+      label: library.label,
+      play_freq: rotation.play_freq,
+      album_title: library.album_title,
+      artist_name: artists.artist_name,
+      kill_date: rotation.kill_date,
+    })
+    .from(library)
+    .innerJoin(rotation, eq(library.id, rotation.album_id))
+    .innerJoin(artists, eq(artists.id, library.artist_id))
+    .where(sql`${rotation.kill_date} < CURRENT_DATE OR ${rotation.kill_date} IS NULL`);
+
+  // drizzle doesn't support renaming columns with "as" at the moment, so this is broken
+  // const rotation_albums = await db
+  //   .select()
+  //   .from(rotation_library_view)
+  //   .where(sql`${rotation_library_view.kill_date} < CURRENT_DATE OR ${rotation_library_view.kill_date} IS NULL`);
   return rotation_albums;
 };
 
