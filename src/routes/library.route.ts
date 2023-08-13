@@ -11,6 +11,8 @@ library_route.post('/', libraryController.addAlbum);
 
 library_route.get('/rotation', libraryController.getRotation);
 
+library_route.post('/rotation', libraryController.addRotation);
+
 //secure: mgmt
 library_route.post('/artists', libraryController.addArtist);
 
