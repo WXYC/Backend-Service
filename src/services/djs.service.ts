@@ -1,5 +1,5 @@
 import { db } from '../db/drizzle_client';
-import { NewDJ, DJ, djs, bins, NewBinEntry, BinEntry, library, artists } from '../db/schema';
+import { NewDJ, DJ, djs, bins, NewBinEntry, BinEntry, library, artists, format, genres } from '../db/schema';
 import { sql, eq, and } from 'drizzle-orm';
 import { DJQueryParams } from '../controllers/djs.controller';
 
@@ -51,11 +51,18 @@ export const getBinFromDB = async (dj_id: number) => {
       album_id: bins.album_id,
       album_title: library.album_title,
       artist_name: artists.artist_name,
-      track_title: bins.track_title,
+      label: library.label,
+      code_letters: artists.code_letters,
+      code_artist_number: artists.code_artist_number,
+      code_number: library.code_number,
+      format_name: format.format_name,
+      genre_name: genres.genre_name,
     })
     .from(bins)
     .innerJoin(library, eq(bins.album_id, library.id))
     .innerJoin(artists, eq(library.artist_id, artists.id))
+    .innerJoin(format, eq(format.id, library.format_id))
+    .innerJoin(genres, eq(genres.id, library.genre_id))
     .where(eq(bins.dj_id, dj_id));
 
   return dj_bin;
