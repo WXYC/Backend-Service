@@ -20,7 +20,7 @@ export const getEntriesFromDB = async (offset: number, limit: number) => {
       play_order: flowsheet.play_order,
     })
     .from(flowsheet)
-    .innerJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .orderBy(desc(flowsheet.show_id), desc(flowsheet.play_order))
     .offset(offset)
     .limit(limit);

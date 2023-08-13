@@ -5,21 +5,22 @@ import { getAlbumFromDB } from '../services/library.service';
 
 type QueryParams = {
   page: number;
-  n: number;
+  limit: number;
   start_date: string;
   end_date: string;
 };
 
 export interface IFSEntry extends FSEntry {
-  rotation_play_freq: string;
+  rotation_play_freq: string | null;
 }
 
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
   const { query } = req;
   const page = query.page || 0;
-  const limit = query.n || 5;
-  const offset = page * query.n;
-
+  const limit = query.limit || 5;
+  const offset = page * query.limit;
+  console.log(limit);
+  console.log(offset);
   try {
     const entries: IFSEntry[] = await flowsheet_service.getEntriesFromDB(offset, limit);
     if (entries.length) {
