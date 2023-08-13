@@ -59,34 +59,36 @@ export const getLatest: RequestHandler = async (req, res, next) => {
 export type FSEntryRequestBody = {
   show_id: number;
   track_title: string;
-  rotation_id: number;
-  album_id: number;
+  rotation_id?: number;
+  album_id?: number;
   artist_name: string;
   album_title: string;
   requst_flag?: boolean;
+  message?: string;
 };
 
 // either an id is provided (meaning it came from the user's bin or was fuzzy found)
-// or it's not provided in which case whe just throw the data provided into the table w/ album_id 0
+// or it's not provided in which case whe just throw the data provided into the table w/ album_id = NULL
 export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res, next) => {
   //check for things that MUST be sent by the client
-  // const body = req.body;
-  // if (body.show_id === undefined || body.rotation_id === undefined || body.track_title === undefined) {
-  //   console.error('Missing required entry parameters');
-  //   res.status(400);
-  //   res.send('Missing required entry parameters: show_id, rotation_id, track_title');
-  // } else if (body.rotation_id === 0 && (body.album_id == undefined || body.album_id === 0) && (!body.album_title)) {
-  //   console.error('Missing album identifier');
-  //   res.send(400);
-  //   res.send('Missing required entry parameter: either album_id or album_title');
-  // } else {
-  //   try {
-  //     const entry_obj = await addTrack(body);
-  //   } catch (e) {
-  //     console.error('Error: Failed to add flowsheet entry');
-  //     console.error(`Error: ${e}`);
-  //   }
-  // }
+  const { body } = req;
+  if (body.show_id === undefined) {
+    console.error('Bad Request, Missing show identifier: show_id');
+    res.status(400).send('Bad Request, Missing show identifier: show_id');
+  } else if (body.message === undefined) {
+    // no message passed, so we assume we're adding a track to the flowsheet
+    if (body.album_id !== undefined) {
+      //backfill album info from library before adding to flowsheet
+      console.log('todo');
+    } else if (body.album_title !== undefined || body.artist_name === undefined || body.track_title === undefined) {
+      console.error('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
+      res.status(400).send('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
+    } else {
+      // todo: add raw info into the fs
+    }
+  } else {
+    //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
+  }
   res.status(200);
   res.send('TODO');
 };
