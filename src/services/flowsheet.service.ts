@@ -21,7 +21,7 @@ export const getEntriesFromDB = async (offset: number, limit: number) => {
     })
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .orderBy(desc(flowsheet.show_id), desc(flowsheet.play_order))
+    .orderBy(desc(flowsheet.play_order))
     .offset(offset)
     .limit(limit);
   console.log(response);
