@@ -144,3 +144,24 @@ export const generateArtistNumber = async (code_letters: string, genre_id: numbe
   }
   return code_artist_number;
 };
+
+export const getAlbumFromDB = async (album_id: number) => {
+  const album = await db
+    .select({
+      id: library.id,
+      code_letters: artists.code_letters,
+      code_artist_number: artists.code_letters,
+      code_number: library.code_number,
+      artist_name: artists.artist_name,
+      album_title: library.album_title,
+      record_label: library.label,
+      plays: library.plays,
+      add_date: library.add_date,
+    })
+    .from(library)
+    .innerJoin(artists, eq(artists.id, library.artist_id))
+    .where(eq(library.id, album_id))
+    .limit(1);
+
+  return album[0];
+};
