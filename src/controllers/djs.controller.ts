@@ -3,14 +3,12 @@ import * as DJService from '../services/djs.service';
 import { DJ, NewDJ, NewBinEntry } from '../db/schema';
 
 export type DJQueryParams = {
-  id?: number;
+  dj_id?: number;
   cognito_user_name?: string;
   real_name?: string;
 };
 
 export const register: RequestHandler<object, unknown, DJQueryParams> = async (req, res, next) => {
-  console.log('registering new user');
-  console.log(req.body);
   if (req.body.cognito_user_name === undefined) {
     console.log('Bad Request: Missing New DJ Parameters');
     res.status(400);
@@ -33,9 +31,9 @@ export const register: RequestHandler<object, unknown, DJQueryParams> = async (r
 };
 
 export const getDJInfo: RequestHandler<object, unknown, object, DJQueryParams> = async (req, res, next) => {
-  const query = req.query;
+  const { query } = req;
 
-  if (query.cognito_user_name === undefined && query.id === undefined) {
+  if (query.cognito_user_name === undefined && query.dj_id === undefined) {
     console.error('Error, Missing DJ Identifier: cognito_user_name or id');
     res.send(400);
   } else {
@@ -64,15 +62,15 @@ export type binQuery = {
   track_title?: string;
 };
 
-export const addToBin: RequestHandler<object, unknown, object, binQuery> = async (req, res, next) => {
-  if (req.query.album_id === undefined || req.query.dj_id === undefined) {
+export const addToBin: RequestHandler<object, unknown, binQuery> = async (req, res, next) => {
+  if (req.body.album_id === undefined || req.body.dj_id === undefined) {
     console.error('Bad Request, Missing Album Identifier: album_id');
     res.send(400).send('Bad Request, Missing DJ or album identifier: album_id');
   } else {
     const bin_entry: NewBinEntry = {
-      dj_id: req.query.dj_id,
-      album_id: req.query.album_id,
-      track_title: req.query.track_title === undefined ? null : req.query.track_title,
+      dj_id: req.body.dj_id,
+      album_id: req.body.album_id,
+      track_title: req.body.track_title === undefined ? null : req.body.track_title,
     };
     try {
       const added_bin_item = await DJService.addToBin(bin_entry);
