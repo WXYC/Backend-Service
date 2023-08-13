@@ -77,7 +77,11 @@ type AlbumQueryParams = {
   page?: number;
 };
 
-export const getAlbum: RequestHandler = async (req: Request<object, object, object, AlbumQueryParams>, res, next) => {
+export const searchForAlbum: RequestHandler = async (
+  req: Request<object, object, object, AlbumQueryParams>,
+  res,
+  next
+) => {
   const { query } = req;
   if (
     query.artist_name === undefined &&
@@ -172,5 +176,21 @@ export const getFormats: RequestHandler = async (req, res, next) => {
     console.error('Error retrieving formats from DB');
     console.error(e);
     next(e);
+  }
+};
+
+export const getAlbum: RequestHandler<object, unknown, unknown, { album_id: number }> = async (req, res, next) => {
+  if (req.query.album_id === undefined) {
+    console.error('Bad Request, missing album identifier: album_id');
+    res.status(400).send('Bad Request, missing album identifier: album_id');
+  } else {
+    try {
+      const album = await libraryService.getAlbumFromDB(req.query.album_id);
+      res.status(200).json(album);
+    } catch (e) {
+      console.error('Failed to retrieve album');
+      console.error(e);
+      next(e);
+    }
   }
 };
