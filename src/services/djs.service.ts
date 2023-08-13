@@ -11,8 +11,8 @@ export const insertDJ = async (new_dj: NewDJ) => {
 export const getDJInfoFromDB = async (items: DJQueryParams) /*:Promise<schema.DJ>*/ => {
   let query_value: number | string;
   let query_col;
-  if (items.id !== undefined) {
-    query_value = items.id;
+  if (items.dj_id !== undefined) {
+    query_value = items.dj_id;
     query_col = djs.id;
   } else if (items.cognito_user_name !== undefined) {
     query_value = items.cognito_user_name;
