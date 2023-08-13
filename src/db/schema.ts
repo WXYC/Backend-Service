@@ -89,7 +89,6 @@ export const format = wxyc_schema.table('format', {
   date_added: date('add_date').defaultNow().notNull(),
 });
 
-//TODO: Create an entry with id 0 for flowsheet entries for outside albums
 export type NewAlbum = InferModel<typeof library, 'insert'>;
 export type Album = InferModel<typeof library, 'select'>;
 export const library = wxyc_schema.table(
@@ -233,7 +232,7 @@ export const specialty_shows = wxyc_schema.table('specialty_shows', {
 export const library_artist_view = wxyc_schema.view('library_artist_view').as((qb) => {
   return qb
     .select({
-      library_id: library.id,
+      id: library.id,
       code_letters: artists.code_letters,
       code_artist_number: artists.code_artist_number,
       code_number: library.code_number,
