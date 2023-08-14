@@ -25,7 +25,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     } else {
       console.error('No Tracks found');
       res.status(404);
-      res.send('Error: No Tracks found');
+      res.send('No Tracks found');
     }
   } catch (e) {
     console.error('Failed to retrieve tracks');
@@ -177,10 +177,13 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 
 //GET
 //TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
-export const endShow: RequestHandler<object, unknown, object, { show_id: number }> = async (req, res, next) => {
+export const endShow: RequestHandler<object, unknown, { show_id: number }> = async (req, res, next) => {
   try {
-    const finalizedShow = await flowsheet_service.endShow(req.query.show_id);
-    res.status(200).json(finalizedShow);
+    let status = 200;
+    const [err, finalizedShow] = await flowsheet_service.endShow(req.body.show_id);
+
+    if (err !== undefined) status = 400;
+    res.status(status).json(finalizedShow);
   } catch (e) {
     console.error('Error: Failed to end show');
     console.error(e);

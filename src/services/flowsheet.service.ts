@@ -24,7 +24,6 @@ export const getEntriesFromDB = async (offset: number, limit: number) => {
     .orderBy(desc(flowsheet.play_order))
     .offset(offset)
     .limit(limit);
-  console.log(response);
 
   return response;
 };
@@ -64,19 +63,19 @@ export const addDJToShow = async (
 };
 
 export const endShow = async (show_id: number) => {
-  const current_show = await getLatestShow();
-
-  if (current_show.id !== +show_id || current_show.end_time !== null) {
-    throw new Error('Invalid show_id');
+  const currentShow = await getLatestShow();
+  let err;
+  if (currentShow.id !== +show_id || currentShow.end_time !== null) {
+    err = 'Invalid show_id';
+    return [err, currentShow];
+  } else {
+    const finalizedShow = await db
+      .update(shows)
+      .set({ end_time: sql`CURRENT_TIMESTAMP` })
+      .where(eq(shows.id, show_id))
+      .returning();
+    return [err, finalizedShow[0]];
   }
-
-  const finalizedShow = await db
-    .update(shows)
-    .set({ end_time: sql`CURRENT_TIMESTAMP` })
-    .where(eq(shows.id, show_id))
-    .returning();
-
-  return finalizedShow[0];
 };
 
 export const getLatestShow = async (): Promise<Show> => {
