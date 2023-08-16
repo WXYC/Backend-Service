@@ -37,7 +37,7 @@ export const getRotationFromDB = async () => {
     .innerJoin(artists, eq(artists.id, library.artist_id))
     .where(sql`${rotation.kill_date} < CURRENT_DATE OR ${rotation.kill_date} IS NULL`);
 
-  // drizzle doesn't support renaming columns with "as" at the moment, so this is broken
+  // drizzle doesn't support renaming columns with "as" at the moment, so below is broken
   // const rotation_albums = await db
   //   .select()
   //   .from(rotation_library_view)
@@ -58,13 +58,13 @@ export const insertAlbum = async (newAlbum: NewAlbum) => {
 //based on artist name and album title, retrieve n best matches from db
 //let's build the where statement using drizzle's sql object
 export const fuzzySearchLibrary = async (artist_name?: string, album_title?: string, n = 5) => {
-  const query = sql`SELECT *, 
-                    similarity(${library_artist_view.artist_name}, ${artist_name || ''}) AS artist_sml,
-                    similarity(${library_artist_view.album_title}, ${album_title || ''}) AS album_sml
+  const query = sql`SELECT *,
+                    ${library_artist_view.artist_name} <-> ${artist_name || ''} AS artist_dist,
+                    ${library_artist_view.album_title} <-> ${album_title || ''} AS album_dist
                       FROM ${library_artist_view}
-                      WHERE ${library_artist_view.artist_name} % ${artist_name || ''} OR 
+                      WHERE ${library_artist_view.artist_name} % ${artist_name || ''} OR
                             ${library_artist_view.album_title} % ${album_title || ''}
-                      ORDER BY artist_sml DESC, album_sml DESC
+                      ORDER BY artist_dist asc, album_dist asc
                       LIMIT ${n}`;
 
   const response = await db.execute(query);
