@@ -83,7 +83,7 @@ export const addToBin: RequestHandler<object, unknown, binQuery> = async (req, r
 };
 
 export const deleteFromBin: RequestHandler<object, unknown, object, binQuery> = async (req, res, next) => {
-  if (req.query.bin_entry_id === undefined || req.query.dj_id) {
+  if (req.query.bin_entry_id === undefined || req.query.dj_id === undefined) {
     console.error('Bad Request, Missing Bin Entry Identifier: bin_entry_id');
     res.status(400).send('Bad Request, Missing Bin Entry Identifier: bin_entry_id');
   } else {
