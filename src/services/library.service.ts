@@ -59,11 +59,11 @@ export const insertAlbum = async (newAlbum: NewAlbum) => {
 //let's build the where statement using drizzle's sql object
 export const fuzzySearchLibrary = async (artist_name?: string, album_title?: string, n = 5) => {
   const query = sql`SELECT *,
-                    ${library_artist_view.artist_name} <-> ${artist_name || ''} AS artist_dist,
-                    ${library_artist_view.album_title} <-> ${album_title || ''} AS album_dist
+                    ${library_artist_view.artist_name} <-> ${artist_name || null} AS artist_dist,
+                    ${library_artist_view.album_title} <-> ${album_title || null} AS album_dist
                       FROM ${library_artist_view}
-                      WHERE ${library_artist_view.artist_name} % ${artist_name || ''} OR
-                            ${library_artist_view.album_title} % ${album_title || ''}
+                      WHERE ${library_artist_view.artist_name} % ${artist_name || null} OR
+                            ${library_artist_view.album_title} % ${album_title || null}
                       ORDER BY artist_dist asc, album_dist asc
                       LIMIT ${n}`;
 
