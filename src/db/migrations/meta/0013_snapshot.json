@@ -1,6 +1,6 @@
 {
-  "id": "cf5801b5-8e12-4b94-a8ed-f0b91636a106",
-  "prevId": "4ac266dd-66dc-4551-a43a-b60889d9c358",
+  "id": "212df034-15f8-4880-ad78-3f818fffec65",
+  "prevId": "137aedc6-a970-4aae-b5c4-c63d6621caa0",
   "version": "5",
   "dialect": "pg",
   "tables": {
@@ -158,8 +158,8 @@
           "primaryKey": true,
           "notNull": true
         },
-        "dj_name": {
-          "name": "dj_name",
+        "cognito_user_name": {
+          "name": "cognito_user_name",
           "type": "varchar",
           "primaryKey": false,
           "notNull": true
@@ -168,13 +168,7 @@
           "name": "real_name",
           "type": "varchar",
           "primaryKey": false,
-          "notNull": true
-        },
-        "email": {
-          "name": "email",
-          "type": "varchar",
-          "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "shows_covered": {
           "name": "shows_covered",
@@ -195,17 +189,10 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "djs_dj_name_unique": {
-          "name": "djs_dj_name_unique",
+        "djs_cognito_user_name_unique": {
+          "name": "djs_cognito_user_name_unique",
           "columns": [
-            "dj_name"
-          ],
-          "nullsNotDistinct": false
-        },
-        "djs_email_unique": {
-          "name": "djs_email_unique",
-          "columns": [
-            "email"
+            "cognito_user_name"
           ],
           "nullsNotDistinct": false
         }
@@ -275,6 +262,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "message": {
+          "name": "message",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
