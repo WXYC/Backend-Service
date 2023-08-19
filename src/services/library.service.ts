@@ -8,7 +8,6 @@ import {
   library_artist_view,
   rotation,
   format,
-  rotation_library_view,
   RotationRelease,
 } from '../db/schema';
 import { RotationAddRequest } from '../controllers/library.controller';
