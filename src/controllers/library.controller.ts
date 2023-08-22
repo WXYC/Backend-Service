@@ -168,6 +168,30 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
   }
 };
 
+export type KillRotationRelease = {
+  rotation_id: number;
+  kill_date?: string; //Accepts ISO8601 formatted dates YYYY-MM-DD
+};
+
+export const killRotation: RequestHandler<object, unknown, KillRotationRelease> = async (req, res, next) => {
+  const { body } = req;
+
+  if (body.rotation_id === undefined) {
+    res.status(400).send('Bad Request, Missing Parameter: rotation_id');
+  } else if (body.kill_date !== undefined && !libraryService.isISODate(body.kill_date)) {
+    res.status(400).send('Bad Request, Incorrect Date Format: kill_date should be of form YYYY-MM-DD');
+  } else {
+    try {
+      const updatedRotation = await libraryService.killRotationInDB(body.rotation_id, body.kill_date);
+      res.status(200).send(updatedRotation);
+    } catch (e) {
+      console.error('Failed to update rotation kill_date');
+      console.error(e);
+      next(e);
+    }
+  }
+};
+
 export const getFormats: RequestHandler = async (req, res, next) => {
   try {
     const formats = await libraryService.getFormatsFromDB();

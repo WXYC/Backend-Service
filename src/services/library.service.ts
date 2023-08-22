@@ -49,6 +49,15 @@ export const addToRotation = async (newRotation: RotationAddRequest) => {
   return insertedRotation[0];
 };
 
+export const killRotationInDB = async (rotationId: number, updatedKillDate?: string) => {
+  const updatedRotation = await db
+    .update(rotation)
+    .set({ kill_date: updatedKillDate || sql`CURRENT_DATE` })
+    .where(eq(rotation.id, rotationId))
+    .returning();
+  return updatedRotation[0];
+};
+
 export const insertAlbum = async (newAlbum: NewAlbum) => {
   const response = await db.insert(library).values(newAlbum).returning();
   return response[0];
@@ -163,4 +172,9 @@ export const getAlbumFromDB = async (album_id: number) => {
     .limit(1);
 
   return album[0];
+};
+
+export const isISODate = (date: string): boolean => {
+  const regex = /^\d{4}-\d{2}-\d{2}$/;
+  return date.match(regex) !== null;
 };
