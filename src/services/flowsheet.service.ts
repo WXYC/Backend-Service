@@ -33,6 +33,10 @@ export const addTrack = async (entry: NewFSEntry) => {
   return response[0];
 };
 
+// export alterFSEntry = async () => {
+//   const response = await db.update()
+// }
+
 export const addDJToShow = async (
   req_dj_id: number,
   req_show_name?: string,

@@ -149,6 +149,22 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   }
 };
 
+//what can be altered: is request, song_title, album_title, album_id
+export const alterEntry: RequestHandler = async (req, res, next) => {
+  //const alteredEntry = await flowsheet_service.alterFSEntry();
+  res.status(501).send('todo');
+  next();
+};
+
+export const deleteEntry: RequestHandler<object, unknown, object, { entry_id: number }> = async (req, res, next) => {
+  const { query } = req;
+  if (query.entry_id === undefined) {
+    res.status(400).send('Bad Request, Missing Query Param: entry_id');
+  } else {
+    res.status(501).send('todo');
+  }
+};
+
 export type JoinRequestBody = {
   dj_id: number;
   show_name?: string;
@@ -189,4 +205,9 @@ export const endShow: RequestHandler<object, unknown, { show_id: number }> = asy
     console.error(e);
     next(e);
   }
+};
+
+export const changeOrder: RequestHandler = (req, res, next) => {
+  res.status(501).send('todo');
+  next();
 };
