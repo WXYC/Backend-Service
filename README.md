@@ -1,6 +1,6 @@
 # Backend-Service
 
-#### This is an API that supports wxyc applications with features for dj, flowsheet, and library access and management.
+#### This is an API that supports wxyc applications with features for dj, flowsheet, and library access/management.
 
 ## Usage
 
@@ -24,7 +24,7 @@ aws ecr get-login-password --region us-east-1 | docker login --username AWS --pa
 3. Build docker image for current version using: <br>
 
 ```
-docker build -t --platform linux/amd64 wxyc_backend_service:latest .
+docker build --platform linux/amd64  -t wxyc_backend_service:latest .
 ```
 
 4. Tag image to prepare for pushing to AWS ECR <br>
