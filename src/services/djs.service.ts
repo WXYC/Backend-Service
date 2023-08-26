@@ -37,10 +37,10 @@ export const addToBin = async (bin_entry: NewBinEntry): Promise<BinEntry> => {
   return added_bin_entry[0];
 };
 
-export const removeFromBin = async (bin_entry_id: number, dj_id: number): Promise<BinEntry> => {
+export const removeFromBin = async (album_id: number, dj_id: number): Promise<BinEntry> => {
   const removed_bin_entry = await db
     .delete(bins)
-    .where(and(eq(bins.dj_id, dj_id), eq(bins.id, bin_entry_id)))
+    .where(and(eq(bins.dj_id, dj_id), eq(bins.album_id, album_id)))
     .returning();
   return removed_bin_entry[0];
 };
