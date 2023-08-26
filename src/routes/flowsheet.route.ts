@@ -7,8 +7,14 @@ flowsheet_route.get('/', flowsheetController.getEntries);
 
 flowsheet_route.post('/', flowsheetController.addEntry);
 
+//flowsheet_route.patch('/', flowsheetController.alterEntry);
+
+//flowsheet_route.delete('/', flowsheetController.deleteEntry);
+
 flowsheet_route.get('/latest', flowsheetController.getLatest);
 
 flowsheet_route.post('/join', flowsheetController.joinShow);
 
 flowsheet_route.post('/end', flowsheetController.endShow);
+
+//flowsheet_route.patch('/play-order', flowsheetController.changeOrder);
