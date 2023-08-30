@@ -149,6 +149,50 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   }
 };
 
+export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> = async (req, res, next) => {
+  const { entry_id } = req.body;
+  if (entry_id === undefined) {
+    console.error('Bad Request, Missing entry identifier: entry_id');
+    res.status(400).send('Bad Request, Missing entry identifier: entry_id');
+  } else {
+    try {
+      const removedEntry = await flowsheet_service.removeTrack(entry_id);
+      res.status(200).json(removedEntry);
+    } catch (e) {
+      console.error('Error: Failed to remove entry');
+      console.error(e);
+      next(e);
+    }
+  }
+};
+
+export const updateEntry: RequestHandler<object, unknown, { entry_id: number, data: UpdateRequestBody }> = async (req, res, next) => {
+  const { entry_id, data } = req.body;
+  if (entry_id === undefined) {
+    console.error('Bad Request, Missing entry identifier: entry_id');
+    res.status(400).send('Bad Request, Missing entry identifier: entry_id');
+  } else {
+    try {
+      const updatedEntry = await flowsheet_service.patchTrack(entry_id, data);
+      res.status(200).json(updatedEntry);
+    } catch (e) {
+      console.error('Error: Failed to update entry');
+      console.error(e);
+      next(e);
+    }
+  }
+};
+
+export type UpdateRequestBody = {
+  artist_name?: string;
+  album_title?: string;
+  track_title?: string;
+  record_label?: string;
+  rotation_id?: number;
+  request_flag?: boolean;
+  message?: string;
+};
+
 export type JoinRequestBody = {
   dj_id: number;
   show_name?: string;
@@ -166,6 +210,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
         req.body.show_name,
         req.body.specialty_id
       );
+
       res.status(200).json(show_session);
     } catch (e) {
       console.error('Error: Failed to join show');

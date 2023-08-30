@@ -1,7 +1,7 @@
 import { sql, desc, eq } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
-import { NewFSEntry, flowsheet, shows, Show, NewShow, rotation, library, artists } from '../db/schema';
-import { IFSEntry } from '../controllers/flowsheet.controller';
+import { NewFSEntry, flowsheet, shows, Show, NewShow, rotation, library, artists, DJ, djs } from '../db/schema';
+import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
 
 export const getEntriesFromDB = async (offset: number, limit: number) => {
   const response: IFSEntry[] = await db
@@ -33,6 +33,17 @@ export const addTrack = async (entry: NewFSEntry) => {
   return response[0];
 };
 
+export const removeTrack = async (entry_id: number) => {
+  const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
+  return response[0];
+};
+
+export const patchTrack = async (entry_id: number, entry: UpdateRequestBody) => {
+  const response = await db.update(flowsheet).set(entry).where(eq(flowsheet.id, entry_id)).returning();
+  return response[0];
+};
+
+
 export const addDJToShow = async (
   req_dj_id: number,
   req_show_name?: string,
@@ -40,25 +51,59 @@ export const addDJToShow = async (
 ): Promise<Show> => {
   const latestShow = await getLatestShow();
 
-  if (latestShow.end_time === null) {
-    let show_session: Show;
-    if (latestShow.dj_id2 === null && latestShow.dj_id != req_dj_id) {
-      show_session = (
-        await db.update(shows).set({ dj_id2: req_dj_id }).where(eq(shows.id, latestShow.id)).returning()
-      )[0];
-      console.log(show_session);
-    } else if (latestShow.dj_id3 === null && latestShow.dj_id2 != req_dj_id && latestShow.dj_id != req_dj_id) {
-      show_session = (
-        await db.update(shows).set({ dj_id3: req_dj_id }).where(eq(shows.id, latestShow.id)).returning()
-      )[0];
+  const showExists = latestShow.end_time === null;
+  const showDjs = [latestShow.dj_id, latestShow.dj_id2, latestShow.dj_id3];
+  const djInShow = showDjs.includes(req_dj_id);
+  const nextDjSlot = showDjs.indexOf(null);
+
+  if (nextDjSlot === -1) {
+    throw new Error('No available DJ slots');
+  }
+
+  const createJoinNotification = async (id: number) => {
+    let dj_name: string = 'DJ';
+    const dj: DJ = (await db.select().from(djs).where(eq(djs.id, id)))[0];
+    if (dj) {
+      dj_name = dj.dj_name ?? dj_name;
     } else {
-      return latestShow;
+      throw new Error('DJ not found');
     }
-    return show_session;
+
+    const message = `${dj_name} joined the show!`;
+
+    await db.insert(flowsheet).values({
+      show_id: latestShow.id,
+      artist_name: '',
+      album_title: '',
+      track_title: '',
+      message: message,
+    });
+  }
+
+  if (showExists) {
+    if (djInShow) {
+      return latestShow;
+    } else {
+      const show_session: Show = (
+        await db
+          .update(shows)
+          .set({ [`dj_id${nextDjSlot + 1}`]: req_dj_id })
+          .where(eq(shows.id, latestShow.id))
+          .returning()
+      )[0];
+      // -- Add DJ Joined to Flowsheet --
+      await createJoinNotification(req_dj_id);
+      // --------------------------------
+      return show_session;
+    }
   } else {
-    const new_show: NewShow = { dj_id: req_dj_id, specialty_id: req_specialty_id, show_name: req_show_name };
-    const show_session: Show = (await db.insert(shows).values(new_show).returning())[0];
-    return show_session;
+    // Show must be created
+    const show_data: NewShow = { dj_id: req_dj_id, specialty_id: req_specialty_id, show_name: req_show_name };
+    const new_show: Show = (await db.insert(shows).values(show_data).returning())[0];
+    // -- Add DJ Joined to Flowsheet --
+    await createJoinNotification(req_dj_id);
+    // --------------------------------
+    return new_show;
   }
 };
 

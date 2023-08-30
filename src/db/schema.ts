@@ -22,6 +22,7 @@ export const djs = wxyc_schema.table('djs', {
   id: serial('id').primaryKey(),
   cognito_user_name: varchar('cognito_user_name').notNull().unique(),
   real_name: varchar('real_name'),
+  dj_name: varchar('dj_name'),
   shows_covered: smallint('shows_covered').default(0).notNull(),
   add_date: date('add_date').defaultNow().notNull(),
 });

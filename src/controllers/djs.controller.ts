@@ -6,6 +6,7 @@ export type DJQueryParams = {
   dj_id?: number;
   cognito_user_name?: string;
   real_name?: string;
+  dj_name?: string;
 };
 
 export const register: RequestHandler<object, unknown, DJQueryParams> = async (req, res, next) => {
@@ -16,6 +17,7 @@ export const register: RequestHandler<object, unknown, DJQueryParams> = async (r
     const new_dj: NewDJ = {
       cognito_user_name: req.body.cognito_user_name,
       real_name: req.body.real_name,
+      dj_name: req.body.dj_name,
     };
 
     try {

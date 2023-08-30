@@ -7,9 +7,9 @@ flowsheet_route.get('/', flowsheetController.getEntries);
 
 flowsheet_route.post('/', flowsheetController.addEntry);
 
-//flowsheet_route.patch('/', flowsheetController.alterEntry);
+flowsheet_route.patch('/', flowsheetController.updateEntry);
 
-//flowsheet_route.delete('/', flowsheetController.deleteEntry);
+flowsheet_route.delete('/', flowsheetController.deleteEntry);
 
 flowsheet_route.get('/latest', flowsheetController.getLatest);
 
