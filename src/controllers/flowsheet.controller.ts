@@ -235,3 +235,14 @@ export const endShow: RequestHandler<object, unknown, { show_id: number }> = asy
     next(e);
   }
 };
+
+export const getOnAir: RequestHandler = async (req, res, next) => {
+  try {
+    const currentDJs = await flowsheet_service.getDJsInCurrentShow();
+    res.status(200).json(currentDJs);
+  } catch (e) {
+    console.error('Error: Failed to retrieve current DJs');
+    console.error(e);
+    next(e);
+  }
+};

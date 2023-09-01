@@ -17,4 +17,6 @@ flowsheet_route.post('/join', flowsheetController.joinShow);
 
 flowsheet_route.post('/end', flowsheetController.endShow);
 
+flowsheet_route.get('/on-air', flowsheetController.getOnAir);
+
 //flowsheet_route.patch('/play-order', flowsheetController.changeOrder);
