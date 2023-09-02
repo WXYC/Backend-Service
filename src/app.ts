@@ -23,7 +23,7 @@ app.use((req, res, next) => {
 -Use cognito api to update user store as well.
 */
 
-app.use('/playlist', playlist_route);
+app.use('/playlists', playlist_route);
 
 app.use('/flowsheet', flowsheet_route);
 

@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, isNull } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
 import { flowsheet, show_djs, shows } from '../db/schema';
 
@@ -19,8 +19,11 @@ export const getPlaylistForDJ = async (dj_id: number) => {
         show_previews.push({ show: show[0].id, preview: [] });
         continue;
       }
+
+      let diff = end_idx - start_idx;
+      let limit = Math.min(diff, 4);
   
-      let entries = await db.select().from(flowsheet).limit(4).offset(start_idx).where(eq(flowsheet.message, ''));
+      let entries = await db.select().from(flowsheet).limit(limit).offset(start_idx).where(isNull(flowsheet.message));
   
       show_previews.push({ show: show[0].id, preview: entries });
       
