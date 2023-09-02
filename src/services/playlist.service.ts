@@ -1,8 +1,8 @@
 import { eq, isNull } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
-import { FSEntry, flowsheet, show_djs, shows, specialty_shows } from '../db/schema';
+import { FSEntry, flowsheet, show_djs, shows, specialty_shows, djs } from '../db/schema';
 
-export const getPlaylistForDJ = async (dj_id: number) => {
+export const getPlaylistsForDJ = async (dj_id: number) => {
     // gets a 'preview set' of 4 artists/albums and the show id for each show the dj has been in
     let this_djs_shows = await db.select().from(show_djs).where(eq(show_djs.dj_id, dj_id));
   
@@ -10,9 +10,25 @@ export const getPlaylistForDJ = async (dj_id: number) => {
     for (let i = 0; i < this_djs_shows.length; i++) {
       let show = await db.select().from(shows).where(eq(shows.id, this_djs_shows[i].show_id));
 
-      let peek_object: {show: number, show_name: string, specialty_show: string, preview: FSEntry[]} = {
+      let djs_involved = await db.select().from(show_djs).where(eq(show_djs.show_id, show[0].id));
+        let dj_names = [];
+        for (let j = 0; j < djs_involved.length; j++) {
+          let dj = await db.select().from(djs).where(eq(djs.id, djs_involved[j].dj_id));
+            dj[0].dj_name && dj_names.push(dj[0].dj_name);
+        }
+
+      let peek_object: {
+        show: number, 
+        show_name: string, 
+        date: Date,
+        djs: string[],
+        specialty_show: string, 
+        preview: FSEntry[] 
+    } = {
         show: show[0].id,
         show_name: show[0].show_name ?? '',
+        date: show[0].start_time,
+        djs: [],
         specialty_show: '',
         preview: [],
       };
