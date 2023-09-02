@@ -50,8 +50,6 @@ export const addDJToShow = async (
 ): Promise<ShowDJ> => {
   let latestShow = await getLatestShow();
 
-  console.log(`latest show: ${JSON.stringify(latestShow)}`);
-
   // a show is not considered finished until its end time is set
   const showExistsAndIsActive = latestShow && !(latestShow?.end_time ?? null);
   console.log(`show exists and is active: ${showExistsAndIsActive}`);
@@ -65,7 +63,6 @@ export const addDJToShow = async (
         .returning()
     );
     latestShow = new_show[0];
-    console.log(`new show: ${JSON.stringify(latestShow)}`);
   }
 
   let show_dj_instance = await (
@@ -75,7 +72,6 @@ export const addDJToShow = async (
       eq(show_djs.dj_id, req_dj_id)
     )).limit(1)
   );
-  console.log(`show_dj_instance: ${JSON.stringify(show_dj_instance)}`);
 
   if (!show_dj_instance || show_dj_instance.length === 0) {
     let new_instance = await (
@@ -86,17 +82,14 @@ export const addDJToShow = async (
         active: false,
       }).returning()
     );
-    console.log(`new_instance: ${JSON.stringify(new_instance)}`);
 
     show_dj_instance = new_instance;
 
     // -- Add DJ Joined to Flowsheet --
     let notif_start = await createJoinNotification(req_dj_id, latestShow.id);
     // --------------------------------
-    console.log(`notif_start: ${JSON.stringify(notif_start)}`);
 
     let this_shows_djs = await db.select().from(show_djs).where(eq(show_djs.show_id, latestShow.id));
-    console.log(`this_shows_djs: ${JSON.stringify(this_shows_djs)}`);
     if (this_shows_djs.length === 1) {
       await db.update(shows).set({ flowsheet_start_index: notif_start.id }).where(eq(shows.id, latestShow.id));
     }
