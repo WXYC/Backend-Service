@@ -1,13 +1,12 @@
-import { sql, desc, eq } from 'drizzle-orm';
+import { sql, desc, eq, and } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
-import { NewFSEntry, flowsheet, shows, Show, NewShow, rotation, library, artists, DJ, djs, FSEntry } from '../db/schema';
+import { NewFSEntry, flowsheet, shows, Show, NewShow, rotation, library, artists, DJ, djs, FSEntry, show_djs, ShowDJ } from '../db/schema';
 import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
 
 export const getEntriesFromDB = async (offset: number, limit: number) => {
   const response: IFSEntry[] = await db
     .select({
       id: flowsheet.id,
-      show_id: flowsheet.show_id,
       album_id: flowsheet.album_id,
       artist_name: flowsheet.artist_name,
       album_title: flowsheet.album_title,
@@ -48,42 +47,70 @@ export const addDJToShow = async (
   req_dj_id: number,
   req_show_name?: string,
   req_specialty_id?: number
-): Promise<Show> => {
-  const latestShow = await getLatestShow();
+): Promise<ShowDJ> => {
+  let latestShow = await getLatestShow();
+
+  console.log(`latest show: ${JSON.stringify(latestShow)}`);
+
+  // a show is not considered finished until its end time is set
   const showExistsAndIsActive = latestShow && !(latestShow?.end_time ?? null);
-  const showDjs = [latestShow?.dj_id ?? null, latestShow?.dj_id2 ?? null, latestShow?.dj_id3 ?? null];
-  const djInShow = showDjs.includes(req_dj_id);
-  const nextDjSlot = showDjs.indexOf(null);
-
-  if (nextDjSlot === -1) {
-    throw new Error('No available DJ slots');
+  console.log(`show exists and is active: ${showExistsAndIsActive}`);
+  if (!showExistsAndIsActive) {
+    let new_show = await (
+      db.insert(shows)
+        .values({
+          specialty_id: req_specialty_id,
+          show_name: req_show_name,
+        })
+        .returning()
+    );
+    latestShow = new_show[0];
+    console.log(`new show: ${JSON.stringify(latestShow)}`);
   }
 
-  if (showExistsAndIsActive) {
-    if (djInShow) {
-      return latestShow;
-    } else {
-      const show_session: Show = (
-        await db
-          .update(shows)
-          .set({ [`dj_id${nextDjSlot + 1}`]: req_dj_id })
-          .where(eq(shows.id, latestShow.id))
-          .returning()
-      )[0];
-      // -- Add DJ Joined to Flowsheet --
-      await createJoinNotification(req_dj_id, show_session.id);
-      // --------------------------------
-      return show_session;
-    }
-  } else {
-    // Show must be created
-    const show_data: NewShow = { dj_id: req_dj_id, specialty_id: req_specialty_id, show_name: req_show_name };
-    const new_show: Show = (await db.insert(shows).values(show_data).returning())[0];
+  let show_dj_instance = await (
+    db.select().from(show_djs)
+    .where(and(
+      eq(show_djs.show_id, latestShow.id),
+      eq(show_djs.dj_id, req_dj_id)
+    )).limit(1)
+  );
+  console.log(`show_dj_instance: ${JSON.stringify(show_dj_instance)}`);
+
+  if (!show_dj_instance || show_dj_instance.length === 0) {
+    let new_instance = await (
+      db.insert(show_djs)
+      .values({
+        show_id: latestShow.id,
+        dj_id: req_dj_id,
+        active: false,
+      }).returning()
+    );
+    console.log(`new_instance: ${JSON.stringify(new_instance)}`);
+
+    show_dj_instance = new_instance;
+
     // -- Add DJ Joined to Flowsheet --
-    await createJoinNotification(req_dj_id, new_show.id);
+    let notif_start = await createJoinNotification(req_dj_id, latestShow.id);
     // --------------------------------
-    return new_show;
+    console.log(`notif_start: ${JSON.stringify(notif_start)}`);
+
+    let this_shows_djs = await db.select().from(show_djs).where(eq(show_djs.show_id, latestShow.id));
+    console.log(`this_shows_djs: ${JSON.stringify(this_shows_djs)}`);
+    if (this_shows_djs.length === 1) {
+      await db.update(shows).set({ flowsheet_start_index: notif_start.id }).where(eq(shows.id, latestShow.id));
+    }
   }
+
+  let update_result = await (
+    db.update(show_djs)
+    .set({ active: true })
+    .where(eq(show_djs.id, show_dj_instance[0].id))
+    .returning()
+  );
+
+  return update_result[0];
+
 };
 
 const createJoinNotification = async (id: number, show_id: number) => {
@@ -99,7 +126,6 @@ const createJoinNotification = async (id: number, show_id: number) => {
 
   const notification = await db.insert(flowsheet)
     .values({
-      show_id: show_id,
       artist_name: '',
       album_title: '',
       track_title: '',
@@ -109,26 +135,47 @@ const createJoinNotification = async (id: number, show_id: number) => {
   return notification[0];
 };
 
-export const endShow = async (show_id: number) => {
+export const leaveShow = async (dj_id: number): Promise<ShowDJ> => {
   const currentShow = await getLatestShow();
-  let err;
-  if (currentShow.id !== +show_id || currentShow.end_time !== null) {
-    err = 'Invalid show_id';
-    return [err, currentShow];
-  } else {
-    const finalizedShow = await db
-      .update(shows)
-      .set({ end_time: sql`CURRENT_TIMESTAMP` })
-      .where(eq(shows.id, show_id))
-      .returning();
-    // -- Add DJ Left to Flowsheet --
-    await createLeaveNotification(currentShow.dj_id, currentShow.id);
-    // -------------------------------
-    return [err, finalizedShow[0]];
+
+  const show_dj_instance = await (
+    db.select().from(show_djs)
+    .where(and(
+      eq(show_djs.show_id, currentShow.id),
+      eq(show_djs.dj_id, dj_id)
+    )).limit(1)
+  );
+
+  if (!show_dj_instance) {
+    throw new Error('DJ not in show');
   }
+
+  let update_result = await (
+    db.update(show_djs)
+    .set({ active: false })
+    .where(eq(show_djs.id, show_dj_instance[0].id))
+    .returning()
+  );
+
+  // -- Add DJ Left to Flowsheet --
+  let notif_end = await createLeaveNotification(dj_id);
+  // -------------------------------
+
+  let this_shows_djs = await db.select().from(show_djs).where(eq(show_djs.show_id, currentShow.id));
+  let everyone_left = false;
+  if (this_shows_djs.length === 0) {
+    everyone_left = true;
+  } else {
+    everyone_left = this_shows_djs.every((dj) => !dj.active);
+  }
+  if (everyone_left) {
+      await db.update(shows).set({ flowsheet_end_index: notif_end.id, end_time: sql`NOW()` }).where(eq(shows.id, currentShow.id));
+  }
+
+  return update_result[0];
 };
 
-const createLeaveNotification = async (id: number, show_id: number) => {
+const createLeaveNotification = async (id: number) => {
   let dj_name: string = 'DJ';
   const dj: DJ = (await db.select().from(djs).where(eq(djs.id, id)))[0];
   if (dj) {
@@ -141,7 +188,6 @@ const createLeaveNotification = async (id: number, show_id: number) => {
 
   const notification = await db.insert(flowsheet)
     .values({
-      show_id: show_id,
       artist_name: '',
       album_title: '',
       track_title: '',
@@ -156,9 +202,23 @@ export const getLatestShow = async (): Promise<Show> => {
   return latest_show;
 };
 
+export const getOnAirStatusForDJ = async (dj_id: number): Promise<boolean> => {
+  const latest_show = await getLatestShow();
+  
+  const showDj = await (
+    db.select().from(show_djs)
+    .where(and(
+      eq(show_djs.show_id, latest_show.id),
+      eq(show_djs.dj_id, dj_id),
+    )).limit(1)
+  );
+
+  return showDj[0]?.active ?? false;
+};
+
 export const getDJsInCurrentShow = async (): Promise<string> => {
   const latest_show = await getLatestShow();
-  const dj_ids = [latest_show.dj_id ?? -1, latest_show.dj_id2 ?? -1, latest_show.dj_id3 ?? -1];
+  const dj_ids = (await db.select().from(show_djs).where(eq(show_djs.show_id, latest_show.id))).map((dj) => dj.dj_id);
   const dj_names = [];
 
   for (let i = 0; i < dj_ids.length; i++) {

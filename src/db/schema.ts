@@ -151,9 +151,6 @@ export type NewFSEntry = InferModel<typeof flowsheet, 'insert'>;
 export type FSEntry = InferModel<typeof flowsheet, 'select'>;
 export const flowsheet = wxyc_schema.table('flowsheet', {
   id: serial('id').primaryKey(),
-  show_id: integer('show_id')
-    .references(() => shows.id)
-    .notNull(),
   album_id: integer('album_id').references(() => library.id),
   rotation_id: integer('rotation_id').references(() => rotation.id),
   track_title: varchar('track_title', { length: 128 }).notNull(),
@@ -207,16 +204,28 @@ export type NewShow = InferModel<typeof shows, 'insert'>;
 export type Show = InferModel<typeof shows, 'select'>;
 export const shows = wxyc_schema.table('shows', {
   id: serial('id').primaryKey(),
-  dj_id: integer('dj_id')
-    .references(() => djs.id)
-    .notNull(),
-  dj_id2: integer('dj_id2').references(() => djs.id),
-  dj_id3: integer('dj_id3').references(() => djs.id),
   specialty_id: integer('specialty_id') //Null for regular shows
     .references(() => specialty_shows.id),
   show_name: varchar('show_name', { length: 128 }), //Null if not provided or specialty show
   start_time: timestamp('start_time').defaultNow().notNull(),
   end_time: timestamp('end_time'),
+  flowsheet_start_index: integer('flowsheet_start_index')
+    .references(() => flowsheet.id),
+  flowsheet_end_index: integer('flowsheet_end_index')
+    .references(() => flowsheet.id),
+});
+
+export type NewShowDJ = InferModel<typeof show_djs, 'insert'>;
+export type ShowDJ = InferModel<typeof show_djs, 'select'>;
+export const show_djs = wxyc_schema.table('show_djs', {
+  id: serial('id').primaryKey(),
+  show_id: integer('show_id')
+    .references(() => shows.id)
+    .notNull(),
+  dj_id: integer('dj_id')
+    .references(() => djs.id)
+    .notNull(),
+  active: boolean('active').default(false).notNull(),
 });
 
 //create entry w/ ID 0 for regular shows

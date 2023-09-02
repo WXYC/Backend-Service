@@ -15,7 +15,9 @@ flowsheet_route.get('/latest', flowsheetController.getLatest);
 
 flowsheet_route.post('/join', flowsheetController.joinShow);
 
-flowsheet_route.post('/end', flowsheetController.endShow);
+flowsheet_route.post('/end', flowsheetController.leaveShow);
+
+flowsheet_route.get('/djs-on-air', flowsheetController.getDJList);
 
 flowsheet_route.get('/on-air', flowsheetController.getOnAir);
 
