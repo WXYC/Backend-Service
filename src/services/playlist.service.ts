@@ -48,10 +48,10 @@ export const getPlaylistsForDJ = async (dj_id: number) => {
         continue;
       }
 
-      let diff = end_idx - start_idx;
+      let diff = end_idx - start_idx + 1;
       let limit = Math.min(diff, 4);
   
-      let entries: FSEntry[] = await db.select().from(flowsheet).limit(limit).offset(start_idx).where(isNull(flowsheet.message));
+      let entries: FSEntry[] = await db.select().from(flowsheet).limit(limit).offset(start_idx - 1).where(isNull(flowsheet.message));
       
       peek_object.preview = entries;
       show_previews.push(peek_object);
@@ -70,9 +70,9 @@ export const getPlaylistsForDJ = async (dj_id: number) => {
       return []; // do not include shows that have not been completed
     }
   
-    let diff = end_idx - start_idx;
+    let diff = end_idx - start_idx + 1;
   
-    let entries = await db.select().from(flowsheet).limit(diff).offset(start_idx);
+    let entries = await db.select().from(flowsheet).limit(diff).offset(start_idx - 1);
   
     return entries;
   };
