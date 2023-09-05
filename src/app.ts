@@ -4,7 +4,7 @@ import express from 'express';
 import { dj_route } from './routes/djs.route';
 import { flowsheet_route } from './routes/flowsheet.route';
 import { library_route } from './routes/library.route';
-import { playlist_route } from './routes/playlist.route';
+import { schedule_route } from './routes/schedule.route';
 
 const port = process.env.PORT || 8080;
 const app = express();
@@ -23,13 +23,15 @@ app.use((req, res, next) => {
 -Use cognito api to update user store as well.
 */
 
-app.use('/playlists', playlist_route);
+app.use('/playlists', library_route);
 
 app.use('/flowsheet', flowsheet_route);
 
 app.use('/djs', dj_route);
 
 app.use('/library', library_route);
+
+app.use('/schedule', schedule_route);
 
 app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
