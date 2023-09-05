@@ -1,7 +1,7 @@
-import { db } from '../db/drizzle_client';
-import { NewDJ, DJ, djs, bins, NewBinEntry, BinEntry, library, artists, format, genres, show_djs, flowsheet, shows } from '../db/schema';
-import { sql, eq, and, not } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { DJQueryParams } from '../controllers/djs.controller';
+import { db } from '../db/drizzle_client';
+import { BinEntry, DJ, FSEntry, NewBinEntry, NewDJ, artists, bins, djs, flowsheet, format, genres, library, show_djs, shows, specialty_shows } from '../db/schema';
 
 export const insertDJ = async (new_dj: NewDJ) => {
   const response = await db.insert(djs).values(new_dj).returning();
@@ -67,3 +67,90 @@ export const getBinFromDB = async (dj_id: number) => {
 
   return dj_bin;
 };
+
+// ERRORS IN SERVICES ARE 500 ERRORS
+export const getPlaylistsForDJ = async (dj_id: number) => {
+    // gets a 'preview set' of 4 artists/albums and the show id for each show the dj has been in
+    let this_djs_shows = await db.select().from(show_djs).where(eq(show_djs.dj_id, dj_id));
+  
+    let show_previews = [];
+    for (let i = 0; i < this_djs_shows.length; i++) {
+      let show = await db.select().from(shows).where(eq(shows.id, this_djs_shows[i].show_id));
+
+      let djs_involved = await db.select().from(show_djs).where(eq(show_djs.show_id, show[0].id));
+        let dj_names = [];
+        for (let j = 0; j < djs_involved.length; j++) {
+          let dj = await db.select().from(djs).where(eq(djs.id, djs_involved[j].dj_id));
+            dj[0].dj_name && dj_names.push(dj[0].dj_name);
+        }
+
+      let peek_object: {
+        show: number, 
+        show_name: string, 
+        date: Date,
+        djs: string[],
+        specialty_show: string, 
+        preview: FSEntry[] 
+    } = {
+        show: show[0].id,
+        show_name: show[0].show_name ?? '',
+        date: show[0].start_time,
+        djs: [],
+        specialty_show: '',
+        preview: [],
+      };
+
+      if (show[0].specialty_id != null) {
+        let specialty_show = await db.select().from(specialty_shows).where(eq(specialty_shows.id, show[0].specialty_id));
+        peek_object.specialty_show = specialty_show[0].specialty_name;
+      }
+
+      let start_idx = show[0].flowsheet_start_index ?? -1;
+      let end_idx = show[0].flowsheet_end_index ?? -1;
+      if (end_idx === -1) {
+        continue; // do not include shows that have not been completed
+      }
+      if (start_idx === -1) {
+        show_previews.push(peek_object);
+        continue;
+      }
+
+      let diff = end_idx - start_idx + 1;
+      let limit = Math.min(diff, 4);
+  
+      let entries: FSEntry[] = await db.select().from(flowsheet).limit(limit).offset(start_idx - 1).where(isNull(flowsheet.message));
+      
+      peek_object.preview = entries;
+      show_previews.push(peek_object);
+      
+    }
+  
+    return show_previews;
+  };
+  
+  export const getPlaylist = async (show_id: number) => {
+    let show = await db.select().from(shows).where(eq(shows.id, show_id));
+  
+    let start_idx = show[0].flowsheet_start_index ?? -1;
+    let end_idx = show[0].flowsheet_end_index ?? -1;
+    if (start_idx === -1 || end_idx === -1) {
+      return []; // do not include shows that have not been completed
+    }
+  
+    let diff = end_idx - start_idx + 1;
+  
+    let entries = await db.select().from(flowsheet).limit(diff).offset(start_idx - 1);
+    
+    let specialty_show_name = '';
+    if (show[0].specialty_id != null) {
+      let specialty_show = await db.select().from(specialty_shows).where(eq(specialty_shows.id, show[0].specialty_id));
+      specialty_show_name = specialty_show[0].specialty_name;
+    }
+
+    return {
+      show_name: show[0].show_name ?? '',
+      specialty_show: specialty_show_name,
+      date: show[0].start_time,
+      entries: entries,
+    };
+  };

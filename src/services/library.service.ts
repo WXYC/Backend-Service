@@ -9,6 +9,7 @@ import {
   rotation,
   format,
   RotationRelease,
+  genres,
 } from '../db/schema';
 import { RotationAddRequest } from '../controllers/library.controller';
 
@@ -23,17 +24,26 @@ export const getFormatsFromDB = async () => {
 export const getRotationFromDB = async () => {
   const rotation_albums = await db
     .select({
-      library_id: library.id,
-      rotation_id: rotation.id,
-      label: library.label,
-      play_freq: rotation.play_freq,
-      album_title: library.album_title,
+      id: library.id,
+      code_letters: artists.code_letters,
+      code_artist_number: artists.code_artist_number,
+      code_number: library.code_number,
       artist_name: artists.artist_name,
+      album_title: library.album_title,
+      record_label: library.label,
+      genre_name: genres.genre_name,
+      format_name: format.format_name,
+      rotation_id: rotation.id,
+      add_date: library.add_date,
+      play_freq: rotation.play_freq,
       kill_date: rotation.kill_date,
+      plays: library.plays,
     })
     .from(library)
     .innerJoin(rotation, eq(library.id, rotation.album_id))
     .innerJoin(artists, eq(artists.id, library.artist_id))
+    .innerJoin(genres, eq(artists.genre_id, genres.id))
+    .innerJoin(format, eq(library.format_id, format.id))
     .where(sql`${rotation.kill_date} < CURRENT_DATE OR ${rotation.kill_date} IS NULL`);
 
   // drizzle doesn't support renaming columns with "as" at the moment, so below is broken

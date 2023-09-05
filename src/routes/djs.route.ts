@@ -14,3 +14,7 @@ dj_route.post('/bin', djsController.addToBin);
 dj_route.delete('/bin', djsController.deleteFromBin);
 
 dj_route.get('/bin', djsController.getBin);
+
+dj_route.get('/playlists', djsController.getPlaylistsForDJ);
+
+dj_route.get('/playlist', djsController.getPlaylist);
