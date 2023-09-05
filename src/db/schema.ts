@@ -38,7 +38,7 @@ export const schedule = wxyc_schema.table('schedule', {
   id: serial('id').primaryKey(),
   day: smallint('day').notNull(),
   start_time: time('start_time').notNull(),
-  show_duration: smallint('show_duration').notNull(), // In hours
+  show_duration: smallint('show_duration').notNull(), // In 15-minute blocs
   specialty_id: integer('specialty_id').references(() => specialty_shows.id), //null for regular shows
   assigned_dj_id: integer('assigned_dj_id').references(() => djs.id),
   assigned_dj_id2: integer('assigned_dj_id2').references(() => djs.id),

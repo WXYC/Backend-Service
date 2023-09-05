@@ -1,15 +1,6 @@
-import { RequestHandler } from "express";
+import { Request, RequestHandler } from "express";
 import * as ScheduleService from "../services/schedule.service";
-
-export interface ScheduleEntry {
-    id: number;
-    day: number;
-    start_time?: string;
-    show_duration: number;
-    specialty_id?: number;
-    assigned_dj_id?: number;
-    assigned_dj_id2?: number;
-};
+import { NewShift } from "../db/schema";
 
 export const getSchedule: RequestHandler<object, unknown, object, object> = async (req, res, next) => {
   try {
@@ -21,6 +12,19 @@ export const getSchedule: RequestHandler<object, unknown, object, object> = asyn
     next(e);
   }
 };
+
+
+export const addToSchedule: RequestHandler = async (req: Request<object, object, NewShift>, res, next) => {
+    const { body } = req;
+    try {
+        let response = await ScheduleService.addToSchedule(body);
+        res.status(200).json(response);
+    } catch (e) {
+        console.error('Error adding to schedule');
+        console.error(e);
+        next(e);
+    }
+}
 /*
 export const removeFromSchedule: RequestHandler<object, unknown, object, { show_id: number }> = async (req, res, next) => {
     if (req.query.show_id === undefined) {
