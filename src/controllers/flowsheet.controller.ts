@@ -67,7 +67,6 @@ export type FSEntryRequestBody = {
 // either an id is provided (meaning it came from the user's bin or was fuzzy found)
 // or it's not provided in which case whe just throw the data provided into the table w/ album_id = NULL
 export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res, next) => {
-  //check for things that MUST be sent by the client
   const { body } = req;
   let latestShow;
   try {
@@ -160,7 +159,11 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   }
 };
 
-export const updateEntry: RequestHandler<object, unknown, { entry_id: number, data: UpdateRequestBody }> = async (req, res, next) => {
+export const updateEntry: RequestHandler<object, unknown, { entry_id: number; data: UpdateRequestBody }> = async (
+  req,
+  res,
+  next
+) => {
   const { entry_id, data } = req.body;
   if (entry_id === undefined) {
     console.error('Bad Request, Missing entry identifier: entry_id');
@@ -217,18 +220,17 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 //GET
 //TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
 export const leaveShow: RequestHandler<object, unknown, { dj_id: number }> = async (req, res, next) => {
-  
-  let status = 200;
   let finalizedShow = null;
-
   try {
     finalizedShow = await flowsheet_service.leaveShow(Number(req.body.dj_id));
   } catch (e) {
-    status = 400;
     console.error('Error: Failed to leave show');
     console.error(e);
     next(e);
   } finally {
+    if (finalizedShow == null) {
+      res.status(400).send('Bad Request: ');
+    }
     res.status(200).json(finalizedShow);
   }
 };
