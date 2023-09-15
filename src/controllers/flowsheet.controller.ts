@@ -159,6 +159,16 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   }
 };
 
+export type UpdateRequestBody = {
+  artist_name?: string;
+  album_title?: string;
+  track_title?: string;
+  record_label?: string;
+  rotation_id?: number;
+  request_flag?: boolean;
+  message?: string;
+};
+
 export const updateEntry: RequestHandler<object, unknown, { entry_id: number; data: UpdateRequestBody }> = async (
   req,
   res,
@@ -178,16 +188,6 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
       next(e);
     }
   }
-};
-
-export type UpdateRequestBody = {
-  artist_name?: string;
-  album_title?: string;
-  track_title?: string;
-  record_label?: string;
-  rotation_id?: number;
-  request_flag?: boolean;
-  message?: string;
 };
 
 export type JoinRequestBody = {
@@ -220,18 +220,18 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 //GET
 //TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
 export const leaveShow: RequestHandler<object, unknown, { dj_id: number }> = async (req, res, next) => {
-  let finalizedShow = null;
+  let finalizedShow;
   try {
     finalizedShow = await flowsheet_service.leaveShow(Number(req.body.dj_id));
+    if (finalizedShow.id === undefined) {
+      res.status(400).send('Bad Request, no active shows for dj');
+    } else {
+      res.status(200).json(finalizedShow);
+    }
   } catch (e) {
     console.error('Error: Failed to leave show');
     console.error(e);
     next(e);
-  } finally {
-    if (finalizedShow == null) {
-      res.status(400).send('Bad Request: ');
-    }
-    res.status(200).json(finalizedShow);
   }
 };
 
