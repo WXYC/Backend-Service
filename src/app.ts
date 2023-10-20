@@ -5,6 +5,7 @@ import { dj_route } from './routes/djs.route';
 import { flowsheet_route } from './routes/flowsheet.route';
 import { library_route } from './routes/library.route';
 import { schedule_route } from './routes/schedule.route';
+import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth';
 
 const port = process.env.PORT || 8080;
 const app = express();
@@ -33,6 +34,17 @@ app.use('/library', library_route);
 
 app.use('/schedule', schedule_route);
 
-app.listen(port, () => {
-  console.log(`listening on port: ${port}!`);
+app.get('/testAuth', cognitoMiddleware, async (req, res) => {
+  res.json({ message: 'Authenticated!' });
 });
+
+jwtVerifier
+  .hydrate()
+  .catch((e) => {
+    console.error(`Failed to hydrate JWT verifier : ${e}`);
+  })
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`listening on port: ${port}!`);
+    });
+  });
