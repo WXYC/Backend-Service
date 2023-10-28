@@ -34,7 +34,7 @@ app.use('/library', library_route);
 
 app.use('/schedule', schedule_route);
 
-app.get('/testAuth', cognitoMiddleware, async (req, res) => {
+app.get('/testAuth', cognitoMiddleware('station-management'), async (req, res) => {
   res.json({ message: 'Authenticated!' });
 });
 
