@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { RequestHandler } from 'express';
+import { Response, Request, NextFunction } from 'express';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 
 export const jwtVerifier = CognitoJwtVerifier.create({
@@ -8,13 +8,20 @@ export const jwtVerifier = CognitoJwtVerifier.create({
   clientId: process.env.DJ_APP_CLIENT_ID ?? '',
 });
 
-export const cognitoMiddleware: RequestHandler = async (req, res, next) => {
-  const accessToken = req.header('authorization') || '';
-  try {
-    const verification = await jwtVerifier.verify(accessToken);
-    console.log(verification);
-    next();
-  } catch (e) {
-    res.status(403).json({ message: 'Forbidden' });
-  }
+export const cognitoMiddleware = (permissionsLevel: string) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const accessToken = req.header('authorization') || '';
+    try {
+      const verification = await jwtVerifier.verify(accessToken);
+      console.log(verification);
+      if (!verification['cognito:groups']?.includes(permissionsLevel)) {
+        console.log('Hello There');
+        res.status(403).json({ message: 'Forbidden' });
+      } else {
+        next();
+      }
+    } catch (e) {
+      res.status(403).json({ message: 'Forbidden' });
+    }
+  };
 };
