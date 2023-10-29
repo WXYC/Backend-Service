@@ -5,38 +5,50 @@ import * as flowsheet_service from '../services/flowsheet.service';
 type QueryParams = {
   page: number;
   limit: number;
-  start_date: string;
-  end_date: string;
+  start_id: number;
+  end_id: number;
 };
 
 export interface IFSEntry extends FSEntry {
   rotation_play_freq: string | null;
 }
 
+const MAX_ITEMS = 200;
+const OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
   const { query } = req;
   const page = query.page || 0;
   const limit = query.limit || 5;
   const offset = page * query.limit;
-  try {
-    const entries: IFSEntry[] = await flowsheet_service.getEntriesFromDB(offset, limit);
-    if (entries.length) {
-      res.status(200).json(entries);
-    } else {
-      console.error('No Tracks found');
-      res.status(404);
-      res.send('No Tracks found');
+  if (query.end_id - query.start_id + OFFSET > MAX_ITEMS || limit > MAX_ITEMS) {
+    res.status(400).json({
+      message: 'Requested too many entries',
+    });
+  } else {
+    try {
+      const entries: IFSEntry[] =
+        query.start_id !== undefined && query.end_id !== undefined
+          ? await flowsheet_service.getEntriesByRange(query.start_id, query.end_id)
+          : await flowsheet_service.getEntriesByPage(offset, limit);
+      if (entries.length) {
+        res.status(200).json(entries);
+      } else {
+        console.error('No Tracks found');
+        res.status(404).json({
+          message: 'No Tracks found',
+        });
+      }
+    } catch (e) {
+      console.error('Failed to retrieve tracks');
+      console.error(`Error: ${e}`);
+      next(e);
     }
-  } catch (e) {
-    console.error('Failed to retrieve tracks');
-    console.error(`Error: ${e}`);
-    next(e);
   }
 };
 
 export const getLatest: RequestHandler = async (req, res, next) => {
   try {
-    const latest: FSEntry[] = await flowsheet_service.getEntriesFromDB(0, 1);
+    const latest: FSEntry[] = await flowsheet_service.getEntriesByPage(0, 1);
     if (latest.length) {
       console.log(latest[0]);
       res.status(200);
