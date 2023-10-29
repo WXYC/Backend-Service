@@ -1,4 +1,4 @@
-import { sql, desc, eq, and } from 'drizzle-orm';
+import { sql, desc, eq, and, lte, gte } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
 import {
   NewFSEntry,
@@ -17,7 +17,7 @@ import {
 } from '../db/schema';
 import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
 
-export const getEntriesFromDB = async (offset: number, limit: number) => {
+export const getEntriesByPage = async (offset: number, limit: number) => {
   const response: IFSEntry[] = await db
     .select({
       id: flowsheet.id,
@@ -37,6 +37,29 @@ export const getEntriesFromDB = async (offset: number, limit: number) => {
     .orderBy(desc(flowsheet.play_order))
     .offset(offset)
     .limit(limit);
+
+  return response;
+};
+
+export const getEntriesByRange = async (startId: number, endId: number) => {
+  const response: IFSEntry[] = await db
+    .select({
+      id: flowsheet.id,
+      album_id: flowsheet.album_id,
+      artist_name: flowsheet.artist_name,
+      album_title: flowsheet.album_title,
+      track_title: flowsheet.track_title,
+      record_label: flowsheet.record_label,
+      rotation_id: flowsheet.rotation_id,
+      rotation_play_freq: rotation.play_freq,
+      request_flag: flowsheet.request_flag,
+      message: flowsheet.message,
+      play_order: flowsheet.play_order,
+    })
+    .from(flowsheet)
+    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
+    .orderBy(desc(flowsheet.play_order));
 
   return response;
 };
