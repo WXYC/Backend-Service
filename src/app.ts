@@ -1,4 +1,3 @@
-//import fetch, { Response as Fetch_Response } from 'node-fetch';
 import 'dotenv/config';
 import express from 'express';
 import { dj_route } from './routes/djs.route';
@@ -19,11 +18,6 @@ app.use((req, res, next) => {
   next();
 });
 
-/* TODO
--Accept jwt and verify that user is part of mgmt.
--Use cognito api to update user store as well.
-*/
-
 app.use('/playlists', library_route);
 
 app.use('/flowsheet', flowsheet_route);
@@ -34,10 +28,12 @@ app.use('/library', library_route);
 
 app.use('/schedule', schedule_route);
 
+//example for how to use te Cognito auth middleware
 app.get('/testAuth', cognitoMiddleware('station-management'), async (req, res) => {
   res.json({ message: 'Authenticated!' });
 });
 
+//On server startup we pre-fetch all
 jwtVerifier
   .hydrate()
   .catch((e) => {
