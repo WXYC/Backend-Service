@@ -15,7 +15,6 @@ export const cognitoMiddleware = (permissionsLevel: string) => {
       const verification = await jwtVerifier.verify(accessToken);
       console.log(verification);
       if (!verification['cognito:groups']?.includes(permissionsLevel)) {
-        console.log('Hello There');
         res.status(403).json({ message: 'Forbidden' });
       } else {
         next();
