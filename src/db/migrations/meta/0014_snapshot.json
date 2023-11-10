@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "pg",
-  "id": "b5720b72-a493-4fac-9d2c-461161decb64",
+  "id": "a53cee1c-a57c-411c-8913-0bd909db00e3",
   "prevId": "212df034-15f8-4880-ad78-3f818fffec65",
   "tables": {
     "artists": {
@@ -214,6 +214,12 @@
           "primaryKey": true,
           "notNull": true
         },
+        "show_id": {
+          "name": "show_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "album_id": {
           "name": "album_id",
           "type": "integer",
@@ -230,19 +236,19 @@
           "name": "track_title",
           "type": "varchar(128)",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "album_title": {
           "name": "album_title",
           "type": "varchar(128)",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "artist_name": {
           "name": "artist_name",
           "type": "varchar(128)",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "record_label": {
           "name": "record_label",
@@ -272,6 +278,19 @@
       },
       "indexes": {},
       "foreignKeys": {
+        "flowsheet_show_id_shows_id_fk": {
+          "name": "flowsheet_show_id_shows_id_fk",
+          "tableFrom": "flowsheet",
+          "tableTo": "shows",
+          "columnsFrom": [
+            "show_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
         "flowsheet_album_id_library_id_fk": {
           "name": "flowsheet_album_id_library_id_fk",
           "tableFrom": "flowsheet",
@@ -832,12 +851,6 @@
       "name": "show_djs",
       "schema": "wxyc_schema",
       "columns": {
-        "id": {
-          "name": "id",
-          "type": "serial",
-          "primaryKey": true,
-          "notNull": true
-        },
         "show_id": {
           "name": "show_id",
           "type": "integer",
@@ -850,12 +863,17 @@
           "primaryKey": false,
           "notNull": true
         },
-        "active": {
-          "name": "active",
-          "type": "boolean",
+        "time_joined": {
+          "name": "time_joined",
+          "type": "timestamp",
           "primaryKey": false,
-          "notNull": true,
-          "default": false
+          "notNull": false
+        },
+        "time_left": {
+          "name": "time_left",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -900,6 +918,12 @@
           "primaryKey": true,
           "notNull": true
         },
+        "primary_dj_id": {
+          "name": "primary_dj_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "specialty_id": {
           "name": "specialty_id",
           "type": "integer",
@@ -924,54 +948,29 @@
           "type": "timestamp",
           "primaryKey": false,
           "notNull": false
-        },
-        "flowsheet_start_index": {
-          "name": "flowsheet_start_index",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "flowsheet_end_index": {
-          "name": "flowsheet_end_index",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
       "foreignKeys": {
+        "shows_primary_dj_id_djs_id_fk": {
+          "name": "shows_primary_dj_id_djs_id_fk",
+          "tableFrom": "shows",
+          "tableTo": "djs",
+          "columnsFrom": [
+            "primary_dj_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
         "shows_specialty_id_specialty_shows_id_fk": {
           "name": "shows_specialty_id_specialty_shows_id_fk",
           "tableFrom": "shows",
           "tableTo": "specialty_shows",
           "columnsFrom": [
             "specialty_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "shows_flowsheet_start_index_flowsheet_id_fk": {
-          "name": "shows_flowsheet_start_index_flowsheet_id_fk",
-          "tableFrom": "shows",
-          "tableTo": "flowsheet",
-          "columnsFrom": [
-            "flowsheet_start_index"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "shows_flowsheet_end_index_flowsheet_id_fk": {
-          "name": "shows_flowsheet_end_index_flowsheet_id_fk",
-          "tableFrom": "shows",
-          "tableTo": "flowsheet",
-          "columnsFrom": [
-            "flowsheet_end_index"
           ],
           "columnsTo": [
             "id"
