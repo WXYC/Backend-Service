@@ -29,11 +29,9 @@ export const djs = wxyc_schema.table('djs', {
 
 export type NewShift = InferModel<typeof schedule, 'insert'>;
 export type Shift = InferModel<typeof schedule, 'select'>;
-
 // days {0: mon, 1: tue, ... , 6: sun}
-// n shows from now can be found with query:
-//SELECT date_trunc('week', current_timestamp + timestamp '${n} weeks') + interval '${schedule.day} days' + ${schedule.time}
-//or really it could be done client side really easily...
+// date n shows from now can be found with query:
+
 export const schedule = wxyc_schema.table('schedule', {
   id: serial('id').primaryKey(),
   day: smallint('day').notNull(),
@@ -44,6 +42,8 @@ export const schedule = wxyc_schema.table('schedule', {
   assigned_dj_id2: integer('assigned_dj_id2').references(() => djs.id),
 });
 
+//SELECT date_trunc('week', current_timestamp + timestamp '${n} weeks') + interval '${schedule.day} days' + ${schedule.time}
+//or really it could be done client side really easily...
 export type NewShiftCover = InferModel<typeof shift_covers, 'insert'>;
 export type ShiftCover = InferModel<typeof shift_covers, 'select'>;
 export const shift_covers = wxyc_schema.table('shift_covers', {
@@ -51,7 +51,7 @@ export const shift_covers = wxyc_schema.table('shift_covers', {
   schedule_id: serial('schedule_id')
     .references(() => schedule.id)
     .notNull(),
-  shift_timestamp: timestamp('shift_timestamp').notNull(),
+  shift_timestamp: timestamp('shift_timestamp').notNull(), //Timestamp to expire cover requests
   cover_dj_id: integer('cover_dj_id').references(() => djs.id),
   covered: boolean('covered').default(false),
 });
@@ -222,8 +222,7 @@ export const show_djs = wxyc_schema.table('show_djs', {
   dj_id: integer('dj_id')
     .references(() => djs.id)
     .notNull(),
-  time_joined: timestamp('time_joined'),
-  time_left: timestamp('time_left'),
+  active: boolean('active').default(true),
 });
 
 //create entry w/ ID 0 for regular shows
