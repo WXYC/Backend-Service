@@ -13,10 +13,11 @@ export const cognitoMiddleware = (permissionsLevel: string) => {
     const accessToken = req.header('authorization') || '';
     try {
       const verification = await jwtVerifier.verify(accessToken);
-      console.log(verification);
+      // console.log(verification);
       if (!verification['cognito:groups']?.includes(permissionsLevel)) {
         res.status(403).json({ message: 'Forbidden' });
       } else {
+        res.locals.decodedJWT = verification;
         next();
       }
     } catch (e) {
