@@ -5,6 +5,7 @@ import { flowsheet_route } from './routes/flowsheet.route';
 import { library_route } from './routes/library.route';
 import { schedule_route } from './routes/schedule.route';
 import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth';
+// import errorHandler from './middleware/errorHandler';
 
 const port = process.env.PORT || 8080;
 const app = express();
@@ -33,7 +34,15 @@ app.get('/testAuth', cognitoMiddleware('station-management'), async (req, res) =
   res.json({ message: 'Authenticated!' });
 });
 
-//On server startup we pre-fetch all
+// app.get(
+//   '/testErrorHandler',
+//   (req, res, next) => {
+//     next(new Error('Testing Error'));
+//   },
+//   errorHandler
+// );
+
+//On server startup we pre-fetch all jwt validation keys
 jwtVerifier
   .hydrate()
   .catch((e) => {
