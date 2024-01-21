@@ -88,7 +88,7 @@ type ShowPeek = {
   show: number;
   show_name: string;
   date: Date;
-  djs: string[];
+  djs: { dj_id: number; dj_name: string | null }[];
   specialty_show: string;
   preview: FSEntry[];
 };
@@ -102,18 +102,16 @@ export const getPlaylistsForDJ = async (dj_id: number) => {
   for (let i = 0; i < this_djs_shows.length; i++) {
     const show = await db.select().from(shows).where(eq(shows.id, this_djs_shows[i].show_id));
 
-    const djs_involved = await db.select().from(show_djs).where(eq(show_djs.show_id, show[0].id));
-    const dj_names = [];
-    for (let j = 0; j < djs_involved.length; j++) {
-      const dj = await db.select().from(djs).where(eq(djs.id, djs_involved[j].dj_id));
-      dj[0].dj_name && dj_names.push(dj[0].dj_name);
-    }
+    const djs_involved = await db
+      .select({ dj_id: show_djs.dj_id, dj_name: djs.dj_name })
+      .from(show_djs)
+      .innerJoin(djs, and(eq(show_djs.show_id, show[0].id), eq(show_djs.dj_id, djs.id)));
 
     const peek_object: ShowPeek = {
       show: show[0].id,
       show_name: show[0].show_name ?? '',
       date: show[0].start_time,
-      djs: [],
+      djs: djs_involved,
       specialty_show: '',
       preview: [],
     };
@@ -126,25 +124,12 @@ export const getPlaylistsForDJ = async (dj_id: number) => {
       peek_object.specialty_show = specialty_show[0].specialty_name;
     }
 
-    const start_idx = show[0].flowsheet_start_index ?? -1;
-    const end_idx = show[0].flowsheet_end_index ?? -1;
-    if (end_idx === -1) {
-      continue; // do not include shows that have not been completed
-    }
-    if (start_idx === -1) {
-      show_previews.push(peek_object);
-      continue;
-    }
-
-    const diff = end_idx - start_idx + 1;
-    const limit = Math.min(diff, 4);
-
+    //get 4 track entries to display in preview
     const entries: FSEntry[] = await db
       .select()
       .from(flowsheet)
-      .limit(limit)
-      .offset(start_idx - 1)
-      .where(isNull(flowsheet.message));
+      .limit(4)
+      .where(and(eq(flowsheet.show_id, show[0].id), isNull(flowsheet.message)));
 
     peek_object.preview = entries;
     show_previews.push(peek_object);
@@ -156,19 +141,7 @@ export const getPlaylistsForDJ = async (dj_id: number) => {
 export const getPlaylist = async (show_id: number) => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
 
-  const start_idx = show[0].flowsheet_start_index ?? -1;
-  const end_idx = show[0].flowsheet_end_index ?? -1;
-  if (start_idx === -1 || end_idx === -1) {
-    return []; // do not include shows that have not been completed
-  }
-
-  const diff = end_idx - start_idx + 1;
-
-  const entries = await db
-    .select()
-    .from(flowsheet)
-    .limit(diff)
-    .offset(start_idx - 1);
+  const entries = await db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id));
 
   let specialty_show_name = '';
   if (show[0].specialty_id != null) {
