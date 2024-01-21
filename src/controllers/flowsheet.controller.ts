@@ -1,5 +1,5 @@
 import { Request, RequestHandler } from 'express';
-import { NewFSEntry, FSEntry } from '../db/schema';
+import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema';
 import * as flowsheet_service from '../services/flowsheet.service';
 
 type QueryParams = {
@@ -14,13 +14,13 @@ export interface IFSEntry extends FSEntry {
 }
 
 const MAX_ITEMS = 200;
-const OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
+const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
   const { query } = req;
   const page = query.page || 0;
   const limit = query.limit || 5;
   const offset = page * query.limit;
-  if (query.end_id - query.start_id + OFFSET > MAX_ITEMS || limit > MAX_ITEMS) {
+  if (query.end_id - query.start_id - DELETION_OFFSET > MAX_ITEMS || limit > MAX_ITEMS) {
     res.status(400).json({
       message: 'Requested too many entries',
     });
@@ -176,7 +176,6 @@ export type UpdateRequestBody = {
   album_title?: string;
   track_title?: string;
   record_label?: string;
-  rotation_id?: number;
   request_flag?: boolean;
   message?: string;
 };
@@ -192,7 +191,7 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
     res.status(400).send('Bad Request, Missing entry identifier: entry_id');
   } else {
     try {
-      const updatedEntry = await flowsheet_service.patchTrack(entry_id, data);
+      const updatedEntry = await flowsheet_service.updateEntry(entry_id, data);
       res.status(200).json(updatedEntry);
     } catch (e) {
       console.error('Error: Failed to update entry');
@@ -210,17 +209,22 @@ export type JoinRequestBody = {
 
 //POST
 export const joinShow: RequestHandler = async (req: Request<object, object, JoinRequestBody>, res, next) => {
+  const current_show = await flowsheet_service.getLatestShow();
   if (req.body.dj_id === undefined) {
-    res.status(400).send('Error: Must include a dj_id to join show');
+    res.status(400).send('Bad Request, Must include a dj_id to join show');
+  } else if (current_show.end_time !== null) {
+    try {
+      const show_session = await flowsheet_service.startShow(req.body.dj_id, req.body.show_name, req.body.specialty_id);
+      res.status(200).json(show_session);
+    } catch (e) {
+      console.error('Error: Failed to start show');
+      console.error(e);
+      next(e);
+    }
   } else {
     try {
-      const show_session = await flowsheet_service.addDJToShow(
-        req.body.dj_id,
-        req.body.show_name,
-        req.body.specialty_id
-      );
-
-      res.status(200).json(show_session);
+      const show_dj_instance = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
+      res.status(200).json(show_dj_instance);
     } catch (e) {
       console.error('Error: Failed to join show');
       console.error(e);
@@ -232,13 +236,18 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 //GET
 //TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
 export const leaveShow: RequestHandler<object, unknown, { dj_id: number }> = async (req, res, next) => {
-  let finalizedShow;
+  const currentShow = await flowsheet_service.getLatestShow();
+  if (currentShow.end_time !== null) {
+    res.status(400).json({ message: 'Bad Request: No active show' });
+  }
+
   try {
-    finalizedShow = await flowsheet_service.leaveShow(Number(req.body.dj_id));
-    if (finalizedShow.id === undefined) {
-      res.status(400).send('Bad Request, no active shows for dj');
-    } else {
+    if (req.body.dj_id === currentShow.primary_dj_id) {
+      const finalizedShow: Show = await flowsheet_service.endShow(currentShow);
       res.status(200).json(finalizedShow);
+    } else {
+      const showDJ: ShowDJ = await flowsheet_service.leaveShow(req.body.dj_id, currentShow);
+      res.status(200).json(showDJ);
     }
   } catch (e) {
     console.error('Error: Failed to leave show');
@@ -260,6 +269,7 @@ export const getDJList: RequestHandler = async (req, res, next) => {
 
 export const getOnAir: RequestHandler = async (req, res, next) => {
   const { dj_id } = req.query;
+
   try {
     const currentShow = await flowsheet_service.getOnAirStatusForDJ(Number(dj_id));
     res.status(200).json(currentShow);
