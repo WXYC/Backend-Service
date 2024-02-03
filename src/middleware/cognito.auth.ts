@@ -14,7 +14,7 @@ export const cognitoMiddleware = (permissionsLevel: string | null = null) => {
     try {
       const verification = await jwtVerifier.verify(accessToken); //throws error for invalid tokens
 
-      if (permissionsLevel !== undefined && !verification['cognito:groups']?.includes(permissionsLevel)) {
+      if (permissionsLevel !== null && !verification['cognito:groups']?.includes(permissionsLevel)) {
         res.status(403).json({ status: 403, message: 'Forbidden' });
       } else {
         res.locals.decodedJWT = verification;
