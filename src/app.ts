@@ -10,8 +10,10 @@ import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth';
 const port = process.env.PORT || 8080;
 const app = express();
 
+//Interpret parse json into js objects
 app.use(express.json());
 
+//CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
@@ -19,13 +21,14 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use('/playlists', library_route);
+app.use('/library', library_route);
+
+//route for compatibility with legacy api
+app.use('/playlists', flowsheet_route);
 
 app.use('/flowsheet', flowsheet_route);
 
 app.use('/djs', dj_route);
-
-app.use('/library', library_route);
 
 app.use('/schedule', schedule_route);
 

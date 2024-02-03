@@ -10,18 +10,18 @@ export const jwtVerifier = CognitoJwtVerifier.create({
 
 export const cognitoMiddleware = (permissionsLevel: string) => {
   return async (req: Request, res: Response, next: NextFunction) => {
-    const accessToken = req.header('authorization') || '';
+    const accessToken = req.header('Authorization') || '';
     try {
       const verification = await jwtVerifier.verify(accessToken);
       // console.log(verification);
       if (!verification['cognito:groups']?.includes(permissionsLevel)) {
-        res.status(403).json({ message: 'Forbidden' });
+        res.status(403).json({ status: 403, message: 'Forbidden' });
       } else {
         res.locals.decodedJWT = verification;
         next();
       }
     } catch (e) {
-      res.status(403).json({ message: 'Forbidden' });
+      res.status(403).json({ status: 403, message: 'Forbidden' });
     }
   };
 };
