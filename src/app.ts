@@ -33,7 +33,7 @@ app.use('/djs', dj_route);
 app.use('/schedule', schedule_route);
 
 //example for how to use te Cognito auth middleware
-app.get('/testAuth', cognitoMiddleware('station-management'), async (req, res) => {
+app.get('/testAuth', cognitoMiddleware(), async (req, res) => {
   res.json({ message: 'Authenticated!' });
 });
 

@@ -8,7 +8,7 @@ export const jwtVerifier = CognitoJwtVerifier.create({
   clientId: process.env.DJ_APP_CLIENT_ID ?? '',
 });
 
-export const cognitoMiddleware = (permissionsLevel: string) => {
+export const cognitoMiddleware = (permissionsLevel: string | null = null) => {
   return async (req: Request, res: Response, next: NextFunction) => {
     const accessToken = req.header('Authorization') || '';
     try {
