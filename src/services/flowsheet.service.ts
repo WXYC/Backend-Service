@@ -115,8 +115,19 @@ export const addDJToShow = async (dj_id: number, current_show: Show): Promise<Sh
       .values({
         show_id: current_show.id,
         dj_id: dj_id,
-        active: false,
       })
+      .returning();
+
+    show_dj_instance = new_instance;
+
+    // -- Add DJ Joined to Flowsheet --
+    await createJoinNotification(dj_id);
+    // --------------------------------
+  } else if (show_dj_instance[0].active == false) {
+    const new_instance = await db
+      .update(show_djs)
+      .set({ active: true })
+      .where(and(eq(show_djs.show_id, current_show.id), eq(show_djs.dj_id, dj_id)))
       .returning();
 
     show_dj_instance = new_instance;
