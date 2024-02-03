@@ -3,10 +3,10 @@ import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema';
 import * as flowsheet_service from '../services/flowsheet.service';
 
 type QueryParams = {
-  page: number;
-  limit: number;
-  start_id: number;
-  end_id: number;
+  page?: number;
+  limit?: number;
+  start_id?: number;
+  end_id?: number;
 };
 
 export interface IFSEntry extends FSEntry {
@@ -17,11 +17,13 @@ const MAX_ITEMS = 200;
 const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
   const { query } = req;
-  const page = query.page || 0;
-  const limit = query.limit || 5;
-  const offset = page * query.limit;
-  if (query.end_id - query.start_id - DELETION_OFFSET > MAX_ITEMS || limit > MAX_ITEMS) {
+  const page = query.page ?? 0;
+  const limit = query.limit ?? 5;
+  const offset = page * limit;
+
+  if ((query.end_id ?? 0) - (query.start_id ?? 0) - DELETION_OFFSET > MAX_ITEMS || limit > MAX_ITEMS) {
     res.status(400).json({
+      status: 400,
       message: 'Requested too many entries',
     });
   } else {
@@ -35,6 +37,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
       } else {
         console.error('No Tracks found');
         res.status(404).json({
+          status: 404,
           message: 'No Tracks found',
         });
       }

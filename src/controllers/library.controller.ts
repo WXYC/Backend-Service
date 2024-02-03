@@ -25,8 +25,10 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     body.format_id === undefined ||
     (body.artist_name === undefined && body.artist_id === undefined)
   ) {
-    res.status(400);
-    res.send('Missing Parameters: album_title, label, genre_id, format_id, artist_name, or artist_id');
+    res.status(400).json({
+      status: 400,
+      message: 'Missing Parameters: album_title, label, genre_id, format_id, artist_name, or artist_id',
+    });
   } else {
     let artist_id = body.artist_id;
     if (artist_id === undefined && body.artist_name !== undefined) {
@@ -95,7 +97,7 @@ export const searchForAlbum: RequestHandler = async (
   } else if (query.code_letters !== undefined && query.code_artist_number !== undefined) {
     //quickly look up albums by that artist
     res.status(501);
-    res.send('todo');
+    res.send('TODO: Library Code Lookup');
   } else {
     try {
       const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n);
@@ -182,8 +184,12 @@ export const killRotation: RequestHandler<object, unknown, KillRotationRelease> 
     res.status(400).send('Bad Request, Incorrect Date Format: kill_date should be of form YYYY-MM-DD');
   } else {
     try {
-      const updatedRotation = await libraryService.killRotationInDB(body.rotation_id, body.kill_date);
-      res.status(200).send(updatedRotation);
+      const updatedRotation: RotationRelease = await libraryService.killRotationInDB(body.rotation_id, body.kill_date);
+      if (updatedRotation !== undefined) {
+        res.status(200).json(updatedRotation);
+      } else {
+        res.status(400).json({ status: 400, message: 'Rotation entry not found' });
+      }
     } catch (e) {
       console.error('Failed to update rotation kill_date');
       console.error(e);
@@ -201,6 +207,21 @@ export const getFormats: RequestHandler = async (req, res, next) => {
     console.error(e);
     next(e);
   }
+};
+
+export const addFormat: RequestHandler = async (req, res, next) => {
+  res.status(501).send('todo');
+  next();
+};
+
+export const getGenres: RequestHandler = async (req, res, next) => {
+  res.status(501).send('todo');
+  next();
+};
+
+export const addGenre: RequestHandler = async (req, res, next) => {
+  res.status(501).send('todo');
+  next();
 };
 
 export const getAlbum: RequestHandler<object, unknown, unknown, { album_id: number }> = async (req, res, next) => {
