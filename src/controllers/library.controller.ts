@@ -1,5 +1,5 @@
 import { RequestHandler, Request } from 'express';
-import { NewAlbum, Album, NewArtist, Artist, NewRotationRelease, RotationRelease } from '../db/schema';
+import { NewAlbum, Album, NewArtist, Artist, NewRotationRelease, RotationRelease, NewAlbumFormat, library, NewGenre } from '../db/schema';
 import * as libraryService from '../services/library.service';
 
 type NewAlbumRequest = {
@@ -210,18 +210,54 @@ export const getFormats: RequestHandler = async (req, res, next) => {
 };
 
 export const addFormat: RequestHandler = async (req, res, next) => {
-  res.status(501).send('todo');
-  next();
-};
+  const { body } = req;
+  if (body.name === undefined) {
+    res.status(400).send('Bad Request, Missing Parameter: name');
+  } else {
+    try {
+      const newFormat: NewAlbumFormat = {
+        format_name: body.name,
+      };
+
+      const insertion = await libraryService.insertFormat(newFormat);
+      res.status(200).json(insertion);
+    } catch (e) {
+      console.error('Failed to add new format');
+      console.error(e);
+      next(e);
+    }
+  }
+}
 
 export const getGenres: RequestHandler = async (req, res, next) => {
-  res.status(501).send('todo');
-  next();
+  const genres = await libraryService.getGenresFromDB();
+  res.status(200).json(genres);
 };
 
 export const addGenre: RequestHandler = async (req, res, next) => {
-  res.status(501).send('todo');
-  next();
+  const { body } = req;
+  if (body.name === undefined ||
+      body.description === undefined) {
+    res.status(400).send('Bad Request, Parameters name and description are required.');
+  } else {
+    try {
+      const newGenre: NewGenre = {
+        genre_name: body.name,
+        description: body.description,
+        plays: 0,
+        add_date: new Date().toISOString(),
+        last_modified: new Date()
+      };
+
+      const insertion = await libraryService.insertGenre(newGenre);
+
+      res.status(200).json(insertion);
+    } catch (e) {
+      console.error('Failed to add new genre');
+      console.error(e);
+      next(e);
+    }
+  }
 };
 
 export const getAlbum: RequestHandler<object, unknown, unknown, { album_id: number }> = async (req, res, next) => {

@@ -20,12 +20,12 @@ library_route.patch('/rotation', cognitoMiddleware('station-management'), librar
 //secure: mgmt
 library_route.post('/artists', cognitoMiddleware('station-management'), libraryController.addArtist);
 
-library_route.get('/formats', libraryController.getFormats);
+library_route.get('/formats', cognitoMiddleware, libraryController.getFormats);
 
-library_route.post('/formats', libraryController.addFormat);
+library_route.post('/formats', cognitoMiddleware('station-management'), libraryController.addFormat);
 
-library_route.get('/genres', libraryController.getGenres);
+library_route.get('/genres', cognitoMiddleware, libraryController.getGenres);
 
 library_route.post('/genres', cognitoMiddleware('station-management'), libraryController.addGenre);
 
-library_route.get('/info', libraryController.getAlbum);
+library_route.get('/album', cognitoMiddleware, libraryController.getAlbum);
