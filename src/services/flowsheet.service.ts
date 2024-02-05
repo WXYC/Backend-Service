@@ -1,4 +1,4 @@
-import { sql, desc, eq, and, lte, gte } from 'drizzle-orm';
+import { sql, desc, eq, and, lte, gte, or } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
 import {
   NewFSEntry,
@@ -14,6 +14,8 @@ import {
   FSEntry,
   show_djs,
   ShowDJ,
+  genres,
+  library_artist_view,
 } from '../db/schema';
 import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
 
@@ -66,12 +68,76 @@ export const getEntriesByRange = async (startId: number, endId: number) => {
   return response;
 };
 
+export const getEntriesByShow = async (show_id: number) => {
+  const response: IFSEntry[] = await db
+    .select({
+      id: flowsheet.id,
+      show_id: flowsheet.show_id,
+      album_id: flowsheet.album_id,
+      artist_name: flowsheet.artist_name,
+      album_title: flowsheet.album_title,
+      track_title: flowsheet.track_title,
+      record_label: flowsheet.record_label,
+      rotation_id: flowsheet.rotation_id,
+      rotation_play_freq: rotation.play_freq,
+      request_flag: flowsheet.request_flag,
+      message: flowsheet.message,
+      play_order: flowsheet.play_order,
+    })
+    .from(flowsheet)
+    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .where(eq(flowsheet.show_id, show_id))
+    .orderBy(desc(flowsheet.play_order));
+
+  return response;
+};
+
 export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
+
+  const matching_albums = await db.select()
+  .from(library_artist_view)
+  .where(and(
+    eq(library_artist_view.artist_name, entry.artist_name ?? ""),
+    eq(library_artist_view.album_title, entry.album_title ?? ""),
+    eq(library_artist_view.label, entry.record_label ?? "")
+  ));
+
+  if (matching_albums.length > 0) {
+    for (let album of matching_albums) {
+      await db.update(library)
+      .set({ last_modified: new Date(), plays: sql`${library.plays} + 1` })
+      .where(eq(library.id, album.id));
+    }
+  }
+
   const response = await db.insert(flowsheet).values(entry).returning();
   return response[0];
 };
 
 export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
+
+  const entry = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
+
+  if (entry.length === 0) {
+    throw new Error('Entry not found');
+  }
+
+  const matching_albums = await db.select()
+  .from(library_artist_view)
+  .where(and(
+    eq(library_artist_view.artist_name, entry[0].artist_name ?? ""),
+    eq(library_artist_view.album_title, entry[0].album_title ?? ""),
+    eq(library_artist_view.label, entry[0].record_label ?? "")
+  ));
+
+  if (matching_albums.length > 0) {
+    for (let album of matching_albums) {
+      await db.update(library)
+      .set({ last_modified: new Date(), plays: sql`${library.plays} - 1` })
+      .where(eq(library.id, album.id));
+    }
+  }
+
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
   return response[0];
 };
@@ -232,6 +298,11 @@ const createLeaveNotification = async (id: number): Promise<FSEntry> => {
 export const getLatestShow = async (): Promise<Show> => {
   const latest_show = (await db.select().from(shows).orderBy(desc(shows.id)).limit(1))[0];
   return latest_show;
+};
+
+export const getMostRecentTwoShows = async (): Promise<Show[]> => {
+  const latest_shows = await db.select().from(shows).orderBy(desc(shows.id)).limit(2);
+  return latest_shows;
 };
 
 export const getOnAirStatusForDJ = async (dj_id: number): Promise<boolean> => {

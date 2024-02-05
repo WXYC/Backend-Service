@@ -249,6 +249,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       genre_name: genres.genre_name,
       rotation: rotation.play_freq,
       add_date: library.add_date,
+      label: library.label,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
