@@ -103,11 +103,13 @@ export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
   ));
 
   if (matching_albums.length > 0) {
-    for (let album of matching_albums) {
-      await db.update(library)
-      .set({ last_modified: new Date(), plays: sql`${library.plays} + 1` })
-      .where(eq(library.id, album.id));
-    }
+    await Promise.all(
+      matching_albums.map(async (album) => {
+        await db.update(library)
+        .set({ last_modified: new Date(), plays: sql`${library.plays} + 1` })
+        .where(eq(library.id, album.id));
+      })
+    );
   }
 
   const response = await db.insert(flowsheet).values(entry).returning();
@@ -131,11 +133,13 @@ export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
   ));
 
   if (matching_albums.length > 0) {
-    for (let album of matching_albums) {
-      await db.update(library)
-      .set({ last_modified: new Date(), plays: sql`${library.plays} - 1` })
-      .where(eq(library.id, album.id));
-    }
+    await Promise.all(
+      matching_albums.map(async (album) => {
+        await db.update(library)
+        .set({ last_modified: new Date(), plays: sql`${library.plays} - 1` })
+        .where(eq(library.id, album.id));
+      })
+    );
   }
 
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
