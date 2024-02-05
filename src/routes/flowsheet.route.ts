@@ -22,4 +22,4 @@ flowsheet_route.get('/djs-on-air', flowsheetController.getDJList);
 
 flowsheet_route.get('/on-air', flowsheetController.getOnAir);
 
-//flowsheet_route.patch('/play-order', flowsheetController.changeOrder);
+flowsheet_route.patch('/play-order', flowsheetController.changeOrder);
