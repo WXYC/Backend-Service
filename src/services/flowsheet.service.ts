@@ -155,20 +155,22 @@ export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
     throw new Error('Entry not found');
   }
 
-  const matching_albums = await db.select()
-  .from(library_artist_view)
-  .where(and(
-    eq(library_artist_view.artist_name, entry[0].artist_name ?? ""),
-    eq(library_artist_view.album_title, entry[0].album_title ?? ""),
-    eq(library_artist_view.label, entry[0].record_label ?? "")
-  ));
+  const qb = new QueryBuilder();
+  let query = withArtistName(
+    withAlbumTitle(
+      withLabel(qb.select().from(library_artist_view).$dynamic(), 
+      entry[0].record_label), 
+    entry[0].album_title), 
+  entry[0].artist_name);
+
+  const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
 
   if (matching_albums.length > 0) {
     await Promise.all(
-      matching_albums.map(async (album) => {
+      matching_albums.map(async (album: LibraryArtistViewEntry) => {
         await db.update(library)
         .set({ last_modified: new Date(), plays: sql`${library.plays} - 1` })
-        .where(eq(library.id, album.id));
+        .where(eq(library.id, album.id))
       })
     );
   }
