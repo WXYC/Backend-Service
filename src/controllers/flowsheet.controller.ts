@@ -215,7 +215,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   const current_show = await flowsheet_service.getLatestShow();
   if (req.body.dj_id === undefined) {
     res.status(400).send('Bad Request, Must include a dj_id to join show');
-  } else if (current_show.end_time !== null) {
+  } else if (current_show?.end_time !== null) {
     try {
       const show_session = await flowsheet_service.startShow(req.body.dj_id, req.body.show_name, req.body.specialty_id);
       res.status(200).json(show_session);
