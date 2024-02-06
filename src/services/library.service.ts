@@ -1,17 +1,19 @@
 import { desc, eq, sql } from 'drizzle-orm';
+import { RotationAddRequest } from '../controllers/library.controller';
 import { db } from '../db/drizzle_client';
 import {
   NewAlbum,
+  NewAlbumFormat,
   NewArtist,
-  library,
-  artists,
-  library_artist_view,
-  rotation,
-  format,
+  NewGenre,
   RotationRelease,
+  artists,
+  format,
   genres,
+  library,
+  library_artist_view,
+  rotation
 } from '../db/schema';
-import { RotationAddRequest } from '../controllers/library.controller';
 
 export const getFormatsFromDB = async () => {
   const formats = await db
@@ -128,6 +130,11 @@ export const insertArtist = async (new_artist: NewArtist) => {
   return response[0];
 };
 
+export const insertFormat = async (new_format: NewAlbumFormat) => {
+  const response = await db.insert(format).values(new_format).returning();
+  return response[0];
+}
+
 export const generateAlbumCodeNumber = async (artist_id: number): Promise<number> => {
   const response = await db
     .select({ code_number: library.code_number })
@@ -182,4 +189,17 @@ export const getAlbumFromDB = async (album_id: number) => {
 export const isISODate = (date: string): boolean => {
   const regex = /^\d{4}-\d{2}-\d{2}$/;
   return date.match(regex) !== null;
+};
+
+
+export const getGenresFromDB = async () => {
+  const genreCollection = await db
+    .select()
+    .from(genres);
+  return genreCollection;
+};
+
+export const insertGenre = async (genre: NewGenre) => {
+  const response = await db.insert(genres).values(genre).returning();
+  return response[0];
 };

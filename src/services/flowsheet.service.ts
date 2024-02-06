@@ -1,21 +1,24 @@
-import { sql, desc, eq, and, lte, gte } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
+import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
+import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
 import { db } from '../db/drizzle_client';
 import {
+  DJ,
+  FSEntry,
+  LibraryArtistViewEntry,
   NewFSEntry,
-  flowsheet,
-  shows,
   Show,
+  ShowDJ,
+  artists,
+  djs,
+  flowsheet,
+  library,
+  library_artist_view,
   // NewShow,
   rotation,
-  library,
-  artists,
-  DJ,
-  djs,
-  FSEntry,
   show_djs,
-  ShowDJ,
+  shows
 } from '../db/schema';
-import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
 
 export const getEntriesByPage = async (offset: number, limit: number) => {
   const response: IFSEntry[] = await db
@@ -66,12 +69,112 @@ export const getEntriesByRange = async (startId: number, endId: number) => {
   return response;
 };
 
+export const getEntriesByShow = async (show_id: number) => {
+  const response: IFSEntry[] = await db
+    .select({
+      id: flowsheet.id,
+      show_id: flowsheet.show_id,
+      album_id: flowsheet.album_id,
+      artist_name: flowsheet.artist_name,
+      album_title: flowsheet.album_title,
+      track_title: flowsheet.track_title,
+      record_label: flowsheet.record_label,
+      rotation_id: flowsheet.rotation_id,
+      rotation_play_freq: rotation.play_freq,
+      request_flag: flowsheet.request_flag,
+      message: flowsheet.message,
+      play_order: flowsheet.play_order,
+    })
+    .from(flowsheet)
+    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .where(eq(flowsheet.show_id, show_id))
+    .orderBy(desc(flowsheet.play_order));
+
+  return response;
+};
+
 export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
+
+  if (entry.artist_name || entry.album_title || entry.record_label) {
+    const qb = new QueryBuilder();
+    let query = qb.select().from(library_artist_view).$dynamic();
+
+    query = withArtistName(withAlbumTitle(withLabel(query, entry.record_label), entry.album_title), entry.artist_name);
+    const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
+
+    if (matching_albums.length > 0) {
+      await Promise.all(
+        matching_albums.map(async (album: LibraryArtistViewEntry) => {
+          await db.update(library)
+          .set({ last_modified: new Date(), plays: sql`${library.plays} + 1` })
+          .where(eq(library.id, album.id))
+        })
+      );
+    }
+  }
+
   const response = await db.insert(flowsheet).values(entry).returning();
   return response[0];
 };
 
+function withArtistName<T extends PgSelectQueryBuilder>(
+  qb: T,
+  artist_name: string | null | undefined
+) {
+  if (artist_name) {
+    return qb.where(eq(library_artist_view.artist_name, artist_name));
+  }
+  return qb;
+}
+
+function withAlbumTitle<T extends PgSelectQueryBuilder>(
+  qb: T,
+  album_title: string | null | undefined
+) {
+  if (album_title) {
+    return qb.where(eq(library_artist_view.album_title, album_title));
+  }
+  return qb;
+}
+
+function withLabel<T extends PgSelectQueryBuilder>(
+  qb: T,
+  label: string | null | undefined
+) {
+  if (label) {
+    return qb.where(eq(library_artist_view.label, label));
+  }
+  return qb;
+}
+
 export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
+
+  const entry = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
+
+  if (entry.length === 0) {
+    throw new Error('Entry not found');
+  }
+
+  const qb = new QueryBuilder();
+  let query = withArtistName(
+    withAlbumTitle(
+      withLabel(qb.select().from(library_artist_view).$dynamic(), 
+      entry[0].record_label), 
+    entry[0].album_title), 
+  entry[0].artist_name);
+
+  const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
+
+  if (matching_albums.length > 0) {
+    await Promise.all(
+      matching_albums.map(async (album: LibraryArtistViewEntry) => {
+        await db.update(library)
+        .set({ last_modified: new Date(), plays: sql`${library.plays} - 1` })
+        .where(eq(library.id, album.id))
+      })
+    );
+  }
+
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
   return response[0];
 };
@@ -234,6 +337,11 @@ export const getLatestShow = async (): Promise<Show> => {
   return latest_show;
 };
 
+export const getMostRecentNShows = async (count: number): Promise<Show[]> => {
+  const latest_shows = await db.select().from(shows).orderBy(desc(shows.id)).limit(count);
+  return latest_shows;
+};
+
 export const getOnAirStatusForDJ = async (dj_id: number): Promise<boolean> => {
   const latest_show = await getLatestShow();
 
@@ -282,4 +390,59 @@ export const getAlbumFromDB = async (album_id: number) => {
     .limit(1);
 
   return album[0];
+};
+
+export const changeOrder = async (position_old: number, position_new: number): Promise<FSEntry> => {
+
+  try {
+
+    await db.transaction(async (trx) => {
+      try {
+        const mover_id = (await trx
+          .select({
+            id: flowsheet.id
+          })
+          .from(flowsheet)
+          .where(eq(flowsheet.play_order, position_old))
+          .limit(1))[0].id;
+
+        if (position_new < position_old) {
+          await trx.update(flowsheet)
+                  .set({ play_order: sql`play_order + 1` })
+                  .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
+        }
+        else if (position_new > position_old) {
+          await trx.update(flowsheet)
+                  .set({ play_order: sql`play_order - 1` })
+                  .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
+        }
+
+        await trx.update(flowsheet)
+                .set({ play_order: position_new })
+                .where(eq(flowsheet.id, mover_id));
+                  
+      } catch (error) {
+        trx.rollback();
+        throw error;
+      }
+
+    }, {
+      isolationLevel: "read committed",
+      accessMode: "read write",
+      deferrable: true
+    });
+
+    const response = await db
+      .select()
+      .from(flowsheet)
+      .where(eq(flowsheet.play_order, position_new))
+      .limit(1);
+
+    return response[0];
+
+  } catch (error) {
+    console.error('Error: Failed to update play_order');
+    console.error(error);
+    throw error;
+  }
 };

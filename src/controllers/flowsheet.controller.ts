@@ -1,5 +1,5 @@
 import { Request, RequestHandler } from 'express';
-import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema';
+import { FSEntry, NewFSEntry, Show, ShowDJ } from '../db/schema';
 import * as flowsheet_service from '../services/flowsheet.service';
 
 type QueryParams = {
@@ -215,7 +215,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   const current_show = await flowsheet_service.getLatestShow();
   if (req.body.dj_id === undefined) {
     res.status(400).send('Bad Request, Must include a dj_id to join show');
-  } else if (current_show.end_time !== null) {
+  } else if (current_show?.end_time !== null) {
     try {
       const show_session = await flowsheet_service.startShow(req.body.dj_id, req.body.show_name, req.body.specialty_id);
       res.status(200).json(show_session);
@@ -280,5 +280,22 @@ export const getOnAir: RequestHandler = async (req, res, next) => {
     console.error('Error: Failed to retrieve current show');
     console.error(e);
     next(e);
+  }
+};
+
+export const changeOrder: RequestHandler<object, unknown, { entry_id: number; new_order: number }> = async (req, res, next) => {
+  const { entry_id, new_order } = req.body;
+
+  if (entry_id === undefined || new_order === undefined) {
+    res.status(400).json({ message: 'Bad Request: entry_id and new_order are required' });
+  } else {
+    try {
+      const updatedEntry = await flowsheet_service.changeOrder(entry_id, new_order);
+      res.status(200).json(updatedEntry);
+    } catch (e) {
+      console.error('Error: Failed to change order');
+      console.error(e);
+      next(e);
+    }
   }
 };
