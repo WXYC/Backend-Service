@@ -1,5 +1,4 @@
 import { and, desc, eq, gte, lte } from 'drizzle-orm';
-import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
 import { db } from '../db/drizzle_client';
 import {
   DJ,
@@ -14,8 +13,12 @@ import {
   // NewShow,
   rotation,
   show_djs,
-  shows
+  shows,
+  library_artist_view,
+  LibraryArtistViewEntry,
 } from '../db/schema';
+import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
+import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 export const getEntriesByPage = async (offset: number, limit: number) => {
   const response: IFSEntry[] = await db
@@ -67,14 +70,82 @@ export const getEntriesByRange = async (startId: number, endId: number) => {
 };
 
 export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
+  if (entry.artist_name || entry.album_title || entry.record_label) {
+    const qb = new QueryBuilder();
+    let query = qb.select().from(library_artist_view).$dynamic();
+
+    query = withArtistName(withAlbumTitle(withLabel(query, entry.record_label), entry.album_title), entry.artist_name);
+    const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
+
+    if (matching_albums.length > 0) {
+      await Promise.all(
+        matching_albums.map(async (album: LibraryArtistViewEntry) => {
+          await db
+            .update(library)
+            .set({ last_modified: new Date(), plays: sql`${library.plays} + 1` })
+            .where(eq(library.id, album.id));
+        })
+      );
+    }
+  }
+
   const response = await db.insert(flowsheet).values(entry).returning();
   return response[0];
 };
 
 export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
+  const entry = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
+
+  if (entry.length === 0) {
+    throw new Error('Entry not found');
+  }
+
+  const qb = new QueryBuilder();
+  let query = withArtistName(
+    withAlbumTitle(
+      withLabel(qb.select().from(library_artist_view).$dynamic(), entry[0].record_label),
+      entry[0].album_title
+    ),
+    entry[0].artist_name
+  );
+
+  const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
+
+  if (matching_albums.length > 0) {
+    await Promise.all(
+      matching_albums.map(async (album: LibraryArtistViewEntry) => {
+        await db
+          .update(library)
+          .set({ last_modified: new Date(), plays: sql`${library.plays} - 1` })
+          .where(eq(library.id, album.id));
+      })
+    );
+  }
+
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
   return response[0];
 };
+
+function withArtistName<T extends PgSelectQueryBuilder>(qb: T, artist_name: string | null | undefined) {
+  if (artist_name) {
+    return qb.where(eq(library_artist_view.artist_name, artist_name));
+  }
+  return qb;
+}
+
+function withAlbumTitle<T extends PgSelectQueryBuilder>(qb: T, album_title: string | null | undefined) {
+  if (album_title) {
+    return qb.where(eq(library_artist_view.album_title, album_title));
+  }
+  return qb;
+}
+
+function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null | undefined) {
+  if (label) {
+    return qb.where(eq(library_artist_view.label, label));
+  }
+  return qb;
+}
 
 export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry> => {
   const response = await db.update(flowsheet).set(entry).where(eq(flowsheet.id, entry_id)).returning();
@@ -82,7 +153,6 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
 };
 
 export const startShow = async (dj_id: number, show_name?: string, specialty_id?: number): Promise<Show> => {
-
   const dj_info = (await db.select().from(djs).where(eq(djs.id, dj_id)).limit(1))[0];
 
   const new_show = await db
@@ -103,7 +173,9 @@ export const startShow = async (dj_id: number, show_name?: string, specialty_id?
     .returning();
 
   await db.insert(flowsheet).values({
-    message: `Start of Show: DJ ${dj_info.dj_name} joined the set at ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`
+    message: `Start of Show: DJ ${dj_info.dj_name} joined the set at ${new Date().toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+    })}`,
   });
 
   return new_show[0];
@@ -175,25 +247,28 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   const primary_dj_id = currentShow.primary_dj_id;
   if (!primary_dj_id) throw new Error('Primary DJ not found');
 
-  const remaining_djs = await db.select().from(show_djs).where(and(
-    eq(show_djs.show_id, currentShow.id),
-    eq(show_djs.active, true)
-  ));
+  const remaining_djs = await db
+    .select()
+    .from(show_djs)
+    .where(and(eq(show_djs.show_id, currentShow.id), eq(show_djs.active, true)));
 
-  await Promise.all(remaining_djs.map(async (dj) => {
-    await db.update(show_djs).set({ active: false }).where(eq(show_djs.dj_id, dj.dj_id));
-    if (dj.dj_id === primary_dj_id) return;
-    await createLeaveNotification(dj.dj_id);
-  }));
+  await Promise.all(
+    remaining_djs.map(async (dj) => {
+      await db.update(show_djs).set({ active: false }).where(eq(show_djs.dj_id, dj.dj_id));
+      if (dj.dj_id === primary_dj_id) return;
+      await createLeaveNotification(dj.dj_id);
+    })
+  );
 
   const dj_information = (await db.select().from(djs).where(eq(djs.id, primary_dj_id)).limit(1))[0];
 
   await db.insert(flowsheet).values({
-    message: `End of Show: DJ ${dj_information.dj_name} left the set at ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`
+    message: `End of Show: DJ ${dj_information.dj_name} left the set at ${new Date().toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+    })}`,
   });
 
   await db.update(shows).set({ end_time: new Date() }).where(eq(shows.id, currentShow.id));
-
 
   return await getLatestShow();
 };
@@ -295,53 +370,48 @@ export const getAlbumFromDB = async (album_id: number) => {
 };
 
 export const changeOrder = async (position_old: number, position_new: number): Promise<FSEntry> => {
-
   try {
+    await db.transaction(
+      async (trx) => {
+        try {
+          const mover_id = (
+            await trx
+              .select({
+                id: flowsheet.id,
+              })
+              .from(flowsheet)
+              .where(eq(flowsheet.play_order, position_old))
+              .limit(1)
+          )[0].id;
 
-    await db.transaction(async (trx) => {
-      try {
-        const mover_id = (await trx
-          .select({
-            id: flowsheet.id
-          })
-          .from(flowsheet)
-          .where(eq(flowsheet.play_order, position_old))
-          .limit(1))[0].id;
+          if (position_new < position_old) {
+            await trx
+              .update(flowsheet)
+              .set({ play_order: sql`play_order + 1` })
+              .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
+          } else if (position_new > position_old) {
+            await trx
+              .update(flowsheet)
+              .set({ play_order: sql`play_order - 1` })
+              .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
+          }
 
-        if (position_new < position_old) {
-          await trx.update(flowsheet)
-                  .set({ play_order: sql`play_order + 1` })
-                  .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
+          await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, mover_id));
+        } catch (error) {
+          trx.rollback();
+          throw error;
         }
-        else if (position_new > position_old) {
-          await trx.update(flowsheet)
-                  .set({ play_order: sql`play_order - 1` })
-                  .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
-        }
-
-        await trx.update(flowsheet)
-                .set({ play_order: position_new })
-                .where(eq(flowsheet.id, mover_id));
-
-      } catch (error) {
-        trx.rollback();
-        throw error;
+      },
+      {
+        isolationLevel: 'read committed',
+        accessMode: 'read write',
+        deferrable: true,
       }
+    );
 
-    }, {
-      isolationLevel: "read committed",
-      accessMode: "read write",
-      deferrable: true
-    });
-
-    const response = await db
-      .select()
-      .from(flowsheet)
-      .where(eq(flowsheet.play_order, position_new))
-      .limit(1);
+    const response = await db.select().from(flowsheet).where(eq(flowsheet.play_order, position_new)).limit(1);
 
     return response[0];
-
   } catch (error) {
     console.error('Error: Failed to update play_order');
     console.error(error);
