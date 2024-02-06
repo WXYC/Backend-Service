@@ -304,8 +304,8 @@ export const getLatestShow = async (): Promise<Show> => {
   return latest_show;
 };
 
-export const getMostRecentTwoShows = async (): Promise<Show[]> => {
-  const latest_shows = await db.select().from(shows).orderBy(desc(shows.id)).limit(2);
+export const getMostRecentNShows = async (count: number): Promise<Show[]> => {
+  const latest_shows = await db.select().from(shows).orderBy(desc(shows.id)).limit(count);
   return latest_shows;
 };
 
