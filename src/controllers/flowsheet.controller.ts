@@ -282,3 +282,20 @@ export const getOnAir: RequestHandler = async (req, res, next) => {
     next(e);
   }
 };
+
+export const changeOrder: RequestHandler<object, unknown, { entry_id: number; new_order: number }> = async (req, res, next) => {
+  const { entry_id, new_order } = req.body;
+
+  if (entry_id === undefined || new_order === undefined) {
+    res.status(400).json({ message: 'Bad Request: entry_id and new_order are required' });
+  } else {
+    try {
+      const updatedEntry = await flowsheet_service.changeOrder(entry_id, new_order);
+      res.status(200).json(updatedEntry);
+    } catch (e) {
+      console.error('Error: Failed to change order');
+      console.error(e);
+      next(e);
+    }
+  }
+};
