@@ -1,4 +1,4 @@
-import { InferModel, sql, eq } from 'drizzle-orm';
+import { InferModel, sql, eq, InferSelectModel } from 'drizzle-orm';
 import {
   pgSchema,
   integer,
@@ -236,6 +236,19 @@ export const specialty_shows = wxyc_schema.table('specialty_shows', {
   last_modified: timestamp('last_modified').defaultNow().notNull(),
 });
 
+export type LibraryArtistViewEntry = {
+  id: number;
+  code_letters: string;
+  code_artist_number: number;
+  code_number: number;
+  artist_name: string;
+  album_title: string;
+  format_name: string;
+  genre_name: string;
+  rotation: string;
+  add_date: Date;
+  label: string;
+};
 export const library_artist_view = wxyc_schema.view('library_artist_view').as((qb) => {
   return qb
     .select({

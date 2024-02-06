@@ -1,5 +1,5 @@
 import { Request, RequestHandler } from 'express';
-import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema';
+import { FSEntry, NewFSEntry, Show, ShowDJ } from '../db/schema';
 import * as flowsheet_service from '../services/flowsheet.service';
 
 type QueryParams = {

@@ -1,23 +1,24 @@
-import { sql, desc, eq, and, lte, gte, or } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
+import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
 import { db } from '../db/drizzle_client';
 import {
+  DJ,
+  FSEntry,
+  LibraryArtistViewEntry,
   NewFSEntry,
-  flowsheet,
-  shows,
   Show,
+  ShowDJ,
+  artists,
+  djs,
+  flowsheet,
+  library,
+  library_artist_view,
   // NewShow,
   rotation,
-  library,
-  artists,
-  DJ,
-  djs,
-  FSEntry,
   show_djs,
-  ShowDJ,
-  genres,
-  library_artist_view,
+  shows
 } from '../db/schema';
-import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
+import { AnyPgSelect, PgSelect, PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 export const getEntriesByPage = async (offset: number, limit: number) => {
   const response: IFSEntry[] = await db
@@ -94,27 +95,57 @@ export const getEntriesByShow = async (show_id: number) => {
 
 export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
 
-  const matching_albums = await db.select()
-  .from(library_artist_view)
-  .where(and(
-    eq(library_artist_view.artist_name, entry.artist_name ?? ""),
-    eq(library_artist_view.album_title, entry.album_title ?? ""),
-    eq(library_artist_view.label, entry.record_label ?? "")
-  ));
+  if (entry.artist_name || entry.album_title || entry.record_label) {
+    const qb = new QueryBuilder();
+    let query = qb.select().from(library_artist_view).$dynamic();
 
-  if (matching_albums.length > 0) {
-    await Promise.all(
-      matching_albums.map(async (album) => {
-        await db.update(library)
-        .set({ last_modified: new Date(), plays: sql`${library.plays} + 1` })
-        .where(eq(library.id, album.id));
-      })
-    );
+    query = withArtistName(withAlbumTitle(withLabel(query, entry.record_label), entry.album_title), entry.artist_name);
+    const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
+
+    if (matching_albums.length > 0) {
+      await Promise.all(
+        matching_albums.map(async (album: LibraryArtistViewEntry) => {
+          await db.update(library)
+          .set({ last_modified: new Date(), plays: sql`${library.plays} + 1` })
+          .where(eq(library.id, album.id))
+        })
+      );
+    }
   }
 
   const response = await db.insert(flowsheet).values(entry).returning();
   return response[0];
 };
+
+function withArtistName<T extends PgSelectQueryBuilder>(
+  qb: T,
+  artist_name: string | null | undefined
+) {
+  if (artist_name) {
+    return qb.where(eq(library_artist_view.artist_name, artist_name));
+  }
+  return qb;
+}
+
+function withAlbumTitle<T extends PgSelectQueryBuilder>(
+  qb: T,
+  album_title: string | null | undefined
+) {
+  if (album_title) {
+    return qb.where(eq(library_artist_view.album_title, album_title));
+  }
+  return qb;
+}
+
+function withLabel<T extends PgSelectQueryBuilder>(
+  qb: T,
+  label: string | null | undefined
+) {
+  if (label) {
+    return qb.where(eq(library_artist_view.label, label));
+  }
+  return qb;
+}
 
 export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
 
