@@ -31,6 +31,30 @@ export const register: RequestHandler<object, unknown, DJQueryParams> = async (r
   }
 };
 
+export const update: RequestHandler<object, unknown, DJQueryParams> = async (req, res, next) => {
+  if (req.body.cognito_user_name === undefined) {
+    console.log('Bad Request: Missing New DJ Parameters');
+    res.status(400).send('Bad Request: Missing New DJ Parameters');
+  } else {
+    // other fields are included in the data, but only cognito_user_name is required in the request
+    const new_dj: NewDJ = {
+      cognito_user_name: req.body.cognito_user_name,
+      real_name: req.body.real_name,
+      dj_name: req.body.dj_name,
+    };
+
+    try {
+      const dj_obj = await DJService.updateDJ(new_dj);
+      res.status(200).json(dj_obj);
+    } catch (e) {
+      console.error(`Failed To Update DJ`);
+      console.error(e);
+      next(e);
+    }
+  
+  }
+}
+
 export const getDJInfo: RequestHandler<object, unknown, object, DJQueryParams> = async (req, res, next) => {
   const { query } = req;
 

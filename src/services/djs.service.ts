@@ -24,6 +24,16 @@ export const insertDJ = async (new_dj: NewDJ) => {
   return response[0];
 };
 
+export const updateDJ = async (new_dj: NewDJ) => {
+  const dj_obj = await db
+    .update(djs)
+    .set(new_dj)
+    .where(eq(djs.cognito_user_name, new_dj.cognito_user_name))
+    .returning();
+
+  return dj_obj[0];
+};
+
 export const getDJInfoFromDB = async (items: DJQueryParams) /*:Promise<schema.DJ>*/ => {
   let query_value: number | string;
   let query_col;
