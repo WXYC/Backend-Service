@@ -6,13 +6,13 @@ import {
   NewFSEntry,
   Show,
   ShowDJ,
-  shows,
   artists,
   djs,
   flowsheet,
   library,
   rotation,
   show_djs,
+  shows,
   library_artist_view,
   LibraryArtistViewEntry,
 } from '../db/schema';
@@ -357,53 +357,48 @@ export const getAlbumFromDB = async (album_id: number) => {
 };
 
 export const changeOrder = async (position_old: number, position_new: number): Promise<FSEntry> => {
-
   try {
+    await db.transaction(
+      async (trx) => {
+        try {
+          const mover_id = (
+            await trx
+              .select({
+                id: flowsheet.id,
+              })
+              .from(flowsheet)
+              .where(eq(flowsheet.play_order, position_old))
+              .limit(1)
+          )[0].id;
 
-    await db.transaction(async (trx) => {
-      try {
-        const mover_id = (await trx
-          .select({
-            id: flowsheet.id
-          })
-          .from(flowsheet)
-          .where(eq(flowsheet.play_order, position_old))
-          .limit(1))[0].id;
+          if (position_new < position_old) {
+            await trx
+              .update(flowsheet)
+              .set({ play_order: sql`play_order + 1` })
+              .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
+          } else if (position_new > position_old) {
+            await trx
+              .update(flowsheet)
+              .set({ play_order: sql`play_order - 1` })
+              .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
+          }
 
-        if (position_new < position_old) {
-          await trx.update(flowsheet)
-                  .set({ play_order: sql`play_order + 1` })
-                  .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
+          await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, mover_id));
+        } catch (error) {
+          trx.rollback();
+          throw error;
         }
-        else if (position_new > position_old) {
-          await trx.update(flowsheet)
-                  .set({ play_order: sql`play_order - 1` })
-                  .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
-        }
-
-        await trx.update(flowsheet)
-                .set({ play_order: position_new })
-                .where(eq(flowsheet.id, mover_id));
-
-      } catch (error) {
-        trx.rollback();
-        throw error;
+      },
+      {
+        isolationLevel: 'read committed',
+        accessMode: 'read write',
+        deferrable: true,
       }
+    );
 
-    }, {
-      isolationLevel: "read committed",
-      accessMode: "read write",
-      deferrable: true
-    });
-
-    const response = await db
-      .select()
-      .from(flowsheet)
-      .where(eq(flowsheet.play_order, position_new))
-      .limit(1);
+    const response = await db.select().from(flowsheet).where(eq(flowsheet.play_order, position_new)).limit(1);
 
     return response[0];
-
   } catch (error) {
     console.error('Error: Failed to update play_order');
     console.error(error);
