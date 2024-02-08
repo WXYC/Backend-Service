@@ -9,6 +9,8 @@ dj_route.get('/', djsController.getDJInfo);
 //secure: mgmt
 dj_route.post('/register', djsController.register);
 
+dj_route.patch('/register', djsController.update);
+
 dj_route.post('/bin', djsController.addToBin);
 
 dj_route.delete('/bin', djsController.deleteFromBin);
