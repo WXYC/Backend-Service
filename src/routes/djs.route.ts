@@ -1,20 +1,21 @@
 import { Router } from 'express';
 import * as djsController from '../controllers/djs.controller';
+import { cognitoMiddleware } from '../middleware/cognito.auth';
 
 export const dj_route = Router();
 
 //secure: mgmt & individual dj
-dj_route.get('/', djsController.getDJInfo);
+dj_route.get('/', cognitoMiddleware, djsController.getDJInfo);
 
 //secure: mgmt
-dj_route.post('/register', djsController.register);
+dj_route.post('/register', cognitoMiddleware('station-management'), djsController.register);
 
-dj_route.post('/bin', djsController.addToBin);
+dj_route.post('/bin', cognitoMiddleware, djsController.addToBin);
 
-dj_route.delete('/bin', djsController.deleteFromBin);
+dj_route.delete('/bin', cognitoMiddleware, djsController.deleteFromBin);
 
-dj_route.get('/bin', djsController.getBin);
+dj_route.get('/bin', cognitoMiddleware, djsController.getBin);
 
-dj_route.get('/playlists', djsController.getPlaylistsForDJ);
+dj_route.get('/playlists', cognitoMiddleware, djsController.getPlaylistsForDJ);
 
-dj_route.get('/playlist', djsController.getPlaylist);
+dj_route.get('/playlist', cognitoMiddleware, djsController.getPlaylist);
