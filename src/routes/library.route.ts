@@ -22,7 +22,7 @@ library_route.post('/artists', cognitoMiddleware('station-management'), libraryC
 
 library_route.get('/formats', libraryController.getFormats);
 
-library_route.post('/formats', libraryController.addFormat);
+library_route.post('/formats', cognitoMiddleware('station-management'), libraryController.addFormat);
 
 library_route.get('/genres', libraryController.getGenres);
 
