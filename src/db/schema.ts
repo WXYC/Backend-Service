@@ -1,4 +1,4 @@
-import { InferModel, sql, eq } from 'drizzle-orm';
+import { InferInsertModel, InferSelectModel, sql, eq } from 'drizzle-orm';
 import {
   pgSchema,
   integer,
@@ -16,8 +16,8 @@ import {
 
 export const wxyc_schema = pgSchema('wxyc_schema');
 
-export type NewDJ = InferModel<typeof djs, 'insert'>;
-export type DJ = InferModel<typeof djs, 'select'>;
+export type NewDJ = InferInsertModel<typeof djs>;
+export type DJ = InferSelectModel<typeof djs>;
 export const djs = wxyc_schema.table('djs', {
   id: serial('id').primaryKey(),
   cognito_user_name: varchar('cognito_user_name').notNull().unique(),
@@ -27,8 +27,8 @@ export const djs = wxyc_schema.table('djs', {
   add_date: date('add_date').defaultNow().notNull(),
 });
 
-export type NewShift = InferModel<typeof schedule, 'insert'>;
-export type Shift = InferModel<typeof schedule, 'select'>;
+export type NewShift = InferInsertModel<typeof schedule>;
+export type Shift = InferSelectModel<typeof schedule>;
 // days {0: mon, 1: tue, ... , 6: sun}
 // date n shows from now can be found with query:
 
@@ -44,8 +44,8 @@ export const schedule = wxyc_schema.table('schedule', {
 
 //SELECT date_trunc('week', current_timestamp + timestamp '${n} weeks') + interval '${schedule.day} days' + ${schedule.time}
 //or really it could be done client side really easily...
-export type NewShiftCover = InferModel<typeof shift_covers, 'insert'>;
-export type ShiftCover = InferModel<typeof shift_covers, 'select'>;
+export type NewShiftCover = InferInsertModel<typeof shift_covers>;
+export type ShiftCover = InferSelectModel<typeof shift_covers>;
 export const shift_covers = wxyc_schema.table('shift_covers', {
   id: serial('id').primaryKey(),
   schedule_id: serial('schedule_id')
@@ -56,8 +56,8 @@ export const shift_covers = wxyc_schema.table('shift_covers', {
   covered: boolean('covered').default(false),
 });
 
-export type NewArtist = InferModel<typeof artists, 'insert'>;
-export type Artist = InferModel<typeof artists, 'select'>;
+export type NewArtist = InferInsertModel<typeof artists>;
+export type Artist = InferSelectModel<typeof artists>;
 export const artists = wxyc_schema.table(
   'artists',
   {
@@ -81,8 +81,8 @@ export const artists = wxyc_schema.table(
   }
 );
 
-export type NewAlbumFormat = InferModel<typeof format, 'insert'>;
-export type AlbumFormat = InferModel<typeof format, 'select'>;
+export type NewAlbumFormat = InferInsertModel<typeof format>;
+export type AlbumFormat = InferSelectModel<typeof format>;
 //cd, cdr, vinyl, vinyl - 7", vinyl - 12", 'vinyl - LP'
 export const format = wxyc_schema.table('format', {
   id: serial('id').primaryKey(),
@@ -90,8 +90,8 @@ export const format = wxyc_schema.table('format', {
   date_added: date('add_date').defaultNow().notNull(),
 });
 
-export type NewAlbum = InferModel<typeof library, 'insert'>;
-export type Album = InferModel<typeof library, 'select'>;
+export type NewAlbum = InferInsertModel<typeof library>;
+export type Album = InferSelectModel<typeof library>;
 export const library = wxyc_schema.table(
   'library',
   {
@@ -126,8 +126,8 @@ export const library = wxyc_schema.table(
   }
 );
 
-export type NewRotationRelease = InferModel<typeof rotation, 'insert'>;
-export type RotationRelease = InferModel<typeof rotation, 'select'>;
+export type NewRotationRelease = InferInsertModel<typeof rotation>;
+export type RotationRelease = InferSelectModel<typeof rotation>;
 export const freqEnum = pgEnum('freq_enum', ['S', 'L', 'M', 'H']);
 export const rotation = wxyc_schema.table(
   'rotation',
@@ -147,8 +147,8 @@ export const rotation = wxyc_schema.table(
   }
 );
 
-export type NewFSEntry = InferModel<typeof flowsheet, 'insert'>;
-export type FSEntry = InferModel<typeof flowsheet, 'select'>;
+export type NewFSEntry = InferInsertModel<typeof flowsheet>;
+export type FSEntry = InferSelectModel<typeof flowsheet>;
 export const flowsheet = wxyc_schema.table('flowsheet', {
   id: serial('id').primaryKey(),
   show_id: integer('show_id').references(() => shows.id),
@@ -163,8 +163,8 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   message: varchar('message', { length: 64 }),
 });
 
-export type NewGenre = InferModel<typeof genres, 'insert'>;
-export type Genre = InferModel<typeof genres, 'select'>;
+export type NewGenre = InferInsertModel<typeof genres>;
+export type Genre = InferSelectModel<typeof genres>;
 export const genres = wxyc_schema.table('genres', {
   id: serial('id').primaryKey(),
   genre_name: varchar('genre_name', { length: 64 }).notNull(),
@@ -174,8 +174,8 @@ export const genres = wxyc_schema.table('genres', {
   last_modified: timestamp('last_modified').defaultNow().notNull(),
 });
 
-export type NewReview = InferModel<typeof reviews, 'insert'>;
-export type Review = InferModel<typeof reviews, 'select'>;
+export type NewReview = InferInsertModel<typeof reviews>;
+export type Review = InferSelectModel<typeof reviews>;
 export const reviews = wxyc_schema.table('reviews', {
   id: serial('id').primaryKey(),
   album_id: integer('album_id')
@@ -188,8 +188,8 @@ export const reviews = wxyc_schema.table('reviews', {
   author: varchar('author', { length: 32 }),
 });
 
-export type NewBinEntry = InferModel<typeof bins, 'insert'>;
-export type BinEntry = InferModel<typeof bins, 'select'>;
+export type NewBinEntry = InferInsertModel<typeof bins>;
+export type BinEntry = InferSelectModel<typeof bins>;
 export const bins = wxyc_schema.table('bins', {
   id: serial('id').primaryKey(),
   dj_id: integer('dj_id')
@@ -201,8 +201,8 @@ export const bins = wxyc_schema.table('bins', {
   track_title: varchar('track_title', { length: 128 }),
 });
 
-export type NewShow = InferModel<typeof shows, 'insert'>;
-export type Show = InferModel<typeof shows, 'select'>;
+export type NewShow = InferInsertModel<typeof shows>;
+export type Show = InferSelectModel<typeof shows>;
 export const shows = wxyc_schema.table('shows', {
   id: serial('id').primaryKey(),
   primary_dj_id: integer('primary_dj_id').references(() => djs.id),
@@ -213,8 +213,8 @@ export const shows = wxyc_schema.table('shows', {
   end_time: timestamp('end_time'),
 });
 
-export type NewShowDJ = InferModel<typeof show_djs, 'insert'>;
-export type ShowDJ = InferModel<typeof show_djs, 'select'>;
+export type NewShowDJ = InferInsertModel<typeof show_djs>;
+export type ShowDJ = InferSelectModel<typeof show_djs>;
 export const show_djs = wxyc_schema.table('show_djs', {
   show_id: integer('show_id')
     .references(() => shows.id)
@@ -226,8 +226,8 @@ export const show_djs = wxyc_schema.table('show_djs', {
 });
 
 //create entry w/ ID 0 for regular shows
-export type NewSpecialtyShow = InferModel<typeof specialty_shows, 'insert'>;
-export type SpecialtyShows = InferModel<typeof specialty_shows, 'select'>;
+export type NewSpecialtyShow = InferInsertModel<typeof specialty_shows>;
+export type SpecialtyShows = InferSelectModel<typeof specialty_shows>;
 export const specialty_shows = wxyc_schema.table('specialty_shows', {
   id: serial('id').primaryKey(),
   specialty_name: varchar('specialty_name', { length: 64 }).notNull(),
@@ -236,6 +236,19 @@ export const specialty_shows = wxyc_schema.table('specialty_shows', {
   last_modified: timestamp('last_modified').defaultNow().notNull(),
 });
 
+export type LibraryArtistViewEntry = {
+  id: number;
+  code_letters: string;
+  code_artist_number: number;
+  code_number: number;
+  artist_name: string;
+  album_title: string;
+  format_name: string;
+  genre_name: string;
+  rotation: string;
+  add_date: Date;
+  label: string;
+};
 export const library_artist_view = wxyc_schema.view('library_artist_view').as((qb) => {
   return qb
     .select({
@@ -249,6 +262,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       genre_name: genres.genre_name,
       rotation: rotation.play_freq,
       add_date: library.add_date,
+      label: library.label,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))

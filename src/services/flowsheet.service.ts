@@ -1,4 +1,4 @@
-import { sql, desc, eq, and, lte, gte } from 'drizzle-orm';
+import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
 import {
   NewFSEntry,
@@ -14,8 +14,11 @@ import {
   FSEntry,
   show_djs,
   ShowDJ,
+  library_artist_view,
+  LibraryArtistViewEntry,
 } from '../db/schema';
 import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
+import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 export const getEntriesByPage = async (offset: number, limit: number) => {
   const response: IFSEntry[] = await db
@@ -67,14 +70,82 @@ export const getEntriesByRange = async (startId: number, endId: number) => {
 };
 
 export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
+  if (entry.artist_name || entry.album_title || entry.record_label) {
+    const qb = new QueryBuilder();
+    let query = qb.select().from(library_artist_view).$dynamic();
+
+    query = withArtistName(withAlbumTitle(withLabel(query, entry.record_label), entry.album_title), entry.artist_name);
+    const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
+
+    if (matching_albums.length > 0) {
+      const matching_album_ids = matching_albums.map((album: LibraryArtistViewEntry) => {
+        return album.id;
+      });
+
+      await db
+        .update(library)
+        .set({ last_modified: sql`current_timestamp()`, plays: sql`${library.plays} + 1` })
+        .where(inArray(library.id, matching_album_ids));
+    }
+  }
+
   const response = await db.insert(flowsheet).values(entry).returning();
   return response[0];
 };
 
 export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
+  const entry = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
+
+  if (entry.length === 0) {
+    throw new Error('Entry not found');
+  }
+
+  const qb = new QueryBuilder();
+  const query = withArtistName(
+    withAlbumTitle(
+      withLabel(qb.select().from(library_artist_view).$dynamic(), entry[0].record_label),
+      entry[0].album_title
+    ),
+    entry[0].artist_name
+  );
+
+  const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
+
+  if (matching_albums.length > 0) {
+    const matching_album_ids = matching_albums.map((album: LibraryArtistViewEntry) => {
+      return album.id;
+    });
+
+    await db
+      .update(library)
+      .set({ last_modified: sql`current_timestamp()`, plays: sql`${library.plays} - 1` })
+      .where(inArray(library.id, matching_album_ids));
+  }
+
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
   return response[0];
 };
+
+function withArtistName<T extends PgSelectQueryBuilder>(qb: T, artist_name: string | null | undefined) {
+  if (artist_name) {
+    return qb.where(eq(library_artist_view.artist_name, artist_name));
+  }
+  return qb;
+}
+
+function withAlbumTitle<T extends PgSelectQueryBuilder>(qb: T, album_title: string | null | undefined) {
+  if (album_title) {
+    return qb.where(eq(library_artist_view.album_title, album_title));
+  }
+  return qb;
+}
+
+function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null | undefined) {
+  if (label) {
+    return qb.where(eq(library_artist_view.label, label));
+  }
+  return qb;
+}
 
 export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry> => {
   const response = await db.update(flowsheet).set(entry).where(eq(flowsheet.id, entry_id)).returning();
@@ -246,27 +317,15 @@ export const getOnAirStatusForDJ = async (dj_id: number): Promise<boolean> => {
   return showDj[0]?.active ?? false;
 };
 
-export const getDJsInCurrentShow = async (): Promise<string> => {
-  const latest_show = await getLatestShow();
-  const dj_ids = (await db.select().from(show_djs).where(eq(show_djs.show_id, latest_show.id))).map((dj) => dj.dj_id);
-  const dj_names = [];
+export const getDJsInCurrentShow = async (): Promise<DJ[]> => {
+  const current_show = await getLatestShow();
+  const showDjsInstance = await db.select().from(show_djs).where(eq(show_djs.show_id, current_show.id));
+  const dj_ids = showDjsInstance.map((dj) => {
+    return dj.dj_id;
+  });
 
-  for (let i = 0; i < dj_ids.length; i++) {
-    if (dj_ids[i] === -1) continue;
-    const dj = (await db.select().from(djs).where(eq(djs.id, dj_ids[i])))[0];
-    if (dj) {
-      dj_names.push(dj);
-    }
-  }
-
-  let djs_string = dj_names.map((dj) => dj.dj_name).join(', ');
-  if (djs_string === '') {
-    djs_string = 'Off Air';
-  } else {
-    const last_comma = djs_string.lastIndexOf(',');
-    djs_string = djs_string.substring(0, last_comma) + ' and' + djs_string.substring(last_comma + 1);
-  }
-  return djs_string;
+  const showDjs = await db.select().from(djs).where(inArray(djs.id, dj_ids));
+  return showDjs;
 };
 
 export const getAlbumFromDB = async (album_id: number) => {
