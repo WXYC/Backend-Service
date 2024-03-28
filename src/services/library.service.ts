@@ -1,17 +1,19 @@
 import { desc, eq, sql } from 'drizzle-orm';
+import { RotationAddRequest } from '../controllers/library.controller';
 import { db } from '../db/drizzle_client';
 import {
   NewAlbum,
+  NewAlbumFormat,
   NewArtist,
-  library,
+  NewGenre,
+  RotationRelease,
   artists,
+  format,
+  genres,
+  library,
   library_artist_view,
   rotation,
-  format,
-  RotationRelease,
-  genres,
 } from '../db/schema';
-import { RotationAddRequest } from '../controllers/library.controller';
 
 export const getFormatsFromDB = async () => {
   const formats = await db
@@ -20,6 +22,11 @@ export const getFormatsFromDB = async () => {
     .where(sql`true`);
   return formats;
 };
+
+export const insertFormat = async (new_format: NewAlbumFormat) => {
+  const response = await db.insert(format).values(new_format).returning();
+  return response[0];
+}
 
 export const getRotationFromDB = async () => {
   const rotation_albums = await db
@@ -177,6 +184,18 @@ export const getAlbumFromDB = async (album_id: number) => {
     .limit(1);
 
   return album[0];
+};
+
+export const getGenresFromDB = async () => {
+  const genreCollection = await db
+    .select()
+    .from(genres);
+  return genreCollection;
+};
+
+export const insertGenre = async (genre: NewGenre) => {
+  const response = await db.insert(genres).values(genre).returning();
+  return response[0];
 };
 
 export const isISODate = (date: string): boolean => {
