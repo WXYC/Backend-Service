@@ -1,17 +1,17 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
 import { db } from '../db/drizzle_client';
 import {
+  DJ,
+  FSEntry,
   NewFSEntry,
-  flowsheet,
-  shows,
   Show,
+  ShowDJ,
+  artists,
+  djs,
+  flowsheet,
+  library,
   // NewShow,
   rotation,
-  library,
-  artists,
-  DJ,
-  djs,
-  FSEntry,
   show_djs,
   ShowDJ,
   library_artist_view,
@@ -153,6 +153,8 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
 };
 
 export const startShow = async (dj_id: number, show_name?: string, specialty_id?: number): Promise<Show> => {
+  const dj_info = (await db.select().from(djs).where(eq(djs.id, dj_id)).limit(1))[0];
+
   const new_show = await db
     .insert(shows)
     .values({
@@ -169,6 +171,12 @@ export const startShow = async (dj_id: number, show_name?: string, specialty_id?
       dj_id: dj_id,
     })
     .returning();
+
+  await db.insert(flowsheet).values({
+    message: `Start of Show: DJ ${dj_info.dj_name} joined the set at ${new Date().toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+    })}`,
+  });
 
   return new_show[0];
 };
@@ -235,26 +243,32 @@ const createJoinNotification = async (id: number): Promise<FSEntry> => {
 export const endShow = async (currentShow: Show): Promise<Show> => {
   //Add leave notification for all remaining guest djs;
   //Update their active state and set show end time.
-  const query = sql`
-    INSERT INTO ${flowsheet} (message)
-    SELECT ${djs.dj_name} || ' left the show!'
-      FROM ${djs} INNER JOIN ${show_djs}
-        ON ${show_djs.active} = true AND ${djs.id} != ${currentShow.primary_dj_id} AND ${djs.id} = ${show_djs.dj_id};
 
-    INSERT INTO ${flowsheet} (message)
-    SELECT 'END OF SHOW: ' || ${djs.dj_name}.dj_name || ' SIGNED OFF at ' || to_char(current_timestamp AT TIME ZONE 'US/Eastern', 'HH12:MI AM (MM/DD/YY)')
-      FROM ${djs} 
-      WHERE ${djs.id} = ${currentShow.primary_dj_id};
+  const primary_dj_id = currentShow.primary_dj_id;
+  if (!primary_dj_id) throw new Error('Primary DJ not found');
 
-    UPDATE ${show_djs} SET ${show_djs.active} = false 
-      WHERE ${show_djs.active} = true;
+  const remaining_djs = await db
+    .select()
+    .from(show_djs)
+    .where(and(eq(show_djs.show_id, currentShow.id), eq(show_djs.active, true)));
 
-    UPDATE ${shows} SET ${shows.end_time} = CURRENT_TIMESTAMP
-      WHERE ${shows.id} = ${currentShow.id};
-  `;
+  await Promise.all(
+    remaining_djs.map(async (dj) => {
+      await db.update(show_djs).set({ active: false }).where(eq(show_djs.dj_id, dj.dj_id));
+      if (dj.dj_id === primary_dj_id) return;
+      await createLeaveNotification(dj.dj_id);
+    })
+  );
 
-  const res = await db.execute(query);
-  console.log(res);
+  const dj_information = (await db.select().from(djs).where(eq(djs.id, primary_dj_id)).limit(1))[0];
+
+  await db.insert(flowsheet).values({
+    message: `End of Show: DJ ${dj_information.dj_name} left the set at ${new Date().toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+    })}`,
+  });
+
+  await db.update(shows).set({ end_time: new Date() }).where(eq(shows.id, currentShow.id));
 
   return await getLatestShow();
 };
