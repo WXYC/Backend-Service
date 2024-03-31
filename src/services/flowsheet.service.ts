@@ -6,6 +6,7 @@ import {
   NewFSEntry,
   Show,
   ShowDJ,
+  shows,
   artists,
   djs,
   flowsheet,
