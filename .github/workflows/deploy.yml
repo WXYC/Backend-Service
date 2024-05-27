@@ -48,10 +48,10 @@ jobs:
           echo "Remote Digest: $REMOTE_DIGEST"
           
           echo "Building Docker image locally..."
-          docker build --platform linux/amd64 -t $IMAGE_URI .
+          docker build --platform linux/amd64  -t wxyc_backend_service:latest .
           
           echo "Fetching local image details..."
-          LOCAL_IMAGE_DETAILS=$(docker inspect $IMAGE_URI)
+          LOCAL_IMAGE_DETAILS=$(docker inspect wxyc_backend_service:latest)
           
           echo "Local Image Details: $LOCAL_IMAGE_DETAILS"
           
@@ -106,9 +106,9 @@ jobs:
         run: |
           IMAGE_URI="${{ secrets.AWS_ECR_REPOSITORY }}:latest"
           echo "Building Docker image..."
-          docker build --platform linux/amd64 -t $IMAGE_URI .
+          docker build --platform linux/amd64  -t wxyc_backend_service:latest .
           echo "Tagging Docker image..."
-          docker tag $IMAGE_URI $IMAGE_URI
+          docker tag wxyc_backend_service:latest $IMAGE_URI
           echo "Pushing Docker image to ECR..."
           docker push $IMAGE_URI
 
