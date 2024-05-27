@@ -75,9 +75,9 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             echo "Listing Docker images..."
-            docker images
+            docker images || exit 1
             echo "Listing running Docker containers..."
-            docker ps
+            docker ps || exit 1
 
   build-and-deploy:
     if: github.event.inputs.dry_run != 'true'
