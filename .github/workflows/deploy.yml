@@ -50,8 +50,13 @@ jobs:
           echo "Building Docker image locally..."
           docker build --platform linux/amd64 -t $IMAGE_URI .
           
+          echo "Fetching local image details..."
+          LOCAL_IMAGE_DETAILS=$(docker inspect $IMAGE_URI)
+          
+          echo "Local Image Details: $LOCAL_IMAGE_DETAILS"
+          
           echo "Fetching local image digest..."
-          LOCAL_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_URI | cut -d '@' -f 2)
+          LOCAL_DIGEST=$(echo "$LOCAL_IMAGE_DETAILS" | jq -r '.[0].RepoDigests[0]' | cut -d '@' -f 2)
           
           if [ -z "$LOCAL_DIGEST" ]; then
             echo "Failed to fetch local image digest."
