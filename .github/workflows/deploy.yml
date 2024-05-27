@@ -50,22 +50,18 @@ jobs:
           echo "Building Docker image locally..."
           docker build --platform linux/amd64  -t wxyc_backend_service:latest .
           
-          echo "Fetching local image details..."
-          LOCAL_IMAGE_DETAILS=$(docker inspect wxyc_backend_service:latest)
+          echo "Fetching local image ID..."
+          LOCAL_ID=$(docker inspect --format='{{.Id}}' wxyc_backend_service:latest)
           
-          echo "Local Image Details: $LOCAL_IMAGE_DETAILS"
-          
-          echo "Fetching local image digest..."
-          LOCAL_DIGEST=$(echo "$LOCAL_IMAGE_DETAILS" | jq -r '.[0].RepoDigests[0]' | cut -d '@' -f 2)
-          
-          if [ -z "$LOCAL_DIGEST" ]; then
-            echo "Failed to fetch local image digest."
+          if [ -z "$LOCAL_ID" ]; then
+            echo "Failed to fetch local image ID."
             exit 1
           fi
           
-          echo "Local Digest: $LOCAL_DIGEST"
+          echo "Local ID: $LOCAL_ID"
+          echo "Remote Digest: $REMOTE_DIGEST"
           
-          if [ "$REMOTE_DIGEST" = "$LOCAL_DIGEST" ]; then
+          if [ "$REMOTE_DIGEST" = "sha256:$LOCAL_ID" ]; then
             echo "The image to be deployed is the same as the current image in ECR."
           else
             echo "The image to be deployed is different from the current image in ECR."
