@@ -29,20 +29,35 @@ jobs:
           aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_REPOSITORY }}
 
       - name: Compare Docker image digests
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           set -e
           IMAGE_URI="${{ secrets.AWS_ECR_REPOSITORY }}:latest"
           
           echo "Fetching remote image digest..."
           REMOTE_DIGEST=$(aws ecr describe-images --repository-name wxyc_backend_service --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageDigest' --output text)
-
+          
+          if [ -z "$REMOTE_DIGEST" ]; then
+            echo "Failed to fetch remote image digest."
+            exit 1
+          fi
+          
+          echo "Remote Digest: $REMOTE_DIGEST"
+          
           echo "Building Docker image locally..."
           docker build --platform linux/amd64 -t $IMAGE_URI .
           
           echo "Fetching local image digest..."
           LOCAL_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_URI | cut -d '@' -f 2)
           
-          echo "Remote Digest: $REMOTE_DIGEST"
+          if [ -z "$LOCAL_DIGEST" ]; then
+            echo "Failed to fetch local image digest."
+            exit 1
+          fi
+          
           echo "Local Digest: $LOCAL_DIGEST"
           
           if [ "$REMOTE_DIGEST" = "$LOCAL_DIGEST" ]; then
