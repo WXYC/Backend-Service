@@ -53,7 +53,6 @@ export const getLatest: RequestHandler = async (req, res, next) => {
   try {
     const latest: FSEntry[] = await flowsheet_service.getEntriesByPage(0, 1);
     if (latest.length) {
-      console.log(latest[0]);
       res.status(200);
       res.json(latest[0]);
     } else {
@@ -287,7 +286,11 @@ export const getOnAir: RequestHandler = async (req, res, next) => {
 //    entry_id is the id of the entry to be moved
 //    new_position is the new position of the entry
 // Positions are serialized starting at 1 and define the play order of the tracks per show
-export const changeOrder: RequestHandler<object, unknown, { entry_id: number; new_position: number }> = async (req, res, next) => {
+export const changeOrder: RequestHandler<object, unknown, { entry_id: number; new_position: number }> = async (
+  req,
+  res,
+  next
+) => {
   const { entry_id, new_position } = req.body;
 
   if (entry_id === undefined || new_position === undefined) {

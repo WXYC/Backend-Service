@@ -1,5 +1,14 @@
 import { Request, RequestHandler } from 'express';
-import { Album, Artist, NewAlbum, NewAlbumFormat, NewArtist, NewGenre, NewRotationRelease, RotationRelease } from '../db/schema';
+import {
+  Album,
+  Artist,
+  NewAlbum,
+  NewAlbumFormat,
+  NewArtist,
+  NewGenre,
+  NewRotationRelease,
+  RotationRelease,
+} from '../db/schema';
 import * as libraryService from '../services/library.service';
 
 type NewAlbumRequest = {
@@ -210,7 +219,6 @@ export const getFormats: RequestHandler = async (req, res, next) => {
 };
 
 export const addFormat: RequestHandler = async (req, res, next) => {
-  
   const { body } = req;
   if (body.name === undefined) {
     res.status(400).send('Bad Request, Missing Parameter: name');
@@ -228,17 +236,16 @@ export const addFormat: RequestHandler = async (req, res, next) => {
       next(e);
     }
   }
-}
+};
 
-export const getGenres: RequestHandler = async (req, res, next) => {
+export const getGenres: RequestHandler = async (req, res) => {
   const genres = await libraryService.getGenresFromDB();
   res.status(200).json(genres);
 };
 
 export const addGenre: RequestHandler = async (req, res, next) => {
   const { body } = req;
-  if (body.name === undefined ||
-      body.description === undefined) {
+  if (body.name === undefined || body.description === undefined) {
     res.status(400).send('Bad Request, Parameters name and description are required.');
   } else {
     try {
@@ -247,7 +254,7 @@ export const addGenre: RequestHandler = async (req, res, next) => {
         description: body.description,
         plays: 0,
         add_date: new Date().toISOString(),
-        last_modified: new Date()
+        last_modified: new Date(),
       };
 
       const insertion = await libraryService.insertGenre(newGenre);
@@ -261,13 +268,14 @@ export const addGenre: RequestHandler = async (req, res, next) => {
   }
 };
 
-export const getAlbum: RequestHandler<object, unknown, unknown, { album_id: number }> = async (req, res, next) => {
-  if (req.query.album_id === undefined) {
+export const getAlbum: RequestHandler<object, unknown, unknown, { album_id: string }> = async (req, res, next) => {
+  const { query } = req;
+  if (query.album_id === undefined) {
     console.error('Bad Request, missing album identifier: album_id');
     res.status(400).send('Bad Request, missing album identifier: album_id');
   } else {
     try {
-      const album = await libraryService.getAlbumFromDB(req.query.album_id);
+      const album = await libraryService.getAlbumFromDB(parseInt(query.album_id));
       res.status(200).json(album);
     } catch (e) {
       console.error('Failed to retrieve album');
