@@ -172,6 +172,7 @@ export const startShow = async (dj_id: number, show_name?: string, specialty_id?
     .returning();
 
   await db.insert(flowsheet).values({
+    show_id: new_show[0].id,
     message: `Start of Show: DJ ${dj_info.dj_name} joined the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
@@ -199,7 +200,7 @@ export const addDJToShow = async (dj_id: number, current_show: Show): Promise<Sh
     show_dj_instance = new_instance;
 
     // -- Add DJ Joined to Flowsheet --
-    await createJoinNotification(dj_id);
+    await createJoinNotification(dj_id, current_show.id);
     // --------------------------------
   } else if (show_dj_instance[0].active == false) {
     const new_instance = await db
@@ -211,14 +212,14 @@ export const addDJToShow = async (dj_id: number, current_show: Show): Promise<Sh
     show_dj_instance = new_instance;
 
     // -- Add DJ Joined to Flowsheet --
-    await createJoinNotification(dj_id);
+    await createJoinNotification(dj_id, current_show.id);
     // --------------------------------
   }
 
   return show_dj_instance[0];
 };
 
-const createJoinNotification = async (id: number): Promise<FSEntry> => {
+const createJoinNotification = async (id: number, show_id: number): Promise<FSEntry> => {
   let dj_name = 'A DJ';
   const dj: DJ = (await db.select().from(djs).where(eq(djs.id, id)))[0];
 
@@ -229,9 +230,7 @@ const createJoinNotification = async (id: number): Promise<FSEntry> => {
   const notification = await db
     .insert(flowsheet)
     .values({
-      artist_name: '',
-      album_title: '',
-      track_title: '',
+      show_id: show_id,
       message: message,
     })
     .returning();
@@ -255,14 +254,16 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
     remaining_djs.map(async (dj) => {
       await db.update(show_djs).set({ active: false }).where(eq(show_djs.dj_id, dj.dj_id));
       if (dj.dj_id === primary_dj_id) return;
-      await createLeaveNotification(dj.dj_id);
+      await createLeaveNotification(dj.dj_id, currentShow.id);
     })
   );
 
   const dj_information = (await db.select().from(djs).where(eq(djs.id, primary_dj_id)).limit(1))[0];
+  const dj_name = dj_information.dj_name ? dj_information.dj_name : 'A DJ';
 
   await db.insert(flowsheet).values({
-    message: `End of Show: DJ ${dj_information.dj_name} left the set at ${new Date().toLocaleString('en-US', {
+    show_id: currentShow.id,
+    message: `End of Show: ${dj_name} left the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
   });
@@ -286,15 +287,15 @@ export const leaveShow = async (dj_id: number, currentShow: Show): Promise<ShowD
   }
 
   // -- Add DJ Left to Flowsheet --
-  await createLeaveNotification(dj_id);
+  await createLeaveNotification(dj_id, currentShow.id);
   // -------------------------------
 
   return update_result;
 };
 
-const createLeaveNotification = async (id: number): Promise<FSEntry> => {
+const createLeaveNotification = async (dj_id: number, show_id: number): Promise<FSEntry> => {
   let dj_name = 'A DJ';
-  const dj: DJ = (await db.select().from(djs).where(eq(djs.id, id)))[0];
+  const dj: DJ = (await db.select().from(djs).where(eq(djs.id, dj_id)))[0];
 
   dj_name = dj.dj_name ?? dj_name;
 
@@ -303,9 +304,7 @@ const createLeaveNotification = async (id: number): Promise<FSEntry> => {
   const notification = await db
     .insert(flowsheet)
     .values({
-      artist_name: '',
-      album_title: '',
-      track_title: '',
+      show_id: show_id,
       message: message,
     })
     .returning();
