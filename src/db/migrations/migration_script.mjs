@@ -5,7 +5,7 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 
 const migrationClient = postgres(
   {
-    host: process.env.DB_ENDPOINT,
+    host: process.env.DB_HOST,
     port: process.env.DB_PORT,
     database: process.env.DB_NAME,
     username: process.env.DB_USERNAME,
