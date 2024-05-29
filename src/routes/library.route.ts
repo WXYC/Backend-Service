@@ -6,17 +6,14 @@ export const library_route = Router();
 
 library_route.get('/', cognitoMiddleware(), libraryController.searchForAlbum);
 
-// secure: mgmt
 library_route.post('/', cognitoMiddleware('station-management'), libraryController.addAlbum);
 
-//secure: mgmt
 library_route.get('/rotation', cognitoMiddleware(), libraryController.getRotation);
 
 library_route.post('/rotation', cognitoMiddleware('station-management'), libraryController.addRotation);
 
 library_route.patch('/rotation', cognitoMiddleware('station-management'), libraryController.killRotation);
 
-//secure: mgmt
 library_route.post('/artists', cognitoMiddleware('station-management'), libraryController.addArtist);
 
 library_route.get('/formats', cognitoMiddleware(), libraryController.getFormats);
