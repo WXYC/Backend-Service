@@ -126,11 +126,16 @@ jobs:
             echo "Pulling Docker image..."
             docker pull ${{ secrets.AWS_ECR_REPOSITORY }}:latest
             
-            echo "Stopping current Docker container..."
-            docker ps -q --filter ancestor=${{ secrets.AWS_ECR_REPOSITORY }}:latest | xargs -r docker stop
+            echo "Stopping any existing container using port 8080..."
+            docker ps --filter "ancestor=${{ secrets.AWS_ECR_REPOSITORY }}:latest" --format "{{.ID}}" | xargs -r docker stop
+            docker ps --filter "publish=8080" --format "{{.ID}}" | xargs -r docker stop
+
+            echo "Removing any existing container using port 8080..."
+            docker ps -a --filter "ancestor=${{ secrets.AWS_ECR_REPOSITORY }}:latest" --format "{{.ID}}" | xargs -r docker rm
+            docker ps -a --filter "publish=8080" --format "{{.ID}}" | xargs -r docker rm
             
             echo "Starting new Docker container..."
-            docker run -d -p 8080:8080 --env-file /path/to/.env ${{ secrets.AWS_ECR_REPOSITORY }}:latest
+            docker run -d -p 8080:8080 --env-file .env ${{ secrets.AWS_ECR_REPOSITORY }}:latest
 
       - name: Confirm server is up
         uses: appleboy/ssh-action@v0.1.0
@@ -142,7 +147,7 @@ jobs:
             echo "Waiting for server to start..."
             sleep 30  # Adjust sleep time as needed
             echo "Checking server status..."
-            if curl -s --head  --request GET http://localhost:8080 | grep "200 OK" > /dev/null; then 
+            if curl -s --head  --request GET http://localhost:8080/flowsheet | grep "200 OK" > /dev/null; then 
               echo "Server is up and running."
             else
               echo "Server is not running. Deployment failed." >&2
