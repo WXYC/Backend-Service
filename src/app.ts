@@ -52,7 +52,9 @@ jwtVerifier
     console.error(`Failed to hydrate JWT verifier : ${e}`);
   })
   .then(() => {
-    app.listen(port, () => {
+    const server = app.listen(port, () => {
       console.log(`listening on port: ${port}!`);
     });
+
+    server.setTimeout(5000);
   });
