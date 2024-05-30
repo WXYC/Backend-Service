@@ -26,7 +26,7 @@ export const getFormatsFromDB = async () => {
 export const insertFormat = async (new_format: NewAlbumFormat) => {
   const response = await db.insert(format).values(new_format).returning();
   return response[0];
-}
+};
 
 export const getRotationFromDB = async () => {
   const rotation_albums = await db
@@ -51,7 +51,7 @@ export const getRotationFromDB = async () => {
     .innerJoin(artists, eq(artists.id, library.artist_id))
     .innerJoin(genres, eq(artists.genre_id, genres.id))
     .innerJoin(format, eq(library.format_id, format.id))
-    .where(sql`${rotation.kill_date} < CURRENT_DATE OR ${rotation.kill_date} IS NULL`);
+    .where(sql`${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL`);
 
   return rotation_albums;
 };
@@ -187,9 +187,7 @@ export const getAlbumFromDB = async (album_id: number) => {
 };
 
 export const getGenresFromDB = async () => {
-  const genreCollection = await db
-    .select()
-    .from(genres);
+  const genreCollection = await db.select().from(genres);
   return genreCollection;
 };
 
