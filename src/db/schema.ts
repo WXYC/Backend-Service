@@ -245,9 +245,9 @@ export type LibraryArtistViewEntry = {
   album_title: string;
   format_name: string;
   genre_name: string;
-  rotation: string;
+  play_freq: string | null;
   add_date: Date;
-  label: string;
+  label: string | null;
 };
 export const library_artist_view = wxyc_schema.view('library_artist_view').as((qb) => {
   return qb
@@ -260,7 +260,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       album_title: library.album_title,
       format_name: format.format_name,
       genre_name: genres.genre_name,
-      rotation: rotation.play_freq,
+      play_freq: rotation.play_freq,
       add_date: library.add_date,
       label: library.label,
     })
