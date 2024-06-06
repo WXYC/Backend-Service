@@ -69,57 +69,68 @@ export const getEntriesByRange = async (startId: number, endId: number) => {
 };
 
 export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
-  if (entry.artist_name || entry.album_title || entry.record_label) {
-    const qb = new QueryBuilder();
-    let query = qb.select().from(library_artist_view).$dynamic();
+  /*
+    TODO: logic for updating album playcount 
+  */
+  // if (entry.artist_name || entry.album_title || entry.record_label) {
+  //   const qb = new QueryBuilder();
+  //   let query = qb.select().from(library_artist_view).$dynamic();
+  //   query = withAlbumTitle(withArtistName(query, entry.artist_name), entry.album_title);
+  //   console.log(query.toSQL());
+  //   // query = withAlbumTitle(query, entry.album_title);
+  //   // console.log(query.toSQL());
+  //   query = withLabel(query, entry.record_label);
+  //   console.log(query.toSQL());
 
-    query = withArtistName(withAlbumTitle(withLabel(query, entry.record_label), entry.album_title), entry.artist_name);
-    const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
+  //   const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
 
-    if (matching_albums.length > 0) {
-      const matching_album_ids = matching_albums.map((album: LibraryArtistViewEntry) => {
-        return album.id;
-      });
+  //   if (matching_albums.length > 0) {
+  //     const matching_album_ids = matching_albums.map((album: LibraryArtistViewEntry) => {
+  //       return album.id;
+  //     });
 
-      await db
-        .update(library)
-        .set({ last_modified: sql`current_timestamp()`, plays: sql`${library.plays} + 1` })
-        .where(inArray(library.id, matching_album_ids));
-    }
-  }
+  //     await db
+  //       .update(library)
+  //       .set({ last_modified: sql`current_timestamp()`, plays: sql`${library.plays} + 1` })
+  //       .where(inArray(library.id, matching_album_ids));
+  //   }
+  // }
 
   const response = await db.insert(flowsheet).values(entry).returning();
   return response[0];
 };
 
 export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
-  const entry = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
+  /*
+    TODO: logic for updating album playcount 
+   */
+  // const entry = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
 
-  if (entry.length === 0) {
-    throw new Error('Entry not found');
-  }
+  // if (entry.length === 0) {
+  //   throw new Error('Entry not found');
+  // }
 
-  const qb = new QueryBuilder();
-  const query = withArtistName(
-    withAlbumTitle(
-      withLabel(qb.select().from(library_artist_view).$dynamic(), entry[0].record_label),
-      entry[0].album_title
-    ),
-    entry[0].artist_name
-  );
+  // const qb = new QueryBuilder();
+  // const query = withArtistName(
+  //   withAlbumTitle(
+  //     withLabel(qb.select().from(library_artist_view).$dynamic(), entry[0].record_label),
+  //     entry[0].album_title
+  //   ),
+  //   entry[0].artist_name
+  // );
 
-  const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
+  // const matching_albums: LibraryArtistViewEntry[] = await db.execute(query);
 
-  if (matching_albums.length > 0) {
-    const matching_album_ids = matching_albums.map((album: LibraryArtistViewEntry) => {
-      return album.id;
-    });
+  // if (matching_albums.length > 0) {
+  //   const matching_album_ids = matching_albums.map((album: LibraryArtistViewEntry) => {
+  //     return album.id;
+  //   });
 
-    await db
-      .update(library)
-      .set({ last_modified: sql`current_timestamp()`, plays: sql`${library.plays} - 1` })
-      .where(inArray(library.id, matching_album_ids));
-  }
+  //   await db
+  //     .update(library)
+  //     .set({ last_modified: sql`current_timestamp()`, plays: sql`${library.plays} - 1` })
+  //     .where(inArray(library.id, matching_album_ids));
+  // }
 
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
   return response[0];
