@@ -8,6 +8,7 @@ import type { Config } from 'jest';
 const config: Config = {
   // The glob patterns Jest uses to detect test files
   testMatch: ['**/tests/specs/?(*.)+(spec).js'],
+  setupFilesAfterEnv: ['./tests/test.setup.js'],
   reporters: [
     'default',
     [
