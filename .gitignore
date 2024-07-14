@@ -1,4 +1,5 @@
 node_modules
+tests/dev_db
 dist
 .env
 .DS_STORE
