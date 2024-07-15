@@ -110,6 +110,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
               track_title: body.track_title,
               rotation_id: body.rotation_id,
               request_flag: body.request_flag,
+              show_id: latestShow.id,
             };
 
             const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
@@ -125,6 +126,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
           } else {
             const fsEntry: NewFSEntry = {
               ...body,
+              show_id: latestShow.id,
             };
 
             const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
@@ -143,6 +145,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
         album_title: '',
         track_title: '',
         message: body.message,
+        show_id: latestShow.id,
       };
       try {
         const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
