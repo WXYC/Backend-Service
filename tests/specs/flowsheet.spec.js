@@ -464,7 +464,6 @@ describe('Shift Flowsheet Entries', () => {
     let get_entries_res = await request.get('/flowsheet').query({ limit: 4 }).send().expect(200);
     const entries = get_entries_res.body;
 
-    console.log(entries);
     const res = await request
       .patch('/flowsheet/play-order')
       .send({ entry_id: entries[0].id, new_position: entries[2].play_order })
