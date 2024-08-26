@@ -243,28 +243,35 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 export const leaveShow: RequestHandler<object, unknown, { dj_id: number }> = async (req, res, next) => {
   const currentShow = await flowsheet_service.getLatestShow();
   if (currentShow.end_time !== null) {
-    res.status(400).json({ message: 'Bad Request: No active show' });
-  }
-
-  try {
-    if (req.body.dj_id === currentShow.primary_dj_id) {
-      const finalizedShow: Show = await flowsheet_service.endShow(currentShow);
-      res.status(200).json(finalizedShow);
-    } else {
-      const showDJ: ShowDJ = await flowsheet_service.leaveShow(req.body.dj_id, currentShow);
-      res.status(200).json(showDJ);
+    res.status(404).json({ message: 'Bad Request: No active show session found.' });
+  } else {
+    try {
+      // Catch case where DJ is not in show, but attempting to hit this endpoint
+      const show_djs = await flowsheet_service.getDJsInCurrentShow();
+      if (!show_djs.map((dj) => dj.id).includes(req.body.dj_id)) {
+        res.status(400).json({ message: 'Bad Request: DJ not in current show' });
+      } else if (req.body.dj_id === currentShow.primary_dj_id) {
+        const finalizedShow: Show = await flowsheet_service.endShow(currentShow);
+        res.status(200).json(finalizedShow);
+      } else {
+        const showDJ: ShowDJ = await flowsheet_service.leaveShow(req.body.dj_id, currentShow);
+        res.status(200).json(showDJ);
+      }
+    } catch (e) {
+      console.error('Error: Failed to leave show');
+      console.error(e);
+      next(e);
     }
-  } catch (e) {
-    console.error('Error: Failed to leave show');
-    console.error(e);
-    next(e);
   }
 };
 
 export const getDJList: RequestHandler = async (req, res, next) => {
   try {
     const currentDJs = await flowsheet_service.getDJsInCurrentShow();
-    res.status(200).json(currentDJs);
+    const cleanDJList = currentDJs.map((dj) => {
+      return { id: dj.id, dj_name: dj.dj_name };
+    });
+    res.status(200).json(cleanDJList);
   } catch (e) {
     console.error('Error: Failed to retrieve current DJs');
     console.error(e);
