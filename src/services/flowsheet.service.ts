@@ -293,6 +293,7 @@ export const leaveShow = async (dj_id: number, currentShow: Show): Promise<ShowD
       .returning()
   )[0];
 
+  // In case gaurds further up the line of logic fail
   if (update_result === undefined) {
     throw new Error('DJ not in show');
   }
@@ -342,10 +343,20 @@ export const getOnAirStatusForDJ = async (dj_id: number): Promise<boolean> => {
 
 export const getDJsInCurrentShow = async (): Promise<DJ[]> => {
   const current_show = await getLatestShow();
+
+  //Avoid a round trip to db with this check
+  if (current_show.end_time !== null) {
+    return Array(0);
+  }
+
   const showDjsInstance = await db.select().from(show_djs).where(eq(show_djs.show_id, current_show.id));
-  const dj_ids = showDjsInstance.map((dj) => {
-    return dj.dj_id;
-  });
+
+  //only return djs with active sessions
+  const dj_ids = showDjsInstance
+    .filter((dj) => dj.active === true)
+    .map((dj) => {
+      return dj.dj_id;
+    });
 
   const showDjs = await db.select().from(djs).where(inArray(djs.id, dj_ids));
   return showDjs;
@@ -366,19 +377,21 @@ export const getAlbumFromDB = async (album_id: number) => {
   return album[0];
 };
 
-export const changeOrder = async (position_old: number, position_new: number): Promise<FSEntry> => {
+// We use entry_id in order to avoid a race condition here.
+// Using the id ensures we are pointing to a specific entry.
+export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry> => {
   await db.transaction(
     async (trx) => {
       try {
-        const mover_id = (
+        const position_old = (
           await trx
             .select({
-              id: flowsheet.id,
+              play_order: flowsheet.play_order,
             })
             .from(flowsheet)
-            .where(eq(flowsheet.play_order, position_old))
+            .where(eq(flowsheet.id, entry_id))
             .limit(1)
-        )[0].id;
+        )[0].play_order;
 
         if (position_new < position_old) {
           await trx
@@ -392,7 +405,7 @@ export const changeOrder = async (position_old: number, position_new: number): P
             .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
         }
 
-        await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, mover_id));
+        await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, entry_id));
       } catch (error) {
         trx.rollback();
         throw error;
