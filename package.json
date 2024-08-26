@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node dist/app.js",
     "build": "tsc",
-    "dev": "nodemon -w src -e ts --exec \"npm run build && npm run start\"",
+    "dev": "nodemon -w src -w .env -e ts --exec \"npm run build && npm run start\"",
     "clean": "rm -rf ./dist/*",
     "lint": "eslint . --ext .ts",
     "test": "jest",
