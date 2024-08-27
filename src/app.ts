@@ -5,6 +5,8 @@ import { flowsheet_route } from './routes/flowsheet.route';
 import { library_route } from './routes/library.route';
 import { schedule_route } from './routes/schedule.route';
 import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth';
+import { showMemberMiddleware } from './middleware/checkShowMember';
+import { activeShow } from './middleware/checkActiveShow';
 // import errorHandler from './middleware/errorHandler';
 
 const port = process.env.PORT || 8080;
@@ -37,13 +39,10 @@ app.get('/testAuth', cognitoMiddleware(), async (req, res) => {
   res.json({ message: 'Authenticated!' });
 });
 
-// app.get(
-//   '/testErrorHandler',
-//   (req, res, next) => {
-//     next(new Error('Testing Error'));
-//   },
-//   errorHandler
-// );
+//example of how cognito auth middleware can inform further middleware.
+app.get('/testInShow', cognitoMiddleware(), activeShow, showMemberMiddleware, async (req, res) => {
+  res.json({ message: 'Authenticated, active show, & show member' });
+});
 
 //On server startup we pre-fetch all jwt validation keys
 jwtVerifier
