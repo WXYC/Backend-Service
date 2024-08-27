@@ -1,0 +1,486 @@
+require('dotenv').config({ path: '../../.env' });
+const request = require('supertest')('http://localhost:8080');
+const { after } = require('node:test');
+const fls_util = require('../utils/flowsheet_util');
+
+/*
+ * Start Show (Primary dj hits /flowsheet/join)
+ */
+describe('Start Show', () => {
+  // Clean up by ending show
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('Properly Formatted Request', async () => {
+    const res = await request
+      .post('/flowsheet/join')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+        show_name: 'test_show',
+      })
+      .expect(200);
+
+    expect(res.body.id).toBeDefined();
+    expect(res.body.primary_dj_id).toBeDefined();
+    expect(res.body.start_time).toBeDefined();
+    expect(res.body.show_name).toEqual('test_show');
+    expect(res.body.end_time).toBeNull();
+  });
+});
+
+/*
+ * Join Show (Secondary dj(s) hits /flowsheet/join)
+ */
+describe('Join Show', () => {
+  beforeEach(async () => {
+    // Start show with primary dj
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  afterEach(async () => {
+    // Clean up and end show
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('Properly Formatted Request', async () => {
+    const res = await request
+      .post('/flowsheet/join')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.secondary_dj_id,
+      })
+      .expect(200);
+  });
+});
+
+/*
+ * End Show (Primary dj hits /flowsheet/end)
+ */
+describe('End Show', () => {
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  // Ensure that primary dj ends the show for all show djs
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('Primary DJ Leaves', async () => {
+    await request
+      .post('/flowsheet/end')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+      })
+      .expect(200);
+  });
+
+  test('No Active Show Session', async () => {
+    // End active show
+    await request.post('/flowsheet/end').set('Authorization', global.access_token).send({
+      dj_id: global.primary_dj_id,
+    });
+
+    const res = await request
+      .post('/flowsheet/end')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.secondary_dj_id,
+      })
+      .expect(404);
+    expect(res.body.message).toBeDefined();
+  });
+});
+
+/*
+ * Leave Show (Secondary dj hits /flowsheet/end)
+ */
+describe('Leave Show', () => {
+  beforeEach(async () => {
+    // Start show
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+
+    // Second DJ joins
+    await fls_util.join_show(global.secondary_dj_id, global.access_token);
+  });
+
+  // Ensure that primary dj ends the show for all show djs
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('Properly formatted request', async () => {
+    const res = await request
+      .post('/flowsheet/end')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+      })
+      .expect(200);
+  });
+
+  test('DJ not in show', async () => {
+    const res = await request
+      .post('/flowsheet/end')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: 1000,
+      })
+      .expect(400);
+    expect(res.body.message).toBeDefined();
+  });
+
+  test('No Active Show Session', async () => {
+    // End active show
+    await request.post('/flowsheet/end').set('Authorization', global.access_token).send({
+      dj_id: global.primary_dj_id,
+    });
+
+    const res = await request
+      .post('/flowsheet/end')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.secondary_dj_id,
+      })
+      .expect(404);
+    expect(res.body.message).toBeDefined();
+  });
+});
+
+/*
+ * Add Flowsheet Entries
+ */
+describe('Add to Flowsheet', () => {
+  // Setup: Start Show
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  // Cleanup: End Show
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('With Album ID', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 32864, //Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+        // record_label: 'Warner Bros',
+      })
+      .expect(200);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.album_title).toEqual('Keep it Like a Secret');
+  });
+
+  test('With Album ID && Rotation ID', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 32864, //Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+        rotation_id: 1,
+      })
+      .expect(200);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.album_title).toEqual('Keep it Like a Secret');
+  });
+
+  test('With Album ID & Record Label', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 32864, //Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+        record_label: 'Warner Bros',
+      })
+      .expect(200);
+
+    expect(res.body.album_title).toEqual('Keep it Like a Secret');
+    expect(res.body.track_title).toEqual('Carry the Zero');
+    expect(res.body.record_label).toEqual('Warner Bros');
+  });
+
+  test('With Album ID & Request Flag', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 32864, //Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+        request_flag: true,
+      })
+      .expect(200);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.album_title).toEqual('Keep it Like a Secret');
+    expect(res.body.request_flag).toBeTruthy();
+  });
+
+  test('With Album Title & Artist Name', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        artist_name: 'Build to Spill',
+        album_title: 'Keep it Like a Secret',
+        track_title: 'Carry the Zero',
+      })
+      .expect(200);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.album_title).toEqual('Keep it Like a Secret');
+    expect(res.body.track_title).toEqual('Carry the Zero');
+  });
+
+  test('With Album Title, Artist Name, & Record Label', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        artist_name: 'Build to Spill',
+        album_title: 'Keep it Like a Secret',
+        track_title: 'Carry the Zero',
+        record_label: 'Warner Bros',
+      })
+      .expect(200);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.album_title).toEqual('Keep it Like a Secret');
+    expect(res.body.track_title).toEqual('Carry the Zero');
+    expect(res.body.record_label).toEqual('Warner Bros');
+  });
+
+  test('With Album Title, Artist Name, & Request Flag', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        artist_name: 'Build to Spill',
+        album_title: 'Keep it Like a Secret',
+        track_title: 'Carry the Zero',
+        request_flag: true,
+      })
+      .expect(200);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.album_title).toEqual('Keep it Like a Secret');
+    expect(res.body.track_title).toEqual('Carry the Zero');
+  });
+
+  test('Flowsheet Message', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        message: 'Test Message',
+      })
+      .expect(200);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.message).toEqual('Test Message');
+    // These are empty strings as of now, but should be null
+    expect(res.body.artist_name).toBeNull();
+    expect(res.body.album_title).toBeNull();
+    expect(res.body.track_title).toBeNull();
+  });
+});
+
+/*
+ * Retrieve Flowsheet Entries
+ */
+describe('Retrieve Flowsheet Entries', () => {
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+
+    await request.post('/flowsheet').set('Authorization', global.access_token).send({
+      album_id: 32864, //Built to Spill - Keep it Like a Secret
+      track_title: 'Carry the Zero',
+    });
+
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('Properly Formatted Request w/o Query Param', async () => {
+    const res = await request.get('/flowsheet').send().expect(200);
+
+    expect(res.body.length).toEqual(5);
+  });
+
+  test('Properly Formatted Request w/ 3 entries', async () => {
+    const res = await request.get('/flowsheet').query({ limit: 3 }).send().expect(200);
+
+    expect(res.body[0].show_id).not.toBeNull();
+    expect(res.body[1].show_id).not.toBeNull();
+    expect(res.body[2].show_id).not.toBeNull();
+
+    expect(res.body[0].message).toMatch(
+      /End of Show: .* left the set at (0?[2-9]|1[0-2]?)\/(0?[1-9]|[1-2][0-9]|3[0-1])\/\d\d\d\d, (0?\d|1[0-2]):(0?\d|[1-5]\d):(0?\d|[1-5]\d) (AM|PM)/
+    );
+    expect(res.body[1].message).toBeNull();
+    expect(res.body[2].message).toMatch(
+      /Start of Show: .* joined the set at (0?[2-9]|1[0-2]?)\/(0?[1-9]|[1-2][0-9]|3[0-1])\/\d\d\d\d, (0?\d|1[0-2]):(0?\d|[1-5]\d):(0?\d|[1-5]\d) (AM|PM)/
+    );
+
+    expect(res.body[1].artist_name).toEqual('Built to Spill');
+    expect(res.body[1].album_title).toEqual('Keep it Like a Secret');
+    expect(res.body[1].track_title).toEqual('Carry the Zero');
+
+    expect(res.body.length).toEqual(3);
+  });
+});
+
+describe('Delete Flowsheet Entries', () => {
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+
+    const res = await request.post('/flowsheet').set('Authorization', global.access_token).send({
+      album_id: 32864, //Built to Spill - Keep it Like a Secret
+      track_title: 'Carry the Zero',
+    });
+
+    global.entry_to_delete_id = res.body.id;
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('Properly Formatted Request', async () => {
+    const delete_res = await request
+      .delete('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        entry_id: global.entry_to_delete_id,
+      })
+      .expect(200);
+
+    expect(delete_res.body).toBeDefined();
+    expect(delete_res.body.id).toEqual(global.entry_to_delete_id);
+    expect(delete_res.body.album_id).toEqual(32864);
+
+    const get_res = await request
+      .get('/flowsheet')
+      .set('Authorization', global.access_token)
+      .query({ limit: 1 })
+      .send()
+      .expect(200);
+
+    expect(get_res.body[0].id).toEqual(Number(global.entry_to_delete_id) - 1);
+  });
+});
+
+describe('Retrieve Now Playing', () => {
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 32864, //Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+      })
+      .expect(200);
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('Properly Formatted Request', async () => {
+    let res = await request.get('/flowsheet/latest').expect(200);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.artist_name).toEqual('Built to Spill');
+    expect(res.body.album_title).toEqual('Keep it Like a Secret');
+    expect(res.body.track_title).toEqual('Carry the Zero');
+
+    // add a new track
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 52339, //Ravyn Lenae - Crush
+        track_title: 'Venom',
+      })
+      .expect(200);
+
+    res = await request.get('/flowsheet/latest').expect(200);
+    expect(res.body).toBeDefined();
+    expect(res.body.artist_name).toEqual('Ravyn Lenae');
+    expect(res.body.album_title).toEqual('Crush');
+    expect(res.body.track_title).toEqual('Venom');
+  });
+});
+
+describe('Shift Flowsheet Entries', () => {
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+
+    // Insert entries to move around
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 32864, //Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+      })
+      .expect(200);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 52339, //Ravyn Lenae - Crush
+        track_title: 'Venom',
+      })
+      .expect(200);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 52588, //Jockstrap - I Love You Jennifer B
+        track_title: 'Debra',
+      })
+      .expect(200);
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('Start > Destination', async () => {
+    let get_entries_res = await request.get('/flowsheet').query({ limit: 4 }).send().expect(200);
+    const entries = get_entries_res.body;
+
+    const res = await request
+      .patch('/flowsheet/play-order')
+      .send({ entry_id: entries[0].id, new_position: entries[2].play_order })
+      .expect(200);
+
+    expect(res.body.play_order).toEqual(entries[2].play_order);
+  });
+
+  test('Destination > Start', async () => {
+    let get_entries_res = await request.get('/flowsheet').query({ limit: 4 }).send().expect(200);
+    const entries = get_entries_res.body;
+    const res = await request
+      .patch('/flowsheet/play-order')
+      .send({ entry_id: entries[2].id, new_position: entries[0].play_order })
+      .expect(200);
+
+    // get_entries_res = await request.get('/flowsheet').query({ limit: 4 }).send().expect(200);
+    expect(res.body.play_order).toEqual(entries[0].play_order);
+  });
+});
