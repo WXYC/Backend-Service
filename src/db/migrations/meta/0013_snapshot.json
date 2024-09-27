@@ -1,10 +1,8 @@
 {
-  "id": "212df034-15f8-4880-ad78-3f818fffec65",
-  "prevId": "137aedc6-a970-4aae-b5c4-c63d6621caa0",
-  "version": "5",
-  "dialect": "pg",
+  "version": "7",
+  "dialect": "postgresql",
   "tables": {
-    "artists": {
+    "wxyc_schema.artists": {
       "name": "artists",
       "schema": "wxyc_schema",
       "columns": {
@@ -55,18 +53,34 @@
       },
       "indexes": {
         "artist_name_trgm_idx": {
-          "name": "artist_name_trgm_idx",
           "columns": [
-            "artist_name"
+            {
+              "expression": "artist_name",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "with": {},
+          "name": "artist_name_trgm_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
         },
         "code_letters_idx": {
-          "name": "code_letters_idx",
           "columns": [
-            "code_letters"
+            {
+              "expression": "code_letters",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "with": {},
+          "name": "code_letters_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
         }
       },
       "foreignKeys": {
@@ -87,7 +101,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "bins": {
+    "wxyc_schema.bins": {
       "name": "bins",
       "schema": "wxyc_schema",
       "columns": {
@@ -148,7 +162,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "djs": {
+    "wxyc_schema.djs": {
       "name": "djs",
       "schema": "wxyc_schema",
       "columns": {
@@ -198,7 +212,7 @@
         }
       }
     },
-    "flowsheet": {
+    "wxyc_schema.flowsheet": {
       "name": "flowsheet",
       "schema": "wxyc_schema",
       "columns": {
@@ -315,7 +329,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "format": {
+    "wxyc_schema.format": {
       "name": "format",
       "schema": "wxyc_schema",
       "columns": {
@@ -344,7 +358,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "genres": {
+    "wxyc_schema.genres": {
       "name": "genres",
       "schema": "wxyc_schema",
       "columns": {
@@ -393,7 +407,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "library": {
+    "wxyc_schema.library": {
       "name": "library",
       "schema": "wxyc_schema",
       "columns": {
@@ -476,32 +490,64 @@
       },
       "indexes": {
         "title_trgm_idx": {
-          "name": "title_trgm_idx",
           "columns": [
-            "album_title"
+            {
+              "expression": "album_title",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "with": {},
+          "name": "title_trgm_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
         },
         "genre_id_idx": {
-          "name": "genre_id_idx",
           "columns": [
-            "genre_id"
+            {
+              "expression": "genre_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "with": {},
+          "name": "genre_id_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
         },
         "format_id_idx": {
-          "name": "format_id_idx",
           "columns": [
-            "format_id"
+            {
+              "expression": "format_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "with": {},
+          "name": "format_id_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
         },
         "artist_id_idx": {
-          "name": "artist_id_idx",
           "columns": [
-            "artist_id"
+            {
+              "expression": "artist_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "with": {},
+          "name": "artist_id_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
         }
       },
       "foreignKeys": {
@@ -548,7 +594,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "reviews": {
+    "wxyc_schema.reviews": {
       "name": "reviews",
       "schema": "wxyc_schema",
       "columns": {
@@ -618,7 +664,7 @@
         }
       }
     },
-    "rotation": {
+    "wxyc_schema.rotation": {
       "name": "rotation",
       "schema": "wxyc_schema",
       "columns": {
@@ -656,11 +702,19 @@
       },
       "indexes": {
         "album_id_idx": {
-          "name": "album_id_idx",
           "columns": [
-            "album_id"
+            {
+              "expression": "album_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "with": {},
+          "name": "album_id_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
         }
       },
       "foreignKeys": {
@@ -681,7 +735,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "schedule": {
+    "wxyc_schema.schedule": {
       "name": "schedule",
       "schema": "wxyc_schema",
       "columns": {
@@ -773,7 +827,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "shift_covers": {
+    "wxyc_schema.shift_covers": {
       "name": "shift_covers",
       "schema": "wxyc_schema",
       "columns": {
@@ -841,7 +895,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "shows": {
+    "wxyc_schema.shows": {
       "name": "shows",
       "schema": "wxyc_schema",
       "columns": {
@@ -953,7 +1007,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "specialty_shows": {
+    "wxyc_schema.specialty_shows": {
       "name": "specialty_shows",
       "schema": "wxyc_schema",
       "columns": {
@@ -997,22 +1051,26 @@
     }
   },
   "enums": {
-    "freq_enum": {
+    "public.freq_enum": {
       "name": "freq_enum",
-      "values": {
-        "S": "S",
-        "L": "L",
-        "M": "M",
-        "H": "H"
-      }
+      "schema": "public",
+      "values": [
+        "S",
+        "L",
+        "M",
+        "H"
+      ]
     }
   },
   "schemas": {
     "wxyc_schema": "wxyc_schema"
   },
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
-  }
+    "tables": {},
+    "columns": {}
+  },
+  "id": "212df034-15f8-4880-ad78-3f818fffec65",
+  "prevId": "137aedc6-a970-4aae-b5c4-c63d6621caa0",
+  "sequences": {}
 }

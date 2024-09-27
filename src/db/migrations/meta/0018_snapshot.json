@@ -1,4 +1,6 @@
 {
+  "id": "dc722914-d252-4b2a-af10-07ec73e4d7b5",
+  "prevId": "efa6d89c-b67c-4261-bc5c-c624150ec72b",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -53,21 +55,22 @@
       },
       "indexes": {
         "artist_name_trgm_idx": {
+          "name": "artist_name_trgm_idx",
           "columns": [
             {
-              "expression": "artist_name",
-              "isExpression": false,
+              "expression": "\"artist_name\" gin_trgm_ops",
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             }
           ],
-          "with": {},
-          "name": "artist_name_trgm_idx",
           "isUnique": false,
-          "method": "btree",
-          "concurrently": false
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
         },
         "code_letters_idx": {
+          "name": "code_letters_idx",
           "columns": [
             {
               "expression": "code_letters",
@@ -76,27 +79,26 @@
               "nulls": "last"
             }
           ],
-          "with": {},
-          "name": "code_letters_idx",
           "isUnique": false,
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "artists_genre_id_genres_id_fk": {
           "name": "artists_genre_id_genres_id_fk",
           "tableFrom": "artists",
+          "tableTo": "genres",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "genre_id"
           ],
-          "tableTo": "genres",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -136,30 +138,30 @@
         "bins_dj_id_djs_id_fk": {
           "name": "bins_dj_id_djs_id_fk",
           "tableFrom": "bins",
+          "tableTo": "djs",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "dj_id"
           ],
-          "tableTo": "djs",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "bins_album_id_library_id_fk": {
           "name": "bins_album_id_library_id_fk",
           "tableFrom": "bins",
+          "tableTo": "library",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "album_id"
           ],
-          "tableTo": "library",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -214,10 +216,10 @@
       "uniqueConstraints": {
         "djs_cognito_user_name_unique": {
           "name": "djs_cognito_user_name_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "cognito_user_name"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       }
     },
@@ -298,44 +300,44 @@
         "flowsheet_show_id_shows_id_fk": {
           "name": "flowsheet_show_id_shows_id_fk",
           "tableFrom": "flowsheet",
+          "tableTo": "shows",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "show_id"
           ],
-          "tableTo": "shows",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "flowsheet_album_id_library_id_fk": {
           "name": "flowsheet_album_id_library_id_fk",
           "tableFrom": "flowsheet",
+          "tableTo": "library",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "album_id"
           ],
-          "tableTo": "library",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "flowsheet_rotation_id_rotation_id_fk": {
           "name": "flowsheet_rotation_id_rotation_id_fk",
           "tableFrom": "flowsheet",
+          "tableTo": "rotation",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "rotation_id"
           ],
-          "tableTo": "rotation",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -502,21 +504,22 @@
       },
       "indexes": {
         "title_trgm_idx": {
+          "name": "title_trgm_idx",
           "columns": [
             {
-              "expression": "album_title",
-              "isExpression": false,
+              "expression": "\"album_title\" gin_trgm_ops",
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             }
           ],
-          "with": {},
-          "name": "title_trgm_idx",
           "isUnique": false,
-          "method": "btree",
-          "concurrently": false
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
         },
         "genre_id_idx": {
+          "name": "genre_id_idx",
           "columns": [
             {
               "expression": "genre_id",
@@ -525,13 +528,13 @@
               "nulls": "last"
             }
           ],
-          "with": {},
-          "name": "genre_id_idx",
           "isUnique": false,
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "format_id_idx": {
+          "name": "format_id_idx",
           "columns": [
             {
               "expression": "format_id",
@@ -540,13 +543,13 @@
               "nulls": "last"
             }
           ],
-          "with": {},
-          "name": "format_id_idx",
           "isUnique": false,
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "artist_id_idx": {
+          "name": "artist_id_idx",
           "columns": [
             {
               "expression": "artist_id",
@@ -555,55 +558,54 @@
               "nulls": "last"
             }
           ],
-          "with": {},
-          "name": "artist_id_idx",
           "isUnique": false,
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "library_artist_id_artists_id_fk": {
           "name": "library_artist_id_artists_id_fk",
           "tableFrom": "library",
+          "tableTo": "artists",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "artist_id"
           ],
-          "tableTo": "artists",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "library_genre_id_genres_id_fk": {
           "name": "library_genre_id_genres_id_fk",
           "tableFrom": "library",
+          "tableTo": "genres",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "genre_id"
           ],
-          "tableTo": "genres",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "library_format_id_format_id_fk": {
           "name": "library_format_id_format_id_fk",
           "tableFrom": "library",
+          "tableTo": "format",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "format_id"
           ],
-          "tableTo": "format",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -657,26 +659,26 @@
         "reviews_album_id_library_id_fk": {
           "name": "reviews_album_id_library_id_fk",
           "tableFrom": "reviews",
+          "tableTo": "library",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "album_id"
           ],
-          "tableTo": "library",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "reviews_album_id_unique": {
           "name": "reviews_album_id_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "album_id"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       }
     },
@@ -699,6 +701,7 @@
         "play_freq": {
           "name": "play_freq",
           "type": "freq_enum",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": true
         },
@@ -718,6 +721,7 @@
       },
       "indexes": {
         "album_id_idx": {
+          "name": "album_id_idx",
           "columns": [
             {
               "expression": "album_id",
@@ -726,27 +730,26 @@
               "nulls": "last"
             }
           ],
-          "with": {},
-          "name": "album_id_idx",
           "isUnique": false,
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "rotation_album_id_library_id_fk": {
           "name": "rotation_album_id_library_id_fk",
           "tableFrom": "rotation",
+          "tableTo": "library",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "album_id"
           ],
-          "tableTo": "library",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -804,44 +807,44 @@
         "schedule_specialty_id_specialty_shows_id_fk": {
           "name": "schedule_specialty_id_specialty_shows_id_fk",
           "tableFrom": "schedule",
+          "tableTo": "specialty_shows",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "specialty_id"
           ],
-          "tableTo": "specialty_shows",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "schedule_assigned_dj_id_djs_id_fk": {
           "name": "schedule_assigned_dj_id_djs_id_fk",
           "tableFrom": "schedule",
+          "tableTo": "djs",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "assigned_dj_id"
           ],
-          "tableTo": "djs",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "schedule_assigned_dj_id2_djs_id_fk": {
           "name": "schedule_assigned_dj_id2_djs_id_fk",
           "tableFrom": "schedule",
+          "tableTo": "djs",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "assigned_dj_id2"
           ],
-          "tableTo": "djs",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -888,30 +891,30 @@
         "shift_covers_schedule_id_schedule_id_fk": {
           "name": "shift_covers_schedule_id_schedule_id_fk",
           "tableFrom": "shift_covers",
+          "tableTo": "schedule",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "schedule_id"
           ],
-          "tableTo": "schedule",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "shift_covers_cover_dj_id_djs_id_fk": {
           "name": "shift_covers_cover_dj_id_djs_id_fk",
           "tableFrom": "shift_covers",
+          "tableTo": "djs",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "cover_dj_id"
           ],
-          "tableTo": "djs",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -946,30 +949,30 @@
         "show_djs_show_id_shows_id_fk": {
           "name": "show_djs_show_id_shows_id_fk",
           "tableFrom": "show_djs",
+          "tableTo": "shows",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "show_id"
           ],
-          "tableTo": "shows",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "show_djs_dj_id_djs_id_fk": {
           "name": "show_djs_dj_id_djs_id_fk",
           "tableFrom": "show_djs",
+          "tableTo": "djs",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "dj_id"
           ],
-          "tableTo": "djs",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1022,30 +1025,30 @@
         "shows_primary_dj_id_djs_id_fk": {
           "name": "shows_primary_dj_id_djs_id_fk",
           "tableFrom": "shows",
+          "tableTo": "djs",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "primary_dj_id"
           ],
-          "tableTo": "djs",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "shows_specialty_id_specialty_shows_id_fk": {
           "name": "shows_specialty_id_specialty_shows_id_fk",
           "tableFrom": "shows",
+          "tableTo": "specialty_shows",
+          "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "specialty_id"
           ],
-          "tableTo": "specialty_shows",
-          "schemaTo": "wxyc_schema",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1109,12 +1112,10 @@
   "schemas": {
     "wxyc_schema": "wxyc_schema"
   },
+  "sequences": {},
   "_meta": {
+    "columns": {},
     "schemas": {},
-    "tables": {},
-    "columns": {}
-  },
-  "id": "efa6d89c-b67c-4261-bc5c-c624150ec72b",
-  "prevId": "faa5deb9-63b8-4703-b041-aea159afaf3c",
-  "sequences": {}
+    "tables": {}
+  }
 }
