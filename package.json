@@ -10,9 +10,12 @@
     "clean": "rm -rf ./dist/*",
     "lint": "eslint . --ext .ts",
     "test": "jest",
-    "generate": "drizzle-kit generate --config 'drizzle.config.ts'",
-    "migrate": "drizzle-kit migrate --config 'drizzle.config.ts'",
-    "drop_migration": "drizzle-kit drop --out ./src/db/migrations"
+    "db:start": "docker compose --file dev_env/docker-compose.yml --env-file .env up db -d && sleep 2 && bash dev_env/db_setup.sh",
+    "db:stop": "docker compose --file dev_env/docker-compose.yml --env-file .env down db -v ",
+    "ci:test": "npm run db:stop; docker compose --file dev_env/docker-compose.yml --env-file .env up --build -d && sleep 2 && bash dev_env/db_setup.sh && PORT=8081 npm run test; docker compose --file dev_env/docker-compose.yml --env-file .env down --remove-orphans",
+    "drizzle:generate": "drizzle-kit generate --config 'drizzle.config.ts'",
+    "drizzle:migrate": "drizzle-kit migrate --config 'drizzle.config.ts'",
+    "drizzle:drop": "drizzle-kit drop --out ./src/db/migrations"
   },
   "author": "AyBruno",
   "license": "MIT",
