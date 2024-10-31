@@ -1,7 +1,5 @@
 node_modules
-tests/dev_db
 tests/report
 dist
 .env
 .DS_STORE
-dev_env
