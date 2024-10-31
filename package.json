@@ -10,9 +10,10 @@
     "clean": "rm -rf ./dist/*",
     "lint": "eslint . --ext .ts",
     "test": "jest",
-    "db:start": "docker compose --file dev_env/docker-compose.yml --env-file .env up db -d && sleep 2 && bash dev_env/db_setup.sh",
-    "db:stop": "docker compose --file dev_env/docker-compose.yml --env-file .env down db -v ",
-    "ci:test": "npm run db:stop; docker compose --file dev_env/docker-compose.yml --env-file .env up --build -d && sleep 2 && bash dev_env/db_setup.sh && PORT=8081 npm run test; docker compose --file dev_env/docker-compose.yml --env-file .env down --remove-orphans",
+    "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d && sleep 2 && bash dev_env/db_setup.sh",
+    "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down db -v --remove-orphans",
+    "ci:test": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci up --build -d && sleep 2 && USE_CI=true bash dev_env/db_setup.sh && PORT=${CI_PORT:-8081} npm run test; npm run ci:clean",
+    "ci:clean": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci down -v",
     "drizzle:generate": "drizzle-kit generate --config 'drizzle.config.ts'",
     "drizzle:migrate": "drizzle-kit migrate --config 'drizzle.config.ts'",
     "drizzle:drop": "drizzle-kit drop --out ./src/db/migrations"

@@ -34,3 +34,5 @@ INSERT INTO wxyc_schema.library(
 INSERT INTO wxyc_schema.library(
     artist_id, genre_id, format_id, album_title, code_number) 
     VALUES (3, 1, 2, 'I love you Jennifer B', 1);
+
+INSERT INTO wxyc_schema.rotation(album_id, play_freq) VALUES (1, 'L')
