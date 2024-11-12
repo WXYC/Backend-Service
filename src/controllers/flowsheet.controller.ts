@@ -3,10 +3,10 @@ import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema';
 import * as flowsheet_service from '../services/flowsheet.service';
 
 type QueryParams = {
-  page?: number;
-  limit?: number;
-  start_id?: number;
-  end_id?: number;
+  page?: string;
+  limit?: string;
+  start_id?: string;
+  end_id?: string;
 };
 
 export interface IFSEntry extends FSEntry {
@@ -17,11 +17,14 @@ const MAX_ITEMS = 200;
 const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
   const { query } = req;
-  const page = query.page ?? 0;
-  const limit = query.limit ?? 5;
+  const page = parseInt(query.page ?? '0');
+  const limit = parseInt(query.limit ?? '5');
   const offset = page * limit;
 
-  if ((query.end_id ?? 0) - (query.start_id ?? 0) - DELETION_OFFSET > MAX_ITEMS || limit > MAX_ITEMS) {
+  if (
+    parseInt(query.end_id ?? '0') - parseInt(query.start_id ?? '0') - DELETION_OFFSET > MAX_ITEMS ||
+    limit > MAX_ITEMS
+  ) {
     res.status(400).json({
       status: 400,
       message: 'Requested too many entries',
@@ -30,9 +33,10 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     try {
       const entries: IFSEntry[] =
         query.start_id !== undefined && query.end_id !== undefined
-          ? await flowsheet_service.getEntriesByRange(query.start_id, query.end_id)
+          ? await flowsheet_service.getEntriesByRange(parseInt(query.start_id), parseInt(query.end_id))
           : await flowsheet_service.getEntriesByPage(offset, limit);
       if (entries.length) {
+        console.log(`limit: ${limit}, length: ${entries.length}`);
         res.status(200).json(entries);
       } else {
         console.error('No Tracks found');
@@ -89,7 +93,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     console.error('Error: Failed to retrieve most recent show ');
     console.error(e);
   }
-  if (latestShow === undefined || latestShow.end_time !== null) {
+  if (latestShow?.end_time !== null) {
     console.error('Bad Request, There are no active shows');
     res.status(400).send('Bad Request, There are no active shows');
   } else {
@@ -217,7 +221,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   const current_show = await flowsheet_service.getLatestShow();
   if (req.body.dj_id === undefined) {
     res.status(400).send('Bad Request, Must include a dj_id to join show');
-  } else if (current_show.end_time !== null) {
+  } else if (current_show?.end_time !== null) {
     try {
       const show_session = await flowsheet_service.startShow(req.body.dj_id, req.body.show_name, req.body.specialty_id);
       res.status(200).json(show_session);
@@ -242,7 +246,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 //TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
 export const leaveShow: RequestHandler<object, unknown, { dj_id: number }> = async (req, res, next) => {
   const currentShow = await flowsheet_service.getLatestShow();
-  if (currentShow.end_time !== null) {
+  if (currentShow?.end_time !== null) {
     res.status(404).json({ message: 'Bad Request: No active show session found.' });
   } else {
     try {
