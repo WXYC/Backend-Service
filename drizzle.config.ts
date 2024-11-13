@@ -11,7 +11,7 @@ export default defineConfig({
     user: `${process.env.DB_USERNAME}`,
     password: `${process.env.DB_PASSWORD}`,
     host: `${process.env.DB_HOST}`,
-    port: process.env.USE_CI ? Number(process.env.CI_DB_PORT) : Number(process.env.DB_PORT),
+    port: Number(process.env.DB_PORT),
     database: `${process.env.DB_NAME}`,
   },
 });
