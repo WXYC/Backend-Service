@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node dist/app.js",
     "build": "tsc",
-    "dev": "nodemon -w src -w .env -e ts --exec \"npm run build && npm run start\"",
+    "dev": "DB_HOST=localhost nodemon -w src -w .env -e ts --exec \"npm run build && npm run start\"",
     "clean": "rm -rf ./dist/*",
     "test": "jest",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d && sleep 2 && bash dev_env/db_setup.sh",
