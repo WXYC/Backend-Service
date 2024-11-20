@@ -36,7 +36,6 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
           ? await flowsheet_service.getEntriesByRange(parseInt(query.start_id), parseInt(query.end_id))
           : await flowsheet_service.getEntriesByPage(offset, limit);
       if (entries.length) {
-        console.log(`limit: ${limit}, length: ${entries.length}`);
         res.status(200).json(entries);
       } else {
         console.error('No Tracks found');
@@ -107,6 +106,10 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
           if (body.album_id !== undefined) {
             //backfill album info from library before adding to flowsheet
             const albumInfo = await flowsheet_service.getAlbumFromDB(body.album_id);
+
+            if (body.record_label !== undefined) {
+              albumInfo.record_label = body.record_label;
+            }
 
             const fsEntry: NewFSEntry = {
               album_id: body.album_id,
