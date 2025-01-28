@@ -36,31 +36,31 @@ jobs:
         run: |
           set -e
           IMAGE_URI="${{ secrets.AWS_ECR_REPOSITORY }}:latest"
-          
+
           echo "Fetching remote image digest..."
           REMOTE_DIGEST=$(aws ecr describe-images --repository-name wxyc_backend_service --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageDigest' --output text)
-          
+
           if [ -z "$REMOTE_DIGEST" ]; then
             echo "Failed to fetch remote image digest."
             exit 1
           fi
-          
+
           echo "Remote Digest: $REMOTE_DIGEST"
-          
+
           echo "Building Docker image locally..."
           docker build --platform linux/amd64  -t wxyc_backend_service:latest .
-          
+
           echo "Fetching local image ID..."
           LOCAL_ID=$(docker inspect --format='{{.Id}}' wxyc_backend_service:latest)
-          
+
           if [ -z "$LOCAL_ID" ]; then
             echo "Failed to fetch local image ID."
             exit 1
           fi
-          
+
           echo "Local ID: $LOCAL_ID"
           echo "Remote Digest: $REMOTE_DIGEST"
-          
+
           if [ "$REMOTE_DIGEST" = "sha256:$LOCAL_ID" ]; then
             echo "The image to be deployed is the same as the current image in ECR."
           else
@@ -119,13 +119,13 @@ jobs:
             export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
             export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
             export AWS_DEFAULT_REGION=${{ secrets.AWS_REGION }}
-            
+
             echo "Logging into AWS ECR..."
             aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_REPOSITORY }}
-            
+
             echo "Pulling Docker image..."
             docker pull ${{ secrets.AWS_ECR_REPOSITORY }}:latest
-            
+
             echo "Stopping any existing container using port 8080..."
             docker ps --filter "ancestor=${{ secrets.AWS_ECR_REPOSITORY }}:latest" --format "{{.ID}}" | xargs -r docker stop
             docker ps --filter "publish=8080" --format "{{.ID}}" | xargs -r docker stop
@@ -133,9 +133,9 @@ jobs:
             echo "Removing any existing container using port 8080..."
             docker ps -a --filter "ancestor=${{ secrets.AWS_ECR_REPOSITORY }}:latest" --format "{{.ID}}" | xargs -r docker rm
             docker ps -a --filter "publish=8080" --format "{{.ID}}" | xargs -r docker rm
-            
+
             echo "Starting new Docker container..."
-            docker run -d -p 8080:8080 --env-file .env ${{ secrets.AWS_ECR_REPOSITORY }}:latest
+            docker run -d -p 8080:8080 --restart unless-stopped --env-file .env ${{ secrets.AWS_ECR_REPOSITORY }}:latest
 
       - name: Confirm server is up
         uses: appleboy/ssh-action@v0.1.0
