@@ -18,7 +18,7 @@ const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual 
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
   const { query } = req;
   const page = parseInt(query.page ?? '0');
-  const limit = parseInt(query.limit ?? '5');
+  const limit = parseInt(query.limit ?? '30');
   const offset = page * limit;
 
   if (
