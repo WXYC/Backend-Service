@@ -7,6 +7,7 @@ type QueryParams = {
   limit?: string;
   start_id?: string;
   end_id?: string;
+  previous_shows?: string;
 };
 
 export interface IFSEntry extends FSEntry {
@@ -17,6 +18,35 @@ const MAX_ITEMS = 200;
 const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
   const { query } = req;
+  
+  if (query.previous_shows !== undefined) {
+    try {
+      const numberOfShows = parseInt(query.previous_shows);
+      if (isNaN(numberOfShows) || numberOfShows < 1) {
+        res.status(400).json({
+          status: 400,
+          message: 'previous_shows must be a positive number',
+        });
+        return;
+      }
+      const entries = await flowsheet_service.getEntriesFromPreviousShows(numberOfShows);
+      if (entries.length) {
+        res.status(200).json(entries);
+      } else {
+        res.status(404).json({
+          status: 404,
+          message: 'No Tracks found',
+        });
+      }
+      return;
+    } catch (e) {
+      console.error('Failed to retrieve tracks from previous shows');
+      console.error(`Error: ${e}`);
+      next(e);
+      return;
+    }
+  }
+
   const page = parseInt(query.page ?? '0');
   const limit = parseInt(query.limit ?? '30');
   const offset = page * limit;

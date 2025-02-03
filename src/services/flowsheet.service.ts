@@ -422,3 +422,39 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
 
   return response[0];
 };
+
+export const getEntriesFromPreviousShows = async (numberOfShows: number) => {
+  // Get the most recent N+1 shows (including current show)
+  const recentShows = await db
+    .select()
+    .from(shows)
+    .orderBy(desc(shows.id))
+    .limit(numberOfShows + 1);
+
+  if (recentShows.length === 0) {
+    return [];
+  }
+
+  // Get all entries from these shows
+  const response: IFSEntry[] = await db
+    .select({
+      id: flowsheet.id,
+      show_id: flowsheet.show_id,
+      album_id: flowsheet.album_id,
+      artist_name: flowsheet.artist_name,
+      album_title: flowsheet.album_title,
+      track_title: flowsheet.track_title,
+      record_label: flowsheet.record_label,
+      rotation_id: flowsheet.rotation_id,
+      rotation_play_freq: rotation.play_freq,
+      request_flag: flowsheet.request_flag,
+      message: flowsheet.message,
+      play_order: flowsheet.play_order,
+    })
+    .from(flowsheet)
+    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .where(inArray(flowsheet.show_id, recentShows.map(show => show.id)))
+    .orderBy(desc(flowsheet.play_order));
+
+  return response;
+};
