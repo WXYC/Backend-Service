@@ -2,7 +2,6 @@ require('dotenv').config({ path: '../../.env' });
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { after } = require('node:test');
 const fls_util = require('../utils/flowsheet_util');
-const { db } = require('../../src/db/drizzle_client');
 
 /*
  * Start Show (Primary dj hits /flowsheet/join)
@@ -415,10 +414,8 @@ describe('Retrieve Flowsheet Entries', () => {
   });
 
   test('Get entries from previous show when none exist', async () => {
-    // End current show and clear database
+    // End current show
     await fls_util.leave_show(global.primary_dj_id, global.access_token);
-    await db.delete(flowsheet);
-    await db.delete(shows);
 
     // Start new show
     await fls_util.join_show(global.primary_dj_id, global.access_token);
