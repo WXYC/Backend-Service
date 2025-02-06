@@ -300,20 +300,43 @@ describe('Add to Flowsheet', () => {
  */
 describe('Retrieve Flowsheet Entries', () => {
   beforeEach(async () => {
+    // first show
     await fls_util.join_show(global.primary_dj_id, global.access_token);
+    await request.post('/flowsheet').set('Authorization', global.access_token).send({
+      album_id: 1, //Built to Spill - Keep it Like a Secret
+      track_title: 'The Plan',
+    });
 
+    // second show
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+    await request.post('/flowsheet').set('Authorization', global.access_token).send({
+      album_id: 2, //Ravyn Lenae - Crush
+      track_title: 'Venom',
+    });
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+
+    // third show
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+    await request.post('/flowsheet').set('Authorization', global.access_token).send({
+      album_id: 3, //Jockstrap - I Love You Jennifer B
+      track_title: 'Debra',
+    });
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+
+    // fourth show
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
     await request.post('/flowsheet').set('Authorization', global.access_token).send({
       album_id: 1, //Built to Spill - Keep it Like a Secret
       track_title: 'Carry the Zero',
     });
-
     await fls_util.leave_show(global.primary_dj_id, global.access_token);
   });
 
   test('Properly Formatted Request w/o Query Param', async () => {
     const res = await request.get('/flowsheet').send().expect(200);
 
-    expect(res.body.length).toEqual(5);
+    expect(res.body.length).toEqual(30);
   });
 
   test('Properly Formatted Request w/ 3 entries', async () => {
@@ -336,6 +359,75 @@ describe('Retrieve Flowsheet Entries', () => {
     expect(res.body[1].track_title).toEqual('Carry the Zero');
 
     expect(res.body.length).toEqual(3);
+  });
+
+  test('Get entries from 3 latest shows', async () => {
+    const res = await request.get('/flowsheet').query({ shows_limit: 3 }).send().expect(200);
+
+    // Should include entries from current show and previous 2 shows
+    expect(res.body.length).toBeGreaterThan(0);
+
+    // Check that we have entries from all 3 shows
+    const showIds = [...new Set(res.body.map((entry) => entry.show_id))];
+    expect(showIds.length).toBe(3);
+
+    // Verify the content of entries
+    const songEntries = res.body.filter((entry) => !entry.message);
+    expect(songEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          artist_name: 'Jockstrap',
+          album_title: 'I Love You Jennifer B',
+          track_title: 'Debra',
+        }),
+        expect.objectContaining({
+          artist_name: 'Ravyn Lenae',
+          album_title: 'Crush',
+          track_title: 'Venom',
+        }),
+        expect.objectContaining({
+          artist_name: 'Built to Spill',
+          album_title: 'Keep it Like a Secret',
+          track_title: 'Carry the Zero',
+        }),
+      ])
+    );
+  });
+
+  test('Get entries from 2 shows using pagination', async () => {
+    const res = await request.get('/flowsheet').query({ shows_limit: 2, page: 1 }).send().expect(200);
+
+    // Should include entries from current show and previous 2 shows
+    expect(res.body.length).toBeGreaterThan(0);
+
+    // Check that we have entries from all 3 shows
+    const showIds = [...new Set(res.body.map((entry) => entry.show_id))];
+    expect(showIds.length).toBe(2);
+
+    // Verify the content of entries
+    const songEntries = res.body.filter((entry) => !entry.message);
+    expect(songEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          artist_name: 'Ravyn Lenae',
+          album_title: 'Crush',
+          track_title: 'Venom',
+        }),
+        expect.objectContaining({
+          artist_name: 'Built to Spill',
+          album_title: 'Keep it Like a Secret',
+          track_title: 'The Plan',
+        }),
+      ])
+    );
+  });
+
+  test('Invalid shows_limit parameter', async () => {
+    await request.get('/flowsheet').query({ shows_limit: 'invalid' }).send().expect(400);
+
+    await request.get('/flowsheet').query({ shows_limit: -1 }).send().expect(400);
+
+    await request.get('/flowsheet').query({ shows_limit: 0 }).send().expect(400);
   });
 });
 
