@@ -19,22 +19,24 @@ import {
 import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
+const FSEntryFields = {
+  id: flowsheet.id,
+  show_id: flowsheet.show_id,
+  album_id: flowsheet.album_id,
+  artist_name: flowsheet.artist_name,
+  album_title: flowsheet.album_title,
+  track_title: flowsheet.track_title,
+  record_label: flowsheet.record_label,
+  rotation_id: flowsheet.rotation_id,
+  rotation_play_freq: rotation.play_freq,
+  request_flag: flowsheet.request_flag,
+  message: flowsheet.message,
+  play_order: flowsheet.play_order,
+};
+
 export const getEntriesByPage = async (offset: number, limit: number) => {
   const response: IFSEntry[] = await db
-    .select({
-      id: flowsheet.id,
-      show_id: flowsheet.show_id,
-      album_id: flowsheet.album_id,
-      artist_name: flowsheet.artist_name,
-      album_title: flowsheet.album_title,
-      track_title: flowsheet.track_title,
-      record_label: flowsheet.record_label,
-      rotation_id: flowsheet.rotation_id,
-      rotation_play_freq: rotation.play_freq,
-      request_flag: flowsheet.request_flag,
-      message: flowsheet.message,
-      play_order: flowsheet.play_order,
-    })
+    .select(FSEntryFields)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .orderBy(desc(flowsheet.play_order))
@@ -46,23 +48,24 @@ export const getEntriesByPage = async (offset: number, limit: number) => {
 
 export const getEntriesByRange = async (startId: number, endId: number) => {
   const response: IFSEntry[] = await db
-    .select({
-      id: flowsheet.id,
-      show_id: flowsheet.show_id,
-      album_id: flowsheet.album_id,
-      artist_name: flowsheet.artist_name,
-      album_title: flowsheet.album_title,
-      track_title: flowsheet.track_title,
-      record_label: flowsheet.record_label,
-      rotation_id: flowsheet.rotation_id,
-      rotation_play_freq: rotation.play_freq,
-      request_flag: flowsheet.request_flag,
-      message: flowsheet.message,
-      play_order: flowsheet.play_order,
-    })
+    .select(FSEntryFields)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
+    .orderBy(desc(flowsheet.play_order));
+
+  return response;
+};
+
+export const getEntriesByShow = async (...show_ids: number[]) => {
+  if (show_ids.length === 0) return [];
+
+  // Get all entries from these shows
+  const response: IFSEntry[] = await db
+    .select(FSEntryFields)
+    .from(flowsheet)
+    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .where(inArray(flowsheet.show_id, show_ids))
     .orderBy(desc(flowsheet.play_order));
 
   return response;
@@ -324,9 +327,17 @@ const createLeaveNotification = async (dj_id: number, show_id: number): Promise<
   return notification[0];
 };
 
+export const getNShows = async (numberOfShows: number = 1, page: number = 0): Promise<Show[]> => {
+  return await db
+    .select()
+    .from(shows)
+    .orderBy(desc(shows.id))
+    .offset(page * numberOfShows)
+    .limit(numberOfShows);
+};
+
 export const getLatestShow = async (): Promise<Show> => {
-  const latest_show = (await db.select().from(shows).orderBy(desc(shows.id)).limit(1))[0];
-  return latest_show;
+  return (await getNShows(1))[0];
 };
 
 export const getOnAirStatusForDJ = async (dj_id: number): Promise<boolean> => {
@@ -421,40 +432,4 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
   const response = await db.select().from(flowsheet).where(eq(flowsheet.play_order, position_new)).limit(1);
 
   return response[0];
-};
-
-export const getEntriesFromPreviousShows = async (numberOfShows: number) => {
-  // Get the most recent N+1 shows (including current show)
-  const recentShows = await db
-    .select()
-    .from(shows)
-    .orderBy(desc(shows.id))
-    .limit(numberOfShows + 1);
-
-  if (recentShows.length === 0) {
-    return [];
-  }
-
-  // Get all entries from these shows
-  const response: IFSEntry[] = await db
-    .select({
-      id: flowsheet.id,
-      show_id: flowsheet.show_id,
-      album_id: flowsheet.album_id,
-      artist_name: flowsheet.artist_name,
-      album_title: flowsheet.album_title,
-      track_title: flowsheet.track_title,
-      record_label: flowsheet.record_label,
-      rotation_id: flowsheet.rotation_id,
-      rotation_play_freq: rotation.play_freq,
-      request_flag: flowsheet.request_flag,
-      message: flowsheet.message,
-      play_order: flowsheet.play_order,
-    })
-    .from(flowsheet)
-    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .where(inArray(flowsheet.show_id, recentShows.map(show => show.id)))
-    .orderBy(desc(flowsheet.play_order));
-
-  return response;
 };

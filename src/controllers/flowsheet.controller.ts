@@ -7,7 +7,7 @@ type QueryParams = {
   limit?: string;
   start_id?: string;
   end_id?: string;
-  previous_shows?: string;
+  shows_limit?: string;
 };
 
 export interface IFSEntry extends FSEntry {
@@ -18,23 +18,27 @@ const MAX_ITEMS = 200;
 const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
   const { query } = req;
-  
-  if (query.previous_shows !== undefined) {
+
+  const page = parseInt(query.page ?? '0');
+  const limit = parseInt(query.limit ?? '30');
+  const offset = page * limit;
+
+  if (query.shows_limit !== undefined) {
     try {
-      const numberOfShows = parseInt(query.previous_shows);
+      const numberOfShows = parseInt(query.shows_limit);
       if (isNaN(numberOfShows) || numberOfShows < 1) {
         res.status(400).json({
-          status: 400,
-          message: 'previous_shows must be a positive number',
+          message: 'shows_limit must be a positive number',
         });
         return;
       }
-      const entries = await flowsheet_service.getEntriesFromPreviousShows(numberOfShows);
+      const recentShows = await flowsheet_service.getNShows(numberOfShows, page);
+      const entries = await flowsheet_service.getEntriesByShow(...recentShows.map((show) => show.id));
+
       if (entries.length) {
         res.status(200).json(entries);
       } else {
         res.status(404).json({
-          status: 404,
           message: 'No Tracks found',
         });
       }
@@ -47,17 +51,16 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     }
   }
 
-  const page = parseInt(query.page ?? '0');
-  const limit = parseInt(query.limit ?? '30');
-  const offset = page * limit;
-
   if (
     parseInt(query.end_id ?? '0') - parseInt(query.start_id ?? '0') - DELETION_OFFSET > MAX_ITEMS ||
     limit > MAX_ITEMS
   ) {
     res.status(400).json({
-      status: 400,
       message: 'Requested too many entries',
+    });
+  } else if (isNaN(limit) || limit < 1) {
+    res.status(400).json({
+      message: 'limit must be a positive number',
     });
   } else {
     try {
@@ -70,7 +73,6 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
       } else {
         console.error('No Tracks found');
         res.status(404).json({
-          status: 404,
           message: 'No Tracks found',
         });
       }
