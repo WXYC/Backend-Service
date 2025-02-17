@@ -1,0 +1,40 @@
+name: Run Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+
+env:
+  TEST_HOST: http://localhost
+  CI_DB_PORT: 5433
+  CI_PORT: 8081
+  DB_USERNAME: test-user
+  DB_PASSWORD: test-pw
+  DB_NAME: wxyc_db
+  AUTH_BYPASS: true
+
+jobs:
+  Unit-Integration-Tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm install --only=dev
+
+      - name: Set Up Test Env
+        run: touch .env && npm run ci:env
+
+      - name: Run Tests
+        run: npm run ci:test
+
+      - name: Clean Up Env
+        run: npm run ci:clean
