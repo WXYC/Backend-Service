@@ -14,6 +14,7 @@ import {
   rotation,
   show_djs,
   library_artist_view,
+  specialty_shows,
   LibraryArtistViewEntry,
 } from '../db/schema';
 import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
@@ -432,4 +433,33 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
   const response = await db.select().from(flowsheet).where(eq(flowsheet.play_order, position_new)).limit(1);
 
   return response[0];
+};
+
+export const getPlaylist = async (show_id: number) => {
+  const show = await db.select().from(shows).where(eq(shows.id, show_id));
+
+  const showDJs = await db
+    .select({
+      id: djs.id,
+      dj_name: djs.dj_name,
+    })
+    .from(show_djs)
+    .fullJoin(djs, eq(show_djs.dj_id, djs.id))
+    .where(eq(show_djs.show_id, show_id));
+
+  const entries = await db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id));
+
+  let specialty_show_name = '';
+  if (show[0].specialty_id != null) {
+    const specialty_show = await db.select().from(specialty_shows).where(eq(specialty_shows.id, show[0].specialty_id));
+    specialty_show_name = specialty_show[0].specialty_name;
+  }
+
+  return {
+    show_name: show[0].show_name ?? '',
+    specialty_show: specialty_show_name,
+    date: show[0].start_time,
+    show_djs: showDJs,
+    entries: entries,
+  };
 };

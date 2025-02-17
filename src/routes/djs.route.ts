@@ -19,5 +19,3 @@ dj_route.delete('/bin', cognitoMiddleware(), djsController.deleteFromBin);
 dj_route.get('/bin', cognitoMiddleware(), djsController.getBin);
 
 dj_route.get('/playlists', cognitoMiddleware(), djsController.getPlaylistsForDJ);
-
-dj_route.get('/playlist', cognitoMiddleware(), djsController.getPlaylist);

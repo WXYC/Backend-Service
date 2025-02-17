@@ -15,7 +15,7 @@ exports.join_show = async (dj_id, access_token) => {
     }),
   });
 
-  return res.ok;
+  return res;
 };
 
 exports.leave_show = async (dj_id, access_token) => {
@@ -30,5 +30,5 @@ exports.leave_show = async (dj_id, access_token) => {
     }),
   });
 
-  return res.ok;
+  return res;
 };
