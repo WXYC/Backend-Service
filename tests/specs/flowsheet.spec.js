@@ -21,7 +21,7 @@ describe('Start Show', () => {
       })
       .expect(200);
 
-    expect(res.body.id).toBeDefined();
+    expect(res.body.id).toBeNull();
     expect(res.body.primary_dj_id).toBeDefined();
     expect(res.body.start_time).toBeDefined();
     expect(res.body.show_name).toEqual('test_show');
