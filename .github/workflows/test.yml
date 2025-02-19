@@ -30,11 +30,12 @@ jobs:
       - name: Install Dependencies
         run: npm install --only=dev
 
-      - name: Set Up Test Env
+      - name: Set Up Test Environment
         run: touch .env && npm run ci:env
 
       - name: Run Tests
         run: npm run ci:test
 
-      - name: Clean Up Env
+      - name: Clean Up Test Environment
+        if: always()
         run: npm run ci:clean

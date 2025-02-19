@@ -1,6 +1,5 @@
 require('dotenv').config({ path: '../../.env' });
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
-const { after } = require('node:test');
 const fls_util = require('../utils/flowsheet_util');
 
 /*
@@ -301,7 +300,8 @@ describe('Add to Flowsheet', () => {
 describe('Retrieve Flowsheet Entries', () => {
   beforeEach(async () => {
     // first show
-    await fls_util.join_show(global.primary_dj_id, global.access_token);
+    const res = await fls_util.join_show(global.primary_dj_id, global.access_token);
+    res.body.id;
     await request.post('/flowsheet').set('Authorization', global.access_token).send({
       album_id: 1, //Built to Spill - Keep it Like a Secret
       track_title: 'The Plan',
@@ -574,5 +574,52 @@ describe('Shift Flowsheet Entries', () => {
 
     // get_entries_res = await request.get('/flowsheet').query({ limit: 4 }).send().expect(200);
     expect(res.body.play_order).toEqual(entries[0].play_order);
+  });
+});
+
+describe('Retrieve Playlist Object', () => {
+  beforeEach(async () => {
+    // setup show
+    const res = await fls_util.join_show(global.primary_dj_id, global.access_token);
+    const body = await res.json();
+    global.CurrentShowID = body.id;
+
+    await fls_util.join_show(global.secondary_dj_id, global.access_token);
+
+    // Insert entry to for show
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 3, //Jockstrap - I Love You Jennifer B
+        track_title: 'Debra',
+      })
+      .expect(200);
+
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('Properly Formatted Request', async () => {
+    const playlist = await request
+      .get('/flowsheet/playlist')
+      .query({ show_id: global.CurrentShowID })
+      .send()
+      .expect(200);
+
+    expect(playlist.body.show_djs).toEqual([
+      { id: 1, dj_name: 'Test dj1' },
+      { id: 2, dj_name: 'Test dj2' },
+    ]);
+
+    expect(playlist.body.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringMatching(/Start of Show:.*joined the set at/) }),
+        expect.objectContaining({ message: expect.stringMatching(/.* joined the set!/) }),
+        expect.objectContaining({ artist_name: 'Jockstrap' }),
+        expect.objectContaining({ message: expect.stringMatching(/.* left the set!/) }),
+        expect.objectContaining({ message: expect.stringMatching(/End of Show:.*left the set at/) }),
+      ])
+    );
+    expect(new Date(playlist.body.date)).toBeInstanceOf(Date);
   });
 });
