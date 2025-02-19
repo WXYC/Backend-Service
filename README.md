@@ -52,8 +52,12 @@ The dev experience makes extensive use of Node.js project scripts. Here's a rund
 - `npm run test` : Runs our Jest unit test suite against an instance of the backend service. This requires an environment variable `PORT` to be defined so that jest may find the backend service to run the tests against.
 - `npm run db:start` : Starts and seeds a docker container running Postgresql on `localhost:5432` by default. It can be configured with the environment variable `DB_PORT`.
 - `npm run db:stop` : Shuts down the aforementioned psql docker container and cleans up any volumes or networks.
-- `npm run ci:test` : Spins up a sandboxed docker environment with a backend service and db and automatically runs the test suite against this environment. Can be run in independantly of `npm run dev` or `npm run db:start`.
+- `npm run ci:env` : Spins up a sandboxed docker environment with a backend service and db.
+  - Can be run in independantly of `npm run dev` or `npm run db:start`.
 - `npm run ci:clean` : Shuts down and cleans up any straggling containers, volumes, and networks.
+- `npm run ci:test` : Runs test suite against ci environment.
+- `npm run ci:testmock` : Utilizes other ci scripts to mock steps our CI pipeline. (Set up env, run tests, and clean up with just one command)
+  - Can be run in independantly of `npm run dev` or `npm run db:start`.
 - `npm run drizzle:generate` : Generates SQL migration files reflecting changes to `src/db/schema.ts`. These files are generated inside of `src/db/migrations`.
 - `npm run drizzle:migrate` : Applies the generated migrations to the database specified by the environment variables `DB_HOST`, `DB_NAME`, and `DB_PORT`. It also requires `DB_USERNAME` and `DB_PASSWORD`.
 - `npm run drizzle:drop` : Deletes a given migration file from the migrations directory and removes it from the drizzle cache.
@@ -106,7 +110,7 @@ A couple env variables of note:
 1. Create a branch to implement your change.
 2. After completing your change pull down any new changes into your local `main` branch.
 3. Rebase with `git rebase -i develop` and feel free to squash or rephrase any commits you've made. Resolve any merge conflicts as well.
-4. For initial push `git push -u origin {{branch}}` and for following pushes use `git push --force`
+4. For initial push `git push -u origin {{branch}}` and for following pushes use `git push` (`git push --force` when squashing local commits)
 5. Create a pull request and assign AyBruno, JacksonMeade, dvdokkum, and jakebromberg as reviewers. Upon approval, merge and delete the remote branch on github.
 6. We have a github actions workflow setup to deploy the current version of `main` to our EC2 instance. For now it must be triggered manually by going to the `Actions` tab, clicking `CI/CD Pipeline`, and click `Run Workflow`. Upon successful completion your changes will be deployed to prod.
 
