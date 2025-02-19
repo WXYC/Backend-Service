@@ -1,7 +1,7 @@
-name: CI/CD Pipeline
+name: Build & Deploy
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       dry_run:
         description: 'Perform a dry run'
