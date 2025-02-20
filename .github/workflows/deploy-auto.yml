@@ -1,4 +1,4 @@
-name: Auto Deploy
+name: Auto Build & Deploy
 
 on:
   push:
@@ -9,4 +9,4 @@ jobs:
   trigger-build-and-deploy:
     uses: ./.github/workflows/deploy.yml
     with:
-      dry-run: false
+      dry-run: 'false'
