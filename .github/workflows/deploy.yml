@@ -4,7 +4,6 @@ on:
   workflow_call:
     inputs:
       dry_run:
-        description: 'Perform a dry run'
         required: false
         default: 'true'
 
