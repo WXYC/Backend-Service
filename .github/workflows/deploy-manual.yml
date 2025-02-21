@@ -13,4 +13,5 @@ jobs:
   trigger-build-and-deploy:
     uses: ./.github/workflows/deploy-base.yml
     with:
-      dry-run: ${{ inputs.dry_run }}
+      dry_run: ${{ inputs.dry_run }}
+    secrets: inherit

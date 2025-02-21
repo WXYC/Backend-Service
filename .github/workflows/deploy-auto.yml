@@ -10,3 +10,4 @@ jobs:
     uses: ./.github/workflows/deploy-base.yml
     with:
       dry_run: false
+    secrets: inherit
