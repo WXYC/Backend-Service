@@ -5,11 +5,12 @@ on:
     inputs:
       dry_run:
         required: false
-        default: 'true'
+        type: boolean
+        default: true
 
 jobs:
   dry-run:
-    if: github.event.inputs.dry_run == 'true'
+    if: ${{ inputs.dry_run }}
     runs-on: ubuntu-latest
 
     steps:
@@ -79,7 +80,7 @@ jobs:
             docker ps || exit 1
 
   build-and-deploy:
-    if: github.event.inputs.dry_run != 'true'
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
 
     steps:
