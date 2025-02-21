@@ -9,4 +9,4 @@ jobs:
   trigger-build-and-deploy:
     uses: ./.github/workflows/deploy-base.yml
     with:
-      dry-run: false
+      dry_run: false
