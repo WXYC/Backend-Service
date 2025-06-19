@@ -58,7 +58,8 @@ export const jwtVerifier = NewJwtVerifier(process.env.AUTH_BYPASS === 'true');
 
 export const cognitoMiddleware = (permissionsLevel: string | null = null) => {
   return async (req: Request, res: Response, next: NextFunction) => {
-    const accessToken = req.header('Authorization') || '';
+    const tokenArr = req.header('Authorization')?.split(' ') || [''];
+    const accessToken = tokenArr.length == 1 ? tokenArr[0] : tokenArr[1];
     if (process.env.AUTH_BYPASS === 'true') {
       res.locals.decodedJWT = { username: process.env.AUTH_USERNAME };
       next();
