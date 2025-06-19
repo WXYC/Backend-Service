@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import * as libraryController from '../controllers/library.controller';
-import { cognitoMiddleware } from '../middleware/cognito.auth';
+import * as libraryController from '../controllers/library.controller.js';
+import { cognitoMiddleware } from '../middleware/cognito.auth.js';
 
 export const library_route = Router();
 

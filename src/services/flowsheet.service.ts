@@ -1,5 +1,5 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
-import { db } from '../db/drizzle_client';
+import { db } from '../db/drizzle_client.js';
 import {
   DJ,
   FSEntry,
@@ -16,8 +16,8 @@ import {
   library_artist_view,
   specialty_shows,
   LibraryArtistViewEntry,
-} from '../db/schema';
-import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller';
+} from '../db/schema.js';
+import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 const FSEntryFields = {
@@ -458,7 +458,8 @@ export const getPlaylist = async (show_id: number) => {
   return {
     show_name: show[0].show_name ?? '',
     specialty_show: specialty_show_name,
-    date: show[0].start_time,
+    start_time: show[0].start_time,
+    end_time: show[0].end_time,
     show_djs: showDJs,
     entries: entries,
   };

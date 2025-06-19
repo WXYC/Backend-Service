@@ -8,8 +8,8 @@ import {
   NewGenre,
   NewRotationRelease,
   RotationRelease,
-} from '../db/schema';
-import * as libraryService from '../services/library.service';
+} from '../db/schema.js';
+import * as libraryService from '../services/library.service.js';
 
 type NewAlbumRequest = {
   album_title: string;
@@ -24,7 +24,6 @@ type NewAlbumRequest = {
 
 //Check if artist exists.
 //Add new album to library
-
 export const addAlbum: RequestHandler = async (req: Request<object, object, NewAlbumRequest>, res, next) => {
   const { body } = req;
   if (

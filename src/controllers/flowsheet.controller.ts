@@ -1,6 +1,6 @@
 import { Request, RequestHandler } from 'express';
-import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema';
-import * as flowsheet_service from '../services/flowsheet.service';
+import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema.js';
+import * as flowsheet_service from '../services/flowsheet.service.js';
 
 type QueryParams = {
   page?: string;
@@ -86,7 +86,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
 
 export const getLatest: RequestHandler = async (req, res, next) => {
   try {
-    const latest: FSEntry[] = await flowsheet_service.getEntriesByPage(0, 1);
+    const latest: IFSEntry[] = await flowsheet_service.getEntriesByPage(0, 1);
     if (latest.length) {
       res.status(200);
       res.json(latest[0]);
@@ -205,7 +205,7 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
     res.status(400).send('Bad Request, Missing entry identifier: entry_id');
   } else {
     try {
-      const removedEntry = await flowsheet_service.removeTrack(entry_id);
+      const removedEntry: FSEntry = await flowsheet_service.removeTrack(entry_id);
       res.status(200).json(removedEntry);
     } catch (e) {
       console.error('Error: Failed to remove entry');
@@ -235,7 +235,7 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
     res.status(400).send('Bad Request, Missing entry identifier: entry_id');
   } else {
     try {
-      const updatedEntry = await flowsheet_service.updateEntry(entry_id, data);
+      const updatedEntry: FSEntry = await flowsheet_service.updateEntry(entry_id, data);
       res.status(200).json(updatedEntry);
     } catch (e) {
       console.error('Error: Failed to update entry');
@@ -258,7 +258,12 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     res.status(400).send('Bad Request, Must include a dj_id to join show');
   } else if (current_show?.end_time !== null) {
     try {
-      const show_session = await flowsheet_service.startShow(req.body.dj_id, req.body.show_name, req.body.specialty_id);
+      const show_session: Show = await flowsheet_service.startShow(
+        req.body.dj_id,
+        req.body.show_name,
+        req.body.specialty_id
+      );
+
       res.status(200).json(show_session);
     } catch (e) {
       console.error('Error: Failed to start show');
@@ -267,7 +272,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     }
   } else {
     try {
-      const show_dj_instance = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
+      const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
       res.status(200).json(show_dj_instance);
     } catch (e) {
       console.error('Error: Failed to join show');
@@ -322,8 +327,8 @@ export const getOnAir: RequestHandler = async (req, res, next) => {
   const { dj_id } = req.query;
 
   try {
-    const currentShow = await flowsheet_service.getOnAirStatusForDJ(Number(dj_id));
-    res.status(200).json(currentShow);
+    const isActive = await flowsheet_service.getOnAirStatusForDJ(Number(dj_id));
+    res.status(200).json({ id: dj_id, is_live: isActive });
   } catch (e) {
     console.error('Error: Failed to retrieve current show');
     console.error(e);

@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { cognitoMiddleware } from '../middleware/cognito.auth';
-import * as flowsheetController from '../controllers/flowsheet.controller';
+import { cognitoMiddleware } from '../middleware/cognito.auth.js';
+import * as flowsheetController from '../controllers/flowsheet.controller.js';
 
 export const flowsheet_route = Router();
 

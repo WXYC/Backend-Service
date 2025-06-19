@@ -1,6 +1,6 @@
-import { Request, RequestHandler } from "express";
-import * as ScheduleService from "../services/schedule.service";
-import { NewShift } from "../db/schema";
+import { Request, RequestHandler } from 'express';
+import * as ScheduleService from '../services/schedule.service.js';
+import { NewShift } from '../db/schema.js';
 
 export const getSchedule: RequestHandler<object, unknown, object, object> = async (req, res, next) => {
   try {
@@ -13,19 +13,19 @@ export const getSchedule: RequestHandler<object, unknown, object, object> = asyn
   }
 };
 
-
 export const addToSchedule: RequestHandler = async (req: Request<object, object, NewShift>, res, next) => {
-    const { body } = req;
-    try {
-        let response = await ScheduleService.addToSchedule(body);
-        res.status(200).json(response);
-    } catch (e) {
-        console.error('Error adding to schedule');
-        console.error(e);
-        next(e);
-    }
-}
-/*
+  const { body } = req;
+  try {
+    let response = await ScheduleService.addToSchedule(body);
+    res.status(200).json(response);
+  } catch (e) {
+    console.error('Error adding to schedule');
+    console.error(e);
+    next(e);
+  }
+};
+
+/* TODO: stubbed out schedule controller logic
 export const removeFromSchedule: RequestHandler<object, unknown, object, { show_id: number }> = async (req, res, next) => {
     if (req.query.show_id === undefined) {
         console.error('Bad Request, Missing Show Identifier: show_id');
