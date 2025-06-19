@@ -3,10 +3,11 @@
   "version": "1.0.0",
   "description": "An API service for the flowsheet database of WXYC",
   "main": "./dist/app.js",
+  "type": "module",
   "scripts": {
     "start": "node dist/app.js",
-    "build": "tsc",
-    "dev": "DB_HOST=localhost nodemon -w src -w .env -e ts --exec \"npm run build && npm run start\"",
+    "build": "tsup --minify",
+    "dev": "(tsup --watch &) && sleep 1 && DB_HOST=localhost nodemon --watch dist --watch .env -e js --exec \"npm run start\"",
     "clean": "rm -rf ./dist/*",
     "test": "jest",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d && sleep 2 && bash dev_env/db_setup.sh",
@@ -22,11 +23,13 @@
   "author": "AyBruno",
   "license": "MIT",
   "devDependencies": {
+    "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/express-serve-static-core": "^4.19.5",
     "@types/node": "^22.6.1",
     "@types/node-fetch": "^2.6.11",
     "@types/pg": "^8.11.10",
+    "@types/swagger-ui-express": "^4.1.8",
     "@typescript-eslint/eslint-plugin": "^8.7.0",
     "@typescript-eslint/parser": "^8.7.0",
     "drizzle-kit": "^0.24.2",
@@ -35,13 +38,17 @@
     "nodemon": "^3.1.7",
     "prettier": "^3.3.3",
     "supertest": "^7.0.0",
+    "tsup": "^8.4.0",
     "typescript": "^5.6.2"
   },
   "dependencies": {
     "aws-jwt-verify": "^4.0.1",
+    "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.33.0",
     "express": "^4.21.0",
-    "postgres": "^3.4.4"
+    "postgres": "^3.4.4",
+    "swagger-ui-express": "^5.0.1",
+    "yaml": "^2.7.1"
   }
 }

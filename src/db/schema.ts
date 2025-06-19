@@ -73,8 +73,7 @@ export const artists = wxyc_schema.table(
   },
   (table) => {
     return {
-      artistNameTrgmIdx: index('artist_name_trgm_idx')
-        .using(`gin`, sql`${table.artist_name} gin_trgm_ops`),
+      artistNameTrgmIdx: index('artist_name_trgm_idx').using(`gin`, sql`${table.artist_name} gin_trgm_ops`),
       codeLettersIdx: index('code_letters_idx').on(table.code_letters),
     };
   }
@@ -115,8 +114,7 @@ export const library = wxyc_schema.table(
   },
   (table) => {
     return {
-      titleTrgmIdx: index('title_trgm_idx')
-        .using(`gin`,sql`${table.album_title} gin_trgm_ops`),
+      titleTrgmIdx: index('title_trgm_idx').using(`gin`, sql`${table.album_title} gin_trgm_ops`),
       genreIdIdx: index('genre_id_idx').on(table.genre_id),
       formatIdIdx: index('format_id_idx').on(table.format_id),
       artistIdIdx: index('artist_id_idx').on(table.artist_id),

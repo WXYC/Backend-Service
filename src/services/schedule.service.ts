@@ -1,5 +1,5 @@
-import { db } from '../db/drizzle_client';
-import { NewShift, schedule } from '../db/schema';
+import { db } from '../db/drizzle_client.js';
+import { NewShift, schedule } from '../db/schema.js';
 
 export const getSchedule = async () => {
   const response = await db.select().from(schedule);

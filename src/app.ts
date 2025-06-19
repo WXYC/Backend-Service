@@ -1,12 +1,16 @@
 import 'dotenv/config';
 import express from 'express';
-import { dj_route } from './routes/djs.route';
-import { flowsheet_route } from './routes/flowsheet.route';
-import { library_route } from './routes/library.route';
-import { schedule_route } from './routes/schedule.route';
-import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth';
-import { showMemberMiddleware } from './middleware/checkShowMember';
-import { activeShow } from './middleware/checkActiveShow';
+import cors from 'cors';
+import swaggerUi from 'swagger-ui-express';
+import { parse as parse_yaml } from 'yaml';
+import swaggerContent from './app.yaml';
+import { dj_route } from './routes/djs.route.js';
+import { flowsheet_route } from './routes/flowsheet.route.js';
+import { library_route } from './routes/library.route.js';
+import { schedule_route } from './routes/schedule.route.js';
+import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth.js';
+import { showMemberMiddleware } from './middleware/checkShowMember.js';
+import { activeShow } from './middleware/checkActiveShow.js';
 // import errorHandler from './middleware/errorHandler';
 
 const port = process.env.PORT || 8080;
@@ -16,12 +20,18 @@ const app = express();
 app.use(express.json());
 
 //CORS
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, PATCH');
-  next();
-});
+app.use(
+  cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'DELETE', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  })
+);
+
+//Serve documentation
+const swaggerDoc = parse_yaml(swaggerContent);
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc));
 
 app.use('/library', library_route);
 

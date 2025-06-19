@@ -1,6 +1,6 @@
 import { and, eq, isNull, sql } from 'drizzle-orm';
-import { DJQueryParams } from '../controllers/djs.controller';
-import { db } from '../db/drizzle_client';
+import { DJQueryParams } from '../controllers/djs.controller.js';
+import { db } from '../db/drizzle_client.js';
 import {
   BinEntry,
   DJ,
@@ -17,7 +17,7 @@ import {
   show_djs,
   shows,
   specialty_shows,
-} from '../db/schema';
+} from '../db/schema.js';
 
 export const insertDJ = async (new_dj: NewDJ) => {
   const response = await db.insert(djs).values(new_dj).returning();

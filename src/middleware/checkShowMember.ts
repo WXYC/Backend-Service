@@ -1,5 +1,5 @@
 import { RequestHandler } from 'express';
-import { getDJsInCurrentShow } from '../services/flowsheet.service';
+import { getDJsInCurrentShow } from '../services/flowsheet.service.js';
 
 export const showMemberMiddleware: RequestHandler = async (req, res, next) => {
   const show_djs = await getDJsInCurrentShow();

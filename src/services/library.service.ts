@@ -1,6 +1,6 @@
 import { desc, eq, sql } from 'drizzle-orm';
-import { RotationAddRequest } from '../controllers/library.controller';
-import { db } from '../db/drizzle_client';
+import { RotationAddRequest } from '../controllers/library.controller.js';
+import { db } from '../db/drizzle_client.js';
 import {
   NewAlbum,
   NewAlbumFormat,
@@ -13,7 +13,7 @@ import {
   library,
   library_artist_view,
   rotation,
-} from '../db/schema';
+} from '../db/schema.js';
 
 export const getFormatsFromDB = async () => {
   const formats = await db
@@ -28,7 +28,25 @@ export const insertFormat = async (new_format: NewAlbumFormat) => {
   return response[0];
 };
 
-export const getRotationFromDB = async () => {
+export interface Rotation {
+  id: number;
+  code_letters: string;
+  code_artist_number: number;
+  code_number: number;
+  artist_name: string;
+  album_title: string;
+  record_label: string | null;
+  genre_name: string;
+  format_name: string;
+  rotation_id: number;
+  add_date: Date;
+  rotation_add_date: string;
+  play_freq: 'S' | 'L' | 'M' | 'H';
+  rotation_kill_date: string | null;
+  plays: number;
+}
+
+export const getRotationFromDB = async (): Promise<Rotation[]> => {
   const rotation_albums = await db
     .select({
       id: library.id,
@@ -42,8 +60,9 @@ export const getRotationFromDB = async () => {
       format_name: format.format_name,
       rotation_id: rotation.id,
       add_date: library.add_date,
+      rotation_add_date: rotation.add_date,
       play_freq: rotation.play_freq,
-      kill_date: rotation.kill_date,
+      rotation_kill_date: rotation.kill_date,
       plays: library.plays,
     })
     .from(library)
@@ -177,6 +196,7 @@ export const getAlbumFromDB = async (album_id: number) => {
       record_label: library.label,
       plays: library.plays,
       add_date: library.add_date,
+      last_modified: library.last_modified,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
