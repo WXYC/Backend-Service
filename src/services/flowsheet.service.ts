@@ -33,6 +33,7 @@ const FSEntryFields = {
   request_flag: flowsheet.request_flag,
   message: flowsheet.message,
   play_order: flowsheet.play_order,
+  add_time: flowsheet.add_time,
 };
 
 export const getEntriesByPage = async (offset: number, limit: number) => {
