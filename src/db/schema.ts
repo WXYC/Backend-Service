@@ -157,6 +157,7 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   play_order: serial('play_order').notNull(),
   request_flag: boolean('request_flag').default(false).notNull(),
   message: varchar('message', { length: 250 }),
+  add_time: timestamp('add_time').defaultNow().notNull(),
 });
 
 export type NewGenre = InferInsertModel<typeof genres>;
