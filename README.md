@@ -10,7 +10,9 @@ TODO. Add table outlining the behavior of each endpoint
 
 Thank you for your interest in contributing to this project! In this section we give you all of the info you may need to get up and running.
 
-#### Dependencies
+### Dependencies
+
+**Development Platform:** If you are using Windows, please consider WSL to run `node/npm` scripts for compatibility
 
 Before you can start interacting with this codebase you will need to install the following dependencies.
 
@@ -38,6 +40,22 @@ $ git clone git@github.com:WXYC/Backend-Service.git
 ```bash
 $ cd Backend-Service && npm install # adjust this to represent whatever directory you've cloned the repo into
 ```
+
+- Install PostgreSQL such that you have access to the `psql` shell command.
+
+  - MacOS:
+
+  ```
+  brew install postgresql
+  ```
+
+  - Linux/WSL (debian based) Instructions:
+
+  ```
+  sudo apt update && sudo apt install postgresql
+  ```
+
+  [Graphical installer instructions](https://www.postgresql.org/download/) if you prefer that.
 
 You now have everything you need installed to get started!
 
