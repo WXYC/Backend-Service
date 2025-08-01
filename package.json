@@ -44,6 +44,7 @@
     "dotenv": "^17.2.1",
     "drizzle-orm": "^0.44.3",
     "express": "^5.1.0",
+    "node-fetch": "^3.3.2",
     "postgres": "^3.4.4",
     "swagger-ui-express": "^5.0.1",
     "yaml": "^2.7.1"
