@@ -1,4 +1,5 @@
 import { Request, RequestHandler } from 'express';
+import { Mutex } from 'async-mutex';
 import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema.js';
 import * as flowsheet_service from '../services/flowsheet.service.js';
 
@@ -340,6 +341,8 @@ export const getOnAir: RequestHandler = async (req, res, next) => {
 //    entry_id is the id of the entry to be moved
 //    new_position is the new position of the entry
 // Positions are serialized starting at 1 and define the play order of the tracks per show
+const orderMutex = new Mutex();
+
 export const changeOrder: RequestHandler<object, unknown, { entry_id: number; new_position: number }> = async (
   req,
   res,
@@ -350,6 +353,7 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   if (entry_id === undefined || new_position === undefined) {
     res.status(400).json({ message: 'Bad Request: entry_id and new_position are required' });
   } else {
+    const release = await orderMutex.acquire();
     try {
       const updatedEntry = await flowsheet_service.changeOrder(entry_id, new_position);
       res.status(200).json(updatedEntry);
@@ -357,6 +361,8 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
       console.error('Error: Failed to change order');
       console.error(e);
       next(e);
+    } finally {
+      release();
     }
   }
 };
