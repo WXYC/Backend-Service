@@ -12,6 +12,8 @@ flowsheet_route.patch('/', cognitoMiddleware(), flowsheetController.updateEntry)
 
 flowsheet_route.delete('/', cognitoMiddleware(), flowsheetController.deleteEntry);
 
+flowsheet_route.patch('/play-order', flowsheetController.changeOrder);
+
 flowsheet_route.get('/latest', flowsheetController.getLatest);
 
 flowsheet_route.post('/join', cognitoMiddleware(), flowsheetController.joinShow);
@@ -22,6 +24,6 @@ flowsheet_route.get('/djs-on-air', flowsheetController.getDJList);
 
 flowsheet_route.get('/on-air', flowsheetController.getOnAir);
 
-flowsheet_route.patch('/play-order', flowsheetController.changeOrder);
+flowsheet_route.get('/playlist', flowsheetController.getShowInfo);
 
-flowsheet_route.get('/playlist', flowsheetController.getPlaylist);
+flowsheet_route.get('/show-info', flowsheetController.getShowInfo);

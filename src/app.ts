@@ -36,9 +36,6 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc));
 
 app.use('/library', library_route);
 
-//route for compatibility with legacy api
-app.use('/playlists', flowsheet_route);
-
 app.use('/flowsheet', flowsheet_route);
 
 app.use('/djs', dj_route);

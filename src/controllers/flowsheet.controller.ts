@@ -367,15 +367,21 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   }
 };
 
-export const getPlaylist: RequestHandler<object, unknown, object, { show_id: string }> = async (req, res, next) => {
+export interface ShowInfo extends Show {
+  specialty_show_name: string;
+  show_djs: { id: number | null; dj_name: string | null }[];
+  entries: FSEntry[];
+}
+
+export const getShowInfo: RequestHandler<object, unknown, object, { show_id: string }> = async (req, res, next) => {
   const showId = parseInt(req.query.show_id);
   if (isNaN(showId)) {
-    console.error('Bad Request, Missing Playlist Identifier: show_id');
-    res.status(400).send('Bad Request, Missing Playlist Identifier: show_id');
+    console.error('Bad Request, Missing Show Identifier: show_id');
+    res.status(400).send('Bad Request, Missing Show Identifier: show_id');
   } else {
     try {
-      const playlist = await flowsheet_service.getPlaylist(showId);
-      res.status(200).json(playlist);
+      const showInfo = await flowsheet_service.getPlaylist(showId);
+      res.status(200).json(showInfo);
     } catch (e) {
       console.error('Error: Failed to retrieve playlist');
       console.error(e);
