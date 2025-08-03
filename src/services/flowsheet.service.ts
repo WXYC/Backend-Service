@@ -15,9 +15,8 @@ import {
   show_djs,
   library_artist_view,
   specialty_shows,
-  LibraryArtistViewEntry,
 } from '../db/schema.js';
-import { IFSEntry, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
+import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 const FSEntryFields = {
@@ -345,13 +344,14 @@ export const getLatestShow = async (): Promise<Show> => {
 export const getOnAirStatusForDJ = async (dj_id: number): Promise<boolean> => {
   const latest_show = await getLatestShow();
 
-  const showDj = await db
-    .select()
-    .from(show_djs)
-    .where(and(eq(show_djs.show_id, latest_show.id), eq(show_djs.dj_id, dj_id)))
-    .limit(1);
+  //Avoid a round trip to db with this check
+  if (latest_show.end_time !== null) {
+    return false;
+  }
 
-  return showDj[0]?.active ?? false;
+  const show_djs = await getDJsInShow(latest_show.id, true);
+
+  return show_djs.some((dj) => dj.id == dj_id);
 };
 
 export const getDJsInCurrentShow = async (): Promise<DJ[]> => {
@@ -362,17 +362,25 @@ export const getDJsInCurrentShow = async (): Promise<DJ[]> => {
     return Array(0);
   }
 
-  const showDjsInstance = await db.select().from(show_djs).where(eq(show_djs.show_id, current_show.id));
+  return getDJsInShow(current_show.id, true);
+};
 
-  //only return djs with active sessions
-  const dj_ids = showDjsInstance
-    .filter((dj) => dj.active === true)
-    .map((dj) => {
-      return dj.dj_id;
-    });
+export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promise<DJ[]> => {
+  let showDJsInstance: ShowDJ[];
+  if (activeOnly) {
+    showDJsInstance = await db
+      .select()
+      .from(show_djs)
+      .where(and(eq(show_djs.show_id, show_id), eq(show_djs.active, true)));
+  } else {
+    showDJsInstance = await db.select().from(show_djs).where(eq(show_djs.show_id, show_id));
+  }
 
-  const showDjs = await db.select().from(djs).where(inArray(djs.id, dj_ids));
-  return showDjs;
+  const dj_ids = showDJsInstance.map((dj) => {
+    return dj.dj_id;
+  });
+
+  return await db.select().from(djs).where(inArray(djs.id, dj_ids));
 };
 
 export const getAlbumFromDB = async (album_id: number) => {
@@ -436,17 +444,10 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
   return response[0];
 };
 
-export const getPlaylist = async (show_id: number) => {
+export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
 
-  const showDJs = await db
-    .select({
-      id: djs.id,
-      dj_name: djs.dj_name,
-    })
-    .from(show_djs)
-    .fullJoin(djs, eq(show_djs.dj_id, djs.id))
-    .where(eq(show_djs.show_id, show_id));
+  const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({ id: dj.id, dj_name: dj.dj_name }));
 
   const entries = await db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id));
 
@@ -457,10 +458,8 @@ export const getPlaylist = async (show_id: number) => {
   }
 
   return {
-    show_name: show[0].show_name ?? '',
-    specialty_show: specialty_show_name,
-    start_time: show[0].start_time,
-    end_time: show[0].end_time,
+    ...show[0],
+    specialty_show_name: specialty_show_name,
     show_djs: showDJs,
     entries: entries,
   };
