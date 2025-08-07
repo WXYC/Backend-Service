@@ -46,8 +46,8 @@ app.use('/schedule', schedule_route);
 app.use(
   '/events',
   (req, res, next) => {
-    // no global timeout on these long lived connection.
-    // SSE logic handles this itself
+    // no global timeout on these long lived connections
+    // SSE logic handles timeouts itself
     res.setTimeout(0);
     next();
   },

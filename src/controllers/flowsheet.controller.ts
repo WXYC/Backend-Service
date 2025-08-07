@@ -283,7 +283,6 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   }
 };
 
-//GET
 //TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
 export const leaveShow: RequestHandler<object, unknown, { dj_id: number }> = async (req, res, next) => {
   const currentShow = await flowsheet_service.getLatestShow();

@@ -1,10 +1,10 @@
 import { Response } from 'express';
 
 export const Topics = {
-  test: 'test-topic',
-  primaryDj: 'prim-dj-topic',
-  showDj: 'show-dj-topic',
-  liveFs: 'live-fs-topic',
+  test: 'test-topic', // just for POC testing.
+  primaryDj: 'prim-dj-topic', // events for the primary dj e.g. remote dj show takover request.
+  showDj: 'show-dj-topic', // events for all show djs e.g. song requests from app or guest dj requesting to add to bin.
+  liveFs: 'live-fs-topic', // events related to fs entries e.g. crud events. Can be used to keep UIs synced live.
 } as const;
 
 export const TestEvents = {

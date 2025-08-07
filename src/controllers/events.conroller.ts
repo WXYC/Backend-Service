@@ -11,13 +11,18 @@ const TopicAuthz: Record<string, string[]> = {
 };
 
 const filterAuthorizedTopics = (res: Response, topics: string[]) => {
-  const groups: Array<string> = res.locals.decodedJWT['cognito:groups'] || [''];
+  const claims = res.locals?.decodedJWT;
+  const groups: Array<string> = claims ? claims['cognito:groups'] : [''];
+
+  // If we have a valid token allow to access dj topics
+  if (claims) {
+    groups.push(Roles.dj);
+  }
 
   return topics.filter((topic) => {
+    if (TopicAuthz[topic] === undefined) return false;
     //empty = anyone can access topic
-    if (TopicAuthz[topic]?.length || 0 == 0) {
-      return true;
-    }
+    if (!TopicAuthz[topic].length) return true;
 
     return TopicAuthz[topic]?.some((authorizedGroup) => groups.includes(authorizedGroup));
   });
