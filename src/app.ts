@@ -9,6 +9,7 @@ import { dj_route } from './routes/djs.route.js';
 import { flowsheet_route } from './routes/flowsheet.route.js';
 import { library_route } from './routes/library.route.js';
 import { schedule_route } from './routes/schedule.route.js';
+import { events_route } from './routes/events.route.js';
 import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth.js';
 import { showMemberMiddleware } from './middleware/checkShowMember.js';
 import { activeShow } from './middleware/checkActiveShow.js';
@@ -41,6 +42,17 @@ app.use('/flowsheet', flowsheet_route);
 app.use('/djs', dj_route);
 
 app.use('/schedule', schedule_route);
+
+app.use(
+  '/events',
+  (req, res, next) => {
+    // no global timeout on these long lived connections
+    // SSE logic handles timeouts itself
+    res.setTimeout(0);
+    next();
+  },
+  events_route
+);
 
 //example for how to use te Cognito auth middleware
 app.get('/testAuth', cognitoMiddleware(), async (req, res) => {
