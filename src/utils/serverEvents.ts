@@ -77,6 +77,7 @@ class ServerEventsManager {
       Connection: 'keep-alive',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Headers': 'Cache-Control',
+      'X-Accel-Buffering': 'no', // Header that makes nginx behave with sse
     });
 
     // Send initial connection event with client ID
