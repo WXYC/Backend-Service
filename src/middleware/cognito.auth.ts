@@ -3,6 +3,8 @@ import { Response, Request, NextFunction } from 'express';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { CognitoJwtVerifierSingleUserPool } from 'aws-jwt-verify/cognito-verifier';
 import { CognitoAccessTokenPayload } from 'aws-jwt-verify/jwt-model';
+import { dpopMiddleware } from './dpop.middleware.js';
+import crypto from 'crypto';
 
 type JwtVerifier =
   | CognitoJwtVerifierSingleUserPool<{ userPoolId: string; tokenUse: 'access'; clientId: string }>
@@ -67,6 +69,7 @@ export const cognitoMiddleware = (...permissionsLevel: string[]) => {
   return async (req: Request, res: Response, next: NextFunction) => {
     const tokenArr = req.header('Authorization')?.split(' ') || [''];
     const accessToken = tokenArr.length == 1 ? tokenArr[0] : tokenArr[1];
+    
     if (process.env.AUTH_BYPASS === 'true') {
       res.locals.decodedJWT = { username: process.env.AUTH_USERNAME };
       next();
@@ -94,6 +97,47 @@ export const cognitoMiddleware = (...permissionsLevel: string[]) => {
         res.status(403).json({ status: 403, message: 'Forbidden' });
       }
     }
+  };
+};
+
+/**
+ * Enhanced middleware that combines Cognito authentication with DPoP validation
+ */
+export const cognitoWithDPoP = (...permissionsLevel: string[]) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    // First validate DPoP token
+    dpopMiddleware(req, res, (err) => {
+      if (err) {
+        return next(err);
+      }
+      
+      // If Authorization header is a locally issued token, bypass Cognito
+      const authHeader = req.header('Authorization') || '';
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+      try {
+        const parsed = JSON.parse(Buffer.from(token, 'base64url').toString());
+        if (parsed && parsed.jkt && parsed.exp && typeof parsed.exp === 'number') {
+          // Validate exp
+          const now = Math.floor(Date.now() / 1000);
+          if (parsed.exp < now) {
+            return res.status(401).json({ status: 401, message: 'Token expired' });
+          }
+          // Optionally, verify DPoP jkt binding to current request
+          // Already validated DPoP; ensure the presented token jkt matches proof jkt
+          if (req.locals?.dpopJkt && req.locals.dpopJkt !== parsed.jkt) {
+            return res.status(401).json({ status: 401, message: 'DPoP binding mismatch' });
+          }
+          // Treat as authenticated
+          res.locals.decodedJWT = { username: 'ios-client', jkt: parsed.jkt };
+          return next();
+        }
+      } catch (e) {
+        // Not a local token; fall through to Cognito
+      }
+
+      // Then proceed with Cognito authentication
+      cognitoMiddleware(...permissionsLevel)(req, res, next);
+    });
   };
 };
 
