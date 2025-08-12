@@ -10,6 +10,7 @@ import { flowsheet_route } from './routes/flowsheet.route.js';
 import { library_route } from './routes/library.route.js';
 import { schedule_route } from './routes/schedule.route.js';
 import { events_route } from './routes/events.route.js';
+import { request_route } from './routes/request.route.js';
 import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth.js';
 import { showMemberMiddleware } from './middleware/checkShowMember.js';
 import { activeShow } from './middleware/checkActiveShow.js';
@@ -40,6 +41,8 @@ app.use('/library', library_route);
 app.use('/flowsheet', flowsheet_route);
 
 app.use('/djs', dj_route);
+
+app.use('/request', request_route);
 
 app.use('/schedule', schedule_route);
 
