@@ -106,6 +106,13 @@ TEST_HOST=http://localhost
 AUTH_BYPASS=true
 AUTH_USERNAME='test_dj1'
 AUTH_PASSWORD={{placeholder}}
+
+### Slack Integration for Song Requests
+SLACK_WXYC_REQUESTS_APP_ID={{placeholder Slack App ID}}
+SLACK_WXYC_REQUESTS_CLIENT_ID={{placeholder Slack Client ID}}
+SLACK_WXYC_REQUESTS_CLIENT_SECRET={{placeholder Slack Client Secret}}
+SLACK_WXYC_REQUESTS_SIGNING_SECRET={{placeholder Slack Signing Secret}}
+SLACK_WXYC_REQUESTS_WEBHOOK={{placeholder Slack Webhook URL}}
 ```
 
 <span style="color:crimson">\*</span>Email/slack dvd or Adrian Bruno (adrian@abruno.dev) to request access to prod placeholder values.

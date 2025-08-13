@@ -1,9 +1,16 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/app.ts'],
+  entry: [
+    'src/app.ts',
+    'src/services/**/*.ts',
+    'src/controllers/**/*.ts',
+    'src/routes/**/*.ts',
+    'src/middleware/**/*.ts',
+    'src/config/**/*.ts'
+  ],
   outDir: 'dist',
-  format: ['esm'], // Use ESM instead of CommonJS
+  format: ['cjs'], // Use CommonJS for Jest compatibility
   clean: true,
   sourcemap: true,
 
