@@ -1,4 +1,5 @@
 import https from 'https';
+import { getServiceConfig } from '../config/service.config.js';
 
 const SLACK_CONFIG = {
   hostname: 'hooks.slack.com',
@@ -11,6 +12,15 @@ const SLACK_CONFIG = {
 };
 
 export const submitSongRequest = async (message: string): Promise<any> => {
+  const config = getServiceConfig();
+  
+  // Use mock service in test environments or when explicitly configured
+  if (config.useMockServices) {
+    const { submitSongRequest: mockSubmitSongRequest } = require('./request.service.mock.js');
+    return mockSubmitSongRequest(message);
+  }
+
+  // Real Slack service implementation
   return new Promise((resolve, reject) => {
     const slackMessage = {
       text: `${message}`
@@ -44,8 +54,8 @@ export const submitSongRequest = async (message: string): Promise<any> => {
       reject(new Error('Slack request timeout'));
     });
 
-    // Set timeout to 10 seconds
-    req.setTimeout(10000);
+    // Set timeout from config
+    req.setTimeout(config.slackTimeout);
 
     req.write(postData);
     req.end();

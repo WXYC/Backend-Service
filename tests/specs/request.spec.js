@@ -55,17 +55,25 @@ describe('Request Route', () => {
 
     it('should return 200 when message is provided with valid DPoP', async () => {
       const mockDPoP = createMockDPoPToken();
+      const testMessage = 'Please play Big Shot by Patrick Cowley';
       
       const response = await request
         .post('/request')
         .set('Authorization', `Bearer ${global.access_token}`)
         .set('DPoP', mockDPoP)
-        .send({ message: 'Please play Big Shot by Patrick Cowley' });
+        .send({ message: testMessage });
 
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
       expect(response.body.message).toBe('Song request submitted successfully');
       expect(response.body.result).toBeDefined();
+      
+      // Validate mock service response structure
+      expect(response.body.result.success).toBe(true);
+      expect(response.body.result.mock).toBe(true);
+      expect(response.body.result.originalMessage).toBe(testMessage);
+      expect(response.body.result.timestamp).toBeDefined();
+      expect(new Date(response.body.result.timestamp)).toBeInstanceOf(Date);
     });
 
     it('should return 401 when DPoP token has expired', async () => {
@@ -100,6 +108,65 @@ describe('Request Route', () => {
 
       expect(response.status).toBe(401);
       expect(response.body.message).toBe('DPoP validation failed');
+    });
+
+    it('should handle empty message gracefully', async () => {
+      const mockDPoP = createMockDPoPToken();
+      
+      const response = await request
+        .post('/request')
+        .set('Authorization', `Bearer ${global.access_token}`)
+        .set('DPoP', mockDPoP)
+        .send({ message: '' });
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.result.originalMessage).toBe('');
+    });
+
+    it('should handle very long messages', async () => {
+      const mockDPoP = createMockDPoPToken();
+      const longMessage = 'A'.repeat(1000); // 1000 character message
+      
+      const response = await request
+        .post('/request')
+        .set('Authorization', `Bearer ${global.access_token}`)
+        .set('DPoP', mockDPoP)
+        .send({ message: longMessage });
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.result.originalMessage).toBe(longMessage);
+    });
+
+    it('should validate request ID generation and logging', async () => {
+      const mockDPoP = createMockDPoPToken();
+      const testMessage = 'Test message for logging validation';
+      
+      // Capture console.log output to validate logging
+      const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
+      
+      const response = await request
+        .post('/request')
+        .set('Authorization', `Bearer ${global.access_token}`)
+        .set('DPoP', mockDPoP)
+        .send({ message: testMessage });
+
+      expect(response.status).toBe(200);
+      
+      // Verify that logging occurred
+      expect(consoleSpy).toHaveBeenCalled();
+      
+      // Find the completion log entry
+      const completionLog = consoleSpy.mock.calls.find(call => 
+        call[0].includes('Request completed successfully')
+      );
+      
+      expect(completionLog).toBeDefined();
+      expect(completionLog[0]).toContain('statusCode: 200');
+      expect(completionLog[0]).toContain('responseTime:');
+      
+      consoleSpy.mockRestore();
     });
   });
 });
