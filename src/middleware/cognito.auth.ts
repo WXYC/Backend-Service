@@ -56,7 +56,14 @@ function NewJwtVerifier(testing: boolean): JwtVerifier {
 
 export const jwtVerifier = NewJwtVerifier(process.env.AUTH_BYPASS === 'true');
 
-export const cognitoMiddleware = (permissionsLevel: string | null = null) => {
+export const Roles = {
+  mgmt: 'station-management',
+  musicDirector: 'music-management',
+  stationMgr: 'station-manager',
+  dj: 'dj',
+};
+
+export const cognitoMiddleware = (...permissionsLevel: string[]) => {
   return async (req: Request, res: Response, next: NextFunction) => {
     const tokenArr = req.header('Authorization')?.split(' ') || [''];
     const accessToken = tokenArr.length == 1 ? tokenArr[0] : tokenArr[1];
@@ -66,15 +73,30 @@ export const cognitoMiddleware = (permissionsLevel: string | null = null) => {
     } else {
       try {
         const verification = await jwtVerifier.verify(accessToken); //throws error for invalid tokens
-        if (permissionsLevel !== null && !verification['cognito:groups']?.includes(permissionsLevel)) {
+        const groups = verification['cognito:groups'];
+
+        const allow = !permissionsLevel.length || permissionsLevel.includes(Roles.dj);
+        // Roles.dj, just means we expect a valid token. No group check is necessary
+        if (!allow && groups && disjoint(groups, permissionsLevel)) {
           res.status(403).json({ status: 403, message: 'Forbidden' });
         } else {
           res.locals.decodedJWT = verification;
           next();
         }
       } catch (e) {
+        // if the auth level is empty and there is no Authorization header,
+        // then verify() will result in error and we continue without
+        if (permissionsLevel.length == 0) {
+          next();
+          return;
+        }
+        // Otherwise we expect a token and if not provided we forbid access
         res.status(403).json({ status: 403, message: 'Forbidden' });
       }
     }
   };
+};
+
+const disjoint = <T>(arr1: Array<T>, arr2: Array<T>): Boolean => {
+  return !arr1.some((val) => arr2.includes(val));
 };

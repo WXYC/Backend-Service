@@ -1,4 +1,5 @@
 import { Request, RequestHandler } from 'express';
+import { Mutex } from 'async-mutex';
 import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema.js';
 import * as flowsheet_service from '../services/flowsheet.service.js';
 
@@ -282,7 +283,6 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   }
 };
 
-//GET
 //TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
 export const leaveShow: RequestHandler<object, unknown, { dj_id: number }> = async (req, res, next) => {
   const currentShow = await flowsheet_service.getLatestShow();
@@ -340,6 +340,8 @@ export const getOnAir: RequestHandler = async (req, res, next) => {
 //    entry_id is the id of the entry to be moved
 //    new_position is the new position of the entry
 // Positions are serialized starting at 1 and define the play order of the tracks per show
+const orderMutex = new Mutex();
+
 export const changeOrder: RequestHandler<object, unknown, { entry_id: number; new_position: number }> = async (
   req,
   res,
@@ -350,6 +352,7 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   if (entry_id === undefined || new_position === undefined) {
     res.status(400).json({ message: 'Bad Request: entry_id and new_position are required' });
   } else {
+    const release = await orderMutex.acquire();
     try {
       const updatedEntry = await flowsheet_service.changeOrder(entry_id, new_position);
       res.status(200).json(updatedEntry);
@@ -357,19 +360,27 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
       console.error('Error: Failed to change order');
       console.error(e);
       next(e);
+    } finally {
+      release();
     }
   }
 };
 
-export const getPlaylist: RequestHandler<object, unknown, object, { show_id: string }> = async (req, res, next) => {
+export interface ShowInfo extends Show {
+  specialty_show_name: string;
+  show_djs: { id: number | null; dj_name: string | null }[];
+  entries: FSEntry[];
+}
+
+export const getShowInfo: RequestHandler<object, unknown, object, { show_id: string }> = async (req, res, next) => {
   const showId = parseInt(req.query.show_id);
   if (isNaN(showId)) {
-    console.error('Bad Request, Missing Playlist Identifier: show_id');
-    res.status(400).send('Bad Request, Missing Playlist Identifier: show_id');
+    console.error('Bad Request, Missing Show Identifier: show_id');
+    res.status(400).send('Bad Request, Missing Show Identifier: show_id');
   } else {
     try {
-      const playlist = await flowsheet_service.getPlaylist(showId);
-      res.status(200).json(playlist);
+      const showInfo = await flowsheet_service.getPlaylist(showId);
+      res.status(200).json(showInfo);
     } catch (e) {
       console.error('Error: Failed to retrieve playlist');
       console.error(e);
