@@ -12,6 +12,7 @@ import { schedule_route } from './routes/schedule.route.js';
 import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth.js';
 import { showMemberMiddleware } from './middleware/checkShowMember.js';
 import { activeShow } from './middleware/checkActiveShow.js';
+import { legacyBackendEventsRouter } from './middleware/legacy/router.js';
 // import errorHandler from './middleware/errorHandler';
 
 const port = process.env.PORT || 8080;
@@ -44,6 +45,9 @@ app.use('/flowsheet', flowsheet_route);
 app.use('/djs', dj_route);
 
 app.use('/schedule', schedule_route);
+
+// monitoring route for legacy backend events
+app.use('/backend-events', legacyBackendEventsRouter);
 
 //example for how to use te Cognito auth middleware
 app.get('/testAuth', cognitoMiddleware(), async (req, res) => {

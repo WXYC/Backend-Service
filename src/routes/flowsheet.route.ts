@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import { cognitoMiddleware } from '../middleware/cognito.auth.js';
 import * as flowsheetController from '../controllers/flowsheet.controller.js';
+import { flowsheetMirror } from '@/middleware/legacy/flowsheet.mirror.js';
 
 export const flowsheet_route = Router();
 
-flowsheet_route.get('/', flowsheetController.getEntries);
+flowsheet_route.get('/', flowsheetMirror.getEntries, flowsheetController.getEntries);
 
 flowsheet_route.post('/', cognitoMiddleware(), flowsheetController.addEntry);
 
