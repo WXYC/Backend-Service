@@ -7,9 +7,9 @@ const { dj } = Roles;
 
 export const flowsheet_route = Router();
 
-flowsheet_route.get('/', flowsheetMirror.getEntries, flowsheetController.getEntries);
+flowsheet_route.get('/', flowsheetMirror.getLatest, flowsheetController.getEntries);
 
-flowsheet_route.post('/', cognitoMiddleware(dj), flowsheetController.addEntry);
+flowsheet_route.post('/', cognitoMiddleware(dj), flowsheetMirror.insertEntry, flowsheetController.addEntry);
 
 flowsheet_route.patch('/', cognitoMiddleware(dj), flowsheetController.updateEntry);
 

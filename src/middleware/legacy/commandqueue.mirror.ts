@@ -1,28 +1,33 @@
-import {
-  EventData,
-  MirrorEvents,
-  serverEventsMgr,
-} from "@/utils/serverEvents.js";
+import type { MySql2Database } from "drizzle-orm/mysql2";
 import { promises } from "fs";
-import path from "path";
 import { EventEmitter } from "node:events";
+import path from "path";
+import { LegacyBackendFunction } from "./middleware.mirror.js";
 import { MirrorSQL } from "./sql.mirror.js";
-import { cryptoRandomId, expBackoffMs } from "./utilities.mirror.js";
+import {
+  createTrigger,
+  cryptoRandomId,
+  expBackoffMs,
+} from "./utilities.mirror.js";
 
 export interface MirrorCommand {
   id: string;
-  sql: string;
   enqueuedAt: number;
   attempts: number;
   lastResult?: string;
   lastError?: string;
+
   status:
     | "pending"
     | "in_progress"
     | "in_progress_retrying"
     | "completed"
     | "failed";
+
+  cmd: (db: MySql2Database) => Promise<unknown>;
 }
+
+type MirrorCommandReport = Omit<MirrorCommand, "cmd">;
 
 export interface MirrorQueueOptions {
   maxAttempts?: number;
@@ -33,8 +38,8 @@ export interface MirrorQueueOptions {
 }
 
 export interface FatalInfo {
-  failedCommand: MirrorCommand;
-  pendingQueue: MirrorCommand[];
+  failedCommand: MirrorCommandReport & { run?: undefined };
+  pendingQueue: Array<MirrorCommandReport & { run?: undefined }>;
   reason: string;
   timestamp: string;
   logFile: string;
@@ -47,27 +52,16 @@ export class MirrorCommandQueue extends EventEmitter {
     if (!this._instance) {
       this._instance = new MirrorCommandQueue(options);
 
-      this._instance.on("enqueued", this.createTrigger("syncStarted"));
-      this._instance.on("started", this.createTrigger("syncProgress"));
-      this._instance.on("succeeded", this.createTrigger("syncComplete"));
-      this._instance.on("failedAttempt", this.createTrigger("syncRetry"));
-      this._instance.on("fatal", this.createTrigger("syncError"));
-      this._instance.on("persisted", this.createTrigger("syncError"));
+      this._instance.on("enqueued", createTrigger("syncStarted"));
+      this._instance.on("started", createTrigger("syncProgress"));
+      this._instance.on("succeeded", createTrigger("syncComplete"));
+      this._instance.on("failedAttempt", createTrigger("syncRetry"));
+      this._instance.on("fatal", createTrigger("syncError"));
+      this._instance.on("persisted", createTrigger("syncError"));
     }
 
     return this._instance;
   }
-
-  private static createTrigger =
-    (eventType: keyof typeof MirrorEvents) => (cmd: MirrorCommand) => {
-      const data: EventData = {
-        type: eventType,
-        payload: cmd,
-        timestamp: new Date(),
-      };
-
-      serverEventsMgr.broadcast("mirror", data);
-    };
 
   private readonly options: Required<MirrorQueueOptions>;
   private readonly queue: MirrorCommand[] = [];
@@ -86,19 +80,25 @@ export class MirrorCommandQueue extends EventEmitter {
     };
   }
 
-  enqueue(sql: string, id = cryptoRandomId()): MirrorCommand | null {
+  enqueue(actions: Array<LegacyBackendFunction>): MirrorCommand[] | null {
     if (!this.alive) return null;
-    const cmd: MirrorCommand = {
-      id,
-      sql,
+
+    const cmds = actions.map<MirrorCommand>((fn) => ({
+      id: cryptoRandomId(),
+      label: fn.label,
       enqueuedAt: Date.now(),
       attempts: 0,
       status: "pending",
-    };
-    this.queue.push(cmd);
-    this.emit("enqueued", cmd);
+      cmd: fn.method,
+    }));
+
+    for (const cmd of cmds) {
+      this.queue.push(cmd);
+      this.emit("enqueued", cmd);
+    }
+
     this.kick();
-    return cmd;
+    return cmds;
   }
 
   isAlive() {
@@ -130,13 +130,14 @@ export class MirrorCommandQueue extends EventEmitter {
     try {
       while (this.alive && this.queue.length > 0) {
         const cmd = this.queue.shift()!;
-
         try {
           cmd.attempts += 1;
           cmd.status = "in_progress";
           this.emit("started", cmd);
 
-          cmd.lastResult = await MirrorSQL.instance().send(cmd.sql);
+          const res = await MirrorSQL.withDb(cmd.cmd);
+          cmd.lastResult =
+            typeof res === "string" ? res : JSON.stringify(res ?? null);
 
           cmd.status = "completed";
           this.emit("succeeded", cmd);
@@ -198,17 +199,27 @@ export class MirrorCommandQueue extends EventEmitter {
       `queue-fatal-${timestamp}.json`
     );
 
+    // Strip the non-serializable `run` before persisting
+    const strip = (c: MirrorCommand) => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { cmd: run, ...rest } = c;
+      return rest;
+    };
+
     const info: FatalInfo = {
-      failedCommand: failedCommand ?? {
-        id: "n/a",
-        sql: "n/a",
-        status: "failed",
-        enqueuedAt: 0,
-        attempts: 0,
-        lastResult: "n/a",
-        lastError: "n/a",
-      },
-      pendingQueue: [...this.queue],
+      failedCommand: failedCommand
+        ? strip(failedCommand)
+        : ({
+            id: "n/a",
+            label: "n/a",
+            sqlPreview: "n/a",
+            status: "failed",
+            enqueuedAt: 0,
+            attempts: 0,
+            lastResult: "n/a",
+            lastError: "n/a",
+          } as any),
+      pendingQueue: this.queue.map(strip),
       reason,
       timestamp: new Date().toISOString(),
       logFile,

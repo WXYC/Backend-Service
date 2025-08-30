@@ -1,16 +1,28 @@
-import { QueryParams } from "@/controllers/flowsheet.controller.js";
-import { createBackendMirrorMiddleware } from "./mirror.middleware.js";
+import { FSEntry } from "@/db/schema.js";
+import { convertToLegacy } from "./conversions.mirror.js";
+import { createBackendMirrorMiddleware } from "./middleware.mirror.js";
+import { legacy_flowsheet_entries } from "./schema.mirror.js";
 
-const getEntries = createBackendMirrorMiddleware((req) => {
-  const query = req.query as QueryParams;
+const getLatest = createBackendMirrorMiddleware<void>((_) => [
+  {
+    label: "Get Latest Flowsheet Entries",
+    method: async (db) => {
+      return db.select().from(legacy_flowsheet_entries).orderBy(legacy_flowsheet_entries.RADIO_SHOW_ID).limit(10);
+    },
+  }
+]);
 
-  const page = parseInt(query.page ?? "0");
-  const limit = parseInt(query.limit ?? "30");
-  const offset = page * limit;
-
-  return `SELECT * FROM FLOWSHEET_ENTRY ORDER BY entry_time DESC LIMIT ${limit} OFFSET ${offset};`;
-});
+const insertEntry = createBackendMirrorMiddleware<FSEntry>((_, data) => [
+  {
+    label: "Insert Flowsheet Entry",
+    method: async (db) => {
+      const legacyEntry = convertToLegacy(data);
+      return db.insert(legacy_flowsheet_entries).values(legacyEntry);
+    },
+  },
+]);
 
 export const flowsheetMirror = {
-  getEntries,
+  getLatest,
+  insertEntry,
 };

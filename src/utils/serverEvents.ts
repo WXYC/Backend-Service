@@ -1,4 +1,5 @@
 import { Response } from 'express';
+import { promises } from 'node:fs';
 
 export const Topics = {
   test: 'test-topic', // just for POC testing.
@@ -34,6 +35,7 @@ export const MirrorEvents = {
   syncComplete: 'sync-complete',
   syncRetry: 'sync-retry',
   syncError: 'sync-error',
+  sqlQuery: 'sql-query',
 }
 
 export type EventClient = {
@@ -187,6 +189,9 @@ class ServerEventsManager {
   broadcast = (topicId: string, data: EventData) => {
     const clientIds = this.topicClients.get(topicId) || new Set();
     const message = `data: ${JSON.stringify(data)}\n\n`;
+
+    console.log(`Broadcasting to ${clientIds.size} clients on topic ${topicId}`);
+    promises.writeFile('mirror-logs/sse.log', message, { flag: 'a' }).catch(() => { /* ignore */ });
 
     clientIds.forEach((clientId) => {
       const client = this.clients.get(clientId);
