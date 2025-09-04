@@ -1,0 +1,14 @@
+{
+  "failedCommand": {
+    "id": "1632b44b-285b-43f0-ab57-02b365e0b2eb",
+    "label": "Get Latest Flowsheet Entries",
+    "enqueuedAt": 1757021547419,
+    "attempts": 5,
+    "status": "failed",
+    "lastError": "Server requests authentication using unknown plugin . See TODO: add plugins doco here on how to configure or author authentication plugins."
+  },
+  "pendingQueue": [],
+  "reason": "Exceeded maxAttempts=5",
+  "timestamp": "2025-09-04T21:32:37.561Z",
+  "logFile": "/mnt/c/Users/Jackson/Desktop/Projects/Backend-Service/mirror-logs/queue-fatal-2025-09-04T21-32-37-561Z.json"
+}
