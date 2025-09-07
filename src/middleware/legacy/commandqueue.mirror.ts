@@ -86,19 +86,25 @@ export class MirrorCommandQueue extends EventEmitter {
     };
   }
 
-  enqueue(sql: string, id = cryptoRandomId()): MirrorCommand | null {
+  enqueue(sqls: string[]): MirrorCommand[] | null {
     if (!this.alive) return null;
-    const cmd: MirrorCommand = {
-      id,
-      sql,
-      enqueuedAt: Date.now(),
-      attempts: 0,
-      status: "pending",
-    };
-    this.queue.push(cmd);
-    this.emit("enqueued", cmd);
+
+    const cmds: MirrorCommand[] = [];
+    for (const sql of sqls)
+    {
+      const cmd: MirrorCommand = {
+        id: cryptoRandomId(),
+        sql,
+        enqueuedAt: Date.now(),
+        attempts: 0,
+        status: "pending",
+      };
+      cmds.push(cmd);
+      this.queue.push(cmd);
+      this.emit("enqueued", cmd);
+    }
     this.kick();
-    return cmd;
+    return cmds;
   }
 
   isAlive() {

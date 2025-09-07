@@ -1,16 +1,286 @@
 import { QueryParams } from "@/controllers/flowsheet.controller.js";
+import { FSEntry, Show } from "@/db/schema.js";
 import { createBackendMirrorMiddleware } from "./mirror.middleware.js";
+import { safeSql, safeSqlNum } from "./utilities.mirror.js";
 
-const getEntries = createBackendMirrorMiddleware((req) => {
+const FLOWSHEET_ENTRY_TABLE = "FLOWSHEET_ENTRY_PROD";
+const RADIO_SHOW_TABLE = "FLOWSHEET_RADIO_SHOW_PROD";
+
+const getEntries = createBackendMirrorMiddleware<any>((req, data) => {
   const query = req.query as QueryParams;
 
   const page = parseInt(query.page ?? "0");
   const limit = parseInt(query.limit ?? "30");
   const offset = page * limit;
 
-  return `SELECT * FROM FLOWSHEET_ENTRY ORDER BY entry_time DESC LIMIT ${limit} OFFSET ${offset};`;
+  return [
+    `SELECT * FROM ${FLOWSHEET_ENTRY_TABLE} ORDER BY entry_time DESC LIMIT ${limit} OFFSET ${offset};`,
+  ];
+});
+
+const startShow = createBackendMirrorMiddleware<Show>((req, show) => {
+  const nowMs = Date.now();
+  const statements: string[] = [];
+
+  const startMs = Number(show.start_time ?? nowMs);
+  const djId = Number(show.primary_dj_id ?? req.body?.dj_id ?? null);
+  const showName = show.show_name ?? req.body?.show_name ?? null;
+  const specialtyId = Number(
+    show.specialty_id ?? req.body?.specialty_id ?? null
+  );
+  const startingHour = Math.floor(startMs / 3_600_000) * 3_600_000;
+  const workingHour = startingHour;
+  const timeCreated = startMs;
+  const timeModified = startMs;
+
+  // NOTE: Legacy table has no AUTO_INCREMENT; we allocate ID as MAX(ID)+1.
+  statements.push(
+    `SET @NEW_RS_ID := (SELECT IFNULL(MAX(ID), 0) + 1 FROM ${RADIO_SHOW_TABLE});`,
+    `INSERT INTO ${RADIO_SHOW_TABLE}
+        (ID, STARTING_RADIO_HOUR, DJ_NAME, DJ_ID, DJ_HANDLE, SHOW_NAME, SPECIALTY_SHOW_ID,
+         WORKING_HOUR, SIGNON_TIME, SIGNOFF_TIME, TIME_LAST_MODIFIED, TIME_CREATED, MODLOCK, SHOW_ID)
+       VALUES
+        (@NEW_RS_ID,
+         ${startingHour},
+         NULL,                             -- DJ_NAME unknown here; keep NULL
+         ${safeSqlNum(djId)},
+         NULL,                             -- DJ_HANDLE unknown here; keep NULL
+         ${safeSql(showName)},
+         ${safeSqlNum(specialtyId)},
+         ${workingHour},
+         ${startMs},
+         NULL,                             -- SIGNOFF_TIME set on end-show mirror
+         ${timeModified},
+         ${timeCreated},
+         NULL,                             -- MODLOCK unused
+         ${safeSqlNum(show.id)});`
+  );
+
+  return statements;
+});
+
+export const endShow = createBackendMirrorMiddleware<Show>((req, show) => {
+  const endMs = Number(show.end_time ?? Date.now());
+  const statements: string[] = [];
+
+  statements.push(
+    `UPDATE ${RADIO_SHOW_TABLE}
+       SET SIGNOFF_TIME = ${safeSqlNum(endMs)},
+           TIME_LAST_MODIFIED = ${safeSqlNum(endMs)}
+     WHERE SHOW_ID = ${safeSqlNum(show.id)};`
+  );
+
+  // Fallback: If no matching SHOW_ID found (e.g. legacy show with no SHOW_ID),
+  // just update the most recent open show (SIGNOFF_TIME IS NULL).
+  statements.push(
+    `UPDATE ${RADIO_SHOW_TABLE}
+       SET SIGNOFF_TIME = ${safeSqlNum(endMs)},
+           TIME_LAST_MODIFIED = ${safeSqlNum(endMs)}
+     WHERE SIGNOFF_TIME IS NULL
+     ORDER BY STARTING_RADIO_HOUR DESC
+     LIMIT 1;`
+  );
+
+  return statements;
+});
+
+export const addEntry = createBackendMirrorMiddleware<FSEntry>((req, entry) => {
+  // If this was a PSA/talk-set/break “message” entry, do nothing on legacy.
+  if (entry?.message && entry.message.trim() !== "") return [];
+
+  const startMs = entry?.add_time ? new Date(entry.add_time).getTime() : Date.now();
+  const radioHour = Math.floor(startMs / 3_600_000) * 3_600_000;
+
+  const statements: string[] = [];
+
+  // 1) Resolve legacy RADIO_SHOW_ID for the active modern show
+  statements.push(
+    `SET @RS_ID := (SELECT ID FROM ${RADIO_SHOW_TABLE}
+                     WHERE SHOW_ID = ${safeSqlNum(entry.show_id)}
+                     ORDER BY TIME_CREATED DESC
+                     LIMIT 1);`,
+
+    // 2) Next sequence within this show (legacy)
+    `SET @SEQ := (SELECT IFNULL(MAX(SEQUENCE_WITHIN_SHOW), 0) + 1
+                   FROM ${FLOWSHEET_ENTRY_TABLE}
+                  WHERE RADIO_SHOW_ID = @RS_ID);`,
+
+    // 3) Allocate new legacy entry ID
+    `SET @NEW_FE_ID := (SELECT IFNULL(MAX(ID), 0) + 1 FROM ${FLOWSHEET_ENTRY_TABLE});`,
+
+    // 4) Close prior "now playing" (if any) for this show
+    `UPDATE ${FLOWSHEET_ENTRY_TABLE}
+        SET NOW_PLAYING_FLAG = 0,
+            STOP_TIME = ${safeSqlNum(startMs)},
+            TIME_LAST_MODIFIED = ${safeSqlNum(startMs)}
+      WHERE RADIO_SHOW_ID = @RS_ID
+        AND NOW_PLAYING_FLAG = 1
+        AND STOP_TIME IS NULL;`,
+
+    // 5) Insert the new track
+    `INSERT INTO ${FLOWSHEET_ENTRY_TABLE}
+      (ID, ARTIST_NAME, ARTIST_ID, SONG_TITLE, RELEASE_TITLE, RELEASE_FORMAT_ID,
+       LIBRARY_RELEASE_ID, ROTATION_RELEASE_ID, LABEL_NAME, RADIO_HOUR, START_TIME, STOP_TIME,
+       RADIO_SHOW_ID, SEQUENCE_WITHIN_SHOW, NOW_PLAYING_FLAG, FLOWSHEET_ENTRY_TYPE_CODE_ID,
+       TIME_LAST_MODIFIED, TIME_CREATED, REQUEST_FLAG, GLOBAL_ORDER_ID, BMI_COMPOSER)
+     VALUES
+      (@NEW_FE_ID,
+       ${safeSql(entry.artist_name)},         -- ARTIST_NAME
+       NULL,                                  -- ARTIST_ID (unknown)
+       ${safeSql(entry.track_title)},         -- SONG_TITLE
+       ${safeSql(entry.album_title)},         -- RELEASE_TITLE
+       NULL,                                  -- RELEASE_FORMAT_ID (unknown here)
+       ${safeSqlNum(entry.album_id)},         -- LIBRARY_RELEASE_ID
+       ${safeSqlNum(entry.rotation_id)},      -- ROTATION_RELEASE_ID
+       ${safeSql(entry.record_label)},        -- LABEL_NAME
+       ${safeSqlNum(radioHour)},              -- RADIO_HOUR (hour bucket)
+       ${safeSqlNum(startMs)},                -- START_TIME
+       NULL,                                  -- STOP_TIME (filled when next track starts)
+       @RS_ID,                                -- RADIO_SHOW_ID (legacy)
+       @SEQ,                                  -- SEQUENCE_WITHIN_SHOW
+       1,                                     -- NOW_PLAYING_FLAG
+       NULL,                                  -- FLOWSHEET_ENTRY_TYPE_CODE_ID (unknown --> NULL)
+       ${safeSqlNum(startMs)},                -- TIME_LAST_MODIFIED
+       ${safeSqlNum(startMs)},                -- TIME_CREATED
+       ${safeSqlNum(entry.request_flag ? 1 : 0)}, -- REQUEST_FLAG (bool --> int)
+       ${safeSqlNum(entry.id)},                                  -- GLOBAL_ORDER_ID
+       NULL);`                                 // BMI_COMPOSER
+  );
+
+  return statements;
+});
+
+export const updateEntry = createBackendMirrorMiddleware<FSEntry>((req, entry) => {
+  // Message-only rows aren’t represented in legacy
+  if (entry?.message && entry.message.trim() !== "") return [];
+
+  const nowMs = Date.now();
+  const statements: string[] = [];
+
+  // Resolve legacy RADIO_SHOW_ID for the modern show
+  statements.push(
+    `SET @RS_ID := (SELECT ID FROM ${RADIO_SHOW_TABLE}
+                     WHERE SHOW_ID = ${safeSqlNum(entry.show_id)}
+                     ORDER BY TIME_CREATED DESC LIMIT 1);`
+  );
+
+  // Update by preferred mapping (GLOBAL_ORDER_ID = modern entry.id),
+  // or fallback to match by (show, sequence) if GLOBAL_ORDER_ID isn’t set.
+  statements.push(
+    `UPDATE ${FLOWSHEET_ENTRY_TABLE}
+        SET ARTIST_NAME = ${safeSql(entry.artist_name)},
+            SONG_TITLE = ${safeSql(entry.track_title)},
+            RELEASE_TITLE = ${safeSql(entry.album_title)},
+            LABEL_NAME = ${safeSql(entry.record_label)},
+            LIBRARY_RELEASE_ID = ${safeSqlNum(entry.album_id)},
+            ROTATION_RELEASE_ID = ${safeSqlNum(entry.rotation_id)},
+            REQUEST_FLAG = ${safeSqlNum(entry.request_flag ? 1 : 0)},
+            TIME_LAST_MODIFIED = ${safeSqlNum(nowMs)}
+      WHERE (GLOBAL_ORDER_ID = ${safeSqlNum(entry.id)})
+         OR (GLOBAL_ORDER_ID IS NULL AND RADIO_SHOW_ID = @RS_ID
+             AND SEQUENCE_WITHIN_SHOW = ${safeSqlNum(entry.play_order)})
+      LIMIT 1;`
+  );
+
+  return statements;
+});
+
+export const deleteEntry = createBackendMirrorMiddleware<FSEntry>((req, removed) => {
+  // Message-only rows weren’t mirrored, so nothing to do
+  if (removed?.message && removed.message.trim() !== "") return [];
+
+  const statements: string[] = [];
+  statements.push(
+    `SET @RS_ID := (SELECT ID FROM ${RADIO_SHOW_TABLE}
+                     WHERE SHOW_ID = ${safeSqlNum(removed.show_id)}
+                     ORDER BY TIME_CREATED DESC LIMIT 1);`
+  );
+
+  statements.push(
+    `DELETE FROM ${FLOWSHEET_ENTRY_TABLE}
+      WHERE (GLOBAL_ORDER_ID = ${safeSqlNum(removed.id)})
+         OR (GLOBAL_ORDER_ID IS NULL AND RADIO_SHOW_ID = @RS_ID
+             AND SEQUENCE_WITHIN_SHOW = ${safeSqlNum(removed.play_order)})
+      LIMIT 1;`
+  );
+
+  return statements;
+});
+
+export const changeOrder = createBackendMirrorMiddleware<FSEntry>((req, moved) => {
+  const entryId = Number((req.body ?? {}).entry_id);
+  const newPos  = Number((req.body ?? {}).new_position);
+
+  if (!entryId || !newPos) return []; // hard guard; controller already validated
+
+  const statements: string[] = [];
+
+  // 1) Resolve this legacy show row
+  statements.push(
+    `SET @RS_ID := (SELECT ID FROM ${RADIO_SHOW_TABLE}
+                     WHERE SHOW_ID = ${safeSqlNum(moved.show_id)}
+                     ORDER BY TIME_CREATED DESC LIMIT 1);`
+  );
+
+  // 2) Locate the legacy entry for the moved row via GLOBAL_ORDER_ID
+  statements.push(
+    `SET @E_ID := (SELECT ID FROM ${FLOWSHEET_ENTRY_TABLE}
+                    WHERE GLOBAL_ORDER_ID = ${safeSqlNum(entryId)}
+                      AND RADIO_SHOW_ID = @RS_ID
+                    LIMIT 1);`
+  );
+
+  // Optional: fallback if GLOBAL_ORDER_ID wasn’t set (rare once add-entry is updated)
+  statements.push(
+    `SET @E_ID := IFNULL(@E_ID, (SELECT ID FROM ${FLOWSHEET_ENTRY_TABLE}
+                                  WHERE RADIO_SHOW_ID = @RS_ID
+                                  ORDER BY SEQUENCE_WITHIN_SHOW DESC LIMIT 1));`
+  );
+
+  // 3) Read old position
+  statements.push(
+    `SET @OLD_POS := (SELECT SEQUENCE_WITHIN_SHOW FROM ${FLOWSHEET_ENTRY_TABLE}
+                       WHERE ID = @E_ID LIMIT 1);`,
+    `SET @NEW_POS := ${safeSqlNum(newPos)};`
+  );
+
+  // 4) Shift neighbors, then place the moved entry
+  // Move upward: new position is smaller number
+  statements.push(
+    `UPDATE ${FLOWSHEET_ENTRY_TABLE}
+        SET SEQUENCE_WITHIN_SHOW = SEQUENCE_WITHIN_SHOW + 1
+      WHERE RADIO_SHOW_ID = @RS_ID
+        AND @NEW_POS < @OLD_POS
+        AND SEQUENCE_WITHIN_SHOW >= @NEW_POS
+        AND SEQUENCE_WITHIN_SHOW <  @OLD_POS;`
+  );
+  // Move downward: new position is larger number
+  statements.push(
+    `UPDATE ${FLOWSHEET_ENTRY_TABLE}
+        SET SEQUENCE_WITHIN_SHOW = SEQUENCE_WITHIN_SHOW - 1
+      WHERE RADIO_SHOW_ID = @RS_ID
+        AND @NEW_POS > @OLD_POS
+        AND SEQUENCE_WITHIN_SHOW >  @OLD_POS
+        AND SEQUENCE_WITHIN_SHOW <= @NEW_POS;`
+  );
+  // Place moved entry
+  statements.push(
+    `UPDATE ${FLOWSHEET_ENTRY_TABLE}
+        SET SEQUENCE_WITHIN_SHOW = @NEW_POS,
+            TIME_LAST_MODIFIED = ${safeSqlNum(Date.now())}
+      WHERE ID = @E_ID
+      LIMIT 1;`
+  );
+
+  return statements;
 });
 
 export const flowsheetMirror = {
   getEntries,
+  startShow,
+  endShow,
+  addEntry,
+  updateEntry,
+  deleteEntry,
+  changeOrder
 };

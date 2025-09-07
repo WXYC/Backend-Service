@@ -2,17 +2,52 @@ import { NextFunction, Request, Response } from "express";
 import { MirrorCommandQueue } from "./commandqueue.mirror.js";
 
 export const createBackendMirrorMiddleware =
-  (createCommand: (req: Request) => string) =>
+  <T>(createCommand: (req: Request, data: T) => string[]) =>
   async (req: Request, res: Response, next: NextFunction) => {
-    let queue = MirrorCommandQueue.instance();
+    tapJsonResponse(res);
 
-    MirrorCommandQueue.instance().enqueue(createCommand(req));
+    // After the response is sent, decide whether to enqueue work
+    res.once("finish", () => {
+      console.log("Response finished, checking for mirror work...");
+      const ok = res.statusCode >= 200 && res.statusCode < 300;
+      const data = (res.locals as any).mirrorData as T | undefined;
 
-    if (queue.isAlive()) {
-      next();
-    } else {
-      res
-        .status(503)
-        .json({ message: "Service Unavailable: Mirror backend is offline" });
-    }
+      console.log("Response status:", res.statusCode, "ok?", ok);
+
+      if (!ok || data == null) return;
+
+      console.log("Enqueuing mirror work...");
+
+      const queue = MirrorCommandQueue.instance();
+      queue.enqueue(createCommand(req, data));
+    });
+
+    next();
   };
+
+function tapJsonResponse(res: Response) {
+  const origSend = res.send.bind(res);
+
+  res.send = ((body?: any) => {
+    let captured: unknown = body;
+
+    const ct = (res.getHeader("content-type") || "").toString().toLowerCase();
+    if (typeof body === "string" && ct.includes("application/json")) {
+      try {
+        captured = JSON.parse(body);
+      } catch {
+        // ignore parse errors; keep raw string
+      }
+    }
+
+    if (Buffer.isBuffer(body) && ct.includes("application/json")) {
+      try {
+        captured = JSON.parse(body.toString("utf8"));
+      } catch {
+        /* ignore */
+      }
+    }
+    (res.locals as any).mirrorData = captured;
+    return origSend(body);
+  }) as any;
+}

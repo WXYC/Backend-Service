@@ -19,3 +19,8 @@ export function cryptoRandomId() {
   } catch { /* ignore */ }
   return "cmd_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
+
+export  const safeSql = (s?: string | null) =>
+    s === undefined || s === null ? "NULL" : `'${String(s).replace(/'/g, "''")}'`;
+export  const safeSqlNum = (n?: number | null) =>
+    n === undefined || n === null || Number.isNaN(Number(n)) ? "NULL" : String(Number(n));
