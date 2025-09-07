@@ -4,8 +4,8 @@ import {
   serverEventsMgr,
 } from "@/utils/serverEvents.js";
 import { promises } from "fs";
-import path from "path";
 import { EventEmitter } from "node:events";
+import path from "path";
 import { MirrorSQL } from "./sql.mirror.js";
 import { cryptoRandomId, expBackoffMs } from "./utilities.mirror.js";
 
@@ -86,25 +86,23 @@ export class MirrorCommandQueue extends EventEmitter {
     };
   }
 
-  enqueue(sqls: string[]): MirrorCommand[] | null {
+  enqueue(sqls: string[]): MirrorCommand | null {
     if (!this.alive) return null;
+    let sql = sqls.map(s => s.trim().endsWith(";") ? s.trim() : s.trim() + ";").join("\n");
+    sql = `START TRANSACTION;\n${sql}\nCOMMIT;`;
 
-    const cmds: MirrorCommand[] = [];
-    for (const sql of sqls)
-    {
-      const cmd: MirrorCommand = {
-        id: cryptoRandomId(),
-        sql,
-        enqueuedAt: Date.now(),
-        attempts: 0,
-        status: "pending",
-      };
-      cmds.push(cmd);
-      this.queue.push(cmd);
-      this.emit("enqueued", cmd);
-    }
+    const cmd: MirrorCommand = {
+      id: cryptoRandomId(),
+      sql,
+      enqueuedAt: Date.now(),
+      attempts: 0,
+      status: "pending",
+    };
+    
+    this.queue.push(cmd);
+    this.emit("enqueued", cmd);
     this.kick();
-    return cmds;
+    return cmd;
   }
 
   isAlive() {
