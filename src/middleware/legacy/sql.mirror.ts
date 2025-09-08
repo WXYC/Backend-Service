@@ -14,6 +14,7 @@ export class MirrorSQL {
 
     const sshConfig: Config = {
       host: process.env.SSH_HOST,
+      port: process.env.SSH_PORT ? parseInt(process.env.SSH_PORT) : 22,
       username: process.env.SSH_USERNAME,
       password: process.env.SSH_PASSWORD,
       readyTimeout: 15000,

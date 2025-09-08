@@ -12,7 +12,9 @@ const TopicAuthz: Record<string, string[]> = {
 
 const filterAuthorizedTopics = (res: Response, topics: string[]) => {
   const claims = res.locals?.decodedJWT;
-  const groups: Array<string> = claims ? claims['cognito:groups'] : [''];
+  const groups: Array<string> = Array.isArray(claims?.['cognito:groups'])
+  ? [...claims['cognito:groups']]
+  : [];
 
   // If we have a valid token allow to access dj topics
   if (claims) {

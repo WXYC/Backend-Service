@@ -9,7 +9,7 @@ export const createBackendMirrorMiddleware =
     // After the response is sent, decide whether to enqueue work
     res.once("finish", () => {
       console.log("Response finished, checking for mirror work...");
-      const ok = res.statusCode >= 200 && res.statusCode < 300;
+      const ok = res.statusCode >= 200 && res.statusCode < 305;
       const data = (res.locals as any).mirrorData as T | undefined;
 
       console.log("Response status:", res.statusCode, "ok?", ok);
