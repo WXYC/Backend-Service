@@ -14,7 +14,7 @@ const getEntries = createBackendMirrorMiddleware<any>((req, data) => {
   const offset = page * limit;
 
   return [
-    `SELECT * FROM ${FLOWSHEET_ENTRY_TABLE} ORDER BY entry_time DESC LIMIT ${limit} OFFSET ${offset};`,
+    `SELECT * FROM ${FLOWSHEET_ENTRY_TABLE} LIMIT ${limit} OFFSET ${offset};`,
   ];
 });
 

@@ -48,6 +48,7 @@ export class MirrorSQL {
               -D ${process.env.REMOTE_DB_NAME ?? ""} \\
               --protocol=TCP \\
               --connect-timeout=10 \\
+              --skip-ssl \\
               --batch --raw --silent <<'__SQL__'
 ${sql}
 __SQL__

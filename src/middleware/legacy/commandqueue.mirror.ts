@@ -59,7 +59,7 @@ export class MirrorCommandQueue extends EventEmitter {
   }
 
   private static createTrigger =
-    (eventType: keyof typeof MirrorEvents) => (cmd: MirrorCommand) => {
+    (eventType: keyof typeof MirrorEvents) => async (cmd: MirrorCommand) => {
       const data: EventData = {
         type: eventType,
         payload: cmd,
@@ -67,6 +67,15 @@ export class MirrorCommandQueue extends EventEmitter {
       };
 
       serverEventsMgr.broadcast("mirror", data);
+
+      await promises.mkdir("mirror-logs", { recursive: true });
+      const logFile = path.join(
+        "mirror-logs",
+        `queue-success.json`
+      );
+
+      const payload = JSON.stringify(cmd, null, 2);
+      await promises.appendFile(logFile, payload, "utf8");
     };
 
   private readonly options: Required<MirrorQueueOptions>;
@@ -88,7 +97,9 @@ export class MirrorCommandQueue extends EventEmitter {
 
   enqueue(sqls: string[]): MirrorCommand | null {
     if (!this.alive) return null;
-    let sql = sqls.map(s => s.trim().endsWith(";") ? s.trim() : s.trim() + ";").join("\n");
+    let sql = sqls
+      .map((s) => (s.trim().endsWith(";") ? s.trim() : s.trim() + ";"))
+      .join("\n");
     sql = `START TRANSACTION;\n${sql}\nCOMMIT;`;
 
     const cmd: MirrorCommand = {
@@ -98,7 +109,7 @@ export class MirrorCommandQueue extends EventEmitter {
       attempts: 0,
       status: "pending",
     };
-    
+
     this.queue.push(cmd);
     this.emit("enqueued", cmd);
     this.kick();
