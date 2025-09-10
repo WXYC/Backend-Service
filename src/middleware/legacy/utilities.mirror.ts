@@ -20,7 +20,18 @@ export function cryptoRandomId() {
   return "cmd_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+export const toMs = (v: unknown, fallback = Date.now()): number => {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
+  if (typeof v === "string") {
+    const iso = Date.parse(v);
+    if (Number.isFinite(iso)) return Math.floor(iso);
+    const num = Number(v);
+    if (Number.isFinite(num)) return Math.floor(num);
+  }
+  return Math.floor(fallback);
+};
+
 export  const safeSql = (s?: string | null) =>
     s === undefined || s === null ? "NULL" : `'${String(s).replace(/'/g, "''")}'`;
-export  const safeSqlNum = (n?: number | null) =>
-    n === undefined || n === null || Number.isNaN(Number(n)) ? "NULL" : String(Number(n));
+export const safeSqlNum = (n: unknown): string =>
+  typeof n === "number" && Number.isFinite(n) ? String(Math.floor(n)) : "NULL";

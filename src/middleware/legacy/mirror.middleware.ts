@@ -2,12 +2,12 @@ import { NextFunction, Request, Response } from "express";
 import { MirrorCommandQueue } from "./commandqueue.mirror.js";
 
 export const createBackendMirrorMiddleware =
-  <T>(createCommand: (req: Request, data: T) => string[]) =>
+  <T>(createCommand: (req: Request, data: T) => Promise<string[]>) =>
   async (req: Request, res: Response, next: NextFunction) => {
     tapJsonResponse(res);
 
     // After the response is sent, decide whether to enqueue work
-    res.once("finish", () => {
+    res.once("finish", async () => {
       console.log("Response finished, checking for mirror work...");
       const ok = res.statusCode >= 200 && res.statusCode < 305;
       const data = (res.locals as any).mirrorData as T | undefined;
@@ -19,7 +19,7 @@ export const createBackendMirrorMiddleware =
       console.log("Enqueuing mirror work...");
 
       const queue = MirrorCommandQueue.instance();
-      queue.enqueue(createCommand(req, data));
+      queue.enqueue(await createCommand(req, data));
     });
 
     next();

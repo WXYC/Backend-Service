@@ -1,12 +1,14 @@
 import { QueryParams } from "@/controllers/flowsheet.controller.js";
-import { FSEntry, Show } from "@/db/schema.js";
+import { djs, FSEntry, Show, show_djs } from "@/db/schema.js";
 import { createBackendMirrorMiddleware } from "./mirror.middleware.js";
-import { safeSql, safeSqlNum } from "./utilities.mirror.js";
+import { safeSql, safeSqlNum, toMs } from "./utilities.mirror.js";
+import { db } from "@/db/drizzle_client.js";
+import { eq } from "drizzle-orm";
 
 const FLOWSHEET_ENTRY_TABLE = "FLOWSHEET_ENTRY_PROD";
 const RADIO_SHOW_TABLE = "FLOWSHEET_RADIO_SHOW_PROD";
 
-const getEntries = createBackendMirrorMiddleware<any>((req, data) => {
+const getEntries = createBackendMirrorMiddleware<any>(async (req, data) => {
   const query = req.query as QueryParams;
 
   const page = parseInt(query.page ?? "0");
@@ -18,12 +20,19 @@ const getEntries = createBackendMirrorMiddleware<any>((req, data) => {
   ];
 });
 
-const startShow = createBackendMirrorMiddleware<Show>((req, show) => {
+const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
   const nowMs = Date.now();
   const statements: string[] = [];
 
-  const startMs = Number(show.start_time ?? nowMs);
-  const djId = Number(show.primary_dj_id ?? req.body?.dj_id ?? null);
+  const startMs = toMs(show.start_time ?? req.body?.start_time ?? nowMs);
+  const djId = Number.isFinite(Number(show.primary_dj_id ?? req.body?.dj_id))
+    ? Number(show.primary_dj_id ?? req.body?.dj_id)
+    : null;
+
+  if (!djId) return statements; // no DJ, nothing to do
+
+  const dj = (await db.select().from(djs).where(eq(djs.id, djId)).limit(1))?.[0];
+
   const showName = show.show_name ?? req.body?.show_name ?? null;
   const specialtyId = Number(
     show.specialty_id ?? req.body?.specialty_id ?? null
@@ -41,41 +50,33 @@ const startShow = createBackendMirrorMiddleware<Show>((req, show) => {
          WORKING_HOUR, SIGNON_TIME, SIGNOFF_TIME, TIME_LAST_MODIFIED, TIME_CREATED, MODLOCK, SHOW_ID)
        VALUES
         (@NEW_RS_ID,
-         ${startingHour},
-         NULL,                             -- DJ_NAME unknown here; keep NULL
+         ${safeSqlNum(startingHour)},
+         ${safeSql(dj.real_name)},
          ${safeSqlNum(djId)},
-         NULL,                             -- DJ_HANDLE unknown here; keep NULL
+         ${safeSql(dj.dj_name)},    
          ${safeSql(showName)},
          ${safeSqlNum(specialtyId)},
-         ${workingHour},
-         ${startMs},
+         ${safeSqlNum(workingHour)},
+         ${safeSqlNum(startMs)},
          NULL,                             -- SIGNOFF_TIME set on end-show mirror
-         ${timeModified},
-         ${timeCreated},
-         NULL,                             -- MODLOCK unused
-         ${safeSqlNum(show.id)});`
+         ${safeSqlNum(timeModified)},
+         ${safeSqlNum(timeCreated)},
+         0,                                -- MODLOCK default to 0 (unlocked)
+         @NEW_RS_ID);`
   );
 
   return statements;
 });
 
-export const endShow = createBackendMirrorMiddleware<Show>((req, show) => {
-  const endMs = Number(show.end_time ?? Date.now());
+export const endShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
+  const endMs = toMs(show.end_time ?? Date.now());
   const statements: string[] = [];
 
   statements.push(
     `UPDATE ${RADIO_SHOW_TABLE}
        SET SIGNOFF_TIME = ${safeSqlNum(endMs)},
-           TIME_LAST_MODIFIED = ${safeSqlNum(endMs)}
-     WHERE SHOW_ID = ${safeSqlNum(show.id)};`
-  );
-
-  // Fallback: If no matching SHOW_ID found (e.g. legacy show with no SHOW_ID),
-  // just update the most recent open show (SIGNOFF_TIME IS NULL).
-  statements.push(
-    `UPDATE ${RADIO_SHOW_TABLE}
-       SET SIGNOFF_TIME = ${safeSqlNum(endMs)},
-           TIME_LAST_MODIFIED = ${safeSqlNum(endMs)}
+           TIME_LAST_MODIFIED = ${safeSqlNum(endMs)},
+              MODLOCK = 1
      WHERE SIGNOFF_TIME IS NULL
      ORDER BY STARTING_RADIO_HOUR DESC
      LIMIT 1;`
@@ -84,7 +85,7 @@ export const endShow = createBackendMirrorMiddleware<Show>((req, show) => {
   return statements;
 });
 
-export const addEntry = createBackendMirrorMiddleware<FSEntry>((req, entry) => {
+export const addEntry = createBackendMirrorMiddleware<FSEntry>(async (req, entry) => {
   // If this was a PSA/talk-set/break “message” entry, do nothing on legacy.
   if (entry?.message && entry.message.trim() !== "") return [];
 
@@ -150,7 +151,7 @@ export const addEntry = createBackendMirrorMiddleware<FSEntry>((req, entry) => {
   return statements;
 });
 
-export const updateEntry = createBackendMirrorMiddleware<FSEntry>((req, entry) => {
+export const updateEntry = createBackendMirrorMiddleware<FSEntry>(async (req, entry) => {
   // Message-only rows aren’t represented in legacy
   if (entry?.message && entry.message.trim() !== "") return [];
 
@@ -185,7 +186,7 @@ export const updateEntry = createBackendMirrorMiddleware<FSEntry>((req, entry) =
   return statements;
 });
 
-export const deleteEntry = createBackendMirrorMiddleware<FSEntry>((req, removed) => {
+export const deleteEntry = createBackendMirrorMiddleware<FSEntry>(async (req, removed) => {
   // Message-only rows weren’t mirrored, so nothing to do
   if (removed?.message && removed.message.trim() !== "") return [];
 
@@ -207,7 +208,7 @@ export const deleteEntry = createBackendMirrorMiddleware<FSEntry>((req, removed)
   return statements;
 });
 
-export const changeOrder = createBackendMirrorMiddleware<FSEntry>((req, moved) => {
+export const changeOrder = createBackendMirrorMiddleware<FSEntry>(async (req, moved) => {
   const entryId = Number((req.body ?? {}).entry_id);
   const newPos  = Number((req.body ?? {}).new_position);
 
