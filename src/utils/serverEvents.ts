@@ -44,7 +44,7 @@ export type EventClient = {
 export type EventData<T = unknown> = {
   type: string;
   payload: T;
-  timestamp: Date;
+  timestamp?: Date;
 };
 
 class ServerEventsManager {
@@ -186,6 +186,11 @@ class ServerEventsManager {
 
   broadcast = (topicId: string, data: EventData) => {
     const clientIds = this.topicClients.get(topicId) || new Set();
+
+    if (!data.timestamp) {
+      data.timestamp = new Date();
+    }
+
     const message = `data: ${JSON.stringify(data)}\n\n`;
 
     clientIds.forEach((clientId) => {
@@ -205,6 +210,10 @@ class ServerEventsManager {
       throw new Error(`Client not found subscribed to ${topicId}: ${clientId}`);
     }
     const client = this.clients.get(clientId);
+
+    if (!data.timestamp) {
+      data.timestamp = new Date();
+    }
 
     const message = `data: ${JSON.stringify(data)}\n\n`;
 

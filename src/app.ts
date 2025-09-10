@@ -11,6 +11,7 @@ import { dj_route } from "./routes/djs.route.js";
 import { events_route } from "./routes/events.route.js";
 import { flowsheet_route } from "./routes/flowsheet.route.js";
 import { library_route } from "./routes/library.route.js";
+import { requests_route } from "./routes/requests.route.js";
 import { schedule_route } from "./routes/schedule.route.js";
 config({ quiet: true });
 // import errorHandler from './middleware/errorHandler';
@@ -44,7 +45,8 @@ app.use("/djs", dj_route);
 
 app.use("/schedule", schedule_route);
 
-// monitoring route for legacy backend events
+app.use("/requests", requests_route);
+
 app.use(
   "/events",
   (req, res, next) => {
