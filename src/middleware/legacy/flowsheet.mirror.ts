@@ -254,6 +254,7 @@ export const deleteEntry = createBackendMirrorMiddleware<FSEntry>(
   }
 );
 
+/*
 export const changeOrder = createBackendMirrorMiddleware<FSEntry>(
   async (req, moved) => {
     const entryId = Number((req.body ?? {}).entry_id);
@@ -323,6 +324,7 @@ export const changeOrder = createBackendMirrorMiddleware<FSEntry>(
     return statements;
   }
 );
+*/
 
 export const flowsheetMirror = {
   getEntries,
@@ -331,5 +333,5 @@ export const flowsheetMirror = {
   addEntry,
   updateEntry,
   deleteEntry,
-  changeOrder,
+  /*changeOrder,*/
 };

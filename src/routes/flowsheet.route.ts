@@ -37,7 +37,7 @@ flowsheet_route.delete(
 flowsheet_route.patch(
   "/play-order",
   cognitoMiddleware(dj),
-  flowsheetMirror.changeOrder,
+  /*flowsheetMirror.changeOrder,*/
   flowsheetController.changeOrder
 );
 
