@@ -1,6 +1,7 @@
 import { serverEventsMgr, Topics, EventData, TestEvents } from '@/utils/serverEvents.js';
 import { Roles } from '@/middleware/cognito.auth.js';
 import { RequestHandler, Response } from 'express';
+import WxycError from '@/utils/error.js';
 
 //Define access levels for events
 const TopicAuthz: Record<string, string[]> = {
@@ -52,8 +53,15 @@ export const subscribeToTopic: RequestHandler<object, unknown, subReqBody> = (re
     return res.status(400).json({ message: 'Bad Request: client_id or topics missing from request body' });
   }
 
-  const subbedTopics = serverEventsMgr.subscribe(topics, client_id);
-  res.status(200).json({ message: 'successfully subscribed', topics: subbedTopics });
+  try {
+    const subbedTopics = serverEventsMgr.subscribe(topics, client_id);
+
+    res.status(200).json({ message: 'successfully subscribed', topics: subbedTopics });
+  } catch (e) {
+    console.error('Failed to subscribe to event: ', e);
+
+    return next(e);
+  }
 };
 
 export const testTrigger: RequestHandler = (req, res, next) => {
@@ -65,7 +73,13 @@ export const testTrigger: RequestHandler = (req, res, next) => {
     timestamp: new Date(),
   };
 
-  serverEventsMgr.broadcast(Topics.test, data);
+  try {
+    serverEventsMgr.broadcast(Topics.test, data);
+  } catch (e) {
+    console.error('Failed to broadcast event: ', e);
+
+    return next(e);
+  }
 
   res.status(200).json({
     message: 'event triggered',

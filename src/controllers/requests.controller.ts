@@ -1,6 +1,7 @@
 import { RequestHandler } from 'express';
 import * as RequestService from '../services/requests.service.js';
 import { serverEventsMgr, Topics, ShowDjEvents, EventData } from '@/utils/serverEvents.js';
+import WxycError from '@/utils/error.js';
 
 export type SongRequestBody = {
   message: string;
@@ -18,7 +19,12 @@ export const submitRequest: RequestHandler<object, unknown, SongRequestBody> = a
 
   //Send to all subscribed showDJ clients
   const requestEvent: EventData = { type: ShowDjEvents.songRequest, payload: { request_message: message } };
-  serverEventsMgr.broadcast(Topics.showDj, requestEvent);
+
+  try {
+    serverEventsMgr.broadcast(Topics.showDj, requestEvent);
+  } catch (e) {
+    console.error('Failed to broadcast request event: ', e);
+  }
 
   //Send to requests slack channel
   try {
