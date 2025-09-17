@@ -1,19 +1,25 @@
 import cors from "cors";
+
 import { config } from "dotenv";
+config({ quiet: true });
+
 import express from "express";
+
 import swaggerUi from "swagger-ui-express";
-import { parse as parse_yaml } from "yaml";
 import swaggerContent from "./app.yaml";
+
+import { parse as parse_yaml } from "yaml";
+
 import { activeShow } from "./middleware/checkActiveShow.js";
 import { showMemberMiddleware } from "./middleware/checkShowMember.js";
 import { cognitoMiddleware, jwtVerifier } from "./middleware/cognito.auth.js";
+
 import { dj_route } from "./routes/djs.route.js";
 import { events_route } from "./routes/events.route.js";
 import { flowsheet_route } from "./routes/flowsheet.route.js";
 import { library_route } from "./routes/library.route.js";
 import { requests_route } from "./routes/requests.route.js";
 import { schedule_route } from "./routes/schedule.route.js";
-config({ quiet: true });
 // import errorHandler from './middleware/errorHandler';
 
 const port = process.env.PORT || 8080;

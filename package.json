@@ -10,7 +10,7 @@
     "dev": "(tsup --watch &) && sleep 1 && DB_HOST=localhost nodemon --watch dist --watch .env -e js --exec \"npm run start\"",
     "clean": "rm -rf ./dist/*",
     "test": "jest",
-    "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d && sleep 2 && pwd && bash dev_env/db_setup.sh",
+    "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d && sleep 2 && bash dev_env/db_setup.sh",
     "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down db -v --remove-orphans",
     "ci:env": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci up --build -d && sleep 2 && USE_CI=true bash dev_env/db_setup.sh",
     "ci:test": "PORT=${CI_PORT:-8081} npm run test;",
