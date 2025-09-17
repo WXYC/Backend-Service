@@ -14,8 +14,12 @@ export function expBackoffMs(attempt: number, base: number, max: number, jitterR
 export function cryptoRandomId() {
   // Node 18+: crypto.randomUUID() available; fallback otherwise
   try {
-    // @ts-ignore
-    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+    if (
+      typeof crypto !== "undefined" &&
+      typeof (crypto as { randomUUID?: () => string }).randomUUID === "function"
+    ) {
+      return (crypto as { randomUUID: () => string }).randomUUID();
+    }
   } catch { /* ignore */ }
   return "cmd_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
