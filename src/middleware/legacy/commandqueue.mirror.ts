@@ -1,8 +1,10 @@
 import {
   EventData,
-  MirrorEvents,
+  MirrorEvents as ImportedMirrorEvents,
   serverEventsMgr,
 } from "@/utils/serverEvents.js";
+
+const MirrorEvents = ImportedMirrorEvents as const;
 import { promises } from "fs";
 import { EventEmitter } from "node:events";
 import path from "path";
