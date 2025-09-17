@@ -37,5 +37,10 @@ export const toMs = (v: unknown, fallback = Date.now()): number => {
 
 export  const safeSql = (s?: string | null) =>
     s === undefined || s === null ? "NULL" : `'${String(s).replace(/'/g, "''")}'`;
+/**
+ * Floors valid numbers and returns their string representation for SQL.
+ * Returns the string "NULL" for invalid inputs (non-numbers or non-finite values).
+ * Intended for safe SQL number generation.
+ */
 export const safeSqlNum = (n: unknown): string =>
   typeof n === "number" && Number.isFinite(n) ? String(Math.floor(n)) : "NULL";
