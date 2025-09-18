@@ -1,3 +1,4 @@
+import WxycError from '@/utils/error.js';
 import { Response } from 'express';
 
 export const Topics = {
@@ -105,7 +106,7 @@ class ServerEventsManager {
   subscribe = (topicIds: string[], clientId: string): string[] => {
     const client = this.clients.get(clientId);
     if (!client) {
-      throw new Error(`Client connection not found: ${clientId}`);
+      throw new WxycError(`Client connection not found: ${clientId}`, 404);
     }
 
     // Filter out topics that aren't registered with ServerEventsManager instance
@@ -207,8 +208,9 @@ class ServerEventsManager {
 
   dispatch = (topicId: string, clientId: string, data: EventData) => {
     if (!this.topicClients.get(topicId)?.has(clientId)) {
-      throw new Error(`Client not found subscribed to ${topicId}: ${clientId}`);
+      throw new WxycError(`Client not found subscribed to ${topicId}: ${clientId}`, 404);
     }
+
     const client = this.clients.get(clientId);
 
     if (!data.timestamp) {

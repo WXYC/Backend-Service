@@ -2,24 +2,21 @@ import cors from "cors";
 
 import { config } from "dotenv";
 config({ quiet: true });
-
-import express from "express";
-
-import swaggerUi from "swagger-ui-express";
-import swaggerContent from "./app.yaml";
-
-import { parse as parse_yaml } from "yaml";
-
-import { activeShow } from "./middleware/checkActiveShow.js";
-import { showMemberMiddleware } from "./middleware/checkShowMember.js";
-import { cognitoMiddleware, jwtVerifier } from "./middleware/cognito.auth.js";
-
-import { dj_route } from "./routes/djs.route.js";
-import { events_route } from "./routes/events.route.js";
-import { flowsheet_route } from "./routes/flowsheet.route.js";
-import { library_route } from "./routes/library.route.js";
-import { requests_route } from "./routes/requests.route.js";
-import { schedule_route } from "./routes/schedule.route.js";
+import express from 'express';
+import cors from 'cors';
+import swaggerUi from 'swagger-ui-express';
+import { parse as parse_yaml } from 'yaml';
+import swaggerContent from './app.yaml';
+import { dj_route } from './routes/djs.route.js';
+import { flowsheet_route } from './routes/flowsheet.route.js';
+import { library_route } from './routes/library.route.js';
+import { schedule_route } from './routes/schedule.route.js';
+import { requests_route } from './routes/requests.route.js';
+import { events_route } from './routes/events.route.js';
+import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth.js';
+import { showMemberMiddleware } from './middleware/checkShowMember.js';
+import { activeShow } from './middleware/checkActiveShow.js';
+import errorHandler from './middleware/errorHandler.js';
 // import errorHandler from './middleware/errorHandler';
 
 const port = process.env.PORT || 8080;
@@ -70,15 +67,11 @@ app.get("/testAuth", cognitoMiddleware(), async (req, res) => {
 });
 
 //example of how cognito auth middleware can inform further middleware.
-app.get(
-  "/testInShow",
-  cognitoMiddleware(),
-  activeShow,
-  showMemberMiddleware,
-  async (req, res) => {
-    res.json({ message: "Authenticated, active show, & show member" });
-  }
-);
+app.get('/testInShow', cognitoMiddleware(), activeShow, showMemberMiddleware, async (req, res) => {
+  res.json({ message: 'Authenticated, active show, & show member' });
+});
+
+app.use(errorHandler);
 
 //On server startup we pre-fetch all jwt validation keys
 jwtVerifier
