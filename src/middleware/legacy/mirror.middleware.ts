@@ -8,18 +8,25 @@ export const createBackendMirrorMiddleware =
 
     // After the response is sent, decide whether to enqueue work
     res.once("finish", async () => {
-      console.log("Response finished, checking for mirror work...");
-      const ok = res.statusCode >= 200 && res.statusCode < 305;
-      const data = (res.locals as any).mirrorData as T | undefined;
+      try
+      {
+        console.log("Response finished, checking for mirror work...");
+        const ok = res.statusCode >= 200 && res.statusCode < 305;
+        const data = (res.locals as any).mirrorData as T | undefined;
 
-      console.log("Response status:", res.statusCode, "ok?", ok);
+        console.log("Response status:", res.statusCode, "ok?", ok);
 
-      if (!ok || data == null) return;
+        if (!ok || data == null) return;
 
-      console.log("Enqueuing mirror work...");
+        console.log("Enqueuing mirror work...");
 
-      const queue = MirrorCommandQueue.instance();
-      queue.enqueue(await createCommand(req, data));
+        const queue = MirrorCommandQueue.instance();
+        queue.enqueue(await createCommand(req, data));
+      }
+      catch(e)
+      {
+        console.error("Error in mirror middleware:", e);
+      }
     });
 
     next();
