@@ -49,6 +49,7 @@
     "node-fetch": "^3.3.2",
     "node-ssh": "^13.2.1",
     "postgres": "^3.4.4",
+    "posthog-node": "^5.8.6",
     "ssh2": "^1.17.0",
     "swagger-ui-express": "^5.0.1",
     "yaml": "^2.7.1"

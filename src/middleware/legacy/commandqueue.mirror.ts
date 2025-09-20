@@ -1,15 +1,23 @@
 import {
   EventData,
-  MirrorEvents as ImportedMirrorEvents,
+  MirrorEvents,
   serverEventsMgr,
 } from "@/utils/serverEvents.js";
 
-const MirrorEvents = ImportedMirrorEvents as const;
 import { promises } from "fs";
 import { EventEmitter } from "node:events";
 import path from "path";
 import { MirrorSQL } from "./sql.mirror.js";
 import { cryptoRandomId, expBackoffMs } from "./utilities.mirror.js";
+
+const CommandQueueEvents = {
+  enqueued: "enqueued",
+  started: "started",
+  succeeded: "succeeded",
+  failedAttempt: "failedAttempt",
+  fatal: "fatal",
+  persisted: "persisted",
+} as const;
 
 export interface MirrorCommand {
   id: string;
@@ -49,12 +57,12 @@ export class MirrorCommandQueue extends EventEmitter {
     if (!this._instance) {
       this._instance = new MirrorCommandQueue(options);
 
-      this._instance.on("enqueued", this.createTrigger("syncStarted"));
-      this._instance.on("started", this.createTrigger("syncProgress"));
-      this._instance.on("succeeded", this.createTrigger("syncComplete"));
-      this._instance.on("failedAttempt", this.createTrigger("syncRetry"));
-      this._instance.on("fatal", this.createTrigger("syncError"));
-      this._instance.on("persisted", this.createTrigger("syncError"));
+      this._instance.on(CommandQueueEvents.enqueued, this.createTrigger("syncStarted"));
+      this._instance.on(CommandQueueEvents.started, this.createTrigger("syncProgress"));
+      this._instance.on(CommandQueueEvents.succeeded, this.createTrigger("syncComplete"));
+      this._instance.on(CommandQueueEvents.failedAttempt, this.createTrigger("syncRetry"));
+      this._instance.on(CommandQueueEvents.fatal, this.createTrigger("syncError"));
+      this._instance.on(CommandQueueEvents.persisted, this.createTrigger("syncError"));
     }
 
     return this._instance;
@@ -69,15 +77,7 @@ export class MirrorCommandQueue extends EventEmitter {
       };
 
       serverEventsMgr.broadcast("mirror", data);
-
-      await promises.mkdir("mirror-logs", { recursive: true });
-      const logFile = path.join(
-        "mirror-logs",
-        `queue-success.json`
-      );
-
-      const payload = JSON.stringify(cmd, null, 2);
-      await promises.appendFile(logFile, payload, "utf8");
+      console.table(cmd);
     };
 
   private readonly options: Required<MirrorQueueOptions>;
@@ -113,7 +113,7 @@ export class MirrorCommandQueue extends EventEmitter {
     };
 
     this.queue.push(cmd);
-    this.emit("enqueued", cmd);
+    this.emit(CommandQueueEvents.enqueued, cmd);
     this.kick();
     return cmd;
   }
@@ -151,12 +151,12 @@ export class MirrorCommandQueue extends EventEmitter {
         try {
           cmd.attempts += 1;
           cmd.status = "in_progress";
-          this.emit("started", cmd);
+          this.emit(CommandQueueEvents.started, cmd);
 
           cmd.lastResult = await MirrorSQL.instance().send(cmd.sql);
 
           cmd.status = "completed";
-          this.emit("succeeded", cmd);
+          this.emit(CommandQueueEvents.succeeded, cmd);
         } catch (err) {
           cmd.status = "failed";
           cmd.lastError = String((err as Error).message || err);
@@ -170,7 +170,7 @@ export class MirrorCommandQueue extends EventEmitter {
 
   private async handleFailure(cmd: MirrorCommand, err: Error) {
     cmd.lastError = err.message ?? String(err);
-    this.emit("failedAttempt", { cmd, error: err, attempt: cmd.attempts });
+    this.emit(CommandQueueEvents.failedAttempt, { cmd, error: err, attempt: cmd.attempts });
 
     if (cmd.attempts >= this.options.maxAttempts) {
       await this.fatalStop(
@@ -204,7 +204,7 @@ export class MirrorCommandQueue extends EventEmitter {
     this.alive = false;
 
     const info = await this.persistQueue(reason, failedCommand);
-    this.emit("fatal", info);
+    this.emit(CommandQueueEvents.fatal, info);
   }
 
   private async persistQueue(reason: string, failedCommand?: MirrorCommand) {
@@ -233,7 +233,7 @@ export class MirrorCommandQueue extends EventEmitter {
 
     const payload = JSON.stringify(info, null, 2);
     await promises.writeFile(logFile, payload, "utf8");
-    this.emit("persisted", info);
+    this.emit(CommandQueueEvents.persisted, info);
     return info;
   }
 }
