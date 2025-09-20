@@ -1,6 +1,4 @@
-import cors from "cors";
-
-import { config } from "dotenv";
+import { config } from 'dotenv';
 config({ quiet: true });
 import express from 'express';
 import cors from 'cors';
@@ -28,30 +26,29 @@ app.use(express.json());
 //CORS
 app.use(
   cors({
-    origin: "*",
-    methods: ["GET", "POST", "DELETE", "PATCH", "PUT", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Cache-Control"],
-    exposedHeaders: ["x-sse-client-id", "x-client-id", "x-event-client-id"],
+    origin: '*',
+    methods: ['GET', 'POST', 'DELETE', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
   })
 );
 
 //Serve documentation
 const swaggerDoc = parse_yaml(swaggerContent);
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDoc));
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc));
 
-app.use("/library", library_route);
+app.use('/library', library_route);
 
-app.use("/flowsheet", flowsheet_route);
+app.use('/flowsheet', flowsheet_route);
 
-app.use("/djs", dj_route);
+app.use('/djs', dj_route);
 
-app.use("/schedule", schedule_route);
+app.use('/schedule', schedule_route);
 
-app.use("/requests", requests_route);
+app.use('/requests', requests_route);
 
 app.use(
-  "/events",
+  '/events',
   (req, res, next) => {
     // no global timeout on these long lived connections
     // SSE logic handles timeouts itself
@@ -62,8 +59,8 @@ app.use(
 );
 
 //example for how to use te Cognito auth middleware
-app.get("/testAuth", cognitoMiddleware(), async (req, res) => {
-  res.json({ message: "Authenticated!" });
+app.get('/testAuth', cognitoMiddleware(), async (req, res) => {
+  res.json({ message: 'Authenticated!' });
 });
 
 //example of how cognito auth middleware can inform further middleware.
