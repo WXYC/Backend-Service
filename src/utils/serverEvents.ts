@@ -6,6 +6,7 @@ export const Topics = {
   primaryDj: 'prim-dj-topic', // events for the primary dj e.g. remote dj show takover request.
   showDj: 'show-dj-topic', // events for all show djs e.g. song requests from app or guest dj requesting to add to bin.
   liveFs: 'live-fs-topic', // events related to fs entries e.g. crud events. Can be used to keep UIs synced live.
+  mirror: 'mirror-topic', // events for the mirror service with Tim's old backend.
 } as const;
 
 export const TestEvents = {
@@ -27,6 +28,14 @@ export const FsEvents = {
   update: 'update',
   refetch: 'refetch',
 } as const;
+
+export const MirrorEvents = {
+  syncStarted: 'sync-started',
+  syncProgress: 'sync-progress',
+  syncComplete: 'sync-complete',
+  syncRetry: 'sync-retry',
+  syncError: 'sync-error',
+}
 
 export type EventClient = {
   id: string; //uuid

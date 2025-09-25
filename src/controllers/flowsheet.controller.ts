@@ -3,7 +3,7 @@ import { Mutex } from 'async-mutex';
 import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema.js';
 import * as flowsheet_service from '../services/flowsheet.service.js';
 
-type QueryParams = {
+export type QueryParams = {
   page?: string;
   limit?: string;
   start_id?: string;

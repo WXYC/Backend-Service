@@ -2,5 +2,6 @@ node_modules
 tests/report
 coverage
 dist
+mirror-logs
 .env
 .DS_STORE
