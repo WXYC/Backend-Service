@@ -23,10 +23,13 @@ export const createBackendMirrorMiddleware =
         console.log("Response status:", res.statusCode, "ok?", ok);
 
         const distinctId = (req as any).user?.id ?? req.ip ?? "anonymous";
+        var mirrorOn = await postHogClient.isFeatureEnabled('backend-mirror', distinctId);
+        mirrorOn ??= false;
+
         if (
           !ok ||
           data == null ||
-          (await postHogClient.isFeatureEnabled(distinctId, 'backend-mirror'))
+          !mirrorOn
         )
           return;
 
