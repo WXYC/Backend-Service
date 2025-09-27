@@ -9,6 +9,7 @@ const TopicAuthz: Record<string, string[]> = {
   [Topics.liveFs]: [],
   [Topics.showDj]: [Roles.dj],
   [Topics.primaryDj]: [Roles.dj],
+  [Topics.mirror]: [Roles.dj],
 };
 
 const filterAuthorizedTopics = (res: Response, topics: string[]) => {
