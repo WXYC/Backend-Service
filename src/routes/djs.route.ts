@@ -13,7 +13,8 @@ dj_route.delete('/', cognitoMiddleware(mgmt), djsController.deleteDJ);
 
 dj_route.post('/register', cognitoMiddleware(mgmt), djsController.register);
 
-dj_route.patch('/register', cognitoMiddleware(dj), djsController.update);
+//TODO: reintroduce auth here once we leave cognito in the dust
+dj_route.patch('/register', cognitoMiddleware(), djsController.update);
 
 dj_route.post('/bin', cognitoMiddleware(dj), djsController.addToBin);
 
