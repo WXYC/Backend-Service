@@ -1,6 +1,6 @@
 import { and, eq, isNull, sql } from 'drizzle-orm';
-import { DJQueryParams } from '../controllers/djs.controller.js';
-import { db } from '../db/drizzle_client.js';
+import { DJQueryParams } from '@/controllers/djs.controller.js';
+import { db } from '@/db/drizzle_client.js';
 import {
   BinEntry,
   DJ,
@@ -17,7 +17,9 @@ import {
   show_djs,
   shows,
   specialty_shows,
-} from '../db/schema.js';
+} from '@/db/schema.js';
+
+import WxycError from '@/utils/error.js';
 
 export const insertDJ = async (new_dj: NewDJ) => {
   const response = await db.insert(djs).values(new_dj).returning();
@@ -30,6 +32,20 @@ export const updateDJ = async (new_dj: NewDJ) => {
     .set(new_dj)
     .where(eq(djs.cognito_user_name, new_dj.cognito_user_name))
     .returning();
+
+  if (!dj_obj[0]) {
+    throw new WxycError(`dj with cognito_username ${new_dj.cognito_user_name} not found`, 404);
+  }
+
+  return dj_obj[0];
+};
+
+export const deleteDJ = async (cognito_user_name: string): Promise<DJ> => {
+  const dj_obj = await db.delete(djs).where(eq(djs.cognito_user_name, cognito_user_name)).returning();
+
+  if (!dj_obj[0]) {
+    throw new WxycError(`dj with cognito_username ${cognito_user_name} not found`, 404);
+  }
 
   return dj_obj[0];
 };

@@ -9,6 +9,8 @@ export const dj_route = Router();
 //TODO: secure - mgmt & individual dj
 dj_route.get('/', cognitoMiddleware(dj), djsController.getDJInfo);
 
+dj_route.delete('/', cognitoMiddleware(mgmt), djsController.deleteDJ);
+
 dj_route.post('/register', cognitoMiddleware(mgmt), djsController.register);
 
 dj_route.patch('/register', cognitoMiddleware(dj), djsController.update);

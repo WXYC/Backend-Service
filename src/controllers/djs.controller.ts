@@ -54,6 +54,24 @@ export const update: RequestHandler<object, unknown, DJQueryParams> = async (req
   }
 };
 
+export const deleteDJ: RequestHandler<object, unknown, { cognito_user_name: string }> = async (req, res, next) => {
+  const { cognito_user_name } = req.body;
+
+  if (cognito_user_name === undefined) {
+    console.error('Error, Missing DJ Identifier: cognito_user_name');
+    res.status(400).send('Error, Missing DJ Identifier: cognito_user_name');
+  } else {
+    try {
+      const deletion_result = await DJService.deleteDJ(query.cognito_user_name);
+      res.status(200).json(deletion_result);
+    } catch (e) {
+      console.error('Error deleting DJ');
+      console.error(e);
+      next(e);
+    }
+  }
+};
+
 export const getDJInfo: RequestHandler<object, unknown, object, DJQueryParams> = async (req, res, next) => {
   const { query } = req;
 
