@@ -45,6 +45,30 @@ services:
     ports:
       - '${CI_PORT:-8081}:8080'
 
+  auth:
+    depends_on:
+      - db
+    image: wxyc_auth_service
+    build:
+      context: '../'
+      dockerfile: Dockerfile.auth
+      platforms:
+        - 'linux/amd64'
+    profiles: [dev]
+    # env_file: '../.env'
+    environment:
+      - DB_HOST=db
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - FRONTEND_SOURCE=${FRONTEND_SOURCE}
+      - BETTER_AUTH_URL=${BETTER_AUTH_URL}
+      - AUTH_ADMIN_USERNAME=${AUTH_ADMIN_USERNAME}
+      - AUTH_ADMIN_PASSWORD=${AUTH_ADMIN_PASSWORD}
+    ports:
+      - '${AUTH_PORT:-8082}:8787'
+
 volumes:
   pg-data:
   ci-pg-data:

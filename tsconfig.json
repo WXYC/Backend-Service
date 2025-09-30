@@ -12,8 +12,6 @@
     "strictPropertyInitialization": true,
     "noImplicitThis": true,
     "alwaysStrict": true,
-    "outDir": "dist",
-    "rootDir": "src",
     "sourceMap": true,
     "declaration": true,
     "skipLibCheck": true,
@@ -21,9 +19,12 @@
     "resolveJsonModule": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@wxyc/database": ["packages/database/dist/client"],
+      "@wxyc/database/schema": ["packages/database/dist/schema"],
+      "@wxyc/shared": ["packages/shared/dist/index"],
+      "@wxyc/auth-middleware": ["packages/auth-middleware/dist/index"]
     }
   },
-  "include": ["src/**/*"],
+  "include": ["apps/**/*", "packages/**/*", "apps/backend/types.d.ts"],
   "exclude": ["node_modules", "dist", "**/*.test.ts"]
 }

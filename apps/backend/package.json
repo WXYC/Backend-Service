@@ -1,0 +1,45 @@
+{
+  "name": "@wxyc/backend-service",
+  "version": "1.0.0",
+  "description": "WXYC Backend API Service",
+  "type": "module",
+  "main": "./dist/app.js",
+  "scripts": {
+    "dev": "tsup --watch",
+    "build": "tsup --minify",
+    "start": "node dist/app.js",
+    "clean": "rm -rf ./dist/*",
+    "test": "jest"
+  },
+  "dependencies": {
+    "async-mutex": "^0.5.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "node-fetch": "^3.3.2",
+    "node-ssh": "^13.2.1",
+    "postgres": "^3.4.4",
+    "posthog-node": "^5.8.6",
+    "ssh2": "^1.17.0",
+    "swagger-ui-express": "^5.0.1",
+    "yaml": "^2.7.1",
+    "@wxyc/database": "file:../../packages/database",
+    "@wxyc/shared": "file:../../packages/shared",
+    "@wxyc/auth-middleware": "file:../../packages/auth-middleware"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.3",
+    "@types/express-serve-static-core": "^5.0.7",
+    "@types/node": "^24.1.0",
+    "@types/pg": "^8.11.10",
+    "@types/ssh2": "^1.15.5",
+    "@types/swagger-ui-express": "^4.1.8",
+    "jest": "^30.0.5",
+    "jest-html-reporters": "^3.1.7",
+    "nodemon": "^3.1.7",
+    "supertest": "^7.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.6.2"
+  }
+}

@@ -1,0 +1,980 @@
+openapi: 3.0.0
+info:
+  title: WXYC Backend API
+  description: API for managing WXYC radio station operations including flowsheets, library, DJs, and schedule
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:{port}
+    variables:
+      port:
+        default: '8080'
+        description: Local API server port
+  - url: https://api.wxyc.org
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: JWT token from Better Auth
+
+  schemas:
+    FlowsheetEntry:
+      type: object
+      properties:
+        artist_name:
+          type: string
+        album_title:
+          type: string
+        track_title:
+          type: string
+        album_id:
+          type: number
+        rotation_id:
+          type: number
+        record_label:
+          type: string
+        request_flag:
+          type: boolean
+
+    FlowsheetEntryGet:
+      allOf:
+        - $ref: '#/components/schemas/FlowsheetEntry'
+        - type: object
+          properties:
+            id:
+              type: integer
+            play_order:
+              type: integer
+            show_id:
+              type: integer
+            rotation_play_freq:
+              type: string
+            message:
+              type: string
+
+    FlowsheetEntryAdd:
+      type: object
+      oneOf:
+        - allOf:
+            - $ref: '#/components/schemas/FlowsheetEntry'
+            - type: object
+              required: ['artist_name', 'album_title', 'track_title']
+        - type: object
+          required: ['message']
+          properties:
+            message:
+              type: string
+
+    Show:
+      type: object
+      properties:
+        id:
+          type: integer
+        primary_dj_id:
+          type: integer
+        specialty_id:
+          type: integer
+        show_name:
+          type: string
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+          nullable: true
+
+    DJ:
+      type: object
+      properties:
+        id:
+          type: integer
+        shows_covered:
+          type: integer
+        add_date:
+          type: string
+          format: date
+
+    NewDJ:
+      type: object
+      properties:
+        user_id:
+          type: string
+        real_name:
+          type: string
+        dj_name:
+          type: string
+
+    ShowDJ:
+      type: object
+      properties:
+        show_id:
+          type: integer
+        dj_id:
+          type: integer
+        active:
+          type: boolean
+
+    Album:
+      type: object
+      properties:
+        id:
+          type: integer
+        code_letters:
+          type: string
+        code_artist_number:
+          type: string
+        code_number:
+          type: integer
+        artist_name:
+          type: string
+        album_title:
+          type: string
+        record_label:
+          type: string
+        plays:
+          type: integer
+        add_date:
+          type: string
+          format: date-time
+        last_modified:
+          type: string
+          format: date-time
+
+    NewAlbumRequest:
+      type: object
+      required: ['album_title', 'label', 'genre_id', 'format_id']
+      properties:
+        album_title:
+          type: string
+        artist_name:
+          type: string
+        artist_id:
+          type: integer
+        alternate_artist_name:
+          type: string
+        label:
+          type: string
+        genre_id:
+          type: integer
+        format_id:
+          type: integer
+        disc_quantity:
+          type: integer
+
+    AlbumView:
+      type: object
+      properties:
+        id:
+          type: integer
+        code_letters:
+          type: string
+        code_artist_number:
+          type: integer
+        code_number:
+          type: integer
+        artist_name:
+          type: string
+        album_title:
+          type: string
+        format_name:
+          type: string
+        genre_name:
+          type: string
+        play_freq:
+          type: string
+          nullable: true
+        add_date:
+          type: string
+          format: date-time
+        label:
+          type: string
+          nullable: true
+
+    Rotation:
+      type: object
+      properties:
+        id:
+          type: integer
+        code_letters:
+          type: string
+        code_artist_number:
+          type: integer
+        code_number:
+          type: integer
+        artist_name:
+          type: string
+        album_title:
+          type: string
+        record_label:
+          type: string
+        genre_name:
+          type: string
+        format_name:
+          type: string
+        rotation_id:
+          type: integer
+        add_date:
+          type: string
+          format: date
+        play_freq:
+          type: string
+          enum: ['S', 'L', 'M', 'H']
+        kill_date:
+          type: string
+          format: date
+          nullable: true
+        plays:
+          type: integer
+
+    NewRotationRequest:
+      type: object
+      required: ['album_id', 'play_freq']
+      properties:
+        album_id:
+          type: integer
+        play_freq:
+          type: string
+          enum: ['S', 'L', 'M', 'H']
+        kill_date:
+          type: string
+          format: date
+
+    BinLibraryDetails:
+      type: object
+      properties:
+        album_id:
+          type: integer
+        album_title:
+          type: string
+        artist_name:
+          type: string
+        label:
+          type: string
+        code_letters:
+          type: string
+        code_artist_number:
+          type: integer
+        code_number:
+          type: integer
+        format_name:
+          type: string
+        genre_name:
+          type: string
+
+    Schedule:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Primary key
+        day:
+          type: integer
+          description: Day of the week 0 = Monday, 6 = Sunday
+          minimum: 0
+          maximum: 6
+        start_time:
+          type: string
+          format: time
+          description: Show start time
+        show_duration:
+          type: integer
+          description: Duration in minutes
+          minimum: 1
+        specialty_id:
+          type: integer
+          nullable: true
+          description: Reference to specialty show, null for regular shows
+        assigned_dj_id:
+          type: integer
+          nullable: true
+          description: Reference to primary DJ
+        assigned_dj_id2:
+          type: integer
+          nullable: true
+          description: Reference to secondary DJ
+
+    ShowPeek:
+      type: object
+      properties:
+        show:
+          type: integer
+        show_name:
+          type: string
+        date:
+          type: string
+          format: date-time
+        djs:
+          type: array
+          items:
+            type: object
+            properties:
+              dj_id:
+                type: integer
+              dj_name:
+                type: string
+                nullable: true
+        specialty_show:
+          type: string
+        preview:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/FlowsheetEntry'
+              - $ref: '#/components/schemas/FlowsheetEntryGet'
+
+security:
+  - BearerAuth: []
+
+paths:
+  /flowsheet:
+    get:
+      summary: Get flowsheet entries
+      security: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          description: Number of entries to return
+        - name: shows_limit
+          in: query
+          schema:
+            type: integer
+          description: Number of shows to return entries from
+        - name: page
+          in: query
+          schema:
+            type: integer
+          description: Page number for pagination ** compatible with either limit or shows_limit
+        - name: start_id
+          in: query
+          schema:
+            type: integer
+          description: first play_order id in range ** Must be provided together with end_id
+        - name: end_id
+          in: query
+          schema:
+            type: integer
+          description: last play_order id in range ** Must be provided together with start_id
+      responses:
+        '200':
+          description: List of flowsheet entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FlowsheetEntryGet'
+
+    post:
+      summary: Add entry to flowsheet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              oneOf:
+                - allOf:
+                    - $ref: '#/components/schemas/FlowsheetEntry'
+                    - type: object
+                      required: ['artist_name', 'album_title', 'track_title']
+                - type: object
+                  required: ['message']
+                  properties:
+                    message:
+                      type: string
+      responses:
+        '200':
+          description: Successfully added entry
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/FlowsheetEntry'
+                  - type: object
+                    properties:
+                      id:
+                        type: integer
+                      play_order:
+                        type: integer
+                      show_id:
+                        type: integer
+                      message:
+                        type: string
+
+    patch:
+      summary: Update flowsheet entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              properties:
+                artist_name:
+                  type: string
+                album_title:
+                  type: string
+                track_title:
+                  type: string
+                record_label:
+                  type: string
+                request_flag:
+                  type: string
+                message:
+                  type: string
+      responses:
+        '200':
+          description: Successfully updated entry
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/FlowsheetEntry'
+                  - type: object
+                    properties:
+                      id:
+                        type: integer
+                      play_order:
+                        type: integer
+                      show_id:
+                        type: integer
+                      message:
+                        type: string
+
+    delete:
+      summary: Delete flowsheet entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entry_id:
+                  type: integer
+      responses:
+        '200':
+          description: Successfully deleted entry
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/FlowsheetEntry'
+                  - type: object
+                    properties:
+                      id:
+                        type: integer
+                      play_order:
+                        type: integer
+                      show_id:
+                        type: integer
+                      message:
+                        type: string
+
+  /flowsheet/latest:
+    get:
+      summary: Get the most recent flowsheet entry
+      responses:
+        '200':
+          description: Latest flowsheet entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlowsheetEntryGet'
+
+  /flowsheet/join:
+    post:
+      summary: Start or join a show
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: ['dj_id']
+              properties:
+                dj_id:
+                  type: integer
+                show_name:
+                  type: string
+                  description: Required only when starting a new show
+                specialty_id:
+                  type: integer
+                  description: id of specialty show entry
+
+      responses:
+        '200':
+          description: Successfully joined/started show
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Show'
+                    description: 'Show started'
+                  - $ref: '#/components/schemas/ShowDJ'
+                    description: 'Show joined'
+
+  /flowsheet/end:
+    post:
+      summary: End or leave a show
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dj_id:
+                  type: integer
+      responses:
+        '200':
+          description: Successfully ended/left show
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Show'
+                    description: 'Show started'
+                  - $ref: '#/components/schemas/ShowDJ'
+                    description: 'Show joined'
+
+  /flowsheet/djs-on-air:
+    get:
+      summary: Get list of DJs currently on air
+      responses:
+        '200':
+          description: List of active DJs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    dj_name:
+                      type: string
+
+  /flowsheet/on-air:
+    get:
+      summary: Get on-air status for dj
+      parameters:
+        - name: dj_id
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Current show details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  is_live:
+                    type: boolean
+
+  /flowsheet/play-order:
+    patch:
+      summary: Update the play order of a flowsheet entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: ['entry_id', 'new_position']
+              properties:
+                entry_id:
+                  type: integer
+                new_position:
+                  type: integer
+      responses:
+        '200':
+          description: Successfully updated play order
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/FlowsheetEntry'
+                  - type: object
+                    properties:
+                      id:
+                        type: integer
+                      play_order:
+                        type: integer
+                      show_id:
+                        type: integer
+                      message:
+                        type: string
+
+  /flowsheet/playlist:
+    get:
+      summary: Get complete playlist for a show
+      parameters:
+        - name: show_id
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Complete flowsheet for show
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  show_name:
+                    type: string
+                  specialty_show:
+                    type: string
+                  start_time:
+                    type: string
+                    format: date-time
+                  end_time:
+                    type: string
+                    format: date-time
+                  show_djs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        dj_name:
+                          type: string
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FlowsheetEntry'
+
+  /djs:
+    get:
+      summary: Get DJ information
+      parameters:
+        - name: dj_id
+          in: query
+          schema:
+            type: integer
+        - name: user_id
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: DJ information
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DJ'
+                  - $ref: '#/components/schemas/NewDJ'
+
+  /djs/register:
+    post:
+      summary: Register a new DJ
+      security:
+        - BearerAuth: ['station-management']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewDJ'
+      responses:
+        '200':
+          description: Successfully registered DJ
+
+    patch:
+      summary: Update DJ information
+      security:
+        - BearerAuth: ['station-management']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewDJ'
+      responses:
+        '200':
+          description: Successfully updated DJ
+
+  /djs/bin:
+    get:
+      summary: Get DJ bin
+      parameters:
+        - name: dj_id
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: DJ bin contents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BinLibraryDetails'
+
+    post:
+      summary: Add to DJ bin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: ['dj_id', 'album_id']
+              properties:
+                dj_id:
+                  type: integer
+                album_id:
+                  type: integer
+                track_title:
+                  type: integer
+      responses:
+        '200':
+          description: Successfully added to bin
+
+    delete:
+      summary: Remove from DJ bin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: ['dj_id', 'album_id']
+              properties:
+                dj_id:
+                  type: integer
+                album_id:
+                  type: integer
+                track_title:
+                  type: integer
+      responses:
+        '200':
+          description: Successfully removed from bin
+
+  /djs/playlists:
+    get:
+      summary: Get playlists for DJ
+      responses:
+        '200':
+          description: List of DJ playlists
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ShowPeek'
+
+  /library:
+    get:
+      summary: Search for album
+      parameters:
+        - name: artist_name
+          in: query
+          schema:
+            type: string
+        - name: album_title
+          in: query
+          schema:
+            type: string
+        - name: n
+          in: query
+          schema:
+            type: number
+        - name: page
+          in: query
+          schema:
+            type: number
+      responses:
+        '200':
+          description: List of matching albums
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AlbumView'
+
+    post:
+      summary: Add new album
+      security:
+        - BearerAuth: ['station-management']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewAlbumRequest'
+      responses:
+        '200':
+          description: Successfully added album
+
+  /library/rotation:
+    get:
+      summary: Get rotation list
+      responses:
+        '200':
+          description: List of rotations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Rotation'
+
+    post:
+      summary: Add new rotation
+      security:
+        - BearerAuth: ['station-management']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewRotationRequest'
+      responses:
+        '200':
+          description: Successfully added rotation
+
+    patch:
+      summary: Set rotation removal date
+      security:
+        - BearerAuth: ['station-management']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rotation_id:
+                  type: integer
+                kill_date:
+                  type: string
+                  format: date
+      responses:
+        '200':
+          description: Successfully set rotation removal date
+
+  /library/artists:
+    post:
+      summary: Add new artist
+      security:
+        - BearerAuth: ['station-management']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                artist_name:
+                  type: string
+                code_letters:
+                  type: string
+                genre_id:
+                  type: integer
+      responses:
+        '200':
+          description: Successfully added artist
+
+  /library/formats:
+    get:
+      summary: Get format list
+      responses:
+        '200':
+          description: List of formats
+
+    post:
+      summary: Add new format
+      security:
+        - BearerAuth: ['station-management']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '200':
+          description: Successfully added format
+
+  /library/genres:
+    get:
+      summary: Get genre list
+      responses:
+        '200':
+          description: List of genres
+
+    post:
+      summary: Add new genre
+      security:
+        - BearerAuth: ['station-management']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '200':
+          description: Successfully added genre
+
+  /library/info:
+    get:
+      summary: Get album information
+      parameters:
+        - name: album_id
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Album details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Album'
+
+  /schedule:
+    get:
+      summary: Get schedule
+      responses:
+        '200':
+          description: List of scheduled shows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Schedule'
+
+    post:
+      summary: Add to schedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Schedule'
+      responses:
+        '200':
+          description: Successfully added to schedule
