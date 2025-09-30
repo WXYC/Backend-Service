@@ -41,12 +41,12 @@ export const updateDJ = async (new_dj: NewDJ) => {
 export const getDJInfoFromDB = async (items: DJQueryParams) /*:Promise<schema.DJ>*/ => {
   let query;
   
-  if (items.dj_id !== undefined) {
-    query = db.select().from(djs).where(eq(djs.id, items.dj_id));
-  } else if (items.user_id !== undefined) {
+  if (items.user_id !== undefined) {
     query = db.select().from(djs).where(eq(djs.user_id, items.user_id));
   } else if (items.real_name !== undefined) {
     query = db.select().from(djs).where(eq(djs.real_name, items.real_name));
+  } else if (items.dj_name !== undefined) {
+    query = db.select().from(djs).where(eq(djs.dj_name, items.dj_name));
   } else {
     throw new Error('Did not specify a query parameter');
   }
@@ -60,7 +60,7 @@ export const addToBin = async (bin_entry: NewBinEntry): Promise<BinEntry> => {
   return added_bin_entry[0];
 };
 
-export const removeFromBin = async (album_id: number, dj_id: number): Promise<BinEntry> => {
+export const removeFromBin = async (album_id: number, dj_id: string): Promise<BinEntry> => {
   const removed_bin_entry = await db
     .delete(bins)
     .where(and(eq(bins.dj_id, dj_id), eq(bins.album_id, album_id)))
@@ -68,7 +68,7 @@ export const removeFromBin = async (album_id: number, dj_id: number): Promise<Bi
   return removed_bin_entry[0];
 };
 
-export const getBinFromDB = async (dj_id: number) => {
+export const getBinFromDB = async (dj_id: string) => {
   const dj_bin = await db
     .select({
       album_id: bins.album_id,
@@ -95,13 +95,13 @@ type ShowPeek = {
   show: number;
   show_name: string;
   date: Date;
-  djs: { dj_id: number; dj_name: string | null }[];
+  djs: { dj_id: string; dj_name: string | null }[];
   specialty_show: string;
   preview: FSEntry[];
 };
 
 // ERRORS IN SERVICES ARE 500 ERRORS
-export const getPlaylistsForDJ = async (dj_id: number) => {
+export const getPlaylistsForDJ = async (dj_id: string) => {
   // gets a 'preview set' of 4 artists/albums and the show id for each show the dj has been in
   const this_djs_shows = await db.select().from(show_djs).where(eq(show_djs.dj_id, dj_id));
 
