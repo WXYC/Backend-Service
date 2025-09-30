@@ -112,7 +112,7 @@ export const getPlaylistsForDJ = async (dj_id: string) => {
     const djs_involved = await db
       .select({ dj_id: show_djs.dj_id, dj_name: djs.dj_name })
       .from(show_djs)
-      .innerJoin(djs, and(eq(show_djs.show_id, show[0].id), eq(show_djs.dj_id, djs.id)));
+      .innerJoin(djs, and(eq(show_djs.show_id, show[0].id), eq(show_djs.dj_id, djs.user_id)));
 
     const peek_object: ShowPeek = {
       show: show[0].id,
