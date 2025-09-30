@@ -15,7 +15,7 @@ import {
   show_djs,
   library_artist_view,
   specialty_shows,
-} from '@wxyc/database/schema';
+} from '@wxyc/database';
 import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 

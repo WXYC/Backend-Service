@@ -13,7 +13,7 @@ import {
   library,
   library_artist_view,
   rotation,
-} from '@wxyc/database/schema';
+} from '@wxyc/database';
 
 export const getFormatsFromDB = async () => {
   const formats = await db

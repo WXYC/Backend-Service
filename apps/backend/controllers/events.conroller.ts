@@ -12,8 +12,8 @@ const TopicAuthz: Record<string, string[]> = {
   [Topics.mirror]: ['dj'],
 };
 
-const filterAuthorizedTopics = (res: Response, topics: string[]) => {
-  const user = res.locals?.user;
+const filterAuthorizedTopics = (req: any, topics: string[]) => {
+  const user = req.user;
   const groups: string[] = [];
 
   // If we have a valid user allow to access dj topics
@@ -37,7 +37,7 @@ type regReqBody = {
 export const registerEventClient: RequestHandler<object, unknown, regReqBody> = (req, res) => {
   const client = serverEventsMgr.registerClient(res);
 
-  const topics = filterAuthorizedTopics(res, req.body.topics || []);
+  const topics = filterAuthorizedTopics(req, req.body.topics || []);
 
   serverEventsMgr.subscribe(topics, client.id);
 };

@@ -4,13 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import { parse as parse_yaml } from 'yaml';
-import { readFileSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const swaggerContent = readFileSync(join(__dirname, 'app.yaml'), 'utf8');
+import swaggerContent from './app.yaml';
 import { dj_route } from './routes/djs.route.js';
 import { flowsheet_route } from './routes/flowsheet.route.js';
 import { library_route } from './routes/library.route.js';
@@ -78,7 +72,7 @@ app.use(errorHandler);
 
 //Start the server
 const server = app.listen(port, () => {
-  console.log(`Backend service listening on port: ${port}!`);
+  console.log(`listening on port: ${port}!`);
 });
 
 server.setTimeout(5000);

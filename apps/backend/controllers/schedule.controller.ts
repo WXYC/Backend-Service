@@ -1,6 +1,6 @@
 import { Request, RequestHandler } from 'express';
 import * as ScheduleService from '../services/schedule.service.js';
-import { NewShift } from '@wxyc/database/schema';
+import { NewShift } from '@wxyc/database';
 
 export const getSchedule: RequestHandler<object, unknown, object, object> = async (req, res, next) => {
   try {

@@ -1,11 +1,10 @@
 import { RequestHandler } from 'express';
 import * as DJService from '../services/djs.service.js';
-import { DJ, NewDJ, NewBinEntry } from '@wxyc/database/schema';
+import { DJ, NewDJ, NewBinEntry } from '@wxyc/database';
 
 export type DJQueryParams = {
   dj_id?: number;
   user_id?: string;
-  cognito_user_name?: string; // Keep for backward compatibility during migration
   real_name?: string;
   dj_name?: string;
 };
@@ -20,7 +19,6 @@ export const register: RequestHandler<object, unknown, DJQueryParams> = async (r
   
   const new_dj: NewDJ = {
     user_id: user.id,
-    cognito_user_name: req.body.cognito_user_name, // Keep for migration compatibility
     real_name: req.body.real_name || user.realName,
     dj_name: req.body.dj_name || user.djName,
   };
@@ -43,10 +41,8 @@ export const update: RequestHandler<object, unknown, DJQueryParams> = async (req
     return;
   }
   
-  // Update DJ info for the authenticated user
   const new_dj: NewDJ = {
     user_id: user.id,
-    cognito_user_name: req.body.cognito_user_name, // Keep for migration compatibility
     real_name: req.body.real_name || user.realName,
     dj_name: req.body.dj_name || user.djName,
   };
@@ -66,7 +62,7 @@ export const getDJInfo: RequestHandler<object, unknown, object, DJQueryParams> =
   const user = (req as any).user;
 
   // If no specific query params, get info for authenticated user
-  if (query.cognito_user_name === undefined && query.dj_id === undefined && query.user_id === undefined) {
+  if (query.dj_id === undefined && query.user_id === undefined) {
     if (!user?.id) {
       console.error('Error, Missing DJ Identifier: user not authenticated');
       res.status(401).send('Error, Missing DJ Identifier: user not authenticated');

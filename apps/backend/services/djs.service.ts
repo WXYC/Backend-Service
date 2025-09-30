@@ -17,7 +17,7 @@ import {
   show_djs,
   shows,
   specialty_shows,
-} from '@wxyc/database/schema';
+} from '@wxyc/database';
 
 export const insertDJ = async (new_dj: NewDJ) => {
   const response = await db.insert(djs).values(new_dj).returning();
@@ -45,8 +45,6 @@ export const getDJInfoFromDB = async (items: DJQueryParams) /*:Promise<schema.DJ
     query = db.select().from(djs).where(eq(djs.id, items.dj_id));
   } else if (items.user_id !== undefined) {
     query = db.select().from(djs).where(eq(djs.user_id, items.user_id));
-  } else if (items.cognito_user_name !== undefined) {
-    query = db.select().from(djs).where(eq(djs.cognito_user_name, items.cognito_user_name));
   } else if (items.real_name !== undefined) {
     query = db.select().from(djs).where(eq(djs.real_name, items.real_name));
   } else {

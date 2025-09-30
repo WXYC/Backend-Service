@@ -10,7 +10,7 @@ export const showMemberMiddleware: RequestHandler = async (req, res, next) => {
 
   const show_djs = await getDJsInCurrentShow();
   const dj_in_show = show_djs.filter((dj) => {
-    return dj.user_id === user.id || dj.cognito_user_name === user.email; // Support both old and new auth
+    return dj.user_id === user.id;
   }).length;
 
   if (dj_in_show > 0) {

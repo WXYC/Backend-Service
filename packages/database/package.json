@@ -3,16 +3,12 @@
   "version": "1.0.0",
   "description": "WXYC Shared Database Client and Schema",
   "type": "module",
-  "main": "./dist/client.js",
-  "types": "./dist/client.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/client.d.ts",
-      "default": "./dist/client.js"
-    },
-    "./schema": {
-      "types": "./dist/schema.d.ts",
-      "default": "./dist/schema.js"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
   "scripts": {

@@ -83,8 +83,7 @@ export type NewDJ = InferInsertModel<typeof djs>;
 export type DJ = InferSelectModel<typeof djs>;
 export const djs = wxyc_schema.table('djs', {
   id: serial('id').primaryKey(),
-  cognito_user_name: varchar('cognito_user_name').unique(), // Made nullable for migration
-  user_id: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }), // New Better Auth user reference
+  user_id: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }).notNull(),
   real_name: varchar('real_name'),
   dj_name: varchar('dj_name'),
   shows_covered: smallint('shows_covered').default(0).notNull(),
