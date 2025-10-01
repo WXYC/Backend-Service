@@ -63,65 +63,108 @@ You now have everything you need installed to get started!
 
 The dev experience makes extensive use of Node.js project scripts. Here's a rundown:
 
-- `npm run dev` : Starts a local instance of the backend service on port `8080` by default using `nodemon` for hot reloading.
-- `npm run build` : Runs `tsc` to compile our typscript code into javascript which node can actually run.
-- `npm run start` : Starts the nodejs server that is compiled by the prior command.
-- `npm run clean` : Removes the `dist` directory containing the artifacts of the build command.
-- `npm run test` : Runs our Jest unit test suite against an instance of the backend service. This requires an environment variable `PORT` to be defined so that jest may find the backend service to run the tests against.
-- `npm run db:start` : Starts and seeds a docker container running Postgresql on `localhost:5432` by default. It can be configured with the environment variable `DB_PORT`.
-- `npm run db:stop` : Shuts down the aforementioned psql docker container and cleans up any volumes or networks.
-- `npm run ci:env` : Spins up a sandboxed docker environment with a backend service and db.
-  - Can be run in independantly of `npm run dev` or `npm run db:start`.
-- `npm run ci:clean` : Shuts down and cleans up any straggling containers, volumes, and networks.
-- `npm run ci:test` : Runs test suite against ci environment.
-- `npm run ci:testmock` : Utilizes other ci scripts to mock steps our CI pipeline. (Set up env, run tests, and clean up with just one command)
-  - Can be run in independantly of `npm run dev` or `npm run db:start`.
-- `npm run drizzle:generate` : Generates SQL migration files reflecting changes to `src/db/schema.ts`. These files are generated inside of `src/db/migrations`.
-- `npm run drizzle:migrate` : Applies the generated migrations to the database specified by the environment variables `DB_HOST`, `DB_NAME`, and `DB_PORT`. It also requires `DB_USERNAME` and `DB_PASSWORD`.
-- `npm run drizzle:drop` : Deletes a given migration file from the migrations directory and removes it from the drizzle cache.
+**Development Commands:**
+- `npm run dev` : Starts the full development stack with Docker, Traefik, database, auth service, and backend service.
+  - **Auth Service**: `http://localhost/api/auth/*`
+  - **Backend API**: `http://localhost/api/*` (auto-strips `/api` prefix)
+  - **Traefik Dashboard**: `http://localhost:8080`
+- `npm run dev:local` : Starts auth and backend services locally (without Docker) for faster iteration during development.
+  - Auth on port `8082`, Backend on port `8080`
+- `npm run dev:down` : Stops all development containers.
+- `npm run dev:clean` : Stops all development containers and removes volumes/networks.
+- `npm run logs` : View logs from all services.
+- `npm run logs:auth` : View logs from auth service only.
+- `npm run logs:backend` : View logs from backend service only.
+
+**Build & Start Commands:**
+- `npm run build` : Runs build script for all workspace packages.
+- `npm run build:auth` : Builds the auth service.
+- `npm run build:backend` : Builds the backend service.
+- `npm run start:auth` : Starts the auth service (after building).
+- `npm run start:backend` : Starts the backend service (after building).
+- `npm run clean` : Removes build artifacts from all workspaces.
+
+**Testing Commands:**
+- `npm run test` : Runs Jest unit test suite for all workspaces.
+- `npm run ci:env` : Spins up isolated CI environment with backend service and database.
+- `npm run ci:test` : Runs test suite against CI environment.
+- `npm run ci:clean` : Shuts down CI environment and cleans up containers/volumes.
+- `npm run ci:full` : Complete CI flow: setup, test, cleanup (one command).
+
+**Database Commands:**
+- `npm run drizzle:generate` : Generates SQL migration files from schema changes in `packages/database/schema.ts`.
+- `npm run drizzle:migrate` : Applies pending migrations to the database.
+- `npm run drizzle:drop` : Removes a migration file from the migrations directory.
+
+**Database Initialization Flow:**
+The database is automatically initialized when you run `npm run dev`:
+1. PostgreSQL starts and installs extensions (`pg_trgm`)
+2. `db-init` service runs Drizzle migrations (creates schema & tables)
+3. `db-init` checks if data exists; if not, runs seed SQL
+4. Auth and Backend services start only after initialization completes
+
+This ensures your database is always properly set up with the latest schema and test data (on first run only).
 
 #### Environment Variables
 
 Here is an example environment variable file. Create a file with these contents named `.env` in the root of your locally cloned project to ensure your dev environment works properly.
 
-```
-### Backend Service Port
+```bash
+### Service Ports
 PORT=8080
 CI_PORT=8081
 
-### DB Info
-DB_HOST={{placeholder FQDN to RDS instance}}
+### Database Configuration
+DB_HOST=localhost
 DB_NAME=wxyc_db
 DB_USERNAME={{placeholder}}
 DB_PASSWORD={{placeholder}}
 DB_PORT=5432
 CI_DB_PORT=5433
 
-### Cognito Auth Info for Starting Backend Service Auth
-COGNITO_USERPOOL_ID={{placeholder}}
-DJ_APP_CLIENT_ID={{placeholder}}
+### Auth Service Configuration
+BETTER_AUTH_URL=http://localhost/api/auth
+FRONTEND_SOURCE=http://localhost:3000  # Your frontend URL (used for CORS)
+AUTH_ADMIN_USERNAME={{placeholder}}
+AUTH_ADMIN_PASSWORD={{placeholder}}
 
-### Testing Env Variables
+### Testing Environment Variables
 TEST_HOST=http://localhost
 AUTH_BYPASS=true
 AUTH_USERNAME='test_dj1'
-AUTH_PASSWORD={{placeholder}}
 ```
 
 <span style="color:crimson">\*</span>Email/slack dvd or Adrian Bruno (adrian@abruno.dev) to request access to prod placeholder values.
 
-A couple env variables of note:
+**Key Environment Variables:**
 
-- DB_HOST: As is mentioned above this env variable should be set to the fully qualified domain name of the RDS database instance. The scripts `npm run db:start` and `npm run ci:test` overwrite this value to `localhost`.
+- `DB_HOST`: Set to `localhost` for local development. In production, use the FQDN of the RDS instance.
 
-- AUTH_BYPASS: This flag will cause the cognito auth middleware to use mocked user data and always pass to the next middleware logic. This is only meant to be set in local testing environments.
+- `BETTER_AUTH_URL`: The publicly accessible URL for the auth service. In Docker dev mode with Traefik, this is `http://localhost/api/auth`.
 
-- AUTH_USERNAME:
+- `FRONTEND_SOURCE`: The URL of your frontend application. Used for CORS configuration. Default: `http://localhost:3000`.
 
-  - When AUTH_BYPASS is active this env variable is added to the request context (res.locals) which may be used by further middleware.
-  - When AUTH_BYPASS is inactive, this environment variable is used by the test suite to fetch an access token when integrating with cognito auth. So when running an integration test with cognito, ensure this is set to a valid account's username.
+- `AUTH_BYPASS`: When `true`, bypasses actual authentication and uses mock user data. Only use in local testing environments.
 
-- AUTH_PASSWORD: This env variable is only used in the test suite when AUTH_BYPASS is inactive. Similarly to above it must be a valid account's password.
+- `AUTH_USERNAME`: When `AUTH_BYPASS` is active, this username is added to the request context for testing purposes.
+
+**Important:** The `FRONTEND_SOURCE` environment variable is critical for CORS. Traefik uses this to allow requests from your frontend. If your frontend runs on a different port or domain, update this value accordingly.
+
+#### Frontend Configuration
+
+When developing your frontend, use these URLs to connect to the backend:
+
+**With Docker (recommended):**
+```javascript
+AUTH_URL=http://localhost/api/auth
+API_URL=http://localhost/api
+```
+
+**With Local Development (faster iteration):**
+```javascript
+AUTH_URL=http://localhost:8082/api/auth
+API_URL=http://localhost:8080
+```
 
 #### Git Workflow
 

@@ -26,9 +26,9 @@ app.use(express.json());
 //CORS
 app.use(
   cors({
-    origin: '*',
-    methods: ['GET', 'POST', 'DELETE', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    origin: process.env.FRONTEND_SOURCE || '*',
+    methods: ['GET', 'POST', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'Set-Cookie'],
     credentials: true,
   })
 );

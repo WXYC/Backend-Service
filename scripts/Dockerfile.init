@@ -1,0 +1,24 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY packages/database/package*.json ./packages/database/
+
+# Install dependencies needed for init script
+RUN npm ci --workspace=packages/database && \
+    npm install dotenv postgres drizzle-kit drizzle-orm
+
+# Copy entire database package (includes migrations, schema, config)
+COPY packages/database/ ./packages/database/
+
+# Copy init script and seed data
+COPY scripts/init-db.js ./scripts/
+COPY dev_env/ ./dev_env/
+
+# Make the script executable
+RUN chmod +x ./scripts/init-db.js
+
+CMD ["node", "scripts/init-db.js"]
+

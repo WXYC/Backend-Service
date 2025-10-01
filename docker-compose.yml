@@ -1,0 +1,211 @@
+services:
+  # Traefik reverse proxy
+  traefik:
+    image: traefik:v3.0
+    container_name: wxyc-traefik
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+    ports:
+      - "80:80"
+      - "8080:8080"  # Traefik dashboard at http://localhost:8080
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - FRONTEND_SOURCE=${FRONTEND_SOURCE}
+    networks:
+      - wxyc-network
+    profiles: [dev, prod]
+
+  # PostgreSQL Database
+  db:
+    image: postgres:latest
+    container_name: wxyc-db
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./dev_env/install_extensions.sql:/docker-entrypoint-initdb.d/01-extensions.sql
+    networks:
+      - wxyc-network
+    profiles: [dev, prod]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Database Initialization (migrations + seeding)
+  db-init:
+    build:
+      context: .
+      dockerfile: scripts/Dockerfile.init
+    container_name: wxyc-db-init
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+    networks:
+      - wxyc-network
+    profiles: [dev, prod]
+    restart: "no"  # Only run once
+
+  # Auth Service
+  auth:
+    build:
+      context: .
+      dockerfile: apps/auth/Dockerfile
+    container_name: wxyc-auth
+    depends_on:
+      db:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      - PORT=8787
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - BETTER_AUTH_URL=http://localhost/api/auth
+      - FRONTEND_SOURCE=${FRONTEND_SOURCE}
+      - AUTH_ADMIN_USERNAME=${AUTH_ADMIN_USERNAME}
+      - AUTH_ADMIN_PASSWORD=${AUTH_ADMIN_PASSWORD}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.auth.rule=Host(`localhost`) && PathPrefix(`/api/auth`)"
+      - "traefik.http.routers.auth.entrypoints=web"
+      - "traefik.http.services.auth.loadbalancer.server.port=8787"
+    networks:
+      - wxyc-network
+    profiles: [dev, prod]
+
+  # Backend Service
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    container_name: wxyc-backend
+    depends_on:
+      db:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      auth:
+        condition: service_started
+    env_file: .env
+    environment:
+      - PORT=8080
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - AUTH_SERVICE_URL=http://auth:8787
+      - AUTH_BYPASS=${AUTH_BYPASS}
+      - AUTH_USERNAME=${AUTH_USERNAME}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`localhost`) && PathPrefix(`/api`) && !PathPrefix(`/api/auth`)"
+      - "traefik.http.routers.backend.entrypoints=web"
+      - "traefik.http.services.backend.loadbalancer.server.port=8080"
+      # Strip /api prefix before forwarding to backend
+      - "traefik.http.middlewares.backend-stripprefix.stripprefix.prefixes=/api"
+      - "traefik.http.routers.backend.middlewares=backend-stripprefix"
+    networks:
+      - wxyc-network
+    profiles: [dev, prod]
+
+  # CI Database (for testing)
+  ci-db:
+    image: postgres:latest
+    container_name: wxyc-ci-db
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${CI_DB_PORT:-5433}:5432"
+    volumes:
+      - ci-pg-data:/var/lib/postgresql/data
+      - ./dev_env/install_extensions.sql:/docker-entrypoint-initdb.d/01-extensions.sql
+    networks:
+      - wxyc-network
+    profiles: [ci]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # CI Database Initialization
+  ci-db-init:
+    build:
+      context: .
+      dockerfile: scripts/Dockerfile.init
+    container_name: wxyc-ci-db-init
+    depends_on:
+      ci-db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - DB_HOST=ci-db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+    networks:
+      - wxyc-network
+    profiles: [ci]
+    restart: "no"
+
+  # CI Backend (for testing)
+  ci-backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    container_name: wxyc-ci-backend
+    depends_on:
+      ci-db:
+        condition: service_healthy
+      ci-db-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      - PORT=8080
+      - DB_HOST=ci-db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - AUTH_BYPASS=${AUTH_BYPASS}
+      - AUTH_USERNAME=${AUTH_USERNAME}
+    ports:
+      - "${CI_PORT:-8081}:8080"
+    networks:
+      - wxyc-network
+    profiles: [ci]
+
+networks:
+  wxyc-network:
+    driver: bridge
+
+volumes:
+  pg-data:
+  ci-pg-data:
+

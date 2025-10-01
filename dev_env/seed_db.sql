@@ -1,8 +1,3 @@
--- Primary and secondary dj used in test automation
--- Insert test users for better-auth
-INSERT INTO wxyc_schema.users(id, email, name, real_name, dj_name, onboarded, app_skin) VALUES ('test-user-id', 'test@example.com', 'Test User', 'Test User', 'Test DJ', true, 'modern-light');
-INSERT INTO wxyc_schema.users(id, email, name, real_name, dj_name, onboarded, app_skin) VALUES ('test-user-id-2', 'test2@example.com', 'Test User 2', 'Test User 2', 'Test DJ 2', true, 'modern-light');
-
 -- Genres, media formats, artists, and albums used in test automation
 INSERT INTO wxyc_schema.genres(genre_name) VALUES ('Rock');
 INSERT INTO wxyc_schema.genres(genre_name) VALUES ('Hiphop');

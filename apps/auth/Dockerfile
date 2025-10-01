@@ -14,7 +14,11 @@ RUN npm ci --workspace=apps/auth --workspace=packages/database
 COPY apps/auth/ ./apps/auth/
 COPY packages/database/ ./packages/database/
 
-# Build the application
+# Build the database package first
+WORKDIR /app/packages/database
+RUN npm run build
+
+# Build the auth application
 WORKDIR /app/apps/auth
 RUN npm run build
 
@@ -30,8 +34,10 @@ COPY packages/database/package*.json ./packages/database/
 # Install production dependencies
 RUN npm ci --workspace=apps/auth --workspace=packages/database --omit=dev
 
-# Copy built application
+# Copy built applications and packages
 COPY --from=builder /app/apps/auth/dist ./dist
+COPY --from=builder /app/packages/database/dist ./node_modules/@wxyc/database/dist
+COPY --from=builder /app/packages/database/package.json ./node_modules/@wxyc/database/
 
 EXPOSE 8787
 

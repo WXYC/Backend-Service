@@ -8,7 +8,7 @@ import {
   ShowDJ,
   shows,
   artists,
-  djs,
+  users,
   flowsheet,
   library,
   rotation,

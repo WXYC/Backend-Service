@@ -1,6 +1,6 @@
 import { QueryParams } from "../../controllers/flowsheet.controller.js";
 import { db } from "@wxyc/database";
-import { djs, flowsheet, FSEntry, Show } from "@wxyc/database";
+import { users, flowsheet, FSEntry, Show } from "@wxyc/database";
 import { asc, desc, eq } from "drizzle-orm";
 import { Request } from "express";
 import { createBackendMirrorMiddleware } from "./mirror.middleware.js";
@@ -34,7 +34,7 @@ const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
   if (!show) return statements; // no show, nothing to do
 
   const dj = (
-    await db.select().from(djs).where(eq(djs.id, djId)).limit(1)
+    await db.select().from(users).where(eq(users.id, djId)).limit(1)
   )?.[0];
 
   const showName = show.show_name ?? req.body?.show_name ?? null;
