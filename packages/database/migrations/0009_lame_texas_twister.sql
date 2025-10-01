@@ -1,1 +1,0 @@
-ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "message" varchar(64);

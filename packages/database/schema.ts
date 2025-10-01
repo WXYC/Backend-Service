@@ -11,83 +11,91 @@ import {
   time,
   index,
   pgEnum,
-  date,
+  date
 } from 'drizzle-orm/pg-core';
 
 export const wxyc_schema = pgSchema('wxyc_schema');
 
-// Better Auth tables
-export const user = wxyc_schema.table('user', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  email: varchar('email', { length: 255 }).notNull().unique(),
-  emailVerified: boolean('emailVerified').notNull().default(false),
-  name: varchar('name', { length: 255 }),
-  image: varchar('image', { length: 500 }),
-  createdAt: timestamp('createdAt').notNull().defaultNow(),
-  updatedAt: timestamp('updatedAt').notNull().defaultNow(),
-  // Custom fields for WXYC
-  realName: varchar('realName', { length: 255 }),
-  djName: varchar('djName', { length: 255 }),
-  onboarded: boolean('onboarded').notNull().default(false),
-  appSkin: varchar('appSkin', { length: 50 }).notNull().default('modern-light'),
-}, (table) => ({
-  emailIdx: index('user_email_idx').on(table.email),
-}));
-
-export const session = wxyc_schema.table('session', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  expiresAt: timestamp('expiresAt').notNull(),
-  token: varchar('token', { length: 255 }).notNull().unique(),
-  createdAt: timestamp('createdAt').notNull().defaultNow(),
-  updatedAt: timestamp('updatedAt').notNull().defaultNow(),
-  ipAddress: varchar('ipAddress', { length: 255 }),
-  userAgent: varchar('userAgent', { length: 500 }),
-  userId: varchar('userId', { length: 255 }).notNull().references(() => user.id, { onDelete: 'cascade' }),
-}, (table) => ({
-  tokenIdx: index('session_token_idx').on(table.token),
-  userIdIdx: index('session_user_id_idx').on(table.userId),
-}));
-
-export const account = wxyc_schema.table('account', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  accountId: varchar('accountId', { length: 255 }).notNull(),
-  providerId: varchar('providerId', { length: 255 }).notNull(),
-  userId: varchar('userId', { length: 255 }).notNull().references(() => user.id, { onDelete: 'cascade' }),
-  accessToken: text('accessToken'),
-  refreshToken: text('refreshToken'),
-  idToken: text('idToken'),
-  accessTokenExpiresAt: timestamp('accessTokenExpiresAt'),
-  refreshTokenExpiresAt: timestamp('refreshTokenExpiresAt'),
-  scope: varchar('scope', { length: 500 }),
-  password: varchar('password', { length: 255 }),
-  createdAt: timestamp('createdAt').notNull().defaultNow(),
-  updatedAt: timestamp('updatedAt').notNull().defaultNow(),
-}, (table) => ({
-  userIdIdx: index('account_user_id_idx').on(table.userId),
-}));
-
-export const verification = wxyc_schema.table('verification', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  identifier: varchar('identifier', { length: 255 }).notNull(),
-  value: varchar('value', { length: 255 }).notNull(),
-  expiresAt: timestamp('expiresAt').notNull(),
-  createdAt: timestamp('createdAt').notNull().defaultNow(),
-  updatedAt: timestamp('updatedAt').notNull().defaultNow(),
-}, (table) => ({
-  identifierIdx: index('verification_identifier_idx').on(table.identifier),
-}));
-
-// Indexes will be created within table definitions
-
-export type NewDJ = InferInsertModel<typeof djs>;
-export type DJ = InferSelectModel<typeof djs>;
-export const djs = wxyc_schema.table('djs', {
-  user_id: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }).primaryKey(),
-  real_name: varchar('real_name'),
-  dj_name: varchar('dj_name'),
-  shows_covered: smallint('shows_covered').default(0).notNull(),
-  add_date: date('add_date').defaultNow().notNull(),
+// ---- Better Auth schema ----
+export const users = wxyc_schema.table("users", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  emailVerified: boolean("email_verified").default(false).notNull(),
+  image: text("image"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => /* @__PURE__ */ new Date())
+    .notNull(),
+  role: text("role"),
+  banned: boolean("banned").default(false),
+  banReason: text("ban_reason"),
+  banExpires: timestamp("ban_expires"),
+  username: text("username").unique(),
+  displayUsername: text("display_username"),
+  realName: text("real_name"),
+  djName: text("dj_name"),
+  onboarded: boolean("onboarded").notNull(),
+  appSkin: text("app_skin").notNull(),
 });
+
+export const sessions = wxyc_schema.table("sessions", {
+  id: text("id").primaryKey(),
+  expiresAt: timestamp("expires_at").notNull(),
+  token: text("token").notNull().unique(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at")
+    .$onUpdate(() => /* @__PURE__ */ new Date())
+    .notNull(),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  impersonatedBy: text("impersonated_by"),
+});
+
+export const accounts = wxyc_schema.table("accounts", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  providerId: text("provider_id").notNull(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  accessToken: text("access_token"),
+  refreshToken: text("refresh_token"),
+  idToken: text("id_token"),
+  accessTokenExpiresAt: timestamp("access_token_expires_at"),
+  refreshTokenExpiresAt: timestamp("refresh_token_expires_at"),
+  scope: text("scope"),
+  password: text("password"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at")
+    .$onUpdate(() => /* @__PURE__ */ new Date())
+    .notNull(),
+});
+
+export const verifications = wxyc_schema.table("verifications", {
+  id: text("id").primaryKey(),
+  identifier: text("identifier").notNull(),
+  value: text("value").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => /* @__PURE__ */ new Date())
+    .notNull(),
+});
+
+export const jwkss = wxyc_schema.table("jwkss", {
+  id: text("id").primaryKey(),
+  publicKey: text("public_key").notNull(),
+  privateKey: text("private_key").notNull(),
+  createdAt: timestamp("created_at").notNull(),
+});
+
+// ---- WXYC schema ----
 
 export type NewShift = InferInsertModel<typeof schedule>;
 export type Shift = InferSelectModel<typeof schedule>;
@@ -100,8 +108,8 @@ export const schedule = wxyc_schema.table('schedule', {
   start_time: time('start_time').notNull(),
   show_duration: smallint('show_duration').notNull(), // In 15-minute blocs
   specialty_id: integer('specialty_id').references(() => specialty_shows.id), //null for regular shows
-  assigned_dj_id: varchar('assigned_dj_id', { length: 255 }).references(() => djs.user_id),
-  assigned_dj_id2: varchar('assigned_dj_id2', { length: 255 }).references(() => djs.user_id),
+  assigned_dj_id: varchar('assigned_dj_id', { length: 255 }).references(() => users.id),
+  assigned_dj_id2: varchar('assigned_dj_id2', { length: 255 }).references(() => users.id),
 });
 
 //SELECT date_trunc('week', current_timestamp + timestamp '${n} weeks') + interval '${schedule.day} days' + ${schedule.time}
@@ -110,11 +118,11 @@ export type NewShiftCover = InferInsertModel<typeof shift_covers>;
 export type ShiftCover = InferSelectModel<typeof shift_covers>;
 export const shift_covers = wxyc_schema.table('shift_covers', {
   id: serial('id').primaryKey(),
-  schedule_id: serial('schedule_id')
+  schedule_id: integer('schedule_id')
     .references(() => schedule.id)
     .notNull(),
   shift_timestamp: timestamp('shift_timestamp').notNull(), //Timestamp to expire cover requests
-  cover_dj_id: varchar('cover_dj_id', { length: 255 }).references(() => djs.user_id),
+  cover_dj_id: varchar('cover_dj_id', { length: 255 }).references(() => users.id),
   covered: boolean('covered').default(false),
 });
 
@@ -216,7 +224,7 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   album_title: varchar('album_title', { length: 128 }),
   artist_name: varchar('artist_name', { length: 128 }),
   record_label: varchar('record_label', { length: 128 }),
-  play_order: serial('play_order').notNull(),
+  play_order: integer('play_order').notNull(),
   request_flag: boolean('request_flag').default(false).notNull(),
   message: varchar('message', { length: 250 }),
   add_time: timestamp('add_time').defaultNow().notNull(),
@@ -252,7 +260,7 @@ export type BinEntry = InferSelectModel<typeof bins>;
 export const bins = wxyc_schema.table('bins', {
   id: serial('id').primaryKey(),
   dj_id: varchar('dj_id', { length: 255 })
-    .references(() => djs.user_id)
+    .references(() => users.id)
     .notNull(),
   album_id: integer('album_id')
     .references(() => library.id)
@@ -264,7 +272,7 @@ export type NewShow = InferInsertModel<typeof shows>;
 export type Show = InferSelectModel<typeof shows>;
 export const shows = wxyc_schema.table('shows', {
   id: serial('id').primaryKey(),
-  primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => djs.user_id),
+  primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => users.id),
   specialty_id: integer('specialty_id') //Null for regular shows
     .references(() => specialty_shows.id),
   show_name: varchar('show_name', { length: 128 }), //Null if not provided or specialty show
@@ -279,7 +287,7 @@ export const show_djs = wxyc_schema.table('show_djs', {
     .references(() => shows.id)
     .notNull(),
   dj_id: varchar('dj_id', { length: 255 })
-    .references(() => djs.user_id)
+    .references(() => users.id)
     .notNull(),
   active: boolean('active').default(true),
 });

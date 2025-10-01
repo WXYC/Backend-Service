@@ -1,1 +1,0 @@
-ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "add_time" timestamp DEFAULT now() NOT NULL;

@@ -1,13 +1,7 @@
 -- Primary and secondary dj used in test automation
 -- Insert test users for better-auth
-INSERT INTO wxyc_schema.user(id, email, name, "realName", "djName", onboarded) VALUES ('test-user-id', 'test@example.com', 'Test User', 'Test User', 'Test DJ', true);
-INSERT INTO wxyc_schema.user(id, email, name, "realName", "djName", onboarded) VALUES ('test-user-id-2', 'test2@example.com', 'Test User 2', 'Test User 2', 'Test DJ 2', true);
-
--- Insert DJs with both old and new auth references for compatibility
-INSERT INTO wxyc_schema.djs(cognito_user_name, user_id, dj_name, real_name) VALUES ('test_dj1', 'test-user-id', 'Test dj1', 'Test User');
-INSERT INTO wxyc_schema.djs(cognito_user_name, user_id, dj_name, real_name) VALUES ('test_dj2', 'test-user-id-2', 'Test dj2', 'Test User 2');
--- If you'd like to test with auth uncomment the following line with your dj portal username.
--- INSERT INTO wxyc_schema.djs(cognito_user_name, dj_name) VALUES ('your_dj_portal_username', 'Your DJ NAME');
+INSERT INTO wxyc_schema.users(id, email, name, real_name, dj_name, onboarded, app_skin) VALUES ('test-user-id', 'test@example.com', 'Test User', 'Test User', 'Test DJ', true, 'modern-light');
+INSERT INTO wxyc_schema.users(id, email, name, real_name, dj_name, onboarded, app_skin) VALUES ('test-user-id-2', 'test2@example.com', 'Test User 2', 'Test User 2', 'Test DJ 2', true, 'modern-light');
 
 -- Genres, media formats, artists, and albums used in test automation
 INSERT INTO wxyc_schema.genres(genre_name) VALUES ('Rock');

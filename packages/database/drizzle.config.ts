@@ -1,7 +1,7 @@
 import { config } from 'dotenv';
 import { defineConfig } from 'drizzle-kit';
 
-config({ path: '.env' });
+config({ path: '../../.env' });
 
 const drizzleConfig: any = defineConfig({
   dialect: 'postgresql',
@@ -13,6 +13,7 @@ const drizzleConfig: any = defineConfig({
     host: `${process.env.DB_HOST}`,
     port: Number(process.env.DB_PORT),
     database: `${process.env.DB_NAME}`,
+    ssl: false
   },
 });
 

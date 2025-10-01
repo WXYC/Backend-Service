@@ -10,7 +10,7 @@ if (!process.env.FRONTEND_SOURCE) {
 }
 
 app.use("/api/auth/*", cors({
-  origin: "*",
+  origin: process.env.FRONTEND_SOURCE,
   allowHeaders: ["Content-Type", "Authorization"],
   allowMethods: ["GET", "POST", "OPTIONS"],
   exposeHeaders: ["Content-Length"],
@@ -19,7 +19,7 @@ app.use("/api/auth/*", cors({
 
 // Add CORS for session endpoint
 app.use("/api/auth/session", cors({
-  origin: "*",
+  origin: process.env.FRONTEND_SOURCE,
   allowHeaders: ["Content-Type", "Authorization"],
   allowMethods: ["GET", "POST", "OPTIONS"],
   exposeHeaders: ["Content-Length"],

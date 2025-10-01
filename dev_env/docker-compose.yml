@@ -26,14 +26,13 @@ services:
   backend:
     depends_on:
       - ci-db
-    image: wxyc_backend_service
     build:
       context: '../'
       dockerfile: Dockerfile
       platforms:
         - 'linux/amd64'
     profiles: [ci]
-    # env_file: '../.env'
+    env_file: '../.env'
     environment:
       - DB_HOST=ci-db
       - DB_PORT=${DB_PORT:-5432}
@@ -48,15 +47,15 @@ services:
   auth:
     depends_on:
       - db
-    image: wxyc_auth_service
     build:
       context: '../'
       dockerfile: Dockerfile.auth
       platforms:
         - 'linux/amd64'
     profiles: [dev]
-    # env_file: '../.env'
+    env_file: '../.env'
     environment:
+      - PORT=8082
       - DB_HOST=db
       - DB_PORT=${DB_PORT:-5432}
       - DB_USERNAME=${DB_USERNAME}
@@ -67,7 +66,7 @@ services:
       - AUTH_ADMIN_USERNAME=${AUTH_ADMIN_USERNAME}
       - AUTH_ADMIN_PASSWORD=${AUTH_ADMIN_PASSWORD}
     ports:
-      - '${AUTH_PORT:-8082}:8787'
+      - '${AUTH_PORT:-8083}:8082'
 
 volumes:
   pg-data:
