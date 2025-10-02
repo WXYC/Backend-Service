@@ -140,6 +140,12 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
             //backfill album info from library before adding to flowsheet
             const albumInfo = await flowsheet_service.getAlbumFromDB(body.album_id);
 
+            if (!albumInfo) {
+              console.error(`Album with ID ${body.album_id} not found in library`);
+              res.status(400).send(`Album with ID ${body.album_id} not found in library`);
+              return;
+            }
+
             if (body.record_label !== undefined) {
               albumInfo.record_label = body.record_label;
             }

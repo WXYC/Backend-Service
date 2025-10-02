@@ -1,7 +1,10 @@
-// This function is assuming the /flowsheet/join enpoint is working properly
+// This function is assuming the /flowsheet/join endpoint is working properly
 require('dotenv').config({ path: `${__dirname}/../../.env` });
 
-const url = `${process.env.TEST_HOST}:${process.env.PORT}`;
+// Use environment variables with fallbacks for testing
+const TEST_HOST = process.env.TEST_HOST || 'http://localhost';
+const PORT = process.env.CI_PORT || '8081';
+const url = `${TEST_HOST}:${PORT}`;
 
 exports.join_show = async (dj_id, access_token) => {
   const res = await fetch(`${url}/flowsheet/join`, {

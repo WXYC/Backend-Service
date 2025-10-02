@@ -8,7 +8,8 @@
     "dev": "tsup --watch",
     "build": "tsup --minify",
     "start": "node dist/app.js",
-    "clean": "rm -rf ./dist/*"
+    "clean": "rm -rf ./dist/*",
+    "test": "echo 'No tests defined for auth service' && exit 0"
   },
   "dependencies": {
     "@wxyc/database": "file:../../packages/database",

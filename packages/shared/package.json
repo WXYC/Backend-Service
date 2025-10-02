@@ -6,7 +6,8 @@
   "main": "./dist/index.js",
   "scripts": {
     "build": "tsup",
-    "clean": "rm -rf ./dist/*"
+    "clean": "rm -rf ./dist/*",
+    "test": "echo 'No tests defined for shared package' && exit 0"
   },
   "devDependencies": {
     "tsup": "^8.4.0",

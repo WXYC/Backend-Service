@@ -23,7 +23,7 @@
     "clean": "npm run clean --workspaces",
     "test": "npm run test --workspaces",
     "ci:env": "docker compose --profile ci up --build -d",
-    "ci:test": "PORT=${CI_PORT:-8081} npm run test",
+    "ci:test": "npm run test",
     "ci:clean": "docker compose --profile ci down --volumes --remove-orphans",
     "ci:full": "npm run ci:env && npm run ci:test && npm run ci:clean",
     "drizzle:generate": "cd packages/database && drizzle-kit generate --config drizzle.config.ts",

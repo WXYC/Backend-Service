@@ -100,7 +100,23 @@ export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
   //   }
   // }
 
-  const response = await db.insert(flowsheet).values(entry).returning();
+  // Calculate the next play_order for this show
+  let nextPlayOrder = 1;
+  if (entry.show_id) {
+    const maxPlayOrder = await db
+      .select({ max: sql<number>`COALESCE(MAX(${flowsheet.play_order}), 0)` })
+      .from(flowsheet)
+      .where(eq(flowsheet.show_id, entry.show_id));
+    
+    nextPlayOrder = (maxPlayOrder[0]?.max || 0) + 1;
+  }
+
+  const entryWithPlayOrder = {
+    ...entry,
+    play_order: nextPlayOrder,
+  };
+
+  const response = await db.insert(flowsheet).values(entryWithPlayOrder).returning();
   return response[0];
 };
 
@@ -167,7 +183,7 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
 };
 
 export const startShow = async (dj_id: number, show_name?: string, specialty_id?: number): Promise<Show> => {
-  const dj_info = (await db.select().from(djs).where(eq(djs.id, dj_id)).limit(1))[0];
+  const dj_info = (await db.select().from(users).where(eq(users.id, dj_id)).limit(1))[0];
 
   const new_show = await db
     .insert(shows)
@@ -188,9 +204,10 @@ export const startShow = async (dj_id: number, show_name?: string, specialty_id?
 
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
-    message: `Start of Show: DJ ${dj_info.dj_name} joined the set at ${new Date().toLocaleString('en-US', {
+    message: `Start of Show: ${dj_info.name} joined the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
+    play_order: 1,
   });
 
   return new_show[0];
@@ -236,17 +253,26 @@ export const addDJToShow = async (dj_id: number, current_show: Show): Promise<Sh
 
 const createJoinNotification = async (id: number, show_id: number): Promise<FSEntry> => {
   let dj_name = 'A DJ';
-  const dj: DJ = (await db.select().from(djs).where(eq(djs.id, id)))[0];
+  const dj = (await db.select().from(users).where(eq(users.id, id)))[0];
 
-  dj_name = dj.dj_name ?? dj_name;
+  dj_name = dj.name ?? dj_name;
 
   const message = `${dj_name} joined the set!`;
+
+  // Calculate the next play_order for this show
+  const maxPlayOrder = await db
+    .select({ max: sql<number>`COALESCE(MAX(${flowsheet.play_order}), 0)` })
+    .from(flowsheet)
+    .where(eq(flowsheet.show_id, show_id));
+  
+  const nextPlayOrder = (maxPlayOrder[0]?.max || 0) + 1;
 
   const notification = await db
     .insert(flowsheet)
     .values({
       show_id: show_id,
       message: message,
+      play_order: nextPlayOrder,
     })
     .returning();
 
@@ -273,14 +299,23 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
     })
   );
 
-  const dj_information = (await db.select().from(djs).where(eq(djs.id, primary_dj_id)).limit(1))[0];
-  const dj_name = dj_information.dj_name ? dj_information.dj_name : 'A DJ';
+  const dj_information = (await db.select().from(users).where(eq(users.id, primary_dj_id)).limit(1))[0];
+  const dj_name = dj_information.name ? dj_information.name : 'A DJ';
+
+  // Calculate the next play_order for this show
+  const maxPlayOrder = await db
+    .select({ max: sql<number>`COALESCE(MAX(${flowsheet.play_order}), 0)` })
+    .from(flowsheet)
+    .where(eq(flowsheet.show_id, currentShow.id));
+  
+  const nextPlayOrder = (maxPlayOrder[0]?.max || 0) + 1;
 
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
     message: `End of Show: ${dj_name} left the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
+    play_order: nextPlayOrder,
   });
 
   await db.update(shows).set({ end_time: new Date() }).where(eq(shows.id, currentShow.id));
@@ -311,17 +346,26 @@ export const leaveShow = async (dj_id: number, currentShow: Show): Promise<ShowD
 
 const createLeaveNotification = async (dj_id: number, show_id: number): Promise<FSEntry> => {
   let dj_name = 'A DJ';
-  const dj: DJ = (await db.select().from(djs).where(eq(djs.id, dj_id)))[0];
+  const dj = (await db.select().from(users).where(eq(users.id, dj_id)))[0];
 
-  dj_name = dj.dj_name ?? dj_name;
+  dj_name = dj.name ?? dj_name;
 
   const message = `${dj_name} left the set!`;
+
+  // Calculate the next play_order for this show
+  const maxPlayOrder = await db
+    .select({ max: sql<number>`COALESCE(MAX(${flowsheet.play_order}), 0)` })
+    .from(flowsheet)
+    .where(eq(flowsheet.show_id, show_id));
+  
+  const nextPlayOrder = (maxPlayOrder[0]?.max || 0) + 1;
 
   const notification = await db
     .insert(flowsheet)
     .values({
       show_id: show_id,
       message: message,
+      play_order: nextPlayOrder,
     })
     .returning();
 
@@ -380,7 +424,7 @@ export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promis
     return dj.dj_id;
   });
 
-  return await db.select().from(djs).where(inArray(djs.id, dj_ids));
+  return await db.select().from(users).where(inArray(users.id, dj_ids));
 };
 
 export const getAlbumFromDB = async (album_id: number) => {
@@ -447,7 +491,7 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
 export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
 
-  const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({ id: dj.id, dj_name: dj.dj_name }));
+  const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({ id: dj.id, dj_name: dj.name }));
 
   const entries = await db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id));
 

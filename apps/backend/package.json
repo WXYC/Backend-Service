@@ -9,7 +9,7 @@
     "build": "tsup --minify",
     "start": "node dist/app.js",
     "clean": "rm -rf ./dist/*",
-    "test": "jest"
+    "test": "jest --config ../../jest.config.json"
   },
   "dependencies": {
     "async-mutex": "^0.5.0",

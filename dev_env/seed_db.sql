@@ -29,4 +29,13 @@ INSERT INTO wxyc_schema.library(
     artist_id, genre_id, format_id, album_title, code_number) 
     VALUES (3, 1, 2, 'I Love You Jennifer B', 1);
 
-INSERT INTO wxyc_schema.rotation(album_id, play_freq) VALUES (1, 'L')
+INSERT INTO wxyc_schema.rotation(album_id, play_freq) VALUES (1, 'L');
+
+-- Test users for automated testing
+INSERT INTO wxyc_schema.users(
+    id, name, email, username, display_username, onboarded, app_skin, created_at, updated_at)
+    VALUES ('1', 'Test dj1', 'test1@wxyc.org', 'testdj1', 'Test dj1', true, 'modern-light', NOW(), NOW());
+
+INSERT INTO wxyc_schema.users(
+    id, name, email, username, display_username, onboarded, app_skin, created_at, updated_at)
+    VALUES ('2', 'Test dj2', 'test2@wxyc.org', 'testdj2', 'Test dj2', true, 'modern-light', NOW(), NOW());

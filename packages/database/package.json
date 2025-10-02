@@ -16,7 +16,8 @@
     "clean": "rm -rf ./dist/*",
     "drizzle:generate": "drizzle-kit generate --config drizzle.config.ts",
     "drizzle:migrate": "drizzle-kit migrate --config drizzle.config.ts",
-    "drizzle:drop": "drizzle-kit drop --out ./migrations"
+    "drizzle:drop": "drizzle-kit drop --out ./migrations",
+    "test": "echo 'No tests defined for database package' && exit 0"
   },
   "dependencies": {
     "drizzle-orm": "^0.44.3",
