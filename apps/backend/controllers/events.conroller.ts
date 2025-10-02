@@ -3,30 +3,30 @@ import { serverEventsMgr, Topics, EventData, TestEvents } from '../utils/serverE
 import { RequestHandler, Response } from 'express';
 import WxycError from '../utils/error.js';
 
-//Define access levels for events
+//Define access levels for events using new role system
 const TopicAuthz: Record<string, string[]> = {
-  [Topics.test]: [],
-  [Topics.liveFs]: [],
-  [Topics.showDj]: ['dj'],
-  [Topics.primaryDj]: ['dj'],
-  [Topics.mirror]: ['dj'],
+  [Topics.test]: [], // Public access
+  [Topics.liveFs]: [], // Public access
+  [Topics.showDj]: ['dj'], // DJs and above
+  [Topics.primaryDj]: ['dj'], // DJs and above
+  [Topics.mirror]: ['music-director'], // Music Directors and above
 };
 
 const filterAuthorizedTopics = (req: any, topics: string[]) => {
   const user = req.user;
-  const groups: string[] = [];
-
-  // If we have a valid user allow to access dj topics
-  if (user) {
-    groups.push('dj');
-  }
+  
+  // Import role utilities from auth middleware
+  const { getUserRole, hasRole } = require('@wxyc/auth-middleware');
+  
+  const userRole = getUserRole(user);
 
   return topics.filter((topic) => {
     if (TopicAuthz[topic] === undefined) return false;
     //empty = anyone can access topic
     if (!TopicAuthz[topic].length) return true;
 
-    return TopicAuthz[topic]?.some((authorizedGroup) => groups.includes(authorizedGroup));
+    // Check if user has any of the required roles for this topic
+    return hasRole(userRole, TopicAuthz[topic] as any);
   });
 };
 

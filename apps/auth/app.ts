@@ -68,6 +68,7 @@ const createDefaultUser = async () => {
         displayUsername: process.env.DEFAULT_USER_DISPLAY_USERNAME!,
         onboarded: false,
         appSkin: "modern-light",
+        role: "station-management", // Default user gets station management role
       }});
       console.log("Default user created:", username);
     } catch (error) {

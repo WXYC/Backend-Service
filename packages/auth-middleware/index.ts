@@ -17,6 +17,7 @@ export interface AuthenticatedRequest extends Request {
     djName?: string;
     onboarded: boolean;
     appSkin: string;
+    role?: string;
   };
 }
 
@@ -32,7 +33,8 @@ export const authMiddleware = (required: boolean = true) => {
           realName: 'Test User',
           djName: 'Test DJ',
           onboarded: true,
-          appSkin: 'modern-light'
+          appSkin: 'modern-light',
+          role: process.env.AUTH_TEST_ROLE || 'dj'
         };
         return next();
       }
@@ -68,7 +70,8 @@ export const authMiddleware = (required: boolean = true) => {
         realName: (session.user as any).realName || undefined,
         djName: (session.user as any).djName || undefined,
         onboarded: (session.user as any).onboarded || false,
-        appSkin: (session.user as any).appSkin || 'modern-light'
+        appSkin: (session.user as any).appSkin || 'modern-light',
+        role: (session.user as any).role || undefined
       };
       next();
     } catch (error) {
@@ -88,8 +91,37 @@ export const authMiddleware = (required: boolean = true) => {
   };
 };
 
-// Role-based middleware (for future use)
-export const requireRole = (roles: string[]) => {
+// Define role hierarchy - higher roles inherit permissions from lower roles
+const ROLE_HIERARCHY = {
+  'guest': 0,
+  'dj': 1,
+  'music-director': 2,
+  'station-management': 3
+} as const;
+
+type Role = keyof typeof ROLE_HIERARCHY;
+
+// Get user's effective role based on their stored role and onboarded status
+const getUserRole = (user: AuthenticatedRequest['user']): Role => {
+  if (!user) return 'guest';
+  
+  // If user has an explicit role, use it
+  if (user.role && user.role in ROLE_HIERARCHY) {
+    return user.role as Role;
+  }
+  
+  // Fallback to legacy logic: onboarded users are DJs, others are guests
+  return user.onboarded ? 'dj' : 'guest';
+};
+
+// Check if user has required role or higher
+const hasRole = (userRole: Role, requiredRoles: Role[]): boolean => {
+  const userLevel = ROLE_HIERARCHY[userRole];
+  return requiredRoles.some(role => userLevel >= ROLE_HIERARCHY[role]);
+};
+
+// Role-based middleware
+export const requireRole = (roles: Role[]) => {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     if (!req.user) {
       return res.status(401).json({
@@ -98,10 +130,9 @@ export const requireRole = (roles: string[]) => {
       });
     }
 
-    // For now, we'll implement basic role checking
-    const userRole = req.user.onboarded ? 'dj' : 'guest';
+    const userRole = getUserRole(req.user);
     
-    if (!roles.includes(userRole)) {
+    if (!hasRole(userRole, roles)) {
       throw new ForbiddenError('Insufficient permissions');
     }
 
@@ -109,27 +140,21 @@ export const requireRole = (roles: string[]) => {
   };
 };
 
-// DJ-specific middleware
-export const requireDJ = (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-  if (!req.user) {
-    return res.status(401).json({
-      success: false,
-      error: 'Authentication required'
-    });
-  }
+// DJ-specific middleware (legacy - now uses role system)
+export const requireDJ = requireRole(['dj']);
 
-  if (!req.user.onboarded) {
-    return res.status(403).json({
-      success: false,
-      error: 'DJ onboarding required'
-    });
-  }
+// Convenience middleware for specific roles
+export const requireMusicDirector = requireRole(['music-director']);
+export const requireStationManagement = requireRole(['station-management']);
 
-  next();
-};
+// Export role type for use in other modules
+export type { Role };
+export { getUserRole, hasRole, ROLE_HIERARCHY };
 
 export default {
   authMiddleware,
   requireRole,
-  requireDJ
+  requireDJ,
+  requireMusicDirector,
+  requireStationManagement
 };

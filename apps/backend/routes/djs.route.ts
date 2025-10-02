@@ -1,20 +1,21 @@
 import { Router } from 'express';
 import * as djsController from '../controllers/djs.controller.js';
-import { authMiddleware, requireDJ } from '@wxyc/auth-middleware';
+import { authMiddleware, requireDJ, requireStationManagement } from '@wxyc/auth-middleware';
 
 // Role-based access will be handled by Better Auth middleware
 
 export const dj_route = Router();
 
-//TODO: secure - mgmt & individual dj
+// Get DJ info - DJs can view their own info, station management can view all
 dj_route.get('/', authMiddleware(),
   requireDJ, djsController.getDJInfo);
 
+// DJ registration and updates - Station Management only
 dj_route.post('/register', authMiddleware(),
-  requireDJ, djsController.register);
+  requireStationManagement, djsController.register);
 
 dj_route.patch('/register', authMiddleware(),
-  requireDJ, djsController.update);
+  requireStationManagement, djsController.update);
 
 dj_route.post('/bin', authMiddleware(),
   requireDJ, djsController.addToBin);

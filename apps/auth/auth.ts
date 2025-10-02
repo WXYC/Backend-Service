@@ -50,6 +50,13 @@ export const auth: any = betterAuth({
       djName: { type: "string", required: false },
       onboarded: { type: "boolean", required: true, default: false },
       appSkin: { type: "string", required: true, default: "modern-light" },
+      role: { type: "string", required: false, default: "dj" },
     },
+  },
+
+  // Admin configuration - station management users are admins
+  admin: {
+    // Only users with station-management role can access admin functions
+    requireAdmin: (user: any) => user?.role === "station-management",
   },
 });
