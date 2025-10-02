@@ -61,11 +61,11 @@ async function waitForDatabase() {
       await sql`SELECT 1`;
       await sql.end();
       
-      console.log('✅ Database is ready!\n');
+      console.log('Database is ready!\n');
       return true;
     } catch (error) {
       if (i === MAX_RETRIES - 1) {
-        console.error(`❌ Database not ready after ${MAX_RETRIES} attempts`);
+        console.error(`Database not ready after ${MAX_RETRIES} attempts`);
         throw error;
       }
       process.stdout.write(`   Attempt ${i + 1}/${MAX_RETRIES}...\r`);
@@ -93,9 +93,9 @@ async function runMigrations() {
     if (stdout) console.log(stdout);
     if (stderr && !stderr.includes('No config path provided')) console.error(stderr);
     
-    console.log('✅ Migrations completed successfully!\n');
+    console.log('Migrations completed successfully!\n');
   } catch (error) {
-    console.error('❌ Migration failed:', error.message);
+    console.error('Migration failed:', error.message);
     throw error;
   }
 }
@@ -153,10 +153,10 @@ async function seedDatabase() {
     await sql.unsafe(seedSQL);
     await sql.end();
     
-    console.log('✅ Database seeded successfully!\n');
+    console.log('Database seeded successfully!\n');
   } catch (error) {
     await sql.end();
-    console.error('❌ Seeding failed:', error.message);
+    console.error('Seeding failed:', error.message);
     throw error;
   }
 }
@@ -176,15 +176,15 @@ async function main() {
     const alreadySeeded = await isDatabaseSeeded();
     
     if (alreadySeeded) {
-      console.log('ℹ️  Database already contains data, skipping seed.\n');
+      console.log('Database already contains data, skipping seed.\n');
     } else {
       await seedDatabase();
     }
     
-    console.log('🎉 Database initialization complete!\n');
+    console.log('Database initialization complete!\n');
     process.exit(0);
   } catch (error) {
-    console.error('\n❌ Database initialization failed:', error);
+    console.error('\nDatabase initialization failed:', error);
     process.exit(1);
   }
 }

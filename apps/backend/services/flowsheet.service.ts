@@ -73,9 +73,7 @@ export const getEntriesByShow = async (...show_ids: number[]) => {
 };
 
 export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
-  /*
-    TODO: logic for updating album playcount 
-  */
+  // TODO: logic for updating album playcount
   // if (entry.artist_name || entry.album_title || entry.record_label) {
   //   const qb = new QueryBuilder();
   //   let query = qb.select().from(library_artist_view).$dynamic();
@@ -121,9 +119,7 @@ export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
 };
 
 export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
-  /*
-    TODO: logic for updating album playcount 
-   */
+  // TODO: logic for updating album playcount
   // const entry = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
 
   // if (entry.length === 0) {

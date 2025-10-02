@@ -2,7 +2,6 @@ import { Request, Response, NextFunction } from 'express';
 import { betterAuth } from 'better-auth';
 import { AppError, UnauthorizedError, ForbiddenError } from '@wxyc/shared';
 
-// This will be configured with the auth service URL
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:8787';
 
 // Better Auth client for JWT verification
@@ -100,7 +99,6 @@ export const requireRole = (roles: string[]) => {
     }
 
     // For now, we'll implement basic role checking
-    // This can be enhanced based on your role system
     const userRole = req.user.onboarded ? 'dj' : 'guest';
     
     if (!roles.includes(userRole)) {

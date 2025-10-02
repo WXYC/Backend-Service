@@ -16,7 +16,7 @@ export interface IFSEntry extends FSEntry {
 }
 
 const MAX_ITEMS = 200;
-const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
+const DELETION_OFFSET = 10;
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
   const { query } = req;
 
@@ -45,8 +45,6 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
       }
       return;
     } catch (e) {
-      console.error('Failed to retrieve tracks from previous shows');
-      console.error(`Error: ${e}`);
       next(e);
       return;
     }
@@ -72,14 +70,11 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
       if (entries.length) {
         res.status(200).json(entries);
       } else {
-        console.error('No Tracks found');
         res.status(404).json({
           message: 'No Tracks found',
         });
       }
     } catch (e) {
-      console.error('Failed to retrieve tracks');
-      console.error(`Error: ${e}`);
       next(e);
     }
   }
@@ -92,13 +87,10 @@ export const getLatest: RequestHandler = async (req, res, next) => {
       res.status(200);
       res.json(latest[0]);
     } else {
-      console.error('No Tracks found');
       res.status(404);
       res.send('Error: No Tracks found');
     }
   } catch (e) {
-    console.error('Error: Failed to retrieve track');
-    console.error(`Error: ${e}`);
     next(e);
   }
 };
@@ -122,17 +114,15 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   try {
     latestShow = await flowsheet_service.getLatestShow();
   } catch (e) {
-    console.error('Error: Failed to retrieve most recent show ');
-    console.error(e);
+    next(e);
+    return;
   }
   if (latestShow?.end_time !== null) {
-    console.error('Bad Request, There are no active shows');
     res.status(400).send('Bad Request, There are no active shows');
   } else {
     if (body.message === undefined) {
       // no message passed, so we assume we're adding a track to the flowsheet
       if (body.track_title === undefined) {
-        console.error('Bad Request, Missing query parameter: track_title');
         res.status(400).send('Bad Request, Missing query parameter: track_title');
       } else {
         try {

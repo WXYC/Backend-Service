@@ -1,4 +1,3 @@
-// This function is assuming the /flowsheet/join endpoint is working properly
 require('dotenv').config({ path: `${__dirname}/../../.env` });
 
 // Use environment variables with fallbacks for testing

@@ -56,7 +56,7 @@ const createDefaultUser = async () => {
       }});
       
       if (!available) {
-        console.log("✅ Default user already exists:", username);
+        console.log("Default user already exists:", username);
         return;
       }
       
@@ -69,12 +69,12 @@ const createDefaultUser = async () => {
         onboarded: false,
         appSkin: "modern-light",
       }});
-      console.log("✅ Default user created:", username);
+      console.log("Default user created:", username);
     } catch (error) {
-      console.error("❌ Failed to create default user:", error);
+      console.error("Failed to create default user:", error);
     }
   } else {
-    console.log("ℹ️  CREATE_DEFAULT_USER not set to TRUE, skipping default user creation");
+    console.log("CREATE_DEFAULT_USER not set to TRUE, skipping default user creation");
   }
 };
 
