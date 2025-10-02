@@ -17,7 +17,7 @@ import {
 export const wxyc_schema = pgSchema('wxyc_schema');
 
 // ---- Better Auth schema ----
-export const users = wxyc_schema.table("users", {
+export const user = wxyc_schema.table("user", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   email: text("email").notNull().unique(),
@@ -36,11 +36,10 @@ export const users = wxyc_schema.table("users", {
   displayUsername: text("display_username"),
   realName: text("real_name"),
   djName: text("dj_name"),
-  onboarded: boolean("onboarded").notNull(),
   appSkin: text("app_skin").notNull(),
 });
 
-export const sessions = wxyc_schema.table("sessions", {
+export const session = wxyc_schema.table("session", {
   id: text("id").primaryKey(),
   expiresAt: timestamp("expires_at").notNull(),
   token: text("token").notNull().unique(),
@@ -52,17 +51,18 @@ export const sessions = wxyc_schema.table("sessions", {
   userAgent: text("user_agent"),
   userId: text("user_id")
     .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
+    .references(() => user.id, { onDelete: "cascade" }),
   impersonatedBy: text("impersonated_by"),
+  activeOrganizationId: text("active_organization_id"),
 });
 
-export const accounts = wxyc_schema.table("accounts", {
+export const account = wxyc_schema.table("account", {
   id: text("id").primaryKey(),
   accountId: text("account_id").notNull(),
   providerId: text("provider_id").notNull(),
   userId: text("user_id")
     .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
+    .references(() => user.id, { onDelete: "cascade" }),
   accessToken: text("access_token"),
   refreshToken: text("refresh_token"),
   idToken: text("id_token"),
@@ -76,7 +76,7 @@ export const accounts = wxyc_schema.table("accounts", {
     .notNull(),
 });
 
-export const verifications = wxyc_schema.table("verifications", {
+export const verification = wxyc_schema.table("verification", {
   id: text("id").primaryKey(),
   identifier: text("identifier").notNull(),
   value: text("value").notNull(),
@@ -88,11 +88,48 @@ export const verifications = wxyc_schema.table("verifications", {
     .notNull(),
 });
 
-export const jwkss = wxyc_schema.table("jwkss", {
+export const jwks = wxyc_schema.table("jwks", {
   id: text("id").primaryKey(),
   publicKey: text("public_key").notNull(),
   privateKey: text("private_key").notNull(),
   createdAt: timestamp("created_at").notNull(),
+});
+
+// ---- Organization Plugin Schema ----
+
+export const organization = wxyc_schema.table("organization", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  slug: text("slug").unique(),
+  logo: text("logo"),
+  createdAt: timestamp("created_at").notNull(),
+  metadata: text("metadata"),
+});
+
+export const member = wxyc_schema.table("member", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id")
+    .notNull()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  role: text("role").default("member").notNull(),
+  createdAt: timestamp("created_at").notNull(),
+});
+
+export const invitation = wxyc_schema.table("invitation", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id")
+    .notNull()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  email: text("email").notNull(),
+  role: text("role"),
+  status: text("status").default("pending").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  inviterId: text("inviter_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
 });
 
 // ---- WXYC schema ----
@@ -108,8 +145,8 @@ export const schedule = wxyc_schema.table('schedule', {
   start_time: time('start_time').notNull(),
   show_duration: smallint('show_duration').notNull(), // In 15-minute blocs
   specialty_id: integer('specialty_id').references(() => specialty_shows.id), //null for regular shows
-  assigned_dj_id: varchar('assigned_dj_id', { length: 255 }).references(() => users.id),
-  assigned_dj_id2: varchar('assigned_dj_id2', { length: 255 }).references(() => users.id),
+  assigned_dj_id: varchar('assigned_dj_id', { length: 255 }).references(() => user.id),
+  assigned_dj_id2: varchar('assigned_dj_id2', { length: 255 }).references(() => user.id),
 });
 
 //SELECT date_trunc('week', current_timestamp + timestamp '${n} weeks') + interval '${schedule.day} days' + ${schedule.time}
@@ -122,7 +159,7 @@ export const shift_covers = wxyc_schema.table('shift_covers', {
     .references(() => schedule.id)
     .notNull(),
   shift_timestamp: timestamp('shift_timestamp').notNull(), //Timestamp to expire cover requests
-  cover_dj_id: varchar('cover_dj_id', { length: 255 }).references(() => users.id),
+  cover_dj_id: varchar('cover_dj_id', { length: 255 }).references(() => user.id),
   covered: boolean('covered').default(false),
 });
 
@@ -260,7 +297,7 @@ export type BinEntry = InferSelectModel<typeof bins>;
 export const bins = wxyc_schema.table('bins', {
   id: serial('id').primaryKey(),
   dj_id: varchar('dj_id', { length: 255 })
-    .references(() => users.id)
+    .references(() => user.id)
     .notNull(),
   album_id: integer('album_id')
     .references(() => library.id)
@@ -272,7 +309,7 @@ export type NewShow = InferInsertModel<typeof shows>;
 export type Show = InferSelectModel<typeof shows>;
 export const shows = wxyc_schema.table('shows', {
   id: serial('id').primaryKey(),
-  primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => users.id),
+  primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => user.id),
   specialty_id: integer('specialty_id') //Null for regular shows
     .references(() => specialty_shows.id),
   show_name: varchar('show_name', { length: 128 }), //Null if not provided or specialty show
@@ -287,7 +324,7 @@ export const show_djs = wxyc_schema.table('show_djs', {
     .references(() => shows.id)
     .notNull(),
   dj_id: varchar('dj_id', { length: 255 })
-    .references(() => users.id)
+    .references(() => user.id)
     .notNull(),
   active: boolean('active').default(true),
 });

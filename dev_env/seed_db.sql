@@ -32,10 +32,33 @@ INSERT INTO wxyc_schema.library(
 INSERT INTO wxyc_schema.rotation(album_id, play_freq) VALUES (1, 'L');
 
 -- Test users for automated testing
-INSERT INTO wxyc_schema.users(
-    id, name, email, username, display_username, onboarded, app_skin, created_at, updated_at)
-    VALUES ('1', 'Test dj1', 'test1@wxyc.org', 'testdj1', 'Test dj1', true, 'modern-light', NOW(), NOW());
+INSERT INTO wxyc_schema.user(
+    id, name, email, username, display_username, app_skin, created_at, updated_at)
+    VALUES ('1', 'Test dj1', 'test1@wxyc.org', 'testdj1', 'Test dj1', 'modern-light', NOW(), NOW());
 
-INSERT INTO wxyc_schema.users(
-    id, name, email, username, display_username, onboarded, app_skin, created_at, updated_at)
-    VALUES ('2', 'Test dj2', 'test2@wxyc.org', 'testdj2', 'Test dj2', true, 'modern-light', NOW(), NOW());
+INSERT INTO wxyc_schema.user(
+    id, name, email, username, display_username, app_skin, created_at, updated_at)
+    VALUES ('2', 'Test dj2', 'test2@wxyc.org', 'testdj2', 'Test dj2', 'modern-light', NOW(), NOW());
+
+-- Create WXYC organization
+INSERT INTO wxyc_schema.organization(
+    id, name, slug, created_at)
+    VALUES ('wxyc-org', 'WXYC 89.3 FM', 'wxyc', NOW());
+
+-- Add test users as members of WXYC organization
+INSERT INTO wxyc_schema.member(
+    id, organization_id, user_id, role, created_at)
+    VALUES ('member-1', 'wxyc-org', '1', 'dj', NOW());
+
+INSERT INTO wxyc_schema.member(
+    id, organization_id, user_id, role, created_at)
+    VALUES ('member-2', 'wxyc-org', '2', 'music-director', NOW());
+
+-- Add an admin user for testing
+INSERT INTO wxyc_schema.user(
+    id, name, email, username, display_username, app_skin, created_at, updated_at)
+    VALUES ('3', 'Test Admin', 'admin@wxyc.org', 'testadmin', 'Test Admin', 'modern-light', NOW(), NOW());
+
+INSERT INTO wxyc_schema.member(
+    id, organization_id, user_id, role, created_at)
+    VALUES ('member-3', 'wxyc-org', '3', 'admin', NOW());

@@ -8,7 +8,7 @@ import {
   ShowDJ,
   shows,
   artists,
-  users,
+  user,
   flowsheet,
   library,
   rotation,
@@ -179,7 +179,7 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
 };
 
 export const startShow = async (dj_id: number, show_name?: string, specialty_id?: number): Promise<Show> => {
-  const dj_info = (await db.select().from(users).where(eq(users.id, dj_id)).limit(1))[0];
+  const dj_info = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
   const new_show = await db
     .insert(shows)
@@ -249,7 +249,7 @@ export const addDJToShow = async (dj_id: number, current_show: Show): Promise<Sh
 
 const createJoinNotification = async (id: number, show_id: number): Promise<FSEntry> => {
   let dj_name = 'A DJ';
-  const dj = (await db.select().from(users).where(eq(users.id, id)))[0];
+  const dj = (await db.select().from(user).where(eq(user.id, id)))[0];
 
   dj_name = dj.name ?? dj_name;
 
@@ -295,7 +295,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
     })
   );
 
-  const dj_information = (await db.select().from(users).where(eq(users.id, primary_dj_id)).limit(1))[0];
+  const dj_information = (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0];
   const dj_name = dj_information.name ? dj_information.name : 'A DJ';
 
   // Calculate the next play_order for this show
@@ -342,7 +342,7 @@ export const leaveShow = async (dj_id: number, currentShow: Show): Promise<ShowD
 
 const createLeaveNotification = async (dj_id: number, show_id: number): Promise<FSEntry> => {
   let dj_name = 'A DJ';
-  const dj = (await db.select().from(users).where(eq(users.id, dj_id)))[0];
+  const dj = (await db.select().from(user).where(eq(user.id, dj_id)))[0];
 
   dj_name = dj.name ?? dj_name;
 
@@ -420,7 +420,7 @@ export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promis
     return dj.dj_id;
   });
 
-  return await db.select().from(users).where(inArray(users.id, dj_ids));
+  return await db.select().from(user).where(inArray(user.id, dj_ids));
 };
 
 export const getAlbumFromDB = async (album_id: number) => {

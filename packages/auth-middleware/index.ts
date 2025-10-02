@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { betterAuth } from 'better-auth';
+import { organization } from 'better-auth/plugins';
 import { AppError, UnauthorizedError, ForbiddenError } from '@wxyc/shared';
 
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:8787';
@@ -7,6 +8,7 @@ const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:8787'
 // Better Auth client for JWT verification
 const authClient = betterAuth({
   baseURL: AUTH_SERVICE_URL,
+  plugins: [organization()],
 });
 
 export interface AuthenticatedRequest extends Request {
@@ -17,7 +19,11 @@ export interface AuthenticatedRequest extends Request {
     djName?: string;
     onboarded: boolean;
     appSkin: string;
-    role?: string;
+    organizations?: Array<{
+      id: string;
+      name: string;
+      role: string;
+    }>;
   };
 }
 
@@ -34,7 +40,11 @@ export const authMiddleware = (required: boolean = true) => {
           djName: 'Test DJ',
           onboarded: true,
           appSkin: 'modern-light',
-          role: process.env.AUTH_TEST_ROLE || 'dj'
+          organizations: [{
+            id: 'wxyc-org',
+            name: 'WXYC',
+            role: process.env.AUTH_TEST_ROLE || 'dj'
+          }]
         };
         return next();
       }
@@ -63,6 +73,23 @@ export const authMiddleware = (required: boolean = true) => {
         throw new UnauthorizedError('Invalid or expired token');
       }
 
+      // Get user organizations
+      let userOrganizations: Array<{id: string, name: string, role: string}> = [];
+      try {
+        const orgs = await authClient.api.listUserOrganizations({
+          headers: {
+            authorization: `Bearer ${token}`
+          } as any
+        });
+        userOrganizations = orgs?.map((org: any) => ({
+          id: org.id,
+          name: org.name,
+          role: org.role
+        })) || [];
+      } catch (error) {
+        console.warn('Failed to fetch user organizations:', error);
+      }
+
       // Attach user info to request with proper type mapping
       req.user = {
         id: session.user.id,
@@ -71,7 +98,7 @@ export const authMiddleware = (required: boolean = true) => {
         djName: (session.user as any).djName || undefined,
         onboarded: (session.user as any).onboarded || false,
         appSkin: (session.user as any).appSkin || 'modern-light',
-        role: (session.user as any).role || undefined
+        organizations: userOrganizations
       };
       next();
     } catch (error) {
@@ -101,13 +128,29 @@ const ROLE_HIERARCHY = {
 
 type Role = keyof typeof ROLE_HIERARCHY;
 
-// Get user's effective role based on their stored role and onboarded status
+// Get user's effective role based on their WXYC organization membership
 const getUserRole = (user: AuthenticatedRequest['user']): Role => {
   if (!user) return 'guest';
   
-  // If user has an explicit role, use it
-  if (user.role && user.role in ROLE_HIERARCHY) {
-    return user.role as Role;
+  // Look for WXYC organization membership
+  if (user.organizations && user.organizations.length > 0) {
+    const wxycOrg = user.organizations.find(org => org.id === 'wxyc-org');
+    
+    if (wxycOrg) {
+      // Map organization roles to our role hierarchy
+      switch (wxycOrg.role.toLowerCase()) {
+        case 'admin':
+          return 'station-management';
+        case 'music-director':
+          return 'music-director';
+        case 'dj':
+          return 'dj';
+        case 'member':
+          return 'dj'; // Members are treated as DJs for backward compatibility
+        default:
+          return 'guest';
+      }
+    }
   }
   
   // Fallback to legacy logic: onboarded users are DJs, others are guests

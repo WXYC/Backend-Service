@@ -1,9 +1,10 @@
 // auth.ts (runs on your auth server)
-import { accounts, db, sessions, users, verifications, jwkss } from "@wxyc/database";
+import { db, user, session, account, verification, jwks, organization, member, invitation } from "@wxyc/database";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { admin, jwt, username } from "better-auth/plugins";
+import { admin, jwt, username, organization } from "better-auth/plugins";
 import { config } from "dotenv";
+import { sql } from "drizzle-orm";
 
 // Load environment variables from project root
 config({ path: "../../.env" });
@@ -12,11 +13,14 @@ export const auth: any = betterAuth({
   database: drizzleAdapter(db, {
     provider: "pg",
     schema: {
-      user: users,
-      session: sessions,
-      account: accounts,
-      verification: verifications,
-      jwks: jwkss
+      user: user,
+      session: session,
+      account: account,
+      verification: verification,
+      jwks: jwks,
+      organization: organization,
+      member: member,
+      invitation: invitation
     },
   }),
 
@@ -38,25 +42,66 @@ export const auth: any = betterAuth({
     crossSubDomainCookies: { enabled: true },
   },*/
 
-  plugins: [admin(), username(), jwt()],
+  plugins: [
+    admin(), 
+    username(), 
+    jwt(), 
+    organization({
+      // Configure for single organization model
+      allowUserToCreateOrganization: false, // Only admins can create organizations
+      organizationLimit: 1, // Users can only be in one organization
+      roles: {
+        // Define the three roles for WXYC
+        member: {
+          name: "Member",
+          description: "Basic member access"
+        },
+        dj: {
+          name: "DJ",
+          description: "DJ access to flowsheet and library"
+        },
+        "music-director": {
+          name: "Music Director", 
+          description: "Music Director access to manage library and rotation"
+        },
+        admin: {
+          name: "Station Management",
+          description: "Full administrative access"
+        }
+      }
+    })
+  ],
 
   // Enable username-based login
   username: { enabled: true },
 
   user: {
-    ...users,
     additionalFields: {
       realName: { type: "string", required: false },
       djName: { type: "string", required: false },
-      onboarded: { type: "boolean", required: true, default: false },
       appSkin: { type: "string", required: true, default: "modern-light" },
-      role: { type: "string", required: false, default: "dj" },
     },
   },
 
-  // Admin configuration - station management users are admins
+  // Admin configuration - organization owners/admins are admins
   admin: {
-    // Only users with station-management role can access admin functions
-    requireAdmin: (user: any) => user?.role === "station-management",
+    // Check if user has admin or owner role in the WXYC organization
+    requireAdmin: async (user: any, request?: any) => {
+      if (!user?.id) return false;
+      
+      try {
+        // Query the member table to check if user has admin/owner role in WXYC org
+        const adminMember = await db
+          .select()
+          .from(member)
+          .where(sql`${member.userId} = ${user.id} AND ${member.organizationId} = 'wxyc-org' AND ${member.role} IN ('admin', 'owner')`)
+          .limit(1);
+          
+        return adminMember.length > 0;
+      } catch (error) {
+        console.error('Error checking admin status:', error);
+        return false;
+      }
+    },
   },
 });

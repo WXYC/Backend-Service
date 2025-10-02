@@ -1,7 +1,7 @@
 CREATE SCHEMA "wxyc_schema";
 --> statement-breakpoint
 CREATE TYPE "public"."freq_enum" AS ENUM('S', 'L', 'M', 'H');--> statement-breakpoint
-CREATE TABLE "wxyc_schema"."accounts" (
+CREATE TABLE "wxyc_schema"."account" (
 	"id" text PRIMARY KEY NOT NULL,
 	"account_id" text NOT NULL,
 	"provider_id" text NOT NULL,
@@ -64,7 +64,17 @@ CREATE TABLE "wxyc_schema"."genres" (
 	"last_modified" timestamp DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "wxyc_schema"."jwkss" (
+CREATE TABLE "wxyc_schema"."invitation" (
+	"id" text PRIMARY KEY NOT NULL,
+	"organization_id" text NOT NULL,
+	"email" text NOT NULL,
+	"role" text,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"expires_at" timestamp NOT NULL,
+	"inviter_id" text NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "wxyc_schema"."jwks" (
 	"id" text PRIMARY KEY NOT NULL,
 	"public_key" text NOT NULL,
 	"private_key" text NOT NULL,
@@ -84,6 +94,24 @@ CREATE TABLE "wxyc_schema"."library" (
 	"plays" integer DEFAULT 0 NOT NULL,
 	"add_date" timestamp DEFAULT now() NOT NULL,
 	"last_modified" timestamp DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "wxyc_schema"."member" (
+	"id" text PRIMARY KEY NOT NULL,
+	"organization_id" text NOT NULL,
+	"user_id" text NOT NULL,
+	"role" text DEFAULT 'member' NOT NULL,
+	"created_at" timestamp NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "wxyc_schema"."organization" (
+	"id" text PRIMARY KEY NOT NULL,
+	"name" text NOT NULL,
+	"slug" text,
+	"logo" text,
+	"created_at" timestamp NOT NULL,
+	"metadata" text,
+	CONSTRAINT "organization_slug_unique" UNIQUE("slug")
 );
 --> statement-breakpoint
 CREATE TABLE "wxyc_schema"."reviews" (
@@ -114,7 +142,7 @@ CREATE TABLE "wxyc_schema"."schedule" (
 	"assigned_dj_id2" varchar(255)
 );
 --> statement-breakpoint
-CREATE TABLE "wxyc_schema"."sessions" (
+CREATE TABLE "wxyc_schema"."session" (
 	"id" text PRIMARY KEY NOT NULL,
 	"expires_at" timestamp NOT NULL,
 	"token" text NOT NULL,
@@ -124,7 +152,8 @@ CREATE TABLE "wxyc_schema"."sessions" (
 	"user_agent" text,
 	"user_id" text NOT NULL,
 	"impersonated_by" text,
-	CONSTRAINT "sessions_token_unique" UNIQUE("token")
+	"active_organization_id" text,
+	CONSTRAINT "session_token_unique" UNIQUE("token")
 );
 --> statement-breakpoint
 CREATE TABLE "wxyc_schema"."shift_covers" (
@@ -158,7 +187,7 @@ CREATE TABLE "wxyc_schema"."specialty_shows" (
 	"last_modified" timestamp DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "wxyc_schema"."users" (
+CREATE TABLE "wxyc_schema"."user" (
 	"id" text PRIMARY KEY NOT NULL,
 	"name" text NOT NULL,
 	"email" text NOT NULL,
@@ -174,13 +203,12 @@ CREATE TABLE "wxyc_schema"."users" (
 	"display_username" text,
 	"real_name" text,
 	"dj_name" text,
-	"onboarded" boolean NOT NULL,
 	"app_skin" text NOT NULL,
-	CONSTRAINT "users_email_unique" UNIQUE("email"),
-	CONSTRAINT "users_username_unique" UNIQUE("username")
+	CONSTRAINT "user_email_unique" UNIQUE("email"),
+	CONSTRAINT "user_username_unique" UNIQUE("username")
 );
 --> statement-breakpoint
-CREATE TABLE "wxyc_schema"."verifications" (
+CREATE TABLE "wxyc_schema"."verification" (
 	"id" text PRIMARY KEY NOT NULL,
 	"identifier" text NOT NULL,
 	"value" text NOT NULL,
@@ -189,27 +217,31 @@ CREATE TABLE "wxyc_schema"."verifications" (
 	"updated_at" timestamp DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-ALTER TABLE "wxyc_schema"."accounts" ADD CONSTRAINT "accounts_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "wxyc_schema"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."account" ADD CONSTRAINT "account_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "wxyc_schema"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."artists" ADD CONSTRAINT "artists_genre_id_genres_id_fk" FOREIGN KEY ("genre_id") REFERENCES "wxyc_schema"."genres"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wxyc_schema"."bins" ADD CONSTRAINT "bins_dj_id_users_id_fk" FOREIGN KEY ("dj_id") REFERENCES "wxyc_schema"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."bins" ADD CONSTRAINT "bins_dj_id_user_id_fk" FOREIGN KEY ("dj_id") REFERENCES "wxyc_schema"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."bins" ADD CONSTRAINT "bins_album_id_library_id_fk" FOREIGN KEY ("album_id") REFERENCES "wxyc_schema"."library"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."flowsheet" ADD CONSTRAINT "flowsheet_show_id_shows_id_fk" FOREIGN KEY ("show_id") REFERENCES "wxyc_schema"."shows"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."flowsheet" ADD CONSTRAINT "flowsheet_album_id_library_id_fk" FOREIGN KEY ("album_id") REFERENCES "wxyc_schema"."library"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."flowsheet" ADD CONSTRAINT "flowsheet_rotation_id_rotation_id_fk" FOREIGN KEY ("rotation_id") REFERENCES "wxyc_schema"."rotation"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."invitation" ADD CONSTRAINT "invitation_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "wxyc_schema"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."invitation" ADD CONSTRAINT "invitation_inviter_id_user_id_fk" FOREIGN KEY ("inviter_id") REFERENCES "wxyc_schema"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."library" ADD CONSTRAINT "library_artist_id_artists_id_fk" FOREIGN KEY ("artist_id") REFERENCES "wxyc_schema"."artists"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."library" ADD CONSTRAINT "library_genre_id_genres_id_fk" FOREIGN KEY ("genre_id") REFERENCES "wxyc_schema"."genres"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."library" ADD CONSTRAINT "library_format_id_format_id_fk" FOREIGN KEY ("format_id") REFERENCES "wxyc_schema"."format"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."member" ADD CONSTRAINT "member_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "wxyc_schema"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."member" ADD CONSTRAINT "member_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "wxyc_schema"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."reviews" ADD CONSTRAINT "reviews_album_id_library_id_fk" FOREIGN KEY ("album_id") REFERENCES "wxyc_schema"."library"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."rotation" ADD CONSTRAINT "rotation_album_id_library_id_fk" FOREIGN KEY ("album_id") REFERENCES "wxyc_schema"."library"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."schedule" ADD CONSTRAINT "schedule_specialty_id_specialty_shows_id_fk" FOREIGN KEY ("specialty_id") REFERENCES "wxyc_schema"."specialty_shows"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wxyc_schema"."schedule" ADD CONSTRAINT "schedule_assigned_dj_id_users_id_fk" FOREIGN KEY ("assigned_dj_id") REFERENCES "wxyc_schema"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wxyc_schema"."schedule" ADD CONSTRAINT "schedule_assigned_dj_id2_users_id_fk" FOREIGN KEY ("assigned_dj_id2") REFERENCES "wxyc_schema"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wxyc_schema"."sessions" ADD CONSTRAINT "sessions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "wxyc_schema"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."schedule" ADD CONSTRAINT "schedule_assigned_dj_id_user_id_fk" FOREIGN KEY ("assigned_dj_id") REFERENCES "wxyc_schema"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."schedule" ADD CONSTRAINT "schedule_assigned_dj_id2_user_id_fk" FOREIGN KEY ("assigned_dj_id2") REFERENCES "wxyc_schema"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."session" ADD CONSTRAINT "session_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "wxyc_schema"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."shift_covers" ADD CONSTRAINT "shift_covers_schedule_id_schedule_id_fk" FOREIGN KEY ("schedule_id") REFERENCES "wxyc_schema"."schedule"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wxyc_schema"."shift_covers" ADD CONSTRAINT "shift_covers_cover_dj_id_users_id_fk" FOREIGN KEY ("cover_dj_id") REFERENCES "wxyc_schema"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."shift_covers" ADD CONSTRAINT "shift_covers_cover_dj_id_user_id_fk" FOREIGN KEY ("cover_dj_id") REFERENCES "wxyc_schema"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."show_djs" ADD CONSTRAINT "show_djs_show_id_shows_id_fk" FOREIGN KEY ("show_id") REFERENCES "wxyc_schema"."shows"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wxyc_schema"."show_djs" ADD CONSTRAINT "show_djs_dj_id_users_id_fk" FOREIGN KEY ("dj_id") REFERENCES "wxyc_schema"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wxyc_schema"."shows" ADD CONSTRAINT "shows_primary_dj_id_users_id_fk" FOREIGN KEY ("primary_dj_id") REFERENCES "wxyc_schema"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."show_djs" ADD CONSTRAINT "show_djs_dj_id_user_id_fk" FOREIGN KEY ("dj_id") REFERENCES "wxyc_schema"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."shows" ADD CONSTRAINT "shows_primary_dj_id_user_id_fk" FOREIGN KEY ("primary_dj_id") REFERENCES "wxyc_schema"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."shows" ADD CONSTRAINT "shows_specialty_id_specialty_shows_id_fk" FOREIGN KEY ("specialty_id") REFERENCES "wxyc_schema"."specialty_shows"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "artist_name_trgm_idx" ON "wxyc_schema"."artists" USING gin ("artist_name" gin_trgm_ops);--> statement-breakpoint
 CREATE INDEX "code_letters_idx" ON "wxyc_schema"."artists" USING btree ("code_letters");--> statement-breakpoint

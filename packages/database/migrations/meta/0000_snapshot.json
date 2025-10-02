@@ -1,11 +1,11 @@
 {
-  "id": "b07fbb4b-4144-40c5-b6ea-2e8ed2680fb0",
+  "id": "f40b6763-eccf-4dd5-bb57-75bf1112edc3",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
-    "wxyc_schema.accounts": {
-      "name": "accounts",
+    "wxyc_schema.account": {
+      "name": "account",
       "schema": "wxyc_schema",
       "columns": {
         "id": {
@@ -90,10 +90,10 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "accounts_user_id_users_id_fk": {
-          "name": "accounts_user_id_users_id_fk",
-          "tableFrom": "accounts",
-          "tableTo": "users",
+        "account_user_id_user_id_fk": {
+          "name": "account_user_id_user_id_fk",
+          "tableFrom": "account",
+          "tableTo": "user",
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "user_id"
@@ -245,10 +245,10 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "bins_dj_id_users_id_fk": {
-          "name": "bins_dj_id_users_id_fk",
+        "bins_dj_id_user_id_fk": {
+          "name": "bins_dj_id_user_id_fk",
           "tableFrom": "bins",
-          "tableTo": "users",
+          "tableTo": "user",
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "dj_id"
@@ -494,8 +494,93 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "wxyc_schema.jwkss": {
-      "name": "jwkss",
+    "wxyc_schema.invitation": {
+      "name": "invitation",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "inviter_id": {
+          "name": "inviter_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "invitation_organization_id_organization_id_fk": {
+          "name": "invitation_organization_id_organization_id_fk",
+          "tableFrom": "invitation",
+          "tableTo": "organization",
+          "schemaTo": "wxyc_schema",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "invitation_inviter_id_user_id_fk": {
+          "name": "invitation_inviter_id_user_id_fk",
+          "tableFrom": "invitation",
+          "tableTo": "user",
+          "schemaTo": "wxyc_schema",
+          "columnsFrom": [
+            "inviter_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "wxyc_schema.jwks": {
+      "name": "jwks",
       "schema": "wxyc_schema",
       "columns": {
         "id": {
@@ -724,6 +809,136 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "wxyc_schema.member": {
+      "name": "member",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'member'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "member_organization_id_organization_id_fk": {
+          "name": "member_organization_id_organization_id_fk",
+          "tableFrom": "member",
+          "tableTo": "organization",
+          "schemaTo": "wxyc_schema",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "member_user_id_user_id_fk": {
+          "name": "member_user_id_user_id_fk",
+          "tableFrom": "member",
+          "tableTo": "user",
+          "schemaTo": "wxyc_schema",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "wxyc_schema.organization": {
+      "name": "organization",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "logo": {
+          "name": "logo",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "organization_slug_unique": {
+          "name": "organization_slug_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "slug"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "wxyc_schema.reviews": {
       "name": "reviews",
       "schema": "wxyc_schema",
@@ -937,10 +1152,10 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "schedule_assigned_dj_id_users_id_fk": {
-          "name": "schedule_assigned_dj_id_users_id_fk",
+        "schedule_assigned_dj_id_user_id_fk": {
+          "name": "schedule_assigned_dj_id_user_id_fk",
           "tableFrom": "schedule",
-          "tableTo": "users",
+          "tableTo": "user",
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "assigned_dj_id"
@@ -951,10 +1166,10 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "schedule_assigned_dj_id2_users_id_fk": {
-          "name": "schedule_assigned_dj_id2_users_id_fk",
+        "schedule_assigned_dj_id2_user_id_fk": {
+          "name": "schedule_assigned_dj_id2_user_id_fk",
           "tableFrom": "schedule",
-          "tableTo": "users",
+          "tableTo": "user",
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "assigned_dj_id2"
@@ -972,8 +1187,8 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "wxyc_schema.sessions": {
-      "name": "sessions",
+    "wxyc_schema.session": {
+      "name": "session",
       "schema": "wxyc_schema",
       "columns": {
         "id": {
@@ -1030,14 +1245,20 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "active_organization_id": {
+          "name": "active_organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
       "foreignKeys": {
-        "sessions_user_id_users_id_fk": {
-          "name": "sessions_user_id_users_id_fk",
-          "tableFrom": "sessions",
-          "tableTo": "users",
+        "session_user_id_user_id_fk": {
+          "name": "session_user_id_user_id_fk",
+          "tableFrom": "session",
+          "tableTo": "user",
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "user_id"
@@ -1051,8 +1272,8 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "sessions_token_unique": {
-          "name": "sessions_token_unique",
+        "session_token_unique": {
+          "name": "session_token_unique",
           "nullsNotDistinct": false,
           "columns": [
             "token"
@@ -1115,10 +1336,10 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "shift_covers_cover_dj_id_users_id_fk": {
-          "name": "shift_covers_cover_dj_id_users_id_fk",
+        "shift_covers_cover_dj_id_user_id_fk": {
+          "name": "shift_covers_cover_dj_id_user_id_fk",
           "tableFrom": "shift_covers",
-          "tableTo": "users",
+          "tableTo": "user",
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "cover_dj_id"
@@ -1176,10 +1397,10 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "show_djs_dj_id_users_id_fk": {
-          "name": "show_djs_dj_id_users_id_fk",
+        "show_djs_dj_id_user_id_fk": {
+          "name": "show_djs_dj_id_user_id_fk",
           "tableFrom": "show_djs",
-          "tableTo": "users",
+          "tableTo": "user",
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "dj_id"
@@ -1241,10 +1462,10 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "shows_primary_dj_id_users_id_fk": {
-          "name": "shows_primary_dj_id_users_id_fk",
+        "shows_primary_dj_id_user_id_fk": {
+          "name": "shows_primary_dj_id_user_id_fk",
           "tableFrom": "shows",
-          "tableTo": "users",
+          "tableTo": "user",
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "primary_dj_id"
@@ -1321,8 +1542,8 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "wxyc_schema.users": {
-      "name": "users",
+    "wxyc_schema.user": {
+      "name": "user",
       "schema": "wxyc_schema",
       "columns": {
         "id": {
@@ -1419,12 +1640,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "onboarded": {
-          "name": "onboarded",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
         "app_skin": {
           "name": "app_skin",
           "type": "text",
@@ -1436,15 +1651,15 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "users_email_unique": {
-          "name": "users_email_unique",
+        "user_email_unique": {
+          "name": "user_email_unique",
           "nullsNotDistinct": false,
           "columns": [
             "email"
           ]
         },
-        "users_username_unique": {
-          "name": "users_username_unique",
+        "user_username_unique": {
+          "name": "user_username_unique",
           "nullsNotDistinct": false,
           "columns": [
             "username"
@@ -1455,8 +1670,8 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "wxyc_schema.verifications": {
-      "name": "verifications",
+    "wxyc_schema.verification": {
+      "name": "verification",
       "schema": "wxyc_schema",
       "columns": {
         "id": {

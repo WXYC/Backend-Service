@@ -9,7 +9,7 @@ import {
   NewDJ,
   artists,
   bins,
-  users,
+  user,
   flowsheet,
   format,
   genres,
@@ -20,7 +20,7 @@ import {
 } from '@wxyc/database';
 
 export const insertDJ = async (new_dj: NewDJ) => {
-  const response = await db.insert(users).values(new_dj).returning();
+  const response = await db.insert(user).values(new_dj).returning();
   return response[0];
 };
 
@@ -30,9 +30,9 @@ export const updateDJ = async (new_dj: NewDJ) => {
   }
   
   const dj_obj = await db
-    .update(users)
+    .update(user)
     .set(new_dj)
-    .where(eq(users.user_id, new_dj.user_id))
+    .where(eq(user.user_id, new_dj.user_id))
     .returning();
 
   return dj_obj[0];
@@ -42,11 +42,11 @@ export const getDJInfoFromDB = async (items: DJQueryParams) /*:Promise<schema.DJ
   let query;
   
   if (items.user_id !== undefined) {
-    query = db.select().from(users).where(eq(users.user_id, items.user_id));
+    query = db.select().from(user).where(eq(user.user_id, items.user_id));
   } else if (items.real_name !== undefined) {
-    query = db.select().from(users).where(eq(users.real_name, items.real_name));
+    query = db.select().from(user).where(eq(user.real_name, items.real_name));
   } else if (items.dj_name !== undefined) {
-    query = db.select().from(users).where(eq(users.dj_name, items.dj_name));
+    query = db.select().from(user).where(eq(user.dj_name, items.dj_name));
   } else {
     throw new Error('Did not specify a query parameter');
   }
@@ -110,9 +110,9 @@ export const getPlaylistsForDJ = async (dj_id: string) => {
     const show = await db.select().from(shows).where(eq(shows.id, this_djs_shows[i].show_id));
 
     const djs_involved = await db
-      .select({ dj_id: show_djs.dj_id, dj_name: users.name })
+      .select({ dj_id: show_djs.dj_id, dj_name: user.name })
       .from(show_djs)
-      .innerJoin(users, and(eq(show_djs.show_id, show[0].id), eq(show_djs.dj_id, users.id)));
+      .innerJoin(user, and(eq(show_djs.show_id, show[0].id), eq(show_djs.dj_id, user.id)));
 
     const peek_object: ShowPeek = {
       show: show[0].id,

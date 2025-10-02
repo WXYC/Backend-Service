@@ -28,10 +28,7 @@
     "ci:full": "npm run ci:env && npm run ci:test && npm run ci:clean",
     "drizzle:generate": "cd packages/database && drizzle-kit generate --config drizzle.config.ts",
     "drizzle:migrate": "cd packages/database && drizzle-kit migrate --config drizzle.config.ts",
-    "drizzle:drop": "cd packages/database && drizzle-kit drop --out ./migrations",
-    "logs": "docker compose --profile dev logs -f",
-    "logs:auth": "docker compose --profile dev logs -f auth",
-    "logs:backend": "docker compose --profile dev logs -f backend"
+    "drizzle:drop": "cd packages/database && drizzle-kit drop --out ./migrations"
   },
   "author": "AyBruno",
   "license": "MIT",
