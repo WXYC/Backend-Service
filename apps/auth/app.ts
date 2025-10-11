@@ -47,23 +47,18 @@ const port = process.env.PORT || "8082";
 
 // Create default user if needed
 const createDefaultUser = async () => {
-  if (process.env.CREATE_DEFAULT_USER === "TRUE") {
-    console.log("🔧 Checking for default user...");
-    try {
-      const username = process.env.DEFAULT_USER_USERNAME!;
-      const email = process.env.DEFAULT_USER_EMAIL!;
-      
-      // Check if username is available
-      const available = await auth.api.isUsernameAvailable({ 
-        body: { username }
-      });
-      
-      if (!available) {
-        console.log("Default user already exists:", username);
-        return;
-      }
-      
-      // Use signUp API but without the invalid fields
+  if (process.env.CREATE_DEFAULT_USER !== "TRUE") return;
+
+  try {
+    const username = process.env.DEFAULT_USER_USERNAME!;
+    const email = process.env.DEFAULT_USER_EMAIL!;
+    
+    let userId: string;
+    
+    // Try to create user, get existing user if already exists
+    const available = await auth.api.isUsernameAvailable({ body: { username } });
+    
+    if (available) {
       const user = await auth.api.signUpEmail({
         body: {
           name: process.env.DEFAULT_USER_NAME!,
@@ -74,43 +69,43 @@ const createDefaultUser = async () => {
           appSkin: "modern-light",
         },
       });
-      
-      console.log("Default user created:", username);
-      
-      // Ensure WXYC organization exists, then add user to it
-      try {
-        // First, try to create the WXYC organization (will fail if it already exists)
-        try {
-          await auth.api.createOrganization({
-            body: {
-              name: "WXYC 89.3 FM",
-              slug: "wxyc",
-            },
-          });
-          console.log("WXYC organization created");
-        } catch (createOrgError) {
-          // Organization probably already exists, which is fine
-          console.log("WXYC organization already exists or creation failed");
-        }
-        
-        // Now add the user to the organization with admin role
-        await auth.api.addMember({
-          body: {
-            organizationId: "wxyc-org",
-            userId: user.data.user.id,
-            role: "admin", // Station management role in organization
-          },
-        });
-        console.log("Default user added to WXYC organization with admin role");
-      } catch (orgError) {
-        console.error("Failed to add user to organization:", orgError);
-      }
-      
-    } catch (error) {
-      console.error("Failed to create default user:", error);
+      userId = user?.data?.user?.id || user?.user?.id || user?.id;
+    } else {
+      // User exists, get their ID
+      const session = await auth.api.signInEmail({
+        body: { email, password: process.env.DEFAULT_USER_PASSWORD! }
+      });
+      userId = session?.data?.user?.id || session?.user?.id || session?.id;
     }
-  } else {
-    console.log("CREATE_DEFAULT_USER not set to TRUE, skipping default user creation");
+
+    if (!userId) throw new Error("Could not get user ID");
+
+    // Ensure organization exists
+    let organizationId = "wxyc-org";
+    try {
+      const org = await auth.api.createOrganization({
+        body: { name: "WXYC 89.3 FM", slug: "wxyc" }
+      });
+      organizationId = org?.data?.id || org?.id || organizationId;
+    } catch {
+      // Organization exists, continue
+    }
+
+    // Add user to organization as admin
+    try {
+      await auth.api.addMember({
+        body: {
+          organizationId,
+          userId,
+          role: "admin"
+        }
+      });
+    } catch {
+      // User might already be a member, continue
+    }
+
+  } catch (error) {
+    console.error("Default user setup failed:", error);
   }
 };
 
