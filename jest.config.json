@@ -7,7 +7,7 @@
     [
       "jest-html-reporters",
       {
-        "publicPath": "./apps/backend/tests/report",
+        "publicPath": "./tests/report",
         "filename": "report.html",
         "pageTitle": "SuperTest and Jest API Test Report",
         "overwrite": true,

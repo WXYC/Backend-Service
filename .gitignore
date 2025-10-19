@@ -1,5 +1,5 @@
 node_modules
-tests/report
+apps/backend/tests/report
 coverage
 dist
 mirror-logs
