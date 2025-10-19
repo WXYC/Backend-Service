@@ -73,43 +73,44 @@ export interface AuthenticatedRequest extends Request {
 
 export const authMiddleware = (...permissionsLevel: string[]) => {
   return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    if (process.env.AUTH_BYPASS === 'true') {
+      req.user = { 
+        id: '1', // Match the primary test DJ ID from seed_db.sql
+        username: 'test_dj1', // Match the cognito_user_name from seed_db.sql
+        groups: ['dj']
+      };
+      next();
+      return;
+    }
+    
     const tokenArr = req.header('Authorization')?.split(' ') || [''];
     const accessToken = tokenArr.length == 1 ? tokenArr[0] : tokenArr[1];
     
-    if (process.env.AUTH_BYPASS === 'true') {
-      req.user = { 
-        id: 'mock_user_id',
-        username: process.env.AUTH_USERNAME || 'test_user',
-        groups: ['mock_group']
-      };
-      next();
-    } else {
-      try {
-        const verification = await jwtVerifier.verify(accessToken); //throws error for invalid tokens
-        const groups = verification['cognito:groups'];
+    try {
+      const verification = await jwtVerifier.verify(accessToken); //throws error for invalid tokens
+      const groups = verification['cognito:groups'];
 
-        const allow = !permissionsLevel.length || permissionsLevel.includes(Roles.dj);
-        // Roles.dj, just means we expect a valid token. No group check is necessary
-        if (!allow && groups && disjoint(groups, permissionsLevel)) {
-          res.status(403).json({ status: 403, message: 'Forbidden' });
-        } else {
-          req.user = {
-            id: verification.sub,
-            username: verification.username,
-            groups: groups
-          };
-          next();
-        }
-      } catch (e) {
-        // if the auth level is empty and there is no Authorization header,
-        // then verify() will result in error and we continue without
-        if (permissionsLevel.length == 0) {
-          next();
-          return;
-        }
-        // Otherwise we expect a token and if not provided we forbid access
+      const allow = !permissionsLevel.length || permissionsLevel.includes(Roles.dj);
+      // Roles.dj, just means we expect a valid token. No group check is necessary
+      if (!allow && groups && disjoint(groups, permissionsLevel)) {
         res.status(403).json({ status: 403, message: 'Forbidden' });
+      } else {
+        req.user = {
+          id: verification.sub,
+          username: verification.username,
+          groups: groups
+        };
+        next();
       }
+    } catch (e) {
+      // if the auth level is empty and there is no Authorization header,
+      // then verify() will result in error and we continue without
+      if (permissionsLevel.length == 0) {
+        next();
+        return;
+      }
+      // Otherwise we expect a token and if not provided we forbid access
+      res.status(403).json({ status: 403, message: 'Forbidden' });
     }
   };
 };

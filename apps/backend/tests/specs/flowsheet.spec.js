@@ -12,9 +12,8 @@ describe('Start Show', () => {
   });
 
   test('Properly Formatted Request', async () => {
-    const res = await request
-      .post('/flowsheet/join')
-      .set('Authorization', global.access_token)
+    const res = await global.setAuthHeader(request
+      .post('/flowsheet/join'))
       .send({
         dj_id: global.primary_dj_id,
         show_name: 'test_show',
