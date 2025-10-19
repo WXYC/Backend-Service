@@ -1,5 +1,18 @@
 require('dotenv').config({ path: '../../.env' });
-const request = require('supertest')(`${process.env.TEST_HOST || 'http://127.0.0.1'}:${process.env.CI_PORT || process.env.PORT}`);
+// WSL compatibility: use Windows host IP instead of localhost
+const getWindowsHostIP = () => {
+  const { execSync } = require('child_process');
+  try {
+    const result = execSync("ip route show | grep default | awk '{print $3}'", { encoding: 'utf8' });
+    return result.trim();
+  } catch (error) {
+    return '127.0.0.1';
+  }
+};
+
+const windowsHost = getWindowsHostIP();
+const testUrl = `http://${windowsHost}:${process.env.CI_PORT || 8081}`;
+const request = require('supertest')(testUrl);
 const fls_util = require('../utils/flowsheet_util');
 
 /*
@@ -8,7 +21,9 @@ const fls_util = require('../utils/flowsheet_util');
 describe('Start Show', () => {
   // Clean up by ending show
   afterEach(async () => {
+    console.log('[TEST] Start Show afterEach starting');
     await fls_util.leave_show(global.primary_dj_id, global.access_token);
+    console.log('[TEST] Start Show afterEach complete');
   });
 
   test('Properly Formatted Request', async () => {

@@ -18,6 +18,7 @@ export interface IFSEntry extends FSEntry {
 const MAX_ITEMS = 200;
 const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
+  console.log(`[FLOWSHEET CONTROLLER] getEntries called with query: ${JSON.stringify(req.query)}`);
   const { query } = req;
 
   const page = parseInt(query.page ?? '0');
@@ -257,7 +258,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   const current_show = await flowsheet_service.getLatestShow();
   if (req.body.dj_id === undefined) {
     res.status(400).send('Bad Request, Must include a dj_id to join show');
-  } else if (current_show?.end_time !== null) {
+  } else if (!current_show || current_show.end_time !== null) {
     try {
       const show_session: Show = await flowsheet_service.startShow(
         req.body.dj_id,

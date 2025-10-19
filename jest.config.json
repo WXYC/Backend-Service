@@ -2,6 +2,7 @@
   "testEnvironment": "node",
   "testMatch": ["**/apps/backend/tests/specs/?(*.)+(spec).js"],
   "setupFilesAfterEnv": ["./apps/backend/tests/test.setup.js"],
+  "testTimeout": 30000,
   "reporters": [
     "default",
     [

@@ -10,7 +10,10 @@ RUN npm install && \
 FROM node:20-alpine AS prod
 WORKDIR /app
 COPY package* ./
+COPY --from=builder ./app/packages ./packages
+COPY --from=builder ./app/apps ./apps
 RUN npm install --production
+
 COPY --from=builder ./app/dist ./dist
 
 EXPOSE 8080

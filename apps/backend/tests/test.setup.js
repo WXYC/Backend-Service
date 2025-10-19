@@ -14,9 +14,11 @@ global.setAuthHeader = (request) => {
 };
 
 beforeAll(async () => {
+  console.log('[TEST] beforeAll starting');
   if (process.env.AUTH_BYPASS === 'true') {
     global.access_token = 'Auth Bypass Enabled';
   } else {
     global.access_token = await get_access_token();
   }
+  console.log('[TEST] beforeAll complete');
 });
