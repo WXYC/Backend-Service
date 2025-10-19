@@ -73,12 +73,10 @@ export interface AuthenticatedRequest extends Request {
 
 export const authMiddleware = (...permissionsLevel: string[]) => {
   return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-    console.log(`[AUTH] Middleware called for ${req.method} ${req.path}, AUTH_BYPASS=${process.env.AUTH_BYPASS}`);
     if (process.env.AUTH_BYPASS === 'true') {
-      console.log('[AUTH] Using bypass, setting mock user');
       req.user = { 
-        id: '1', // Match the primary test DJ ID from seed_db.sql
-        username: 'test_dj1', // Match the cognito_user_name from seed_db.sql
+        id: '1',
+        username: 'test_dj1',
         groups: ['dj']
       };
       next();
@@ -105,13 +103,10 @@ export const authMiddleware = (...permissionsLevel: string[]) => {
         next();
       }
     } catch (e: any) {
-      // if the auth level is empty and there is no Authorization header,
-      // then verify() will result in error and we continue without
       if (permissionsLevel.length == 0) {
         next();
         return;
       }
-      // Otherwise we expect a token and if not provided we forbid access
       res.status(403).json({ status: 403, message: 'Forbidden' });
     }
   };

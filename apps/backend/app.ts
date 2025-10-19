@@ -19,11 +19,6 @@ import errorHandler from './middleware/errorHandler.js';
 const port = process.env.PORT || 8080;
 const app = express();
 
-// Add debug middleware to log all requests
-app.use((req, res, next) => {
-  console.log(`[APP DEBUG] ${req.method} ${req.path} - ${new Date().toISOString()}`);
-  next();
-});
 
 //Interpret parse json into js objects
 app.use(express.json());
@@ -74,7 +69,7 @@ app.get('/testInShow', authMiddleware(), requireDJ, activeShow, showMemberMiddle
 app.use(errorHandler);
 
 const server = app.listen(port, () => {
-  console.log(`[SERVER] listening on port: ${port}!`);
+  console.log(`Server listening on port: ${port}`);
 });
 
 server.setTimeout(5000);

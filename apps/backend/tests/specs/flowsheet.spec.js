@@ -21,9 +21,7 @@ const fls_util = require('../utils/flowsheet_util');
 describe('Start Show', () => {
   // Clean up by ending show
   afterEach(async () => {
-    console.log('[TEST] Start Show afterEach starting');
     await fls_util.leave_show(global.primary_dj_id, global.access_token);
-    console.log('[TEST] Start Show afterEach complete');
   });
 
   test('Properly Formatted Request', async () => {

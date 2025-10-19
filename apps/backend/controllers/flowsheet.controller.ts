@@ -18,7 +18,6 @@ export interface IFSEntry extends FSEntry {
 const MAX_ITEMS = 200;
 const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
-  console.log(`[FLOWSHEET CONTROLLER] getEntries called with query: ${JSON.stringify(req.query)}`);
   const { query } = req;
 
   const page = parseInt(query.page ?? '0');

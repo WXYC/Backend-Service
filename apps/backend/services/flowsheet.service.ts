@@ -36,7 +36,6 @@ const FSEntryFields = {
 };
 
 export const getEntriesByPage = async (offset: number, limit: number) => {
-  console.log(`[FLOWSHEET SERVICE] getEntriesByPage called with offset=${offset}, limit=${limit}`);
   const response: IFSEntry[] = await db
     .select(FSEntryFields)
     .from(flowsheet)
@@ -45,7 +44,6 @@ export const getEntriesByPage = async (offset: number, limit: number) => {
     .offset(offset)
     .limit(limit);
 
-  console.log(`[FLOWSHEET SERVICE] getEntriesByPage returning ${response.length} entries`);
   return response;
 };
 
@@ -61,7 +59,6 @@ export const getEntriesByRange = async (startId: number, endId: number) => {
 };
 
 export const getEntriesByShow = async (...show_ids: number[]) => {
-  console.log(`[FLOWSHEET SERVICE] getEntriesByShow called with show_ids=${JSON.stringify(show_ids)}`);
   if (show_ids.length === 0) return [];
 
   // Get all entries from these shows
