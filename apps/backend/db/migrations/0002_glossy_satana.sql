@@ -1,0 +1,1 @@
+ALTER TABLE "wxyc_schema"."reviews" ADD COLUMN "author" varchar(32);

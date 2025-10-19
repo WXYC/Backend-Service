@@ -1,13 +1,13 @@
 {
   "testEnvironment": "node",
-  "testMatch": ["**/tests/specs/?(*.)+(spec).js"],
-  "setupFilesAfterEnv": ["./tests/test.setup.js"],
+  "testMatch": ["**/apps/backend/tests/specs/?(*.)+(spec).js"],
+  "setupFilesAfterEnv": ["./apps/backend/tests/test.setup.js"],
   "reporters": [
     "default",
     [
       "jest-html-reporters",
       {
-        "publicPath": "./tests/report",
+        "publicPath": "./apps/backend/tests/report",
         "filename": "report.html",
         "pageTitle": "SuperTest and Jest API Test Report",
         "overwrite": true,

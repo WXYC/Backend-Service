@@ -12,18 +12,18 @@
     "strictPropertyInitialization": true,
     "noImplicitThis": true,
     "alwaysStrict": true,
-    "outDir": "dist",
-    "rootDir": "src",
     "sourceMap": true,
     "declaration": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    }
+    "composite": true
   },
-  "include": ["src/**/*"],
+  "references": [
+    { "path": "./packages/database" },
+    { "path": "./packages/shared" },
+    { "path": "./packages/auth-middleware" },
+    { "path": "./apps/backend" }
+  ],
   "exclude": ["node_modules", "dist", "**/*.test.ts"]
 }

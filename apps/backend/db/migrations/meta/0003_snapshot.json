@@ -1,0 +1,1052 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "wxyc_schema.artists": {
+      "name": "artists",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "artist_name": {
+          "name": "artist_name",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "code_letters": {
+          "name": "code_letters",
+          "type": "varchar(2)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "code_artist_number": {
+          "name": "code_artist_number",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "add_date": {
+          "name": "add_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "last_modified": {
+          "name": "last_modified",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "artist_name_trgm_idx": {
+          "columns": [
+            {
+              "expression": "artist_name",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "with": {},
+          "name": "artist_name_trgm_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
+        },
+        "code_letters_idx": {
+          "columns": [
+            {
+              "expression": "code_letters",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "with": {},
+          "name": "code_letters_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    },
+    "wxyc_schema.bins": {
+      "name": "bins",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "dj_id": {
+          "name": "dj_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "album_id": {
+          "name": "album_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "track_title": {
+          "name": "track_title",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "bins_dj_id_djs_id_fk": {
+          "name": "bins_dj_id_djs_id_fk",
+          "tableFrom": "bins",
+          "columnsFrom": [
+            "dj_id"
+          ],
+          "tableTo": "djs",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "bins_album_id_library_id_fk": {
+          "name": "bins_album_id_library_id_fk",
+          "tableFrom": "bins",
+          "columnsFrom": [
+            "album_id"
+          ],
+          "tableTo": "library",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    },
+    "wxyc_schema.djs": {
+      "name": "djs",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "dj_name": {
+          "name": "dj_name",
+          "type": "varchar",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "real_name": {
+          "name": "real_name",
+          "type": "varchar",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "email": {
+          "name": "email",
+          "type": "varchar",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "shows_covered": {
+          "name": "shows_covered",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "add_date": {
+          "name": "add_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "djs_dj_name_unique": {
+          "name": "djs_dj_name_unique",
+          "columns": [
+            "dj_name"
+          ],
+          "nullsNotDistinct": false
+        },
+        "djs_email_unique": {
+          "name": "djs_email_unique",
+          "columns": [
+            "email"
+          ],
+          "nullsNotDistinct": false
+        }
+      }
+    },
+    "wxyc_schema.flowsheet": {
+      "name": "flowsheet",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "show_id": {
+          "name": "show_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "album_id": {
+          "name": "album_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rotation_id": {
+          "name": "rotation_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "track_title": {
+          "name": "track_title",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "album_title": {
+          "name": "album_title",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "artist_name": {
+          "name": "artist_name",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "record_label": {
+          "name": "record_label",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "play_order": {
+          "name": "play_order",
+          "type": "serial",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_flag": {
+          "name": "request_flag",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "flowsheet_show_id_shows_id_fk": {
+          "name": "flowsheet_show_id_shows_id_fk",
+          "tableFrom": "flowsheet",
+          "columnsFrom": [
+            "show_id"
+          ],
+          "tableTo": "shows",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "flowsheet_album_id_library_id_fk": {
+          "name": "flowsheet_album_id_library_id_fk",
+          "tableFrom": "flowsheet",
+          "columnsFrom": [
+            "album_id"
+          ],
+          "tableTo": "library",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "flowsheet_rotation_id_rotation_id_fk": {
+          "name": "flowsheet_rotation_id_rotation_id_fk",
+          "tableFrom": "flowsheet",
+          "columnsFrom": [
+            "rotation_id"
+          ],
+          "tableTo": "rotation",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    },
+    "wxyc_schema.format": {
+      "name": "format",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "format_name": {
+          "name": "format_name",
+          "type": "varchar",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "add_date": {
+          "name": "add_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    },
+    "wxyc_schema.genres": {
+      "name": "genres",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "genre_name": {
+          "name": "genre_name",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "plays": {
+          "name": "plays",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "add_date": {
+          "name": "add_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "last_modified": {
+          "name": "last_modified",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    },
+    "wxyc_schema.library": {
+      "name": "library",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "artist_id": {
+          "name": "artist_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "genre_id": {
+          "name": "genre_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "format_id": {
+          "name": "format_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "alternate_artist_name": {
+          "name": "alternate_artist_name",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "album_title": {
+          "name": "album_title",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "label": {
+          "name": "label",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "code_number": {
+          "name": "code_number",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "disc_quantity": {
+          "name": "disc_quantity",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "plays": {
+          "name": "plays",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "add_date": {
+          "name": "add_date",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "last_modified": {
+          "name": "last_modified",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "title_trgm_idx": {
+          "columns": [
+            {
+              "expression": "album_title",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "with": {},
+          "name": "title_trgm_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
+        },
+        "genre_id_idx": {
+          "columns": [
+            {
+              "expression": "genre_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "with": {},
+          "name": "genre_id_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
+        },
+        "format_id_idx": {
+          "columns": [
+            {
+              "expression": "format_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "with": {},
+          "name": "format_id_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
+        },
+        "artist_id_idx": {
+          "columns": [
+            {
+              "expression": "artist_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "with": {},
+          "name": "artist_id_idx",
+          "isUnique": false,
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "library_artist_id_artists_id_fk": {
+          "name": "library_artist_id_artists_id_fk",
+          "tableFrom": "library",
+          "columnsFrom": [
+            "artist_id"
+          ],
+          "tableTo": "artists",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "library_genre_id_genres_id_fk": {
+          "name": "library_genre_id_genres_id_fk",
+          "tableFrom": "library",
+          "columnsFrom": [
+            "genre_id"
+          ],
+          "tableTo": "genres",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "library_format_id_format_id_fk": {
+          "name": "library_format_id_format_id_fk",
+          "tableFrom": "library",
+          "columnsFrom": [
+            "format_id"
+          ],
+          "tableTo": "format",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    },
+    "wxyc_schema.reviews": {
+      "name": "reviews",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "album_id": {
+          "name": "album_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "review": {
+          "name": "review",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "add_date": {
+          "name": "add_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "last_modified": {
+          "name": "last_modified",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "author": {
+          "name": "author",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "reviews_album_id_library_id_fk": {
+          "name": "reviews_album_id_library_id_fk",
+          "tableFrom": "reviews",
+          "columnsFrom": [
+            "album_id"
+          ],
+          "tableTo": "library",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "reviews_album_id_unique": {
+          "name": "reviews_album_id_unique",
+          "columns": [
+            "album_id"
+          ],
+          "nullsNotDistinct": false
+        }
+      }
+    },
+    "wxyc_schema.rotation": {
+      "name": "rotation",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "album_id": {
+          "name": "album_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "play_freq": {
+          "name": "play_freq",
+          "type": "freq_enum",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "add_date": {
+          "name": "add_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kill_date": {
+          "name": "kill_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "rotation_album_id_library_id_fk": {
+          "name": "rotation_album_id_library_id_fk",
+          "tableFrom": "rotation",
+          "columnsFrom": [
+            "album_id"
+          ],
+          "tableTo": "library",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    },
+    "wxyc_schema.schedule": {
+      "name": "schedule",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "day": {
+          "name": "day",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "start_time": {
+          "name": "start_time",
+          "type": "time",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "show_duration": {
+          "name": "show_duration",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "specialty_id": {
+          "name": "specialty_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "assigned_dj_id": {
+          "name": "assigned_dj_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "assigned_dj_id2": {
+          "name": "assigned_dj_id2",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "schedule_specialty_id_specialty_shows_id_fk": {
+          "name": "schedule_specialty_id_specialty_shows_id_fk",
+          "tableFrom": "schedule",
+          "columnsFrom": [
+            "specialty_id"
+          ],
+          "tableTo": "specialty_shows",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "schedule_assigned_dj_id_djs_id_fk": {
+          "name": "schedule_assigned_dj_id_djs_id_fk",
+          "tableFrom": "schedule",
+          "columnsFrom": [
+            "assigned_dj_id"
+          ],
+          "tableTo": "djs",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "schedule_assigned_dj_id2_djs_id_fk": {
+          "name": "schedule_assigned_dj_id2_djs_id_fk",
+          "tableFrom": "schedule",
+          "columnsFrom": [
+            "assigned_dj_id2"
+          ],
+          "tableTo": "djs",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    },
+    "wxyc_schema.shift_covers": {
+      "name": "shift_covers",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "schedule_id": {
+          "name": "schedule_id",
+          "type": "serial",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "shift_timestamp": {
+          "name": "shift_timestamp",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cover_dj_id": {
+          "name": "cover_dj_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "covered": {
+          "name": "covered",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "shift_covers_schedule_id_schedule_id_fk": {
+          "name": "shift_covers_schedule_id_schedule_id_fk",
+          "tableFrom": "shift_covers",
+          "columnsFrom": [
+            "schedule_id"
+          ],
+          "tableTo": "schedule",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "shift_covers_cover_dj_id_djs_id_fk": {
+          "name": "shift_covers_cover_dj_id_djs_id_fk",
+          "tableFrom": "shift_covers",
+          "columnsFrom": [
+            "cover_dj_id"
+          ],
+          "tableTo": "djs",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    },
+    "wxyc_schema.shows": {
+      "name": "shows",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "dj_id": {
+          "name": "dj_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "dj_id2": {
+          "name": "dj_id2",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dj_id3": {
+          "name": "dj_id3",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "specialty_id": {
+          "name": "specialty_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "show_name": {
+          "name": "show_name",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "start_time": {
+          "name": "start_time",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "end_time": {
+          "name": "end_time",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "shows_dj_id_djs_id_fk": {
+          "name": "shows_dj_id_djs_id_fk",
+          "tableFrom": "shows",
+          "columnsFrom": [
+            "dj_id"
+          ],
+          "tableTo": "djs",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "shows_dj_id2_djs_id_fk": {
+          "name": "shows_dj_id2_djs_id_fk",
+          "tableFrom": "shows",
+          "columnsFrom": [
+            "dj_id2"
+          ],
+          "tableTo": "djs",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "shows_dj_id3_djs_id_fk": {
+          "name": "shows_dj_id3_djs_id_fk",
+          "tableFrom": "shows",
+          "columnsFrom": [
+            "dj_id3"
+          ],
+          "tableTo": "djs",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "shows_specialty_id_specialty_shows_id_fk": {
+          "name": "shows_specialty_id_specialty_shows_id_fk",
+          "tableFrom": "shows",
+          "columnsFrom": [
+            "specialty_id"
+          ],
+          "tableTo": "specialty_shows",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    },
+    "wxyc_schema.specialty_shows": {
+      "name": "specialty_shows",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "specialty_name": {
+          "name": "specialty_name",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "add_date": {
+          "name": "add_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "last_modified": {
+          "name": "last_modified",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {}
+    }
+  },
+  "enums": {
+    "public.freq_enum": {
+      "name": "freq_enum",
+      "schema": "public",
+      "values": [
+        "S",
+        "L",
+        "M",
+        "H"
+      ]
+    }
+  },
+  "schemas": {
+    "wxyc_schema": "wxyc_schema"
+  },
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "id": "5c399e49-74dc-4646-b15d-5d6cc4712c2f",
+  "prevId": "57839367-594a-4f1d-a569-31c2379eb549",
+  "sequences": {}
+}
