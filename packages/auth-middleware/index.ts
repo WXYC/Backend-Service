@@ -1,4 +1,3 @@
-// dotenv should be loaded at the application level
 import { Response, Request, NextFunction } from 'express';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { CognitoJwtVerifierSingleUserPool } from 'aws-jwt-verify/cognito-verifier';
@@ -143,13 +142,11 @@ const getUserRole = (user: AuthenticatedRequest['user']): Role => {
   return 'guest';
 };
 
-// Check if user has required role or higher
 const hasRole = (userRole: Role, requiredRoles: Role[]): boolean => {
   const userLevel = ROLE_HIERARCHY[userRole];
   return requiredRoles.some(role => userLevel >= ROLE_HIERARCHY[role]);
 };
 
-// Role-based middleware
 export const requireRole = (roles: Role[]) => {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     if (!req.user) {
@@ -169,14 +166,10 @@ export const requireRole = (roles: Role[]) => {
   };
 };
 
-// DJ-specific middleware (legacy - now uses role system)
 export const requireDJ = requireRole(['dj']);
-
-// Convenience middleware for specific roles
 export const requireMusicDirector = requireRole(['music-director']);
 export const requireStationManagement = requireRole(['station-management']);
 
-// Export role type for use in other modules
 export type { Role };
 export { getUserRole, hasRole, ROLE_HIERARCHY };
 

@@ -57,19 +57,16 @@ app.use(
   events_route
 );
 
-//example for how to use the auth middleware
 app.get('/testAuth', authMiddleware(), async (req, res) => {
   res.json({ message: 'Authenticated!' });
 });
 
-//example of how auth middleware can inform further middleware.
 app.get('/testInShow', authMiddleware(), requireDJ, activeShow, showMemberMiddleware, async (req, res) => {
   res.json({ message: 'Authenticated, active show, & show member' });
 });
 
 app.use(errorHandler);
 
-//Start the server
 const server = app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
 });

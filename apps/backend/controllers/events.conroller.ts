@@ -3,13 +3,12 @@ import { RequestHandler, Response } from 'express';
 import WxycError from '@wxyc/shared';
 import { getUserRole, hasRole } from '@wxyc/auth-middleware';
 
-//Define access levels for events using new role system
 const TopicAuthz: Record<string, string[]> = {
-  [Topics.test]: [], // Public access
-  [Topics.liveFs]: [], // Public access
-  [Topics.showDj]: ['dj'], // DJs and above
-  [Topics.primaryDj]: ['dj'], // DJs and above
-  [Topics.mirror]: ['music-director'], // Music Directors and above
+  [Topics.test]: [],
+  [Topics.liveFs]: [],
+  [Topics.showDj]: ['dj'],
+  [Topics.primaryDj]: ['dj'],
+  [Topics.mirror]: ['music-director'],
 };
 
 const filterAuthorizedTopics = (req: any, topics: string[]) => {
@@ -19,10 +18,7 @@ const filterAuthorizedTopics = (req: any, topics: string[]) => {
 
   return topics.filter((topic) => {
     if (TopicAuthz[topic] === undefined) return false;
-    //empty = anyone can access topic
     if (!TopicAuthz[topic].length) return true;
-
-    // Check if user has any of the required roles for this topic
     return hasRole(userRole, TopicAuthz[topic] as any);
   });
 };
