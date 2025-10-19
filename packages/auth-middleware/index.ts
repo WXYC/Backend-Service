@@ -1,4 +1,4 @@
-import 'dotenv/config';
+// dotenv should be loaded at the application level
 import { Response, Request, NextFunction } from 'express';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { CognitoJwtVerifierSingleUserPool } from 'aws-jwt-verify/cognito-verifier';

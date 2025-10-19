@@ -1,6 +1,7 @@
 import { serverEventsMgr, Topics, EventData, TestEvents } from '@wxyc/shared';
 import { RequestHandler, Response } from 'express';
 import WxycError from '@wxyc/shared';
+import { getUserRole, hasRole } from '@wxyc/auth-middleware';
 
 //Define access levels for events using new role system
 const TopicAuthz: Record<string, string[]> = {
@@ -13,9 +14,6 @@ const TopicAuthz: Record<string, string[]> = {
 
 const filterAuthorizedTopics = (req: any, topics: string[]) => {
   const user = req.user;
-  
-  // Import role utilities from auth middleware
-  const { getUserRole, hasRole } = require('@wxyc/auth-middleware');
   
   const userRole = getUserRole(user);
 

@@ -1,5 +1,4 @@
-import { config } from 'dotenv';
-config({ quiet: true });
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
