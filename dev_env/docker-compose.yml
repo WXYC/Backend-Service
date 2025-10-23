@@ -23,13 +23,31 @@ services:
     volumes:
       - ci-pg-data:/var/lib/postgresql/data
 
+  # Database Initialization (migrations + seeding)
+  db-init:
+    build:
+      context: ..
+      dockerfile: dev_env/Dockerfile.init
+    container_name: wxyc-db-init
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+    profiles: [dev]
+    restart: "no"  # Only run once
+
   backend:
     depends_on:
       - ci-db
     image: wxyc_backend_service
     build:
       context: '../'
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.backend
       platforms:
         - 'linux/amd64'
     profiles: [ci]

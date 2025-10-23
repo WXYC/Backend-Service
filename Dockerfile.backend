@@ -1,0 +1,20 @@
+#Build stage
+FROM node:20-alpine AS builder
+WORKDIR /builder
+
+COPY ./package.json ./package.json
+COPY ./shared ./shared
+COPY ./apps/backend ./apps/backend
+
+RUN npm install && npm run build
+
+#Production stage
+FROM node:20-alpine AS prod
+WORKDIR /app
+COPY package* ./
+RUN npm install --production
+COPY --from=builder ./builder/apps/backend/dist ./dist
+
+EXPOSE 8080
+
+CMD ["npm", "start"]
