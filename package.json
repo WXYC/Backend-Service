@@ -5,7 +5,7 @@
   "scripts": {
     "start": "node dist/app.js",
     "build": "npm run build --workspaces",
-    "dev": "(tsup --watch &) && sleep 1 && DB_HOST=localhost nodemon --watch dist --watch .env -e js --exec \"npm run start\"",
+    "dev": "dotenvx run -f .env -- npm run dev --workspaces",
     "clean": "rm -rf ./dist/*",
     "test": "jest",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d && sleep 2 && bash dev_env/db_setup.sh",
@@ -23,5 +23,8 @@
   "workspaces": [
     "apps/*",
     "shared/*"
-  ]
+  ],
+  "dependencies": {
+    "@dotenvx/dotenvx": "^1.51.0"
+  }
 }
