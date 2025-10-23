@@ -1,6 +1,6 @@
 import { QueryParams } from "@/controllers/flowsheet.controller.js";
-import { db } from "@/db/drizzle_client.js";
-import { djs, flowsheet, FSEntry, Show } from "@/db/schema.js";
+import { db } from "@wxyc/database";
+import { djs, flowsheet, FSEntry, Show } from "@wxyc/database"
 import { asc, desc, eq } from "drizzle-orm";
 import { Request } from "express";
 import { createBackendMirrorMiddleware } from "./mirror.middleware.js";
