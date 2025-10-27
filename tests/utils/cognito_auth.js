@@ -1,5 +1,3 @@
-require('dotenv').config({ path: `${__dirname}/../../.env` });
-
 async function authorize() {
   const payload = JSON.stringify({
     AuthFlow: 'USER_PASSWORD_AUTH',

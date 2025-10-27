@@ -1,4 +1,3 @@
-require('dotenv').config({ path: '../../.env' });
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const fls_util = require('../utils/flowsheet_util');
 

@@ -1,5 +1,3 @@
-import 'dotenv/config';
-
 type SlackRequestStatus = {
   success: boolean;
   message: string;

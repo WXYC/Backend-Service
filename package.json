@@ -3,20 +3,20 @@
   "version": "1.0.0",
   "description": "All necessary app services for the WXYC flowsheet backend",
   "scripts": {
-    "start": "node dist/app.js",
+    "start": "dotenvx run -f .env -- node dist/app.js",
     "build": "npm run build --workspaces",
     "dev": "dotenvx run -f .env -- npm run dev --workspaces",
     "clean": "rm -rf ./dist/*",
-    "test": "jest",
+    "test": "dotenvx run -f .env -- jest",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d && sleep 2 && bash dev_env/db_setup.sh",
     "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down db -v --remove-orphans",
     "ci:env": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci up --build -d && sleep 2 && USE_CI=true bash dev_env/db_setup.sh",
     "ci:test": "PORT=${CI_PORT:-8081} npm run test;",
     "ci:clean": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci down -v",
     "ci:testmock": "npm run ci:env && npm run ci:test && npm run ci:clean",
-    "drizzle:generate": "drizzle-kit generate --config 'drizzle.config.ts'",
-    "drizzle:migrate": "drizzle-kit migrate --config 'drizzle.config.ts'",
-    "drizzle:drop": "drizzle-kit drop --out ./src/db/migrations"
+    "drizzle:generate": "dotenvx run -f .env -- drizzle-kit generate --config 'drizzle.config.ts'",
+    "drizzle:migrate": "dotenvx run -f .env -- drizzle-kit migrate --config 'drizzle.config.ts'",
+    "drizzle:drop": "dotenvx run -f .env -- drizzle-kit drop --out ./src/db/migrations"
   },
   "author": "AyBruno",
   "license": "MIT",
@@ -24,7 +24,23 @@
     "apps/*",
     "shared/*"
   ],
-  "dependencies": {
-    "@dotenvx/dotenvx": "^1.51.0"
+  "devDependencies": {
+    "@dotenvx/dotenvx": "^1.51.0",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.3",
+    "@types/express-serve-static-core": "^5.0.7",
+    "@types/node": "^24.1.0",
+    "@types/pg": "^8.11.10",
+    "@types/ssh2": "^1.15.5",
+    "@types/swagger-ui-express": "^4.1.8",
+    "drizzle-kit": "^0.31.4",
+    "jest": "^30.0.5",
+    "jest-html-reporters": "^3.1.7",
+    "nodemon": "^3.1.7",
+    "postgres": "^3.4.7",
+    "prettier": "^3.3.3",
+    "supertest": "^7.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.6.2"
   }
 }
