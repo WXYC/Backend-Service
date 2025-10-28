@@ -26,12 +26,15 @@ const MAX_RETRIES = 30;
 const RETRY_DELAY = 1000; // 1 second
 
 const dbConfig = {
-  host: process.env.DB_HOST || 'localhost',
+  host: process.env.DB_HOST || 'db',
   port: parseInt(process.env.DB_PORT || '5432'),
   database: process.env.DB_NAME || 'wxyc_db',
   username: process.env.DB_USERNAME,
   password: process.env.DB_PASSWORD,
+  max: 1,
 };
+
+const sql = postgres(dbConfig);
 
 console.log(`🔧 Database Init Script Starting...`);
 console.log(`   Host: ${dbConfig.host}:${dbConfig.port}`);
@@ -45,17 +48,7 @@ async function waitForDatabase() {
 
   for (let i = 0; i < MAX_RETRIES; i++) {
     try {
-      const sql = postgres({
-        host: dbConfig.host,
-        port: dbConfig.port,
-        database: dbConfig.database,
-        username: dbConfig.username,
-        password: dbConfig.password,
-        max: 1,
-      });
-
       await sql`SELECT 1`;
-      await sql.end();
 
       console.log('Database is ready!\n');
       return true;
@@ -73,22 +66,12 @@ async function waitForDatabase() {
 async function installExtensions() {
   console.log('⬇️ Installing Postgresql Extensions...');
 
-  const sql = postgres({
-    host: dbConfig.host,
-    port: dbConfig.port,
-    database: dbConfig.database,
-    username: dbConfig.username,
-    password: dbConfig.password,
-  });
-
   try {
     const extensionsSQL = readFileSync(join(__dirname, './install_extensions.sql'), 'utf8');
 
     // Execute the extension install SQL
     await sql.unsafe(extensionsSQL);
-    await sql.end();
   } catch (error) {
-    await sql.end();
     console.error('Extension Install failed:', error.message);
     throw error;
   }
@@ -101,8 +84,7 @@ async function runMigrations() {
   console.log('🔄 Running Drizzle migrations...');
 
   try {
-    const { stdout, stderr } = await execAsync('cd packages/database && npx drizzle-kit migrate', {
-      cwd: join(__dirname, '..'),
+    const { stdout, stderr } = await execAsync('npm run drizzle:migrate', {
       env: { ...process.env },
       shell: '/bin/sh',
     });
@@ -121,14 +103,6 @@ async function runMigrations() {
  * Check if database has been seeded
  */
 async function isDatabaseSeeded() {
-  const sql = postgres({
-    host: dbConfig.host,
-    port: dbConfig.port,
-    database: dbConfig.database,
-    username: dbConfig.username,
-    password: dbConfig.password,
-  });
-
   try {
     // Check if genres table has any data
     const result = await sql`
@@ -137,11 +111,9 @@ async function isDatabaseSeeded() {
     `;
 
     const count = parseInt(result[0].count);
-    await sql.end();
 
     return count > 0;
   } catch (error) {
-    await sql.end();
     throw error;
   }
 }
@@ -151,14 +123,6 @@ async function isDatabaseSeeded() {
  */
 async function seedDatabase() {
   console.log('🌱 Seeding database...');
-
-  const sql = postgres({
-    host: dbConfig.host,
-    port: dbConfig.port,
-    database: dbConfig.database,
-    username: dbConfig.username,
-    password: dbConfig.password,
-  });
 
   try {
     const seedSQL = readFileSync(join(__dirname, './seed_db.sql'), 'utf8');
@@ -199,9 +163,11 @@ async function main() {
     }
 
     console.log('Database initialization complete!\n');
+    sql.end();
     process.exit(0);
   } catch (error) {
     console.error('\nDatabase initialization failed:', error);
+    sql.end();
     process.exit(1);
   }
 }

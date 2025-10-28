@@ -5,11 +5,30 @@ services:
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_USER: ${DB_USERNAME}
+      PGUSER: ${DB_USERNAME}
       POSTGRES_DB: ${DB_NAME}
     ports:
       - '${DB_PORT:-5432}:5432'
     volumes:
       - pg-data:/var/lib/postgresql/data
+
+  # Database Initialization (migrations + seeding)
+  db-init:
+    image: wxyc-db-init-image
+    profiles: [dev]
+    build:
+      context: ..
+      dockerfile: dev_env/Dockerfile.init
+    container_name: wxyc-db-init
+    depends_on:
+      - db
+    environment:
+      - DB_HOST=db # Differentiates between db containers with internal network hostname
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+    restart: 'no' # Only run once
 
   ci-db:
     image: postgres:latest
@@ -17,6 +36,7 @@ services:
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_USER: ${DB_USERNAME}
+      PGUSER: ${DB_USERNAME}
       POSTGRES_DB: ${DB_NAME}
     ports:
       - '${CI_DB_PORT:-5433}:5432'
@@ -24,22 +44,22 @@ services:
       - ci-pg-data:/var/lib/postgresql/data
 
   # Database Initialization (migrations + seeding)
-  db-init:
+  ci-db-init:
+    image: wxyc-db-init-image
+    profiles: [ci]
     build:
       context: ..
       dockerfile: dev_env/Dockerfile.init
-    container_name: wxyc-db-init
+    container_name: wxyc-ci-db-init
     depends_on:
-      db:
-        condition: service_healthy
+      - ci-db
     environment:
-      - DB_HOST=db
+      - DB_HOST=ci-db # Differentiates between db containers with internal network hostname
       - DB_PORT=5432
       - DB_USERNAME=${DB_USERNAME}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
-    profiles: [dev]
-    restart: "no"  # Only run once
+    restart: 'no' # Only run once
 
   backend:
     depends_on:
@@ -48,8 +68,6 @@ services:
     build:
       context: '../'
       dockerfile: Dockerfile.backend
-      platforms:
-        - 'linux/amd64'
     profiles: [ci]
     # env_file: '../.env'
     environment:

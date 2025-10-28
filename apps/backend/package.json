@@ -15,7 +15,7 @@
     "async-mutex": "^0.5.0",
     "aws-jwt-verify": "^5.1.0",
     "cors": "^2.8.5",
-    "drizzle-orm": "^0.44.3",
+    "drizzle-orm": "^0.44.7",
     "express": "^5.1.0",
     "node-fetch": "^3.3.2",
     "node-ssh": "^13.2.1",

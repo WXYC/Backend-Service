@@ -4,20 +4,24 @@ WORKDIR /init
 
 # Copy package files
 COPY package.json ./
-COPY shared/database/package.json ./shared/database/
 
 # Install dependencies needed for init script
-RUN npm install && npm run build --workspace=shared
+RUN npm install
 
-# Copy entire database package (includes migrations, schema, config)
-COPY shared/database/ ./shared/database/
+# Copy necessary database files and set drizzle env vars
+COPY drizzle.config.ts ./
+COPY shared/database/src/schema.ts /init/database/
+COPY shared/database/src/migrations/ /init/database/migrations
+
+ENV SCHEMA_LOC='/init/database'
+ENV MIGRATION_LOC='/init/database/migrations'
 
 # Copy init script and seed data
 COPY dev_env/init-db.js ./
 COPY dev_env/install_extensions.sql ./
 COPY dev_env/seed_db.sql ./
 
-# Make the script executable
-RUN chmod +x init-db.js
+# Dummy .env file for npm script compatibility
+RUN touch .env
 
 CMD ["node", "init-db.js"]
