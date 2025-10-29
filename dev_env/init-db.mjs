@@ -17,6 +17,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { styleText } from 'node:util';
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -36,7 +37,9 @@ const dbConfig = {
 
 const sql = postgres(dbConfig);
 
-console.log(`🔧 Database Init Script Starting...`);
+const bold = 'font-weight: strong;';
+
+console.log(styleText(['bold'], `🔧 Database Init Script Starting...`));
 console.log(`   Host: ${dbConfig.host}:${dbConfig.port}`);
 console.log(`   Database: ${dbConfig.database}\n`);
 
@@ -44,7 +47,7 @@ console.log(`   Database: ${dbConfig.database}\n`);
  * Wait for database to be ready
  */
 async function waitForDatabase() {
-  console.log('⏳ Waiting for database to be ready...');
+  console.log(styleText(['bold'], '⏳ Waiting for database to be ready...\n'));
 
   for (let i = 0; i < MAX_RETRIES; i++) {
     try {
@@ -64,13 +67,14 @@ async function waitForDatabase() {
 }
 
 async function installExtensions() {
-  console.log('⬇️ Installing Postgresql Extensions...');
+  console.log(styleText(['bold'], '🛠️  Installing Postgresql Extensions..\n'));
 
   try {
     const extensionsSQL = readFileSync(join(__dirname, './install_extensions.sql'), 'utf8');
 
     // Execute the extension install SQL
     await sql.unsafe(extensionsSQL);
+    console.log('Installed psql extensions successfully!\n');
   } catch (error) {
     console.error('Extension Install failed:', error.message);
     throw error;
@@ -81,7 +85,7 @@ async function installExtensions() {
  * Run Drizzle migrations
  */
 async function runMigrations() {
-  console.log('🔄 Running Drizzle migrations...');
+  console.log(styleText(['bold'], '🔄 Running Drizzle migrations...'));
 
   try {
     const { stdout, stderr } = await execAsync('npm run drizzle:migrate', {
@@ -92,7 +96,7 @@ async function runMigrations() {
     if (stdout) console.log(stdout);
     if (stderr && !stderr.includes('No config path provided')) console.error(stderr);
 
-    console.log('Migrations completed successfully!\n');
+    console.log('\nMigrations completed successfully!\n');
   } catch (error) {
     console.error('Migration failed:', error.message);
     throw error;
@@ -122,7 +126,7 @@ async function isDatabaseSeeded() {
  * Seed the database
  */
 async function seedDatabase() {
-  console.log('🌱 Seeding database...');
+  console.log(styleText(['bold'], '🌱 Seeding database...\n'));
 
   try {
     const seedSQL = readFileSync(join(__dirname, './seed_db.sql'), 'utf8');
@@ -162,7 +166,7 @@ async function main() {
       await seedDatabase();
     }
 
-    console.log('Database initialization complete!\n');
+    console.log(styleText(['bold'], '💾 Database initialization complete!'));
     sql.end();
     process.exit(0);
   } catch (error) {

@@ -17,11 +17,11 @@ ENV SCHEMA_LOC='/init/database'
 ENV MIGRATION_LOC='/init/database/migrations'
 
 # Copy init script and seed data
-COPY dev_env/init-db.js ./
+COPY dev_env/init-db.mjs ./
 COPY dev_env/install_extensions.sql ./
 COPY dev_env/seed_db.sql ./
 
 # Dummy .env file for npm script compatibility
 RUN touch .env
 
-CMD ["node", "init-db.js"]
+CMD sleep 1 && node init-db.mjs
