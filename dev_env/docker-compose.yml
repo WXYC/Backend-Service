@@ -64,12 +64,11 @@ services:
   backend:
     depends_on:
       - ci-db
-    image: wxyc_backend_service
+    image: wxyc_backend_service:ci
     build:
       context: '../'
       dockerfile: Dockerfile.backend
     profiles: [ci]
-    # env_file: '../.env'
     environment:
       - DB_HOST=ci-db
       - DB_PORT=${DB_PORT:-5432}

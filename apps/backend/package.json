@@ -4,9 +4,10 @@
   "description": "An API service for the flowsheet database of WXYC",
   "main": "./dist/app.js",
   "scripts": {
+    "start": "node dist/app.js",
     "build": "tsup --minify",
-    "dev": "tsup --watch",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "docker:build": "docker build -t wxyc_backend_service:ci -f ../../Dockerfile.backend ../../",
+    "dev": "tsup --watch"
   },
   "author": "AyBruno",
   "license": "MIT",
