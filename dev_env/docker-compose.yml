@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:latest
+    image: postgres:18.0-alpine
     profiles: [dev]
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -31,7 +31,7 @@ services:
     restart: 'no' # Only run once
 
   ci-db:
-    image: postgres:latest
+    image: postgres:18.0-alpine
     profiles: [ci]
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
