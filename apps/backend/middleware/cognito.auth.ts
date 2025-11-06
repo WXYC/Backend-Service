@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import { Response, Request, NextFunction } from 'express';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { CognitoJwtVerifierSingleUserPool } from 'aws-jwt-verify/cognito-verifier';

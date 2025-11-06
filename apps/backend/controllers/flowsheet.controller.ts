@@ -1,6 +1,6 @@
 import { Request, RequestHandler } from 'express';
 import { Mutex } from 'async-mutex';
-import { NewFSEntry, FSEntry, Show, ShowDJ } from '../db/schema.js';
+import { NewFSEntry, FSEntry, Show, ShowDJ } from "@wxyc/database";
 import * as flowsheet_service from '../services/flowsheet.service.js';
 
 export type QueryParams = {

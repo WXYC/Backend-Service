@@ -1,6 +1,6 @@
 import { desc, eq, sql } from 'drizzle-orm';
 import { RotationAddRequest } from '../controllers/library.controller.js';
-import { db } from '../db/drizzle_client.js';
+import { db } from '../../../shared/database/src/client.js';
 import {
   NewAlbum,
   NewAlbumFormat,
@@ -13,7 +13,7 @@ import {
   library,
   library_artist_view,
   rotation,
-} from '../db/schema.js';
+} from "@wxyc/database";
 
 export const getFormatsFromDB = async () => {
   const formats = await db

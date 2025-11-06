@@ -1,5 +1,5 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
-import { db } from '../db/drizzle_client.js';
+import { db } from '../../../shared/database/src/client.js';
 import {
   DJ,
   FSEntry,
@@ -15,7 +15,7 @@ import {
   show_djs,
   library_artist_view,
   specialty_shows,
-} from '../db/schema.js';
+} from "@wxyc/database";
 import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 

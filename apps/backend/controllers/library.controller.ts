@@ -8,7 +8,7 @@ import {
   NewGenre,
   NewRotationRelease,
   RotationRelease,
-} from '../db/schema.js';
+} from "@wxyc/database";
 import * as libraryService from '../services/library.service.js';
 
 type NewAlbumRequest = {

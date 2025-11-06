@@ -1,0 +1,29 @@
+{
+  "name": "@wxyc/backend",
+  "version": "1.0.0",
+  "description": "An API service for the flowsheet database of WXYC",
+  "main": "./dist/app.js",
+  "scripts": {
+    "start": "node dist/app.js",
+    "build": "tsup --minify",
+    "docker:build": "docker build -t wxyc_backend_service:ci -f ../../Dockerfile.backend ../../",
+    "dev": "tsup --watch"
+  },
+  "author": "AyBruno",
+  "license": "MIT",
+  "dependencies": {
+    "@wxyc/database": "*",
+    "async-mutex": "^0.5.0",
+    "aws-jwt-verify": "^5.1.0",
+    "cors": "^2.8.5",
+    "drizzle-orm": "^0.44.7",
+    "express": "^5.1.0",
+    "node-fetch": "^3.3.2",
+    "node-ssh": "^13.2.1",
+    "postgres": "^3.4.4",
+    "posthog-node": "^5.8.6",
+    "ssh2": "^1.17.0",
+    "swagger-ui-express": "^5.0.1",
+    "yaml": "^2.7.1"
+  }
+}

@@ -1,6 +1,6 @@
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { DJQueryParams } from '@/controllers/djs.controller.js';
-import { db } from '@/db/drizzle_client.js';
+import { db } from "@wxyc/database";
 import {
   BinEntry,
   DJ,
@@ -17,7 +17,7 @@ import {
   show_djs,
   shows,
   specialty_shows,
-} from '@/db/schema.js';
+} from "@wxyc/database";
 
 import WxycError from '@/utils/error.js';
 

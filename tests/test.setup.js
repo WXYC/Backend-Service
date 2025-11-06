@@ -1,4 +1,3 @@
-require('dotenv').config({ path: `${__dirname}/../.env` });
 const get_access_token = require('./utils/cognito_auth');
 
 global.primary_dj_id = 1;
