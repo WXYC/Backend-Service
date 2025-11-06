@@ -15,7 +15,7 @@ env:
   AUTH_BYPASS: true
 
 jobs:
-  Unit-Integration-Tests:
+  Integration-Tests:
     runs-on: ubuntu-latest
 
     steps:

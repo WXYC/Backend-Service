@@ -15,10 +15,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Amazon ECR
         env:
@@ -48,7 +48,7 @@ jobs:
           echo "Remote Digest: $REMOTE_DIGEST"
 
           echo "Building Docker image locally..."
-          docker build --platform linux/amd64  -t wxyc_backend_service:latest .
+          docker build --platform linux/amd64 -f Dockerfile.backend -t wxyc_backend_service:latest .
 
           echo "Fetching local image ID..."
           LOCAL_ID=$(docker inspect --format='{{.Id}}' wxyc_backend_service:latest)
@@ -68,7 +68,7 @@ jobs:
           fi
 
       - name: Dry run - list Docker images
-        uses: appleboy/ssh-action@v0.1.0
+        uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
@@ -85,10 +85,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Amazon ECR
         env:
@@ -102,14 +102,14 @@ jobs:
         run: |
           IMAGE_URI="${{ secrets.AWS_ECR_REPOSITORY }}:latest"
           echo "Building Docker image..."
-          docker build --platform linux/amd64  -t wxyc_backend_service:latest .
+          docker build --platform linux/amd64 -f Dockerfile.backend -t wxyc_backend_service:latest .
           echo "Tagging Docker image..."
           docker tag wxyc_backend_service:latest $IMAGE_URI
           echo "Pushing Docker image to ECR..."
           docker push $IMAGE_URI
 
       - name: Execute remote commands via SSH
-        uses: appleboy/ssh-action@v0.1.0
+        uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
@@ -138,7 +138,7 @@ jobs:
             docker run -d -p 8080:8080 --restart unless-stopped --env-file .env ${{ secrets.AWS_ECR_REPOSITORY }}:latest
 
       - name: Confirm server is up
-        uses: appleboy/ssh-action@v0.1.0
+        uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
