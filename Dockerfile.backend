@@ -27,4 +27,4 @@ COPY --from=builder ./builder/shared/database/dist ./shared/database/dist
 EXPOSE 8080
 
 ENV TARGET="backend"
-CMD ["npm", "start"]
+CMD ["npm", "start", "--workspace=@wxyc/backend"]
