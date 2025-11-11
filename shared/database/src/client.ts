@@ -1,5 +1,6 @@
-import { PostgresJsDatabase, drizzle } from 'drizzle-orm/postgres-js';
-import postgres from 'postgres';
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import * as schema from "./schema";
 
 const queryClient = postgres({
   host: process.env.DB_HOST,
@@ -9,4 +10,4 @@ const queryClient = postgres({
   password: process.env.DB_PASSWORD,
 });
 
-export const db: PostgresJsDatabase = drizzle(queryClient);
+export const db = drizzle(queryClient, { schema });
