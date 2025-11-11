@@ -40,7 +40,7 @@ const wxycRoles = {
   },
 };
 
-export const auth: any = betterAuth({
+export const auth = betterAuth({
   database: drizzleAdapter(db, {
     provider: "pg",
     schema: {
@@ -80,12 +80,40 @@ export const auth: any = betterAuth({
   plugins: [
     admin(), 
     username(), 
-    jwt(), 
+    jwt({
+     jwt: {
+       definePayload: async ({ user: sessionUser }) => {
+         const memberships = await db
+           .select({
+             organizationId: member.organizationId,
+             role: member.role,
+             organizationSlug: organization.slug,
+           })
+           .from(member)
+           .leftJoin(organization, sql`${member.organizationId} = ${organization.id}` as any)
+           .where(sql`${member.userId} = ${sessionUser.id}` as any);
+         const roles = memberships.map((membership) => membership.role).filter(Boolean);
+         const organizations = memberships
+           .filter((membership) => membership.organizationId)
+           .map((membership) => ({
+             id: membership.organizationId,
+             slug: membership.organizationSlug,
+           }));
+         return {
+           ...sessionUser,
+           roles,
+           organizations,
+           primaryOrganizationId: organizations[0]?.id ?? null,
+         };
+       },
+     },
+   }), 
     organizationPlugin({
       // Configure for single organization model
       allowUserToCreateOrganization: false, // Only admins can create organizations
       organizationLimit: 1, // Users can only be in one organization
       roles: wxycRoles,
+      creatorRole: "admin"
     })
   ],
 
