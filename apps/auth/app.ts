@@ -3,6 +3,8 @@ import express from 'express';
 import cors from 'cors';
 import { auth } from "./auth.js";
 import { toNodeHandler } from 'better-auth/node';
+import { db, organization as organizationTable } from "@wxyc/database";
+import { sql } from "drizzle-orm";
 
 const app = express();
 
@@ -81,15 +83,24 @@ const createDefaultUser = async () => {
     if (!userId) throw new Error("Could not get user ID");
 
     // Ensure organization exists
-    let organizationId = "wxyc-org";
+    const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG || "wxyc";
+    const defaultOrgName = process.env.DEFAULT_ORG_NAME || "WXYC 89.3 FM";
+    let organizationId: string | null = null;
     try {
       const org = await auth.api.createOrganization({
-        body: { name: "WXYC 89.3 FM", slug: "wxyc" }
+        body: { name: defaultOrgName, slug: defaultOrgSlug }
       });
       organizationId = org?.data?.id || org?.id || organizationId;
     } catch {
-      // Organization exists, continue
+      const existingOrg = await db
+        .select({ id: organizationTable.id })
+        .from(organizationTable)
+        .where(sql`${organizationTable.slug} = ${defaultOrgSlug}` as any)
+        .limit(1);
+      organizationId = existingOrg[0]?.id ?? organizationId;
     }
+
+    if (!organizationId) throw new Error("Could not determine organization ID");
 
     // Add user to organization as admin
     try {

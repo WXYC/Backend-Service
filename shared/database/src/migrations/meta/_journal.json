@@ -120,6 +120,13 @@
       "when": 1750973320585,
       "tag": "0019_salty_praxagora",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1762820304572,
+      "tag": "0020_sticky_alex_power",
+      "breakpoints": true
     }
   ]
 }

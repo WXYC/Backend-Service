@@ -1,6 +1,7 @@
 import { InferInsertModel, InferSelectModel, sql, eq } from 'drizzle-orm';
 import {
   pgSchema,
+  pgTable,
   integer,
   smallint,
   varchar,
@@ -12,9 +13,154 @@ import {
   index,
   pgEnum,
   date,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 export const wxyc_schema = pgSchema('wxyc_schema');
+
+export const user = pgTable(
+  'auth_user',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    name: varchar('name', { length: 255 }).notNull(),
+    email: varchar('email', { length: 255 }).notNull(),
+    emailVerified: boolean('email_verified').notNull().default(false),
+    image: text('image'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    role: varchar('role', { length: 255 }),
+    banned: boolean('banned').default(false),
+    banReason: text('ban_reason'),
+    banExpires: timestamp('ban_expires', { withTimezone: true }),
+    username: varchar('username', { length: 255 }),
+    displayUsername: varchar('display_username', { length: 255 }),
+    realName: varchar('real_name', { length: 255 }),
+    djName: varchar('dj_name', { length: 255 }),
+    appSkin: varchar('app_skin', { length: 255 }).notNull().default('modern-light'),
+  },
+  (table) => [
+    uniqueIndex('auth_user_email_key').on(table.email),
+    uniqueIndex('auth_user_username_key').on(table.username),
+  ]
+);
+
+export const session = pgTable(
+  'auth_session',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    userId: varchar('user_id', { length: 255 })
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    token: varchar('token', { length: 255 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    ipAddress: varchar('ip_address', { length: 255 }),
+    userAgent: text('user_agent'),
+    impersonatedBy: varchar('impersonated_by', { length: 255 }),
+    activeOrganizationId: varchar('active_organization_id', { length: 255 }),
+  },
+  (table) => [
+    uniqueIndex('auth_session_token_key').on(table.token),
+  ]
+);
+
+export const account = pgTable(
+  'auth_account',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    userId: varchar('user_id', { length: 255 })
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    accountId: varchar('account_id', { length: 255 }).notNull(),
+    providerId: varchar('provider_id', { length: 255 }).notNull(),
+    accessToken: text('access_token'),
+    refreshToken: text('refresh_token'),
+    idToken: text('id_token'),
+    accessTokenExpiresAt: timestamp('access_token_expires_at', { withTimezone: true }),
+    refreshTokenExpiresAt: timestamp('refresh_token_expires_at', { withTimezone: true }),
+    scope: varchar('scope', { length: 255 }),
+    password: text('password'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('auth_account_provider_account_key').on(
+      table.providerId,
+      table.accountId
+    ),
+  ]
+);
+
+export const verification = pgTable('auth_verification', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  identifier: varchar('identifier', { length: 255 }).notNull(),
+  value: text('value').notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const jwks = pgTable('auth_jwks', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  publicKey: text('public_key').notNull(),
+  privateKey: text('private_key').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const organization = pgTable(
+  'auth_organization',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    name: varchar('name', { length: 255 }).notNull(),
+    slug: varchar('slug', { length: 255 }).notNull(),
+    logo: text('logo'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    metadata: text('metadata'),
+  },
+  (table) => [
+    uniqueIndex('auth_organization_slug_key').on(table.slug),
+  ]
+);
+
+export const member = pgTable(
+  'auth_member',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    organizationId: varchar('organization_id', { length: 255 })
+      .notNull()
+      .references(() => organization.id, { onDelete: 'cascade' }),
+    userId: varchar('user_id', { length: 255 })
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    role: varchar('role', { length: 255 }).notNull().default('member'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('auth_member_org_user_key').on(table.organizationId, table.userId),
+  ]
+);
+
+export const invitation = pgTable(
+  'auth_invitation',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    organizationId: varchar('organization_id', { length: 255 })
+      .notNull()
+      .references(() => organization.id, { onDelete: 'cascade' }),
+    email: varchar('email', { length: 255 }).notNull(),
+    role: varchar('role', { length: 255 }),
+    status: varchar('status', { length: 255 }).notNull().default('pending'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    inviterId: varchar('inviter_id', { length: 255 })
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('auth_invitation_email_idx').on(table.email),
+  ]
+);
 
 export type NewDJ = InferInsertModel<typeof djs>;
 export type DJ = InferSelectModel<typeof djs>;

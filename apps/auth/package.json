@@ -2,6 +2,7 @@
     "name": "@wxyc/auth-service",
     "version": "1.0.0",
     "description": "WXYC Authentication Service using Better Auth",
+    "type": "module",
     "main": "./dist/app.js",
     "scripts": {
       "dev": "tsup --watch",
