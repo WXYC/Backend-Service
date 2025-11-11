@@ -44,7 +44,7 @@ app.post("/api/auth/token", async (req, res) => {
 // Use app.use() to handle all methods and paths under /api/auth
 app.use("/api/auth", toNodeHandler(auth));
 
-const port = process.env.PORT || "8082";
+const port = process.env.AUTH_PORT || "8082";
 
 
 // Create default user if needed
