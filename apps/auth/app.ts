@@ -122,7 +122,7 @@ const createDefaultUser = async () => {
 
 // Start the server
 app.listen(parseInt(port), async () => {
-  console.log(`Auth service listening on port: ${port}!`);
+  console.log(`listening on port: ${port}! (auth service)`);
 
   // Initialize default user after server starts
   await createDefaultUser();

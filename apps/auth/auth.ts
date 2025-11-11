@@ -1,12 +1,44 @@
 import { db, user, session, account, verification, jwks, organization, member, invitation } from "@wxyc/database";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { admin, defaultRoles, jwt, username, organization as organizationPlugin } from "better-auth/plugins";
+import { admin, jwt, username, organization as organizationPlugin } from "better-auth/plugins";
+import { defaultRoles as organizationDefaultRoles } from "better-auth/plugins/organization/access";
 import { config } from "dotenv";
 import { sql } from "drizzle-orm";
 
 // Load environment variables from project root
 config();
+
+const wxycRoles = {
+  member: {
+    ...organizationDefaultRoles.member,
+    metadata: {
+      name: "Member",
+      description: "Baseline member access",
+    },
+  },
+  dj: {
+    ...organizationDefaultRoles.member,
+    metadata: {
+      name: "DJ",
+      description: "DJ access to flowsheet and library tools",
+    },
+  },
+  "music-director": {
+    ...organizationDefaultRoles.admin,
+    metadata: {
+      name: "Music Director",
+      description: "Manage library rotation and curation workflows",
+    },
+  },
+  admin: {
+    ...organizationDefaultRoles.admin,
+    metadata: {
+      name: "Station Management",
+      description: "Full administrative access",
+    },
+  },
+};
 
 export const auth: any = betterAuth({
   database: drizzleAdapter(db, {
@@ -32,11 +64,12 @@ export const auth: any = betterAuth({
     .map((origin) => origin.trim())
     .filter(Boolean),
 
-  // Email+password only (social omitted), admin-only creation is in your UI
+  // Email+password only (social omitted), admin-only creation is in UI
   emailAndPassword: {
     enabled: true,
     requireEmailVerification: false,
     minPasswordLength: 8,
+    disableSignUp: true,
   },
 
   // Subdomain-friendly cookie setting (recommended over cross-site cookies)
@@ -52,11 +85,7 @@ export const auth: any = betterAuth({
       // Configure for single organization model
       allowUserToCreateOrganization: false, // Only admins can create organizations
       organizationLimit: 1, // Users can only be in one organization
-      roles: {
-        ...defaultRoles,
-        dj: defaultRoles.member,
-        "music-director": defaultRoles.admin,
-      }
+      roles: wxycRoles,
     })
   ],
 

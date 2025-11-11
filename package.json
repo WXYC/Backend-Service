@@ -5,7 +5,9 @@
   "scripts": {
     "start": "npm start --workspace=apps/$TARGET",
     "build": "npm run build --workspaces",
-    "dev": "dotenvx run -f .env -- npm run dev --workspaces",
+    "dev": "dotenvx run -f .env -- concurrently \"npm:dev:backend\" \"npm:dev:auth\"",
+    "dev:backend": "npm run dev --workspace=@wxyc/backend",
+    "dev:auth": "npm run dev --workspace=@wxyc/auth-service",
     "clean": "rm -rf ./dist/*",
     "test": "dotenvx run -f .env -- jest",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d; docker attach wxyc-db-init",
@@ -34,6 +36,7 @@
     "@types/pg": "^8.11.10",
     "@types/ssh2": "^1.15.5",
     "@types/swagger-ui-express": "^4.1.8",
+    "concurrently": "^9.1.2",
     "drizzle-kit": "^0.31.5",
     "drizzle-orm": "^0.44.7",
     "jest": "^30.0.5",
