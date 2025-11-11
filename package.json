@@ -29,9 +29,6 @@
   ],
   "devDependencies": {
     "@dotenvx/dotenvx": "^1.51.0",
-    "@types/cors": "^2.8.17",
-    "@types/express": "^5.0.3",
-    "@types/express-serve-static-core": "^5.0.7",
     "@types/node": "^24.1.0",
     "@types/pg": "^8.11.10",
     "@types/ssh2": "^1.15.5",

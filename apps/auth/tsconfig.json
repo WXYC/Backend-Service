@@ -3,8 +3,7 @@
     "include": [".", "../../shared/database/src/client.ts"],
     "compilerOptions": {
         "paths": {
-            "@/*": ["./*"],
-            "@wxyc/database": ["../../shared/database/src/index.ts"]
+            "@/*": ["./*"]
         }
     }
 }
