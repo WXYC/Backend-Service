@@ -29,6 +29,12 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
     restart: 'no' # Only run once
+    volumes:
+      - ../drizzle.config.ts:/init/drizzle.config.ts
+      - ../shared/database/src/schema.ts:/init/database/schema.ts
+      - ../shared/database/src/migrations:/init/database/migrations
+      - ./dev_env/install_extensions.sql:/install_extensions.sql
+      - ./dev_env/seed_db.sql:/seed_db.sql
 
   ci-db:
     image: postgres:18.0-alpine
@@ -60,6 +66,12 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
     restart: 'no' # Only run once
+    volumes:
+      - ../drizzle.config.ts:/init/drizzle.config.ts
+      - ../shared/database/src/schema.ts:/init/database/schema.ts
+      - ../shared/database/src/migrations:/init/database/migrations
+      - ./dev_env/install_extensions.sql:/install_extensions.sql
+      - ./dev_env/seed_db.sql:/seed_db.sql
 
   backend:
     depends_on:
