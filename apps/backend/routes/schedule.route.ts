@@ -1,11 +1,11 @@
-import { Router } from 'express';
-import * as scheduleController from '../controllers/schedule.controller.js';
+import { Router } from "express";
+import * as scheduleController from "../controllers/schedule.controller.js";
 
 export const schedule_route = Router();
 
-schedule_route.get('/', scheduleController.getSchedule);
+schedule_route.get("/", scheduleController.getSchedule);
 
-schedule_route.post('/', scheduleController.addToSchedule);
+schedule_route.post("/", scheduleController.addToSchedule);
 
 /*
 schedule_route.delete('/', scheduleController.removeFromSchedule);

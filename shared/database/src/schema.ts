@@ -1,4 +1,5 @@
-import { InferInsertModel, InferSelectModel, sql, eq } from 'drizzle-orm';
+import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
+import { sql, eq } from 'drizzle-orm';
 import {
   pgSchema,
   pgTable,
