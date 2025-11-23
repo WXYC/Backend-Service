@@ -1,13 +1,10 @@
 {
     "extends": ["../../tsconfig.base.json"],
-    "references": [{ "path": "../../shared/database" }, { "path": "../../shared/authentication" }],
-    "include": ["."],
+    "include": ["src/**/*.ts"],
     "compilerOptions": {
         "module": "esnext",
         "moduleResolution": "bundler",
         "verbatimModuleSyntax": true,
-        "paths": {
-            "@/*": ["./*"]
-        }
+        "strict": true
     }
 }

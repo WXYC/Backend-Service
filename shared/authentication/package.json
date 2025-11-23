@@ -1,0 +1,32 @@
+{
+  "name": "@wxyc/authentication",
+  "version": "1.0.0",
+  "description": "Types and Middleware for Authentication in WXYC Services",
+  "author": "Jackson Meade",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@wxyc/database": "^1.0.0",
+    "drizzle-orm": "^0.44.7",
+    "better-auth": "^1.3.23",
+    "postgres": "^3.4.4"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "tsup": "^8.5.0",
+    "typescript": "^5.6.2"
+  },
+  "types" : "dist/index.d.ts"
+}

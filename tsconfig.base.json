@@ -16,6 +16,11 @@
     "declaration": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@wxyc/authentication": ["shared/authentication/src"],
+      "@wxyc/database": ["shared/database/src"]
+    }
   }
 }

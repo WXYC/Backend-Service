@@ -1,13 +1,11 @@
+import { requirePermissions } from "@wxyc/authentication";
 import { Router } from 'express';
 import * as djsController from '../controllers/djs.controller.js';
-import { cognitoMiddleware, Roles } from '../middleware/cognito.auth.js';
-
-const { dj, mgmt } = Roles;
 
 export const dj_route = Router();
 
 //TODO: secure - mgmt & individual dj
-dj_route.get('/', cognitoMiddleware(dj), djsController.getDJInfo);
+dj_route.get('/', requirePermissions(), djsController.getDJInfo);
 
 dj_route.delete('/', cognitoMiddleware(mgmt), djsController.deleteDJ);
 

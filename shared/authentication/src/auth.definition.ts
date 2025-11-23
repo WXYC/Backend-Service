@@ -1,44 +1,9 @@
-import { db, user, session, account, verification, jwks, organization, member, invitation } from "@wxyc/database";
+import { account, db, invitation, jwks, member, organization, session, user, verification } from "@wxyc/database";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { admin, jwt, username, organization as organizationPlugin } from "better-auth/plugins";
-import { defaultRoles as organizationDefaultRoles } from "better-auth/plugins/organization/access";
-import { config } from "dotenv";
+import { admin, jwt, organization as organizationPlugin, username } from "better-auth/plugins";
 import { sql } from "drizzle-orm";
-
-// Load environment variables from project root
-config();
-
-const wxycRoles = {
-  member: {
-    ...organizationDefaultRoles.member,
-    metadata: {
-      name: "Member",
-      description: "Baseline member access",
-    },
-  },
-  dj: {
-    ...organizationDefaultRoles.member,
-    metadata: {
-      name: "DJ",
-      description: "DJ access to flowsheet and library tools",
-    },
-  },
-  "music-director": {
-    ...organizationDefaultRoles.admin,
-    metadata: {
-      name: "Music Director",
-      description: "Manage library rotation and curation workflows",
-    },
-  },
-  admin: {
-    ...organizationDefaultRoles.admin,
-    metadata: {
-      name: "Station Management",
-      description: "Full administrative access",
-    },
-  },
-};
+import { WXYCRoles } from "./auth.roles";
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
@@ -78,42 +43,24 @@ export const auth = betterAuth({
   },*/
 
   plugins: [
-    admin(), 
-    username(), 
+    admin(),
+    username(),
     jwt({
-     jwt: {
-       definePayload: async ({ user: sessionUser }) => {
-         const memberships = await db
-           .select({
-             organizationId: member.organizationId,
-             role: member.role,
-             organizationSlug: organization.slug,
-           })
-           .from(member)
-           .leftJoin(organization, sql`${member.organizationId} = ${organization.id}` as any)
-           .where(sql`${member.userId} = ${sessionUser.id}` as any);
-         const roles = memberships.map((membership) => membership.role).filter(Boolean);
-         const organizations = memberships
-           .filter((membership) => membership.organizationId)
-           .map((membership) => ({
-             id: membership.organizationId,
-             slug: membership.organizationSlug,
-           }));
-         return {
-           ...sessionUser,
-           roles,
-           organizations,
-           primaryOrganizationId: organizations[0]?.id ?? null,
-         };
-       },
-     },
-   }), 
+      jwt: {
+        definePayload: async ({ user: sessionUser }) => {
+          return {
+            id: sessionUser.id,
+            email: sessionUser.email,
+            role: sessionUser.role,
+          }
+        },
+      },
+    }),
     organizationPlugin({
       // Configure for single organization model
       allowUserToCreateOrganization: false, // Only admins can create organizations
       organizationLimit: 1, // Users can only be in one organization
-      roles: wxycRoles,
-      creatorRole: "admin"
+      roles: WXYCRoles
     })
   ],
 
@@ -135,7 +82,12 @@ export const auth = betterAuth({
       if (!user?.id) return false;
 
       try {
-        const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG || "wxyc";
+        const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
+
+        if (!defaultOrgSlug) {
+          throw new Error('DEFAULT_ORG_SLUG is not set in environment variables.');
+        }
+
         // Query the member table to check if user has admin/owner role in WXYC org
         const adminMember = await db
           .select({ memberId: member.id })
@@ -156,3 +108,5 @@ export const auth = betterAuth({
     },
   },
 });
+
+export type Auth = typeof auth;
