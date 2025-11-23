@@ -1,7 +1,12 @@
 {
     "extends": ["../../tsconfig.base.json"],
     "include": ["src/**/*.ts"],
+    "exclude": ["node_modules", "dist"],
     "compilerOptions": {
+        "composite": true,
+        "baseUrl": ".",
+        "rootDir": ".",
+        "outDir": "./dist",
         "module": "esnext",
         "moduleResolution": "bundler",
         "verbatimModuleSyntax": true,
