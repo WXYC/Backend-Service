@@ -10,7 +10,10 @@ config();
 
 const app = express();
 
-// Apply CORS globally to all routes
+// Parse JSON bodies first (needed for auth endpoints)
+app.use(express.json());
+
+// Apply CORS globally to all routes (must be before auth handler)
 app.use(
   cors({
     origin: process.env.FRONTEND_SOURCE || "*",
@@ -21,12 +24,9 @@ app.use(
   })
 );
 
-// Parse JSON bodies
-app.use(express.json());
-
 // Mount the Better Auth handler for all auth routes
-// Use app.use() to handle all methods and paths under /api/auth
-app.all("/api/auth/*", toNodeHandler(auth));
+// app.use() will handle all methods and paths under /api/auth
+app.use("/api/auth", toNodeHandler(auth));
 
 const port = process.env.AUTH_PORT || "8082";
 
