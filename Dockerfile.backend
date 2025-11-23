@@ -18,11 +18,13 @@ WORKDIR /application
 COPY ./package* ./
 COPY ./apps/backend/package* ./apps/backend/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/authentication/package* ./shared/authentication/
 
 RUN npm install --omit=dev
 
 COPY --from=builder ./builder/apps/backend/dist ./apps/backend/dist
 COPY --from=builder ./builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./builder/shared/authentication/dist ./shared/authentication/dist
 
 EXPOSE 8080
 

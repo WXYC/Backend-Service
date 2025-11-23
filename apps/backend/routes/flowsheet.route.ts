@@ -1,10 +1,7 @@
-import { flowsheetMirror } from "@/middleware/legacy/flowsheet.mirror.js";
 import { requirePermissions } from "@wxyc/authentication";
 import { Router } from "express";
-import * as flowsheetController from "../controllers/flowsheet.controller.js";
-import { Roles } from "../middleware/cognito.auth.js";
-
-const { dj } = Roles;
+import * as flowsheetController from "../controllers/flowsheet.controller";
+import { flowsheetMirror } from "../middleware/legacy/flowsheet.mirror";
 
 export const flowsheet_route = Router();
 

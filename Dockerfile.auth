@@ -18,6 +18,7 @@ WORKDIR /auth-service
 COPY ./package* ./
 COPY ./apps/auth/package* ./apps/auth/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/authentication/package* ./shared/authentication/
 
 RUN npm install --omit=dev
 

@@ -9,7 +9,6 @@
         "outDir": "./dist",
         "module": "esnext",
         "moduleResolution": "bundler",
-        "verbatimModuleSyntax": true,
         "strict": true
     }
 }

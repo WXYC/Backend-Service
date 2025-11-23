@@ -2,13 +2,13 @@ import {
   EventData,
   MirrorEvents,
   serverEventsMgr,
-} from "@/utils/serverEvents.js";
+} from "../../utils/serverEvents";
 
 import { promises } from "fs";
 import { EventEmitter } from "node:events";
 import path from "path";
-import { MirrorSQL } from "./sql.mirror.js";
-import { cryptoRandomId, expBackoffMs } from "./utilities.mirror.js";
+import { MirrorSQL } from "./sql.mirror";
+import { cryptoRandomId, expBackoffMs } from "./utilities.mirror";
 
 const CommandQueueEvents = {
   enqueued: "enqueued",
