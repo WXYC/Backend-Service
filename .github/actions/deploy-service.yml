@@ -1,0 +1,77 @@
+name: 'Deploy Service'
+description: 'Pulls a Docker image and starts a service on a remote EC2 instance.'
+inputs:
+  target_app:
+    description: 'The target application name (used for container naming).'
+    required: true
+  publish_port:
+    description: 'The port to publish the service on.'
+    required: true
+  deploy_tag:
+    description: 'The Docker image tag to deploy.'
+    required: true
+  ec2_host:
+    description: 'The EC2 host address.'
+    required: true
+    secret: true
+  ec2_user:
+    description: 'The EC2 username.'
+    required: true
+    secret: true
+  ec2_ssh_key:
+    description: 'The SSH private key for EC2 access.'
+    required: true
+    secret: true
+  aws_access_key_id:
+    description: 'AWS Access Key ID.'
+    required: true
+    secret: true
+  aws_secret_access_key:
+    description: 'AWS Secret Access Key.'
+    required: true
+    secret: true
+  aws_region:
+    description: 'AWS Region.'
+    required: true
+    secret: true
+  aws_ecr_uri:
+    description: 'AWS ECR URI.'
+    required: true
+    secret: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Pull Image and Start Service
+      uses: appleboy/ssh-action@v1
+      with:
+        host: ${{ inputs.ec2_host }}
+        username: ${{ inputs.ec2_user }}
+        key: ${{ inputs.ec2_ssh_key }}
+        script: |
+          set -e
+          export AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }}
+          export AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }}
+
+          PUBLISH_PORT=${{ inputs.publish_port }}
+          DEPLOY_TAG=${{ inputs.deploy_tag }}
+          TARGET_APP=${{ inputs.target_app }}
+
+          echo "Logging into AWS ECR..."
+          aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin ${{ inputs.aws_ecr_uri }}
+
+          echo "Pulling Docker image..."
+          docker pull ${{ inputs.aws_ecr_uri }}/$TARGET_APP:latest
+
+          echo "Stopping any existing container named $TARGET_APP or using published port $PUBLISH_PORT..."
+          docker stop $TARGET_APP || true
+          docker ps --filter "publish=$PUBLISH_PORT" --format "{{.ID}}" | xargs -r docker stop
+
+          echo "Removing any existing container named $TARGET_APP or using published port $PUBLISH_PORT..."
+          docker rm $TARGET_APP || true
+          docker ps -a --filter "publish=$PUBLISH_PORT" --format "{{.ID}}" | xargs -r docker rm 
+
+          echo "Starting new Docker container..."
+          docker run -d --name $TARGET_APP -p $PUBLISH_PORT:8080 --restart unless-stopped --env-file .env ${{ inputs.aws_ecr_uri }}/$TARGET_APP:$DEPLOY_TAG
+
+          echo "Pruning unused Docker objects..."
+          docker system prune -f
