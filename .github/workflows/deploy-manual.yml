@@ -3,15 +3,19 @@ name: Manual Build & Deploy
 on:
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: 'Perform a dry run'
+      target:
+        description: 'The application target to deploy (e.g., backend, auth).'
+        required: true
+        type: string
+      version:
+        description: 'The specific version to deploy (e.g., v1.2.3). Defaults to latest if not provided.'
         required: false
-        type: boolean
-        default: true
+        type: string
 
 jobs:
   trigger-build-and-deploy:
     uses: ./.github/workflows/deploy-base.yml
     with:
-      dry_run: ${{ inputs.dry_run }}
+      target: ${{ github.event.inputs.target }}
+      version: ${{ github.event.inputs.version || 'latest' }}
     secrets: inherit
