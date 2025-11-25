@@ -60,7 +60,7 @@ runs:
           aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin ${{ inputs.aws_ecr_uri }}
 
           echo "Pulling Docker image..."
-          docker pull ${{ inputs.aws_ecr_uri }}/$TARGET_APP:latest
+          docker pull ${{ inputs.aws_ecr_uri }}/$TARGET_APP:$DEPLOY_TAG
 
           echo "Stopping any existing container named $TARGET_APP or using published port $PUBLISH_PORT..."
           docker stop $TARGET_APP || true
