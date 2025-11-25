@@ -85,6 +85,9 @@ jobs:
       deploy_version: ${{ steps.determine_deploy_version.outputs.deploy_version }}
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
       - name: Get Latest Tag
         id: latest_tag
         uses: ./.github/actions/latest_tag.yml
