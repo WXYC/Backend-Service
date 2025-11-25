@@ -90,14 +90,14 @@ jobs:
 
       - name: Get Latest Tag
         id: latest_tag
-        uses: ./.github/actions/latest_tag.yml
+        uses: ./.github/actions/latest_tag
         with:
           target: ${{ matrix.target }}
 
       - name: Bump Tag Version
         id: bump_version
         if: inputs.version == ''
-        uses: ./.github/actions/semver.yml
+        uses: ./.github/actions/semver
         with:
           version: ${{ steps.latest_tag.outputs.latest_tag }}
           bump: patch
@@ -223,7 +223,7 @@ jobs:
           echo "publish_port=$PUBLISH_PORT" >> $GITHUB_OUTPUT
 
       - name: Deploy Service
-        uses: ./.github/actions/deploy-service.yml
+        uses: ./.github/actions/deploy-service
         with:
           target_app: ${{ matrix.target }}
           publish_port: ${{ steps.deploy_vars.outputs.publish_port }}
