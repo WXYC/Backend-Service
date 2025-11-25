@@ -42,7 +42,7 @@ jobs:
           fi
 
           TAG_TO_CHECK="$TARGET_INPUT/$VERSION_INPUT"
-          if [ "$VERSION_INPUT" != "latest"]; then
+          if [ "$VERSION_INPUT" != "latest" ]; then
             if ! git tag -l "$TAG_TO_CHECK" | grep -q "$TAG_TO_CHECK"; then
               echo "Error: The corresponding tag for target and version does not exist: $TAG_TO_CHECK"
               exit 1
