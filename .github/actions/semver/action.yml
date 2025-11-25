@@ -46,3 +46,4 @@ runs:
 
         NEXT_VERSION="$major.$minor.$patch"
         echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+      shell: bash
