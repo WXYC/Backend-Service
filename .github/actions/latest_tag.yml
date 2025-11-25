@@ -1,0 +1,31 @@
+name: 'Get Latest Git Tag'
+inputs:
+  target:
+    description: 'build target tag prefix'
+    required: true
+outputs:
+  latest_tag:
+    description: 'The latest tag for target'
+    value: ${{ steps.get_tag.outputs.latest_tag }}
+runs:
+  using: 'composite'
+  steps:
+    - id: get_tag
+      outputs:
+        latest_tag:
+      run: |
+        TARGET_APP="${{ inputs.target }}"
+
+        # Get latest tag for build target
+        LATEST_TAG=$(git tag -l "${TARGET_APP}" | sort -V | tail -n 1)
+
+        if [ -z "$LATEST_TAG" ]; then
+          echo "No existing tags found for ${TARGET_APP}. Initializing with v0.0.0"
+          CURRENT_TAG="${TARGET_APP}/v0.0.0"
+        else
+          echo "Latest tag for ${TARGET_APP}: $LATEST_TAG"
+          CURRENT_TAG="$LATEST_TAG"
+        fi
+
+        echo "latest_tag=$CURRENT_TAG"
+        echo "latest_tag=$CURRENT_TAG" >> $GITHUB_OUTPUT

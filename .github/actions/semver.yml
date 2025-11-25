@@ -1,0 +1,48 @@
+name: 'Version Bump'
+inputs:
+  version:
+    description: 'Semver formatted version'
+    required: true
+  bump:
+    description: 'major, minor, or patch'
+    required: true
+outputs:
+  next_version:
+    description: 'The next version'
+    value: ${{ steps.version_bump.outputs.next_version }}
+runs:
+  using: 'composite'
+  steps:
+    - id: version_bump
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        BUMP: ${{ inputs.bump }}
+      run: |
+        # Strip all characters that aren't part of the semver section
+        VERSION=$(echo "$VERSION" | tr -dc '0-9.')
+
+        # Parse in semver
+        IFS='.' read -r major minor patch <<< "$VERSION"
+
+        case "$BUMP" in
+          major)
+            major=$((major + 1))
+            minor=0
+            patch=0
+            ;;
+          minor)
+            minor=$((minor + 1))
+            patch=0
+            ;;
+          patch)
+            patch=$((patch + 1))
+            ;;
+          *)
+            echo "Invalid bump type. Must be major, minor, or patch."
+            exit 1
+            ;;
+        esac
+
+        NEXT_VERSION="$major.$minor.$patch"
+        echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"

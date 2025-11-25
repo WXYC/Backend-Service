@@ -13,7 +13,6 @@ import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth.js';
 import { showMemberMiddleware } from './middleware/checkShowMember.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
-// import errorHandler from './middleware/errorHandler';
 
 const port = process.env.PORT || 8080;
 const app = express();
@@ -64,6 +63,11 @@ app.get('/testAuth', cognitoMiddleware(), async (req, res) => {
 //example of how cognito auth middleware can inform further middleware.
 app.get('/testInShow', cognitoMiddleware(), activeShow, showMemberMiddleware, async (req, res) => {
   res.json({ message: 'Authenticated, active show, & show member' });
+});
+
+//endpoint for healthchecks
+app.get('/healthcheck', async (req, res) => {
+  res.json({ message: 'Healthy!' });
 });
 
 app.use(errorHandler);

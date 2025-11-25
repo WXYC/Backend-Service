@@ -1,5 +1,6 @@
 {
   "name": "@wxyc/backend",
+  "publishPort": "8080",
   "version": "1.0.0",
   "description": "An API service for the flowsheet database of WXYC",
   "main": "./dist/app.js",
