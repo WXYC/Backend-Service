@@ -27,3 +27,4 @@ runs:
 
         echo "latest_tag=$CURRENT_TAG"
         echo "latest_tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
+      shell: bash
