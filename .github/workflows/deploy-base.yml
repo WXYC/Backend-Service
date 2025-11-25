@@ -34,10 +34,21 @@ jobs:
         if: inputs.version != ''
         run: |
           VERSION_INPUT="${{ inputs.version }}"
+          TARGET_INPUT="${{ inputs.target }}"
+
           if [[ ! "$VERSION_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$ && "$VERSION_INPUT" != "latest" ]]; then
             echo "Error: The 'version' input must follow semantic versioning format (e.g., v1.0.0, v1.0.0-beta.1). Received: $VERSION_INPUT" >&2
             exit 1
           fi
+
+          TAG_TO_CHECK="$TARGET_INPUT/$VERSION_INPUT"
+          if [ "$VERSION_INPUT" != "latest"]; then
+            if ! git tag -l "$TAG_TO_CHECK" | grep -q "$TAG_TO_CHECK"; then
+              echo "Error: The corresponding tag for target and version does not exist: $TAG_TO_CHECK"
+              exit 1
+            fi
+          fi
+
           echo "Version input '$VERSION_INPUT' is valid."
 
   detect-build-targets:
@@ -107,15 +118,23 @@ jobs:
         run: |
           if [ "${{ inputs.version }}" == "latest" ]; then
             LATEST_VERSION=$(echo ${{ steps.latest_tag.outputs.latest_tag }} | sed 's/[^0-9.]//g')
+            echo "deploy_version=v$LATEST_VERSION"
             echo "deploy_version=v$LATEST_VERSION" >> $GITHUB_OUTPUT
           elif [ -n "${{ inputs.version }}" ]; then
+            echo "deploy_version=${{ inputs.version }}" 
             echo "deploy_version=${{ inputs.version }}" >> $GITHUB_OUTPUT
-          else
+          if [ "${{ steps.latest_tag.outputs.is_initial }}" == "true" ]; then
+            LATEST_VERSION=$(echo ${{ steps.latest_tag.outputs.latest_tag }} | sed 's/[^0-9.]//g')
+            echo "deploy_version=v$LATEST_VERSION"
+            echo "deploy_version=v$LATEST_VERSION" >> $GITHUB_OUTPUT
+          else # Default case for merging changes for existing target with version bump
+            echo "deploy_version=v${{ steps.bump_version.outputs.next_version }}"
             echo "deploy_version=v${{ steps.bump_version.outputs.next_version }}" >> $GITHUB_OUTPUT
           fi
 
+      # Only apply new tag if no specific version was provided or latest is provided and there were no existing tags
       - name: Apply Tag to Ref
-        if: inputs.version == '' # Only apply new tag if no specific version was provided
+        if: inputs.version == '' || steps.latest_tag.outputs.is_initial == 'true'
         uses: actions/github-script@v8
         with:
           script: |

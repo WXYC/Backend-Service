@@ -7,6 +7,9 @@ outputs:
   latest_tag:
     description: 'The latest tag for target'
     value: ${{ steps.get_tag.outputs.latest_tag }}
+  is_initial:
+    description: 'Whether this will be the first tag for a given target'
+    value: ${{ steps.get_tag.outputs.is_initial }}
 runs:
   using: 'composite'
   steps:
@@ -18,12 +21,17 @@ runs:
         LATEST_TAG=$(git tag -l "${TARGET_APP}" | sort -V | tail -n 1)
 
         if [ -z "$LATEST_TAG" ]; then
-          echo "No existing tags found for ${TARGET_APP}. Initializing with v0.0.0"
-          CURRENT_TAG="${TARGET_APP}/v0.0.0"
+          IS_INITIAL=true
+          echo "No existing tags found for ${TARGET_APP}. Initializing with v0.1.0"
+          CURRENT_TAG="${TARGET_APP}/v0.1.0"
         else
+          IS_INITIAL=false
           echo "Latest tag for ${TARGET_APP}: $LATEST_TAG"
           CURRENT_TAG="$LATEST_TAG"
         fi
+
+        echo "is_initial=$IS_INITIAL" 
+        echo "is_initial=$IS_INITIAL" >> $GITHUB_OUTPUT
 
         echo "latest_tag=$CURRENT_TAG"
         echo "latest_tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
