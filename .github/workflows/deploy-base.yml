@@ -132,10 +132,23 @@ jobs:
         target: ${{ fromJSON(needs.detect-build-targets.outputs.targets) }}
 
     steps:
+      # Checkout specific version if provided, otherwise current SHA
+      - name: Determine Checkout Ref
+        id: determine_checkout_ref
+        run: |
+          INPUT_VERSION="${{ inputs.version }}"
+          TARGET_APP="${{ matrix.target }}"
+
+          if [ "$INPUT_VERSION" == "latest" ] || [ -z "$INPUT_VERSION" ]; then
+            echo "checkout_ref=${{ github.sha }}" >> $GITHUB_OUTPUT
+          else
+            echo "checkout_ref=refs/tags/$TARGET_APP/$INPUT_VERSION" >> $GITHUB_OUTPUT
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: "${{ inputs.version == 'latest' || inputs.version == '' ? github.sha : format('refs/tags/{0}/{1}', matrix.target, inputs.version) }}" # Checkout specific version if provided, otherwise current SHA
+          ref: ${{ steps.determine_checkout_ref.outputs.checkout_ref }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
