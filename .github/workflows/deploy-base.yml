@@ -113,7 +113,7 @@ jobs:
 
       - name: Apply Tag to Ref
         if: inputs.version == '' # Only apply new tag if no specific version was provided
-        uses: actions/github-script@v5
+        uses: actions/github-script@v8
         with:
           script: |
             github.rest.git.createRef({
@@ -135,7 +135,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.version == 'latest' || inputs.version == '' ? github.sha : format('refs/tags/{0}/{1}', matrix.target, inputs.version) }} # Checkout specific version if provided, otherwise current SHA
+          ref: "${{ inputs.version == 'latest' || inputs.version == '' ? github.sha : format('refs/tags/{0}/{1}', matrix.target, inputs.version) }}" # Checkout specific version if provided, otherwise current SHA
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
