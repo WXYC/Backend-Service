@@ -123,7 +123,7 @@ jobs:
           elif [ -n "${{ inputs.version }}" ]; then
             echo "deploy_version=${{ inputs.version }}" 
             echo "deploy_version=${{ inputs.version }}" >> $GITHUB_OUTPUT
-          if [ "${{ steps.latest_tag.outputs.is_initial }}" == "true" ]; then
+          elif [ "${{ steps.latest_tag.outputs.is_initial }}" == "true" ]; then
             LATEST_VERSION=$(echo ${{ steps.latest_tag.outputs.latest_tag }} | sed 's/[^0-9.]//g')
             echo "deploy_version=v$LATEST_VERSION"
             echo "deploy_version=v$LATEST_VERSION" >> $GITHUB_OUTPUT
