@@ -3,139 +3,257 @@ name: Build & Deploy Base Workflow
 on:
   workflow_call:
     inputs:
-      dry_run:
+      target:
+        description: 'The application target to deploy (e.g., backend, auth).'
         required: false
-        type: boolean
-        default: true
+        type: string
+      version:
+        description: 'The specific version to deploy (e.g., v1.2.3). Defaults to latest if not provided.'
+        required: false
+        type: string
 
 jobs:
-  dry-run:
-    if: ${{ inputs.dry_run }}
+  validate_inputs:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Amazon ECR
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Validate Build Target
+        if: inputs.target != ''
         run: |
-          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_REPOSITORY }}
+          TARGET_INPUT="${{ inputs.target }}"
 
-      - name: Compare Docker image digests
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          if [ ! -d "apps/$TARGET_INPUT" ]; then
+            echo "Error: The target directory 'apps/$TARGET_INPUT' does not exist." >&2
+            exit 1
+          fi
+          echo "target input '$TARGET_INPUT' is valid."
+
+      - name: Validate Version Input Format
+        if: inputs.version != ''
         run: |
-          set -e
-          IMAGE_URI="${{ secrets.AWS_ECR_REPOSITORY }}:latest"
+          VERSION_INPUT="${{ inputs.version }}"
+          TARGET_INPUT="${{ inputs.target }}"
 
-          echo "Fetching remote image digest..."
-          REMOTE_DIGEST=$(aws ecr describe-images --repository-name wxyc_backend_service --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageDigest' --output text)
-
-          if [ -z "$REMOTE_DIGEST" ]; then
-            echo "Failed to fetch remote image digest."
+          if [[ ! "$VERSION_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$ && "$VERSION_INPUT" != "latest" ]]; then
+            echo "Error: The 'version' input must follow semantic versioning format (e.g., v1.0.0, v1.0.0-beta.1). Received: $VERSION_INPUT" >&2
             exit 1
           fi
 
-          echo "Remote Digest: $REMOTE_DIGEST"
-
-          echo "Building Docker image locally..."
-          docker build --platform linux/amd64 -f Dockerfile.backend -t wxyc_backend_service:latest .
-
-          echo "Fetching local image ID..."
-          LOCAL_ID=$(docker inspect --format='{{.Id}}' wxyc_backend_service:latest)
-
-          if [ -z "$LOCAL_ID" ]; then
-            echo "Failed to fetch local image ID."
-            exit 1
+          TAG_TO_CHECK="$TARGET_INPUT/$VERSION_INPUT"
+          if [ "$VERSION_INPUT" != "latest" ]; then
+            if ! git tag -l "$TAG_TO_CHECK" | grep -q "$TAG_TO_CHECK"; then
+              echo "Error: The corresponding tag for target and version does not exist: $TAG_TO_CHECK"
+              exit 1
+            fi
           fi
 
-          echo "Local ID: $LOCAL_ID"
-          echo "Remote Digest: $REMOTE_DIGEST"
+          echo "Version input '$VERSION_INPUT' is valid."
 
-          if [ "$REMOTE_DIGEST" = "sha256:$LOCAL_ID" ]; then
-            echo "The image to be deployed is the same as the current image in ECR."
+  detect-build-targets:
+    needs: validate_inputs
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.detect_targets.outputs.TARGETS }}
+      has_targets: ${{ steps.detect_targets.outputs.HAS_TARGETS }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Detect Build Target
+        id: detect_targets
+        run: |
+          if [ -n "${{ inputs.target }}" ]; then
+            echo "Using provided target: ${{ inputs.target }}"
+            TARGETS="${{ inputs.target }}"
           else
-            echo "The image to be deployed is different from the current image in ECR."
+            echo "Detecting targets from git diff..."
+            TARGETS=$(git diff --name-only HEAD~1..HEAD | grep '^apps' | cut -d '/' -f 2 | sort -u)
           fi
 
-      - name: Dry run - list Docker images
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            echo "Listing Docker images..."
-            docker images || exit 1
-            echo "Listing running Docker containers..."
-            docker ps || exit 1
+          if [ -z "$TARGETS" ] ; then
+            echo "No targets found. Exiting."
+            echo "TARGETS=[]" >> $GITHUB_OUTPUT
+            echo "HAS_TARGETS=false" >> $GITHUB_OUTPUT
+          else
+            echo "TARGETS=$TARGETS"
+            echo "TARGETS=$(echo "$TARGETS" | jq -R -s -c 'split("\n") | map(select(length > 0))')" >> $GITHUB_OUTPUT
+            echo "HAS_TARGETS=true" >> $GITHUB_OUTPUT
+          fi
 
-  build-and-deploy:
-    if: ${{ !inputs.dry_run }}
+  handle-git-tags:
+    needs: detect-build-targets
     runs-on: ubuntu-latest
+    if: needs.detect-build-targets.outputs.has_targets == 'true'
+    strategy:
+      matrix:
+        target: ${{ fromJSON(needs.detect-build-targets.outputs.targets) }}
+
+    outputs:
+      deploy_version: ${{ steps.determine_deploy_version.outputs.deploy_version }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      - name: Get Latest Tag
+        id: latest_tag
+        uses: ./.github/actions/latest_tag
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Bump Tag Version
+        id: bump_version
+        if: inputs.version == ''
+        uses: ./.github/actions/semver
+        with:
+          version: ${{ steps.latest_tag.outputs.latest_tag }}
+          bump: patch
+
+      - name: Determine Deploy Version
+        id: determine_deploy_version
+        run: |
+          if [ "${{ inputs.version }}" == "latest" ]; then
+            LATEST_VERSION=$(echo ${{ steps.latest_tag.outputs.latest_tag }} | sed 's/[^0-9.]//g')
+            echo "deploy_version=v$LATEST_VERSION"
+            echo "deploy_version=v$LATEST_VERSION" >> $GITHUB_OUTPUT
+          elif [ -n "${{ inputs.version }}" ]; then
+            echo "deploy_version=${{ inputs.version }}" 
+            echo "deploy_version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.latest_tag.outputs.is_initial }}" == "true" ]; then
+            LATEST_VERSION=$(echo ${{ steps.latest_tag.outputs.latest_tag }} | sed 's/[^0-9.]//g')
+            echo "deploy_version=v$LATEST_VERSION"
+            echo "deploy_version=v$LATEST_VERSION" >> $GITHUB_OUTPUT
+          else # Default case for merging changes for existing target with version bump
+            echo "deploy_version=v${{ steps.bump_version.outputs.next_version }}"
+            echo "deploy_version=v${{ steps.bump_version.outputs.next_version }}" >> $GITHUB_OUTPUT
+          fi
+
+      # Only apply new tag if no specific version was provided or latest is provided and there were no existing tags
+      - name: Apply Tag to Ref
+        if: inputs.version == '' || steps.latest_tag.outputs.is_initial == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/${{ matrix.target }}/${{ steps.determine_deploy_version.outputs.deploy_version }}',
+              sha: context.sha
+            })
+
+  build:
+    needs: [handle-git-tags, detect-build-targets]
+    runs-on: ubuntu-latest
+    if: needs.detect-build-targets.outputs.has_targets == 'true'
+    strategy:
+      matrix:
+        target: ${{ fromJSON(needs.detect-build-targets.outputs.targets) }}
+
+    steps:
+      # Checkout specific version if provided, otherwise current SHA
+      - name: Determine Checkout Ref
+        id: determine_checkout_ref
+        run: |
+          INPUT_VERSION="${{ inputs.version }}"
+          TARGET_APP="${{ matrix.target }}"
+
+          if [ "$INPUT_VERSION" == "latest" ] || [ -z "$INPUT_VERSION" ]; then
+            echo "checkout_ref=${{ github.sha }}" >> $GITHUB_OUTPUT
+          else
+            echo "checkout_ref=refs/tags/$TARGET_APP/$INPUT_VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.determine_checkout_ref.outputs.checkout_ref }}
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Amazon ECR
+        id: login-ecr
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_REPOSITORY }}
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_URI }}
 
-      - name: Build, tag, and push Docker image to Amazon ECR
+      - name: Check if image exists in ECR
+        id: check_image
         run: |
-          IMAGE_URI="${{ secrets.AWS_ECR_REPOSITORY }}:latest"
-          echo "Building Docker image..."
-          docker build --platform linux/amd64 -f Dockerfile.backend -t wxyc_backend_service:latest .
+          TARGET_APP=${{ matrix.target }}
+          DEPLOY_TAG=${{ needs.handle-git-tags.outputs.deploy_version }}
+          IMAGE_URI="${{ secrets.AWS_ECR_URI }}/$TARGET_APP:$DEPLOY_TAG"
+
+          if aws ecr describe-images --repository-name $TARGET_APP --image-ids imageTag=$DEPLOY_TAG --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1; then
+            echo "Image $IMAGE_URI already exists in ECR. Skipping build."
+            echo "image_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Image $IMAGE_URI not found in ECR. Proceeding with build."
+            echo "image_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Image
+        if: steps.check_image.outputs.image_exists == 'false'
+        run: |
+          TARGET_APP=${{ matrix.target }}
+
+          docker build --platform linux/amd64 -f Dockerfile.${TARGET_APP} -t ${TARGET_APP}:ci .
+
+      - name: Tag and Push Image
+        if: steps.check_image.outputs.image_exists == 'false'
+        run: |
+          TARGET_APP=${{ matrix.target }}
+          TAG=${{ needs.handle-git-tags.outputs.deploy_version }}
+
+          IMAGE_URI="${{ secrets.AWS_ECR_URI }}/${TARGET_APP}"
+
           echo "Tagging Docker image..."
-          docker tag wxyc_backend_service:latest $IMAGE_URI
+          docker tag ${TARGET_APP}:ci $IMAGE_URI:latest
+          docker tag ${TARGET_APP}:ci $IMAGE_URI:$TAG
+
           echo "Pushing Docker image to ECR..."
-          docker push $IMAGE_URI
+          docker push $IMAGE_URI:latest
+          docker push $IMAGE_URI:$TAG
 
-      - name: Execute remote commands via SSH
-        uses: appleboy/ssh-action@v1
+  deploy:
+    needs: [detect-build-targets, handle-git-tags, build]
+    runs-on: ubuntu-latest
+    if: needs.detect-build-targets.outputs.has_targets == 'true'
+    strategy:
+      matrix:
+        target: ${{ fromJSON(needs.detect-build-targets.outputs.targets) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Get Deploy Vars
+        id: deploy_vars
+        run: |
+          TARGET_APP=${{ matrix.target }}
+          PUBLISH_PORT=$(yq .publishPort apps/$TARGET_APP/package.json)
+
+          echo "publish_port=$PUBLISH_PORT" >> $GITHUB_OUTPUT
+
+      - name: Deploy Service
+        uses: ./.github/actions/deploy-service
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
-            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            export AWS_DEFAULT_REGION=${{ secrets.AWS_REGION }}
-
-            echo "Logging into AWS ECR..."
-            aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_REPOSITORY }}
-
-            echo "Pulling Docker image..."
-            docker pull ${{ secrets.AWS_ECR_REPOSITORY }}:latest
-
-            echo "Stopping any existing container using port 8080..."
-            docker ps --filter "ancestor=${{ secrets.AWS_ECR_REPOSITORY }}:latest" --format "{{.ID}}" | xargs -r docker stop
-            docker ps --filter "publish=8080" --format "{{.ID}}" | xargs -r docker stop
-
-            echo "Removing any existing container using port 8080..."
-            docker ps -a --filter "ancestor=${{ secrets.AWS_ECR_REPOSITORY }}:latest" --format "{{.ID}}" | xargs -r docker rm
-            docker ps -a --filter "publish=8080" --format "{{.ID}}" | xargs -r docker rm
-
-            echo "Starting new Docker container..."
-            docker run -d -p 8080:8080 --restart unless-stopped --env-file .env ${{ secrets.AWS_ECR_REPOSITORY }}:latest
+          target_app: ${{ matrix.target }}
+          publish_port: ${{ steps.deploy_vars.outputs.publish_port }}
+          deploy_tag: ${{ needs.handle-git-tags.outputs.deploy_version }} # Use provided version or the newly bumped version
+          ec2_host: ${{ secrets.EC2_HOST }}
+          ec2_user: ${{ secrets.EC2_USER }}
+          ec2_ssh_key: ${{ secrets.EC2_SSH_KEY }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: ${{ secrets.AWS_REGION }}
+          aws_ecr_uri: ${{ secrets.AWS_ECR_URI }}
 
       - name: Confirm server is up
         uses: appleboy/ssh-action@v1
@@ -144,10 +262,11 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            PUBLISH_PORT=${{ steps.deploy_vars.outputs.publish_port }}
             echo "Waiting for server to start..."
             sleep 30  # Adjust sleep time as needed
             echo "Checking server status..."
-            if curl -s --head  --request GET http://localhost:8080/flowsheet | grep "200 OK" > /dev/null; then 
+            if curl -s --head  --request GET http://localhost:$PUBLISH_PORT/healthcheck | grep "200 OK" > /dev/null; then 
               echo "Server is up and running."
             else
               echo "Server is not running. Deployment failed." >&2

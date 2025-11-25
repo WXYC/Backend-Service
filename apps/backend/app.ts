@@ -67,6 +67,11 @@ app.get('/testInShow', cognitoMiddleware(), activeShow, showMemberMiddleware, as
   res.json({ message: 'Authenticated, active show, & show member' });
 });
 
+//endpoint for healthchecks
+app.get('/healthcheck', async (req, res) => {
+  res.json({ message: 'Healthy!' });
+});
+
 app.use(errorHandler);
 
 //On server startup we pre-fetch all jwt validation keys
