@@ -11,8 +11,6 @@ runs:
   using: 'composite'
   steps:
     - id: get_tag
-      outputs:
-        latest_tag:
       run: |
         TARGET_APP="${{ inputs.target }}"
 
