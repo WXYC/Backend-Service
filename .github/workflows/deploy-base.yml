@@ -190,6 +190,10 @@ jobs:
 
       - name: Check if image exists in ECR
         id: check_image
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           TARGET_APP=${{ matrix.target }}
           DEPLOY_TAG=${{ needs.handle-git-tags.outputs.deploy_version }}
@@ -219,12 +223,17 @@ jobs:
           IMAGE_URI="${{ secrets.AWS_ECR_URI }}/${TARGET_APP}"
 
           echo "Tagging Docker image..."
-          docker tag ${TARGET_APP}:ci $IMAGE_URI:latest
           docker tag ${TARGET_APP}:ci $IMAGE_URI:$TAG
 
           echo "Pushing Docker image to ECR..."
-          docker push $IMAGE_URI:latest
           docker push $IMAGE_URI:$TAG
+
+          if [[ "${{ inputs.version }}" == "latest" || -z "${{ inputs.version }}" ]]; then
+          echo "Tagging Docker image with `latest`..."
+          docker tag ${TARGET_APP}:ci $IMAGE_URI:latest
+          echo "Pushing Docker image to ECR with `latest` tag..."
+          docker push $IMAGE_URI:latest
+          fi
 
   deploy:
     needs: [detect-build-targets, handle-git-tags, build]
