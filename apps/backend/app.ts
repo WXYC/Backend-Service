@@ -60,11 +60,6 @@ app.get('/testAuth', cognitoMiddleware(), async (req, res) => {
   res.json({ message: 'Authenticated!' });
 });
 
-//example of how cognito auth middleware can inform further middleware.
-app.get('/testInShow', cognitoMiddleware(), activeShow, showMemberMiddleware, async (req, res) => {
-  res.json({ message: 'Authenticated, active show, & show member' });
-});
-
 //endpoint for healthchecks
 app.get('/healthcheck', async (req, res) => {
   res.json({ message: 'Healthy!' });
