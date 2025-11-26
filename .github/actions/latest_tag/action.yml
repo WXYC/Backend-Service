@@ -17,6 +17,9 @@ runs:
       run: |
         TARGET_APP="${{ inputs.target }}"
 
+        # Ensure all tags are fetched first
+        git fetch --tags
+
         # Get latest tag for build target
         LATEST_TAG=$(git tag -l "${TARGET_APP}*" | sort -V | tail -n 1)
 
