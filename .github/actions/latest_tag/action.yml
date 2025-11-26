@@ -18,7 +18,7 @@ runs:
         TARGET_APP="${{ inputs.target }}"
 
         # Get latest tag for build target
-        LATEST_TAG=$(git tag -l "${TARGET_APP}" | sort -V | tail -n 1)
+        LATEST_TAG=$(git tag -l "${TARGET_APP}*" | sort -V | tail -n 1)
 
         if [ -z "$LATEST_TAG" ]; then
           IS_INITIAL=true
