@@ -229,9 +229,9 @@ jobs:
           docker push $IMAGE_URI:$TAG
 
           if [[ "${{ inputs.version }}" == "latest" || -z "${{ inputs.version }}" ]]; then
-          echo "Tagging Docker image with `latest`..."
+          echo "Tagging Docker image with 'latest'..."
           docker tag ${TARGET_APP}:ci $IMAGE_URI:latest
-          echo "Pushing Docker image to ECR with `latest` tag..."
+          echo "Pushing Docker image to ECR with 'latest' tag..."
           docker push $IMAGE_URI:latest
           fi
 
