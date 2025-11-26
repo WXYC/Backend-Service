@@ -190,6 +190,10 @@ jobs:
 
       - name: Check if image exists in ECR
         id: check_image
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           TARGET_APP=${{ matrix.target }}
           DEPLOY_TAG=${{ needs.handle-git-tags.outputs.deploy_version }}
