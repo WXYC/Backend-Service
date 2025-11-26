@@ -30,10 +30,11 @@ app.use(
   })
 );
 
-//Serve documentation
+// Serve documentation
 const swaggerDoc = parse_yaml(swaggerContent);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc));
 
+// Business logic routes
 app.use('/library', library_route);
 
 app.use('/flowsheet', flowsheet_route);
