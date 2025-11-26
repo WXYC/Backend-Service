@@ -223,12 +223,17 @@ jobs:
           IMAGE_URI="${{ secrets.AWS_ECR_URI }}/${TARGET_APP}"
 
           echo "Tagging Docker image..."
-          docker tag ${TARGET_APP}:ci $IMAGE_URI:latest
           docker tag ${TARGET_APP}:ci $IMAGE_URI:$TAG
 
           echo "Pushing Docker image to ECR..."
-          docker push $IMAGE_URI:latest
           docker push $IMAGE_URI:$TAG
+
+          if [[ "${{ inputs.version }}" == "latest" || -z "${{ inputs.version }}" ]]; then
+          echo "Tagging Docker image with `latest`..."
+          docker tag ${TARGET_APP}:ci $IMAGE_URI:latest
+          echo "Pushing Docker image to ECR with `latest` tag..."
+          docker push $IMAGE_URI:latest
+          fi
 
   deploy:
     needs: [detect-build-targets, handle-git-tags, build]
