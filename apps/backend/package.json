@@ -28,6 +28,6 @@
     "yaml": "^2.7.1"
   },
   "peerDependencies": {
-    "drizzle-orm": "^0.44.7"
+    "drizzle-orm": "^0.41.0"
   }
 }

@@ -33,8 +33,8 @@ services:
       - ../drizzle.config.ts:/init/drizzle.config.ts
       - ../shared/database/src/schema.ts:/init/database/schema.ts
       - ../shared/database/src/migrations:/init/database/migrations
-      - ./dev_env/install_extensions.sql:/install_extensions.sql
-      - ./dev_env/seed_db.sql:/seed_db.sql
+      - ./install_extensions.sql:/init/install_extensions.sql
+      - ./seed_db.sql:/init/seed_db.sql
 
   ci-db:
     image: postgres:18.0-alpine
@@ -70,12 +70,45 @@ services:
       - ../drizzle.config.ts:/init/drizzle.config.ts
       - ../shared/database/src/schema.ts:/init/database/schema.ts
       - ../shared/database/src/migrations:/init/database/migrations
-      - ./dev_env/install_extensions.sql:/install_extensions.sql
-      - ./dev_env/seed_db.sql:/seed_db.sql
+      - ./install_extensions.sql:/init/install_extensions.sql
+      - ./seed_db.sql:/init/seed_db.sql
+
+  auth:
+    depends_on:
+      - ci-db
+    image: wxyc_auth_service:ci
+    build:
+      context: '../'
+      dockerfile: Dockerfile.auth
+    profiles: [ci]
+    environment:
+      - DB_HOST=ci-db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost:8082/api/auth}
+      - BETTER_AUTH_JWKS_URL=${BETTER_AUTH_JWKS_URL}
+      - BETTER_AUTH_ISSUER=${BETTER_AUTH_ISSUER}
+      - BETTER_AUTH_AUDIENCE=${BETTER_AUTH_AUDIENCE}
+      - BETTER_AUTH_TRUSTED_ORIGINS=${BETTER_AUTH_TRUSTED_ORIGINS}
+      - FRONTEND_SOURCE=${FRONTEND_SOURCE}
+      - DEFAULT_ORG_SLUG=${DEFAULT_ORG_SLUG}
+      - DEFAULT_ORG_NAME=${DEFAULT_ORG_NAME}
+      - DEFAULT_USER_EMAIL=${DEFAULT_USER_EMAIL}
+      - DEFAULT_USER_USERNAME=${DEFAULT_USER_USERNAME}
+      - DEFAULT_USER_PASSWORD=${DEFAULT_USER_PASSWORD}
+      - DEFAULT_USER_DJ_NAME=${DEFAULT_USER_DJ_NAME}
+      - DEFAULT_USER_REAL_NAME=${DEFAULT_USER_REAL_NAME}
+      - CREATE_DEFAULT_USER=${CREATE_DEFAULT_USER}
+      - AUTH_PORT=8082
+    ports:
+      - '${CI_AUTH_PORT:-8082}:8082'
 
   backend:
     depends_on:
       - ci-db
+      - auth
     image: wxyc_backend_service:ci
     build:
       context: '../'
@@ -89,10 +122,13 @@ services:
       - DB_NAME=${DB_NAME}
       - AUTH_BYPASS=${AUTH_BYPASS}
       - AUTH_USERNAME=${AUTH_USERNAME}
-      - BETTER_AUTH_URL=${BETTER_AUTH_URL}
-      - BETTER_AUTH_AUDIENCE=${BETTER_AUTH_AUDIENCE}
-      - BETTER_AUTH_ISSUER=${BETTER_AUTH_ISSUER}
-      - BETTER_AUTH_JWKS_URL=${BETTER_AUTH_JWKS_URL}
+      - COGNITO_USERPOOL_ID=${COGNITO_USERPOOL_ID}
+      - DJ_APP_CLIENT_ID=${DJ_APP_CLIENT_ID}
+      - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost:8082/api/auth}
+      - BETTER_AUTH_AUDIENCE=${BETTER_AUTH_AUDIENCE:-http://localhost:8082}
+      - BETTER_AUTH_ISSUER=${BETTER_AUTH_ISSUER:-http://localhost:8082}
+      # Use Docker service name for internal networking (backend -> auth)
+      - BETTER_AUTH_JWKS_URL=http://auth:8082/api/auth/jwks
     ports:
       - '${CI_PORT:-8081}:8080'
 

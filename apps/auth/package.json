@@ -23,7 +23,7 @@
       "express": "^5.1.0"
     },
     "peerDependencies": {
-      "drizzle-orm": "^0.44.7"
+      "drizzle-orm": "^0.41.0"
     },
     "devDependencies": {
       "@types/cors": "^2.8.17",

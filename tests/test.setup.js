@@ -1,4 +1,4 @@
-const get_access_token = require('./utils/cognito_auth');
+const get_access_token = require('./utils/better_auth');
 
 global.primary_dj_id = 1;
 global.secondary_dj_id = 2;

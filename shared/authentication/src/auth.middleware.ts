@@ -1,12 +1,16 @@
 import { NextFunction, Request, Response } from "express";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
-import { authClient } from "./auth.client";
 import { AccessControlStatement, WXYCRole, WXYCRoles } from "./auth.roles";
 
+// JWT payload structure expected from better-auth JWT plugin
+// When used with organization plugin, tokens include user info and organization role
+// Standard JWT fields: 'sub' (user ID), 'email'
+// Organization plugin adds: organization context with member role
 export type WXYCAuthJwtPayload  = JWTPayload & {
-    id: string;
+    id?: string;        // User ID (may be in 'sub' field, better-auth may map it)
+    sub?: string;       // Standard JWT subject (user ID)
     email: string;
-    role: WXYCRole;
+    role: WXYCRole;     // Organization member role from better-auth organization plugin
 };
 
 const issuer = process.env.BETTER_AUTH_ISSUER;
@@ -54,44 +58,74 @@ export function requirePermissions(required: RequiredPermissions) {
       return next();
     }
 
-    const { data, error } = await authClient.token();
-
-    if (error || !data) {
-      return res.status(401).json({ error: "Unauthorized: Invalid token." });
+    // Extract Bearer token from Authorization header
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader) {
+      return res.status(401).json({ error: "Unauthorized: Missing Authorization header." });
     }
 
+    // Extract token from Authorization header
+    // Support both "Bearer <token>" and plain "<token>" formats
+    // Tests may use plain format, but Bearer format is standard
+    const token = authHeader.startsWith("Bearer ") 
+      ? authHeader.slice(7).trim() 
+      : authHeader.trim();
+
+    if (!token) {
+      return res.status(401).json({ error: "Unauthorized: Missing token in Authorization header." });
+    }
+
+    // Verify JWT using JWKS from better-auth service
+    let payload: WXYCAuthJwtPayload;
     try {
-      const payload = await verify(data.token);
-
-      req.auth = payload;
-
-      const roleImpl = WXYCRoles[payload.role];
-      if (!roleImpl) {
-        return res.status(403).json({ error: "Forbidden: Invalid role." });
-      }
-
-      const ok = Object.entries(required).every(([resource, actions]) => {
-        if (!actions || actions.length === 0) return true;
-  
-        const authorize = roleImpl.authorize as (
-          request: RequiredPermissions
-        ) => { success: boolean };
-        
-        const result = authorize({
-          [resource]: actions,
-        } as RequiredPermissions);
-        
-        return result.success;
-      });
-  
-      if (!ok) {
-        return res.status(403).json({ error: "Forbidden: insufficient permissions" });
-      }
-
-      return next();
+      payload = await verify(token);
     } catch (error) {
-      console.error("Error verifying JWT:", error);
-      return res.status(401).json({ error: "Unauthorized: Invalid token." });
+      console.error("JWT verification failed:", error);
+      return res.status(401).json({ error: "Unauthorized: Invalid or expired token." });
     }
+
+    // Normalize user ID - JWT standard uses 'sub', but better-auth may also include 'id'
+    const userId = payload.id || payload.sub;
+    if (!userId) {
+      return res.status(403).json({ error: "Forbidden: Missing user ID in token." });
+    }
+
+    // Attach authenticated payload to request (ensure id field is set)
+    req.auth = {
+      ...payload,
+      id: userId,
+    } as WXYCAuthJwtPayload;
+
+    // Validate role exists
+    if (!payload.role) {
+      return res.status(403).json({ error: "Forbidden: Missing role in token." });
+    }
+
+    const roleImpl = WXYCRoles[payload.role];
+    if (!roleImpl) {
+      return res.status(403).json({ error: "Forbidden: Invalid role." });
+    }
+
+    // Check permissions
+    const ok = Object.entries(required).every(([resource, actions]) => {
+      if (!actions || actions.length === 0) return true;
+
+      const authorize = roleImpl.authorize as (
+        request: RequiredPermissions
+      ) => { success: boolean };
+      
+      const result = authorize({
+        [resource]: actions,
+      } as RequiredPermissions);
+      
+      return result.success;
+    });
+
+    if (!ok) {
+      return res.status(403).json({ error: "Forbidden: insufficient permissions" });
+    }
+
+    return next();
   };
 }

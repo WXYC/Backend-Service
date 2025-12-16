@@ -64,12 +64,17 @@ export const auth = betterAuth({
   plugins: [
     admin(),
     username(),
-    jwt(),
+    jwt({
+      // JWT plugin configuration
+      // JWKS endpoint automatically exposed at /api/auth/jwks
+      // Tokens include user info and organization context (including role) when organization plugin is enabled
+    }),
     organizationPlugin({
       // Configure for single organization model
       allowUserToCreateOrganization: false, // Only admins can create organizations
       organizationLimit: 1, // Users can only be in one organization
       roles: WXYCRoles,
+      // Role information is automatically included in JWT tokens when requesting /api/auth/token
     }),
   ],
 

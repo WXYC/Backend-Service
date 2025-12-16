@@ -24,6 +24,7 @@ RUN npm install --omit=dev
 
 COPY --from=builder ./auth-builder/apps/auth/dist ./apps/auth/dist
 COPY --from=builder ./auth-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./auth-builder/shared/authentication/dist ./shared/authentication/dist
 
 EXPOSE 8082
 

@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@wxyc/database": "^1.0.0",
-    "drizzle-orm": "^0.44.7",
+    "drizzle-orm": "^0.41.0",
     "better-auth": "^1.3.23",
     "postgres": "^3.4.4"
   },

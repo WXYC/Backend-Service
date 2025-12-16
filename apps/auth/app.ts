@@ -134,6 +134,7 @@ const createDefaultUser = async () => {
       data: {
         userId: newUser.id,
         organizationId: organizationId,
+        role: "stationManager",
         createdAt: new Date(),
       }
     });
