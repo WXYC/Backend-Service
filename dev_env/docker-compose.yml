@@ -127,7 +127,6 @@ services:
       - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost:8082/api/auth}
       - BETTER_AUTH_AUDIENCE=${BETTER_AUTH_AUDIENCE:-http://localhost:8082}
       - BETTER_AUTH_ISSUER=${BETTER_AUTH_ISSUER:-http://localhost:8082}
-      # Use Docker service name for internal networking (backend -> auth)
       - BETTER_AUTH_JWKS_URL=http://auth:8082/api/auth/jwks
     ports:
       - '${CI_PORT:-8081}:8080'
