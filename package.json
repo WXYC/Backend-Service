@@ -14,7 +14,7 @@
     "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down db -v --remove-orphans",
     "ci:build": "npm run docker:build --workspace=@wxyc/backend && npm run docker:build --workspace=@wxyc/auth-service",
     "ci:env": "npm run ci:build && docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci up -d && docker attach wxyc-ci-db-init",
-    "ci:test": "PORT=${CI_PORT:-8081} npm run test;",
+    "ci:test": "PORT=${CI_PORT:-8081} BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost:8082/api/auth} npm run test;",
     "ci:clean": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci down -v",
     "ci:testmock": "npm run ci:env && npm run ci:test && npm run ci:clean",
     "drizzle:generate": "dotenvx run -f .env -- drizzle-kit generate --config 'drizzle.config.ts'",

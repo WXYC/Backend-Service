@@ -48,6 +48,12 @@ services:
       - '${CI_DB_PORT:-5433}:5432'
     volumes:
       - ci-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_NAME} || pg_isready"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
   # Database Initialization (migrations + seeding)
   ci-db-init:
@@ -75,7 +81,8 @@ services:
 
   auth:
     depends_on:
-      - ci-db
+      ci-db:
+        condition: service_healthy
     image: wxyc_auth_service:ci
     build:
       context: '../'
@@ -87,7 +94,7 @@ services:
       - DB_USERNAME=${DB_USERNAME}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
-      - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost:8082/api/auth}
+      - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://auth:8082/api/auth}
       - BETTER_AUTH_JWKS_URL=${BETTER_AUTH_JWKS_URL}
       - BETTER_AUTH_ISSUER=${BETTER_AUTH_ISSUER}
       - BETTER_AUTH_AUDIENCE=${BETTER_AUTH_AUDIENCE}
@@ -124,9 +131,9 @@ services:
       - AUTH_USERNAME=${AUTH_USERNAME}
       - COGNITO_USERPOOL_ID=${COGNITO_USERPOOL_ID}
       - DJ_APP_CLIENT_ID=${DJ_APP_CLIENT_ID}
-      - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost:8082/api/auth}
-      - BETTER_AUTH_AUDIENCE=${BETTER_AUTH_AUDIENCE:-http://localhost:8082}
-      - BETTER_AUTH_ISSUER=${BETTER_AUTH_ISSUER:-http://localhost:8082}
+      - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://auth:8082/api/auth}
+      - BETTER_AUTH_AUDIENCE=${BETTER_AUTH_AUDIENCE:-http://auth:8082}
+      - BETTER_AUTH_ISSUER=${BETTER_AUTH_ISSUER:-http://auth:8082}
       - BETTER_AUTH_JWKS_URL=http://auth:8082/api/auth/jwks
     ports:
       - '${CI_PORT:-8081}:8080'

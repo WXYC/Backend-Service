@@ -67,14 +67,35 @@ export const auth = betterAuth({
     jwt({
       // JWT plugin configuration
       // JWKS endpoint automatically exposed at /api/auth/jwks
-      // Tokens include user info and organization context (including role) when organization plugin is enabled
+      // Custom payload to include organization member role
+      jwt: {
+        definePayload: async ({ user }) => {
+          // Query organization membership to get member role
+          if (user?.id) {
+            const memberRecord = await db
+              .select({ role: member.role })
+              .from(member)
+              .where(sql`${member.userId} = ${user.id}` as any)
+              .limit(1);
+
+            if (memberRecord.length > 0) {
+              return {
+                ...user,
+                role: memberRecord[0].role, // Use organization member role instead of default user role
+              };
+            }
+          }
+          // Fallback to default user data if no organization membership found
+          return user;
+        },
+      },
     }),
     organizationPlugin({
       // Configure for single organization model
       allowUserToCreateOrganization: false, // Only admins can create organizations
       organizationLimit: 1, // Users can only be in one organization
       roles: WXYCRoles,
-      // Role information is automatically included in JWT tokens when requesting /api/auth/token
+      // Role information is included via custom JWT definePayload function above
     }),
   ],
 

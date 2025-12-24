@@ -1,12 +1,11 @@
 // Auth service using Express
+import { config } from "dotenv";
+const dotenvResult = config();
+
 import { auth } from "@wxyc/authentication";
 import { toNodeHandler } from "better-auth/node";
 import cors from "cors";
-import { config } from "dotenv";
 import express from "express";
-
-// Load environment variables from .env file
-config();
 
 const app = express();
 
