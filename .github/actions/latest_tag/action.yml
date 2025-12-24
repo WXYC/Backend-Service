@@ -14,11 +14,15 @@ runs:
   using: 'composite'
   steps:
     - id: get_tag
+      shell: bash
       run: |
         TARGET_APP="${{ inputs.target }}"
 
+        # Ensure all tags are fetched first
+        git fetch --tags
+
         # Get latest tag for build target
-        LATEST_TAG=$(git tag -l "${TARGET_APP}" | sort -V | tail -n 1)
+        LATEST_TAG=$(git tag -l "${TARGET_APP}*" | sort -V | tail -n 1)
 
         if [ -z "$LATEST_TAG" ]; then
           IS_INITIAL=true
@@ -35,4 +39,3 @@ runs:
 
         echo "latest_tag=$CURRENT_TAG"
         echo "latest_tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
-      shell: bash

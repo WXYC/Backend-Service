@@ -32,10 +32,11 @@ app.use(
   })
 );
 
-//Serve documentation
+// Serve documentation
 const swaggerDoc = parse_yaml(swaggerContent);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc));
 
+// Business logic routes
 app.use('/library', library_route);
 
 app.use('/flowsheet', flowsheet_route);
@@ -60,11 +61,6 @@ app.use(
 //example for how to use te Cognito auth middleware
 app.get('/testAuth', requirePermissions({ flowsheet: ["read"] }), async (req, res) => {
   res.json({ message: 'Authenticated!' });
-});
-
-//example of how cognito auth middleware can inform further middleware.
-app.get('/testInShow', cognitoMiddleware(), activeShow, showMemberMiddleware, async (req, res) => {
-  res.json({ message: 'Authenticated, active show, & show member' });
 });
 
 //endpoint for healthchecks
