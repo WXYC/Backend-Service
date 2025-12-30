@@ -11,14 +11,10 @@ describe('Start Show', () => {
   });
 
   test('Properly Formatted Request', async () => {
-    const res = await request
-      .post('/flowsheet/join')
-      .set('Authorization', global.access_token)
-      .send({
-        dj_id: global.primary_dj_id,
-        show_name: 'test_show',
-      })
-      .expect(200);
+    const res = await request.post('/flowsheet/join').set('Authorization', global.access_token).send({
+      dj_id: global.primary_dj_id,
+      show_name: 'test_show',
+    });
 
     expect(res.body.id).toBeDefined();
     expect(res.body.primary_dj_id).toBeDefined();

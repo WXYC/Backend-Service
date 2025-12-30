@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node dist/app.js",
     "build": "tsup --minify",
+    "clean": "rm -rf dist",
     "docker:build": "docker build -t wxyc_backend_service:ci -f ../../Dockerfile.backend ../../",
     "dev": "tsup --watch"
   },

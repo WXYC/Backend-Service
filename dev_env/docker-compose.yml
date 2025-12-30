@@ -49,7 +49,7 @@ services:
     volumes:
       - ci-pg-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_NAME} || pg_isready"]
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME} -d ${DB_NAME} || pg_isready']
       interval: 2s
       timeout: 5s
       retries: 10
@@ -94,10 +94,10 @@ services:
       - DB_USERNAME=${DB_USERNAME}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
-      - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://auth:8082/api/auth}
-      - BETTER_AUTH_JWKS_URL=${BETTER_AUTH_JWKS_URL}
-      - BETTER_AUTH_ISSUER=${BETTER_AUTH_ISSUER}
-      - BETTER_AUTH_AUDIENCE=${BETTER_AUTH_AUDIENCE}
+      - BETTER_AUTH_URL=http://auth:8082/api/auth
+      - BETTER_AUTH_JWKS_URL=http://auth:8082/api/auth/jwks
+      - BETTER_AUTH_ISSUER=http://auth:8082
+      - BETTER_AUTH_AUDIENCE=http://auth:8082
       - BETTER_AUTH_TRUSTED_ORIGINS=${BETTER_AUTH_TRUSTED_ORIGINS}
       - FRONTEND_SOURCE=${FRONTEND_SOURCE}
       - DEFAULT_ORG_SLUG=${DEFAULT_ORG_SLUG}
@@ -108,9 +108,8 @@ services:
       - DEFAULT_USER_DJ_NAME=${DEFAULT_USER_DJ_NAME}
       - DEFAULT_USER_REAL_NAME=${DEFAULT_USER_REAL_NAME}
       - CREATE_DEFAULT_USER=${CREATE_DEFAULT_USER}
-      - AUTH_PORT=8082
     ports:
-      - '${CI_AUTH_PORT:-8082}:8082'
+      - '${CI_AUTH_PORT:-8083}:8082'
 
   backend:
     depends_on:
@@ -131,9 +130,9 @@ services:
       - AUTH_USERNAME=${AUTH_USERNAME}
       - COGNITO_USERPOOL_ID=${COGNITO_USERPOOL_ID}
       - DJ_APP_CLIENT_ID=${DJ_APP_CLIENT_ID}
-      - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://auth:8082/api/auth}
-      - BETTER_AUTH_AUDIENCE=${BETTER_AUTH_AUDIENCE:-http://auth:8082}
-      - BETTER_AUTH_ISSUER=${BETTER_AUTH_ISSUER:-http://auth:8082}
+      - BETTER_AUTH_URL=http://auth:8082/api/auth
+      - BETTER_AUTH_AUDIENCE=http://auth:8082
+      - BETTER_AUTH_ISSUER=http://auth:8082
       - BETTER_AUTH_JWKS_URL=http://auth:8082/api/auth/jwks
     ports:
       - '${CI_PORT:-8081}:8080'

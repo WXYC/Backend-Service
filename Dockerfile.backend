@@ -8,7 +8,7 @@ COPY ./tsconfig.base.json ./
 COPY ./shared ./shared
 COPY ./apps/backend ./apps/backend
 
-RUN npm install && npm run build --workspace=@wxyc/database && npm run build
+RUN npm install && npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=@wxyc/backend
 
 #Production stage
 FROM node:22-alpine AS prod
@@ -28,5 +28,4 @@ COPY --from=builder ./builder/shared/authentication/dist ./shared/authentication
 
 EXPOSE 8080
 
-ENV TARGET="backend"
 CMD ["npm", "start", "--workspace=@wxyc/backend"]

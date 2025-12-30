@@ -3,18 +3,17 @@
   "version": "1.0.0",
   "description": "All necessary app services for the WXYC flowsheet backend",
   "scripts": {
-    "start": "npm start --workspace=apps/$TARGET",
-    "build": "npm run build --workspaces",
-    "dev": "dotenvx run -f .env -- concurrently \"npm:dev:backend\" \"npm:dev:auth\"",
+    "build": "npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
+    "dev": "dotenvx run -f .env -- concurrently \"npm:dev:auth\" \"npm:dev:backend\"",
     "dev:backend": "npm run dev --workspace=@wxyc/backend",
     "dev:auth": "npm run dev --workspace=@wxyc/auth-service",
-    "clean": "rm -rf ./dist/*",
+    "clean": "npm run clean --workspaces",
     "test": "dotenvx run -f .env -- jest",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d; docker attach wxyc-db-init",
     "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down db -v --remove-orphans",
-    "ci:build": "npm run docker:build --workspace=@wxyc/backend && npm run docker:build --workspace=@wxyc/auth-service",
+    "ci:build": "npm run docker:build --workspace=apps/**",
     "ci:env": "npm run ci:build && sh -c 'COMPOSE=\"docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci\" && $COMPOSE up -d ci-db && $COMPOSE up ci-db-init && $COMPOSE up -d auth backend'",
-    "ci:test": "PORT=${CI_PORT:-8081} BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost:8082/api/auth} npm run test;",
+    "ci:test": "PORT=${CI_PORT:-8081} BETTER_AUTH_URL=${CI_BETTER_AUTH_URL:-http://localhost:8083/api/auth} npm run test;",
     "ci:clean": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci down -v",
     "ci:testmock": "npm run ci:env && npm run ci:test && npm run ci:clean",
     "drizzle:generate": "dotenvx run -f .env -- drizzle-kit generate --config 'drizzle.config.ts'",
@@ -46,6 +45,7 @@
     "typescript": "^5.6.2"
   },
   "dependencies": {
-    "jose": "^6.1.2"
+    "jose": "^6.1.2",
+    "wait-on": "^9.0.3"
   }
 }
