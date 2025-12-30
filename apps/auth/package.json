@@ -1,5 +1,6 @@
 {
   "name": "@wxyc/auth-service",
+  "publishPort": "8082",
   "version": "1.0.0",
   "description": "WXYC Authentication Service using Better Auth",
   "type": "module",
