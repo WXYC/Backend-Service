@@ -9,17 +9,11 @@ COPY package.json ./
 RUN npm install
 
 # Copy necessary database files and set drizzle env vars
-COPY drizzle.config.ts ./
-COPY shared/database/src/schema.ts /init/database/
-COPY shared/database/src/migrations/ /init/database/migrations
-
 ENV SCHEMA_LOC='/init/database'
 ENV MIGRATION_LOC='/init/database/migrations'
 
 # Copy init script and seed data
 COPY dev_env/init-db.mjs ./
-COPY dev_env/install_extensions.sql ./
-COPY dev_env/seed_db.sql ./
 
 # Dummy .env file for npm script compatibility
 RUN touch .env

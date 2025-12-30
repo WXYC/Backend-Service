@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from "express";
-import { MirrorCommandQueue } from "./commandqueue.mirror.js";
+import { MirrorCommandQueue } from "./commandqueue.mirror";
 
 import { PostHog } from "posthog-node";
 

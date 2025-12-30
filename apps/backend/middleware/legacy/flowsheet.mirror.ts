@@ -1,4 +1,4 @@
-import { QueryParams } from "@/controllers/flowsheet.controller.js";
+import { QueryParams } from "../../controllers/flowsheet.controller";
 import { db } from "@wxyc/database";
 import { djs, flowsheet, FSEntry, Show } from "@wxyc/database"
 import { asc, desc, eq } from "drizzle-orm";

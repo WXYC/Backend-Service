@@ -1,4 +1,10 @@
 import { defineConfig } from 'tsup';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+// Get the directory where this config file is located
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 export default defineConfig((options) => ({
   entry: ['app.ts'],
@@ -10,5 +16,13 @@ export default defineConfig((options) => ({
 
   loader: {
     '.yaml': 'text',
-  }
+  },
+
+  esbuildOptions(options) {
+    // Resolve @/ alias to the directory where this config file is located
+    // This matches TypeScript's behavior (relative to tsconfig.json location)
+    options.alias = {
+      '@': resolve(__dirname),
+    };
+  },
 }));

@@ -1,0 +1,31 @@
+#Build stage
+FROM node:22-alpine AS builder
+
+WORKDIR /auth-builder
+
+COPY ./package.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared ./shared
+COPY ./apps/auth ./apps/auth
+
+RUN npm install && npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=@wxyc/auth-service
+
+#Production stage
+FROM node:22-alpine AS prod
+
+WORKDIR /auth-service
+
+COPY ./package* ./
+COPY ./apps/auth/package* ./apps/auth/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/authentication/package* ./shared/authentication/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./auth-builder/apps/auth/dist ./apps/auth/dist
+COPY --from=builder ./auth-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./auth-builder/shared/authentication/dist ./shared/authentication/dist
+
+EXPOSE 8082
+
+CMD ["npm", "start", "--workspace=@wxyc/auth-service"]

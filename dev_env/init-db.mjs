@@ -76,8 +76,14 @@ async function installExtensions() {
     await sql.unsafe(extensionsSQL);
     console.log('Installed psql extensions successfully!\n');
   } catch (error) {
-    console.error('Extension Install failed:', error.message);
-    throw error;
+    // Extension already exists is not a fatal error (code 42710)
+    // This can happen if the database was previously initialized
+    if (error.code === '42710') {
+      console.log('Extensions already exist, skipping installation.\n');
+    } else {
+      console.error('Extension Install failed:', error.message);
+      throw error; // Re-throw non-extension-exists errors
+    }
   }
 }
 

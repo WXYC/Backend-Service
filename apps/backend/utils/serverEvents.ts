@@ -1,4 +1,4 @@
-import WxycError from '@/utils/error.js';
+import WxycError from '../utils/error.js';
 import { Response } from 'express';
 
 export const Topics = {

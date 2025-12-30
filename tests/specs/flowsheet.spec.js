@@ -11,14 +11,10 @@ describe('Start Show', () => {
   });
 
   test('Properly Formatted Request', async () => {
-    const res = await request
-      .post('/flowsheet/join')
-      .set('Authorization', global.access_token)
-      .send({
-        dj_id: global.primary_dj_id,
-        show_name: 'test_show',
-      })
-      .expect(200);
+    const res = await request.post('/flowsheet/join').set('Authorization', global.access_token).send({
+      dj_id: global.primary_dj_id,
+      show_name: 'test_show',
+    });
 
     expect(res.body.id).toBeDefined();
     expect(res.body.primary_dj_id).toBeDefined();
@@ -557,6 +553,7 @@ describe('Shift Flowsheet Entries', () => {
 
     const res = await request
       .patch('/flowsheet/play-order')
+      .set('Authorization', global.access_token)
       .send({ entry_id: entries[0].id, new_position: entries[2].play_order })
       .expect(200);
 
@@ -568,6 +565,7 @@ describe('Shift Flowsheet Entries', () => {
     const entries = get_entries_res.body;
     const res = await request
       .patch('/flowsheet/play-order')
+      .set('Authorization', global.access_token)
       .send({ entry_id: entries[2].id, new_position: entries[0].play_order })
       .expect(200);
 

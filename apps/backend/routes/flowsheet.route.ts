@@ -1,9 +1,7 @@
-import { flowsheetMirror } from "@/middleware/legacy/flowsheet.mirror.js";
+import { requirePermissions } from "@wxyc/authentication";
 import { Router } from "express";
-import * as flowsheetController from "../controllers/flowsheet.controller.js";
-import { cognitoMiddleware, Roles } from "../middleware/cognito.auth.js";
-
-const { dj } = Roles;
+import * as flowsheetController from "../controllers/flowsheet.controller";
+import { flowsheetMirror } from "../middleware/legacy/flowsheet.mirror";
 
 export const flowsheet_route = Router();
 
@@ -15,28 +13,28 @@ flowsheet_route.get(
 
 flowsheet_route.post(
   "/",
-  cognitoMiddleware(dj),
+  requirePermissions({ flowsheet: ["write"] }),
   flowsheetMirror.addEntry,
   flowsheetController.addEntry
 );
 
 flowsheet_route.patch(
   "/",
-  cognitoMiddleware(dj),
+  requirePermissions({ flowsheet: ["write"] }),
   flowsheetMirror.updateEntry,
   flowsheetController.updateEntry
 );
 
 flowsheet_route.delete(
   "/",
-  cognitoMiddleware(dj),
+  requirePermissions({ flowsheet: ["write"] }),
   flowsheetMirror.deleteEntry,
   flowsheetController.deleteEntry
 );
 
 flowsheet_route.patch(
   "/play-order",
-  cognitoMiddleware(dj),
+  requirePermissions({ flowsheet: ["write"] }),
   /*flowsheetMirror.changeOrder,*/
   flowsheetController.changeOrder
 );
@@ -45,14 +43,14 @@ flowsheet_route.get("/latest", flowsheetController.getLatest);
 
 flowsheet_route.post(
   "/join",
-  cognitoMiddleware(dj),
+  requirePermissions({ flowsheet: ["write"] }),
   flowsheetMirror.startShow,
   flowsheetController.joinShow
 );
 
 flowsheet_route.post(
   "/end",
-  cognitoMiddleware(dj),
+  requirePermissions({ flowsheet: ["write"] }),
   flowsheetMirror.endShow,
   flowsheetController.leaveShow
 );

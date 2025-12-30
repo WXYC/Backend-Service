@@ -29,6 +29,12 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
     restart: 'no' # Only run once
+    volumes:
+      - ../drizzle.config.ts:/init/drizzle.config.ts
+      - ../shared/database/src/schema.ts:/init/database/schema.ts
+      - ../shared/database/src/migrations:/init/database/migrations
+      - ./install_extensions.sql:/init/install_extensions.sql
+      - ./seed_db.sql:/init/seed_db.sql
 
   ci-db:
     image: postgres:18.0-alpine
@@ -42,6 +48,12 @@ services:
       - '${CI_DB_PORT:-5433}:5432'
     volumes:
       - ci-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME} -d ${DB_NAME} || pg_isready']
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
   # Database Initialization (migrations + seeding)
   ci-db-init:
@@ -60,10 +72,49 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
     restart: 'no' # Only run once
+    volumes:
+      - ../drizzle.config.ts:/init/drizzle.config.ts
+      - ../shared/database/src/schema.ts:/init/database/schema.ts
+      - ../shared/database/src/migrations:/init/database/migrations
+      - ./install_extensions.sql:/init/install_extensions.sql
+      - ./seed_db.sql:/init/seed_db.sql
+
+  auth:
+    depends_on:
+      ci-db:
+        condition: service_healthy
+    image: wxyc_auth_service:ci
+    build:
+      context: '../'
+      dockerfile: Dockerfile.auth
+    profiles: [ci]
+    environment:
+      - DB_HOST=ci-db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - BETTER_AUTH_URL=http://auth:8082/api/auth
+      - BETTER_AUTH_JWKS_URL=http://auth:8082/api/auth/jwks
+      - BETTER_AUTH_ISSUER=http://auth:8082
+      - BETTER_AUTH_AUDIENCE=http://auth:8082
+      - BETTER_AUTH_TRUSTED_ORIGINS=${BETTER_AUTH_TRUSTED_ORIGINS}
+      - FRONTEND_SOURCE=${FRONTEND_SOURCE}
+      - DEFAULT_ORG_SLUG=${DEFAULT_ORG_SLUG}
+      - DEFAULT_ORG_NAME=${DEFAULT_ORG_NAME}
+      - DEFAULT_USER_EMAIL=${DEFAULT_USER_EMAIL}
+      - DEFAULT_USER_USERNAME=${DEFAULT_USER_USERNAME}
+      - DEFAULT_USER_PASSWORD=${DEFAULT_USER_PASSWORD}
+      - DEFAULT_USER_DJ_NAME=${DEFAULT_USER_DJ_NAME}
+      - DEFAULT_USER_REAL_NAME=${DEFAULT_USER_REAL_NAME}
+      - CREATE_DEFAULT_USER=${CREATE_DEFAULT_USER}
+    ports:
+      - '${CI_AUTH_PORT:-8083}:8082'
 
   backend:
     depends_on:
       - ci-db
+      - auth
     image: wxyc_backend_service:ci
     build:
       context: '../'
@@ -77,6 +128,12 @@ services:
       - DB_NAME=${DB_NAME}
       - AUTH_BYPASS=${AUTH_BYPASS}
       - AUTH_USERNAME=${AUTH_USERNAME}
+      - COGNITO_USERPOOL_ID=${COGNITO_USERPOOL_ID}
+      - DJ_APP_CLIENT_ID=${DJ_APP_CLIENT_ID}
+      - BETTER_AUTH_URL=http://auth:8082/api/auth
+      - BETTER_AUTH_AUDIENCE=http://auth:8082
+      - BETTER_AUTH_ISSUER=http://auth:8082
+      - BETTER_AUTH_JWKS_URL=http://auth:8082/api/auth/jwks
     ports:
       - '${CI_PORT:-8081}:8080'
 

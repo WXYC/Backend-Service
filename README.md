@@ -97,15 +97,25 @@ DB_PASSWORD={{placeholder}}
 DB_PORT=5432
 CI_DB_PORT=5433
 
-### Cognito Auth Info for Starting Backend Service Auth
-COGNITO_USERPOOL_ID={{placeholder}}
-DJ_APP_CLIENT_ID={{placeholder}}
+### Better-Auth Configuration
+# Base URL for the auth service (must end with /api/auth)
+BETTER_AUTH_URL=http://localhost:8082/api/auth
+# JWKS endpoint URL for JWT verification (should be ${BETTER_AUTH_URL}/jwks)
+BETTER_AUTH_JWKS_URL=http://localhost:8082/api/auth/jwks
+# JWT issuer claim (better-auth sets this to the base URL without /api/auth path)
+BETTER_AUTH_ISSUER=http://localhost:8082
+# JWT audience claim (better-auth sets this to the base URL without /api/auth path)
+BETTER_AUTH_AUDIENCE=http://localhost:8082
+# Trusted origins for CORS (comma-separated)
+BETTER_AUTH_TRUSTED_ORIGINS=http://localhost:3000
 
 ### Testing Env Variables
 TEST_HOST=http://localhost
-AUTH_BYPASS=true
-AUTH_USERNAME='test_dj1'
-AUTH_PASSWORD={{placeholder}}
+AUTH_BYPASS=true  # Set to false to use real better-auth authentication in tests
+AUTH_USERNAME='test_dj1'  # Username for test account (used when AUTH_BYPASS=false)
+AUTH_PASSWORD={{placeholder}}  # Password for test account (used when AUTH_BYPASS=false)
+# When AUTH_BYPASS=false, tests will authenticate with better-auth service
+# Ensure BETTER_AUTH_URL points to accessible auth service (e.g., http://localhost:8082/api/auth)
 ```
 
 <span style="color:crimson">\*</span>Email/slack dvd or Adrian Bruno (adrian@abruno.dev) to request access to prod placeholder values.
@@ -114,14 +124,14 @@ A couple env variables of note:
 
 - DB_HOST: As is mentioned above this env variable should be set to the fully qualified domain name of the RDS database instance. The scripts `npm run db:start` and `npm run ci:test` overwrite this value to `localhost`.
 
-- AUTH_BYPASS: This flag will cause the cognito auth middleware to use mocked user data and always pass to the next middleware logic. This is only meant to be set in local testing environments.
+- AUTH_BYPASS: This flag will cause the auth middleware to use mocked user data and always pass to the next middleware logic. This is only meant to be set in local testing environments. **For proper testing, set this to false to use real better-auth authentication.**
 
 - AUTH_USERNAME:
 
   - When AUTH_BYPASS is active this env variable is added to the request context (res.locals) which may be used by further middleware.
-  - When AUTH_BYPASS is inactive, this environment variable is used by the test suite to fetch an access token when integrating with cognito auth. So when running an integration test with cognito, ensure this is set to a valid account's username.
+  - When AUTH_BYPASS is inactive, this environment variable is used by the test suite to authenticate with better-auth service. Ensure this is set to a valid account's username that exists in the database.
 
-- AUTH_PASSWORD: This env variable is only used in the test suite when AUTH_BYPASS is inactive. Similarly to above it must be a valid account's password.
+- AUTH_PASSWORD: This env variable is only used in the test suite when AUTH_BYPASS is inactive. It must be a valid password for the test account specified in AUTH_USERNAME.
 
 #### Git Workflow
 

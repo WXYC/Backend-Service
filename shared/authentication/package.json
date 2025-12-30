@@ -1,8 +1,8 @@
 {
-  "name": "@wxyc/database",
+  "name": "@wxyc/authentication",
   "version": "1.0.0",
-  "description": "Database Types and Drizzle Integration for DTOs on the WXYC Flowsheet backend",
-  "author": "AyBruno",
+  "description": "Types and Middleware for Authentication in WXYC Services",
+  "author": "Jackson Meade",
   "license": "MIT",
   "exports": {
     ".": {
@@ -18,10 +18,13 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@wxyc/database": "^1.0.0",
     "drizzle-orm": "^0.41.0",
+    "better-auth": "^1.3.23",
     "postgres": "^3.4.4"
   },
   "devDependencies": {
+    "@types/express": "^5.0.3",
     "tsup": "^8.5.0",
     "typescript": "^5.6.2"
   },

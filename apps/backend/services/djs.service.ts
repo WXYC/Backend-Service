@@ -1,6 +1,3 @@
-import { and, eq, isNull, sql } from 'drizzle-orm';
-import { DJQueryParams } from '@/controllers/djs.controller.js';
-import { db } from "@wxyc/database";
 import {
   BinEntry,
   DJ,
@@ -9,6 +6,7 @@ import {
   NewDJ,
   artists,
   bins,
+  db,
   djs,
   flowsheet,
   format,
@@ -18,8 +16,10 @@ import {
   shows,
   specialty_shows,
 } from "@wxyc/database";
+import { and, eq, isNull, sql } from 'drizzle-orm';
+import { DJQueryParams } from '../controllers/djs.controller.js';
 
-import WxycError from '@/utils/error.js';
+import WxycError from '../utils/error.js';
 
 export const insertDJ = async (new_dj: NewDJ) => {
   const response = await db.insert(djs).values(new_dj).returning();

@@ -1,5 +1,5 @@
 import { RequestHandler } from 'express';
-import * as DJService from '../services/djs.service.js';
+import * as DJService from '../services/djs.service';
 import { DJ, NewDJ, NewBinEntry } from "@wxyc/database";
 
 export type DJQueryParams = {

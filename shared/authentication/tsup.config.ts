@@ -8,5 +8,5 @@ export default defineConfig({
   outDir: 'dist',
   clean: true,
   sourcemap: true,
-  external: ["drizzle-orm", "postgres" ]
+  external: ["drizzle-orm", "postgres", "better-auth" ]
 });

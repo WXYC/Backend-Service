@@ -1,6 +1,6 @@
 {
     "extends": ["../../tsconfig.base.json"],
-    "references": [{ "path": "../../shared/database" }, { "path": "../../shared/authentication" }],
+    "references": [{ "path": "../../shared/authentication" }],
     "include": ["."],
     "compilerOptions": {
         "module": "esnext",
