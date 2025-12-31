@@ -36,7 +36,6 @@ async function getUserIdsFromDatabase() {
     global.primary_dj_id = primaryUser[0].id;
     global.secondary_dj_id = secondaryUser[0].id;
     
-    console.log(`Test user IDs loaded: primary=${global.primary_dj_id}, secondary=${global.secondary_dj_id}`);
   } catch (err) {
     throw err;
   } finally {
@@ -90,7 +89,6 @@ async function waitForServices(resources, options = {}) {
     );
 
     if (allReady) {
-      console.log('Services are ready!');
       return;
     }
 
@@ -99,7 +97,6 @@ async function waitForServices(resources, options = {}) {
       const readyCount = results.filter(r => 
         r.status === 'fulfilled' && r.value.status === 'ready'
       ).length;
-      console.log(`Waiting for services... (${readyCount}/${resources.length} ready)`);
     }
 
     await new Promise(resolve => setTimeout(resolve, interval));
@@ -116,7 +113,6 @@ beforeAll(async () => {
 
   const resources = [backendHealthcheckUrl, authHealthcheckUrl];
 
-  console.log(`Waiting for services to be ready: ${resources.join(', ')}`);
   try {
     await waitForServices(resources, {
       delay: 1000,
