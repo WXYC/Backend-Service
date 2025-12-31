@@ -155,9 +155,57 @@ const createDefaultUser = async () => {
   }
 };
 
+// Fix admin roles for existing stationManagers (one-time migration)
+const fixExistingAdminRoles = async () => {
+  try {
+    const { db, user, member, organization } = await import('@wxyc/database');
+    const { eq, sql } = await import('drizzle-orm');
+    
+    const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
+    if (!defaultOrgSlug) {
+      console.log('[ADMIN FIX] DEFAULT_ORG_SLUG not set, skipping admin role fix');
+      return;
+    }
+
+    // Find all users who are stationManager/admin/owner in default org but don't have admin role
+    const usersNeedingFix = await db
+      .select({
+        userId: user.id,
+        userEmail: user.email,
+        userRole: user.role,
+        memberRole: member.role,
+      })
+      .from(user)
+      .innerJoin(member, sql`${member.userId} = ${user.id}` as any)
+      .innerJoin(organization, sql`${member.organizationId} = ${organization.id}` as any)
+      .where(
+        sql`${organization.slug} = ${defaultOrgSlug}
+        AND ${member.role} IN ('admin', 'owner', 'stationManager')
+        AND (${user.role} IS NULL OR ${user.role} != 'admin')` as any
+      );
+
+    if (usersNeedingFix.length > 0) {
+      console.log(`[ADMIN FIX] Found ${usersNeedingFix.length} users needing admin role fix:`);
+      for (const u of usersNeedingFix) {
+        console.log(`[ADMIN FIX] - ${u.userEmail} (${u.memberRole}) - current role: ${u.userRole || 'null'}`);
+        await db
+          .update(user)
+          .set({ role: 'admin' })
+          .where(eq(user.id, u.userId));
+        console.log(`[ADMIN FIX] - Fixed: ${u.userEmail} now has admin role`);
+      }
+    } else {
+      console.log('[ADMIN FIX] All stationManagers already have admin role');
+    }
+  } catch (error) {
+    console.error('[ADMIN FIX] Error fixing admin roles:', error);
+  }
+};
+
 // Initialize default user before starting the server
 (async () => {
   await createDefaultUser();
+  await fixExistingAdminRoles();
 
   app.listen(parseInt(port), async () => {
     console.log(`listening on port: ${port}! (auth service)`);
