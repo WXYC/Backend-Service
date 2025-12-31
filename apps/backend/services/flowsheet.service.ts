@@ -446,7 +446,7 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
 export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
 
-  const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({ id: dj.id, dj_name: dj.dj_name }));
+  const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({ id: dj.id, dj_name: dj.djName || dj.name }));
 
   const entries = await db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id));
 

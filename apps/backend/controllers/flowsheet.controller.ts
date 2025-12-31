@@ -368,7 +368,7 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
 
 export interface ShowInfo extends Show {
   specialty_show_name: string;
-  show_djs: { id: number | null; dj_name: string | null }[];
+  show_djs: { id: string | null; dj_name: string | null }[];
   entries: FSEntry[];
 }
 

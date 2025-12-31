@@ -1,5 +1,4 @@
 const get_access_token = require('./utils/better_auth');
-const waitOn = require('wait-on'); // Import wait-on
 const postgres = require('postgres');
 
 global.primary_dj_id = null;
@@ -8,9 +7,14 @@ global.access_token = '';
 
 async function getUserIdsFromDatabase() {
   // Connect to database to get user IDs
+  // Prioritize CI_DB_PORT for CI environments, then DB_PORT, then default
+  const dbPort = process.env.CI_DB_PORT 
+    ? parseInt(process.env.CI_DB_PORT) 
+    : (process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 5432);
+  
   const sql = postgres({
     host: process.env.DB_HOST || 'localhost',
-    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 5432,
+    port: dbPort,
     database: process.env.DB_NAME,
     username: process.env.DB_USERNAME,
     password: process.env.DB_PASSWORD,
@@ -31,11 +35,77 @@ async function getUserIdsFromDatabase() {
 
     global.primary_dj_id = primaryUser[0].id;
     global.secondary_dj_id = secondaryUser[0].id;
-
+    
     console.log(`Test user IDs loaded: primary=${global.primary_dj_id}, secondary=${global.secondary_dj_id}`);
+  } catch (err) {
+    throw err;
   } finally {
     await sql.end();
   }
+}
+
+/**
+ * Simple healthcheck polling function to replace wait-on
+ * Polls HTTP endpoints until they return 200 OK or timeout is reached
+ */
+async function waitForServices(resources, options = {}) {
+  const {
+    delay = 1000,
+    interval = 500,
+    timeout = 60000,
+    httpTimeout = 2000,
+  } = options;
+
+  const startTime = Date.now();
+
+  // Initial delay
+  await new Promise(resolve => setTimeout(resolve, delay));
+
+  while (Date.now() - startTime < timeout) {
+    const results = await Promise.allSettled(
+      resources.map(url => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), httpTimeout);
+        
+        return fetch(url, {
+          method: 'GET',
+          signal: controller.signal,
+        })
+          .then(res => {
+            clearTimeout(timeoutId);
+            if (res.ok) {
+              return { url, status: 'ready' };
+            }
+            return { url, status: 'not-ready', statusCode: res.status };
+          })
+          .catch(err => {
+            clearTimeout(timeoutId);
+            return { url, status: 'not-ready', error: err.message };
+          });
+      })
+    );
+
+    const allReady = results.every(result => 
+      result.status === 'fulfilled' && result.value.status === 'ready'
+    );
+
+    if (allReady) {
+      console.log('Services are ready!');
+      return;
+    }
+
+    // Log progress for first few attempts
+    if ((Date.now() - startTime) % (interval * 10) < interval) {
+      const readyCount = results.filter(r => 
+        r.status === 'fulfilled' && r.value.status === 'ready'
+      ).length;
+      console.log(`Waiting for services... (${readyCount}/${resources.length} ready)`);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, interval));
+  }
+
+  throw new Error(`Timeout waiting for services to be ready after ${timeout}ms`);
 }
 
 beforeAll(async () => {
@@ -44,26 +114,23 @@ beforeAll(async () => {
   const authBaseUrl = new URL(process.env.BETTER_AUTH_URL).origin;
   const authHealthcheckUrl = `${authBaseUrl}/healthcheck`;
 
-  const waitOnOptions = {
-    resources: [backendHealthcheckUrl, authHealthcheckUrl],
-    delay: 1000, // initial delay in ms
-    interval: 500, // poll interval in ms
-    timeout: 60000, // timeout in ms (e.g., 60 seconds)
-    tcpTimeout: 1000, // tcp timeout in ms
-    httpTimeout: 2000, // http timeout in ms
-    log: true, // Log wait-on progress
-  };
+  const resources = [backendHealthcheckUrl, authHealthcheckUrl];
 
-  console.log(`Waiting for services to be ready: ${waitOnOptions.resources.join(', ')}`);
+  console.log(`Waiting for services to be ready: ${resources.join(', ')}`);
   try {
-    await waitOn(waitOnOptions);
-    console.log('Services are ready!');
+    await waitForServices(resources, {
+      delay: 1000,
+      interval: 500,
+      timeout: 60000,
+      httpTimeout: 2000,
+    });
   } catch (err) {
     console.error('Error waiting for services:', err);
     throw err; // Fail the test suite if services are not ready
   }
 
   // Load user IDs from database
+  // Note: Database is already ready at this point due to Docker Compose orchestration
   await getUserIdsFromDatabase();
 
   if (process.env.AUTH_BYPASS === 'true') {
