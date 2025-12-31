@@ -127,6 +127,13 @@
       "when": 1762820304572,
       "tag": "0020_sticky_alex_power",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1767161700000,
+      "tag": "0021_replace_djs_with_user",
+      "breakpoints": true
     }
   ]
 }

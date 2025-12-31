@@ -1,14 +1,13 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
 import { db } from '../../../shared/database/src/client.js';
 import {
-  DJ,
   FSEntry,
   NewFSEntry,
   Show,
   ShowDJ,
   shows,
   artists,
-  djs,
+  user,
   flowsheet,
   library,
   rotation,
@@ -166,8 +165,8 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
   return response[0];
 };
 
-export const startShow = async (dj_id: number, show_name?: string, specialty_id?: number): Promise<Show> => {
-  const dj_info = (await db.select().from(djs).where(eq(djs.id, dj_id)).limit(1))[0];
+export const startShow = async (dj_id: string, show_name?: string, specialty_id?: number): Promise<Show> => {
+  const dj_info = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
   const new_show = await db
     .insert(shows)
@@ -188,7 +187,7 @@ export const startShow = async (dj_id: number, show_name?: string, specialty_id?
 
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
-    message: `Start of Show: DJ ${dj_info.dj_name} joined the set at ${new Date().toLocaleString('en-US', {
+    message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
   });
@@ -196,7 +195,7 @@ export const startShow = async (dj_id: number, show_name?: string, specialty_id?
   return new_show[0];
 };
 
-export const addDJToShow = async (dj_id: number, current_show: Show): Promise<ShowDJ> => {
+export const addDJToShow = async (dj_id: string, current_show: Show): Promise<ShowDJ> => {
   let show_dj_instance = await db
     .select()
     .from(show_djs)
@@ -234,11 +233,11 @@ export const addDJToShow = async (dj_id: number, current_show: Show): Promise<Sh
   return show_dj_instance[0];
 };
 
-const createJoinNotification = async (id: number, show_id: number): Promise<FSEntry> => {
+const createJoinNotification = async (id: string, show_id: number): Promise<FSEntry> => {
   let dj_name = 'A DJ';
-  const dj: DJ = (await db.select().from(djs).where(eq(djs.id, id)))[0];
+  const dj = (await db.select().from(user).where(eq(user.id, id)).limit(1))[0];
 
-  dj_name = dj.dj_name ?? dj_name;
+  dj_name = dj?.djName || dj?.name || dj_name;
 
   const message = `${dj_name} joined the set!`;
 
@@ -273,8 +272,8 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
     })
   );
 
-  const dj_information = (await db.select().from(djs).where(eq(djs.id, primary_dj_id)).limit(1))[0];
-  const dj_name = dj_information.dj_name ? dj_information.dj_name : 'A DJ';
+  const dj_information = (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0];
+  const dj_name = dj_information?.djName || dj_information?.name || 'A DJ';
 
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
@@ -288,7 +287,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   return await getLatestShow();
 };
 
-export const leaveShow = async (dj_id: number, currentShow: Show): Promise<ShowDJ> => {
+export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowDJ> => {
   const update_result = (
     await db
       .update(show_djs)
@@ -309,11 +308,11 @@ export const leaveShow = async (dj_id: number, currentShow: Show): Promise<ShowD
   return update_result;
 };
 
-const createLeaveNotification = async (dj_id: number, show_id: number): Promise<FSEntry> => {
+const createLeaveNotification = async (dj_id: string, show_id: number): Promise<FSEntry> => {
   let dj_name = 'A DJ';
-  const dj: DJ = (await db.select().from(djs).where(eq(djs.id, dj_id)))[0];
+  const dj = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
-  dj_name = dj.dj_name ?? dj_name;
+  dj_name = dj?.djName || dj?.name || dj_name;
 
   const message = `${dj_name} left the set!`;
 
@@ -341,7 +340,7 @@ export const getLatestShow = async (): Promise<Show> => {
   return (await getNShows(1))[0];
 };
 
-export const getOnAirStatusForDJ = async (dj_id: number): Promise<boolean> => {
+export const getOnAirStatusForDJ = async (dj_id: string): Promise<boolean> => {
   const latest_show = await getLatestShow();
 
   //Avoid a round trip to db with this check
@@ -354,7 +353,7 @@ export const getOnAirStatusForDJ = async (dj_id: number): Promise<boolean> => {
   return show_djs.some((dj) => dj.id == dj_id);
 };
 
-export const getDJsInCurrentShow = async (): Promise<DJ[]> => {
+export const getDJsInCurrentShow = async () => {
   const current_show = await getLatestShow();
 
   //Avoid a round trip to db with this check
@@ -365,7 +364,7 @@ export const getDJsInCurrentShow = async (): Promise<DJ[]> => {
   return getDJsInShow(current_show.id, true);
 };
 
-export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promise<DJ[]> => {
+export const getDJsInShow = async (show_id: number, activeOnly: boolean) => {
   let showDJsInstance: ShowDJ[];
   if (activeOnly) {
     showDJsInstance = await db
@@ -380,7 +379,7 @@ export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promis
     return dj.dj_id;
   });
 
-  return await db.select().from(djs).where(inArray(djs.id, dj_ids));
+  return await db.select().from(user).where(inArray(user.id, dj_ids));
 };
 
 export const getAlbumFromDB = async (album_id: number) => {

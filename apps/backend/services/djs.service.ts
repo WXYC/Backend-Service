@@ -1,13 +1,10 @@
 import {
   BinEntry,
-  DJ,
   FSEntry,
   NewBinEntry,
-  NewDJ,
   artists,
   bins,
   db,
-  djs,
   flowsheet,
   format,
   genres,
@@ -15,71 +12,16 @@ import {
   show_djs,
   shows,
   specialty_shows,
+  user,
 } from "@wxyc/database";
-import { and, eq, isNull, sql } from 'drizzle-orm';
-import { DJQueryParams } from '../controllers/djs.controller.js';
-
-import WxycError from '../utils/error.js';
-
-export const insertDJ = async (new_dj: NewDJ) => {
-  const response = await db.insert(djs).values(new_dj).returning();
-  return response[0];
-};
-
-export const updateDJ = async (new_dj: NewDJ) => {
-  const dj_obj = await db
-    .update(djs)
-    .set(new_dj)
-    .where(eq(djs.cognito_user_name, new_dj.cognito_user_name))
-    .returning();
-
-  if (!dj_obj[0]) {
-    throw new WxycError(`dj with cognito_username ${new_dj.cognito_user_name} not found`, 404);
-  }
-
-  return dj_obj[0];
-};
-
-export const deleteDJ = async (cognito_user_name: string): Promise<DJ> => {
-  const dj_obj = await db.delete(djs).where(eq(djs.cognito_user_name, cognito_user_name)).returning();
-
-  if (!dj_obj[0]) {
-    throw new WxycError(`dj with cognito_username ${cognito_user_name} not found`, 404);
-  }
-
-  return dj_obj[0];
-};
-
-export const getDJInfoFromDB = async (items: DJQueryParams) /*:Promise<schema.DJ>*/ => {
-  let query_value: number | string;
-  let query_col;
-  if (items.dj_id !== undefined) {
-    query_value = items.dj_id;
-    query_col = djs.id;
-  } else if (items.cognito_user_name !== undefined) {
-    query_value = items.cognito_user_name;
-    query_col = djs.cognito_user_name;
-  } else if (items.real_name !== undefined) {
-    query_value = items.real_name;
-    query_col = djs.real_name;
-  } else {
-    throw new Error('Did not specify a query parameter');
-  }
-
-  const dj_obj: DJ[] = await db
-    .select()
-    .from(djs)
-    .where(sql`${query_col} = ${query_value}`);
-
-  return dj_obj[0];
-};
+import { and, eq, isNull } from 'drizzle-orm';
 
 export const addToBin = async (bin_entry: NewBinEntry): Promise<BinEntry> => {
   const added_bin_entry = await db.insert(bins).values(bin_entry).returning();
   return added_bin_entry[0];
 };
 
-export const removeFromBin = async (album_id: number, dj_id: number): Promise<BinEntry> => {
+export const removeFromBin = async (album_id: number, dj_id: string): Promise<BinEntry> => {
   const removed_bin_entry = await db
     .delete(bins)
     .where(and(eq(bins.dj_id, dj_id), eq(bins.album_id, album_id)))
@@ -87,7 +29,7 @@ export const removeFromBin = async (album_id: number, dj_id: number): Promise<Bi
   return removed_bin_entry[0];
 };
 
-export const getBinFromDB = async (dj_id: number) => {
+export const getBinFromDB = async (dj_id: string) => {
   const dj_bin = await db
     .select({
       album_id: bins.album_id,
@@ -114,13 +56,13 @@ type ShowPeek = {
   show: number;
   show_name: string;
   date: Date;
-  djs: { dj_id: number; dj_name: string | null }[];
+  djs: { dj_id: string; dj_name: string | null }[];
   specialty_show: string;
   preview: FSEntry[];
 };
 
 // ERRORS IN SERVICES ARE 500 ERRORS
-export const getPlaylistsForDJ = async (dj_id: number) => {
+export const getPlaylistsForDJ = async (dj_id: string) => {
   // gets a 'preview set' of 4 artists/albums and the show id for each show the dj has been in
   const this_djs_shows = await db.select().from(show_djs).where(eq(show_djs.dj_id, dj_id));
 
@@ -129,9 +71,9 @@ export const getPlaylistsForDJ = async (dj_id: number) => {
     const show = await db.select().from(shows).where(eq(shows.id, this_djs_shows[i].show_id));
 
     const djs_involved = await db
-      .select({ dj_id: show_djs.dj_id, dj_name: djs.dj_name })
+      .select({ dj_id: show_djs.dj_id, dj_name: user.djName })
       .from(show_djs)
-      .innerJoin(djs, and(eq(show_djs.show_id, show[0].id), eq(show_djs.dj_id, djs.id)));
+      .innerJoin(user, and(eq(show_djs.show_id, show[0].id), eq(show_djs.dj_id, user.id)));
 
     const peek_object: ShowPeek = {
       show: show[0].id,
