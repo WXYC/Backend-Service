@@ -96,6 +96,144 @@ export const auth = betterAuth({
       organizationLimit: 1, // Users can only be in one organization
       roles: WXYCRoles,
       // Role information is included via custom JWT definePayload function above
+      organizationHooks: {
+        // Sync global user.role when members are added to default organization
+        afterAddMember: async ({ member, user: userData, organization: orgData }) => {
+          try {
+            const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
+            if (!defaultOrgSlug) {
+              console.warn(
+                "DEFAULT_ORG_SLUG is not set, skipping admin role sync"
+              );
+              return;
+            }
+
+            // Only update for default organization
+            if (orgData.slug !== defaultOrgSlug) {
+              return;
+            }
+
+            // Check if role should grant admin permissions
+            const adminRoles = ["stationManager", "admin", "owner"];
+            if (adminRoles.includes(member.role)) {
+              // Update user.role to "admin" for Better Auth Admin plugin
+              const userId = userData.id;
+              await db
+                .update(user)
+                .set({ role: "admin" })
+                .where(eq(user.id, userId));
+              console.log(
+                `Granted admin role to user ${userId} (${userData.email}) with ${member.role} role in default organization`
+              );
+            }
+          } catch (error) {
+            console.error("Error syncing admin role in afterAddMember:", error);
+          }
+        },
+
+        // Sync global user.role when member roles are updated
+        afterUpdateMemberRole: async ({
+          member,
+          previousRole,
+          user: userData,
+          organization: orgData,
+        }) => {
+          try {
+            const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
+            if (!defaultOrgSlug) {
+              console.warn(
+                "DEFAULT_ORG_SLUG is not set, skipping admin role sync"
+              );
+              return;
+            }
+
+            // Only update for default organization
+            if (orgData.slug !== defaultOrgSlug) {
+              return;
+            }
+
+            const adminRoles = ["stationManager", "admin", "owner"];
+            const shouldHaveAdmin = adminRoles.includes(member.role);
+            const previouslyHadAdmin = adminRoles.includes(previousRole);
+
+            const userId = userData.id;
+            if (shouldHaveAdmin && !previouslyHadAdmin) {
+              // Promoted to admin role - grant admin
+              await db
+                .update(user)
+                .set({ role: "admin" })
+                .where(eq(user.id, userId));
+              console.log(
+                `Granted admin role to user ${userId} (${userData.email}) after promotion to ${member.role}`
+              );
+            } else if (!shouldHaveAdmin && previouslyHadAdmin) {
+              // Demoted from admin role - remove admin
+              await db
+                .update(user)
+                .set({ role: null })
+                .where(eq(user.id, userId));
+              console.log(
+                `Removed admin role from user ${userId} (${userData.email}) after demotion from ${previousRole} to ${member.role}`
+              );
+            }
+          } catch (error) {
+            console.error(
+              "Error syncing admin role in afterUpdateMemberRole:",
+              error
+            );
+          }
+        },
+
+        // Sync global user.role when members are removed from default organization
+        afterRemoveMember: async ({ user: userData, organization: orgData }) => {
+          try {
+            const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
+            if (!defaultOrgSlug) {
+              console.warn(
+                "DEFAULT_ORG_SLUG is not set, skipping admin role sync"
+              );
+              return;
+            }
+
+            // Only update for default organization
+            if (orgData.slug !== defaultOrgSlug) {
+              return;
+            }
+
+            // Check if user has any other memberships with admin roles
+            const otherAdminMemberships = await db
+              .select({ role: member.role })
+              .from(member)
+              .innerJoin(
+                organization,
+                sql`${member.organizationId} = ${organization.id}` as any
+              )
+              .where(
+                sql`${member.userId} = ${userData.id}
+                AND ${organization.slug} = ${defaultOrgSlug}
+                AND ${member.role} IN ('admin', 'owner', 'stationManager')` as any
+              )
+              .limit(1);
+
+            // If no other admin memberships exist, remove admin role
+            if (otherAdminMemberships.length === 0) {
+              const userId = userData.id;
+              await db
+                .update(user)
+                .set({ role: null })
+                .where(eq(user.id, userId));
+              console.log(
+                `Removed admin role from user ${userId} (${userData.email}) after removal from default organization`
+              );
+            }
+          } catch (error) {
+            console.error(
+              "Error syncing admin role in afterRemoveMember:",
+              error
+            );
+          }
+        },
+      },
     }),
   ],
 
@@ -110,43 +248,6 @@ export const auth = betterAuth({
     },
   },
 
-  // Admin configuration - organization owners/admins/stationManagers are admins
-  admin: {
-    // Check if user has admin, owner, or stationManager role in the WXYC organization
-    requireAdmin: async (user: any, request?: any) => {
-      if (!user?.id) return false;
-
-      try {
-        const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
-
-        if (!defaultOrgSlug) {
-          throw new Error(
-            "DEFAULT_ORG_SLUG is not set in environment variables."
-          );
-        }
-
-        // Query the member table to check if user has admin/owner/stationManager role in WXYC org
-        const adminMember = await db
-          .select({ memberId: member.id })
-          .from(member)
-          .innerJoin(
-            organization,
-            sql`${member.organizationId} = ${organization.id}` as any
-          )
-          .where(
-            sql`${member.userId} = ${user.id}
-            AND ${organization.slug} = ${defaultOrgSlug}
-            AND ${member.role} IN ('admin', 'owner', 'stationManager')` as any
-          )
-          .limit(1);
-
-        return adminMember.length > 0;
-      } catch (error) {
-        console.error("Error checking admin status:", error);
-        return false;
-      }
-    },
-  },
 });
 
 export type Auth = typeof auth;
