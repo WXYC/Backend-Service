@@ -148,7 +148,16 @@ const createDefaultUser = async () => {
       },
     });
 
-    console.log('Default user created successfully.');
+    // Set admin role for stationManager in default organization
+    // This ensures the user has admin permissions for Better Auth Admin plugin
+    const { db, user } = await import('@wxyc/database');
+    const { eq } = await import('drizzle-orm');
+    await db
+      .update(user)
+      .set({ role: 'admin' })
+      .where(eq(user.id, newUser.id));
+
+    console.log('Default user created successfully with admin role.');
   } catch (error) {
     console.error('Error creating default user!');
     throw error;
@@ -156,14 +165,14 @@ const createDefaultUser = async () => {
 };
 
 // Fix admin roles for existing stationManagers (one-time migration)
-const fixExistingAdminRoles = async () => {
+const syncAdminRoles = async () => {
   try {
     const { db, user, member, organization } = await import('@wxyc/database');
     const { eq, sql } = await import('drizzle-orm');
     
     const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
     if (!defaultOrgSlug) {
-      console.log('[ADMIN FIX] DEFAULT_ORG_SLUG not set, skipping admin role fix');
+      console.log('[ADMIN PERMISSIONS] DEFAULT_ORG_SLUG not set, skipping admin role fix');
       return;
     }
 
@@ -185,27 +194,27 @@ const fixExistingAdminRoles = async () => {
       );
 
     if (usersNeedingFix.length > 0) {
-      console.log(`[ADMIN FIX] Found ${usersNeedingFix.length} users needing admin role fix:`);
+      console.log(`[ADMIN PERMISSIONS] Found ${usersNeedingFix.length} users needing admin role fix:`);
       for (const u of usersNeedingFix) {
-        console.log(`[ADMIN FIX] - ${u.userEmail} (${u.memberRole}) - current role: ${u.userRole || 'null'}`);
+        console.log(`[ADMIN PERMISSIONS] - ${u.userEmail} (${u.memberRole}) - current role: ${u.userRole || 'null'}`);
         await db
           .update(user)
           .set({ role: 'admin' })
           .where(eq(user.id, u.userId));
-        console.log(`[ADMIN FIX] - Fixed: ${u.userEmail} now has admin role`);
+        console.log(`[ADMIN PERMISSIONS] - Fixed: ${u.userEmail} now has admin role`);
       }
     } else {
-      console.log('[ADMIN FIX] All stationManagers already have admin role');
+      console.log('[ADMIN PERMISSIONS] All stationManagers already have admin role');
     }
   } catch (error) {
-    console.error('[ADMIN FIX] Error fixing admin roles:', error);
+    console.error('[ADMIN PERMISSIONS] Error fixing admin roles:', error);
   }
 };
 
-// Initialize default user before starting the server
+// Initialize default user and sync admin roles before starting the server
 (async () => {
   await createDefaultUser();
-  await fixExistingAdminRoles();
+  await syncAdminRoles();
 
   app.listen(parseInt(port), async () => {
     console.log(`listening on port: ${port}! (auth service)`);
