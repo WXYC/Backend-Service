@@ -1,5 +1,5 @@
 const get_access_token = require('./utils/better_auth');
-const waitOn = require('wait-on'); // Import wait-on
+const waitOn = require('wait-on');
 
 global.primary_dj_id = 1;
 global.secondary_dj_id = 2;
