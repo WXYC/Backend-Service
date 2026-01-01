@@ -195,7 +195,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: version-${{ matrix.target }}-${{ needs.setup.outputs.build_id }}
-          path: deploy_version.txt
 
       - name: Determine Target Version
         id: determine_version
@@ -288,7 +287,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: version-${{ matrix.target }}-${{ needs.setup.outputs.build_id }}
-          path: deploy_version.txt
 
       - name: Determine Target Version
         id: determine_version
