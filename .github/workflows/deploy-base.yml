@@ -200,7 +200,7 @@ jobs:
         id: determine_version
         run: |
           DEPLOY_TAG=$(cat deploy_version.txt)
-          if [[ -n DEPLOY_TAG ]] then;
+          if [[ -n DEPLOY_TAG ]]; then
             echo "deploy_version=$DEPLOY_TAG"
             echo "deploy_version=$DEPLOY_TAG >> GITHUB_OUTPUT"
           else
@@ -292,7 +292,7 @@ jobs:
         id: determine_version
         run: |
           DEPLOY_TAG=$(cat deploy_version.txt)
-          if [[ -n DEPLOY_TAG ]] then;
+          if [[ -n DEPLOY_TAG ]]; then
             echo "deploy_version=$DEPLOY_TAG"
             echo "deploy_version=$DEPLOY_TAG >> GITHUB_OUTPUT"
           else
