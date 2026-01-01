@@ -14,7 +14,6 @@ import { showMemberMiddleware } from './middleware/checkShowMember.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
 import { requirePermissions } from '@wxyc/authentication';
-// import errorHandler from './middleware/errorHandler';
 
 const port = process.env.PORT || 8080;
 const app = express();
@@ -59,7 +58,7 @@ app.use(
 );
 
 //example for how to use te Cognito auth middleware
-app.get('/testAuth', requirePermissions({ flowsheet: ["read"] }), async (req, res) => {
+app.get('/testAuth', requirePermissions({ flowsheet: ['read'] }), async (req, res) => {
   res.json({ message: 'Authenticated!' });
 });
 

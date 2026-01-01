@@ -53,12 +53,14 @@ jobs:
 
           echo "Version input '$VERSION_INPUT' is valid."
 
-  detect-build-targets:
+  setup:
     needs: validate_inputs
     runs-on: ubuntu-latest
     outputs:
       targets: ${{ steps.detect_targets.outputs.TARGETS }}
       has_targets: ${{ steps.detect_targets.outputs.HAS_TARGETS }}
+      build_id: ${{ steps.generate_build_id.outputs.id }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -86,13 +88,20 @@ jobs:
             echo "HAS_TARGETS=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: Generate Unique Build ID
+        id: generate_build_id
+        run: |
+          ID=$(head -c 8 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 7)
+          echo "Build ID: $ID"
+          echo "id=$ID" >> $GITHUB_OUTPUT
+
   handle-git-tags:
-    needs: detect-build-targets
+    needs: setup
     runs-on: ubuntu-latest
-    if: needs.detect-build-targets.outputs.has_targets == 'true'
+    if: needs.setup.outputs.has_targets == 'true'
     strategy:
       matrix:
-        target: ${{ fromJSON(needs.detect-build-targets.outputs.targets) }}
+        target: ${{ fromJSON(needs.setup.outputs.targets) }}
 
     outputs:
       deploy_version: ${{ steps.determine_deploy_version.outputs.deploy_version }}
@@ -149,13 +158,23 @@ jobs:
               sha: context.sha
             })
 
+      - name: Persist Tag
+        run: |
+          echo "${{ steps.determine_deploy_version.outputs.deploy_version }}" > deploy_version.txt
+
+      - name: Upload Deploy Tag Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-${{ matrix.target }}-${{ needs.setup.outputs.build_id }}
+          path: deploy_version.txt
+
   build:
-    needs: [handle-git-tags, detect-build-targets]
+    needs: [handle-git-tags, setup]
     runs-on: ubuntu-latest
-    if: needs.detect-build-targets.outputs.has_targets == 'true'
+    if: needs.setup.outputs.has_targets == 'true'
     strategy:
       matrix:
-        target: ${{ fromJSON(needs.detect-build-targets.outputs.targets) }}
+        target: ${{ fromJSON(needs.setup.outputs.targets) }}
 
     steps:
       # Checkout specific version if provided, otherwise current SHA
@@ -169,6 +188,23 @@ jobs:
             echo "checkout_ref=${{ github.sha }}" >> $GITHUB_OUTPUT
           else
             echo "checkout_ref=refs/tags/$TARGET_APP/$INPUT_VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download Target Tag
+        id: download_deploy_tag
+        uses: actions/download-artifact@v4
+        with:
+          name: version-${{ matrix.target }}-${{ needs.setup.outputs.build_id }}
+
+      - name: Determine Target Version
+        id: determine_version
+        run: |
+          DEPLOY_TAG=$(cat deploy_version.txt)
+          if [[ -n DEPLOY_TAG ]]; then
+            echo "deploy_version=$DEPLOY_TAG" >> $GITHUB_OUTPUT
+          else
+            echo "Couldn't find deploy version for target ${{ matrix.target }}"
+            exit 1
           fi
 
       - name: Checkout code
@@ -196,7 +232,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           TARGET_APP=${{ matrix.target }}
-          DEPLOY_TAG=${{ needs.handle-git-tags.outputs.deploy_version }}
+          DEPLOY_TAG=${{ steps.determine_version.outputs.deploy_version }}
           IMAGE_URI="${{ secrets.AWS_ECR_URI }}/$TARGET_APP:$DEPLOY_TAG"
 
           if aws ecr describe-images --repository-name $TARGET_APP --image-ids imageTag=$DEPLOY_TAG --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1; then
@@ -218,7 +254,7 @@ jobs:
         if: steps.check_image.outputs.image_exists == 'false'
         run: |
           TARGET_APP=${{ matrix.target }}
-          TAG=${{ needs.handle-git-tags.outputs.deploy_version }}
+          TAG=${{ steps.determine_version.outputs.deploy_version }}
 
           IMAGE_URI="${{ secrets.AWS_ECR_URI }}/${TARGET_APP}"
 
@@ -236,15 +272,32 @@ jobs:
           fi
 
   deploy:
-    needs: [detect-build-targets, handle-git-tags, build]
+    needs: [setup, handle-git-tags, build]
     runs-on: ubuntu-latest
-    if: needs.detect-build-targets.outputs.has_targets == 'true'
+    if: needs.setup.outputs.has_targets == 'true'
     strategy:
       matrix:
-        target: ${{ fromJSON(needs.detect-build-targets.outputs.targets) }}
+        target: ${{ fromJSON(needs.setup.outputs.targets) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+
+      - name: Download Target Tag
+        id: download_deploy_tag
+        uses: actions/download-artifact@v4
+        with:
+          name: version-${{ matrix.target }}-${{ needs.setup.outputs.build_id }}
+
+      - name: Determine Target Version
+        id: determine_version
+        run: |
+          DEPLOY_TAG=$(cat deploy_version.txt)
+          if [[ -n DEPLOY_TAG ]]; then
+            echo "deploy_version=$DEPLOY_TAG" >> $GITHUB_OUTPUT
+          else
+            echo "Couldn't find deploy version for target ${{ matrix.target }}"
+            exit 1
+          fi
 
       - name: Get Deploy Vars
         id: deploy_vars
@@ -259,7 +312,7 @@ jobs:
         with:
           target_app: ${{ matrix.target }}
           publish_port: ${{ steps.deploy_vars.outputs.publish_port }}
-          deploy_tag: ${{ needs.handle-git-tags.outputs.deploy_version }} # Use provided version or the newly bumped version
+          deploy_tag: ${{ steps.determine_version.outputs.deploy_version }} # Use provided version or the newly bumped version
           ec2_host: ${{ secrets.EC2_HOST }}
           ec2_user: ${{ secrets.EC2_USER }}
           ec2_ssh_key: ${{ secrets.EC2_SSH_KEY }}
