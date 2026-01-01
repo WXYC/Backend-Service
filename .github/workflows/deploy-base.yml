@@ -59,7 +59,7 @@ jobs:
     outputs:
       targets: ${{ steps.detect_targets.outputs.TARGETS }}
       has_targets: ${{ steps.detect_targets.outputs.HAS_TARGETS }}
-      short_sha: ${{ steps.calc_sha.outputs.sha }}
+      build_id: ${{ steps.generate_build_id.outputs.id }}
 
     steps:
       - name: Checkout code
@@ -88,9 +88,12 @@ jobs:
             echo "HAS_TARGETS=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Calculate Short SHA
-        id: calc_sha
-        run: echo "sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+      - name: Generate Unique Build ID
+        id: generate_build_id
+        run: |
+          ID=$(head -c 8 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 7)
+          echo "Build ID: $ID"
+          echo "id=$ID" >> $GITHUB_OUTPUT
 
   handle-git-tags:
     needs: setup
@@ -162,7 +165,7 @@ jobs:
       - name: Upload Deploy Tag Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: version-${{ matrix.target }}-${{ needs.setup.short_sha }}
+          name: version-${{ matrix.target }}-${{ needs.setup.outputs.build_id }}
           path: deploy_version.txt
 
   build:
@@ -189,9 +192,9 @@ jobs:
 
       - name: Download Target Tag
         id: download_deploy_tag
-        uses: action/download-artifact@v4
+        uses: actions/download-artifact@v4
         with:
-          name: version-${{ matrix.target }}-${{ needs.setup.short_sha }}
+          name: version-${{ matrix.target }}-${{ needs.setup.outputs.build_id }}
           path: deploy_version.txt
 
       - name: Determine Target Version
@@ -282,9 +285,9 @@ jobs:
 
       - name: Download Target Tag
         id: download_deploy_tag
-        uses: action/download-artifact@v4
+        uses: actions/download-artifact@v4
         with:
-          name: version-${{ matrix.target }}-${{ needs.setup.short_sha }}
+          name: version-${{ matrix.target }}-${{ needs.setup.outputs.build_id }}
           path: deploy_version.txt
 
       - name: Determine Target Version
