@@ -201,7 +201,7 @@ jobs:
         run: |
           DEPLOY_TAG=$(cat deploy_version.txt)
           if [[ -n DEPLOY_TAG ]]; then
-            echo "deploy_version=$DEPLOY_TAG >> $GITHUB_OUTPUT"
+            echo "deploy_version=$DEPLOY_TAG" >> $GITHUB_OUTPUT
           else
             echo "Couldn't find deploy version for target ${{ matrix.target }}"
             exit 1
@@ -293,7 +293,7 @@ jobs:
         run: |
           DEPLOY_TAG=$(cat deploy_version.txt)
           if [[ -n DEPLOY_TAG ]]; then
-            echo "deploy_version=$DEPLOY_TAG >> $GITHUB_OUTPUT"
+            echo "deploy_version=$DEPLOY_TAG" >> $GITHUB_OUTPUT
           else
             echo "Couldn't find deploy version for target ${{ matrix.target }}"
             exit 1
