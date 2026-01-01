@@ -206,6 +206,7 @@ jobs:
           else
             echo "Couldn't find deploy version for target ${{ matrix.target }}"
             exit 1
+          fi
 
       - name: Checkout code
         uses: actions/checkout@v5
@@ -298,6 +299,7 @@ jobs:
           else
             echo "Couldn't find deploy version for target ${{ matrix.target }}"
             exit 1
+          fi
 
       - name: Get Deploy Vars
         id: deploy_vars
