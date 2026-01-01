@@ -94,10 +94,10 @@ services:
       - DB_USERNAME=${DB_USERNAME}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
-      - BETTER_AUTH_URL=http://auth:8082/api/auth
-      - BETTER_AUTH_JWKS_URL=http://auth:8082/api/auth/jwks
-      - BETTER_AUTH_ISSUER=http://auth:8082
-      - BETTER_AUTH_AUDIENCE=http://auth:8082
+      - BETTER_AUTH_URL=http://auth:8080/api/auth
+      - BETTER_AUTH_JWKS_URL=http://auth:8080/api/auth/jwks
+      - BETTER_AUTH_ISSUER=http://auth:8080
+      - BETTER_AUTH_AUDIENCE=http://auth:8080
       - BETTER_AUTH_TRUSTED_ORIGINS=${BETTER_AUTH_TRUSTED_ORIGINS}
       - FRONTEND_SOURCE=${FRONTEND_SOURCE}
       - DEFAULT_ORG_SLUG=${DEFAULT_ORG_SLUG}
@@ -109,7 +109,7 @@ services:
       - DEFAULT_USER_REAL_NAME=${DEFAULT_USER_REAL_NAME}
       - CREATE_DEFAULT_USER=${CREATE_DEFAULT_USER}
     ports:
-      - '${CI_AUTH_PORT:-8083}:8082'
+      - '${CI_AUTH_PORT:-8083}:8080'
 
   backend:
     depends_on:
@@ -130,10 +130,10 @@ services:
       - AUTH_USERNAME=${AUTH_USERNAME}
       - COGNITO_USERPOOL_ID=${COGNITO_USERPOOL_ID}
       - DJ_APP_CLIENT_ID=${DJ_APP_CLIENT_ID}
-      - BETTER_AUTH_URL=http://auth:8082/api/auth
-      - BETTER_AUTH_AUDIENCE=http://auth:8082
-      - BETTER_AUTH_ISSUER=http://auth:8082
-      - BETTER_AUTH_JWKS_URL=http://auth:8082/api/auth/jwks
+      - BETTER_AUTH_URL=http://auth:8080/api/auth
+      - BETTER_AUTH_AUDIENCE=http://auth:8080
+      - BETTER_AUTH_ISSUER=http://auth:8080
+      - BETTER_AUTH_JWKS_URL=http://auth:8080/api/auth/jwks
     ports:
       - '${CI_PORT:-8081}:8080'
 

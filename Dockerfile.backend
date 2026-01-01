@@ -26,6 +26,4 @@ COPY --from=builder ./builder/apps/backend/dist ./apps/backend/dist
 COPY --from=builder ./builder/shared/database/dist ./shared/database/dist
 COPY --from=builder ./builder/shared/authentication/dist ./shared/authentication/dist
 
-EXPOSE 8080
-
 CMD ["npm", "start", "--workspace=@wxyc/backend"]

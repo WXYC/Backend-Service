@@ -7,7 +7,7 @@ import { toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
 import express from 'express';
 
-const port = process.env.AUTH_PORT || '8082';
+const port = process.env.AUTH_PORT || '8080';
 
 const app = express();
 
