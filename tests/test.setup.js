@@ -1,4 +1,5 @@
 const get_access_token = require('./utils/better_auth');
+const waitOn = require('wait-on');
 const postgres = require('postgres');
 
 global.primary_dj_id = null;
@@ -43,83 +44,26 @@ async function getUserIdsFromDatabase() {
   }
 }
 
-/**
- * Simple healthcheck polling function to replace wait-on
- * Polls HTTP endpoints until they return 200 OK or timeout is reached
- */
-async function waitForServices(resources, options = {}) {
-  const {
-    delay = 1000,
-    interval = 500,
-    timeout = 60000,
-    httpTimeout = 2000,
-  } = options;
-
-  const startTime = Date.now();
-
-  // Initial delay
-  await new Promise(resolve => setTimeout(resolve, delay));
-
-  while (Date.now() - startTime < timeout) {
-    const results = await Promise.allSettled(
-      resources.map(url => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), httpTimeout);
-        
-        return fetch(url, {
-          method: 'GET',
-          signal: controller.signal,
-        })
-          .then(res => {
-            clearTimeout(timeoutId);
-            if (res.ok) {
-              return { url, status: 'ready' };
-            }
-            return { url, status: 'not-ready', statusCode: res.status };
-          })
-          .catch(err => {
-            clearTimeout(timeoutId);
-            return { url, status: 'not-ready', error: err.message };
-          });
-      })
-    );
-
-    const allReady = results.every(result => 
-      result.status === 'fulfilled' && result.value.status === 'ready'
-    );
-
-    if (allReady) {
-      return;
-    }
-
-    // Log progress for first few attempts
-    if ((Date.now() - startTime) % (interval * 10) < interval) {
-      const readyCount = results.filter(r => 
-        r.status === 'fulfilled' && r.value.status === 'ready'
-      ).length;
-    }
-
-    await new Promise(resolve => setTimeout(resolve, interval));
-  }
-
-  throw new Error(`Timeout waiting for services to be ready after ${timeout}ms`);
-}
-
 beforeAll(async () => {
   // Determine the healthcheck URLs dynamically
   const backendHealthcheckUrl = `http://localhost:${process.env.PORT}/healthcheck`;
   const authBaseUrl = new URL(process.env.BETTER_AUTH_URL).origin;
   const authHealthcheckUrl = `${authBaseUrl}/healthcheck`;
 
-  const resources = [backendHealthcheckUrl, authHealthcheckUrl];
+  const waitOnOptions = {
+    resources: [backendHealthcheckUrl, authHealthcheckUrl],
+    delay: 1000, // initial delay in ms
+    interval: 500, // poll interval in ms
+    timeout: 60000, // timeout in ms (e.g., 60 seconds)
+    tcpTimeout: 1000, // tcp timeout in ms
+    httpTimeout: 2000, // http timeout in ms
+    log: true, // Log wait-on progress
+  };
 
+  console.log(`Waiting for services to be ready: ${waitOnOptions.resources.join(', ')}`);
   try {
-    await waitForServices(resources, {
-      delay: 1000,
-      interval: 500,
-      timeout: 60000,
-      httpTimeout: 2000,
-    });
+    await waitOn(waitOnOptions);
+    console.log('Services are ready!');
   } catch (err) {
     console.error('Error waiting for services:', err);
     throw err; // Fail the test suite if services are not ready
