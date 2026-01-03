@@ -148,16 +148,73 @@ const createDefaultUser = async () => {
       },
     });
 
-    console.log('Default user created successfully.');
+    // Set admin role for stationManager in default organization
+    // This ensures the user has admin permissions for Better Auth Admin plugin
+    const { db, user } = await import('@wxyc/database');
+    const { eq } = await import('drizzle-orm');
+    await db
+      .update(user)
+      .set({ role: 'admin' })
+      .where(eq(user.id, newUser.id));
+
+    console.log('Default user created successfully with admin role.');
   } catch (error) {
     console.error('Error creating default user!');
     throw error;
   }
 };
 
-// Initialize default user before starting the server
+// Fix admin roles for existing stationManagers (one-time migration)
+const syncAdminRoles = async () => {
+  try {
+    const { db, user, member, organization } = await import('@wxyc/database');
+    const { eq, sql } = await import('drizzle-orm');
+    
+    const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
+    if (!defaultOrgSlug) {
+      console.log('[ADMIN PERMISSIONS] DEFAULT_ORG_SLUG not set, skipping admin role fix');
+      return;
+    }
+
+    // Find all users who are stationManager/admin/owner in default org but don't have admin role
+    const usersNeedingFix = await db
+      .select({
+        userId: user.id,
+        userEmail: user.email,
+        userRole: user.role,
+        memberRole: member.role,
+      })
+      .from(user)
+      .innerJoin(member, sql`${member.userId} = ${user.id}` as any)
+      .innerJoin(organization, sql`${member.organizationId} = ${organization.id}` as any)
+      .where(
+        sql`${organization.slug} = ${defaultOrgSlug}
+        AND ${member.role} IN ('admin', 'owner', 'stationManager')
+        AND (${user.role} IS NULL OR ${user.role} != 'admin')` as any
+      );
+
+    if (usersNeedingFix.length > 0) {
+      console.log(`[ADMIN PERMISSIONS] Found ${usersNeedingFix.length} users needing admin role fix:`);
+      for (const u of usersNeedingFix) {
+        console.log(`[ADMIN PERMISSIONS] - ${u.userEmail} (${u.memberRole}) - current role: ${u.userRole || 'null'}`);
+        await db
+          .update(user)
+          .set({ role: 'admin' })
+          .where(eq(user.id, u.userId));
+        console.log(`[ADMIN PERMISSIONS] - Fixed: ${u.userEmail} now has admin role`);
+      }
+    } else {
+      console.log('[ADMIN PERMISSIONS] All stationManagers already have admin role');
+    }
+  } catch (error) {
+    console.error('[ADMIN PERMISSIONS] Error fixing admin roles:', error);
+  }
+};
+
+// Initialize default user and sync admin roles before starting the server
 (async () => {
   await createDefaultUser();
+  await syncAdminRoles();
 
   app.listen(parseInt(port), async () => {
     console.log(`listening on port: ${port}! (auth service)`);
