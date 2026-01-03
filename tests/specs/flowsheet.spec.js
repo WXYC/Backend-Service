@@ -604,8 +604,8 @@ describe('Retrieve Playlist Object', () => {
       .expect(200);
 
     expect(playlist.body.show_djs).toEqual([
-      { id: 1, dj_name: 'Test dj1' },
-      { id: 2, dj_name: 'Test dj2' },
+      { id: global.primary_dj_id, dj_name: 'Test dj1' },
+      { id: global.secondary_dj_id, dj_name: 'Test dj2' },
     ]);
 
     expect(playlist.body.entries).toEqual(

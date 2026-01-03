@@ -163,15 +163,13 @@ export const invitation = pgTable(
   ]
 );
 
-export type NewDJ = InferInsertModel<typeof djs>;
-export type DJ = InferSelectModel<typeof djs>;
-export const djs = wxyc_schema.table('djs', {
-  id: serial('id').primaryKey(),
-  cognito_user_name: varchar('cognito_user_name').notNull().unique(),
-  real_name: varchar('real_name'),
-  dj_name: varchar('dj_name'),
+export type NewDJStats = InferInsertModel<typeof dj_stats>;
+export type DJStats = InferSelectModel<typeof dj_stats>;
+export const dj_stats = wxyc_schema.table('dj_stats', {
+  user_id: varchar('user_id', { length: 255 })
+    .primaryKey()
+    .references(() => user.id, { onDelete: 'cascade' }),
   shows_covered: smallint('shows_covered').default(0).notNull(),
-  add_date: date('add_date').defaultNow().notNull(),
 });
 
 export type NewShift = InferInsertModel<typeof schedule>;
@@ -185,8 +183,8 @@ export const schedule = wxyc_schema.table('schedule', {
   start_time: time('start_time').notNull(),
   show_duration: smallint('show_duration').notNull(), // In 15-minute blocs
   specialty_id: integer('specialty_id').references(() => specialty_shows.id), //null for regular shows
-  assigned_dj_id: integer('assigned_dj_id').references(() => djs.id),
-  assigned_dj_id2: integer('assigned_dj_id2').references(() => djs.id),
+  assigned_dj_id: varchar('assigned_dj_id', { length: 255 }).references(() => user.id),
+  assigned_dj_id2: varchar('assigned_dj_id2', { length: 255 }).references(() => user.id),
 });
 
 //SELECT date_trunc('week', current_timestamp + timestamp '${n} weeks') + interval '${schedule.day} days' + ${schedule.time}
@@ -199,7 +197,7 @@ export const shift_covers = wxyc_schema.table('shift_covers', {
     .references(() => schedule.id)
     .notNull(),
   shift_timestamp: timestamp('shift_timestamp').notNull(), //Timestamp to expire cover requests
-  cover_dj_id: integer('cover_dj_id').references(() => djs.id),
+  cover_dj_id: varchar('cover_dj_id', { length: 255 }).references(() => user.id),
   covered: boolean('covered').default(false),
 });
 
@@ -336,8 +334,8 @@ export type NewBinEntry = InferInsertModel<typeof bins>;
 export type BinEntry = InferSelectModel<typeof bins>;
 export const bins = wxyc_schema.table('bins', {
   id: serial('id').primaryKey(),
-  dj_id: integer('dj_id')
-    .references(() => djs.id)
+  dj_id: varchar('dj_id', { length: 255 })
+    .references(() => user.id, { onDelete: 'cascade' })
     .notNull(),
   album_id: integer('album_id')
     .references(() => library.id)
@@ -349,7 +347,7 @@ export type NewShow = InferInsertModel<typeof shows>;
 export type Show = InferSelectModel<typeof shows>;
 export const shows = wxyc_schema.table('shows', {
   id: serial('id').primaryKey(),
-  primary_dj_id: integer('primary_dj_id').references(() => djs.id),
+  primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => user.id),
   specialty_id: integer('specialty_id') //Null for regular shows
     .references(() => specialty_shows.id),
   show_name: varchar('show_name', { length: 128 }), //Null if not provided or specialty show
@@ -363,8 +361,8 @@ export const show_djs = wxyc_schema.table('show_djs', {
   show_id: integer('show_id')
     .references(() => shows.id)
     .notNull(),
-  dj_id: integer('dj_id')
-    .references(() => djs.id)
+  dj_id: varchar('dj_id', { length: 255 })
+    .references(() => user.id, { onDelete: 'cascade' })
     .notNull(),
   active: boolean('active').default(true),
 });

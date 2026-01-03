@@ -1,6 +1,6 @@
 import { QueryParams } from "../../controllers/flowsheet.controller";
 import { db } from "@wxyc/database";
-import { djs, flowsheet, FSEntry, Show } from "@wxyc/database"
+import { user, flowsheet, FSEntry, Show } from "@wxyc/database"
 import { asc, desc, eq } from "drizzle-orm";
 import { Request } from "express";
 import { createBackendMirrorMiddleware } from "./mirror.middleware.js";
@@ -26,15 +26,13 @@ const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
   const statements: string[] = [];
 
   const startMs = toMs(show.start_time ?? req.body?.start_time ?? nowMs);
-  const djId = Number.isFinite(Number(show.primary_dj_id ?? req.body?.dj_id))
-    ? Number(show.primary_dj_id ?? req.body?.dj_id)
-    : null;
+  const djId = show.primary_dj_id ?? req.body?.dj_id;
 
   if (!djId) return statements; // no DJ, nothing to do
   if (!show) return statements; // no show, nothing to do
 
   const dj = (
-    await db.select().from(djs).where(eq(djs.id, djId)).limit(1)
+    await db.select().from(user).where(eq(user.id, djId as string)).limit(1)
   )?.[0];
 
   if (!dj) return statements; // DJ not found
@@ -57,9 +55,9 @@ const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
        VALUES
         (@NEW_RS_ID,
          ${safeSqlNum(startingHour)},         -- STARTING_RADIO_HOUR (hour bucket)
-         ${safeSql(dj.real_name)},            -- DJ_NAME (real name)
+         ${safeSql(dj.realName || dj.name)},            -- DJ_NAME (real name)
          0,                                   -- DJ_ID (always 0 in legacy system)
-         ${safeSql(dj.dj_name)},              -- DJ_HANDLE (DJ name/handle)
+         ${safeSql(dj.djName || dj.name)},              -- DJ_HANDLE (DJ name/handle)
          ${safeSql(showName)},                -- SHOW_NAME
          ${safeSqlNum(specialtyId)},          -- SPECIALTY_SHOW_ID (0 if not specialty)
          ${safeSqlNum(workingHour)},          -- WORKING_HOUR (current working hour bucket)

@@ -247,7 +247,7 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
 };
 
 export type JoinRequestBody = {
-  dj_id: number;
+  dj_id: string;
   show_name?: string;
   specialty_id?: number;
 };
@@ -284,7 +284,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 };
 
 //TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
-export const leaveShow: RequestHandler<object, unknown, { dj_id: number }> = async (req, res, next) => {
+export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = async (req, res, next) => {
   const currentShow = await flowsheet_service.getLatestShow();
   if (currentShow?.end_time !== null) {
     res.status(404).json({ message: 'Bad Request: No active show session found.' });
@@ -313,7 +313,7 @@ export const getDJList: RequestHandler = async (req, res, next) => {
   try {
     const currentDJs = await flowsheet_service.getDJsInCurrentShow();
     const cleanDJList = currentDJs.map((dj) => {
-      return { id: dj.id, dj_name: dj.dj_name };
+      return { id: dj.id, dj_name: dj.djName || dj.name };
     });
     res.status(200).json(cleanDJList);
   } catch (e) {
@@ -327,7 +327,7 @@ export const getOnAir: RequestHandler = async (req, res, next) => {
   const { dj_id } = req.query;
 
   try {
-    const isActive = await flowsheet_service.getOnAirStatusForDJ(Number(dj_id));
+    const isActive = await flowsheet_service.getOnAirStatusForDJ(dj_id as string);
     res.status(200).json({ id: dj_id, is_live: isActive });
   } catch (e) {
     console.error('Error: Failed to retrieve current show');
@@ -368,7 +368,7 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
 
 export interface ShowInfo extends Show {
   specialty_show_name: string;
-  show_djs: { id: number | null; dj_name: string | null }[];
+  show_djs: { id: string | null; dj_name: string | null }[];
   entries: FSEntry[];
 }
 

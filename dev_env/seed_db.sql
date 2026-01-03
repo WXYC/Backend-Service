@@ -1,8 +1,14 @@
 -- Primary and secondary dj used in test automation
-INSERT INTO wxyc_schema.djs(cognito_user_name, dj_name) VALUES ('test_dj1', 'Test dj1');
-INSERT INTO wxyc_schema.djs(cognito_user_name, dj_name) VALUES ('test_dj2', 'Test dj2');
--- If you'd like to test with auth uncomment the following line with your dj portal username.
--- INSERT INTO wxyc_schema.djs(cognito_user_name, dj_name) VALUES ('your_dj_portal_username', 'Your DJ NAME');
+-- Note: In production, users should be created via better-auth service
+-- For test/dev environments, we create test users directly in the seed file
+
+-- Create test users for test automation
+-- These users are required for the test suite to function
+INSERT INTO auth_user (id, name, email, email_verified, username, dj_name, real_name, created_at, updated_at, app_skin)
+VALUES 
+  ('test-dj1-id-00000000000000000001', 'test_dj1', 'test_dj1@wxyc.org', true, 'test_dj1', 'Test dj1', 'Test DJ 1', NOW(), NOW(), 'modern-light'),
+  ('test-dj2-id-00000000000000000002', 'test_dj2', 'test_dj2@wxyc.org', true, 'test_dj2', 'Test dj2', 'Test DJ 2', NOW(), NOW(), 'modern-light')
+ON CONFLICT (id) DO NOTHING;
 
 -- Genres, media formats, artists, and albums used in test automation
 INSERT INTO wxyc_schema.genres(genre_name) VALUES ('Rock');

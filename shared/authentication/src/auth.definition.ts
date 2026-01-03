@@ -110,9 +110,9 @@ export const auth = betterAuth({
     },
   },
 
-  // Admin configuration - organization owners/admins are admins
+  // Admin configuration - organization owners/admins/stationManagers are admins
   admin: {
-    // Check if user has admin or owner role in the WXYC organization
+    // Check if user has admin, owner, or stationManager role in the WXYC organization
     requireAdmin: async (user: any, request?: any) => {
       if (!user?.id) return false;
 
@@ -125,7 +125,7 @@ export const auth = betterAuth({
           );
         }
 
-        // Query the member table to check if user has admin/owner role in WXYC org
+        // Query the member table to check if user has admin/owner/stationManager role in WXYC org
         const adminMember = await db
           .select({ memberId: member.id })
           .from(member)
@@ -136,7 +136,7 @@ export const auth = betterAuth({
           .where(
             sql`${member.userId} = ${user.id}
             AND ${organization.slug} = ${defaultOrgSlug}
-            AND ${member.role} IN ('admin', 'owner')` as any
+            AND ${member.role} IN ('admin', 'owner', 'stationManager')` as any
           )
           .limit(1);
 
