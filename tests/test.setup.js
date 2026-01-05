@@ -9,10 +9,8 @@ global.access_token = '';
 async function getUserIdsFromDatabase() {
   // Connect to database to get user IDs
   // Prioritize CI_DB_PORT for CI environments, then DB_PORT, then default
-  const dbPort = process.env.CI_DB_PORT 
-    ? parseInt(process.env.CI_DB_PORT) 
-    : (process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 5432);
-  
+  const dbPort = process.env.DB_PORT || 5432;
+
   const sql = postgres({
     host: process.env.DB_HOST || 'localhost',
     port: dbPort,
@@ -36,7 +34,6 @@ async function getUserIdsFromDatabase() {
 
     global.primary_dj_id = primaryUser[0].id;
     global.secondary_dj_id = secondaryUser[0].id;
-    
   } catch (err) {
     throw err;
   } finally {
