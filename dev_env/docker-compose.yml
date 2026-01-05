@@ -94,8 +94,8 @@ services:
       - DB_USERNAME=${DB_USERNAME}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
-      - BETTER_AUTH_URL=http://auth:8080/api/auth
-      - BETTER_AUTH_JWKS_URL=http://auth:8080/api/auth/jwks
+      - BETTER_AUTH_URL=http://auth:8080/auth
+      - BETTER_AUTH_JWKS_URL=http://auth:8080/auth/jwks
       - BETTER_AUTH_ISSUER=http://auth:8080
       - BETTER_AUTH_AUDIENCE=http://auth:8080
       - BETTER_AUTH_TRUSTED_ORIGINS=${BETTER_AUTH_TRUSTED_ORIGINS}
@@ -130,10 +130,10 @@ services:
       - AUTH_USERNAME=${AUTH_USERNAME}
       - COGNITO_USERPOOL_ID=${COGNITO_USERPOOL_ID}
       - DJ_APP_CLIENT_ID=${DJ_APP_CLIENT_ID}
-      - BETTER_AUTH_URL=http://auth:8080/api/auth
+      - BETTER_AUTH_URL=http://auth:8080/auth
       - BETTER_AUTH_AUDIENCE=http://auth:8080
       - BETTER_AUTH_ISSUER=http://auth:8080
-      - BETTER_AUTH_JWKS_URL=http://auth:8080/api/auth/jwks
+      - BETTER_AUTH_JWKS_URL=http://auth:8080/auth/jwks
     ports:
       - '${CI_PORT:-8081}:8080'
 

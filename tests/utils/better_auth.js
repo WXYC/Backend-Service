@@ -4,7 +4,7 @@
  */
 
 async function signIn() {
-  const authUrl = process.env.BETTER_AUTH_URL || 'http://localhost:8082/api/auth';
+  const authUrl = process.env.BETTER_AUTH_URL || 'http://localhost:8082/auth';
   const username = process.env.AUTH_USERNAME;
   const password = process.env.AUTH_PASSWORD;
 
@@ -35,22 +35,20 @@ async function signIn() {
     // Extract session cookies from response
     // In Node.js fetch, use getSetCookie() which returns an array of cookie strings
     const cookies = signInResponse.headers.getSetCookie();
-    
+
     if (!cookies || cookies.length === 0) {
       throw new Error('No session cookie received from sign-in');
     }
 
     // Combine all cookies into a single Cookie header
     // Extract just the cookie name=value part (before any attributes like ; Path=, ; HttpOnly, etc.)
-    const cookieHeader = cookies
-      .map(cookie => cookie.split(';')[0].trim())
-      .join('; ');
+    const cookieHeader = cookies.map((cookie) => cookie.split(';')[0].trim()).join('; ');
 
     // Get JWT token using the session cookie
     const jwtResponse = await fetch(`${authUrl}/token`, {
       method: 'GET',
       headers: {
-        'Cookie': cookieHeader,
+        Cookie: cookieHeader,
       },
       credentials: 'include',
     });
@@ -61,7 +59,7 @@ async function signIn() {
     }
 
     const jwtData = await jwtResponse.json();
-    
+
     if (!jwtData || !jwtData.token) {
       throw new Error('No token in JWT response');
     }
@@ -84,4 +82,3 @@ async function get_access_token() {
 }
 
 module.exports = get_access_token;
-

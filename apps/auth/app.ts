@@ -26,23 +26,23 @@ app.use(
 );
 
 // Mount the Better Auth handler for all auth routes
-// app.use() will handle all methods and paths under /api/auth
-app.use('/api/auth', toNodeHandler(auth));
+// app.use() will handle all methods and paths under /auth
+app.use('/auth', toNodeHandler(auth));
 
 //endpoint for healthchecks
 app.get('/healthcheck', async (req, res) => {
   const authServiceUrl = `http://localhost:${port}`; // Use the port the server is listening on
   try {
     // Make an internal HTTP request to the better-auth /ok endpoint
-    const response = await fetch(`${authServiceUrl}/api/auth/ok`);
+    const response = await fetch(`${authServiceUrl}/auth/ok`);
 
-    // Forward the status and body from the /api/auth/ok response
-    const data = await response.json(); // Assuming /api/auth/ok returns JSON
+    // Forward the status and body from the /auth/ok response
+    const data = await response.json(); // Assuming /auth/ok returns JSON
     res.status(response.status).json(data);
   } catch (error) {
-    console.error('Error proxying /healthcheck to /api/auth/ok:', error);
+    console.error('Error proxying /healthcheck to /auth/ok:', error);
     // If the internal call fails, it indicates a problem with the auth service itself
-    res.status(500).json({ message: 'Healthcheck failed: Could not reach internal /api/auth/ok endpoint' });
+    res.status(500).json({ message: 'Healthcheck failed: Could not reach internal /auth/ok endpoint' });
   }
 });
 

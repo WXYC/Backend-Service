@@ -8,21 +8,21 @@ import {
   session,
   user,
   verification,
-} from "@wxyc/database";
-import { betterAuth } from "better-auth";
-import { drizzleAdapter } from "better-auth/adapters/drizzle";
+} from '@wxyc/database';
+import { betterAuth } from 'better-auth';
+import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import {
   admin,
   jwt,
   organization as organizationPlugin,
   username,
-} from "better-auth/plugins";
-import { and, eq, sql } from "drizzle-orm";
-import { WXYCRoles } from "./auth.roles";
+} from 'better-auth/plugins';
+import { eq, sql } from 'drizzle-orm';
+import { WXYCRoles } from './auth.roles';
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
-    provider: "pg",
+    provider: 'pg',
     schema: {
       user: user,
       session: session,
@@ -36,15 +36,15 @@ export const auth = betterAuth({
   }),
 
   // Base URL for the auth service
-  baseURL: process.env.BETTER_AUTH_URL || "http://localhost:8082/api/auth",
+  baseURL: process.env.BETTER_AUTH_URL || 'http://localhost:8082/auth',
 
   // Trusted origins for CORS
   trustedOrigins: (
     process.env.BETTER_AUTH_TRUSTED_ORIGINS ||
     process.env.FRONTEND_SOURCE ||
-    "http://localhost:3000"
+    'http://localhost:3000'
   )
-    .split(",")
+    .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean),
 
@@ -98,12 +98,16 @@ export const auth = betterAuth({
       // Role information is included via custom JWT definePayload function above
       organizationHooks: {
         // Sync global user.role when members are added to default organization
-        afterAddMember: async ({ member, user: userData, organization: orgData }) => {
+        afterAddMember: async ({
+          member,
+          user: userData,
+          organization: orgData,
+        }) => {
           try {
             const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
             if (!defaultOrgSlug) {
               console.warn(
-                "DEFAULT_ORG_SLUG is not set, skipping admin role sync"
+                'DEFAULT_ORG_SLUG is not set, skipping admin role sync'
               );
               return;
             }
@@ -114,20 +118,20 @@ export const auth = betterAuth({
             }
 
             // Check if role should grant admin permissions
-            const adminRoles = ["stationManager", "admin", "owner"];
+            const adminRoles = ['stationManager', 'admin', 'owner'];
             if (adminRoles.includes(member.role)) {
               // Update user.role to "admin" for Better Auth Admin plugin
               const userId = userData.id;
               await db
                 .update(user)
-                .set({ role: "admin" })
+                .set({ role: 'admin' })
                 .where(eq(user.id, userId));
               console.log(
                 `Granted admin role to user ${userId} (${userData.email}) with ${member.role} role in default organization`
               );
             }
           } catch (error) {
-            console.error("Error syncing admin role in afterAddMember:", error);
+            console.error('Error syncing admin role in afterAddMember:', error);
           }
         },
 
@@ -142,7 +146,7 @@ export const auth = betterAuth({
             const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
             if (!defaultOrgSlug) {
               console.warn(
-                "DEFAULT_ORG_SLUG is not set, skipping admin role sync"
+                'DEFAULT_ORG_SLUG is not set, skipping admin role sync'
               );
               return;
             }
@@ -152,7 +156,7 @@ export const auth = betterAuth({
               return;
             }
 
-            const adminRoles = ["stationManager", "admin", "owner"];
+            const adminRoles = ['stationManager', 'admin', 'owner'];
             const shouldHaveAdmin = adminRoles.includes(member.role);
             const previouslyHadAdmin = adminRoles.includes(previousRole);
 
@@ -161,7 +165,7 @@ export const auth = betterAuth({
               // Promoted to admin role - grant admin
               await db
                 .update(user)
-                .set({ role: "admin" })
+                .set({ role: 'admin' })
                 .where(eq(user.id, userId));
               console.log(
                 `Granted admin role to user ${userId} (${userData.email}) after promotion to ${member.role}`
@@ -178,19 +182,22 @@ export const auth = betterAuth({
             }
           } catch (error) {
             console.error(
-              "Error syncing admin role in afterUpdateMemberRole:",
+              'Error syncing admin role in afterUpdateMemberRole:',
               error
             );
           }
         },
 
         // Sync global user.role when members are removed from default organization
-        afterRemoveMember: async ({ user: userData, organization: orgData }) => {
+        afterRemoveMember: async ({
+          user: userData,
+          organization: orgData,
+        }) => {
           try {
             const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
             if (!defaultOrgSlug) {
               console.warn(
-                "DEFAULT_ORG_SLUG is not set, skipping admin role sync"
+                'DEFAULT_ORG_SLUG is not set, skipping admin role sync'
               );
               return;
             }
@@ -228,7 +235,7 @@ export const auth = betterAuth({
             }
           } catch (error) {
             console.error(
-              "Error syncing admin role in afterRemoveMember:",
+              'Error syncing admin role in afterRemoveMember:',
               error
             );
           }
@@ -242,12 +249,11 @@ export const auth = betterAuth({
 
   user: {
     additionalFields: {
-      realName: { type: "string", required: false },
-      djName: { type: "string", required: false },
-      appSkin: { type: "string", required: true, defaultValue: "modern-light" },
+      realName: { type: 'string', required: false },
+      djName: { type: 'string', required: false },
+      appSkin: { type: 'string', required: true, defaultValue: 'modern-light' },
     },
   },
-
 });
 
 export type Auth = typeof auth;
