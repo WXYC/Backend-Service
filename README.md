@@ -42,7 +42,6 @@ $ cd Backend-Service && npm install # adjust this to represent whatever director
 ```
 
 - Install PostgreSQL such that you have access to the `psql` shell command.
-
   - MacOS:
 
   ```
@@ -98,13 +97,13 @@ DB_PORT=5432
 CI_DB_PORT=5433
 
 ### Better-Auth Configuration
-# Base URL for the auth service (must end with /api/auth)
-BETTER_AUTH_URL=http://localhost:8082/api/auth
+# Base URL for the auth service (must end with /auth)
+BETTER_AUTH_URL=http://localhost:8082/auth
 # JWKS endpoint URL for JWT verification (should be ${BETTER_AUTH_URL}/jwks)
-BETTER_AUTH_JWKS_URL=http://localhost:8082/api/auth/jwks
-# JWT issuer claim (better-auth sets this to the base URL without /api/auth path)
+BETTER_AUTH_JWKS_URL=http://localhost:8082/auth/jwks
+# JWT issuer claim (better-auth sets this to the base URL without /auth path)
 BETTER_AUTH_ISSUER=http://localhost:8082
-# JWT audience claim (better-auth sets this to the base URL without /api/auth path)
+# JWT audience claim (better-auth sets this to the base URL without /auth path)
 BETTER_AUTH_AUDIENCE=http://localhost:8082
 # Trusted origins for CORS (comma-separated)
 BETTER_AUTH_TRUSTED_ORIGINS=http://localhost:3000
@@ -115,7 +114,7 @@ AUTH_BYPASS=true  # Set to false to use real better-auth authentication in tests
 AUTH_USERNAME='test_dj1'  # Username for test account (used when AUTH_BYPASS=false)
 AUTH_PASSWORD={{placeholder}}  # Password for test account (used when AUTH_BYPASS=false)
 # When AUTH_BYPASS=false, tests will authenticate with better-auth service
-# Ensure BETTER_AUTH_URL points to accessible auth service (e.g., http://localhost:8082/api/auth)
+# Ensure BETTER_AUTH_URL points to accessible auth service (e.g., http://localhost:8082/auth)
 ```
 
 <span style="color:crimson">\*</span>Email/slack dvd or Adrian Bruno (adrian@abruno.dev) to request access to prod placeholder values.
@@ -127,7 +126,6 @@ A couple env variables of note:
 - AUTH_BYPASS: This flag will cause the auth middleware to use mocked user data and always pass to the next middleware logic. This is only meant to be set in local testing environments. **For proper testing, set this to false to use real better-auth authentication.**
 
 - AUTH_USERNAME:
-
   - When AUTH_BYPASS is active this env variable is added to the request context (res.locals) which may be used by further middleware.
   - When AUTH_BYPASS is inactive, this environment variable is used by the test suite to authenticate with better-auth service. Ensure this is set to a valid account's username that exists in the database.
 
