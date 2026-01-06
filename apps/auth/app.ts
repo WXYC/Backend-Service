@@ -194,7 +194,7 @@ const syncAdminRoles = async () => {
       );
 
     if (usersNeedingFix.length > 0) {
-      console.log(`[ADMIN PERMISSIONS] Found ${usersNeedingFix.length} users needing admin role fix:`);
+      console.log(`[ADMIN PERMISSIONS] Found ${usersNeedingFix.length} users needing admin role fix: `);
       for (const u of usersNeedingFix) {
         console.log(`[ADMIN PERMISSIONS] - ${u.userEmail} (${u.memberRole}) - current role: ${u.userRole || 'null'}`);
         await db
