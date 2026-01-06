@@ -57,9 +57,12 @@ export const auth = betterAuth({
   },
 
   // Subdomain-friendly cookie setting (recommended over cross-site cookies)
-  /*advanced: {
-    crossSubDomainCookies: { enabled: true },
-  },*/
+  advanced: {
+    defaultCookieAttributes: {
+      sameSite: "none",
+      secure: true
+    }
+  },
 
   plugins: [
     admin(),
