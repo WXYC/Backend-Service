@@ -131,8 +131,15 @@
     {
       "idx": 21,
       "version": "7",
-      "when": 1767161700000,
-      "tag": "0021_replace_djs_with_user",
+      "when": 1767666836924,
+      "tag": "0021_user-table-migration",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1767751296757,
+      "tag": "0022_library_cross_reference",
       "breakpoints": true
     }
   ]
