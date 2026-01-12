@@ -61,9 +61,7 @@ export const session = pgTable(
     impersonatedBy: varchar('impersonated_by', { length: 255 }),
     activeOrganizationId: varchar('active_organization_id', { length: 255 }),
   },
-  (table) => [
-    uniqueIndex('auth_session_token_key').on(table.token),
-  ]
+  (table) => [uniqueIndex('auth_session_token_key').on(table.token)]
 );
 
 export const account = pgTable(
@@ -85,12 +83,7 @@ export const account = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [
-    uniqueIndex('auth_account_provider_account_key').on(
-      table.providerId,
-      table.accountId
-    ),
-  ]
+  (table) => [uniqueIndex('auth_account_provider_account_key').on(table.providerId, table.accountId)]
 );
 
 export const verification = pgTable('auth_verification', {
@@ -119,9 +112,7 @@ export const organization = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     metadata: text('metadata'),
   },
-  (table) => [
-    uniqueIndex('auth_organization_slug_key').on(table.slug),
-  ]
+  (table) => [uniqueIndex('auth_organization_slug_key').on(table.slug)]
 );
 
 export const member = pgTable(
@@ -137,9 +128,7 @@ export const member = pgTable(
     role: varchar('role', { length: 255 }).notNull().default('member'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [
-    uniqueIndex('auth_member_org_user_key').on(table.organizationId, table.userId),
-  ]
+  (table) => [uniqueIndex('auth_member_org_user_key').on(table.organizationId, table.userId)]
 );
 
 export const invitation = pgTable(
@@ -158,9 +147,7 @@ export const invitation = pgTable(
       .references(() => user.id, { onDelete: 'cascade' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [
-    index('auth_invitation_email_idx').on(table.email),
-  ]
+  (table) => [index('auth_invitation_email_idx').on(table.email)]
 );
 
 export type NewDJStats = InferInsertModel<typeof dj_stats>;
@@ -342,6 +329,33 @@ export const bins = wxyc_schema.table('bins', {
     .notNull(),
   track_title: varchar('track_title', { length: 128 }),
 });
+
+export type NewGenreArtistCrossreference = InferInsertModel<typeof genre_artist_crossreference>;
+export type GenreArtistCrossreference = InferSelectModel<typeof genre_artist_crossreference>;
+export const genre_artist_crossreference = wxyc_schema.table(
+  'genre_artist_crossreference',
+  {
+    artist_id: integer('artist_id')
+      .notNull()
+      .references(() => artists.id),
+    genre_id: integer('genre_id')
+      .notNull()
+      .references(() => genres.id),
+    artist_genre_code: integer('artist_genre_code').notNull(),
+  },
+  (table) => [uniqueIndex('artist_genre_key').on(table.artist_id, table.genre_id)]
+);
+
+export type NewArtistLibraryCrossreference = InferInsertModel<typeof artist_library_crossreference>;
+export type ArtistLibraryCrossreference = InferSelectModel<typeof artist_library_crossreference>;
+export const artist_library_crossreference = wxyc_schema.table(
+  'artist_library_crossreference',
+  {
+    artist_id: integer('artist_id').references(() => artists.id),
+    library_id: integer('library_id').references(() => library.id),
+  },
+  (table) => [uniqueIndex('library_id_artist_id').on(table.artist_id, table.library_id)]
+);
 
 export type NewShow = InferInsertModel<typeof shows>;
 export type Show = InferSelectModel<typeof shows>;
