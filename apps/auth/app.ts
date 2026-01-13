@@ -152,10 +152,7 @@ const createDefaultUser = async () => {
     // This ensures the user has admin permissions for Better Auth Admin plugin
     const { db, user } = await import('@wxyc/database');
     const { eq } = await import('drizzle-orm');
-    await db
-      .update(user)
-      .set({ role: 'admin' })
-      .where(eq(user.id, newUser.id));
+    await db.update(user).set({ role: 'admin' }).where(eq(user.id, newUser.id));
 
     console.log('Default user created successfully with admin role.');
   } catch (error) {
@@ -169,7 +166,7 @@ const syncAdminRoles = async () => {
   try {
     const { db, user, member, organization } = await import('@wxyc/database');
     const { eq, sql } = await import('drizzle-orm');
-    
+
     const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
     if (!defaultOrgSlug) {
       console.log('[ADMIN PERMISSIONS] DEFAULT_ORG_SLUG not set, skipping admin role fix');
@@ -197,10 +194,7 @@ const syncAdminRoles = async () => {
       console.log(`[ADMIN PERMISSIONS] Found ${usersNeedingFix.length} users needing admin role fix: `);
       for (const u of usersNeedingFix) {
         console.log(`[ADMIN PERMISSIONS] - ${u.userEmail} (${u.memberRole}) - current role: ${u.userRole || 'null'}`);
-        await db
-          .update(user)
-          .set({ role: 'admin' })
-          .where(eq(user.id, u.userId));
+        await db.update(user).set({ role: 'admin' }).where(eq(user.id, u.userId));
         console.log(`[ADMIN PERMISSIONS] - Fixed: ${u.userEmail} now has admin role`);
       }
     } else {

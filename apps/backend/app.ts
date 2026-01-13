@@ -21,6 +21,7 @@ const app = express();
 //Interpret parse json into js objects
 app.use(express.json());
 
+
 //CORS
 app.use(
   cors({
