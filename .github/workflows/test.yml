@@ -30,6 +30,9 @@ jobs:
       - name: Install Dependencies
         run: npm install --only=dev
 
+      - name: Lint .env file
+        run: npm run lint:env
+
       - name: Set Up Test Environment
         run: touch .env && npm run ci:env
 
