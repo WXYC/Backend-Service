@@ -108,6 +108,14 @@ BETTER_AUTH_AUDIENCE=http://localhost:8082
 # Trusted origins for CORS (comma-separated)
 BETTER_AUTH_TRUSTED_ORIGINS=http://localhost:3000
 
+### Password Reset Email (SES)
+AWS_ACCESS_KEY_ID={{placeholder}}
+AWS_SECRET_ACCESS_KEY={{placeholder}}
+AWS_REGION=us-east-1
+SES_FROM_EMAIL=no-reply@example.com
+# Where users land after clicking the reset link
+PASSWORD_RESET_REDIRECT_URL=http://localhost:3000/reset-password
+
 ### Testing Env Variables
 TEST_HOST=http://localhost
 AUTH_BYPASS=true  # Set to false to use real better-auth authentication in tests

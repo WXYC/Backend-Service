@@ -19,6 +19,21 @@ import {
 } from 'better-auth/plugins';
 import { eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
+import { sendResetPasswordEmail } from './email';
+
+const buildResetUrl = (url: string, redirectTo?: string) => {
+  if (!redirectTo) {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set('redirectTo', redirectTo);
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+};
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
@@ -54,6 +69,20 @@ export const auth = betterAuth({
     requireEmailVerification: false,
     minPasswordLength: 8,
     disableSignUp: true,
+    sendResetPassword: async ({ user, url }, request) => {
+      const redirectTo = process.env.PASSWORD_RESET_REDIRECT_URL?.trim();
+      const resetUrl = buildResetUrl(url, redirectTo);
+
+      void sendResetPasswordEmail({
+        to: user.email,
+        resetUrl,
+      }).catch((error) => {
+        console.error('Error sending password reset email:', error);
+      });
+    },
+    onPasswordReset: async ({ user }, request) => {
+      console.log(`Password for user ${user.email} has been reset.`);
+    },
   },
 
   // Subdomain-friendly cookie setting (recommended over cross-site cookies)
