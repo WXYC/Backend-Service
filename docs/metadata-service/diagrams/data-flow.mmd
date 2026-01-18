@@ -1,0 +1,29 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#dbeafe', 'primaryTextColor': '#1e40af', 'primaryBorderColor': '#3b82f6', 'lineColor': '#374151'}}}%%
+flowchart TD
+    subgraph GET["GET /flowsheet (Read Path)"]
+        A[Mobile Apps<br/>iOS / Android] --> B{Cache Hit?}
+        B -->|Yes| C[Return Cached Data]
+        B -->|No| D[Query PostgreSQL<br/>with LEFT JOINs]
+        D --> E[Store in Cache]
+        E --> F[Return Response]
+    end
+
+    GET ~~~ POST
+
+    subgraph POST["POST /flowsheet (Write Path)"]
+        G[DJ Site] --> H[Insert to PostgreSQL]
+        H --> I[Invalidate Cache]
+        I --> J[Return Response]
+        H -.->|fire-and-forget| K[Metadata Service]
+        K --> L[External APIs<br/>Discogs, Spotify, Apple Music]
+        L --> M[Store Metadata in DB]
+    end
+
+    style A fill:#dbeafe,stroke:#3b82f6
+    style G fill:#dbeafe,stroke:#3b82f6
+    style B fill:#fef3c7,stroke:#f59e0b
+    style C fill:#dcfce7,stroke:#22c55e
+    style F fill:#dcfce7,stroke:#22c55e
+    style J fill:#dcfce7,stroke:#22c55e
+    style I fill:#fee2e2,stroke:#ef4444
+    style K fill:#f3e8ff,stroke:#9333ea

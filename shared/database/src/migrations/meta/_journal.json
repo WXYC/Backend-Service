@@ -141,6 +141,13 @@
       "when": 1767751296757,
       "tag": "0022_library_cross_reference",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1768708593895,
+      "tag": "0023_metadata_tables",
+      "breakpoints": true
     }
   ]
 }

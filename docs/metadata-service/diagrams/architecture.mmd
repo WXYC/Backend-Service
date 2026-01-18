@@ -1,0 +1,35 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#dbeafe', 'primaryTextColor': '#1e40af', 'primaryBorderColor': '#3b82f6', 'lineColor': '#374151', 'secondaryColor': '#dcfce7', 'tertiaryColor': '#fef3c7'}}}%%
+flowchart TB
+    subgraph Client["iOS Client"]
+        C[Client App]
+    end
+
+    subgraph Backend["Backend Service"]
+        FC[Flowsheet Controller]
+        FS[Flowsheet Service]
+        MS[Metadata Service<br/>fire-and-forget]
+    end
+
+    subgraph Database["PostgreSQL"]
+        FT[(flowsheet)]
+        AMT[(album_metadata)]
+        ART[(artist_metadata)]
+    end
+
+    subgraph External["External APIs"]
+        DG[Discogs API]
+        SP[Spotify API]
+        AM[Apple Music API]
+    end
+
+    C -->|GET/POST /flowsheet| FC
+    FC --> FS
+    FS <-->|LEFT JOIN queries| FT
+    FC -.->|async| MS
+    MS --> DG
+    MS --> SP
+    MS --> AM
+    MS -->|upsert| AMT
+    MS -->|upsert| ART
+    FT ---|FK| AMT
+    FT ---|FK| ART

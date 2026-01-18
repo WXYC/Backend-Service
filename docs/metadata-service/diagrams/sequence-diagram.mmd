@@ -1,0 +1,29 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'actorBkg': '#dbeafe', 'actorBorder': '#3b82f6', 'actorTextColor': '#1e40af', 'signalColor': '#374151', 'signalTextColor': '#374151'}}}%%
+sequenceDiagram
+    autonumber
+    participant DJ as DJ Site
+    participant Mobile as Mobile Apps
+    participant API as Backend API
+    participant DB as PostgreSQL
+    participant Meta as Metadata Service
+    participant Ext as External APIs
+
+    rect rgb(254, 243, 199)
+        Note over DJ,Ext: 1. Add Track (with async metadata fetch)
+        DJ->>+API: POST /flowsheet {artist, album, track}
+        API->>DB: INSERT INTO flowsheet
+        DB-->>API: FSEntry (new entry)
+        API-->>DJ: 200 OK + FSEntry (metadata may be null)
+        API-)Meta: fetchAndCacheMetadata() [async, fire-and-forget]
+        Meta->>Ext: Discogs, Spotify, Apple Music
+        Ext-->>Meta: artwork, urls, bio
+        Meta->>DB: UPSERT album_metadata, artist_metadata
+    end
+
+    rect rgb(220, 252, 231)
+        Note over Mobile,Ext: 2. Get Entries
+        Mobile->>+API: GET /flowsheet?page=0&limit=50
+        API->>DB: SELECT flowsheet LEFT JOIN metadata tables
+        DB-->>API: entries WITH metadata
+        API-->>-Mobile: 200 OK + IFSEntry[] with metadata
+    end

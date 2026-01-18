@@ -1,7 +1,8 @@
 import { Request, RequestHandler } from 'express';
 import { Mutex } from 'async-mutex';
-import { NewFSEntry, FSEntry, Show, ShowDJ } from "@wxyc/database";
+import { NewFSEntry, FSEntry, Show, ShowDJ, library } from "@wxyc/database";
 import * as flowsheet_service from '../services/flowsheet.service.js';
+import { fetchAndCacheMetadata } from '../services/metadata/index.js';
 
 export type QueryParams = {
   page?: string;
@@ -13,6 +14,18 @@ export type QueryParams = {
 
 export interface IFSEntry extends FSEntry {
   rotation_play_freq: string | null;
+  // Album metadata from cache
+  artwork_url: string | null;
+  discogs_url: string | null;
+  release_year: number | null;
+  spotify_url: string | null;
+  apple_music_url: string | null;
+  youtube_music_url: string | null;
+  bandcamp_url: string | null;
+  soundcloud_url: string | null;
+  // Artist metadata from cache
+  artist_bio: string | null;
+  artist_wikipedia_url: string | null;
 }
 
 const MAX_ITEMS = 200;
@@ -155,6 +168,18 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
 
             const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
 
+            // Fire-and-forget: fetch metadata for this entry
+            if (completedEntry.artist_name) {
+              fetchAndCacheMetadata({
+                albumId: completedEntry.album_id ?? undefined,
+                artistId: undefined, // Will be looked up from library
+                rotationId: completedEntry.rotation_id ?? undefined,
+                artistName: completedEntry.artist_name,
+                albumTitle: completedEntry.album_title ?? undefined,
+                trackTitle: completedEntry.track_title ?? undefined,
+              }).catch((err) => console.error('[Flowsheet] Metadata fetch failed:', err));
+            }
+
             res.status(200).json(completedEntry);
           } else if (
             body.album_title === undefined ||
@@ -170,6 +195,19 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
             };
 
             const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+
+            // Fire-and-forget: fetch metadata for this entry
+            if (completedEntry.artist_name) {
+              fetchAndCacheMetadata({
+                albumId: completedEntry.album_id ?? undefined,
+                artistId: undefined,
+                rotationId: completedEntry.rotation_id ?? undefined,
+                artistName: completedEntry.artist_name,
+                albumTitle: completedEntry.album_title ?? undefined,
+                trackTitle: completedEntry.track_title ?? undefined,
+              }).catch((err) => console.error('[Flowsheet] Metadata fetch failed:', err));
+            }
+
             res.status(200).json(completedEntry);
           }
         } catch (e) {
