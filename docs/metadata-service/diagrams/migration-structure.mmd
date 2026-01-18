@@ -1,0 +1,59 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#fef9c3', 'primaryTextColor': '#713f12', 'primaryBorderColor': '#eab308', 'lineColor': '#374151'}}}%%
+erDiagram
+    flowsheet {
+        serial id PK
+        integer album_id FK
+        varchar artist_name
+        varchar album_title
+        varchar track_title
+        integer show_id FK
+        serial play_order
+        timestamp add_time
+    }
+
+    album_metadata {
+        serial id PK
+        integer album_id FK "UNIQUE - links to library"
+        varchar cache_key "UNIQUE - for non-library"
+        varchar artwork_url
+        varchar spotify_url
+        varchar apple_music_url
+        varchar discogs_url
+        varchar youtube_music_url
+        varchar bandcamp_url
+        varchar soundcloud_url
+        smallint release_year
+        boolean is_rotation
+        timestamp last_accessed
+        timestamp created_at
+    }
+
+    artist_metadata {
+        serial id PK
+        integer artist_id FK "UNIQUE - links to artists"
+        varchar cache_key "UNIQUE - for non-library"
+        integer discogs_artist_id
+        text bio
+        varchar wikipedia_url
+        timestamp last_accessed
+        timestamp created_at
+    }
+
+    library {
+        serial id PK
+        integer artist_id FK
+        varchar album_title
+        varchar label
+    }
+
+    artists {
+        serial id PK
+        varchar artist_name
+        integer genre_id FK
+    }
+
+    flowsheet ||--o| album_metadata : "LEFT JOIN via album_id"
+    flowsheet ||--o| library : "album_id"
+    library ||--o| album_metadata : "album_id"
+    library ||--|| artists : "artist_id"
+    artists ||--o| artist_metadata : "artist_id"

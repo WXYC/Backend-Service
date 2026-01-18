@@ -445,3 +445,67 @@ export const rotation_library_view = wxyc_schema.view('rotation_library_view').a
     .innerJoin(rotation, eq(library.id, rotation.album_id))
     .innerJoin(artists, eq(artists.id, library.artist_id));
 });
+
+// Metadata cache tables for external API data (Discogs, Spotify, etc.)
+export type NewAlbumMetadata = InferInsertModel<typeof album_metadata>;
+export type AlbumMetadata = InferSelectModel<typeof album_metadata>;
+export const album_metadata = wxyc_schema.table(
+  'album_metadata',
+  {
+    id: serial('id').primaryKey(),
+    album_id: integer('album_id').references(() => library.id).unique(), // FK to library - for known albums
+    cache_key: varchar('cache_key', { length: 512 }).unique(), // For unknown albums (no album_id)
+
+    // Discogs metadata
+    discogs_release_id: integer('discogs_release_id'),
+    discogs_url: varchar('discogs_url', { length: 512 }),
+    release_year: smallint('release_year'),
+    artwork_url: varchar('artwork_url', { length: 512 }),
+
+    // Streaming URLs
+    spotify_url: varchar('spotify_url', { length: 512 }),
+    apple_music_url: varchar('apple_music_url', { length: 512 }),
+    youtube_music_url: varchar('youtube_music_url', { length: 512 }),
+    bandcamp_url: varchar('bandcamp_url', { length: 512 }),
+    soundcloud_url: varchar('soundcloud_url', { length: 512 }),
+
+    // LRU cache management
+    is_rotation: boolean('is_rotation').default(false).notNull(),
+    last_accessed: timestamp('last_accessed').defaultNow().notNull(),
+    created_at: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => {
+    return {
+      albumIdIdx: index('album_metadata_album_id_idx').on(table.album_id),
+      cacheKeyIdx: index('album_metadata_cache_key_idx').on(table.cache_key),
+      lastAccessedIdx: index('album_metadata_last_accessed_idx').on(table.last_accessed),
+    };
+  }
+);
+
+export type NewArtistMetadata = InferInsertModel<typeof artist_metadata>;
+export type ArtistMetadata = InferSelectModel<typeof artist_metadata>;
+export const artist_metadata = wxyc_schema.table(
+  'artist_metadata',
+  {
+    id: serial('id').primaryKey(),
+    artist_id: integer('artist_id').references(() => artists.id).unique(), // FK to artists - for known artists
+    cache_key: varchar('cache_key', { length: 256 }).unique(), // For unknown artists (no artist_id)
+
+    // Discogs artist data
+    discogs_artist_id: integer('discogs_artist_id'),
+    bio: text('bio'),
+    wikipedia_url: varchar('wikipedia_url', { length: 512 }),
+
+    // LRU cache management
+    last_accessed: timestamp('last_accessed').defaultNow().notNull(),
+    created_at: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => {
+    return {
+      artistIdIdx: index('artist_metadata_artist_id_idx').on(table.artist_id),
+      cacheKeyIdx: index('artist_metadata_cache_key_idx').on(table.cache_key),
+      lastAccessedIdx: index('artist_metadata_last_accessed_idx').on(table.last_accessed),
+    };
+  }
+);
