@@ -26,10 +26,17 @@ const CACHE_TTL_MS = 30_000; // 30 seconds
 let recentEntriesCache: IFSEntry[] | null = null;
 let cacheTimestamp = 0;
 
+// Track when flowsheet was last modified (for HTTP If-Modified-Since)
+let lastModifiedTimestamp = new Date();
+
+/** Get the timestamp of the last flowsheet modification */
+export const getLastModified = (): Date => lastModifiedTimestamp;
+
 /** Invalidate the recent entries cache (call after any write operation) */
 export const invalidateRecentEntriesCache = () => {
   recentEntriesCache = null;
   cacheTimestamp = 0;
+  lastModifiedTimestamp = new Date();
 };
 
 const FSEntryFields = {

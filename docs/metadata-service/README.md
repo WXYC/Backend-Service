@@ -7,6 +7,7 @@ This document describes the metadata service integration that moves metadata fet
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [In-Memory Cache](#in-memory-cache)
+- [HTTP Cache Headers](#http-cache-headers)
 - [Fire-and-Forget Metadata Fetch](#fire-and-forget-metadata-fetch)
 - [Migration Structure](#migration-structure)
 - [Network Sequence Diagram](#network-sequence-diagram)
@@ -86,6 +87,55 @@ The cache is automatically invalidated when:
 ### Why 30s TTL?
 
 Metadata is fetched fire-and-forget after entries are added. The short TTL ensures clients eventually see metadata without needing complex invalidation logic for async metadata updates.
+
+---
+
+## HTTP Cache Headers
+
+The flowsheet endpoints support standard HTTP caching via `Last-Modified` and `If-Modified-Since` headers. This allows clients to avoid re-downloading unchanged data.
+
+### How It Works
+
+1. **Server response**: Every successful GET response includes a `Last-Modified` header
+2. **Client request**: Client stores this timestamp and sends it as `If-Modified-Since` on subsequent requests
+3. **304 Not Modified**: If the flowsheet hasn't changed, server returns 304 (no body)
+4. **200 OK**: If the flowsheet has changed, server returns full response with updated `Last-Modified`
+
+### Supported Endpoints
+
+| Endpoint | Support |
+|----------|---------|
+| `GET /flowsheet` | Yes |
+| `GET /flowsheet/latest` | Yes |
+
+### Example Flow
+
+```
+# First request
+GET /flowsheet
+→ 200 OK
+→ Last-Modified: Sun, 18 Jan 2026 10:30:00 GMT
+→ [entries...]
+
+# Subsequent request (no changes)
+GET /flowsheet
+If-Modified-Since: Sun, 18 Jan 2026 10:30:00 GMT
+→ 304 Not Modified
+→ (no body)
+
+# After a track is added
+GET /flowsheet
+If-Modified-Since: Sun, 18 Jan 2026 10:30:00 GMT
+→ 200 OK
+→ Last-Modified: Sun, 18 Jan 2026 10:35:00 GMT
+→ [entries...]
+```
+
+### Benefits
+
+- **Reduced bandwidth**: 304 responses have no body
+- **Native iOS support**: `URLSession` handles 304 responses automatically
+- **Proxy-friendly**: Standard HTTP caching semantics work with CDNs/proxies
 
 ---
 
