@@ -11,6 +11,7 @@ import {
 } from '@wxyc/database';
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
+import { createAuthMiddleware } from 'better-auth/api';
 import {
   admin,
   jwt,
@@ -287,6 +288,34 @@ export const auth = betterAuth({
       },
     }),
   ],
+
+  hooks: {
+    after: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== '/admin/create-user') {
+        return;
+      }
+
+      const email = ctx.body?.email;
+      if (!email || typeof email !== 'string') {
+        return;
+      }
+
+      const callbackURL =
+        process.env.EMAIL_VERIFICATION_REDIRECT_URL?.trim() ||
+        process.env.FRONTEND_SOURCE?.trim();
+
+      void auth.api
+        .sendVerificationEmail({
+          body: {
+            email,
+            callbackURL,
+          },
+        })
+        .catch((error) => {
+          console.error('Error triggering verification email:', error);
+        });
+    }),
+  },
 
   // Enable username-based login
   username: { enabled: true },
