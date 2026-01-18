@@ -115,6 +115,8 @@ AWS_REGION=us-east-1
 SES_FROM_EMAIL=no-reply@example.com
 # Where users land after clicking the reset link
 PASSWORD_RESET_REDIRECT_URL=http://localhost:3000/reset-password
+# Where users land after verifying their email
+EMAIL_VERIFICATION_REDIRECT_URL=http://localhost:3000/login
 
 ### Testing Env Variables
 TEST_HOST=http://localhost

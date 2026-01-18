@@ -19,7 +19,7 @@ import {
 } from 'better-auth/plugins';
 import { eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
-import { sendResetPasswordEmail } from './email';
+import { sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 
 const buildResetUrl = (url: string, redirectTo?: string) => {
   if (!redirectTo) {
@@ -66,7 +66,7 @@ export const auth = betterAuth({
   // Email+password only (social omitted), admin-only creation is in UI
   emailAndPassword: {
     enabled: true,
-    requireEmailVerification: false,
+    requireEmailVerification: true,
     minPasswordLength: 8,
     disableSignUp: true,
     sendResetPassword: async ({ user, url }, request) => {
@@ -83,6 +83,18 @@ export const auth = betterAuth({
     onPasswordReset: async ({ user }, request) => {
       console.log(`Password for user ${user.email} has been reset.`);
     },
+  },
+
+  emailVerification: {
+    sendVerificationEmail: async ({ user, url }, request) => {
+      void sendVerificationEmailMessage({
+        to: user.email,
+        verificationUrl: url,
+      }).catch((error) => {
+        console.error('Error sending verification email:', error);
+      });
+    },
+    autoSignInAfterVerification: true,
   },
 
   // Subdomain-friendly cookie setting (recommended over cross-site cookies)

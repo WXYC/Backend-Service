@@ -30,6 +30,11 @@ type ResetEmailInput = {
   resetUrl: string;
 };
 
+type VerificationEmailInput = {
+  to: string;
+  verificationUrl: string;
+};
+
 export const sendResetPasswordEmail = async ({
   to,
   resetUrl,
@@ -44,6 +49,38 @@ export const sendResetPasswordEmail = async ({
   const htmlBody = `
     <p>Click the link below to reset your password:</p>
     <p><a href="${resetUrl}">${resetUrl}</a></p>
+  `.trim();
+
+  const command = new SendEmailCommand({
+    Source: from,
+    Destination: { ToAddresses: [to] },
+    Message: {
+      Subject: { Data: subject },
+      Body: {
+        Text: { Data: textBody },
+        Html: { Data: htmlBody },
+      },
+    },
+  });
+
+  const client = getSesClient();
+  await client.send(command);
+};
+
+export const sendVerificationEmailMessage = async ({
+  to,
+  verificationUrl,
+}: VerificationEmailInput) => {
+  const from = process.env.SES_FROM_EMAIL;
+  if (!from) {
+    throw new Error('Missing AWS SES configuration: SES_FROM_EMAIL');
+  }
+
+  const subject = 'Verify your email address';
+  const textBody = `Click the link to verify your email: ${verificationUrl}`;
+  const htmlBody = `
+    <p>Click the link below to verify your email address:</p>
+    <p><a href="${verificationUrl}">${verificationUrl}</a></p>
   `.trim();
 
   const command = new SendEmailCommand({
