@@ -1,0 +1,36 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#dbeafe', 'primaryTextColor': '#1e40af', 'primaryBorderColor': '#3b82f6', 'lineColor': '#374151'}}}%%
+flowchart TD
+    A[POST /flowsheet - add track] --> B[flowsheet_service.addTrack]
+    B --> C[Insert to DB]
+    C --> D{Has artist_name?}
+
+    D -->|NO| E[Skip metadata fetch<br/>talkset/message]
+    D -->|YES| F[Fire & Forget:<br/>fetchAndCacheMetadata<br/>.catch - errors logged]
+
+    F -.->|async non-blocking| G[Metadata Service]
+
+    subgraph Providers["Metadata Providers"]
+        H[Discogs Provider<br/>artwork_url, release_year<br/>discogs_url]
+        I[Spotify Provider<br/>spotify_url]
+        J[Apple Music Provider<br/>apple_music_url]
+        K[Search URL Provider<br/>youtube_url, bandcamp_url<br/>soundcloud_url]
+    end
+
+    G --> H
+    G --> I
+    G --> J
+    G --> K
+
+    H --> L[Upsert to Database<br/>album_metadata<br/>artist_metadata]
+    I --> L
+    J --> L
+    K --> L
+
+    L --> M[GET /flowsheet returns<br/>entries WITH metadata<br/>via LEFT JOIN]
+
+    style A fill:#dbeafe,stroke:#3b82f6
+    style D fill:#fef3c7,stroke:#f59e0b
+    style E fill:#f1f5f9,stroke:#94a3b8
+    style F fill:#fee2e2,stroke:#ef4444
+    style L fill:#fef9c3,stroke:#eab308
+    style M fill:#dcfce7,stroke:#22c55e
