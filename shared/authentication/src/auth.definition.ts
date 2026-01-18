@@ -11,6 +11,7 @@ import {
 } from '@wxyc/database';
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
+import { createAuthMiddleware } from 'better-auth/api';
 import {
   admin,
   jwt,
@@ -19,6 +20,21 @@ import {
 } from 'better-auth/plugins';
 import { eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
+import { sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
+
+const buildResetUrl = (url: string, redirectTo?: string) => {
+  if (!redirectTo) {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set('redirectTo', redirectTo);
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+};
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
@@ -51,9 +67,35 @@ export const auth = betterAuth({
   // Email+password only (social omitted), admin-only creation is in UI
   emailAndPassword: {
     enabled: true,
-    requireEmailVerification: false,
+    requireEmailVerification: true,
     minPasswordLength: 8,
     disableSignUp: true,
+    sendResetPassword: async ({ user, url }, request) => {
+      const redirectTo = process.env.PASSWORD_RESET_REDIRECT_URL?.trim();
+      const resetUrl = buildResetUrl(url, redirectTo);
+
+      void sendResetPasswordEmail({
+        to: user.email,
+        resetUrl,
+      }).catch((error) => {
+        console.error('Error sending password reset email:', error);
+      });
+    },
+    onPasswordReset: async ({ user }, request) => {
+      console.log(`Password for user ${user.email} has been reset.`);
+    },
+  },
+
+  emailVerification: {
+    sendVerificationEmail: async ({ user, url }, request) => {
+      void sendVerificationEmailMessage({
+        to: user.email,
+        verificationUrl: url,
+      }).catch((error) => {
+        console.error('Error sending verification email:', error);
+      });
+    },
+    autoSignInAfterVerification: true,
   },
 
   // Subdomain-friendly cookie setting (recommended over cross-site cookies)
@@ -246,6 +288,34 @@ export const auth = betterAuth({
       },
     }),
   ],
+
+  hooks: {
+    after: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== '/admin/create-user') {
+        return;
+      }
+
+      const email = ctx.body?.email;
+      if (!email || typeof email !== 'string') {
+        return;
+      }
+
+      const callbackURL =
+        process.env.EMAIL_VERIFICATION_REDIRECT_URL?.trim() ||
+        process.env.FRONTEND_SOURCE?.trim();
+
+      void auth.api
+        .sendVerificationEmail({
+          body: {
+            email,
+            callbackURL,
+          },
+        })
+        .catch((error) => {
+          console.error('Error triggering verification email:', error);
+        });
+    }),
+  },
 
   // Enable username-based login
   username: { enabled: true },
