@@ -2,6 +2,10 @@ const get_access_token = require('../utils/better_auth');
 const waitOn = require('wait-on');
 const postgres = require('postgres');
 
+// Ensure mock services are enabled for testing
+process.env.NODE_ENV = 'test';
+process.env.USE_MOCK_SERVICES = 'true';
+
 global.primary_dj_id = null;
 global.secondary_dj_id = null;
 global.access_token = '';
