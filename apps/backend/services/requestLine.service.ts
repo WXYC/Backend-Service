@@ -9,19 +9,21 @@ const getSlackConfig = () => ({
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-  }
+  },
 });
 
-export const submitSongRequest = async (message: string): Promise<{ success: boolean; message?: string; statusCode?: number; response?: string }> => {
+export const submitRequestLine = async (
+  message: string
+): Promise<{ success: boolean; message?: string; statusCode?: number; response?: string }> => {
   // Use mock in test environments
   if (process.env.USE_MOCK_SERVICES === 'true') {
-    console.log('[Request Service] Mock mode - would send to Slack:', message);
+    console.log('[RequestLine Service] Mock mode - would send to Slack:', message);
     return { success: true, message: 'Mock: Message sent to Slack successfully' };
   }
 
   const webhookPath = process.env.SLACK_WXYC_REQUESTS_WEBHOOK;
   if (!webhookPath) {
-    console.error('[Request Service] SLACK_WXYC_REQUESTS_WEBHOOK not configured');
+    console.error('[RequestLine Service] SLACK_WXYC_REQUESTS_WEBHOOK not configured');
     return { success: false, message: 'Slack webhook not configured' };
   }
 
@@ -46,7 +48,7 @@ export const submitSongRequest = async (message: string): Promise<{ success: boo
     });
 
     req.on('error', (e) => {
-      console.error('[Request Service] Error sending message to Slack:', e);
+      console.error('[RequestLine Service] Error sending message to Slack:', e);
       reject(e);
     });
 
