@@ -18,6 +18,17 @@ import {
 import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
+// Track when the flowsheet was last modified for conditional responses (304 Not Modified)
+let lastModifiedAt: Date = new Date();
+
+/** Get the timestamp of the last flowsheet modification */
+export const getLastModifiedAt = (): Date => lastModifiedAt;
+
+/** Update the last modified timestamp (call after any write operation) */
+const updateLastModified = () => {
+  lastModifiedAt = new Date();
+};
+
 const FSEntryFields = {
   id: flowsheet.id,
   show_id: flowsheet.show_id,
@@ -100,6 +111,7 @@ export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
   // }
 
   const response = await db.insert(flowsheet).values(entry).returning();
+  updateLastModified();
   return response[0];
 };
 
@@ -136,6 +148,7 @@ export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
   // }
 
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
+  updateLastModified();
   return response[0];
 };
 
@@ -162,6 +175,7 @@ function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null |
 
 export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry> => {
   const response = await db.update(flowsheet).set(entry).where(eq(flowsheet.id, entry_id)).returning();
+  updateLastModified();
   return response[0];
 };
 
@@ -191,6 +205,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
       timeZone: 'America/New_York',
     })}`,
   });
+  updateLastModified();
 
   return new_show[0];
 };
@@ -248,6 +263,7 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
       message: message,
     })
     .returning();
+  updateLastModified();
 
   return notification[0];
 };
@@ -281,6 +297,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
       timeZone: 'America/New_York',
     })}`,
   });
+  updateLastModified();
 
   await db.update(shows).set({ end_time: new Date() }).where(eq(shows.id, currentShow.id));
 
@@ -323,6 +340,7 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
       message: message,
     })
     .returning();
+  updateLastModified();
 
   return notification[0];
 };
@@ -437,6 +455,7 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
       deferrable: true,
     }
   );
+  updateLastModified();
 
   const response = await db.select().from(flowsheet).where(eq(flowsheet.play_order, position_new)).limit(1);
 
