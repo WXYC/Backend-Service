@@ -7,7 +7,6 @@ import { dj_route } from './routes/djs.route.js';
 import { flowsheet_route } from './routes/flowsheet.route.js';
 import { library_route } from './routes/library.route.js';
 import { schedule_route } from './routes/schedule.route.js';
-import { requests_route } from './routes/requests.route.js';
 import { events_route } from './routes/events.route.js';
 import { request_line_route } from './routes/requestLine.route.js';
 import { showMemberMiddleware } from './middleware/checkShowMember.js';
@@ -45,8 +44,6 @@ app.use('/djs', dj_route);
 app.use('/request', request_line_route);
 
 app.use('/schedule', schedule_route);
-
-app.use('/requests', requests_route);
 
 app.use(
   '/events',

@@ -1,6 +1,7 @@
 {
   "testEnvironment": "node",
   "testMatch": ["**/tests/integration/?(*.)+(spec).js"],
+  "globalSetup": "./tests/setup/globalSetup.js",
   "setupFilesAfterEnv": ["./tests/setup/integration.setup.js"],
   "reporters": [
     "default",
