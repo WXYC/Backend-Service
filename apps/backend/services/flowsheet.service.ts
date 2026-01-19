@@ -20,23 +20,15 @@ import {
 import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
-// In-memory cache for recent flowsheet entries
-const CACHE_SIZE = 100;
-const CACHE_TTL_MS = 30_000; // 30 seconds
-let recentEntriesCache: IFSEntry[] | null = null;
-let cacheTimestamp = 0;
-
-// Track when flowsheet was last modified (for HTTP If-Modified-Since)
-let lastModifiedTimestamp = new Date();
+// Track when the flowsheet was last modified for conditional responses (304 Not Modified)
+let lastModifiedAt: Date = new Date();
 
 /** Get the timestamp of the last flowsheet modification */
-export const getLastModified = (): Date => lastModifiedTimestamp;
+export const getLastModifiedAt = (): Date => lastModifiedAt;
 
-/** Invalidate the recent entries cache (call after any write operation) */
-export const invalidateRecentEntriesCache = () => {
-  recentEntriesCache = null;
-  cacheTimestamp = 0;
-  lastModifiedTimestamp = new Date();
+/** Update the last modified timestamp (call after any write operation) */
+const updateLastModified = () => {
+  lastModifiedAt = new Date();
 };
 
 const FSEntryFields = {
@@ -67,8 +59,8 @@ const FSEntryFields = {
   artist_wikipedia_url: artist_metadata.wikipedia_url,
 };
 
-/** Fetch entries directly from database (bypasses cache) */
-const fetchEntriesFromDB = async (offset: number, limit: number): Promise<IFSEntry[]> => {
+/** Gets flowsheet entries by page with metadata joins */
+export const getEntriesByPage = async (offset: number, limit: number): Promise<IFSEntry[]> => {
   return db
     .select(FSEntryFields)
     .from(flowsheet)
@@ -79,27 +71,6 @@ const fetchEntriesFromDB = async (offset: number, limit: number): Promise<IFSEnt
     .orderBy(desc(flowsheet.play_order))
     .offset(offset)
     .limit(limit);
-};
-
-/**
- * Gets flowsheet entries by page with metadata joins.
- * Uses in-memory cache for first page requests (offset=0, limit <= CACHE_SIZE).
- */
-export const getEntriesByPage = async (offset: number, limit: number): Promise<IFSEntry[]> => {
-  // Use cache for first page requests
-  if (offset === 0 && limit <= CACHE_SIZE) {
-    const now = Date.now();
-    if (recentEntriesCache && (now - cacheTimestamp) < CACHE_TTL_MS) {
-      return recentEntriesCache.slice(0, limit);
-    }
-    // Cache miss - fetch and cache
-    const entries = await fetchEntriesFromDB(0, CACHE_SIZE);
-    recentEntriesCache = entries;
-    cacheTimestamp = now;
-    return entries.slice(0, limit);
-  }
-  // Non-cached path for pagination
-  return fetchEntriesFromDB(offset, limit);
 };
 
 export const getEntriesByRange = async (startId: number, endId: number) => {
@@ -162,7 +133,7 @@ export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
   // }
 
   const response = await db.insert(flowsheet).values(entry).returning();
-  invalidateRecentEntriesCache();
+  updateLastModified();
   return response[0];
 };
 
@@ -199,7 +170,7 @@ export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
   // }
 
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
-  invalidateRecentEntriesCache();
+  updateLastModified();
   return response[0];
 };
 
@@ -226,7 +197,7 @@ function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null |
 
 export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry> => {
   const response = await db.update(flowsheet).set(entry).where(eq(flowsheet.id, entry_id)).returning();
-  invalidateRecentEntriesCache();
+  updateLastModified();
   return response[0];
 };
 
@@ -256,7 +227,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
       timeZone: 'America/New_York',
     })}`,
   });
-  invalidateRecentEntriesCache();
+  updateLastModified();
 
   return new_show[0];
 };
@@ -315,7 +286,7 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
     })
     .returning();
 
-  invalidateRecentEntriesCache();
+  updateLastModified();
   return notification[0];
 };
 
@@ -348,7 +319,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
       timeZone: 'America/New_York',
     })}`,
   });
-  invalidateRecentEntriesCache();
+  updateLastModified();
 
   await db.update(shows).set({ end_time: new Date() }).where(eq(shows.id, currentShow.id));
 
@@ -392,7 +363,7 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
     })
     .returning();
 
-  invalidateRecentEntriesCache();
+  updateLastModified();
   return notification[0];
 };
 
@@ -507,7 +478,7 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
     }
   );
 
-  invalidateRecentEntriesCache();
+  updateLastModified();
   const response = await db.select().from(flowsheet).where(eq(flowsheet.play_order, position_new)).limit(1);
 
   return response[0];

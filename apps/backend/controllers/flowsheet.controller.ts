@@ -1,32 +1,8 @@
-import { Request, Response, RequestHandler } from 'express';
+import { Request, RequestHandler } from 'express';
 import { Mutex } from 'async-mutex';
 import { NewFSEntry, FSEntry, Show, ShowDJ, library } from "@wxyc/database";
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import { fetchAndCacheMetadata } from '../services/metadata/index.js';
-
-/**
- * Check If-Modified-Since header and return 304 if content hasn't changed.
- * Returns true if 304 was sent (caller should return early).
- */
-const checkNotModified = (req: Request, res: Response): boolean => {
-  const ifModifiedSince = req.get('If-Modified-Since');
-  if (!ifModifiedSince) return false;
-
-  const clientDate = new Date(ifModifiedSince);
-  const lastModified = flowsheet_service.getLastModified();
-
-  // Compare timestamps (truncate to seconds since HTTP dates don't have ms precision)
-  if (clientDate.getTime() >= Math.floor(lastModified.getTime() / 1000) * 1000) {
-    res.status(304).end();
-    return true;
-  }
-  return false;
-};
-
-/** Set Last-Modified header on response */
-const setLastModifiedHeader = (res: Response): void => {
-  res.set('Last-Modified', flowsheet_service.getLastModified().toUTCString());
-};
 
 export type QueryParams = {
   page?: string;
@@ -55,9 +31,6 @@ export interface IFSEntry extends FSEntry {
 const MAX_ITEMS = 200;
 const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res, next) => {
-  // Check If-Modified-Since - return 304 if content hasn't changed
-  if (checkNotModified(req, res)) return;
-
   const { query } = req;
 
   const page = parseInt(query.page ?? '0');
@@ -77,7 +50,6 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
       const entries = await flowsheet_service.getEntriesByShow(...recentShows.map((show) => show.id));
 
       if (entries.length) {
-        setLastModifiedHeader(res);
         res.status(200).json(entries);
       } else {
         res.status(404).json({
@@ -111,7 +83,6 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
           ? await flowsheet_service.getEntriesByRange(parseInt(query.start_id), parseInt(query.end_id))
           : await flowsheet_service.getEntriesByPage(offset, limit);
       if (entries.length) {
-        setLastModifiedHeader(res);
         res.status(200).json(entries);
       } else {
         console.error('No Tracks found');
@@ -128,13 +99,9 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
 };
 
 export const getLatest: RequestHandler = async (req, res, next) => {
-  // Check If-Modified-Since - return 304 if content hasn't changed
-  if (checkNotModified(req, res)) return;
-
   try {
     const latest: IFSEntry[] = await flowsheet_service.getEntriesByPage(0, 1);
     if (latest.length) {
-      setLastModifiedHeader(res);
       res.status(200).json(latest[0]);
     } else {
       console.error('No Tracks found');

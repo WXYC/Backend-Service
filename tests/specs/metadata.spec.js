@@ -407,7 +407,7 @@ describe('Flowsheet Cache Behavior', () => {
   });
 });
 
-describe('HTTP Cache Headers (If-Modified-Since)', () => {
+describe('Conditional GET (304 Not Modified)', () => {
   beforeEach(async () => {
     await fls_util.join_show(getTestDjId(), global.access_token);
   });
@@ -416,95 +416,210 @@ describe('HTTP Cache Headers (If-Modified-Since)', () => {
     await fls_util.leave_show(getTestDjId(), global.access_token);
   });
 
-  test('GET /flowsheet returns Last-Modified header', async () => {
-    const res = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+  describe('Last-Modified header', () => {
+    test('GET /flowsheet returns Last-Modified header', async () => {
+      const res = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
 
-    expect(res.headers['last-modified']).toBeDefined();
-    // Should be a valid HTTP date
-    const lastModified = new Date(res.headers['last-modified']);
-    expect(lastModified.getTime()).not.toBeNaN();
+      expect(res.headers['last-modified']).toBeDefined();
+      // Should be a valid HTTP date
+      const lastModified = new Date(res.headers['last-modified']);
+      expect(lastModified.getTime()).not.toBeNaN();
+    });
+
+    test('GET /flowsheet/latest returns Last-Modified header', async () => {
+      // Add a track first so there's data
+      await request
+        .post('/flowsheet')
+        .set('Authorization', global.access_token)
+        .send({
+          album_id: 1,
+          track_title: 'Last-Modified Header Test',
+        })
+        .expect(200);
+
+      const res = await request.get('/flowsheet/latest').expect(200);
+
+      expect(res.headers['last-modified']).toBeDefined();
+    });
   });
 
-  test('GET /flowsheet/latest returns Last-Modified header', async () => {
-    // Add a track first so there's data
-    await request
-      .post('/flowsheet')
-      .set('Authorization', global.access_token)
-      .send({
-        album_id: 1,
-        track_title: 'Last-Modified Header Test',
-      })
-      .expect(200);
+  describe('If-Modified-Since header', () => {
+    test('Returns 304 when If-Modified-Since is current', async () => {
+      // First request to get the Last-Modified timestamp
+      const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+      const lastModified = initialRes.headers['last-modified'];
 
-    const res = await request.get('/flowsheet/latest').expect(200);
+      // Second request with If-Modified-Since header
+      const cachedRes = await request
+        .get('/flowsheet')
+        .query({ limit: 10 })
+        .set('If-Modified-Since', lastModified)
+        .send()
+        .expect(304);
 
-    expect(res.headers['last-modified']).toBeDefined();
+      // 304 responses should have no body
+      expect(cachedRes.body).toEqual({});
+    });
+
+    test('Returns 200 with data when content has been modified', async () => {
+      // First request to get the Last-Modified timestamp
+      const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+      const lastModified = initialRes.headers['last-modified'];
+
+      // Add a new track to modify the flowsheet
+      await request
+        .post('/flowsheet')
+        .set('Authorization', global.access_token)
+        .send({
+          album_id: 1,
+          track_title: 'Modification Test Track',
+        })
+        .expect(200);
+
+      // Request with old If-Modified-Since should return 200 with new data
+      const updatedRes = await request
+        .get('/flowsheet')
+        .query({ limit: 10 })
+        .set('If-Modified-Since', lastModified)
+        .send()
+        .expect(200);
+
+      expect(updatedRes.body.length).toBeGreaterThan(0);
+      expect(updatedRes.headers['last-modified']).toBeDefined();
+      // The new Last-Modified should be different (later) than the old one
+      expect(new Date(updatedRes.headers['last-modified']).getTime()).toBeGreaterThan(
+        new Date(lastModified).getTime()
+      );
+    });
+
+    test('/flowsheet/latest returns 304 when not modified', async () => {
+      // Add a track so there's data
+      await request
+        .post('/flowsheet')
+        .set('Authorization', global.access_token)
+        .send({
+          album_id: 2,
+          track_title: 'Latest 304 Test',
+        })
+        .expect(200);
+
+      // First request to get timestamp
+      const initialRes = await request.get('/flowsheet/latest').expect(200);
+      const lastModified = initialRes.headers['last-modified'];
+
+      // Second request should return 304
+      await request.get('/flowsheet/latest').set('If-Modified-Since', lastModified).send().expect(304);
+    });
+
+    test('Returns 200 when If-Modified-Since is invalid date', async () => {
+      const res = await request
+        .get('/flowsheet')
+        .query({ limit: 10 })
+        .set('If-Modified-Since', 'not-a-valid-date')
+        .send()
+        .expect(200);
+
+      expect(res.headers['last-modified']).toBeDefined();
+    });
   });
 
-  test('Returns 304 Not Modified when If-Modified-Since is current', async () => {
-    // First request to get the Last-Modified timestamp
-    const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
-    const lastModified = initialRes.headers['last-modified'];
+  describe('since query parameter', () => {
+    test('Returns 304 when since param is current', async () => {
+      // First request to get the Last-Modified timestamp
+      const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+      const lastModified = initialRes.headers['last-modified'];
 
-    // Second request with If-Modified-Since header
-    const cachedRes = await request
-      .get('/flowsheet')
-      .query({ limit: 10 })
-      .set('If-Modified-Since', lastModified)
-      .send()
-      .expect(304);
+      // Second request with since query param
+      const cachedRes = await request
+        .get('/flowsheet')
+        .query({ limit: 10, since: lastModified })
+        .send()
+        .expect(304);
 
-    // 304 responses should have no body
-    expect(cachedRes.body).toEqual({});
-  });
+      expect(cachedRes.body).toEqual({});
+    });
 
-  test('Returns 200 with data when content has been modified', async () => {
-    // First request to get the Last-Modified timestamp
-    const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
-    const lastModified = initialRes.headers['last-modified'];
+    test('Returns 200 when since param is stale', async () => {
+      // First request to get the Last-Modified timestamp
+      const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+      const lastModified = initialRes.headers['last-modified'];
 
-    // Add a new track to modify the flowsheet
-    await request
-      .post('/flowsheet')
-      .set('Authorization', global.access_token)
-      .send({
-        album_id: 1,
-        track_title: 'Modification Test Track',
-      })
-      .expect(200);
+      // Add a new track to modify the flowsheet
+      await request
+        .post('/flowsheet')
+        .set('Authorization', global.access_token)
+        .send({
+          album_id: 1,
+          track_title: 'Since Query Param Test',
+        })
+        .expect(200);
 
-    // Request with old If-Modified-Since should return 200 with new data
-    const updatedRes = await request
-      .get('/flowsheet')
-      .query({ limit: 10 })
-      .set('If-Modified-Since', lastModified)
-      .send()
-      .expect(200);
+      // Request with old since param should return 200 with new data
+      const updatedRes = await request
+        .get('/flowsheet')
+        .query({ limit: 10, since: lastModified })
+        .send()
+        .expect(200);
 
-    expect(updatedRes.body.length).toBeGreaterThan(0);
-    expect(updatedRes.headers['last-modified']).toBeDefined();
-    // The new Last-Modified should be different (later) than the old one
-    expect(new Date(updatedRes.headers['last-modified']).getTime()).toBeGreaterThan(
-      new Date(lastModified).getTime()
-    );
-  });
+      expect(updatedRes.body.length).toBeGreaterThan(0);
+    });
 
-  test('/flowsheet/latest returns 304 when not modified', async () => {
-    // Add a track so there's data
-    await request
-      .post('/flowsheet')
-      .set('Authorization', global.access_token)
-      .send({
-        album_id: 2,
-        track_title: 'Latest 304 Test',
-      })
-      .expect(200);
+    test('Returns 200 when since param is invalid date', async () => {
+      const res = await request
+        .get('/flowsheet')
+        .query({ limit: 10, since: 'invalid-date' })
+        .send()
+        .expect(200);
 
-    // First request to get timestamp
-    const initialRes = await request.get('/flowsheet/latest').expect(200);
-    const lastModified = initialRes.headers['last-modified'];
+      expect(res.headers['last-modified']).toBeDefined();
+    });
 
-    // Second request should return 304
-    await request.get('/flowsheet/latest').set('If-Modified-Since', lastModified).send().expect(304);
+    test('since query param takes precedence over If-Modified-Since header', async () => {
+      // First request to get the Last-Modified timestamp
+      const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+      const lastModified = initialRes.headers['last-modified'];
+
+      // Add a track to modify the flowsheet
+      await request
+        .post('/flowsheet')
+        .set('Authorization', global.access_token)
+        .send({
+          album_id: 1,
+          track_title: 'Precedence Test Track',
+        })
+        .expect(200);
+
+      // Get the new Last-Modified
+      const updatedRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+      const newLastModified = updatedRes.headers['last-modified'];
+
+      // Request with current since param but old header - should return 304
+      // (since param takes precedence, and it's current)
+      await request
+        .get('/flowsheet')
+        .query({ limit: 10, since: newLastModified })
+        .set('If-Modified-Since', lastModified)
+        .send()
+        .expect(304);
+    });
+
+    test('/flowsheet/latest supports since query param', async () => {
+      // Add a track so there's data
+      await request
+        .post('/flowsheet')
+        .set('Authorization', global.access_token)
+        .send({
+          album_id: 2,
+          track_title: 'Latest Since Test',
+        })
+        .expect(200);
+
+      // First request to get timestamp
+      const initialRes = await request.get('/flowsheet/latest').expect(200);
+      const lastModified = initialRes.headers['last-modified'];
+
+      // Second request with since param should return 304
+      await request.get('/flowsheet/latest').query({ since: lastModified }).send().expect(304);
+    });
   });
 });

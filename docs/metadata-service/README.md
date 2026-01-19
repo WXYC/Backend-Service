@@ -6,8 +6,8 @@ This document describes the metadata service integration that moves metadata fet
 
 - [Overview](#overview)
 - [Architecture](#architecture)
-- [In-Memory Cache](#in-memory-cache)
-- [HTTP Cache Headers](#http-cache-headers)
+- [Last-Modified Tracking](#last-modified-tracking)
+- [Conditional GET (304 Not Modified)](#conditional-get-304-not-modified)
 - [Fire-and-Forget Metadata Fetch](#fire-and-forget-metadata-fetch)
 - [Migration Structure](#migration-structure)
 - [Network Sequence Diagram](#network-sequence-diagram)
@@ -30,7 +30,7 @@ Move metadata fetching to the backend with:
 - **Database-backed storage** for persistent metadata
 - **Fire-and-forget fetching** for non-blocking metadata retrieval
 - **LEFT JOINs** to include metadata in flowsheet responses automatically
-- **In-memory cache** for recent flowsheet entries (reduces database load)
+- **Conditional GET** support (304 responses) for efficient client polling
 
 ---
 
@@ -50,33 +50,20 @@ The overall system architecture showing how components interact:
 | Component | Responsibility |
 |-----------|---------------|
 | **Flowsheet Controller** | Handles HTTP requests, triggers async metadata fetch |
-| **Flowsheet Service** | Database queries with metadata JOINs, in-memory cache |
+| **Flowsheet Service** | Database queries with metadata JOINs, last-modified tracking |
 | **Metadata Service** | Coordinates external API calls, stores results |
 | **PostgreSQL** | Persistent storage for flowsheet and metadata tables |
 | **External APIs** | Discogs, Spotify, Apple Music for metadata |
 
 ---
 
-## In-Memory Cache
+## Last-Modified Tracking
 
-The flowsheet service includes an in-memory cache for the most recent entries to reduce database load.
+The flowsheet service tracks when the flowsheet was last modified to support conditional GET requests (304 responses).
 
-### Configuration
+### Modification Triggers
 
-| Setting | Value | Description |
-|---------|-------|-------------|
-| **Cache Size** | 100 entries | Maximum entries cached |
-| **TTL** | 30 seconds | Time before cache expires |
-
-### Behavior
-
-- **Cache hits**: First-page requests (`offset=0`, `limit <= 100`) use cached data when available
-- **Cache misses**: Query database, store result in cache
-- **Invalidation**: Cache is cleared on any write operation (add, update, delete, reorder)
-
-### Invalidation Triggers
-
-The cache is automatically invalidated when:
+The `lastModifiedAt` timestamp is updated when:
 - Track is added (`addTrack`)
 - Track is deleted (`removeTrack`)
 - Track is updated (`updateEntry`)
@@ -84,20 +71,20 @@ The cache is automatically invalidated when:
 - Show starts/ends (flowsheet messages added)
 - DJ joins/leaves (flowsheet notifications added)
 
-### Why 30s TTL?
-
-Metadata is fetched fire-and-forget after entries are added. The short TTL ensures clients eventually see metadata without needing complex invalidation logic for async metadata updates.
+This allows clients to poll efficiently using conditional GET requests (see below).
 
 ---
 
-## HTTP Cache Headers
+## Conditional GET (304 Not Modified)
 
-The flowsheet endpoints support standard HTTP caching via `Last-Modified` and `If-Modified-Since` headers. This allows clients to avoid re-downloading unchanged data.
+The flowsheet endpoints support conditional requests via the `Last-Modified` header and either the `If-Modified-Since` header or `since` query parameter. This allows clients to avoid re-downloading unchanged data.
 
 ### How It Works
 
 1. **Server response**: Every successful GET response includes a `Last-Modified` header
-2. **Client request**: Client stores this timestamp and sends it as `If-Modified-Since` on subsequent requests
+2. **Client request**: Client stores this timestamp and sends it back via:
+   - `If-Modified-Since` header (standard HTTP), or
+   - `since` query parameter (convenience for clients that can't set headers easily)
 3. **304 Not Modified**: If the flowsheet hasn't changed, server returns 304 (no body)
 4. **200 OK**: If the flowsheet has changed, server returns full response with updated `Last-Modified`
 
@@ -117,9 +104,14 @@ GET /flowsheet
 → Last-Modified: Sun, 18 Jan 2026 10:30:00 GMT
 → [entries...]
 
-# Subsequent request (no changes)
+# Subsequent request using header (no changes)
 GET /flowsheet
 If-Modified-Since: Sun, 18 Jan 2026 10:30:00 GMT
+→ 304 Not Modified
+→ (no body)
+
+# Or using query parameter (equivalent)
+GET /flowsheet?since=Sun,%2018%20Jan%202026%2010:30:00%20GMT
 → 304 Not Modified
 → (no body)
 
@@ -136,6 +128,7 @@ If-Modified-Since: Sun, 18 Jan 2026 10:30:00 GMT
 - **Reduced bandwidth**: 304 responses have no body
 - **Native iOS support**: `URLSession` handles 304 responses automatically
 - **Proxy-friendly**: Standard HTTP caching semantics work with CDNs/proxies
+- **Flexible client support**: Query parameter alternative for clients that can't easily set headers
 
 ---
 
@@ -242,7 +235,7 @@ This diagram shows the complete request/response flow between all systems:
 | Area | Change |
 |------|--------|
 | **Migration** | Created 0023_metadata_tables.sql |
-| **Flowsheet Service** | Added LEFT JOINs, in-memory cache for recent entries |
+| **Flowsheet Service** | Added LEFT JOINs, last-modified tracking |
 | **Flowsheet Controller** | Fire-and-forget metadata fetch on new entries |
 | **Database** | New `album_metadata` and `artist_metadata` tables |
 
@@ -258,7 +251,7 @@ This diagram shows the complete request/response flow between all systems:
 
 | File | Change |
 |------|--------|
-| `apps/backend/services/flowsheet.service.ts` | Added LEFT JOINs, in-memory cache |
+| `apps/backend/services/flowsheet.service.ts` | Added LEFT JOINs, last-modified tracking |
 | `apps/backend/controllers/flowsheet.controller.ts` | Fire-and-forget metadata fetch |
 | `apps/backend/services/metadata/*` | Metadata service implementation |
 
