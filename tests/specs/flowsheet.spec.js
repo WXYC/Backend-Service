@@ -620,3 +620,121 @@ describe('Retrieve Playlist Object', () => {
     expect(new Date(playlist.body.date)).toBeInstanceOf(Date);
   });
 });
+
+/*
+ * Conditional GET (304 Not Modified)
+ */
+describe('Conditional GET', () => {
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('should return Last-Modified and X-Last-Modified-Epoch headers', async () => {
+    const res = await request.get('/flowsheet').expect(200);
+
+    expect(res.headers['last-modified']).toBeDefined();
+    expect(res.headers['x-last-modified-epoch']).toBeDefined();
+
+    // Verify epoch is a valid number
+    const epoch = parseInt(res.headers['x-last-modified-epoch'], 10);
+    expect(isNaN(epoch)).toBe(false);
+    expect(epoch).toBeGreaterThan(0);
+
+    // Verify Last-Modified is a valid date
+    const lastModified = new Date(res.headers['last-modified']);
+    expect(isNaN(lastModified.getTime())).toBe(false);
+  });
+
+  test('should return 304 when using since query param with epoch timestamp', async () => {
+    // First request to get the epoch
+    const firstRes = await request.get('/flowsheet').expect(200);
+    const epoch = firstRes.headers['x-last-modified-epoch'];
+
+    // Second request with since param should return 304
+    const secondRes = await request.get('/flowsheet').query({ since: epoch }).expect(304);
+
+    expect(secondRes.body).toEqual({});
+  });
+
+  test('should return 304 when using If-Modified-Since header', async () => {
+    // First request to get Last-Modified
+    const firstRes = await request.get('/flowsheet').expect(200);
+    const lastModified = firstRes.headers['last-modified'];
+
+    // Second request with If-Modified-Since should return 304
+    const secondRes = await request
+      .get('/flowsheet')
+      .set('If-Modified-Since', lastModified)
+      .expect(304);
+
+    expect(secondRes.body).toEqual({});
+  });
+
+  test('should return 200 with fresh data after mutation', async () => {
+    // First request to get the epoch
+    const firstRes = await request.get('/flowsheet').expect(200);
+    const epoch = firstRes.headers['x-last-modified-epoch'];
+
+    // Add a new entry (mutation)
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1,
+        track_title: 'Carry the Zero',
+      })
+      .expect(200);
+
+    // Request with old epoch should return 200 (data changed)
+    const thirdRes = await request.get('/flowsheet').query({ since: epoch }).expect(200);
+
+    expect(thirdRes.body.length).toBeGreaterThan(0);
+    expect(thirdRes.headers['x-last-modified-epoch']).toBeDefined();
+    expect(parseInt(thirdRes.headers['x-last-modified-epoch'], 10)).toBeGreaterThan(parseInt(epoch, 10));
+  });
+
+  test('should return 200 with old epoch timestamp', async () => {
+    // Use an old epoch (year 2000)
+    const oldEpoch = 946684800000;
+
+    const res = await request.get('/flowsheet').query({ since: oldEpoch }).expect(200);
+
+    expect(res.body.length).toBeGreaterThan(0);
+  });
+
+  test('should return 200 when since param is invalid (non-numeric)', async () => {
+    // Invalid epoch formats should be ignored, returning fresh data
+    const invalidFormats = ['invalid', 'abc123', '', 'null', 'undefined'];
+
+    for (const invalid of invalidFormats) {
+      const res = await request.get('/flowsheet').query({ since: invalid }).expect(200);
+      expect(res.body.length).toBeGreaterThan(0);
+      expect(res.headers['x-last-modified-epoch']).toBeDefined();
+    }
+  });
+
+  test('should work with /flowsheet/latest endpoint', async () => {
+    // Add an entry first
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1,
+        track_title: 'Carry the Zero',
+      })
+      .expect(200);
+
+    // Get latest with headers
+    const firstRes = await request.get('/flowsheet/latest').expect(200);
+    expect(firstRes.headers['last-modified']).toBeDefined();
+    expect(firstRes.headers['x-last-modified-epoch']).toBeDefined();
+
+    // Second request should return 304
+    const epoch = firstRes.headers['x-last-modified-epoch'];
+    await request.get('/flowsheet/latest').query({ since: epoch }).expect(304);
+  });
+});
