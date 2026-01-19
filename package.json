@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "All necessary app services for the WXYC flowsheet backend",
   "scripts": {
+    "lint:env": "node scripts/lint-env.js",
     "build": "npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
     "dev": "dotenvx run -f .env -- concurrently \"npm:dev:auth\" \"npm:dev:backend\"",
     "dev:backend": "npm run dev --workspace=@wxyc/backend",
