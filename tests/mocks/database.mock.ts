@@ -46,3 +46,21 @@ export function createMockDb() {
     _chain: mockChain,
   };
 }
+
+// Mock database client
+export const db = createMockDb();
+
+// Mock table schemas (empty objects that can be used in queries)
+export const anonymous_devices = {};
+
+// Mock types
+export type AnonymousDevice = {
+  id: number;
+  deviceId: string;
+  createdAt: Date;
+  lastSeenAt: Date;
+  blocked: boolean;
+  blockedAt: Date | null;
+  blockedReason: string | null;
+  requestCount: number;
+};

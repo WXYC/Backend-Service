@@ -1,10 +1,11 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
-import { db } from '../../../shared/database/src/client.js';
 import {
+  db,
   FSEntry,
   NewFSEntry,
   Show,
   ShowDJ,
+  User,
   shows,
   artists,
   user,
@@ -369,7 +370,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
     .where(and(eq(show_djs.show_id, currentShow.id), eq(show_djs.active, true)));
 
   await Promise.all(
-    remaining_djs.map(async (dj) => {
+    remaining_djs.map(async (dj: ShowDJ) => {
       await db.update(show_djs).set({ active: false }).where(eq(show_djs.dj_id, dj.dj_id));
       if (dj.dj_id === primary_dj_id) return;
       await createLeaveNotification(dj.dj_id, currentShow.id);
@@ -459,18 +460,18 @@ export const getOnAirStatusForDJ = async (dj_id: string): Promise<boolean> => {
   return show_djs.some((dj) => dj.id == dj_id);
 };
 
-export const getDJsInCurrentShow = async () => {
+export const getDJsInCurrentShow = async (): Promise<User[]> => {
   const current_show = await getLatestShow();
 
   //Avoid a round trip to db with this check
   if (current_show.end_time !== null) {
-    return Array(0);
+    return [];
   }
 
   return getDJsInShow(current_show.id, true);
 };
 
-export const getDJsInShow = async (show_id: number, activeOnly: boolean) => {
+export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promise<User[]> => {
   let showDJsInstance: ShowDJ[];
   if (activeOnly) {
     showDJsInstance = await db
@@ -509,34 +510,29 @@ export const getAlbumFromDB = async (album_id: number) => {
 export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry> => {
   await db.transaction(
     async (trx) => {
-      try {
-        const position_old = (
-          await trx
-            .select({
-              play_order: flowsheet.play_order,
-            })
-            .from(flowsheet)
-            .where(eq(flowsheet.id, entry_id))
-            .limit(1)
-        )[0].play_order;
+      const position_old = (
+        await trx
+          .select({
+            play_order: flowsheet.play_order,
+          })
+          .from(flowsheet)
+          .where(eq(flowsheet.id, entry_id))
+          .limit(1)
+      )[0].play_order;
 
-        if (position_new < position_old) {
-          await trx
-            .update(flowsheet)
-            .set({ play_order: sql`play_order + 1` })
-            .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
-        } else if (position_new > position_old) {
-          await trx
-            .update(flowsheet)
-            .set({ play_order: sql`play_order - 1` })
-            .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
-        }
-
-        await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, entry_id));
-      } catch (error) {
-        trx.rollback();
-        throw error;
+      if (position_new < position_old) {
+        await trx
+          .update(flowsheet)
+          .set({ play_order: sql`play_order + 1` })
+          .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
+      } else if (position_new > position_old) {
+        await trx
+          .update(flowsheet)
+          .set({ play_order: sql`play_order - 1` })
+          .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
       }
+
+      await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, entry_id));
     },
     {
       isolationLevel: 'read committed',

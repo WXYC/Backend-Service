@@ -5,9 +5,21 @@ const config: Config = {
   testEnvironment: 'node',
   testMatch: ['<rootDir>/tests/unit/**/*.test.ts'],
   setupFilesAfterEnv: ['<rootDir>/tests/setup/unit.setup.ts'],
+  transform: {
+    '^.+\\.tsx?$': ['ts-jest', {
+      tsconfig: '<rootDir>/tests/tsconfig.json',
+    }],
+  },
+  transformIgnorePatterns: [
+    'node_modules/(?!(jose|drizzle-orm)/)',
+  ],
   moduleNameMapper: {
-    '^@/(.*)$': '<rootDir>/apps/backend/$1',
-    '^@wxyc/database$': '<rootDir>/shared/database/src/index.ts',
+    '^jose$': '<rootDir>/tests/__mocks__/jose.ts',
+    '^drizzle-orm$': '<rootDir>/tests/__mocks__/drizzle-orm.ts',
+    '^@/(.*)\.js$': '<rootDir>/apps/backend/$1.ts',
+    '^@/(.*)$': '<rootDir>/apps/backend/$1.ts',
+    '^@wxyc/database$': '<rootDir>/tests/mocks/database.mock.ts',
+    '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },
   collectCoverageFrom: [
     'apps/backend/**/*.ts',
