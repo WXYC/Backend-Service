@@ -1,6 +1,6 @@
 import { desc, eq, sql } from 'drizzle-orm';
 import { RotationAddRequest } from '../controllers/library.controller.js';
-import { db } from '../../../shared/database/src/client.js';
+import { db } from '@wxyc/database';
 import {
   NewAlbum,
   NewAlbumFormat,
@@ -174,7 +174,7 @@ export const generateArtistNumber = async (code_letters: string, genre_id: numbe
     .select({ code_artist_number: artists.code_artist_number })
     .from(artists)
     .where(sql`${artists.code_letters} = ${code_letters} AND ${artists.genre_id} = ${genre_id}`)
-    .orderBy(({ code_artist_number }) => desc(code_artist_number))
+    .orderBy(desc(artists.code_artist_number))
     .limit(1);
 
   let code_artist_number = 1;
