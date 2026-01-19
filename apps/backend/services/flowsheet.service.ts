@@ -18,6 +18,15 @@ import {
 import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
+// Track when the flowsheet was last modified for conditional responses (304 Not Modified)
+let lastModifiedAt: Date = new Date();
+
+export const getLastModifiedAt = (): Date => lastModifiedAt;
+
+const updateLastModified = () => {
+  lastModifiedAt = new Date();
+};
+
 const FSEntryFields = {
   id: flowsheet.id,
   show_id: flowsheet.show_id,
@@ -34,16 +43,14 @@ const FSEntryFields = {
   add_time: flowsheet.add_time,
 };
 
-export const getEntriesByPage = async (offset: number, limit: number) => {
-  const response: IFSEntry[] = await db
+export const getEntriesByPage = async (offset: number, limit: number): Promise<IFSEntry[]> => {
+  return await db
     .select(FSEntryFields)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .orderBy(desc(flowsheet.play_order))
     .offset(offset)
     .limit(limit);
-
-  return response;
 };
 
 export const getEntriesByRange = async (startId: number, endId: number) => {
@@ -73,7 +80,7 @@ export const getEntriesByShow = async (...show_ids: number[]) => {
 
 export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
   /*
-    TODO: logic for updating album playcount 
+    TODO: logic for updating album playcount
   */
   // if (entry.artist_name || entry.album_title || entry.record_label) {
   //   const qb = new QueryBuilder();
@@ -100,12 +107,13 @@ export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
   // }
 
   const response = await db.insert(flowsheet).values(entry).returning();
+  updateLastModified();
   return response[0];
 };
 
 export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
   /*
-    TODO: logic for updating album playcount 
+    TODO: logic for updating album playcount
    */
   // const entry = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
 
@@ -136,6 +144,7 @@ export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
   // }
 
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
+  updateLastModified();
   return response[0];
 };
 
@@ -162,6 +171,7 @@ function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null |
 
 export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry> => {
   const response = await db.update(flowsheet).set(entry).where(eq(flowsheet.id, entry_id)).returning();
+  updateLastModified();
   return response[0];
 };
 

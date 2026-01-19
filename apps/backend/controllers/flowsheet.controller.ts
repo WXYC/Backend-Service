@@ -1,4 +1,4 @@
-import { Request, RequestHandler } from 'express';
+import { RequestHandler } from 'express';
 import { Mutex } from 'async-mutex';
 import { NewFSEntry, FSEntry, Show, ShowDJ } from "@wxyc/database";
 import * as flowsheet_service from '../services/flowsheet.service.js';
