@@ -148,6 +148,13 @@
       "when": 1768708593895,
       "tag": "0023_metadata_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1768890679949,
+      "tag": "0024_anonymous_devices",
+      "breakpoints": true
     }
   ]
 }
