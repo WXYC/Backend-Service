@@ -1,5 +1,4 @@
 import { RequestHandler, Response } from "express";
-import { Roles } from "../middleware/cognito.auth";
 import {
   serverEventsMgr,
   TestEvents,
@@ -7,34 +6,31 @@ import {
   type EventData,
 } from "../utils/serverEvents";
 
-//Define access levels for events
+// Role constants for event authorization
+const ROLE_DJ = 'dj';
+
+// Define access levels for events
+// Empty array = public access, array with roles = requires one of those roles
 const TopicAuthz: Record<string, string[]> = {
   [Topics.test]: [],
   [Topics.liveFs]: [],
-  [Topics.showDj]: [Roles.dj],
-  [Topics.primaryDj]: [Roles.dj],
-  [Topics.mirror]: [Roles.dj],
+  [Topics.showDj]: [ROLE_DJ],
+  [Topics.primaryDj]: [ROLE_DJ],
+  [Topics.mirror]: [ROLE_DJ],
 };
 
 const filterAuthorizedTopics = (res: Response, topics: string[]) => {
-  const claims = res.locals?.decodedJWT;
-  const groups: Array<string> = Array.isArray(claims?.["cognito:groups"])
-    ? claims["cognito:groups"]
-    : [];
+  const user = res.locals?.user;
 
-  // If we have a valid token allow to access dj topics
-  if (claims) {
-    groups.push(Roles.dj);
-  }
+  // If user is authenticated, they have DJ access
+  const hasAuth = !!user;
 
   return topics.filter((topic) => {
     if (TopicAuthz[topic] === undefined) return false;
-    //empty = anyone can access topic
+    // Empty = anyone can access topic
     if (!TopicAuthz[topic].length) return true;
-
-    return TopicAuthz[topic]?.some((authorizedGroup) =>
-      groups.includes(authorizedGroup)
-    );
+    // If requires auth and user is authenticated, allow
+    return hasAuth;
   });
 };
 

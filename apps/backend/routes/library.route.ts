@@ -1,9 +1,6 @@
 import { requirePermissions } from "@wxyc/authentication";
 import { Router } from "express";
 import * as libraryController from "../controllers/library.controller.js";
-import { Roles } from "../middleware/cognito.auth.js";
-
-const { dj, musicDirector, stationMgr } = Roles;
 
 export const library_route = Router();
 
