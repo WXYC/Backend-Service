@@ -2,11 +2,13 @@ import { requirePermissions } from "@wxyc/authentication";
 import { Router } from "express";
 import * as flowsheetController from "../controllers/flowsheet.controller";
 import { flowsheetMirror } from "../middleware/legacy/flowsheet.mirror";
+import { conditionalGet } from "../middleware/conditionalGet";
 
 export const flowsheet_route = Router();
 
 flowsheet_route.get(
   "/",
+  conditionalGet,
   flowsheetMirror.getEntries,
   flowsheetController.getEntries
 );
@@ -39,7 +41,7 @@ flowsheet_route.patch(
   flowsheetController.changeOrder
 );
 
-flowsheet_route.get("/latest", flowsheetController.getLatest);
+flowsheet_route.get("/latest", conditionalGet, flowsheetController.getLatest);
 
 flowsheet_route.post(
   "/join",
