@@ -135,6 +135,8 @@ services:
       - BETTER_AUTH_ISSUER=http://auth:8080
       - BETTER_AUTH_JWKS_URL=http://auth:8080/auth/jwks
       - USE_MOCK_SERVICES=true
+      - ANON_DEVICE_JWT_SECRET=${ANON_DEVICE_JWT_SECRET:-ci-test-secret-key-for-anonymous-devices}
+      - SLACK_WXYC_REQUESTS_WEBHOOK=${SLACK_WXYC_REQUESTS_WEBHOOK}
     ports:
       - '${CI_PORT:-8081}:8080'
 
