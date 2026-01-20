@@ -9,11 +9,13 @@ import {
   user,
   verification,
 } from '@wxyc/database';
-import { betterAuth } from 'better-auth';
+import { betterAuth, type Auth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { createAuthMiddleware } from 'better-auth/api';
 import {
   admin,
+  anonymous,
+  bearer,
   jwt,
   organization as organizationPlugin,
   username,
@@ -36,7 +38,7 @@ const buildResetUrl = (url: string, redirectTo?: string) => {
   }
 };
 
-export const auth = betterAuth({
+export const auth: Auth = betterAuth({
   database: drizzleAdapter(db, {
     provider: 'pg',
     schema: {
@@ -109,6 +111,10 @@ export const auth = betterAuth({
   plugins: [
     admin(),
     username(),
+    anonymous({
+      emailDomainName: 'anonymous.wxyc.org',
+    }),
+    bearer(),
     jwt({
       // JWT plugin configuration
       // JWKS endpoint automatically exposed at /api/auth/jwks
@@ -337,8 +343,7 @@ export const auth = betterAuth({
       realName: { type: 'string', required: false },
       djName: { type: 'string', required: false },
       appSkin: { type: 'string', required: true, defaultValue: 'modern-light' },
+      isAnonymous: { type: 'boolean', required: false, defaultValue: false },
     },
   },
 });
-
-export type Auth = typeof auth;

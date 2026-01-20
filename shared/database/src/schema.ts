@@ -40,6 +40,7 @@ export const user = pgTable(
     realName: varchar('real_name', { length: 255 }),
     djName: varchar('dj_name', { length: 255 }),
     appSkin: varchar('app_skin', { length: 255 }).notNull().default('modern-light'),
+    isAnonymous: boolean('is_anonymous').notNull().default(false),
   },
   (table) => [
     uniqueIndex('auth_user_email_key').on(table.email),
@@ -515,7 +516,20 @@ export const artist_metadata = wxyc_schema.table(
   }
 );
 
-// Anonymous device tracking for song requests
+// User activity tracking (for anonymous users)
+export const user_activity = pgTable('user_activity', {
+  userId: varchar('user_id', { length: 255 })
+    .primaryKey()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  requestCount: integer('request_count').notNull().default(0),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type UserActivity = InferSelectModel<typeof user_activity>;
+export type NewUserActivity = InferInsertModel<typeof user_activity>;
+
+// Anonymous device tracking for song requests (legacy - to be deprecated)
 export const anonymous_devices = pgTable(
   'anonymous_devices',
   {

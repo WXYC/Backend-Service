@@ -13,7 +13,10 @@ import {
   library,
   library_artist_view,
   rotation,
+  LibraryArtistViewEntry,
 } from "@wxyc/database";
+import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
+import { extractSignificantWords } from './requestLine/matching/index.js';
 
 export const getFormatsFromDB = async () => {
   const formats = await db
@@ -220,3 +223,244 @@ export const isISODate = (date: string): boolean => {
   const regex = /^\d{4}-\d{2}-\d{2}$/;
   return date.match(regex) !== null;
 };
+
+// =============================================================================
+// Request Line Enhanced Search Functions
+// =============================================================================
+
+/**
+ * Convert a library_artist_view row to LibraryResult.
+ */
+function viewRowToLibraryResult(row: LibraryArtistViewEntry): LibraryResult {
+  return {
+    id: row.id,
+    title: row.album_title,
+    artist: row.artist_name,
+    codeLetters: row.code_letters,
+    codeArtistNumber: row.code_artist_number,
+    codeNumber: row.code_number,
+    genre: row.genre_name,
+    format: row.format_name,
+  };
+}
+
+/**
+ * Search the library catalog with flexible query options.
+ *
+ * Uses PostgreSQL pg_trgm for fuzzy matching. Supports:
+ * - Combined artist + album/song queries
+ * - Artist-only queries
+ * - Album/title-only queries
+ *
+ * @param query - Free text search query (artist and/or album)
+ * @param artist - Artist name filter
+ * @param title - Album/title filter
+ * @param limit - Maximum results to return
+ * @returns Array of enriched library results
+ */
+export async function searchLibrary(
+  query?: string,
+  artist?: string,
+  title?: string,
+  limit = 5
+): Promise<EnrichedLibraryResult[]> {
+  let results: LibraryArtistViewEntry[] = [];
+
+  if (query) {
+    // Full text search using pg_trgm similarity
+    const searchQuery = sql`
+      SELECT *,
+        similarity(${library_artist_view.artist_name}, ${query}) as artist_sim,
+        similarity(${library_artist_view.album_title}, ${query}) as album_sim
+      FROM ${library_artist_view}
+      WHERE ${library_artist_view.artist_name} % ${query}
+         OR ${library_artist_view.album_title} % ${query}
+      ORDER BY GREATEST(
+        similarity(${library_artist_view.artist_name}, ${query}),
+        similarity(${library_artist_view.album_title}, ${query})
+      ) DESC
+      LIMIT ${limit}
+    `;
+
+    const response = await db.execute(searchQuery);
+    results = response.rows as LibraryArtistViewEntry[];
+
+    // If no results with trigram, try LIKE fallback with significant words
+    if (results.length === 0) {
+      const words = extractSignificantWords(query);
+      if (words.length > 0) {
+        // Build LIKE conditions for each word
+        const likeConditions = words
+          .map((w) => `(artist_name ILIKE '%${w}%' OR album_title ILIKE '%${w}%')`)
+          .join(' AND ');
+
+        const fallbackQuery = sql.raw(`
+          SELECT * FROM wxyc_schema.library_artist_view
+          WHERE ${likeConditions}
+          LIMIT ${limit}
+        `);
+
+        const fallbackResponse = await db.execute(fallbackQuery);
+        results = fallbackResponse.rows as LibraryArtistViewEntry[];
+      }
+    }
+  } else if (artist || title) {
+    // Filtered search by artist and/or title
+    const response = await fuzzySearchLibrary(artist, title, limit);
+    results = response.rows as LibraryArtistViewEntry[];
+  }
+
+  return results.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
+}
+
+/**
+ * Find a similar artist name in the library using fuzzy matching.
+ *
+ * Useful for correcting typos or spelling variants (e.g., "Color" vs "Colour").
+ *
+ * @param artistName - Artist name to match
+ * @param threshold - Minimum similarity score (0.0 to 1.0) to accept
+ * @returns Corrected artist name if a good match is found, null otherwise
+ */
+export async function findSimilarArtist(
+  artistName: string,
+  threshold = 0.85
+): Promise<string | null> {
+  // Use pg_trgm similarity function to find close matches
+  const query = sql`
+    SELECT DISTINCT artist_name,
+      similarity(artist_name, ${artistName}) as sim
+    FROM ${library_artist_view}
+    WHERE similarity(artist_name, ${artistName}) > ${threshold}
+    ORDER BY sim DESC
+    LIMIT 1
+  `;
+
+  const response = await db.execute(query);
+  const rows = response.rows as Array<{ artist_name: string; sim: number }>;
+
+  if (rows.length > 0) {
+    const match = rows[0];
+    // Only return if it's actually different (i.e., a correction)
+    if (match.artist_name.toLowerCase() !== artistName.toLowerCase()) {
+      console.log(
+        `[Library] Corrected artist '${artistName}' to '${match.artist_name}' (similarity: ${match.sim.toFixed(2)})`
+      );
+      return match.artist_name;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Search for albums by title with fuzzy matching.
+ *
+ * Useful for cross-referencing Discogs album titles with the library.
+ *
+ * @param albumTitle - Album title to search for
+ * @param limit - Maximum results to return
+ * @returns Array of enriched library results
+ */
+export async function searchAlbumsByTitle(
+  albumTitle: string,
+  limit = 5
+): Promise<EnrichedLibraryResult[]> {
+  const query = sql`
+    SELECT *,
+      similarity(${library_artist_view.album_title}, ${albumTitle}) as sim
+    FROM ${library_artist_view}
+    WHERE ${library_artist_view.album_title} % ${albumTitle}
+    ORDER BY sim DESC
+    LIMIT ${limit}
+  `;
+
+  const response = await db.execute(query);
+  const rows = response.rows as LibraryArtistViewEntry[];
+
+  // If no trigram matches, try keyword search
+  if (rows.length === 0) {
+    const words = extractSignificantWords(albumTitle);
+    if (words.length > 0) {
+      const significantWords = words.slice(0, 4); // Use up to 4 significant words
+      const likeConditions = significantWords
+        .map((w) => `album_title ILIKE '%${w}%'`)
+        .join(' AND ');
+
+      const fallbackQuery = sql.raw(`
+        SELECT * FROM wxyc_schema.library_artist_view
+        WHERE ${likeConditions}
+        LIMIT ${limit}
+      `);
+
+      const fallbackResponse = await db.execute(fallbackQuery);
+      return (fallbackResponse.rows as LibraryArtistViewEntry[]).map((row) =>
+        enrichLibraryResult(viewRowToLibraryResult(row))
+      );
+    }
+  }
+
+  return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
+}
+
+/**
+ * Search the library for releases by a specific artist.
+ *
+ * @param artistName - Artist name to search for
+ * @param limit - Maximum results to return
+ * @returns Array of enriched library results
+ */
+export async function searchByArtist(
+  artistName: string,
+  limit = 5
+): Promise<EnrichedLibraryResult[]> {
+  const query = sql`
+    SELECT *,
+      similarity(${library_artist_view.artist_name}, ${artistName}) as sim
+    FROM ${library_artist_view}
+    WHERE ${library_artist_view.artist_name} % ${artistName}
+    ORDER BY sim DESC
+    LIMIT ${limit}
+  `;
+
+  const response = await db.execute(query);
+  const rows = response.rows as LibraryArtistViewEntry[];
+
+  return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
+}
+
+/**
+ * Filter library results to only include those matching the artist.
+ *
+ * Requires the searched artist name to appear at the START of the result's
+ * artist field (case-insensitive). This prevents false positives like
+ * "Toy" matching "Chew Toy" while still allowing "Various" to match
+ * "Various Artists - Rock - D".
+ *
+ * @param results - List of library items from search
+ * @param artist - Artist name to filter by
+ * @returns Filtered list containing only items where artist matches
+ */
+export function filterResultsByArtist(
+  results: EnrichedLibraryResult[],
+  artist: string | null | undefined
+): EnrichedLibraryResult[] {
+  if (!artist) {
+    return results;
+  }
+
+  const artistLower = artist.toLowerCase();
+  const filtered = results.filter((item) => {
+    const itemArtist = (item.artist || '').toLowerCase();
+    // Check if result's artist starts with searched artist
+    return itemArtist.startsWith(artistLower);
+  });
+
+  if (filtered.length < results.length) {
+    console.log(
+      `[Library] Filtered ${results.length} results to ${filtered.length} matching artist '${artist}'`
+    );
+  }
+
+  return filtered;
+}

@@ -152,6 +152,18 @@ services:
       - USE_MOCK_SERVICES=true
       # Anonymous device authentication
       - ANON_DEVICE_JWT_SECRET=${ANON_DEVICE_JWT_SECRET:-ci-test-secret-key-for-anonymous-devices}
+      - SLACK_WXYC_REQUESTS_WEBHOOK=${SLACK_WXYC_REQUESTS_WEBHOOK}
+      # Slack failure simulation (for testing error handling)
+      # Set SIMULATE_SLACK_FAILURE=true to test Slack webhook failure scenarios
+      - SIMULATE_SLACK_FAILURE=${SIMULATE_SLACK_FAILURE:-false}
+      # Rate limiting is disabled by default in test mode (USE_MOCK_SERVICES=true)
+      # To run rate limiting tests, rebuild with TEST_RATE_LIMITING=true:
+      #   TEST_RATE_LIMITING=true docker compose ... up -d --build backend
+      # Rate limit config (only applies when TEST_RATE_LIMITING=true):
+      - RATE_LIMIT_REGISTRATION_WINDOW_MS=2000
+      - RATE_LIMIT_REGISTRATION_MAX=3
+      - RATE_LIMIT_REQUEST_WINDOW_MS=2000
+      - RATE_LIMIT_REQUEST_MAX=3
     ports:
       - '${CI_PORT:-8081}:8080'
 
