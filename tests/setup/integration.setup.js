@@ -6,21 +6,44 @@ global.primary_dj_id = null;
 global.secondary_dj_id = null;
 global.access_token = '';
 
-async function getUserIdsFromDatabase() {
-  // Connect to database to get user IDs
-  // Prioritize CI_DB_PORT for CI environments, then DB_PORT, then default
-  const dbPort = process.env.DB_PORT || 5432;
+// Sensible defaults for ports/hosts used in CI
+const backendHost = process.env.BACKEND_HOST || 'localhost';
+const backendPort = process.env.PORT || process.env.BACKEND_PORT || process.env.CI_PORT || 8081;
+const backendHealthcheckUrl = `http://${backendHost}:${backendPort}/healthcheck`;
 
+// BETTER_AUTH_URL may be a full URL; if not present, fall back to AUTH_HOST/AUTH_PORT
+let authBaseUrl;
+if (process.env.BETTER_AUTH_URL) {
+  try {
+    authBaseUrl = new URL(process.env.BETTER_AUTH_URL).origin;
+  } catch (err) {
+    console.warn('Malformed BETTER_AUTH_URL, falling back to AUTH_HOST/AUTH_PORT');
+    authBaseUrl = `http://${process.env.AUTH_HOST || 'localhost'}:${process.env.AUTH_PORT || process.env.CI_AUTH_PORT || 8083}`;
+  }
+} else {
+  authBaseUrl = `http://${process.env.AUTH_HOST || 'localhost'}:${process.env.AUTH_PORT || process.env.CI_AUTH_PORT || 8083}`;
+}
+const authHealthcheckUrl = `${authBaseUrl}/healthcheck`;
+
+// DB config with defaults to avoid connecting as root when envs are missing
+const dbConfig = {
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
+  database: process.env.DB_NAME || 'wxyc_db',
+  username: process.env.DB_USERNAME || 'test-user',
+  password: process.env.DB_PASSWORD || 'test-pw',
+};
+
+async function getUserIdsFromDatabase() {
   const sql = postgres({
-    host: process.env.DB_HOST || 'localhost',
-    port: dbPort,
-    database: process.env.DB_NAME,
-    username: process.env.DB_USERNAME,
-    password: process.env.DB_PASSWORD,
+    host: dbConfig.host,
+    port: dbConfig.port,
+    database: dbConfig.database,
+    user: dbConfig.username,
+    password: dbConfig.password,
   });
 
   try {
-    // Get user IDs by username
     const primaryUser = await sql`
       SELECT id FROM auth_user WHERE username = 'test_dj1' LIMIT 1
     `;
@@ -34,27 +57,29 @@ async function getUserIdsFromDatabase() {
 
     global.primary_dj_id = primaryUser[0].id;
     global.secondary_dj_id = secondaryUser[0].id;
-  } catch (err) {
-    throw err;
   } finally {
     await sql.end();
   }
 }
 
 beforeAll(async () => {
-  // Determine the healthcheck URLs dynamically
-  const backendHealthcheckUrl = `http://localhost:${process.env.PORT}/healthcheck`;
-  const authBaseUrl = new URL(process.env.BETTER_AUTH_URL).origin;
-  const authHealthcheckUrl = `${authBaseUrl}/healthcheck`;
+  // Log resolved endpoints/DB config to make CI failures easier to debug
+  console.log('Resolved healthcheck URLs:', backendHealthcheckUrl, authHealthcheckUrl);
+  console.log('Resolved DB config:', {
+    host: dbConfig.host,
+    port: dbConfig.port,
+    database: dbConfig.database,
+    username: dbConfig.username ? '***' : '(none)',
+  });
 
   const waitOnOptions = {
     resources: [backendHealthcheckUrl, authHealthcheckUrl],
-    delay: 1000, // initial delay in ms
-    interval: 500, // poll interval in ms
-    timeout: 60000, // timeout in ms (e.g., 60 seconds)
-    tcpTimeout: 1000, // tcp timeout in ms
-    httpTimeout: 2000, // http timeout in ms
-    log: true, // Log wait-on progress
+    delay: 1000,
+    interval: 500,
+    timeout: 60000,
+    tcpTimeout: 1000,
+    httpTimeout: 2000,
+    log: true,
   };
 
   console.log(`Waiting for services to be ready: ${waitOnOptions.resources.join(', ')}`);
@@ -63,11 +88,9 @@ beforeAll(async () => {
     console.log('Services are ready!');
   } catch (err) {
     console.error('Error waiting for services:', err);
-    throw err; // Fail the test suite if services are not ready
+    throw err;
   }
 
-  // Load user IDs from database
-  // Note: Database is already ready at this point due to Docker Compose orchestration
   await getUserIdsFromDatabase();
 
   if (process.env.AUTH_BYPASS === 'true') {
