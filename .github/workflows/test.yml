@@ -25,13 +25,35 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Cache Docker layers
-        uses: actions/cache@v4
+      - name: Build db-init image
+        uses: docker/build-push-action@v6
         with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
+          context: .
+          file: dev_env/Dockerfile.init
+          load: true
+          tags: wxyc-db-init-image:latest
+          cache-from: type=gha,scope=db-init
+          cache-to: type=gha,mode=max,scope=db-init
+
+      - name: Build auth image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.auth
+          load: true
+          tags: wxyc_auth_service:ci
+          cache-from: type=gha,scope=auth
+          cache-to: type=gha,mode=max,scope=auth
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.backend
+          load: true
+          tags: wxyc_backend_service:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
 
       - name: Set Up Node.js
         uses: actions/setup-node@v4
@@ -45,22 +67,16 @@ jobs:
       - name: Lint .env file
         run: npm run lint:env
 
-      - name: Set Up Test Environment
-        run: touch .env && npm run ci:env
-        env:
-          DOCKER_BUILDKIT: 1
-          COMPOSE_DOCKER_CLI_BUILD: 1
-          BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
-          BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache-new,mode=max
+      - name: Start Test Environment
+        run: |
+          touch .env
+          COMPOSE="docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci"
+          $COMPOSE up -d ci-db
+          $COMPOSE up ci-db-init
+          $COMPOSE up -d auth backend
 
       - name: Run Tests
         run: npm run ci:test
-
-      - name: Move cache
-        if: always()
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
 
       - name: Clean Up Test Environment
         if: always()
