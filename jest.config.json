@@ -1,7 +1,7 @@
 {
   "testEnvironment": "node",
-  "testMatch": ["**/tests/specs/?(*.)+(spec).js"],
-  "setupFilesAfterEnv": ["./tests/test.setup.js"],
+  "testMatch": ["**/tests/integration/?(*.)+(spec).js"],
+  "setupFilesAfterEnv": ["./tests/setup/integration.setup.js"],
   "reporters": [
     "default",
     [

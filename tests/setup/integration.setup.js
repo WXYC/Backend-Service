@@ -1,4 +1,4 @@
-const get_access_token = require('./utils/better_auth');
+const get_access_token = require('../utils/better_auth');
 const waitOn = require('wait-on');
 const postgres = require('postgres');
 

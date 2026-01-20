@@ -9,13 +9,17 @@
     "dev:backend": "npm run dev --workspace=@wxyc/backend",
     "dev:auth": "npm run dev --workspace=@wxyc/auth-service",
     "clean": "npm run clean --workspaces",
-    "test": "dotenvx run -f .env -- jest --runInBand",
-    "test:coverage": "dotenvx run -f .env -- jest --runInBand --coverage",
+    "test": "dotenvx run -f .env -- jest --config jest.config.json --runInBand",
+    "test:unit": "jest --config jest.unit.config.ts",
+    "test:unit:coverage": "jest --config jest.unit.config.ts --coverage",
+    "test:unit:watch": "jest --config jest.unit.config.ts --watch",
+    "test:integration": "dotenvx run -f .env -- jest --config jest.config.json --runInBand",
+    "test:all": "npm run test:unit && npm run test:integration",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d; docker attach wxyc-db-init",
     "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down db -v --remove-orphans",
     "ci:build": "npm run docker:build --workspace=apps/**",
     "ci:env": "npm run ci:build && sh -c 'COMPOSE=\"docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci\" && $COMPOSE up -d ci-db && $COMPOSE up ci-db-init && $COMPOSE up -d auth backend'",
-    "ci:test": "DB_PORT=${CI_DB_PORT:-5433} PORT=${CI_PORT:-8081} BETTER_AUTH_URL=${CI_BETTER_AUTH_URL:-http://localhost:8083/auth} npm run test:coverage;",
+    "ci:test": "DB_PORT=${CI_DB_PORT:-5433} PORT=${CI_PORT:-8081} BETTER_AUTH_URL=${CI_BETTER_AUTH_URL:-http://localhost:8083/auth} dotenvx run -f .env -- jest --config jest.config.json --runInBand --coverage",
     "ci:clean": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci down -v",
     "ci:testmock": "npm run ci:env && npm run ci:test && npm run ci:clean",
     "drizzle:generate": "read -p \"Enter migration name (optional): \" MIGRATION_NAME && dotenvx run -f .env -- drizzle-kit generate --config 'drizzle.config.ts' --name \"$MIGRATION_NAME\"",
@@ -30,6 +34,7 @@
   ],
   "devDependencies": {
     "@dotenvx/dotenvx": "^1.51.0",
+    "@types/jest": "^29.5.14",
     "@types/node": "^24.1.0",
     "@types/pg": "^8.11.10",
     "@types/ssh2": "^1.15.5",
@@ -42,10 +47,12 @@
     "nodemon": "^3.1.7",
     "postgres": "^3.4.7",
     "prettier": "^3.3.3",
-    "wait-on": "^8.0.1",
     "supertest": "^7.0.0",
+    "ts-jest": "^29.4.6",
+    "ts-node": "^10.9.2",
     "tsup": "^8.4.0",
-    "typescript": "^5.6.2"
+    "typescript": "^5.6.2",
+    "wait-on": "^8.0.1"
   },
   "dependencies": {
     "jose": "^6.1.2"
