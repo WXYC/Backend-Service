@@ -17,6 +17,11 @@ export const submitRequestLine = async (
 ): Promise<{ success: boolean; message?: string; statusCode?: number; response?: string }> => {
   // Use mock in test environments
   if (process.env.USE_MOCK_SERVICES === 'true') {
+    // Allow simulating Slack failures in test mode
+    if (process.env.SIMULATE_SLACK_FAILURE === 'true') {
+      console.log('[RequestLine Service] Mock mode - simulating Slack failure');
+      return { success: false, statusCode: 500, response: 'Mock: Simulated Slack failure' };
+    }
     console.log('[RequestLine Service] Mock mode - would send to Slack:', message);
     return { success: true, message: 'Mock: Message sent to Slack successfully' };
   }
