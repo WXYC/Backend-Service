@@ -43,18 +43,19 @@ describe('Metadata Fields in Flowsheet Response', () => {
     const trackEntry = getRes.body.find((e) => e.track_title === 'Carry the Zero');
     expect(trackEntry).toBeDefined();
 
-    // Verify all metadata fields are present in the response schema
+    // Verify metadata object is present with all fields
     // These may be null initially (fire-and-forget hasn't completed)
-    expect(trackEntry).toHaveProperty('artwork_url');
-    expect(trackEntry).toHaveProperty('discogs_url');
-    expect(trackEntry).toHaveProperty('release_year');
-    expect(trackEntry).toHaveProperty('spotify_url');
-    expect(trackEntry).toHaveProperty('apple_music_url');
-    expect(trackEntry).toHaveProperty('youtube_music_url');
-    expect(trackEntry).toHaveProperty('bandcamp_url');
-    expect(trackEntry).toHaveProperty('soundcloud_url');
-    expect(trackEntry).toHaveProperty('artist_bio');
-    expect(trackEntry).toHaveProperty('artist_wikipedia_url');
+    expect(trackEntry).toHaveProperty('metadata');
+    expect(trackEntry.metadata).toHaveProperty('artwork_url');
+    expect(trackEntry.metadata).toHaveProperty('discogs_url');
+    expect(trackEntry.metadata).toHaveProperty('release_year');
+    expect(trackEntry.metadata).toHaveProperty('spotify_url');
+    expect(trackEntry.metadata).toHaveProperty('apple_music_url');
+    expect(trackEntry.metadata).toHaveProperty('youtube_music_url');
+    expect(trackEntry.metadata).toHaveProperty('bandcamp_url');
+    expect(trackEntry.metadata).toHaveProperty('soundcloud_url');
+    expect(trackEntry.metadata).toHaveProperty('artist_bio');
+    expect(trackEntry.metadata).toHaveProperty('artist_wikipedia_url');
   });
 
   test('/flowsheet/latest includes metadata fields', async () => {
@@ -69,11 +70,12 @@ describe('Metadata Fields in Flowsheet Response', () => {
 
     const res = await request.get('/flowsheet/latest').expect(200);
 
-    // Verify metadata fields are in the response
-    expect(res.body).toHaveProperty('artwork_url');
-    expect(res.body).toHaveProperty('spotify_url');
-    expect(res.body).toHaveProperty('apple_music_url');
-    expect(res.body).toHaveProperty('youtube_music_url');
+    // Verify metadata object is in the response
+    expect(res.body).toHaveProperty('metadata');
+    expect(res.body.metadata).toHaveProperty('artwork_url');
+    expect(res.body.metadata).toHaveProperty('spotify_url');
+    expect(res.body.metadata).toHaveProperty('apple_music_url');
+    expect(res.body.metadata).toHaveProperty('youtube_music_url');
   });
 });
 
@@ -110,8 +112,9 @@ describe('Fire-and-Forget Metadata Fetch', () => {
     expect(entry).toBeDefined();
 
     // Metadata fields should exist in response (may be null if fetch hasn't completed)
-    expect(entry).toHaveProperty('youtube_music_url');
-    expect(entry).toHaveProperty('spotify_url');
+    expect(entry).toHaveProperty('metadata');
+    expect(entry.metadata).toHaveProperty('youtube_music_url');
+    expect(entry.metadata).toHaveProperty('spotify_url');
   });
 
   test('Fire-and-forget does not block track insertion for non-library tracks', async () => {
@@ -154,9 +157,9 @@ describe('Fire-and-Forget Metadata Fetch', () => {
     expect(messageEntry).toBeDefined();
 
     // Messages should have null metadata fields
-    expect(messageEntry.artwork_url).toBeNull();
-    expect(messageEntry.spotify_url).toBeNull();
-    expect(messageEntry.youtube_music_url).toBeNull();
+    expect(messageEntry.metadata.artwork_url).toBeNull();
+    expect(messageEntry.metadata.spotify_url).toBeNull();
+    expect(messageEntry.metadata.youtube_music_url).toBeNull();
   });
 });
 
