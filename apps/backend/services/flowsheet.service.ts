@@ -14,9 +14,30 @@ import {
   show_djs,
   library_artist_view,
   specialty_shows,
+  album_metadata,
+  artist_metadata,
 } from "@wxyc/database";
 import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
+
+// Track when the flowsheet was last modified for conditional responses (304 Not Modified)
+let lastModifiedAt: Date = new Date();
+
+/** Get the timestamp of the last flowsheet modification */
+export const getLastModifiedAt = (): Date => lastModifiedAt;
+
+/** Update the last modified timestamp (call after any write operation) */
+const updateLastModified = () => {
+  // Truncate to seconds for HTTP Date header compatibility (avoids millisecond precision issues)
+  const now = new Date();
+  now.setMilliseconds(0);
+  // Ensure timestamp advances even for rapid writes within the same second
+  if (now.getTime() <= lastModifiedAt.getTime()) {
+    lastModifiedAt = new Date(lastModifiedAt.getTime() + 1000);
+  } else {
+    lastModifiedAt = now;
+  }
+};
 
 const FSEntryFields = {
   id: flowsheet.id,
@@ -32,25 +53,42 @@ const FSEntryFields = {
   message: flowsheet.message,
   play_order: flowsheet.play_order,
   add_time: flowsheet.add_time,
+  // Album metadata from cache
+  artwork_url: album_metadata.artwork_url,
+  discogs_url: album_metadata.discogs_url,
+  release_year: album_metadata.release_year,
+  spotify_url: album_metadata.spotify_url,
+  apple_music_url: album_metadata.apple_music_url,
+  youtube_music_url: album_metadata.youtube_music_url,
+  bandcamp_url: album_metadata.bandcamp_url,
+  soundcloud_url: album_metadata.soundcloud_url,
+  // Artist metadata from cache
+  artist_bio: artist_metadata.bio,
+  artist_wikipedia_url: artist_metadata.wikipedia_url,
 };
 
-export const getEntriesByPage = async (offset: number, limit: number) => {
-  const response: IFSEntry[] = await db
+/** Gets flowsheet entries by page with metadata joins */
+export const getEntriesByPage = async (offset: number, limit: number): Promise<IFSEntry[]> => {
+  return db
     .select(FSEntryFields)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    .leftJoin(library, eq(library.id, flowsheet.album_id))
+    .leftJoin(artist_metadata, eq(artist_metadata.artist_id, library.artist_id))
     .orderBy(desc(flowsheet.play_order))
     .offset(offset)
     .limit(limit);
-
-  return response;
 };
 
 export const getEntriesByRange = async (startId: number, endId: number) => {
-  const response: IFSEntry[] = await db
+  const response = await db
     .select(FSEntryFields)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    .leftJoin(library, eq(library.id, flowsheet.album_id))
+    .leftJoin(artist_metadata, eq(artist_metadata.artist_id, library.artist_id))
     .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
     .orderBy(desc(flowsheet.play_order));
 
@@ -61,10 +99,13 @@ export const getEntriesByShow = async (...show_ids: number[]) => {
   if (show_ids.length === 0) return [];
 
   // Get all entries from these shows
-  const response: IFSEntry[] = await db
+  const response = await db
     .select(FSEntryFields)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    .leftJoin(library, eq(library.id, flowsheet.album_id))
+    .leftJoin(artist_metadata, eq(artist_metadata.artist_id, library.artist_id))
     .where(inArray(flowsheet.show_id, show_ids))
     .orderBy(desc(flowsheet.play_order));
 
@@ -73,7 +114,7 @@ export const getEntriesByShow = async (...show_ids: number[]) => {
 
 export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
   /*
-    TODO: logic for updating album playcount 
+    TODO: logic for updating album playcount
   */
   // if (entry.artist_name || entry.album_title || entry.record_label) {
   //   const qb = new QueryBuilder();
@@ -100,12 +141,13 @@ export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
   // }
 
   const response = await db.insert(flowsheet).values(entry).returning();
+  updateLastModified();
   return response[0];
 };
 
 export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
   /*
-    TODO: logic for updating album playcount 
+    TODO: logic for updating album playcount
    */
   // const entry = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
 
@@ -136,6 +178,7 @@ export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
   // }
 
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
+  updateLastModified();
   return response[0];
 };
 
@@ -162,6 +205,7 @@ function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null |
 
 export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry> => {
   const response = await db.update(flowsheet).set(entry).where(eq(flowsheet.id, entry_id)).returning();
+  updateLastModified();
   return response[0];
 };
 
@@ -191,6 +235,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
       timeZone: 'America/New_York',
     })}`,
   });
+  updateLastModified();
 
   return new_show[0];
 };
@@ -249,6 +294,7 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
     })
     .returning();
 
+  updateLastModified();
   return notification[0];
 };
 
@@ -281,6 +327,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
       timeZone: 'America/New_York',
     })}`,
   });
+  updateLastModified();
 
   await db.update(shows).set({ end_time: new Date() }).where(eq(shows.id, currentShow.id));
 
@@ -324,6 +371,7 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
     })
     .returning();
 
+  updateLastModified();
   return notification[0];
 };
 
@@ -438,6 +486,7 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
     }
   );
 
+  updateLastModified();
   const response = await db.select().from(flowsheet).where(eq(flowsheet.play_order, position_new)).limit(1);
 
   return response[0];

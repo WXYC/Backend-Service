@@ -9,7 +9,7 @@
     "dev:backend": "npm run dev --workspace=@wxyc/backend",
     "dev:auth": "npm run dev --workspace=@wxyc/auth-service",
     "clean": "npm run clean --workspaces",
-    "test": "dotenvx run -f .env -- jest",
+    "test": "dotenvx run -f .env -- jest --runInBand",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d; docker attach wxyc-db-init",
     "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down db -v --remove-orphans",
     "ci:build": "npm run docker:build --workspace=apps/**",
