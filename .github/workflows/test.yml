@@ -1,7 +1,10 @@
-name: Run Tests
+name: CI
 
 on:
   pull_request:
+    branches:
+      - main
+  push:
     branches:
       - main
 
@@ -9,40 +12,231 @@ env:
   TEST_HOST: http://localhost
   CI_DB_PORT: 5433
   CI_PORT: 8081
+  PORT: 8081
+  CI_BETTER_AUTH_URL: http://localhost:8083/auth
+  BETTER_AUTH_URL: http://localhost:8083/auth
   DB_USERNAME: test-user
   DB_PASSWORD: test-pw
   DB_NAME: wxyc_db
   AUTH_BYPASS: true
 
 jobs:
-  Integration-Tests:
+  # Detect what changed to conditionally run jobs
+  detect-changes:
     runs-on: ubuntu-latest
-
+    outputs:
+      backend: ${{ steps.changes.outputs.backend }}
+      auth: ${{ steps.changes.outputs.auth }}
+      shared: ${{ steps.changes.outputs.shared }}
+      tests: ${{ steps.changes.outputs.tests }}
+      db-init: ${{ steps.changes.outputs.db-init }}
+      docs-only: ${{ steps.changes.outputs.docs-only }}
+      src: ${{ steps.changes.outputs.src }}
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+
+      - name: Detect file changes
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            backend:
+              - 'apps/backend/**'
+            auth:
+              - 'apps/auth/**'
+            shared:
+              - 'shared/**'
+            tests:
+              - 'tests/**'
+            db-init:
+              - 'dev_env/Dockerfile.init'
+              - 'dev_env/init-db.mjs'
+              - 'dev_env/seed_db.sql'
+            docs-only:
+              - '**/*.md'
+              - 'docs/**'
+            src:
+              - 'apps/**'
+              - 'shared/**'
+              - 'tests/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'tsconfig.base.json'
+
+  # Fast lint and type check - always runs on code changes
+  lint-and-typecheck:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.src == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Set Up Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install Dependencies
-        run: npm install --only=dev
+        run: npm ci
+
+      - name: Build (includes type checking)
+        run: npm run build
+
+  # Unit tests - runs affected tests only
+  unit-tests:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.src == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for --changedSince
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run affected unit tests
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, run tests affected by changes since base branch
+            npx jest --config jest.unit.config.ts --changedSince=origin/${{ github.base_ref }} --coverage --passWithNoTests
+          else
+            # For pushes to main, run all unit tests
+            npm run test:unit:coverage
+          fi
+
+      - name: Upload Coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-coverage
+          path: coverage/
+          retention-days: 7
+
+  # Integration tests - only when backend/auth/shared changes
+  integration-tests:
+    needs: detect-changes
+    if: |
+      needs.detect-changes.outputs.backend == 'true' ||
+      needs.detect-changes.outputs.auth == 'true' ||
+      needs.detect-changes.outputs.shared == 'true' ||
+      needs.detect-changes.outputs.tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        continue-on-error: true
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_URI }}
+
+      # db-init image: pull from ECR or build with layer cache
+      - name: Pull db-init image from ECR
+        if: needs.detect-changes.outputs.db-init == 'false'
+        id: pull-db-init
+        continue-on-error: true
+        run: |
+          docker pull ${{ secrets.AWS_ECR_URI }}/db-init:latest
+          docker tag ${{ secrets.AWS_ECR_URI }}/db-init:latest wxyc-db-init-image
+
+      - name: Build db-init image
+        if: needs.detect-changes.outputs.db-init == 'true' || steps.pull-db-init.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dev_env/Dockerfile.init
+          load: true
+          push: false
+          tags: wxyc-db-init-image
+          cache-from: type=gha,scope=db-init
+          cache-to: type=gha,mode=max,scope=db-init
+
+      # auth image: pull from ECR or build with layer cache
+      - name: Pull auth image from ECR
+        if: needs.detect-changes.outputs.auth == 'false' && needs.detect-changes.outputs.shared == 'false'
+        id: pull-auth
+        continue-on-error: true
+        run: |
+          docker pull ${{ secrets.AWS_ECR_URI }}/auth:latest
+          docker tag ${{ secrets.AWS_ECR_URI }}/auth:latest wxyc_auth_service:ci
+
+      - name: Build auth image
+        if: needs.detect-changes.outputs.auth == 'true' || needs.detect-changes.outputs.shared == 'true' || steps.pull-auth.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.auth
+          load: true
+          push: false
+          tags: wxyc_auth_service:ci
+          cache-from: type=gha,scope=auth
+          cache-to: type=gha,mode=max,scope=auth
+
+      # backend image: pull from ECR or build with layer cache
+      - name: Pull backend image from ECR
+        if: needs.detect-changes.outputs.backend == 'false' && needs.detect-changes.outputs.shared == 'false'
+        id: pull-backend
+        continue-on-error: true
+        run: |
+          docker pull ${{ secrets.AWS_ECR_URI }}/backend:latest
+          docker tag ${{ secrets.AWS_ECR_URI }}/backend:latest wxyc_backend_service:ci
+
+      - name: Build backend image
+        if: needs.detect-changes.outputs.backend == 'true' || needs.detect-changes.outputs.shared == 'true' || steps.pull-backend.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.backend
+          load: true
+          push: false
+          tags: wxyc_backend_service:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
 
       - name: Lint .env file
         run: npm run lint:env
 
       - name: Set Up Test Environment
-        run: touch .env && npm run ci:env
+        run: |
+          touch .env
+          npm run ci:env
 
-      - name: Run Tests with Coverage
+      - name: Run Integration Tests
         run: npm run ci:test
 
       - name: Upload Coverage Report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: coverage-report
+          name: integration-test-coverage
           path: coverage/
           retention-days: 14
 
