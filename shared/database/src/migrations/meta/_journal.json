@@ -155,6 +155,13 @@
       "when": 1768890679949,
       "tag": "0024_anonymous_devices",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1768890229444,
+      "tag": "0025_rate_limiting_tables",
+      "breakpoints": true
     }
   ]
 }
