@@ -20,12 +20,24 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
 
       - name: Set Up Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install Dependencies
         run: npm install --only=dev
@@ -35,9 +47,20 @@ jobs:
 
       - name: Set Up Test Environment
         run: touch .env && npm run ci:env
+        env:
+          DOCKER_BUILDKIT: 1
+          COMPOSE_DOCKER_CLI_BUILD: 1
+          BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
+          BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
       - name: Run Tests
         run: npm run ci:test
+
+      - name: Move cache
+        if: always()
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
 
       - name: Clean Up Test Environment
         if: always()
