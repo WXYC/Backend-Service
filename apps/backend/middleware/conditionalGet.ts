@@ -21,7 +21,10 @@ export const conditionalGet: RequestHandler = (
 
   if (sinceStr) {
     const clientTime = new Date(sinceStr);
-    if (!isNaN(clientTime.getTime()) && clientTime >= lastModified) {
+    // HTTP Date format only has second precision, so compare at second granularity
+    const clientSeconds = Math.floor(clientTime.getTime() / 1000);
+    const serverSeconds = Math.floor(lastModified.getTime() / 1000);
+    if (!isNaN(clientSeconds) && clientSeconds >= serverSeconds) {
       res.status(304).end();
       return;
     }

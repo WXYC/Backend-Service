@@ -28,7 +28,15 @@ export const getLastModifiedAt = (): Date => lastModifiedAt;
 
 /** Update the last modified timestamp (call after any write operation) */
 const updateLastModified = () => {
-  lastModifiedAt = new Date();
+  // Truncate to seconds for HTTP Date header compatibility (avoids millisecond precision issues)
+  const now = new Date();
+  now.setMilliseconds(0);
+  // Ensure timestamp advances even for rapid writes within the same second
+  if (now.getTime() <= lastModifiedAt.getTime()) {
+    lastModifiedAt = new Date(lastModifiedAt.getTime() + 1000);
+  } else {
+    lastModifiedAt = now;
+  }
 };
 
 const FSEntryFields = {
