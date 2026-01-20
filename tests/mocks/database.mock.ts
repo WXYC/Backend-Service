@@ -26,11 +26,11 @@ export function createMockQueryChain(resolvedValue: unknown = []): MockQueryChai
   ];
 
   chainMethods.forEach(method => {
-    chain[method as keyof MockQueryChain] = jest.fn().mockReturnValue(chain);
+    (chain as Record<string, jest.Mock>)[method] = jest.fn().mockReturnValue(chain);
   });
 
-  chain.returning = jest.fn().mockResolvedValue(resolvedValue);
-  chain.execute = jest.fn().mockResolvedValue(resolvedValue);
+  (chain as Record<string, jest.Mock>).returning = jest.fn().mockResolvedValue(resolvedValue);
+  (chain as Record<string, jest.Mock>).execute = jest.fn().mockResolvedValue(resolvedValue);
 
   return chain;
 }
@@ -52,6 +52,15 @@ export const db = createMockDb();
 
 // Mock table schemas (empty objects that can be used in queries)
 export const anonymous_devices = {};
+export const user_activity = {};
+export const album_metadata = {};
+export const artist_metadata = {};
+export const library = {};
+export const artists = {};
+export const genres = {};
+export const format = {};
+export const rotation = {};
+export const library_artist_view = {};
 
 // Mock types
 export type AnonymousDevice = {
@@ -64,3 +73,8 @@ export type AnonymousDevice = {
   blockedReason: string | null;
   requestCount: number;
 };
+
+export type AlbumMetadata = Record<string, unknown>;
+export type ArtistMetadata = Record<string, unknown>;
+export type NewAlbumMetadata = Record<string, unknown>;
+export type NewArtistMetadata = Record<string, unknown>;

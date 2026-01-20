@@ -19,6 +19,7 @@ const config: Config = {
     '^@/(.*)\.js$': '<rootDir>/apps/backend/$1.ts',
     '^@/(.*)$': '<rootDir>/apps/backend/$1.ts',
     '^@wxyc/database$': '<rootDir>/tests/mocks/database.mock.ts',
+    '../../../../shared/database/src/client\\.js$': '<rootDir>/tests/mocks/database.mock.ts',
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },
   collectCoverageFrom: [
