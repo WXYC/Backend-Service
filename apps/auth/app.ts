@@ -83,7 +83,7 @@ const createDefaultUser = async () => {
       emailVerified: true,
       name: username,
       username: username,
-      // Optional/Additional fields
+      // Optional fields
       createdAt: new Date(),
       updatedAt: new Date(),
       real_name: realName,
