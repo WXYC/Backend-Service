@@ -12,8 +12,7 @@ export type QueryParams = {
   shows_limit?: string;
 };
 
-export interface IFSEntry extends FSEntry {
-  rotation_play_freq: string | null;
+export interface IFSEntryMetadata {
   // Album metadata from cache
   artwork_url: string | null;
   discogs_url: string | null;
@@ -26,6 +25,11 @@ export interface IFSEntry extends FSEntry {
   // Artist metadata from cache
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
+}
+
+export interface IFSEntry extends FSEntry {
+  rotation_play_freq: string | null;
+  metadata: IFSEntryMetadata;
 }
 
 const MAX_ITEMS = 200;
@@ -170,7 +174,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
             if (completedEntry.artist_name) {
               fetchAndCacheMetadata({
                 albumId: completedEntry.album_id ?? undefined,
-                artistId: undefined, // Will be looked up from library
+                artistId: albumInfo.artist_id ?? undefined,
                 rotationId: completedEntry.rotation_id ?? undefined,
                 artistName: completedEntry.artist_name,
                 albumTitle: completedEntry.album_title ?? undefined,
