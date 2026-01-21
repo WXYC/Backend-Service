@@ -156,14 +156,15 @@ services:
       # Slack failure simulation (for testing error handling)
       # Set SIMULATE_SLACK_FAILURE=true to test Slack webhook failure scenarios
       - SIMULATE_SLACK_FAILURE=${SIMULATE_SLACK_FAILURE:-false}
-      # Rate limiting is disabled by default in test mode (USE_MOCK_SERVICES=true)
-      # To run rate limiting tests, rebuild with TEST_RATE_LIMITING=true:
-      #   TEST_RATE_LIMITING=true docker compose ... up -d --build backend
+      # Rate limiting configuration
+      # Set TEST_RATE_LIMITING=true to enable rate limiting in test mode
+      # Use ci:env:full and ci:test:full npm scripts to run with rate limiting enabled
+      - TEST_RATE_LIMITING=${TEST_RATE_LIMITING:-false}
       # Rate limit config (only applies when TEST_RATE_LIMITING=true):
       - RATE_LIMIT_REGISTRATION_WINDOW_MS=2000
-      - RATE_LIMIT_REGISTRATION_MAX=3
+      - RATE_LIMIT_REGISTRATION_MAX=5
       - RATE_LIMIT_REQUEST_WINDOW_MS=2000
-      - RATE_LIMIT_REQUEST_MAX=3
+      - RATE_LIMIT_REQUEST_MAX=20
     ports:
       - '${CI_PORT:-8081}:8080'
 
