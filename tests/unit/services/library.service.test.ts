@@ -1,5 +1,5 @@
 import { isISODate, filterResultsByArtist } from '@/services/library.service';
-import { EnrichedLibraryResult } from '@/services/requestLine/types';
+import { createLibraryResultSet } from '../../utils/fixtures';
 
 describe('library.service', () => {
   describe('isISODate', () => {
@@ -34,44 +34,7 @@ describe('library.service', () => {
   });
 
   describe('filterResultsByArtist', () => {
-    const mockResults: EnrichedLibraryResult[] = [
-      {
-        id: 1,
-        title: 'Album One',
-        artist: 'Test Artist',
-        codeLetters: 'RO',
-        codeArtistNumber: 1,
-        codeNumber: 1,
-        genre: 'Rock',
-        format: 'CD',
-        callNumber: 'Rock CD RO 1/1',
-        libraryUrl: 'http://www.wxyc.info/wxycdb/libraryRelease?id=1',
-      },
-      {
-        id: 2,
-        title: 'Album Two',
-        artist: 'Test Artist',
-        codeLetters: 'RO',
-        codeArtistNumber: 1,
-        codeNumber: 2,
-        genre: 'Rock',
-        format: 'CD',
-        callNumber: 'Rock CD RO 1/2',
-        libraryUrl: 'http://www.wxyc.info/wxycdb/libraryRelease?id=2',
-      },
-      {
-        id: 3,
-        title: 'Other Album',
-        artist: 'Different Artist',
-        codeLetters: 'RO',
-        codeArtistNumber: 2,
-        codeNumber: 1,
-        genre: 'Rock',
-        format: 'CD',
-        callNumber: 'Rock CD RO 2/1',
-        libraryUrl: 'http://www.wxyc.info/wxycdb/libraryRelease?id=3',
-      },
-    ];
+    const mockResults = createLibraryResultSet();
 
     it('filters results to only include matching artist (case-insensitive)', () => {
       const filtered = filterResultsByArtist(mockResults, 'Test Artist');
@@ -94,9 +57,8 @@ describe('library.service', () => {
       expect(filtered).toHaveLength(0);
     });
 
-    it('returns empty array when artist is empty string', () => {
-      // Empty string matches nothing since no artist starts with empty
-      // Actually, every string starts with empty string, so this should return all
+    it('returns all results when artist is empty string', () => {
+      // Every string starts with empty string
       const filtered = filterResultsByArtist(mockResults, '');
       expect(filtered).toHaveLength(3);
     });
