@@ -1,10 +1,11 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
-import { db } from '../../../shared/database/src/client.js';
 import {
+  db,
   FSEntry,
   NewFSEntry,
   Show,
   ShowDJ,
+  User,
   shows,
   artists,
   user,
@@ -43,6 +44,7 @@ const FSEntryFields = {
   id: flowsheet.id,
   show_id: flowsheet.show_id,
   album_id: flowsheet.album_id,
+  entry_type: flowsheet.entry_type,
   artist_name: flowsheet.artist_name,
   album_title: flowsheet.album_title,
   track_title: flowsheet.track_title,
@@ -231,6 +233,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
 
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
+    entry_type: 'show_start',
     message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
@@ -290,6 +293,7 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
     .insert(flowsheet)
     .values({
       show_id: show_id,
+      entry_type: 'dj_join',
       message: message,
     })
     .returning();
@@ -311,7 +315,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
     .where(and(eq(show_djs.show_id, currentShow.id), eq(show_djs.active, true)));
 
   await Promise.all(
-    remaining_djs.map(async (dj) => {
+    remaining_djs.map(async (dj: ShowDJ) => {
       await db.update(show_djs).set({ active: false }).where(eq(show_djs.dj_id, dj.dj_id));
       if (dj.dj_id === primary_dj_id) return;
       await createLeaveNotification(dj.dj_id, currentShow.id);
@@ -323,6 +327,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
 
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
+    entry_type: 'show_end',
     message: `End of Show: ${dj_name} left the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
@@ -367,6 +372,7 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
     .insert(flowsheet)
     .values({
       show_id: show_id,
+      entry_type: 'dj_leave',
       message: message,
     })
     .returning();
@@ -401,18 +407,18 @@ export const getOnAirStatusForDJ = async (dj_id: string): Promise<boolean> => {
   return show_djs.some((dj) => dj.id == dj_id);
 };
 
-export const getDJsInCurrentShow = async () => {
+export const getDJsInCurrentShow = async (): Promise<User[]> => {
   const current_show = await getLatestShow();
 
   //Avoid a round trip to db with this check
   if (current_show.end_time !== null) {
-    return Array(0);
+    return [];
   }
 
   return getDJsInShow(current_show.id, true);
 };
 
-export const getDJsInShow = async (show_id: number, activeOnly: boolean) => {
+export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promise<User[]> => {
   let showDJsInstance: ShowDJ[];
   if (activeOnly) {
     showDJsInstance = await db
@@ -450,34 +456,29 @@ export const getAlbumFromDB = async (album_id: number) => {
 export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry> => {
   await db.transaction(
     async (trx) => {
-      try {
-        const position_old = (
-          await trx
-            .select({
-              play_order: flowsheet.play_order,
-            })
-            .from(flowsheet)
-            .where(eq(flowsheet.id, entry_id))
-            .limit(1)
-        )[0].play_order;
+      const position_old = (
+        await trx
+          .select({
+            play_order: flowsheet.play_order,
+          })
+          .from(flowsheet)
+          .where(eq(flowsheet.id, entry_id))
+          .limit(1)
+      )[0].play_order;
 
-        if (position_new < position_old) {
-          await trx
-            .update(flowsheet)
-            .set({ play_order: sql`play_order + 1` })
-            .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
-        } else if (position_new > position_old) {
-          await trx
-            .update(flowsheet)
-            .set({ play_order: sql`play_order - 1` })
-            .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
-        }
-
-        await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, entry_id));
-      } catch (error) {
-        trx.rollback();
-        throw error;
+      if (position_new < position_old) {
+        await trx
+          .update(flowsheet)
+          .set({ play_order: sql`play_order + 1` })
+          .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
+      } else if (position_new > position_old) {
+        await trx
+          .update(flowsheet)
+          .set({ play_order: sql`play_order - 1` })
+          .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
       }
+
+      await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, entry_id));
     },
     {
       isolationLevel: 'read committed',
@@ -511,4 +512,174 @@ export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
     show_djs: showDJs,
     entries: entries,
   };
+};
+
+/** Add a talkset entry (DJ talk segment, announcements, station ID) */
+export const addTalkset = async (show_id: number, message: string): Promise<FSEntry> => {
+  const entry = await db
+    .insert(flowsheet)
+    .values({
+      show_id,
+      entry_type: 'talkset',
+      message,
+    })
+    .returning();
+
+  updateLastModified();
+  return entry[0];
+};
+
+/** Add a breakpoint entry (hour marker, top of hour transitions) */
+export const addBreakpoint = async (show_id: number, message?: string): Promise<FSEntry> => {
+  const entry = await db
+    .insert(flowsheet)
+    .values({
+      show_id,
+      entry_type: 'breakpoint',
+      message: message ?? null,
+    })
+    .returning();
+
+  updateLastModified();
+  return entry[0];
+};
+
+/** Add a custom message entry */
+export const addMessage = async (show_id: number, message: string): Promise<FSEntry> => {
+  const entry = await db
+    .insert(flowsheet)
+    .values({
+      show_id,
+      entry_type: 'message',
+      message,
+    })
+    .returning();
+
+  updateLastModified();
+  return entry[0];
+};
+
+/** Add a track entry with explicit entry_type */
+export const addTrackV2 = async (entry: NewFSEntry): Promise<FSEntry> => {
+  const response = await db
+    .insert(flowsheet)
+    .values({
+      ...entry,
+      entry_type: 'track',
+    })
+    .returning();
+
+  updateLastModified();
+  return response[0];
+};
+
+/**
+ * Transform a V1 flowsheet entry to V2 discriminated union format.
+ * Removes irrelevant fields based on entry_type for cleaner API responses.
+ */
+export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
+  const baseFields = {
+    id: entry.id,
+    show_id: entry.show_id,
+    play_order: entry.play_order,
+    add_time: entry.add_time,
+    entry_type: entry.entry_type,
+  };
+
+  switch (entry.entry_type) {
+    case 'track':
+      return {
+        ...baseFields,
+        album_id: entry.album_id,
+        rotation_id: entry.rotation_id,
+        artist_name: entry.artist_name,
+        album_title: entry.album_title,
+        track_title: entry.track_title,
+        record_label: entry.record_label,
+        request_flag: entry.request_flag,
+        rotation_play_freq: entry.rotation_play_freq,
+        artwork_url: entry.artwork_url,
+        discogs_url: entry.discogs_url,
+        release_year: entry.release_year,
+        spotify_url: entry.spotify_url,
+        apple_music_url: entry.apple_music_url,
+        youtube_music_url: entry.youtube_music_url,
+        bandcamp_url: entry.bandcamp_url,
+        soundcloud_url: entry.soundcloud_url,
+        artist_bio: entry.artist_bio,
+        artist_wikipedia_url: entry.artist_wikipedia_url,
+      };
+
+    case 'show_start':
+    case 'show_end': {
+      // Parse DJ name and timestamp from message
+      // Format: "Start of Show: DJ {name} joined the set at {timestamp}"
+      // Format: "End of Show: {name} left the set at {timestamp}"
+      const message = entry.message || '';
+      let dj_name = '';
+      let timestamp = '';
+
+      if (entry.entry_type === 'show_start') {
+        const match = message.match(/^Start of Show: DJ (.+) joined the set at (.+)$/);
+        if (match) {
+          dj_name = match[1];
+          timestamp = match[2];
+        }
+      } else {
+        const match = message.match(/^End of Show: (.+) left the set at (.+)$/);
+        if (match) {
+          dj_name = match[1];
+          timestamp = match[2];
+        }
+      }
+
+      return {
+        ...baseFields,
+        dj_name,
+        timestamp,
+      };
+    }
+
+    case 'dj_join':
+    case 'dj_leave': {
+      // Parse DJ name from message
+      // Format: "{name} joined the set!" or "{name} left the set!"
+      const message = entry.message || '';
+      let dj_name = '';
+
+      if (entry.entry_type === 'dj_join') {
+        const match = message.match(/^(.+) joined the set!$/);
+        if (match) {
+          dj_name = match[1];
+        }
+      } else {
+        const match = message.match(/^(.+) left the set!$/);
+        if (match) {
+          dj_name = match[1];
+        }
+      }
+
+      return {
+        ...baseFields,
+        dj_name,
+      };
+    }
+
+    case 'talkset':
+    case 'message':
+      return {
+        ...baseFields,
+        message: entry.message,
+      };
+
+    case 'breakpoint':
+      return {
+        ...baseFields,
+        message: entry.message,
+      };
+
+    default:
+      // Fallback for unknown types - return all fields
+      return entry as Record<string, unknown>;
+  }
 };

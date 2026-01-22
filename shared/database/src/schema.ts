@@ -38,12 +38,16 @@ export const user = pgTable(
     realName: varchar('real_name', { length: 255 }),
     djName: varchar('dj_name', { length: 255 }),
     appSkin: varchar('app_skin', { length: 255 }).notNull().default('modern-light'),
+    isAnonymous: boolean('is_anonymous').notNull().default(false),
   },
   (table) => [
     uniqueIndex('auth_user_email_key').on(table.email),
     uniqueIndex('auth_user_username_key').on(table.username),
   ]
 );
+
+export type User = InferSelectModel<typeof user>;
+export type NewUser = InferInsertModel<typeof user>;
 
 export const session = pgTable(
   'auth_session',
@@ -257,6 +261,10 @@ export const library = wxyc_schema.table(
 export type NewRotationRelease = InferInsertModel<typeof rotation>;
 export type RotationRelease = InferSelectModel<typeof rotation>;
 export const freqEnum = pgEnum('freq_enum', ['S', 'L', 'M', 'H']);
+
+export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
+  'track', 'show_start', 'show_end', 'dj_join', 'dj_leave', 'talkset', 'breakpoint', 'message'
+]);
 export const rotation = wxyc_schema.table(
   'rotation',
   {
@@ -282,6 +290,7 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   show_id: integer('show_id').references(() => shows.id),
   album_id: integer('album_id').references(() => library.id),
   rotation_id: integer('rotation_id').references(() => rotation.id),
+  entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
   track_title: varchar('track_title', { length: 128 }),
   album_title: varchar('album_title', { length: 128 }),
   artist_name: varchar('artist_name', { length: 128 }),
@@ -509,3 +518,35 @@ export const artist_metadata = wxyc_schema.table(
     };
   }
 );
+
+// User activity tracking (for anonymous users)
+export const user_activity = pgTable('user_activity', {
+  userId: varchar('user_id', { length: 255 })
+    .primaryKey()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  requestCount: integer('request_count').notNull().default(0),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type UserActivity = InferSelectModel<typeof user_activity>;
+export type NewUserActivity = InferInsertModel<typeof user_activity>;
+
+// Anonymous device tracking for song requests (legacy - to be deprecated)
+export const anonymous_devices = pgTable(
+  'anonymous_devices',
+  {
+    id: serial('id').primaryKey(),
+    deviceId: varchar('device_id', { length: 255 }).notNull().unique(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    blocked: boolean('blocked').notNull().default(false),
+    blockedAt: timestamp('blocked_at', { withTimezone: true }),
+    blockedReason: text('blocked_reason'),
+    requestCount: integer('request_count').notNull().default(0),
+  },
+  (table) => [uniqueIndex('anonymous_devices_device_id_key').on(table.deviceId)]
+);
+
+export type AnonymousDevice = InferSelectModel<typeof anonymous_devices>;
+export type NewAnonymousDevice = InferInsertModel<typeof anonymous_devices>;

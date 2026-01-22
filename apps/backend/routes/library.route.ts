@@ -1,11 +1,18 @@
 import { requirePermissions } from "@wxyc/authentication";
 import { Router } from "express";
 import * as libraryController from "../controllers/library.controller.js";
-import { Roles } from "../middleware/cognito.auth.js";
-
-const { dj, musicDirector, stationMgr } = Roles;
+import * as requestLineController from "../controllers/requestLine.controller.js";
+import { requireAnonymousAuth } from "../middleware/anonymousAuth.js";
 
 export const library_route = Router();
+
+// Public library search endpoint (for request line feature)
+// Uses anonymous auth instead of DJ permissions
+library_route.get(
+  "/search",
+  requireAnonymousAuth,
+  requestLineController.searchLibraryEndpoint
+);
 
 library_route.get(
   "/",

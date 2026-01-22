@@ -125,6 +125,13 @@ AUTH_USERNAME='test_dj1'  # Username for test account (used when AUTH_BYPASS=fal
 AUTH_PASSWORD={{placeholder}}  # Password for test account (used when AUTH_BYPASS=false)
 # When AUTH_BYPASS=false, tests will authenticate with better-auth service
 # Ensure BETTER_AUTH_URL points to accessible auth service (e.g., http://localhost:8082/auth)
+
+### Slack Integration for Song Requests
+SLACK_WXYC_REQUESTS_APP_ID={{placeholder Slack App ID}}
+SLACK_WXYC_REQUESTS_CLIENT_ID={{placeholder Slack Client ID}}
+SLACK_WXYC_REQUESTS_CLIENT_SECRET={{placeholder Slack Client Secret}}
+SLACK_WXYC_REQUESTS_SIGNING_SECRET={{placeholder Slack Signing Secret}}
+SLACK_WXYC_REQUESTS_WEBHOOK={{placeholder Slack Webhook URL}}
 ```
 
 <span style="color:crimson">\*</span>Email/slack dvd or Adrian Bruno (adrian@abruno.dev) to request access to prod placeholder values.
