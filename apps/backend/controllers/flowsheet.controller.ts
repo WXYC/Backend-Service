@@ -13,6 +13,7 @@ export type QueryParams = {
 };
 
 export interface IFSEntry extends FSEntry {
+  entry_type: string;
   rotation_play_freq: string | null;
   // Album metadata from cache
   artwork_url: string | null;
