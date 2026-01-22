@@ -150,25 +150,50 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
         AND STOP_TIME = 0;`
   );
 
-  if (entry?.message && entry.message.trim() !== "") {
-    let message = entry.message.trim();
+  // Determine legacy entry type code based on entry_type field (if available) or message patterns
+  // Legacy type codes: 0-4=rotation tracks, 6=library, 7=talkset, 8=breakpoint, 9=start, 10=end
+  const entryType = entry.entry_type;
+
+  // Non-track entries (messages, events, etc.)
+  if (entryType === 'show_start' || entryType === 'show_end' ||
+      entryType === 'dj_join' || entryType === 'dj_leave' ||
+      entryType === 'talkset' || entryType === 'breakpoint' || entryType === 'message' ||
+      (entry?.message && entry.message.trim() !== "" && entryType !== 'track')) {
+
+    let message = entry.message?.trim() ?? '';
     let entryTypeCode = 7; // Default to talkset
     let nowPlayingFlag = 0;
     let startTime = 0;
-    
-    // Detect the type of message entry
-    if (message.toLowerCase().includes("breakpoint")) {
-      entryTypeCode = 8; // Breakpoint
-      message = message.toUpperCase();
-    } else if (message.toLowerCase().includes("start of show") || message.toLowerCase().includes("signed on")) {
-      entryTypeCode = 9; // Start of show
+
+    // Map entry_type to legacy type codes
+    if (entryType === 'show_start') {
+      entryTypeCode = 9;
       startTime = startMs;
-    } else if (message.toLowerCase().includes("end of show") || message.toLowerCase().includes("signed off")) {
-      entryTypeCode = 10; // End of show
+    } else if (entryType === 'show_end') {
+      entryTypeCode = 10;
       startTime = startMs;
-    } else {
-      // Talkset - format as "------ talkset -------"
+    } else if (entryType === 'dj_join' || entryType === 'dj_leave') {
+      entryTypeCode = 7; // Map to talkset in legacy
+    } else if (entryType === 'talkset' || entryType === 'message') {
+      entryTypeCode = 7;
       message = "------ talkset -------";
+    } else if (entryType === 'breakpoint') {
+      entryTypeCode = 8;
+      message = message.toUpperCase() || 'BREAKPOINT';
+    } else {
+      // Fallback to pattern matching for backwards compatibility
+      if (message.toLowerCase().includes("breakpoint")) {
+        entryTypeCode = 8;
+        message = message.toUpperCase();
+      } else if (message.toLowerCase().includes("start of show") || message.toLowerCase().includes("signed on")) {
+        entryTypeCode = 9;
+        startTime = startMs;
+      } else if (message.toLowerCase().includes("end of show") || message.toLowerCase().includes("signed off")) {
+        entryTypeCode = 10;
+        startTime = startMs;
+      } else {
+        message = "------ talkset -------";
+      }
     }
 
     statements.push(
@@ -201,6 +226,7 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
        '');` // BMI_COMPOSER
     );
   } else {
+    // Track entries
     // Determine entry type code based on rotation and library IDs
     // Type codes: 1-4 for different rotation types, 6 for library, 0 for manual/unknown
     let entryTypeCode = 0;
@@ -211,7 +237,7 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
     } else if (entry.album_id && entry.album_id > 0) {
       entryTypeCode = 6; // Library entry
     }
-    
+
     statements.push(
       `INSERT INTO ${FLOWSHEET_ENTRY_TABLE}
       (ID, ARTIST_NAME, ARTIST_ID, SONG_TITLE, RELEASE_TITLE, RELEASE_FORMAT_ID,

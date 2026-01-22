@@ -61,6 +61,14 @@ export const genres = {};
 export const format = {};
 export const rotation = {};
 export const library_artist_view = {};
+export const flowsheet = { id: 'id', show_id: 'show_id', album_id: 'album_id', entry_type: 'entry_type', track_title: 'track_title', album_title: 'album_title', artist_name: 'artist_name', record_label: 'record_label', rotation_id: 'rotation_id', play_order: 'play_order', request_flag: 'request_flag', message: 'message', add_time: 'add_time' };
+export const shows = {};
+export const show_djs = {};
+export const user = {};
+export const specialty_shows = {};
+
+// Mock enum
+export const flowsheetEntryTypeEnum = () => ({});
 
 // Mock types
 export type AnonymousDevice = {
@@ -78,3 +86,24 @@ export type AlbumMetadata = Record<string, unknown>;
 export type ArtistMetadata = Record<string, unknown>;
 export type NewAlbumMetadata = Record<string, unknown>;
 export type NewArtistMetadata = Record<string, unknown>;
+
+export type FSEntry = {
+  id: number;
+  show_id: number | null;
+  album_id: number | null;
+  rotation_id: number | null;
+  entry_type: string;
+  track_title: string | null;
+  album_title: string | null;
+  artist_name: string | null;
+  record_label: string | null;
+  play_order: number;
+  request_flag: boolean;
+  message: string | null;
+  add_time: Date;
+};
+
+export type NewFSEntry = Partial<FSEntry>;
+export type Show = Record<string, unknown>;
+export type ShowDJ = Record<string, unknown>;
+export type User = Record<string, unknown>;
