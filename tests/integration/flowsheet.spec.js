@@ -620,3 +620,99 @@ describe('Retrieve Playlist Object', () => {
     expect(new Date(playlist.body.date)).toBeInstanceOf(Date);
   });
 });
+
+/*
+ * V2 API - Playlist with Discriminated Union Format
+ */
+describe('V2 Playlist - Discriminated Union Format', () => {
+  beforeEach(async () => {
+    // setup show
+    const res = await fls_util.join_show(global.primary_dj_id, global.access_token);
+    const body = await res.json();
+    global.CurrentShowID = body.id;
+
+    await fls_util.join_show(global.secondary_dj_id, global.access_token);
+
+    // Insert entry for show
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 3, //Jockstrap - I Love You Jennifer B
+        track_title: 'Debra',
+      })
+      .expect(200);
+
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('returns entries with entry_type discriminated union', async () => {
+    const playlist = await request
+      .get('/v2/flowsheet/playlist')
+      .query({ show_id: global.CurrentShowID })
+      .send()
+      .expect(200);
+
+    expect(playlist.body.show_djs).toEqual([
+      { id: global.primary_dj_id, dj_name: 'Test dj1' },
+      { id: global.secondary_dj_id, dj_name: 'Test dj2' },
+    ]);
+
+    // All entries should have entry_type
+    playlist.body.entries.forEach((entry) => {
+      expect(entry.entry_type).toBeDefined();
+      expect([
+        'track',
+        'show_start',
+        'show_end',
+        'dj_join',
+        'dj_leave',
+        'talkset',
+        'breakpoint',
+        'message',
+      ]).toContain(entry.entry_type);
+    });
+
+    // Track entries should not have message field
+    const trackEntry = playlist.body.entries.find((e) => e.entry_type === 'track');
+    expect(trackEntry).toBeDefined();
+    expect(trackEntry.artist_name).toBeDefined();
+    expect(trackEntry.message).toBeUndefined();
+
+    // Show start/end entries should have dj_name and timestamp, not track fields
+    const showStartEntry = playlist.body.entries.find((e) => e.entry_type === 'show_start');
+    expect(showStartEntry).toBeDefined();
+    expect(showStartEntry.dj_name).toBeDefined();
+    expect(showStartEntry.timestamp).toBeDefined();
+    expect(showStartEntry.artist_name).toBeUndefined();
+  });
+});
+
+describe('V1 API - entry_type field', () => {
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('V1 API returns entry_type field (additive change)', async () => {
+    // Add a track via V1 API
+    const addRes = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1,
+        track_title: 'Carry the Zero',
+      })
+      .expect(200);
+
+    // V1 response should now include entry_type (additive change)
+    expect(addRes.body.entry_type).toBe('track');
+
+    // V1 GET should also include entry_type
+    const getRes = await request.get('/flowsheet').query({ limit: 1 }).expect(200);
+    expect(getRes.body[0].entry_type).toBeDefined();
+  });
+});

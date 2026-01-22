@@ -262,6 +262,10 @@ export const library = wxyc_schema.table(
 export type NewRotationRelease = InferInsertModel<typeof rotation>;
 export type RotationRelease = InferSelectModel<typeof rotation>;
 export const freqEnum = pgEnum('freq_enum', ['S', 'L', 'M', 'H']);
+
+export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
+  'track', 'show_start', 'show_end', 'dj_join', 'dj_leave', 'talkset', 'breakpoint', 'message'
+]);
 export const rotation = wxyc_schema.table(
   'rotation',
   {
@@ -287,6 +291,7 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   show_id: integer('show_id').references(() => shows.id),
   album_id: integer('album_id').references(() => library.id),
   rotation_id: integer('rotation_id').references(() => rotation.id),
+  entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
   track_title: varchar('track_title', { length: 128 }),
   album_title: varchar('album_title', { length: 128 }),
   artist_name: varchar('artist_name', { length: 128 }),
