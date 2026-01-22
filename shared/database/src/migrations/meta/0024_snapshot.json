@@ -1,6 +1,6 @@
 {
-  "id": "b546a947-e2be-4c4f-802f-3ed45c3f334b",
-  "prevId": "d6f81c6c-fc0b-44d7-9d07-d4a7646446a2",
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "prevId": "335ff99b-a9d0-49ec-a275-2bf4e9b2edf7",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -855,6 +855,14 @@
           "primaryKey": false,
           "notNull": false
         },
+        "entry_type": {
+          "name": "entry_type",
+          "type": "flowsheet_entry_type",
+          "typeSchema": "wxyc_schema",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'track'"
+        },
         "track_title": {
           "name": "track_title",
           "type": "varchar(128)",
@@ -906,7 +914,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "flowsheet_entry_type_idx": {
+          "name": "flowsheet_entry_type_idx",
+          "columns": [
+            {
+              "expression": "entry_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "flowsheet_show_id_shows_id_fk": {
           "name": "flowsheet_show_id_shows_id_fk",
@@ -2330,6 +2354,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'modern-light'"
+        },
+        "is_anonymous": {
+          "name": "is_anonymous",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         }
       },
       "indexes": {
@@ -2365,6 +2396,60 @@
         }
       },
       "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.user_activity": {
+      "name": "user_activity",
+      "schema": "",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "varchar(255)",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "request_count": {
+          "name": "request_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "last_seen_at": {
+          "name": "last_seen_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "user_activity_user_id_auth_user_id_fk": {
+          "name": "user_activity_user_id_auth_user_id_fk",
+          "tableFrom": "user_activity",
+          "tableTo": "auth_user",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -2432,6 +2517,20 @@
         "L",
         "M",
         "H"
+      ]
+    },
+    "wxyc_schema.flowsheet_entry_type": {
+      "name": "flowsheet_entry_type",
+      "schema": "wxyc_schema",
+      "values": [
+        "track",
+        "show_start",
+        "show_end",
+        "dj_join",
+        "dj_leave",
+        "talkset",
+        "breakpoint",
+        "message"
       ]
     }
   },
