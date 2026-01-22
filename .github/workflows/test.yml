@@ -15,20 +15,60 @@ env:
   AUTH_BYPASS: true
 
 jobs:
+  # Fast unit tests run in parallel (no Docker needed)
+  Unit-Tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Run Unit Tests
+        run: npm run test:unit:coverage
+
+      - name: Upload Unit Test Coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-coverage-report
+          path: coverage/
+          retention-days: 14
+
+  # Integration tests require Docker services
   Integration-Tests:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Set Up Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('**/Dockerfile*', '**/docker-compose.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
 
       - name: Install Dependencies
-        run: npm install --only=dev
+        run: npm install
 
       - name: Lint .env file
         run: npm run lint:env
@@ -36,13 +76,13 @@ jobs:
       - name: Set Up Test Environment
         run: touch .env && npm run ci:env
 
-      - name: Run Tests with Coverage
+      - name: Run Integration Tests with Coverage
         run: npm run ci:test
 
-      - name: Upload Coverage Report
+      - name: Upload Integration Coverage Report
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          name: integration-coverage-report
           path: coverage/
           retention-days: 14
 

@@ -49,11 +49,11 @@ beforeAll(async () => {
 
   const waitOnOptions = {
     resources: [backendHealthcheckUrl, authHealthcheckUrl],
-    delay: 1000, // initial delay in ms
-    interval: 500, // poll interval in ms
-    timeout: 60000, // timeout in ms (e.g., 60 seconds)
-    tcpTimeout: 1000, // tcp timeout in ms
-    httpTimeout: 2000, // http timeout in ms
+    delay: 500, // initial delay in ms (reduced from 1000)
+    interval: 250, // poll interval in ms (reduced from 500)
+    timeout: 15000, // timeout in ms (reduced from 60000 - services should start fast in CI)
+    tcpTimeout: 500, // tcp timeout in ms (reduced from 1000)
+    httpTimeout: 1000, // http timeout in ms (reduced from 2000)
     log: true, // Log wait-on progress
   };
 
