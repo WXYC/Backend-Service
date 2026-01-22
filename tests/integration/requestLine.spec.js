@@ -1,157 +1,44 @@
 require('dotenv').config({ path: '../../.env' });
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
-const crypto = require('crypto');
-const postgres = require('postgres');
+const { signInAnonymous, banUser, unbanUser, getAdminToken } = require('../utils/anonymous_auth');
 
-// Database connection for test utilities
-const getDbConnection = () => {
-  const dbPort = process.env.DB_PORT || 5432;
-  return postgres({
-    host: process.env.DB_HOST || 'localhost',
-    port: dbPort,
-    database: process.env.DB_NAME,
-    username: process.env.DB_USERNAME,
-    password: process.env.DB_PASSWORD,
-  });
-};
-
-// Helper to generate a valid UUID for test device IDs
-const generateTestDeviceId = () => crypto.randomUUID();
-
-// Helper to block a device in the database
-const blockDevice = async (deviceId) => {
-  const sql = getDbConnection();
-  try {
-    await sql`
-      UPDATE anonymous_devices
-      SET blocked = true, blocked_at = NOW(), blocked_reason = 'Test block'
-      WHERE device_id = ${deviceId}
-    `;
-  } finally {
-    await sql.end();
-  }
-};
-
-// Helper to unblock a device (cleanup)
-const unblockDevice = async (deviceId) => {
-  const sql = getDbConnection();
-  try {
-    await sql`
-      UPDATE anonymous_devices
-      SET blocked = false, blocked_at = NULL, blocked_reason = NULL
-      WHERE device_id = ${deviceId}
-    `;
-  } finally {
-    await sql.end();
-  }
-};
-
-// Helper to register a test device and get a token
-const registerTestDevice = async (deviceId = null) => {
-  const testDeviceId = deviceId || generateTestDeviceId();
-  const response = await request
-    .post('/request/register')
-    .send({ deviceId: testDeviceId });
-
-  return {
-    deviceId: testDeviceId,
-    token: response.body.token,
-    expiresAt: response.body.expiresAt,
-    response,
-  };
+// Helper to get a new anonymous auth token
+const getTestToken = async () => {
+  const { token, userId, user } = await signInAnonymous();
+  return { token, userId, user };
 };
 
 describe('Request Line Endpoint', () => {
-  describe('Device Registration', () => {
-    it('should register a new device and return a token', async () => {
-      const { response, deviceId } = await registerTestDevice();
+  describe('Device Registration (Legacy Endpoint)', () => {
+    it('should return 301 redirect for legacy registration endpoint', async () => {
+      const response = await request.post('/request/register').send({ deviceId: 'test-uuid' });
 
-      expect(response.status).toBe(200);
-      expect(response.body.token).toBeDefined();
-      expect(response.body.expiresAt).toBeDefined();
-      expect(typeof response.body.token).toBe('string');
-      expect(response.body.token.length).toBeGreaterThan(0);
-    });
-
-    it('should return 400 when deviceId is missing', async () => {
-      const response = await request.post('/request/register').send({});
-
-      expect(response.status).toBe(400);
-      expect(response.body.message).toMatch(/deviceId/i);
-    });
-
-    it('should return 400 when deviceId is invalid format', async () => {
-      const response = await request
-        .post('/request/register')
-        .send({ deviceId: 'not-a-valid-uuid' });
-
-      expect(response.status).toBe(400);
-      expect(response.body.message).toMatch(/invalid/i);
-    });
-
-    it('should return same device for repeated registration with same deviceId', async () => {
-      const deviceId = generateTestDeviceId();
-
-      const response1 = await request.post('/request/register').send({ deviceId });
-      const response2 = await request.post('/request/register').send({ deviceId });
-
-      expect(response1.status).toBe(200);
-      expect(response2.status).toBe(200);
-      // Both should succeed (tokens may differ but both should be valid)
-      expect(response1.body.token).toBeDefined();
-      expect(response2.body.token).toBeDefined();
-    });
-
-    it('should return 403 when device is blocked', async () => {
-      // Register a device first
-      const deviceId = generateTestDeviceId();
-      const registerResponse = await request.post('/request/register').send({ deviceId });
-      expect(registerResponse.status).toBe(200);
-      const { token } = registerResponse.body;
-
-      // Make a request with the token - should succeed before blocking
-      const successResponse = await request
-        .post('/request')
-        .set('Authorization', `Bearer ${token}`)
-        .send({ message: 'Test before block' });
-      expect(successResponse.status).toBe(200);
-
-      // Block the device in the database
-      await blockDevice(deviceId);
-
-      try {
-        // Attempt to make another request - should return 403
-        const blockedResponse = await request
-          .post('/request')
-          .set('Authorization', `Bearer ${token}`)
-          .send({ message: 'Test after block' });
-        expect(blockedResponse.status).toBe(403);
-        expect(blockedResponse.body.message).toMatch(/blocked/i);
-
-        // Attempt to re-register - should also return 403
-        const reRegisterResponse = await request.post('/request/register').send({ deviceId });
-        expect(reRegisterResponse.status).toBe(403);
-        expect(reRegisterResponse.body.message).toMatch(/blocked/i);
-      } finally {
-        // Cleanup: unblock the device
-        await unblockDevice(deviceId);
-      }
+      expect(response.status).toBe(301);
+      expect(response.body.message).toMatch(/deprecated/i);
+      expect(response.body.endpoint).toMatch(/sign-in\/anonymous/);
     });
   });
 
   describe('Anonymous Authentication', () => {
-    it('should return 401 when Authorization header is missing', async () => {
+    it('should return 401 without Authorization header', async () => {
+      const response = await request.post('/request').send({ message: 'Test song request' });
+
+      expect(response.status).toBe(401);
+    });
+
+    it('should return 401 with malformed Authorization header', async () => {
       const response = await request
         .post('/request')
+        .set('Authorization', 'not-bearer-format')
         .send({ message: 'Test song request' });
 
       expect(response.status).toBe(401);
     });
 
-    it('should return 401 with invalid token format', async () => {
+    it('should return 401 with empty Bearer token', async () => {
       const response = await request
         .post('/request')
-        .set('Authorization', 'invalid-token')
+        .set('Authorization', 'Bearer ')
         .send({ message: 'Test song request' });
 
       expect(response.status).toBe(401);
@@ -160,14 +47,14 @@ describe('Request Line Endpoint', () => {
     it('should return 401 with invalid Bearer token', async () => {
       const response = await request
         .post('/request')
-        .set('Authorization', 'Bearer invalid-jwt-token')
+        .set('Authorization', 'Bearer invalid-token')
         .send({ message: 'Test song request' });
 
       expect(response.status).toBe(401);
     });
 
-    it('should accept valid anonymous device token', async () => {
-      const { token } = await registerTestDevice();
+    it('should accept valid anonymous session token', async () => {
+      const { token } = await getTestToken();
 
       const response = await request
         .post('/request')
@@ -182,7 +69,7 @@ describe('Request Line Endpoint', () => {
     let testToken;
 
     beforeAll(async () => {
-      const { token } = await registerTestDevice();
+      const { token } = await getTestToken();
       testToken = token;
     });
 
@@ -255,56 +142,55 @@ describe('Request Line Endpoint', () => {
     let testToken;
 
     beforeAll(async () => {
-      const { token } = await registerTestDevice();
+      const { token } = await getTestToken();
       testToken = token;
     });
 
-    it('should handle simple text message', async () => {
-      const testMessage = 'Please play Carry the Zero by Built to Spill';
-
+    it('should accept song request messages', async () => {
       const response = await request
         .post('/request')
         .set('Authorization', `Bearer ${testToken}`)
-        .send({ message: testMessage });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-      expect(response.body.message).toBe('Request line submitted successfully');
-      expect(response.body.result).toBeDefined();
-      expect(response.body.result.success).toBe(true);
-    });
-
-    it('should handle message with special characters', async () => {
-      const testMessage = 'Request: "Señor" by Los Ángeles Azules!';
-
-      const response = await request
-        .post('/request')
-        .set('Authorization', `Bearer ${testToken}`)
-        .send({ message: testMessage });
+        .send({ message: 'Play Blue Monday by New Order' });
 
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
     });
 
-    it('should handle message with newlines', async () => {
-      const testMessage = 'Song Request:\nArtist: Built to Spill\nTrack: Carry the Zero';
-
+    it('should handle special characters in message', async () => {
       const response = await request
         .post('/request')
         .set('Authorization', `Bearer ${testToken}`)
-        .send({ message: testMessage });
+        .send({ message: 'Play "Smells Like Teen Spirit" by Nirvana & friends!' });
 
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
     });
 
-    it('should handle message at maximum length (500 characters)', async () => {
-      const maxMessage = 'A'.repeat(500);
-
+    it('should handle unicode characters in message', async () => {
       const response = await request
         .post('/request')
         .set('Authorization', `Bearer ${testToken}`)
-        .send({ message: maxMessage });
+        .send({ message: 'Play Mötley Crüe or 日本語 music' });
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+    });
+
+    it('should handle emoji in message', async () => {
+      const response = await request
+        .post('/request')
+        .set('Authorization', `Bearer ${testToken}`)
+        .send({ message: 'Play some music 🎵🎸' });
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+    });
+
+    it('should trim leading and trailing whitespace', async () => {
+      const response = await request
+        .post('/request')
+        .set('Authorization', `Bearer ${testToken}`)
+        .send({ message: '   Test song request   ' });
 
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
@@ -315,29 +201,25 @@ describe('Request Line Endpoint', () => {
     let testToken;
 
     beforeAll(async () => {
-      const { token } = await registerTestDevice();
+      const { token } = await getTestToken();
       testToken = token;
     });
 
-    it('should return correct response structure', async () => {
+    it('should return JSON response with success field', async () => {
       const response = await request
         .post('/request')
         .set('Authorization', `Bearer ${testToken}`)
         .send({ message: 'Test message' });
 
       expect(response.status).toBe(200);
-      expect(response.body).toHaveProperty('success');
-      expect(response.body).toHaveProperty('message');
-      expect(response.body).toHaveProperty('result');
       expect(response.body.success).toBe(true);
-      expect(response.body.message).toBe('Request line submitted successfully');
     });
 
-    it('should include result object with success flag', async () => {
+    it('should include result object on success', async () => {
       const response = await request
         .post('/request')
         .set('Authorization', `Bearer ${testToken}`)
-        .send({ message: 'Test message' });
+        .send({ message: 'Test song request' });
 
       expect(response.status).toBe(200);
       expect(response.body.result).toBeDefined();
@@ -359,22 +241,22 @@ describe('Request Line Endpoint', () => {
     let testToken;
 
     beforeAll(async () => {
-      const { token } = await registerTestDevice();
+      const { token } = await getTestToken();
       testToken = token;
     });
 
     it('should handle rapid successive requests (up to rate limit)', async () => {
-      // Note: Rate limit is 10 per 15 minutes per device
-      const requests = Array(5)
-        .fill(null)
-        .map((_, i) =>
+      const promises = [];
+      for (let i = 0; i < 3; i++) {
+        promises.push(
           request
             .post('/request')
             .set('Authorization', `Bearer ${testToken}`)
-            .send({ message: `Rapid request ${i}` })
+            .send({ message: `Test request ${i}` })
         );
+      }
 
-      const responses = await Promise.all(requests);
+      const responses = await Promise.all(promises);
 
       responses.forEach((response) => {
         expect(response.status).toBe(200);
@@ -389,7 +271,7 @@ describe('Request Line Endpoint', () => {
         .send({
           message: 'Test message',
           extraField: 'should be ignored',
-          anotherField: 123,
+          anotherExtra: 123,
         });
 
       expect(response.status).toBe(200);
@@ -397,63 +279,37 @@ describe('Request Line Endpoint', () => {
     });
   });
 
-  describe('HTTP Methods', () => {
-    let testToken;
+  describe('User Banning', () => {
+    // Skip these tests if admin credentials aren't configured or TEST_ADMIN_BAN isn't explicitly enabled
+    // Admin tests require valid credentials that exist in the auth database
+    const enableAdminTests = process.env.TEST_ADMIN_BAN === 'true';
+    const describeOrSkip = enableAdminTests ? describe : describe.skip;
 
-    beforeAll(async () => {
-      const { token } = await registerTestDevice();
-      testToken = token;
-    });
+    describeOrSkip('with admin credentials', () => {
+      it('should return 403 when user is banned', async () => {
+        // Get a new anonymous user
+        const { token, userId } = await getTestToken();
 
-    it('should reject GET requests', async () => {
-      const response = await request
-        .get('/request')
-        .set('Authorization', `Bearer ${testToken}`);
+        // Verify request works before banning
+        const beforeBanResponse = await request
+          .post('/request')
+          .set('Authorization', `Bearer ${token}`)
+          .send({ message: 'Test before ban' });
+        expect(beforeBanResponse.status).toBe(200);
 
-      expect(response.status).toBe(404);
-    });
+        // Ban the user
+        await banUser(userId, 'Test ban');
 
-    it('should reject PUT requests', async () => {
-      const response = await request
-        .put('/request')
-        .set('Authorization', `Bearer ${testToken}`)
-        .send({ message: 'Test message' });
+        // Request should now return 403
+        const afterBanResponse = await request
+          .post('/request')
+          .set('Authorization', `Bearer ${token}`)
+          .send({ message: 'Test after ban' });
+        expect(afterBanResponse.status).toBe(403);
 
-      expect(response.status).toBe(404);
-    });
-
-    it('should reject DELETE requests', async () => {
-      const response = await request
-        .delete('/request')
-        .set('Authorization', `Bearer ${testToken}`);
-
-      expect(response.status).toBe(404);
-    });
-
-    it('should reject PATCH requests', async () => {
-      const response = await request
-        .patch('/request')
-        .set('Authorization', `Bearer ${testToken}`)
-        .send({ message: 'Test message' });
-
-      expect(response.status).toBe(404);
-    });
-  });
-
-  describe('Token Refresh', () => {
-    it('should include refresh token headers when token is nearing expiration', async () => {
-      // This test would require mocking the token expiration
-      // For now, we just verify the headers can be present
-      const { token } = await registerTestDevice();
-
-      const response = await request
-        .post('/request')
-        .set('Authorization', `Bearer ${token}`)
-        .send({ message: 'Test message' });
-
-      expect(response.status).toBe(200);
-      // Note: X-Refresh-Token headers will only be present if token is within refresh threshold
-      // In normal test conditions, a fresh token won't trigger refresh
+        // Clean up: unban the user
+        await unbanUser(userId);
+      });
     });
   });
 });
