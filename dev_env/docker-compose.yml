@@ -149,6 +149,22 @@ services:
       - METADATA_ALBUM_CACHE_MAX_SIZE=${METADATA_ALBUM_CACHE_MAX_SIZE:-1000}
       - METADATA_ARTIST_CACHE_MAX_SIZE=${METADATA_ARTIST_CACHE_MAX_SIZE:-500}
       - METADATA_ROTATION_PRIORITY=${METADATA_ROTATION_PRIORITY:-2.0}
+      - USE_MOCK_SERVICES=true
+      - ANON_DEVICE_JWT_SECRET=${ANON_DEVICE_JWT_SECRET:-ci-test-secret-key-for-anonymous-devices}
+      - SLACK_WXYC_REQUESTS_WEBHOOK=${SLACK_WXYC_REQUESTS_WEBHOOK}
+      # Slack failure simulation (for testing error handling)
+      # Set SIMULATE_SLACK_FAILURE=true to test Slack webhook failure scenarios
+      - SIMULATE_SLACK_FAILURE=${SIMULATE_SLACK_FAILURE:-false}
+      # Rate limiting configuration
+      # Set TEST_RATE_LIMITING=true to enable rate limiting in test mode
+      # Use ci:env:full and ci:test:full npm scripts to run with rate limiting enabled
+      - TEST_RATE_LIMITING=${TEST_RATE_LIMITING:-false}
+      # Rate limiting for CI - aggressive for rate limit tests, but enough for other tests
+      # Each anonymous user gets their own counter, so this affects per-test-block usage
+      - RATE_LIMIT_REGISTRATION_WINDOW_MS=2000
+      - RATE_LIMIT_REGISTRATION_MAX=5
+      - RATE_LIMIT_REQUEST_WINDOW_MS=2000
+      - RATE_LIMIT_REQUEST_MAX=20
     ports:
       - '${CI_PORT:-8081}:8080'
 
