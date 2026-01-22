@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "esModuleInterop": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "declaration": false,
+    "noEmit": true,
+    "isolatedModules": true,
+    "baseUrl": "..",
+    "paths": {
+      "@/*": ["apps/backend/*"],
+      "@wxyc/database": ["shared/database/src/index.ts"]
+    },
+    "types": ["jest", "node"]
+  },
+  "include": ["**/*.ts", "../apps/backend/**/*.ts"],
+  "exclude": ["node_modules"]
+}
