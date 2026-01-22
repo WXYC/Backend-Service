@@ -1,11 +1,14 @@
 import { Router } from 'express';
 import * as requestLineController from '../controllers/requestLine.controller.js';
 import { requireAnonymousAuth } from '../middleware/anonymousAuth.js';
+import { registrationRateLimit, songRequestRateLimit } from '../middleware/rateLimiting.js';
 
 export const request_line_route = Router();
 
 // Device registration - get token for anonymous requests
-request_line_route.post('/register', requestLineController.registerDevice);
+// Rate limited by IP address
+request_line_route.post('/register', registrationRateLimit, requestLineController.registerDevice);
 
 // Request Line - song requests from listeners (requires anonymous auth)
-request_line_route.post('/', requireAnonymousAuth, requestLineController.submitRequestLine);
+// Rate limited by device ID after authentication
+request_line_route.post('/', requireAnonymousAuth, songRequestRateLimit, requestLineController.submitRequestLine);
