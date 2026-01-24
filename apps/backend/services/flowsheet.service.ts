@@ -48,7 +48,7 @@ const FSEntryFields = {
   track_title: flowsheet.track_title,
   record_label: flowsheet.record_label,
   rotation_id: flowsheet.rotation_id,
-  rotation_play_freq: rotation.play_freq,
+  rotation_bin: rotation.play_freq, // Map DB column to API field
   request_flag: flowsheet.request_flag,
   message: flowsheet.message,
   play_order: flowsheet.play_order,

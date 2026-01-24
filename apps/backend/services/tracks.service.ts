@@ -42,8 +42,8 @@ export async function searchTracks(params: TrackSearchParams): Promise<TrackSear
     // Within rotation, higher frequency comes first (H > M > L > S)
     if (a.rotation_id && b.rotation_id) {
       const freqOrder: Record<string, number> = { H: 4, M: 3, L: 2, S: 1 };
-      const freqA = a.play_freq ? freqOrder[a.play_freq] || 0 : 0;
-      const freqB = b.play_freq ? freqOrder[b.play_freq] || 0 : 0;
+      const freqA = a.rotation_bin ? freqOrder[a.rotation_bin] || 0 : 0;
+      const freqB = b.rotation_bin ? freqOrder[b.rotation_bin] || 0 : 0;
       if (freqA !== freqB) return freqB - freqA;
     }
 
@@ -113,7 +113,7 @@ async function searchDiscogsTracksCache(
     artist_name: row.artist_name,
     label: row.label,
     rotation_id: row.rotation_id,
-    play_freq: row.play_freq,
+    rotation_bin: row.play_freq, // Map DB column to API field
     source: 'discogs' as const,
   }));
 }
@@ -167,7 +167,7 @@ async function searchFlowsheetHistory(
     artist_name: row.artist_name || '',
     label: row.label,
     rotation_id: row.rotation_id,
-    play_freq: row.play_freq,
+    rotation_bin: row.play_freq, // Map DB column to API field
     source: 'flowsheet' as const,
   }));
 }
@@ -219,7 +219,7 @@ async function searchBins(
     artist_name: row.artist_name || '',
     label: row.label,
     rotation_id: row.rotation_id,
-    play_freq: row.play_freq,
+    rotation_bin: row.play_freq, // Map DB column to API field
     source: 'bin' as const,
   }));
 }
