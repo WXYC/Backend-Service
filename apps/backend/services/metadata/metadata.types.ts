@@ -72,6 +72,13 @@ export interface DiscogsSearchResponse {
   results: DiscogsSearchResult[];
 }
 
+export interface DiscogsTrack {
+  position: string;
+  title: string;
+  duration?: string;
+  type_?: string;
+}
+
 export interface DiscogsRelease {
   id: number;
   title: string;
@@ -79,6 +86,7 @@ export interface DiscogsRelease {
   labels?: Array<{ name: string; id: number }>;
   artists?: Array<{ name: string; id: number }>;
   images?: Array<{ type: string; uri: string }>;
+  tracklist?: DiscogsTrack[];
   uri?: string;
 }
 
@@ -88,6 +96,7 @@ export interface DiscogsMaster {
   year?: number;
   artists?: Array<{ name: string; id: number }>;
   images?: Array<{ type: string; uri: string }>;
+  tracklist?: DiscogsTrack[];
   uri?: string;
   main_release?: number;
 }

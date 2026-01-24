@@ -16,6 +16,7 @@
   "dependencies": {
     "@wxyc/database": "*",
     "@wxyc/authentication": "*",
+    "@wxyc/shared": "github:WXYC/wxyc-shared",
     "async-mutex": "^0.5.0",
     "aws-jwt-verify": "^5.1.0",
     "cors": "^2.8.5",

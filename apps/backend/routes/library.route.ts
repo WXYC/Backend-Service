@@ -72,3 +72,9 @@ library_route.get(
   requirePermissions({ catalog: ["read"] }),
   libraryController.getAlbum
 );
+
+library_route.get(
+  "/tracks/search",
+  requirePermissions({ catalog: ["read"] }),
+  libraryController.searchTracks
+);

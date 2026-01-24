@@ -10,6 +10,7 @@ import {
   RotationRelease,
 } from "@wxyc/database";
 import * as libraryService from '../services/library.service.js';
+import * as tracksService from '../services/tracks.service.js';
 
 type NewAlbumRequest = {
   album_title: string;
@@ -281,5 +282,43 @@ export const getAlbum: RequestHandler<object, unknown, unknown, { album_id: stri
       console.error(e);
       next(e);
     }
+  }
+};
+
+type TrackSearchQueryParams = {
+  song: string;
+  artist?: string;
+  album?: string;
+  label?: string;
+  n?: string;
+};
+
+export const searchTracks: RequestHandler<object, unknown, unknown, TrackSearchQueryParams> = async (
+  req,
+  res,
+  next
+) => {
+  const { query } = req;
+
+  if (!query.song || query.song.length < 2) {
+    res.status(400).json({
+      status: 400,
+      message: 'Missing or invalid parameter: song (minimum 2 characters required)',
+    });
+    return;
+  }
+
+  try {
+    const results = await tracksService.searchTracks({
+      song: query.song,
+      artist: query.artist,
+      album: query.album,
+      label: query.label,
+      n: query.n ? parseInt(query.n, 10) : 10,
+    });
+    res.status(200).json(results);
+  } catch (e) {
+    console.error('Error searching tracks:', e);
+    next(e);
   }
 };

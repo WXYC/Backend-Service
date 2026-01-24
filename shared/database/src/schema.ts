@@ -446,6 +446,30 @@ export const rotation_library_view = wxyc_schema.view('rotation_library_view').a
     .innerJoin(artists, eq(artists.id, library.artist_id));
 });
 
+// Tracks table for song title search (cached from Discogs)
+export type NewTrack = InferInsertModel<typeof tracks>;
+export type Track = InferSelectModel<typeof tracks>;
+export const tracks = wxyc_schema.table(
+  'tracks',
+  {
+    id: serial('id').primaryKey(),
+    album_id: integer('album_id').references(() => library.id, { onDelete: 'cascade' }),
+    discogs_release_id: integer('discogs_release_id'),
+    position: varchar('position', { length: 16 }), // "A1", "1", etc.
+    title: varchar('title', { length: 256 }).notNull(),
+    duration: varchar('duration', { length: 16 }), // "3:45"
+    artist_name: varchar('artist_name', { length: 128 }), // Denormalized for search
+    album_title: varchar('album_title', { length: 128 }), // Denormalized for search
+    created_at: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => {
+    return {
+      titleTrgmIdx: index('tracks_title_trgm_idx').using('gin', sql`${table.title} gin_trgm_ops`),
+      albumIdIdx: index('tracks_album_id_idx').on(table.album_id),
+    };
+  }
+);
+
 // Metadata cache tables for external API data (Discogs, Spotify, etc.)
 export type NewAlbumMetadata = InferInsertModel<typeof album_metadata>;
 export type AlbumMetadata = InferSelectModel<typeof album_metadata>;
