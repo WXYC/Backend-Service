@@ -1,4 +1,4 @@
-import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
+import { InferInsertModel, InferSelectModel, relations } from 'drizzle-orm';
 import { sql, eq } from 'drizzle-orm';
 import {
   pgSchema,
@@ -533,3 +533,108 @@ export const artist_metadata = wxyc_schema.table(
     };
   }
 );
+
+// ============================================================================
+// Drizzle Relations (for nested queries via db.query.*)
+// ============================================================================
+
+export const genresRelations = relations(genres, ({ many }) => ({
+  artists: many(artists),
+}));
+
+export const artistsRelations = relations(artists, ({ one, many }) => ({
+  genre: one(genres, {
+    fields: [artists.genre_id],
+    references: [genres.id],
+  }),
+  albums: many(library),
+}));
+
+export const formatRelations = relations(format, ({ many }) => ({
+  albums: many(library),
+}));
+
+export const libraryRelations = relations(library, ({ one, many }) => ({
+  artist: one(artists, {
+    fields: [library.artist_id],
+    references: [artists.id],
+  }),
+  genre: one(genres, {
+    fields: [library.genre_id],
+    references: [genres.id],
+  }),
+  format: one(format, {
+    fields: [library.format_id],
+    references: [format.id],
+  }),
+  rotations: many(rotation),
+  reviews: many(reviews),
+  tracks: many(tracks),
+  metadata: one(album_metadata, {
+    fields: [library.id],
+    references: [album_metadata.album_id],
+  }),
+}));
+
+export const rotationRelations = relations(rotation, ({ one }) => ({
+  album: one(library, {
+    fields: [rotation.album_id],
+    references: [library.id],
+  }),
+}));
+
+export const flowsheetRelations = relations(flowsheet, ({ one }) => ({
+  show: one(shows, {
+    fields: [flowsheet.show_id],
+    references: [shows.id],
+  }),
+  album: one(library, {
+    fields: [flowsheet.album_id],
+    references: [library.id],
+  }),
+  rotation: one(rotation, {
+    fields: [flowsheet.rotation_id],
+    references: [rotation.id],
+  }),
+}));
+
+export const showsRelations = relations(shows, ({ one, many }) => ({
+  primaryDJ: one(user, {
+    fields: [shows.primary_dj_id],
+    references: [user.id],
+  }),
+  specialty: one(specialty_shows, {
+    fields: [shows.specialty_id],
+    references: [specialty_shows.id],
+  }),
+  entries: many(flowsheet),
+  djs: many(show_djs),
+}));
+
+export const reviewsRelations = relations(reviews, ({ one }) => ({
+  album: one(library, {
+    fields: [reviews.album_id],
+    references: [library.id],
+  }),
+}));
+
+export const tracksRelations = relations(tracks, ({ one }) => ({
+  album: one(library, {
+    fields: [tracks.album_id],
+    references: [library.id],
+  }),
+}));
+
+export const albumMetadataRelations = relations(album_metadata, ({ one }) => ({
+  album: one(library, {
+    fields: [album_metadata.album_id],
+    references: [library.id],
+  }),
+}));
+
+export const artistMetadataRelations = relations(artist_metadata, ({ one }) => ({
+  artist: one(artists, {
+    fields: [artist_metadata.artist_id],
+    references: [artists.id],
+  }),
+}));
