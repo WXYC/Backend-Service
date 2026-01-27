@@ -2,6 +2,74 @@
 
 #### This is an API that supports wxyc applications with features for dj, flowsheet, and library access/management.
 
+## Quick Start
+
+Get the backend running locally in 5 steps:
+
+```bash
+# 1. Clone and install
+git clone git@github.com:WXYC/Backend-Service.git
+cd Backend-Service
+npm install
+
+# 2. Copy environment template
+cp .env.example .env  # Or create .env from the template below
+
+# 3. Start the database
+npm run db:start
+
+# 4. Start the backend and auth services
+npm run dev
+
+# 5. Verify it's running
+curl http://localhost:8080/healthcheck
+```
+
+The backend API is now available at `http://localhost:8080`.
+
+## Ports Reference
+
+| Service    | Port | Health Check Endpoint          |
+|------------|------|-------------------------------|
+| Backend    | 8080 | `http://localhost:8080/healthcheck` |
+| Auth       | 8082 | `http://localhost:8082/auth/ok`     |
+| PostgreSQL | 5432 | N/A (use `psql` to connect)         |
+
+## Test Credentials
+
+The local development database is seeded with test accounts for all roles:
+
+| Username              | Password         | Role           | Permissions |
+|-----------------------|------------------|----------------|-------------|
+| test_member           | testpassword123  | member         | bin r/w, catalog r, flowsheet r |
+| test_dj1              | testpassword123  | dj             | bin r/w, catalog r, flowsheet r/w |
+| test_dj2              | testpassword123  | dj             | bin r/w, catalog r, flowsheet r/w |
+| test_music_director   | testpassword123  | musicDirector  | bin r/w, catalog r/w, flowsheet r/w |
+| test_station_manager  | testpassword123  | stationManager | full admin access |
+
+These credentials can be used with the auth service at `http://localhost:8082/auth`.
+
+## Full Stack Development
+
+To run the complete WXYC stack (backend + frontend):
+
+1. Start the backend services (follow Quick Start above)
+2. Clone and set up the frontend:
+   ```bash
+   git clone git@github.com:WXYC/dj-site.git
+   cd dj-site
+   npm install
+   ```
+3. Create `dj-site/.env.local` with:
+   ```
+   NEXT_PUBLIC_BACKEND_URL=http://localhost:8080
+   NEXT_PUBLIC_BETTER_AUTH_URL=http://localhost:8082/auth
+   ```
+4. Start the frontend: `npm run dev`
+5. Access the app at `http://localhost:3000`
+
+For automated full-stack setup, see the [wxyc-shared](https://github.com/WXYC/wxyc-shared) repository's setup script.
+
 ## API reference
 
 TODO. Add table outlining the behavior of each endpoint

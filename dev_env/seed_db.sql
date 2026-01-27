@@ -1,13 +1,28 @@
--- Primary and secondary dj used in test automation
+-- Test accounts for all roles
 -- Note: In production, users should be created via better-auth service
 -- For test/dev environments, we create test users directly in the seed file
+--
+-- Available roles (defined in shared/authentication/src/auth.roles.ts):
+--   member         - basic access: bin read/write, catalog read, flowsheet read
+--   dj             - DJ access: bin read/write, catalog read, flowsheet read/write
+--   musicDirector  - music director: bin read/write, catalog read/write, flowsheet read/write
+--   stationManager - admin: full access to everything
+--
+-- All test accounts use password: testpassword123
 
--- Create test users for test automation
--- These users are required for the test suite to function
+-- Create WXYC organization
+INSERT INTO auth_organization (id, name, slug, logo, metadata, created_at)
+VALUES ('wxyc-org-000000000000000000001', 'WXYC 89.3 FM', 'wxyc', NULL, NULL, NOW())
+ON CONFLICT (id) DO NOTHING;
+
+-- Create test users for each role
 INSERT INTO auth_user (id, name, email, email_verified, username, dj_name, real_name, created_at, updated_at, app_skin)
 VALUES
-  ('test-dj1-id-00000000000000000001', 'test_dj1', 'test_dj1@wxyc.org', true, 'test_dj1', 'Test dj1', 'Test DJ 1', NOW(), NOW(), 'modern-light'),
-  ('test-dj2-id-00000000000000000002', 'test_dj2', 'test_dj2@wxyc.org', true, 'test_dj2', 'Test dj2', 'Test DJ 2', NOW(), NOW(), 'modern-light')
+  ('test-member-id-000000000000000001', 'test_member', 'test_member@wxyc.org', true, 'test_member', 'Test Member', 'Test Member', NOW(), NOW(), 'modern-light'),
+  ('test-dj1-id-00000000000000000001', 'test_dj1', 'test_dj1@wxyc.org', true, 'test_dj1', 'Test DJ 1', 'Test DJ 1', NOW(), NOW(), 'modern-light'),
+  ('test-dj2-id-00000000000000000002', 'test_dj2', 'test_dj2@wxyc.org', true, 'test_dj2', 'Test DJ 2', 'Test DJ 2', NOW(), NOW(), 'modern-light'),
+  ('test-music-dir-id-0000000000000001', 'test_music_director', 'test_music_director@wxyc.org', true, 'test_music_director', 'Test Music Director', 'Test Music Director', NOW(), NOW(), 'modern-light'),
+  ('test-manager-id-00000000000000001', 'test_station_manager', 'test_station_manager@wxyc.org', true, 'test_station_manager', 'Test Station Manager', 'Test Station Manager', NOW(), NOW(), 'modern-light')
 ON CONFLICT (id) DO NOTHING;
 
 -- Create auth_account entries for test users (credential provider for username/password login)
@@ -15,8 +30,21 @@ ON CONFLICT (id) DO NOTHING;
 -- Hash generated with: import { hashPassword } from 'better-auth/crypto'; hashPassword('testpassword123')
 INSERT INTO auth_account (id, user_id, account_id, provider_id, password, created_at, updated_at)
 VALUES
+  ('test-account-member-0000000000001', 'test-member-id-000000000000000001', 'test_member', 'credential', '658683f3d57f62fc4140eff6bd79a1a7:3ccb6966bf4629a27bfb0be5471041dff9c751ad2513037f786a79c2fbdf455526f2c1e5d3d3acdabed3c4eb3506ec5312b1f19f3d22a5471e4c9bf8086fdd88', NOW(), NOW()),
   ('test-account-1-000000000000000001', 'test-dj1-id-00000000000000000001', 'test_dj1', 'credential', '658683f3d57f62fc4140eff6bd79a1a7:3ccb6966bf4629a27bfb0be5471041dff9c751ad2513037f786a79c2fbdf455526f2c1e5d3d3acdabed3c4eb3506ec5312b1f19f3d22a5471e4c9bf8086fdd88', NOW(), NOW()),
-  ('test-account-2-000000000000000002', 'test-dj2-id-00000000000000000002', 'test_dj2', 'credential', '29fd75d5d2ed6cc337f95d4e5b45e714:cf7d90a2b3a03a4b734f28c90faf6be08fedf051db646564adf3bb8befe2b5566fe2db3d052c9db9279a6985e821dfe3bc202dec2198f849374bd012e1013b6f', NOW(), NOW())
+  ('test-account-2-000000000000000002', 'test-dj2-id-00000000000000000002', 'test_dj2', 'credential', '658683f3d57f62fc4140eff6bd79a1a7:3ccb6966bf4629a27bfb0be5471041dff9c751ad2513037f786a79c2fbdf455526f2c1e5d3d3acdabed3c4eb3506ec5312b1f19f3d22a5471e4c9bf8086fdd88', NOW(), NOW()),
+  ('test-account-music-dir-00000000001', 'test-music-dir-id-0000000000000001', 'test_music_director', 'credential', '658683f3d57f62fc4140eff6bd79a1a7:3ccb6966bf4629a27bfb0be5471041dff9c751ad2513037f786a79c2fbdf455526f2c1e5d3d3acdabed3c4eb3506ec5312b1f19f3d22a5471e4c9bf8086fdd88', NOW(), NOW()),
+  ('test-account-manager-000000000001', 'test-manager-id-00000000000000001', 'test_station_manager', 'credential', '658683f3d57f62fc4140eff6bd79a1a7:3ccb6966bf4629a27bfb0be5471041dff9c751ad2513037f786a79c2fbdf455526f2c1e5d3d3acdabed3c4eb3506ec5312b1f19f3d22a5471e4c9bf8086fdd88', NOW(), NOW())
+ON CONFLICT (id) DO NOTHING;
+
+-- Create organization memberships with roles
+INSERT INTO auth_member (id, organization_id, user_id, role, created_at)
+VALUES
+  ('test-membership-member-0000000001', 'wxyc-org-000000000000000000001', 'test-member-id-000000000000000001', 'member', NOW()),
+  ('test-membership-dj1-000000000001', 'wxyc-org-000000000000000000001', 'test-dj1-id-00000000000000000001', 'dj', NOW()),
+  ('test-membership-dj2-000000000001', 'wxyc-org-000000000000000000001', 'test-dj2-id-00000000000000000002', 'dj', NOW()),
+  ('test-membership-musicdir-000001', 'wxyc-org-000000000000000000001', 'test-music-dir-id-0000000000000001', 'musicDirector', NOW()),
+  ('test-membership-manager-00000001', 'wxyc-org-000000000000000000001', 'test-manager-id-00000000000000001', 'stationManager', NOW())
 ON CONFLICT (id) DO NOTHING;
 
 -- Genres, media formats, artists, and albums used in test automation
