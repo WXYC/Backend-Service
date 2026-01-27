@@ -152,6 +152,117 @@ services:
     ports:
       - '${CI_PORT:-8081}:8080'
 
+  # E2E Test Profile Services
+  # These services are specifically for running E2E tests with the frontend
+  e2e-db:
+    image: postgres:18.0-alpine
+    profiles: [e2e]
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      PGUSER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - '${E2E_DB_PORT:-5434}:5432'
+    volumes:
+      - e2e-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME} -d ${DB_NAME} || pg_isready']
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  e2e-db-init:
+    image: wxyc-db-init-image
+    profiles: [e2e]
+    build:
+      context: ..
+      dockerfile: dev_env/Dockerfile.init
+    container_name: wxyc-e2e-db-init
+    depends_on:
+      e2e-db:
+        condition: service_healthy
+    environment:
+      - DB_HOST=e2e-db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+    restart: 'no'
+    volumes:
+      - ../drizzle.config.ts:/init/drizzle.config.ts
+      - ../shared/database/src/schema.ts:/init/database/schema.ts
+      - ../shared/database/src/migrations:/init/database/migrations
+      - ./install_extensions.sql:/init/install_extensions.sql
+      - ./seed_db.sql:/init/seed_db.sql
+
+  e2e-auth:
+    depends_on:
+      e2e-db:
+        condition: service_healthy
+    image: wxyc_auth_service:e2e
+    build:
+      context: '../'
+      dockerfile: Dockerfile.auth
+    profiles: [e2e]
+    environment:
+      - DB_HOST=e2e-db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-e2e-auth-secret}
+      - BETTER_AUTH_URL=http://e2e-auth:8080/auth
+      - BETTER_AUTH_JWKS_URL=http://e2e-auth:8080/auth/jwks
+      - BETTER_AUTH_ISSUER=http://e2e-auth:8080
+      - BETTER_AUTH_AUDIENCE=http://e2e-auth:8080
+      - BETTER_AUTH_TRUSTED_ORIGINS=http://localhost:3000,http://e2e-frontend:3000
+      - FRONTEND_SOURCE=http://localhost:3000
+      - DEFAULT_ORG_SLUG=test-org
+      - DEFAULT_ORG_NAME=Test Organization
+      - APP_ORGANIZATION_ID=test-org-id-0000000000000000001
+    ports:
+      - '${E2E_AUTH_PORT:-8084}:8080'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -f http://localhost:8080/healthcheck || exit 1']
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  e2e-backend:
+    depends_on:
+      e2e-db:
+        condition: service_healthy
+      e2e-auth:
+        condition: service_healthy
+    image: wxyc_backend_service:e2e
+    build:
+      context: '../'
+      dockerfile: Dockerfile.backend
+    profiles: [e2e]
+    environment:
+      - DB_HOST=e2e-db
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - AUTH_BYPASS=false
+      - BETTER_AUTH_URL=http://e2e-auth:8080/auth
+      - BETTER_AUTH_AUDIENCE=http://e2e-auth:8080
+      - BETTER_AUTH_ISSUER=http://e2e-auth:8080
+      - BETTER_AUTH_JWKS_URL=http://e2e-auth:8080/auth/jwks
+    ports:
+      - '${E2E_BACKEND_PORT:-8085}:8080'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -f http://localhost:8080/healthcheck || exit 1']
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
 volumes:
   pg-data:
   ci-pg-data:
+  e2e-pg-data:

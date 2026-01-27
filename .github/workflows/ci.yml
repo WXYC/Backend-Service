@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (includes type checking)
+        run: npm run build
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-coverage
+          path: coverage/
+          retention-days: 7
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wxyc_admin
+          POSTGRES_PASSWORD: 'RadioIsEpic$1100'
+          POSTGRES_DB: wxyc_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Set up database
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: wxyc_db
+          DB_USERNAME: wxyc_admin
+          DB_PASSWORD: 'RadioIsEpic$1100'
+        run: |
+          # Install pg_trgm extension
+          PGPASSWORD='RadioIsEpic$1100' psql -h localhost -U wxyc_admin -d wxyc_db -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm;'
+
+          # Run migrations
+          npm run drizzle:migrate
+
+          # Seed the database
+          PGPASSWORD='RadioIsEpic$1100' psql -h localhost -U wxyc_admin -d wxyc_db -f dev_env/seed_db.sql
+
+      - name: Run integration tests
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: wxyc_db
+          DB_USERNAME: wxyc_admin
+          DB_PASSWORD: 'RadioIsEpic$1100'
+          BETTER_AUTH_SECRET: ci-auth-secret-for-testing
+          BETTER_AUTH_URL: http://localhost:8082/auth
+          AUTH_BYPASS: "true"
+        run: npm run test:integration
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-coverage
+          path: coverage/
+          retention-days: 7
