@@ -158,16 +158,16 @@ services:
     image: postgres:18.0-alpine
     profiles: [e2e]
     environment:
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_USER: ${DB_USERNAME}
-      PGUSER: ${DB_USERNAME}
-      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-e2epassword}
+      POSTGRES_USER: ${DB_USERNAME:-e2euser}
+      PGUSER: ${DB_USERNAME:-e2euser}
+      POSTGRES_DB: ${DB_NAME:-e2edb}
     ports:
       - '${E2E_DB_PORT:-5434}:5432'
     volumes:
       - e2e-pg-data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME} -d ${DB_NAME} || pg_isready']
+      test: ['CMD-SHELL', 'pg_isready -U e2euser -d e2edb || pg_isready']
       interval: 2s
       timeout: 5s
       retries: 10
@@ -186,9 +186,9 @@ services:
     environment:
       - DB_HOST=e2e-db
       - DB_PORT=5432
-      - DB_USERNAME=${DB_USERNAME}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
+      - DB_USERNAME=${DB_USERNAME:-e2euser}
+      - DB_PASSWORD=${DB_PASSWORD:-e2epassword}
+      - DB_NAME=${DB_NAME:-e2edb}
     restart: 'no'
     volumes:
       - ../drizzle.config.ts:/init/drizzle.config.ts
@@ -209,9 +209,9 @@ services:
     environment:
       - DB_HOST=e2e-db
       - DB_PORT=5432
-      - DB_USERNAME=${DB_USERNAME}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
+      - DB_USERNAME=${DB_USERNAME:-e2euser}
+      - DB_PASSWORD=${DB_PASSWORD:-e2epassword}
+      - DB_NAME=${DB_NAME:-e2edb}
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-e2e-auth-secret-for-testing-minimum-32-chars}
       - BETTER_AUTH_URL=http://e2e-auth:8080/auth
       - BETTER_AUTH_JWKS_URL=http://e2e-auth:8080/auth/jwks
@@ -245,9 +245,9 @@ services:
     environment:
       - DB_HOST=e2e-db
       - DB_PORT=5432
-      - DB_USERNAME=${DB_USERNAME}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
+      - DB_USERNAME=${DB_USERNAME:-e2euser}
+      - DB_PASSWORD=${DB_PASSWORD:-e2epassword}
+      - DB_NAME=${DB_NAME:-e2edb}
       - AUTH_BYPASS=false
       - BETTER_AUTH_URL=http://e2e-auth:8080/auth
       - BETTER_AUTH_AUDIENCE=http://e2e-auth:8080
