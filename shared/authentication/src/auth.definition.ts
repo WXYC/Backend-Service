@@ -300,20 +300,32 @@ export const auth = betterAuth({
         return;
       }
 
-      const callbackURL =
-        process.env.EMAIL_VERIFICATION_REDIRECT_URL?.trim() ||
-        process.env.FRONTEND_SOURCE?.trim();
+      // Auto-verify email for admin-created users (admin is a trusted source)
+      // This avoids requiring email verification for accounts created by station managers
+      try {
+        await db
+          .update(user)
+          .set({ emailVerified: true })
+          .where(eq(user.email, email));
+        console.log(`Auto-verified email for admin-created user: ${email}`);
+      } catch (error) {
+        console.error('Error auto-verifying admin-created user email:', error);
+        // Still try to send verification email as fallback
+        const callbackURL =
+          process.env.EMAIL_VERIFICATION_REDIRECT_URL?.trim() ||
+          process.env.FRONTEND_SOURCE?.trim();
 
-      void auth.api
-        .sendVerificationEmail({
-          body: {
-            email,
-            callbackURL,
-          },
-        })
-        .catch((error) => {
-          console.error('Error triggering verification email:', error);
-        });
+        void auth.api
+          .sendVerificationEmail({
+            body: {
+              email,
+              callbackURL,
+            },
+          })
+          .catch((verifyError) => {
+            console.error('Error triggering verification email:', verifyError);
+          });
+      }
     }),
   },
 
