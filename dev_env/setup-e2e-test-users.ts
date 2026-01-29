@@ -15,17 +15,27 @@ import { config } from 'dotenv';
 config();
 
 const TEST_PASSWORD = 'testpassword123';
+const TEMP_PASSWORD = 'temppass123'; // For incomplete users (onboarding flow)
 
-const TEST_USERS = [
+interface TestUser {
+  id: string;
+  username: string;
+  password?: string; // Uses TEST_PASSWORD if not specified
+}
+
+const TEST_USERS: TestUser[] = [
   { id: 'test-member-id-000000000000000001', username: 'test_member' },
   { id: 'test-dj1-id-00000000000000000001', username: 'test_dj1' },
   { id: 'test-dj2-id-00000000000000000002', username: 'test_dj2' },
   { id: 'test-md-id-0000000000000000001', username: 'test_music_director' },
   { id: 'test-sm-id-0000000000000000001', username: 'test_station_manager' },
-  { id: 'test-incomplete-id-0000000000001', username: 'test_incomplete' },
+  { id: 'test-incomplete-id-0000000000001', username: 'test_incomplete', password: TEMP_PASSWORD },
   { id: 'test-deletable-id-00000000000001', username: 'test_deletable_user' },
   { id: 'test-promotable-id-0000000000001', username: 'test_promotable_user' },
   { id: 'test-demotable-sm-id-000000000001', username: 'test_demotable_sm' },
+  { id: 'test-reset1-id-000000000000000001', username: 'test_reset1' },
+  { id: 'test-reset2-id-000000000000000002', username: 'test_reset2' },
+  { id: 'test-adminreset1-id-00000000001', username: 'test_adminreset1' },
 ];
 
 async function setUpTestUsers() {
@@ -38,26 +48,34 @@ async function setUpTestUsers() {
 
     console.log('Setting up E2E test users with passwords...\n');
 
-    // Hash the test password
-    const hashedPassword = await context.password.hash(TEST_PASSWORD);
-    console.log('Password hashed successfully');
+    // Hash both passwords upfront
+    const hashedTestPassword = await context.password.hash(TEST_PASSWORD);
+    const hashedTempPassword = await context.password.hash(TEMP_PASSWORD);
+    console.log('Passwords hashed successfully');
 
     for (const user of TEST_USERS) {
       try {
+        // Use custom password if specified, otherwise default test password
+        const passwordHash = user.password
+          ? (user.password === TEMP_PASSWORD ? hashedTempPassword : await context.password.hash(user.password))
+          : hashedTestPassword;
+
         // Update the account with the password hash
         const result = await db
           .update(account)
-          .set({ password: hashedPassword })
+          .set({ password: passwordHash })
           .where(eq(account.userId, user.id));
 
-        console.log(`[+] Set password for ${user.username}`);
+        const passwordType = user.password ? user.password : TEST_PASSWORD;
+        console.log(`[+] Set password for ${user.username} (${passwordType})`);
       } catch (error) {
         console.error(`[-] Failed to set password for ${user.username}:`, error);
       }
     }
 
     console.log('\nE2E test user setup complete!');
-    console.log(`All test users now have password: ${TEST_PASSWORD}`);
+    console.log(`Most test users have password: ${TEST_PASSWORD}`);
+    console.log(`Incomplete user has password: ${TEMP_PASSWORD}`);
     process.exit(0);
   } catch (error) {
     console.error('Failed to set up E2E test users:', error);
