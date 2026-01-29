@@ -40,7 +40,9 @@ VALUES
   ('test-demotable-sm-id-000000000001', 'test_demotable_sm', 'test_demotable_sm@wxyc.org', true, 'test_demotable_sm', 'Demotable SM', 'Test Demotable SM', 'admin', NOW(), NOW(), 'modern-light'),
   -- Password reset test users (dedicated users for password reset tests to avoid conflicts)
   ('test-reset1-id-000000000000000001', 'test_reset1', 'test_reset1@wxyc.org', true, 'test_reset1', 'Reset DJ 1', 'Test Reset 1', NULL, NOW(), NOW(), 'modern-light'),
-  ('test-reset2-id-000000000000000002', 'test_reset2', 'test_reset2@wxyc.org', true, 'test_reset2', 'Reset DJ 2', 'Test Reset 2', NULL, NOW(), NOW(), 'modern-light')
+  ('test-reset2-id-000000000000000002', 'test_reset2', 'test_reset2@wxyc.org', true, 'test_reset2', 'Reset DJ 2', 'Test Reset 2', NULL, NOW(), NOW(), 'modern-light'),
+  -- Admin password reset test user (dedicated for admin-initiated password reset tests)
+  ('test-adminreset1-id-00000000001', 'test_adminreset1', 'test_adminreset1@wxyc.org', true, 'test_adminreset1', 'AdminReset DJ', 'Test AdminReset 1', NULL, NOW(), NOW(), 'modern-light')
 ON CONFLICT (id) DO UPDATE SET
   dj_name = EXCLUDED.dj_name,
   real_name = EXCLUDED.real_name,
@@ -56,13 +58,16 @@ VALUES
   ('test-account-dj2-000000000001', 'test-dj2-id-00000000000000000002', 'test-dj2-id-00000000000000000002', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW()),
   ('test-account-md-0000000000001', 'test-md-id-0000000000000000001', 'test-md-id-0000000000000000001', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW()),
   ('test-account-sm-0000000000001', 'test-sm-id-0000000000000000001', 'test-sm-id-0000000000000000001', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW()),
-  ('test-account-incomplete-00001', 'test-incomplete-id-0000000000001', 'test-incomplete-id-0000000000001', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW()),
+  -- Incomplete user uses temppass123 (for onboarding password change tests)
+  ('test-account-incomplete-00001', 'test-incomplete-id-0000000000001', 'test-incomplete-id-0000000000001', 'credential', '5fa267eec9d6a94701575fce7b835466:805e0eef8140a9663c1f92dc6b66bb4f895d97f5be798dea9cf6d6cafc7ad68b63f0d8da6374bb3ca8185b96260ab94cdfc2e65aae4c305ebd3da787c05cecab', NOW(), NOW()),
   ('test-account-deletable-00001', 'test-deletable-id-00000000000001', 'test-deletable-id-00000000000001', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW()),
   ('test-account-promotable-0001', 'test-promotable-id-0000000000001', 'test-promotable-id-0000000000001', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW()),
   ('test-account-demotable-sm-01', 'test-demotable-sm-id-000000000001', 'test-demotable-sm-id-000000000001', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW()),
   -- Password reset test user accounts
   ('test-account-reset1-0000000001', 'test-reset1-id-000000000000000001', 'test-reset1-id-000000000000000001', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW()),
-  ('test-account-reset2-0000000001', 'test-reset2-id-000000000000000002', 'test-reset2-id-000000000000000002', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW())
+  ('test-account-reset2-0000000001', 'test-reset2-id-000000000000000002', 'test-reset2-id-000000000000000002', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW()),
+  -- Admin password reset test user account
+  ('test-account-adminreset1-001', 'test-adminreset1-id-00000000001', 'test-adminreset1-id-00000000001', 'credential', 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8:05891b04ad22fe3cc64671a93657e9503e08bbe12193287ebc6944d4b3c12ef16e4a796f4f723920798e9911ae21306009e92b6a1f79d155835085e7efd77aa8', NOW(), NOW())
 ON CONFLICT (id) DO UPDATE SET
   password = EXCLUDED.password,
   updated_at = NOW();
@@ -89,7 +94,9 @@ VALUES
   ('test-membership-demotable01', 'test-org-id-0000000000000000001', 'test-demotable-sm-id-000000000001', 'stationManager', NOW()),
   -- Password reset test users as DJ (for password reset tests)
   ('test-membership-reset1-0001', 'test-org-id-0000000000000000001', 'test-reset1-id-000000000000000001', 'dj', NOW()),
-  ('test-membership-reset2-0001', 'test-org-id-0000000000000000001', 'test-reset2-id-000000000000000002', 'dj', NOW())
+  ('test-membership-reset2-0001', 'test-org-id-0000000000000000001', 'test-reset2-id-000000000000000002', 'dj', NOW()),
+  -- Admin password reset test user as DJ
+  ('test-membership-adminres01', 'test-org-id-0000000000000000001', 'test-adminreset1-id-00000000001', 'dj', NOW())
 ON CONFLICT (id) DO NOTHING;
 
 -- Genres, media formats, artists, and albums used in test automation
