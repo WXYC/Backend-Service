@@ -375,8 +375,10 @@ jobs:
           retention-days: 14
 
       # On push to main, push built images to ECR with SHA tags for cache
+      # Note: Only pushes to repositories that exist (backend, auth). db-init is not deployed.
       - name: Push images to ECR cache
         if: env.RUN_TESTS == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -387,16 +389,7 @@ jobs:
 
           echo "Pushing images to ECR with SHA tag: ${SHA_TAG}"
 
-          # Push db-init if it was built
-          if docker image inspect wxyc-db-init-image > /dev/null 2>&1; then
-            echo "📦 Pushing db-init..."
-            docker tag wxyc-db-init-image ${ECR_URI}/db-init:${SHA_TAG}
-            docker tag wxyc-db-init-image ${ECR_URI}/db-init:latest
-            docker push ${ECR_URI}/db-init:${SHA_TAG}
-            docker push ${ECR_URI}/db-init:latest
-          fi
-
-          # Push auth if it was built
+          # Push auth if it was built (auth repository exists in ECR)
           if docker image inspect wxyc_auth_service:ci > /dev/null 2>&1; then
             echo "📦 Pushing auth..."
             docker tag wxyc_auth_service:ci ${ECR_URI}/auth:${SHA_TAG}
@@ -405,7 +398,7 @@ jobs:
             docker push ${ECR_URI}/auth:latest
           fi
 
-          # Push backend if it was built
+          # Push backend if it was built (backend repository exists in ECR)
           if docker image inspect wxyc_backend_service:ci > /dev/null 2>&1; then
             echo "📦 Pushing backend..."
             docker tag wxyc_backend_service:ci ${ECR_URI}/backend:${SHA_TAG}
@@ -413,6 +406,9 @@ jobs:
             docker push ${ECR_URI}/backend:${SHA_TAG}
             docker push ${ECR_URI}/backend:latest
           fi
+
+          # Note: db-init is not pushed because the ECR repository doesn't exist
+          # (db-init is only used in CI, not deployed to production)
 
           echo "✅ ECR cache updated with SHA: ${SHA_TAG}"
 
