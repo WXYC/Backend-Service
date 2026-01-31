@@ -14,6 +14,8 @@ const config: Config = {
     'node_modules/(?!(jose|drizzle-orm)/)',
   ],
   moduleNameMapper: {
+    // Mock workspace database package
+    '^@wxyc/database$': '<rootDir>/tests/mocks/database.mock.ts',
     // Mock database client for any path resolving to shared/database/src/client
     '^.*/shared/database/src/client(\\.js)?$': '<rootDir>/tests/mocks/database.mock.ts',
     // Remove .js extensions from relative imports (ESM compatibility)
