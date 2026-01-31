@@ -25,6 +25,96 @@ app.use(
   })
 );
 
+// Test helper endpoints (must be registered BEFORE Better Auth handler)
+// Disabled in production
+if (process.env.NODE_ENV !== 'production') {
+  // Get verification token for testing password reset flow
+  // Better Auth stores password reset tokens with:
+  //   identifier: "reset-password:<token>" or "email-verification:<token>"
+  //   value: userId
+  // This endpoint accepts an email, looks up the user, then finds their reset token
+  app.get('/auth/test/verification-token', async (req, res) => {
+    try {
+      const { identifier, type = 'reset-password' } = req.query;
+      if (!identifier || typeof identifier !== 'string') {
+        return res.status(400).json({ error: 'identifier query parameter is required (email address)' });
+      }
+
+      const { db, verification, user } = await import('@wxyc/database');
+      const { eq, desc, like, and } = await import('drizzle-orm');
+
+      // First, look up the user by email to get their userId
+      const userResult = await db
+        .select({ id: user.id })
+        .from(user)
+        .where(eq(user.email, identifier))
+        .limit(1);
+
+      if (userResult.length === 0) {
+        return res.status(404).json({ error: 'User not found with this email' });
+      }
+
+      const userId = userResult[0].id;
+
+      // Now find the verification token where value = userId and identifier starts with type prefix
+      const tokenPrefix = `${type}:`;
+      const result = await db
+        .select()
+        .from(verification)
+        .where(and(
+          eq(verification.value, userId),
+          like(verification.identifier, `${tokenPrefix}%`)
+        ))
+        .orderBy(desc(verification.createdAt))
+        .limit(1);
+
+      if (result.length === 0) {
+        return res.status(404).json({ error: `No ${type} token found for this user` });
+      }
+
+      // Extract the actual token from the identifier (e.g., "reset-password:abc123" -> "abc123")
+      const fullIdentifier = result[0].identifier;
+      const token = fullIdentifier.startsWith(tokenPrefix)
+        ? fullIdentifier.slice(tokenPrefix.length)
+        : fullIdentifier;
+
+      res.json({
+        token,
+        expiresAt: result[0].expiresAt,
+        createdAt: result[0].createdAt,
+      });
+    } catch (error) {
+      console.error('Error fetching verification token:', error);
+      res.status(500).json({ error: 'Failed to fetch verification token' });
+    }
+  });
+
+  // Expire a user's session for testing session timeout
+  app.post('/auth/test/expire-session', async (req, res) => {
+    try {
+      const { userId } = req.body;
+      if (!userId || typeof userId !== 'string') {
+        return res.status(400).json({ error: 'userId is required in request body' });
+      }
+
+      const { db, session } = await import('@wxyc/database');
+      const { eq } = await import('drizzle-orm');
+
+      await db
+        .update(session)
+        .set({ expiresAt: new Date(0) })
+        .where(eq(session.userId, userId));
+
+      res.json({ success: true, message: `Session expired for user ${userId}` });
+    } catch (error) {
+      console.error('Error expiring session:', error);
+      res.status(500).json({ error: 'Failed to expire session' });
+    }
+  });
+
+  console.log('[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session)');
+}
+
 // Mount the Better Auth handler for all auth routes
 // app.use() will handle all methods and paths under /auth
 app.use('/auth', toNodeHandler(auth));

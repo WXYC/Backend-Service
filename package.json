@@ -17,14 +17,17 @@
     "test:all": "npm run test:unit && npm run test:integration",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d; docker attach wxyc-db-init",
     "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down db -v --remove-orphans",
-    "ci:build": "npm run docker:build --workspace=apps/**",
-    "ci:env": "npm run ci:build && sh -c 'COMPOSE=\"docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci\" && $COMPOSE up -d ci-db && $COMPOSE up ci-db-init && $COMPOSE up -d auth backend'",
+    "ci:env": "sh -c 'COMPOSE=\"docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci\" && $COMPOSE up -d ci-db && $COMPOSE up ci-db-init && $COMPOSE up -d ${BUILD_ENABLED:+--build} auth backend'",
     "ci:test": "DB_PORT=${CI_DB_PORT:-5433} PORT=${CI_PORT:-8081} BETTER_AUTH_URL=${CI_BETTER_AUTH_URL:-http://localhost:8083/auth} dotenvx run -f .env -- jest --config jest.config.json --runInBand --coverage",
     "ci:clean": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci down -v",
     "ci:testmock": "npm run ci:env && npm run ci:test && npm run ci:clean",
+    "e2e:env": "npm run docker:build --workspace=apps/** && docker compose -f dev_env/docker-compose.yml --env-file .env --profile e2e up -d e2e-db && docker compose -f dev_env/docker-compose.yml --env-file .env --profile e2e up e2e-db-init && docker compose -f dev_env/docker-compose.yml --env-file .env --profile e2e up -d e2e-auth e2e-backend",
+    "e2e:setup-users": "E2E_DB_PORT=${E2E_DB_PORT:-5434} DB_PORT=${E2E_DB_PORT:-5434} npm run setup:e2e-users",
+    "e2e:clean": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile e2e down -v",
     "drizzle:generate": "read -p \"Enter migration name (optional): \" MIGRATION_NAME && dotenvx run -f .env -- drizzle-kit generate --config 'drizzle.config.ts' --name \"$MIGRATION_NAME\"",
     "drizzle:migrate": "dotenvx run -f .env -- drizzle-kit migrate --config 'drizzle.config.ts'",
-    "drizzle:drop": "dotenvx run -f .env -- drizzle-kit drop --out ./shared/database/src/migrations"
+    "drizzle:drop": "dotenvx run -f .env -- drizzle-kit drop --out ./shared/database/src/migrations",
+    "setup:e2e-users": "dotenvx run -f .env -- tsx dev_env/setup-e2e-test-users.ts"
   },
   "author": "AyBruno",
   "license": "MIT",
@@ -51,6 +54,7 @@
     "ts-jest": "^29.4.6",
     "ts-node": "^10.9.2",
     "tsup": "^8.4.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.6.2",
     "wait-on": "^8.0.1"
   },
