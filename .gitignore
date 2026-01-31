@@ -6,3 +6,4 @@ mirror-logs
 .env
 .DS_STORE
 *.tsbuildinfo
+worklog/
