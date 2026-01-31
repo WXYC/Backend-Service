@@ -52,7 +52,7 @@ jobs:
             db-init:
               - 'dev_env/Dockerfile.init'
               - 'dev_env/init-db.mjs'
-              - 'dev_env/seed_db.sql'
+              - 'dev_env/package.init.json'
             docs-only:
               - '**/*.md'
               - 'docs/**'
@@ -230,6 +230,9 @@ jobs:
           npm run ci:env
 
       - name: Run Integration Tests
+        # Note: Tests must run sequentially (--runInBand) because they share
+        # show state, DJ sessions, and flowsheet entries. Parallel execution
+        # causes tests to interfere with each other's join/leave operations.
         run: npm run ci:test
 
       - name: Upload Coverage Report

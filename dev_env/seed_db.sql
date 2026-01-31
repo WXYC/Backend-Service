@@ -130,4 +130,33 @@ INSERT INTO wxyc_schema.library(
     artist_id, genre_id, format_id, album_title, code_number) 
     VALUES (3, 1, 2, 'I Love You Jennifer B', 1);
 
-INSERT INTO wxyc_schema.rotation(album_id, play_freq) VALUES (1, 'L')
+-- Additional artists for parallel test isolation (metadata.spec.js uses albums 4-6)
+INSERT INTO wxyc_schema.artists(
+	artist_name, code_letters, code_artist_number, genre_id)
+	VALUES ('Sufjan Stevens', 'ST', 42, 1);
+
+INSERT INTO wxyc_schema.artists(
+	artist_name, code_letters, code_artist_number, genre_id)
+	VALUES ('Kendrick Lamar', 'LA', 15, 2);
+
+INSERT INTO wxyc_schema.artists(
+	artist_name, code_letters, code_artist_number, genre_id)
+	VALUES ('Bjork', 'BJ', 22, 1);
+
+-- Additional albums for parallel test isolation (IDs 4, 5, 6 for metadata.spec.js)
+INSERT INTO wxyc_schema.library(
+    artist_id, genre_id, format_id, album_title, code_number)
+    VALUES (4, 1, 1, 'Illinois', 1);
+
+INSERT INTO wxyc_schema.library(
+    artist_id, genre_id, format_id, album_title, code_number)
+    VALUES (5, 2, 1, 'To Pimp a Butterfly', 1);
+
+INSERT INTO wxyc_schema.library(
+    artist_id, genre_id, format_id, album_title, code_number)
+    VALUES (6, 1, 2, 'Homogenic', 1);
+
+INSERT INTO wxyc_schema.rotation(album_id, play_freq) VALUES (1, 'L');
+
+-- Add album 4 to rotation for metadata.spec.js rotation tests
+INSERT INTO wxyc_schema.rotation(album_id, play_freq) VALUES (4, 'M');
