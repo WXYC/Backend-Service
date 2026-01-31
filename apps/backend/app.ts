@@ -9,7 +9,6 @@ import { flowsheet_v2_route } from './routes/flowsheet.v2.route.js';
 import { library_route } from './routes/library.route.js';
 import { schedule_route } from './routes/schedule.route.js';
 import { events_route } from './routes/events.route.js';
-import { jwtVerifier, cognitoMiddleware } from './middleware/cognito.auth.js';
 import { showMemberMiddleware } from './middleware/checkShowMember.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
@@ -69,16 +68,8 @@ app.get('/healthcheck', async (req, res) => {
 
 app.use(errorHandler);
 
-//On server startup we pre-fetch all jwt validation keys
-jwtVerifier
-  .hydrate()
-  .catch((e) => {
-    console.error(`Failed to hydrate JWT verifier : ${e}`);
-  })
-  .then(() => {
-    const server = app.listen(port, () => {
-      console.log(`listening on port: ${port}!`);
-    });
+const server = app.listen(port, () => {
+  console.log(`listening on port: ${port}!`);
+});
 
-    server.setTimeout(5000);
-  });
+server.setTimeout(5000);
