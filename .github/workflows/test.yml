@@ -13,8 +13,6 @@ env:
   CI_DB_PORT: 5433
   CI_PORT: 8081
   PORT: 8081
-  DB_HOST: localhost
-  DB_PORT: 5433
   CI_BETTER_AUTH_URL: http://localhost:8083/auth
   BETTER_AUTH_URL: http://localhost:8083/auth
   DB_USERNAME: test-user
