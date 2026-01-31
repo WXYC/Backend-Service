@@ -1,4 +1,4 @@
-import WxycError from '@/utils/error';
+import WxycError from '../../../apps/backend/utils/error';
 
 describe('WxycError', () => {
   it('creates error with default values', () => {
