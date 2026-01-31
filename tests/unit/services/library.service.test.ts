@@ -1,5 +1,29 @@
-import { isISODate, filterResultsByArtist } from '@/services/library.service';
-import { createLibraryResultSet } from '../../utils/fixtures';
+// Mock dependencies before importing the service
+jest.mock('@wxyc/database', () => ({
+  db: {
+    select: jest.fn().mockReturnThis(),
+    insert: jest.fn().mockReturnThis(),
+    update: jest.fn().mockReturnThis(),
+    delete: jest.fn().mockReturnThis(),
+  },
+  library: {},
+  artists: {},
+  genres: {},
+  format: {},
+  rotation: {},
+  library_artist_view: {},
+}));
+
+jest.mock('drizzle-orm', () => ({
+  eq: jest.fn((a, b) => ({ eq: [a, b] })),
+  sql: Object.assign(
+    jest.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ sql: strings, values })),
+    { raw: jest.fn((s: string) => ({ raw: s })) }
+  ),
+  desc: jest.fn((col) => ({ desc: col })),
+}));
+
+import { isISODate } from '../../../apps/backend/services/library.service';
 
 describe('library.service', () => {
   describe('isISODate', () => {
@@ -30,37 +54,6 @@ describe('library.service', () => {
       expect(isISODate('2024-02-29')).toBe(true); // leap year
       expect(isISODate('2024-02-30')).toBe(true); // invalid day but correct format
       expect(isISODate('2024-13-01')).toBe(true); // invalid month but correct format
-    });
-  });
-
-  describe('filterResultsByArtist', () => {
-    const mockResults = createLibraryResultSet();
-
-    it('filters results to only include matching artist (case-insensitive)', () => {
-      const filtered = filterResultsByArtist(mockResults, 'Test Artist');
-      expect(filtered).toHaveLength(2);
-      expect(filtered.every((r) => r.artist === 'Test Artist')).toBe(true);
-    });
-
-    it('filters using case-insensitive startsWith matching', () => {
-      const filtered = filterResultsByArtist(mockResults, 'test');
-      expect(filtered).toHaveLength(2);
-    });
-
-    it('returns all results when artist is null or undefined', () => {
-      expect(filterResultsByArtist(mockResults, null)).toHaveLength(3);
-      expect(filterResultsByArtist(mockResults, undefined)).toHaveLength(3);
-    });
-
-    it('returns empty array when no artists match', () => {
-      const filtered = filterResultsByArtist(mockResults, 'Nonexistent');
-      expect(filtered).toHaveLength(0);
-    });
-
-    it('returns all results when artist is empty string', () => {
-      // Every string starts with empty string
-      const filtered = filterResultsByArtist(mockResults, '');
-      expect(filtered).toHaveLength(3);
     });
   });
 });

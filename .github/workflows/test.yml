@@ -77,9 +77,28 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+
+      - name: Validate cached node_modules
+        id: validate-cache
+        if: steps.cache-node-modules.outputs.cache-hit == 'true'
+        run: |
+          if npm ls --depth=0 >/dev/null 2>&1; then
+            echo "valid=true" >> $GITHUB_OUTPUT
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Cache corrupted, will reinstall"
+            rm -rf node_modules
+          fi
 
       - name: Install Dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false'
         run: npm ci
 
       - name: Build (includes type checking)
@@ -100,9 +119,28 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+
+      - name: Validate cached node_modules
+        id: validate-cache
+        if: steps.cache-node-modules.outputs.cache-hit == 'true'
+        run: |
+          if npm ls --depth=0 >/dev/null 2>&1; then
+            echo "valid=true" >> $GITHUB_OUTPUT
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Cache corrupted, will reinstall"
+            rm -rf node_modules
+          fi
 
       - name: Install Dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false'
         run: npm ci
 
       - name: Run affected unit tests
@@ -216,9 +254,28 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+
+      - name: Validate cached node_modules
+        id: validate-cache
+        if: steps.cache-node-modules.outputs.cache-hit == 'true'
+        run: |
+          if npm ls --depth=0 >/dev/null 2>&1; then
+            echo "valid=true" >> $GITHUB_OUTPUT
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Cache corrupted, will reinstall"
+            rm -rf node_modules
+          fi
 
       - name: Install Dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false'
         run: npm ci
 
       - name: Lint .env file

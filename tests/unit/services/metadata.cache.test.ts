@@ -1,7 +1,18 @@
+// Mock database dependencies before importing the module
+jest.mock('@wxyc/database', () => ({
+  db: {},
+  album_metadata: {},
+  artist_metadata: {},
+}));
+
+jest.mock('drizzle-orm', () => ({
+  eq: jest.fn(),
+}));
+
 import {
   generateAlbumCacheKey,
   generateArtistCacheKey,
-} from '@/services/metadata/metadata.cache';
+} from '../../../apps/backend/services/metadata/metadata.cache';
 
 describe('metadata.cache', () => {
   describe('generateAlbumCacheKey', () => {
