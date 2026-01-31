@@ -1,3 +1,7 @@
+// =============================================================================
+// Base Test Data
+// =============================================================================
+
 export const testArtist = {
   id: 1,
   artist_name: 'Test Artist',
@@ -15,7 +19,10 @@ export const testAlbum = {
   format_id: 1,
 };
 
-// Factory functions for dynamic test data
+// =============================================================================
+// Factory Functions
+// =============================================================================
+
 export function createTestArtist(overrides = {}) {
   return { ...testArtist, ...overrides };
 }

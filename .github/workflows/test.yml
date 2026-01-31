@@ -32,6 +32,7 @@ jobs:
       db-init: ${{ steps.changes.outputs.db-init }}
       docs-only: ${{ steps.changes.outputs.docs-only }}
       src: ${{ steps.changes.outputs.src }}
+      run-integration: ${{ steps.should-run.outputs.run-integration }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -64,6 +65,18 @@ jobs:
               - 'package-lock.json'
               - 'tsconfig.base.json'
 
+      - name: Determine if integration tests should run
+        id: should-run
+        run: |
+          if [[ "${{ steps.changes.outputs.backend }}" == "true" || \
+                "${{ steps.changes.outputs.auth }}" == "true" || \
+                "${{ steps.changes.outputs.shared }}" == "true" || \
+                "${{ steps.changes.outputs.tests }}" == "true" ]]; then
+            echo "run-integration=true" >> $GITHUB_OUTPUT
+          else
+            echo "run-integration=false" >> $GITHUB_OUTPUT
+          fi
+
   # Fast lint and type check - always runs on code changes
   lint-and-typecheck:
     needs: detect-changes
@@ -77,9 +90,28 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+
+      - name: Validate cached node_modules
+        id: validate-cache
+        if: steps.cache-node-modules.outputs.cache-hit == 'true'
+        run: |
+          if npm ls --depth=0 >/dev/null 2>&1; then
+            echo "valid=true" >> $GITHUB_OUTPUT
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Cache corrupted, will reinstall"
+            rm -rf node_modules
+          fi
 
       - name: Install Dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false'
         run: npm ci
 
       - name: Build (includes type checking)
@@ -100,9 +132,28 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+
+      - name: Validate cached node_modules
+        id: validate-cache
+        if: steps.cache-node-modules.outputs.cache-hit == 'true'
+        run: |
+          if npm ls --depth=0 >/dev/null 2>&1; then
+            echo "valid=true" >> $GITHUB_OUTPUT
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Cache corrupted, will reinstall"
+            rm -rf node_modules
+          fi
 
       - name: Install Dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false'
         run: npm ci
 
       - name: Run affected unit tests
@@ -124,22 +175,27 @@ jobs:
           retention-days: 7
 
   # Integration tests - only when backend/auth/shared changes
-  integration-tests:
+  # Note: Job always runs to report status, but steps are skipped when no relevant changes
+  Integration-Tests:
     needs: detect-changes
-    if: |
-      needs.detect-changes.outputs.backend == 'true' ||
-      needs.detect-changes.outputs.auth == 'true' ||
-      needs.detect-changes.outputs.shared == 'true' ||
-      needs.detect-changes.outputs.tests == 'true'
     runs-on: ubuntu-latest
+    env:
+      RUN_TESTS: ${{ needs.detect-changes.outputs.run-integration }}
     steps:
+      - name: Skip notification
+        if: env.RUN_TESTS != 'true'
+        run: echo "No relevant changes detected, skipping integration tests"
+
       - name: Checkout Code
+        if: env.RUN_TESTS == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
+        if: env.RUN_TESTS == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Amazon ECR
+        if: env.RUN_TESTS == 'true'
         id: login-ecr
         continue-on-error: true
         env:
@@ -151,7 +207,7 @@ jobs:
 
       # db-init image: pull from ECR or build with layer cache
       - name: Pull db-init image from ECR
-        if: needs.detect-changes.outputs.db-init == 'false'
+        if: env.RUN_TESTS == 'true' && needs.detect-changes.outputs.db-init == 'false'
         id: pull-db-init
         continue-on-error: true
         run: |
@@ -159,7 +215,7 @@ jobs:
           docker tag ${{ secrets.AWS_ECR_URI }}/db-init:latest wxyc-db-init-image
 
       - name: Build db-init image
-        if: needs.detect-changes.outputs.db-init == 'true' || steps.pull-db-init.outcome == 'failure'
+        if: env.RUN_TESTS == 'true' && (needs.detect-changes.outputs.db-init == 'true' || steps.pull-db-init.outcome == 'failure')
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -172,7 +228,7 @@ jobs:
 
       # auth image: pull from ECR or build with layer cache
       - name: Pull auth image from ECR
-        if: needs.detect-changes.outputs.auth == 'false' && needs.detect-changes.outputs.shared == 'false'
+        if: env.RUN_TESTS == 'true' && needs.detect-changes.outputs.auth == 'false' && needs.detect-changes.outputs.shared == 'false'
         id: pull-auth
         continue-on-error: true
         run: |
@@ -180,7 +236,7 @@ jobs:
           docker tag ${{ secrets.AWS_ECR_URI }}/auth:latest wxyc_auth_service:ci
 
       - name: Build auth image
-        if: needs.detect-changes.outputs.auth == 'true' || needs.detect-changes.outputs.shared == 'true' || steps.pull-auth.outcome == 'failure'
+        if: env.RUN_TESTS == 'true' && (needs.detect-changes.outputs.auth == 'true' || needs.detect-changes.outputs.shared == 'true' || steps.pull-auth.outcome == 'failure')
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -193,7 +249,7 @@ jobs:
 
       # backend image: pull from ECR or build with layer cache
       - name: Pull backend image from ECR
-        if: needs.detect-changes.outputs.backend == 'false' && needs.detect-changes.outputs.shared == 'false'
+        if: env.RUN_TESTS == 'true' && needs.detect-changes.outputs.backend == 'false' && needs.detect-changes.outputs.shared == 'false'
         id: pull-backend
         continue-on-error: true
         run: |
@@ -201,7 +257,7 @@ jobs:
           docker tag ${{ secrets.AWS_ECR_URI }}/backend:latest wxyc_backend_service:ci
 
       - name: Build backend image
-        if: needs.detect-changes.outputs.backend == 'true' || needs.detect-changes.outputs.shared == 'true' || steps.pull-backend.outcome == 'failure'
+        if: env.RUN_TESTS == 'true' && (needs.detect-changes.outputs.backend == 'true' || needs.detect-changes.outputs.shared == 'true' || steps.pull-backend.outcome == 'failure')
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -213,23 +269,47 @@ jobs:
           cache-to: type=gha,mode=max,scope=backend
 
       - name: Set Up Node.js
+        if: env.RUN_TESTS == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+
+      - name: Cache node_modules
+        if: env.RUN_TESTS == 'true'
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+
+      - name: Validate cached node_modules
+        id: validate-cache
+        if: env.RUN_TESTS == 'true' && steps.cache-node-modules.outputs.cache-hit == 'true'
+        run: |
+          if npm ls --depth=0 >/dev/null 2>&1; then
+            echo "valid=true" >> $GITHUB_OUTPUT
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Cache corrupted, will reinstall"
+            rm -rf node_modules
+          fi
 
       - name: Install Dependencies
+        if: env.RUN_TESTS == 'true' && (steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false')
         run: npm ci
 
       - name: Lint .env file
+        if: env.RUN_TESTS == 'true'
         run: npm run lint:env
 
       - name: Set Up Test Environment
+        if: env.RUN_TESTS == 'true'
         run: |
           touch .env
           npm run ci:env
 
       - name: Run Integration Tests
+        if: env.RUN_TESTS == 'true'
         # Note: Tests must run sequentially (--runInBand) because they share
         # show state, DJ sessions, and flowsheet entries. Parallel execution
         # causes tests to interfere with each other's join/leave operations.
@@ -237,12 +317,12 @@ jobs:
 
       - name: Upload Coverage Report
         uses: actions/upload-artifact@v4
-        if: always()
+        if: env.RUN_TESTS == 'true' && always()
         with:
           name: integration-test-coverage
           path: coverage/
           retention-days: 14
 
       - name: Clean Up Test Environment
-        if: always()
+        if: env.RUN_TESTS == 'true' && always()
         run: npm run ci:clean

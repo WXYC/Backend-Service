@@ -1,4 +1,33 @@
-import { isValidDeviceId, tokenNeedsRefresh } from '@/services/anonymousDevice.service';
+// Mock dependencies before importing the service
+jest.mock('@wxyc/database', () => ({
+  db: {
+    select: jest.fn().mockReturnThis(),
+    insert: jest.fn().mockReturnThis(),
+    update: jest.fn().mockReturnThis(),
+    delete: jest.fn().mockReturnThis(),
+  },
+  anonymous_devices: {},
+}));
+
+jest.mock('jose', () => ({
+  SignJWT: jest.fn().mockImplementation(() => ({
+    setProtectedHeader: jest.fn().mockReturnThis(),
+    setIssuedAt: jest.fn().mockReturnThis(),
+    setExpirationTime: jest.fn().mockReturnThis(),
+    sign: jest.fn().mockResolvedValue('mock-token'),
+  })),
+  jwtVerify: jest.fn(),
+}));
+
+jest.mock('drizzle-orm', () => ({
+  eq: jest.fn((a, b) => ({ eq: [a, b] })),
+  sql: Object.assign(
+    jest.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ sql: strings, values })),
+    { raw: jest.fn((s: string) => ({ raw: s })) }
+  ),
+}));
+
+import { isValidDeviceId, tokenNeedsRefresh } from '../../../apps/backend/services/anonymousDevice.service';
 import { daysFromNow } from '../../utils/time';
 import {
   VALID_UUIDS,

@@ -14,11 +14,11 @@ const config: Config = {
     'node_modules/(?!(jose|drizzle-orm)/)',
   ],
   moduleNameMapper: {
-    '^jose$': '<rootDir>/tests/__mocks__/jose.ts',
-    '^drizzle-orm$': '<rootDir>/tests/__mocks__/drizzle-orm.ts',
-    '^@/(.*)\.js$': '<rootDir>/apps/backend/$1.ts',
-    '^@/(.*)$': '<rootDir>/apps/backend/$1.ts',
+    // Mock workspace database package
     '^@wxyc/database$': '<rootDir>/tests/mocks/database.mock.ts',
+    // Mock database client for any path resolving to shared/database/src/client
+    '^.*/shared/database/src/client(\\.js)?$': '<rootDir>/tests/mocks/database.mock.ts',
+    // Remove .js extensions from relative imports (ESM compatibility)
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },
   collectCoverageFrom: [
