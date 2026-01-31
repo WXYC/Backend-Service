@@ -1,5 +1,5 @@
-import { transformToV2 } from '@/services/flowsheet.service';
-import { IFSEntry } from '@/controllers/flowsheet.controller';
+import { transformToV2 } from '../../../apps/backend/services/flowsheet.service';
+import { IFSEntry } from '../../../apps/backend/controllers/flowsheet.controller';
 
 // Helper to create a base entry with common fields
 const createBaseEntry = (overrides: Partial<IFSEntry> = {}): IFSEntry => ({
