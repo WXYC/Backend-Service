@@ -26,13 +26,13 @@ describe('Metadata Fields in Flowsheet Response', () => {
   });
 
   test('Response includes all metadata fields (even if null)', async () => {
-    // Add a track
+    // Add a track (uses album 4 to avoid conflicts with flowsheet.spec.js in parallel)
     const addRes = await request
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 1, // Built to Spill - Keep it Like a Secret
-        track_title: 'Carry the Zero',
+        album_id: 4, // Sufjan Stevens - Illinois
+        track_title: 'Chicago',
       })
       .expect(200);
 
@@ -40,7 +40,7 @@ describe('Metadata Fields in Flowsheet Response', () => {
     const getRes = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
 
     // Find the track entry (not a message)
-    const trackEntry = getRes.body.find((e) => e.track_title === 'Carry the Zero');
+    const trackEntry = getRes.body.find((e) => e.track_title === 'Chicago');
     expect(trackEntry).toBeDefined();
 
     // Verify metadata object is present with all fields
@@ -63,8 +63,8 @@ describe('Metadata Fields in Flowsheet Response', () => {
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 2, // Ravyn Lenae - Crush
-        track_title: 'Venom',
+        album_id: 5, // Kendrick Lamar - To Pimp a Butterfly
+        track_title: 'Alright',
       })
       .expect(200);
 
@@ -89,22 +89,22 @@ describe('Fire-and-Forget Metadata Fetch', () => {
   });
 
   test('Fire-and-forget does not block track insertion for library tracks', async () => {
-    // Add a track from the library
+    // Add a track from the library (uses album 4 to avoid conflicts with flowsheet.spec.js)
     // The key test here is that the response returns immediately,
     // even though metadata fetch is triggered in the background
     const addRes = await request
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 1, // Built to Spill - Keep it Like a Secret
-        track_title: 'The Plan',
+        album_id: 4, // Sufjan Stevens - Illinois
+        track_title: 'Casimir Pulaski Day',
       })
       .expect(200);
 
     // Response should return immediately with the entry
     expect(addRes.body.id).toBeDefined();
-    expect(addRes.body.track_title).toEqual('The Plan');
-    expect(addRes.body.artist_name).toEqual('Built to Spill');
+    expect(addRes.body.track_title).toEqual('Casimir Pulaski Day');
+    expect(addRes.body.artist_name).toEqual('Sufjan Stevens');
 
     // Entry should be queryable immediately
     const getRes = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
@@ -173,12 +173,12 @@ describe('Flowsheet CRUD with Metadata', () => {
   });
 
   test('New tracks appear in subsequent queries', async () => {
-    // Add a new track
+    // Add a new track (uses album 5 to avoid conflicts with flowsheet.spec.js)
     await request
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 2,
+        album_id: 5,
         track_title: 'CRUD Test Track',
       })
       .expect(200);
@@ -191,12 +191,12 @@ describe('Flowsheet CRUD with Metadata', () => {
   });
 
   test('Deleted tracks are removed from queries', async () => {
-    // Add a track to delete
+    // Add a track to delete (uses album 6 to avoid conflicts with flowsheet.spec.js)
     const addRes = await request
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 3,
+        album_id: 6,
         track_title: 'Delete Test Track',
       })
       .expect(200);
@@ -220,12 +220,12 @@ describe('Flowsheet CRUD with Metadata', () => {
   });
 
   test('Updated tracks reflect changes in queries', async () => {
-    // Add a track
+    // Add a track (uses album 4 to avoid conflicts with flowsheet.spec.js)
     const addRes = await request
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 1,
+        album_id: 4,
         track_title: 'Update Test Original',
       })
       .expect(200);
@@ -268,14 +268,14 @@ describe('Metadata with Rotation Entries', () => {
   });
 
   test('Rotation entries include rotation_play_freq', async () => {
-    // Add a track with rotation_id (album_id 1 is in rotation per seed)
+    // Add a track with rotation_id (album_id 4 is in rotation per seed with rotation_id 2)
     const addRes = await request
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 1,
+        album_id: 4,
         track_title: 'Rotation Test Track',
-        rotation_id: 1,
+        rotation_id: 2,
       })
       .expect(200);
 
@@ -284,8 +284,8 @@ describe('Metadata with Rotation Entries', () => {
     const rotationEntry = getRes.body.find((e) => e.track_title === 'Rotation Test Track');
 
     expect(rotationEntry).toBeDefined();
-    expect(rotationEntry.rotation_id).toEqual(1);
-    expect(rotationEntry.rotation_play_freq).toEqual('L'); // From seed data
+    expect(rotationEntry.rotation_id).toEqual(2);
+    expect(rotationEntry.rotation_play_freq).toEqual('M'); // From seed data
   });
 });
 
@@ -311,7 +311,7 @@ describe('Flowsheet Cache Behavior', () => {
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 1,
+        album_id: 4,
         track_title: 'Cache Consistency Test',
       })
       .expect(200);
@@ -334,7 +334,7 @@ describe('Flowsheet Cache Behavior', () => {
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 2,
+        album_id: 5,
         track_title: 'Cache Invalidation Test Add',
       })
       .expect(200);
@@ -352,7 +352,7 @@ describe('Flowsheet Cache Behavior', () => {
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 1,
+        album_id: 4,
         track_title: 'Cache Invalidation Test Delete',
       })
       .expect(200);
@@ -381,7 +381,7 @@ describe('Flowsheet Cache Behavior', () => {
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
-        album_id: 1,
+        album_id: 4,
         track_title: 'Cache Update Original',
       })
       .expect(200);
@@ -430,12 +430,12 @@ describe('Conditional GET (304 Not Modified)', () => {
     });
 
     test('GET /flowsheet/latest returns Last-Modified header', async () => {
-      // Add a track first so there's data
+      // Add a track first so there's data (uses album 4 to avoid conflicts)
       await request
         .post('/flowsheet')
         .set('Authorization', global.access_token)
         .send({
-          album_id: 1,
+          album_id: 4,
           track_title: 'Last-Modified Header Test',
         })
         .expect(200);
@@ -474,7 +474,7 @@ describe('Conditional GET (304 Not Modified)', () => {
         .post('/flowsheet')
         .set('Authorization', global.access_token)
         .send({
-          album_id: 1,
+          album_id: 4,
           track_title: 'Modification Test Track',
         })
         .expect(200);
@@ -496,12 +496,12 @@ describe('Conditional GET (304 Not Modified)', () => {
     });
 
     test('/flowsheet/latest returns 304 when not modified', async () => {
-      // Add a track so there's data
+      // Add a track so there's data (uses album 5 to avoid conflicts)
       await request
         .post('/flowsheet')
         .set('Authorization', global.access_token)
         .send({
-          album_id: 2,
+          album_id: 5,
           track_title: 'Latest 304 Test',
         })
         .expect(200);
@@ -547,12 +547,12 @@ describe('Conditional GET (304 Not Modified)', () => {
       const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
       const lastModified = initialRes.headers['last-modified'];
 
-      // Add a new track to modify the flowsheet
+      // Add a new track to modify the flowsheet (uses album 4 to avoid conflicts)
       await request
         .post('/flowsheet')
         .set('Authorization', global.access_token)
         .send({
-          album_id: 1,
+          album_id: 4,
           track_title: 'Since Query Param Test',
         })
         .expect(200);
@@ -582,12 +582,12 @@ describe('Conditional GET (304 Not Modified)', () => {
       const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
       const lastModified = initialRes.headers['last-modified'];
 
-      // Add a track to modify the flowsheet
+      // Add a track to modify the flowsheet (uses album 4 to avoid conflicts)
       await request
         .post('/flowsheet')
         .set('Authorization', global.access_token)
         .send({
-          album_id: 1,
+          album_id: 4,
           track_title: 'Precedence Test Track',
         })
         .expect(200);
@@ -607,12 +607,12 @@ describe('Conditional GET (304 Not Modified)', () => {
     });
 
     test('/flowsheet/latest supports since query param', async () => {
-      // Add a track so there's data
+      // Add a track so there's data (uses album 5 to avoid conflicts)
       await request
         .post('/flowsheet')
         .set('Authorization', global.access_token)
         .send({
-          album_id: 2,
+          album_id: 5,
           track_title: 'Latest Since Test',
         })
         .expect(200);
