@@ -75,6 +75,7 @@ type FSEntryRaw = {
   id: number;
   show_id: number | null;
   album_id: number | null;
+  entry_type: string;
   artist_name: string | null;
   album_title: string | null;
   track_title: string | null;
@@ -102,6 +103,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   id: raw.id,
   show_id: raw.show_id,
   album_id: raw.album_id,
+  entry_type: raw.entry_type,
   artist_name: raw.artist_name,
   album_title: raw.album_title,
   track_title: raw.track_title,
