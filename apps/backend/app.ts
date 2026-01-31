@@ -9,6 +9,7 @@ import { flowsheet_v2_route } from './routes/flowsheet.v2.route.js';
 import { library_route } from './routes/library.route.js';
 import { schedule_route } from './routes/schedule.route.js';
 import { events_route } from './routes/events.route.js';
+import { request_line_route } from './routes/requestLine.route.js';
 import { showMemberMiddleware } from './middleware/checkShowMember.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
@@ -42,6 +43,8 @@ app.use('/flowsheet', flowsheet_route);
 app.use('/v2/flowsheet', flowsheet_v2_route);
 
 app.use('/djs', dj_route);
+
+app.use('/request', request_line_route);
 
 app.use('/schedule', schedule_route);
 
