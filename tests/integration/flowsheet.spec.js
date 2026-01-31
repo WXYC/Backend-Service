@@ -574,6 +574,109 @@ describe('Shift Flowsheet Entries', () => {
   });
 });
 
+describe('On Air Status', () => {
+  describe('GET /flowsheet/on-air', () => {
+    test('returns false when DJ is not on air', async () => {
+      // Ensure no active show
+      await fls_util.leave_show(global.primary_dj_id, global.access_token);
+
+      const res = await request
+        .get('/flowsheet/on-air')
+        .query({ dj_id: global.primary_dj_id })
+        .set('Authorization', global.access_token)
+        .expect(200);
+
+      expect(res.body).toBeDefined();
+      expect(res.body.id).toBe(global.primary_dj_id);
+      expect(res.body.is_live).toBe(false);
+    });
+
+    test('returns true when DJ is on air', async () => {
+      // Start a show
+      await fls_util.join_show(global.primary_dj_id, global.access_token);
+
+      const res = await request
+        .get('/flowsheet/on-air')
+        .query({ dj_id: global.primary_dj_id })
+        .set('Authorization', global.access_token)
+        .expect(200);
+
+      expect(res.body).toBeDefined();
+      expect(res.body.id).toBe(global.primary_dj_id);
+      expect(res.body.is_live).toBe(true);
+
+      // Clean up
+      await fls_util.leave_show(global.primary_dj_id, global.access_token);
+    });
+
+    test('returns false for non-existent DJ', async () => {
+      const res = await request
+        .get('/flowsheet/on-air')
+        .query({ dj_id: 'non-existent-dj-id' })
+        .set('Authorization', global.access_token)
+        .expect(200);
+
+      expect(res.body).toBeDefined();
+      expect(res.body.is_live).toBe(false);
+    });
+  });
+
+  describe('GET /flowsheet/djs-on-air', () => {
+    test('returns empty array when no show is active', async () => {
+      // Ensure no active show
+      await fls_util.leave_show(global.primary_dj_id, global.access_token);
+
+      const res = await request
+        .get('/flowsheet/djs-on-air')
+        .set('Authorization', global.access_token)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+      expect(res.body.length).toBe(0);
+    });
+
+    test('returns DJ list when show is active', async () => {
+      // Start a show
+      await fls_util.join_show(global.primary_dj_id, global.access_token);
+
+      const res = await request
+        .get('/flowsheet/djs-on-air')
+        .set('Authorization', global.access_token)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+      expect(res.body.length).toBeGreaterThan(0);
+      expect(res.body[0]).toHaveProperty('id');
+      expect(res.body[0]).toHaveProperty('dj_name');
+
+      // Clean up
+      await fls_util.leave_show(global.primary_dj_id, global.access_token);
+    });
+
+    test('returns multiple DJs when multiple are on air', async () => {
+      // Start a show with primary DJ
+      await fls_util.join_show(global.primary_dj_id, global.access_token);
+      // Secondary DJ joins
+      await fls_util.join_show(global.secondary_dj_id, global.access_token);
+
+      const res = await request
+        .get('/flowsheet/djs-on-air')
+        .set('Authorization', global.access_token)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+      expect(res.body.length).toBe(2);
+
+      const djIds = res.body.map((dj) => dj.id);
+      expect(djIds).toContain(global.primary_dj_id);
+      expect(djIds).toContain(global.secondary_dj_id);
+
+      // Clean up
+      await fls_util.leave_show(global.primary_dj_id, global.access_token);
+    });
+  });
+});
+
 describe('Retrieve Playlist Object', () => {
   beforeEach(async () => {
     // setup show
