@@ -176,7 +176,7 @@ jobs:
 
   # Integration tests - only when backend/auth/shared changes
   # Note: Job always runs to report status, but steps are skipped when no relevant changes
-  integration-tests:
+  Integration-Tests:
     needs: detect-changes
     runs-on: ubuntu-latest
     env:
