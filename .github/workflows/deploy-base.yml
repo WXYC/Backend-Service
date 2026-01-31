@@ -255,6 +255,7 @@ jobs:
         run: |
           TARGET_APP=${{ matrix.target }}
           TAG=${{ steps.determine_version.outputs.deploy_version }}
+          SHA_TAG="sha-${{ github.sha }}"
 
           IMAGE_URI="${{ secrets.AWS_ECR_URI }}/${TARGET_APP}"
 
@@ -263,6 +264,11 @@ jobs:
 
           echo "Pushing Docker image to ECR..."
           docker push $IMAGE_URI:$TAG
+
+          # Always push SHA tag for cache invalidation detection
+          echo "Tagging Docker image with SHA..."
+          docker tag ${TARGET_APP}:ci $IMAGE_URI:$SHA_TAG
+          docker push $IMAGE_URI:$SHA_TAG
 
           if [[ "${{ inputs.version }}" == "latest" || -z "${{ inputs.version }}" ]]; then
           echo "Tagging Docker image with 'latest'..."

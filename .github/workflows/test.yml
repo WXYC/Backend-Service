@@ -33,9 +33,26 @@ jobs:
       docs-only: ${{ steps.changes.outputs.docs-only }}
       src: ${{ steps.changes.outputs.src }}
       run-integration: ${{ steps.should-run.outputs.run-integration }}
+      merge_base_sha: ${{ steps.merge-base.outputs.sha }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for merge-base
+
+      - name: Get merge-base SHA
+        id: merge-base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, get the merge-base between the PR and main
+            MERGE_BASE=$(git merge-base origin/${{ github.base_ref }} ${{ github.sha }})
+            echo "sha=$MERGE_BASE" >> $GITHUB_OUTPUT
+            echo "Merge-base SHA: $MERGE_BASE"
+          else
+            # For pushes to main, use the current SHA
+            echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "Current SHA: ${{ github.sha }}"
+          fi
 
       - name: Detect file changes
         uses: dorny/paths-filter@v3
@@ -205,14 +222,26 @@ jobs:
         run: |
           aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_URI }}
 
-      # db-init image: pull from ECR or build with layer cache
+      # db-init image: pull SHA-tagged image from ECR or build
       - name: Pull db-init image from ECR
         if: env.RUN_TESTS == 'true' && needs.detect-changes.outputs.db-init == 'false'
         id: pull-db-init
         continue-on-error: true
+        env:
+          MERGE_BASE_SHA: ${{ needs.detect-changes.outputs.merge_base_sha }}
         run: |
-          docker pull ${{ secrets.AWS_ECR_URI }}/db-init:latest
-          docker tag ${{ secrets.AWS_ECR_URI }}/db-init:latest wxyc-db-init-image
+          # Try SHA-tagged image first (most accurate), then fall back to :latest
+          SHA_TAG="sha-${MERGE_BASE_SHA}"
+          if docker pull ${{ secrets.AWS_ECR_URI }}/db-init:${SHA_TAG} 2>/dev/null; then
+            echo "✅ Pulled db-init image with SHA tag: ${SHA_TAG}"
+            docker tag ${{ secrets.AWS_ECR_URI }}/db-init:${SHA_TAG} wxyc-db-init-image
+          elif docker pull ${{ secrets.AWS_ECR_URI }}/db-init:latest 2>/dev/null; then
+            echo "⚠️ SHA-tagged image not found, using :latest (may be stale)"
+            docker tag ${{ secrets.AWS_ECR_URI }}/db-init:latest wxyc-db-init-image
+          else
+            echo "❌ No ECR image available, will build locally"
+            exit 1
+          fi
 
       - name: Build db-init image
         if: env.RUN_TESTS == 'true' && (needs.detect-changes.outputs.db-init == 'true' || steps.pull-db-init.outcome == 'failure')
@@ -226,14 +255,25 @@ jobs:
           cache-from: type=gha,scope=db-init
           cache-to: type=gha,mode=max,scope=db-init
 
-      # auth image: pull from ECR or build with layer cache
+      # auth image: pull SHA-tagged image from ECR or build
       - name: Pull auth image from ECR
         if: env.RUN_TESTS == 'true' && needs.detect-changes.outputs.auth == 'false' && needs.detect-changes.outputs.shared == 'false'
         id: pull-auth
         continue-on-error: true
+        env:
+          MERGE_BASE_SHA: ${{ needs.detect-changes.outputs.merge_base_sha }}
         run: |
-          docker pull ${{ secrets.AWS_ECR_URI }}/auth:latest
-          docker tag ${{ secrets.AWS_ECR_URI }}/auth:latest wxyc_auth_service:ci
+          SHA_TAG="sha-${MERGE_BASE_SHA}"
+          if docker pull ${{ secrets.AWS_ECR_URI }}/auth:${SHA_TAG} 2>/dev/null; then
+            echo "✅ Pulled auth image with SHA tag: ${SHA_TAG}"
+            docker tag ${{ secrets.AWS_ECR_URI }}/auth:${SHA_TAG} wxyc_auth_service:ci
+          elif docker pull ${{ secrets.AWS_ECR_URI }}/auth:latest 2>/dev/null; then
+            echo "⚠️ SHA-tagged image not found, using :latest (may be stale)"
+            docker tag ${{ secrets.AWS_ECR_URI }}/auth:latest wxyc_auth_service:ci
+          else
+            echo "❌ No ECR image available, will build locally"
+            exit 1
+          fi
 
       - name: Build auth image
         if: env.RUN_TESTS == 'true' && (needs.detect-changes.outputs.auth == 'true' || needs.detect-changes.outputs.shared == 'true' || steps.pull-auth.outcome == 'failure')
@@ -247,14 +287,25 @@ jobs:
           cache-from: type=gha,scope=auth
           cache-to: type=gha,mode=max,scope=auth
 
-      # backend image: pull from ECR or build with layer cache
+      # backend image: pull SHA-tagged image from ECR or build
       - name: Pull backend image from ECR
         if: env.RUN_TESTS == 'true' && needs.detect-changes.outputs.backend == 'false' && needs.detect-changes.outputs.shared == 'false'
         id: pull-backend
         continue-on-error: true
+        env:
+          MERGE_BASE_SHA: ${{ needs.detect-changes.outputs.merge_base_sha }}
         run: |
-          docker pull ${{ secrets.AWS_ECR_URI }}/backend:latest
-          docker tag ${{ secrets.AWS_ECR_URI }}/backend:latest wxyc_backend_service:ci
+          SHA_TAG="sha-${MERGE_BASE_SHA}"
+          if docker pull ${{ secrets.AWS_ECR_URI }}/backend:${SHA_TAG} 2>/dev/null; then
+            echo "✅ Pulled backend image with SHA tag: ${SHA_TAG}"
+            docker tag ${{ secrets.AWS_ECR_URI }}/backend:${SHA_TAG} wxyc_backend_service:ci
+          elif docker pull ${{ secrets.AWS_ECR_URI }}/backend:latest 2>/dev/null; then
+            echo "⚠️ SHA-tagged image not found, using :latest (may be stale)"
+            docker tag ${{ secrets.AWS_ECR_URI }}/backend:latest wxyc_backend_service:ci
+          else
+            echo "❌ No ECR image available, will build locally"
+            exit 1
+          fi
 
       - name: Build backend image
         if: env.RUN_TESTS == 'true' && (needs.detect-changes.outputs.backend == 'true' || needs.detect-changes.outputs.shared == 'true' || steps.pull-backend.outcome == 'failure')
@@ -322,6 +373,48 @@ jobs:
           name: integration-test-coverage
           path: coverage/
           retention-days: 14
+
+      # On push to main, push built images to ECR with SHA tags for cache
+      - name: Push images to ECR cache
+        if: env.RUN_TESTS == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          SHA_TAG="sha-${{ github.sha }}"
+          ECR_URI="${{ secrets.AWS_ECR_URI }}"
+
+          echo "Pushing images to ECR with SHA tag: ${SHA_TAG}"
+
+          # Push db-init if it was built
+          if docker image inspect wxyc-db-init-image > /dev/null 2>&1; then
+            echo "📦 Pushing db-init..."
+            docker tag wxyc-db-init-image ${ECR_URI}/db-init:${SHA_TAG}
+            docker tag wxyc-db-init-image ${ECR_URI}/db-init:latest
+            docker push ${ECR_URI}/db-init:${SHA_TAG}
+            docker push ${ECR_URI}/db-init:latest
+          fi
+
+          # Push auth if it was built
+          if docker image inspect wxyc_auth_service:ci > /dev/null 2>&1; then
+            echo "📦 Pushing auth..."
+            docker tag wxyc_auth_service:ci ${ECR_URI}/auth:${SHA_TAG}
+            docker tag wxyc_auth_service:ci ${ECR_URI}/auth:latest
+            docker push ${ECR_URI}/auth:${SHA_TAG}
+            docker push ${ECR_URI}/auth:latest
+          fi
+
+          # Push backend if it was built
+          if docker image inspect wxyc_backend_service:ci > /dev/null 2>&1; then
+            echo "📦 Pushing backend..."
+            docker tag wxyc_backend_service:ci ${ECR_URI}/backend:${SHA_TAG}
+            docker tag wxyc_backend_service:ci ${ECR_URI}/backend:latest
+            docker push ${ECR_URI}/backend:${SHA_TAG}
+            docker push ${ECR_URI}/backend:latest
+          fi
+
+          echo "✅ ECR cache updated with SHA: ${SHA_TAG}"
 
       - name: Clean Up Test Environment
         if: env.RUN_TESTS == 'true' && always()
