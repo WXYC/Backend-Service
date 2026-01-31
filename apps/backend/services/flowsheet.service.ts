@@ -1,10 +1,11 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
-import { db } from '../../../shared/database/src/client.js';
 import {
+  db,
   FSEntry,
   NewFSEntry,
   Show,
   ShowDJ,
+  User,
   shows,
   artists,
   user,
@@ -39,7 +40,8 @@ const updateLastModified = () => {
   }
 };
 
-const FSEntryFields = {
+// SQL query fields (flat structure from database)
+const FSEntryFieldsRaw = {
   id: flowsheet.id,
   show_id: flowsheet.show_id,
   album_id: flowsheet.album_id,
@@ -53,7 +55,7 @@ const FSEntryFields = {
   message: flowsheet.message,
   play_order: flowsheet.play_order,
   add_time: flowsheet.add_time,
-  // Album metadata from cache
+  // Album metadata from cache (will be nested in transform)
   artwork_url: album_metadata.artwork_url,
   discogs_url: album_metadata.discogs_url,
   release_year: album_metadata.release_year,
@@ -62,15 +64,71 @@ const FSEntryFields = {
   youtube_music_url: album_metadata.youtube_music_url,
   bandcamp_url: album_metadata.bandcamp_url,
   soundcloud_url: album_metadata.soundcloud_url,
-  // Artist metadata from cache
+  // Artist metadata from cache (will be nested in transform)
   artist_bio: artist_metadata.bio,
   artist_wikipedia_url: artist_metadata.wikipedia_url,
 };
 
+// Raw result type from SQL query
+type FSEntryRaw = {
+  id: number;
+  show_id: number | null;
+  album_id: number | null;
+  artist_name: string | null;
+  album_title: string | null;
+  track_title: string | null;
+  record_label: string | null;
+  rotation_id: number | null;
+  rotation_play_freq: string | null;
+  request_flag: boolean | null;
+  message: string | null;
+  play_order: number | null;
+  add_time: Date | null;
+  artwork_url: string | null;
+  discogs_url: string | null;
+  release_year: number | null;
+  spotify_url: string | null;
+  apple_music_url: string | null;
+  youtube_music_url: string | null;
+  bandcamp_url: string | null;
+  soundcloud_url: string | null;
+  artist_bio: string | null;
+  artist_wikipedia_url: string | null;
+};
+
+/** Transform flat SQL result to nested IFSEntry structure */
+const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
+  id: raw.id,
+  show_id: raw.show_id,
+  album_id: raw.album_id,
+  artist_name: raw.artist_name,
+  album_title: raw.album_title,
+  track_title: raw.track_title,
+  record_label: raw.record_label,
+  rotation_id: raw.rotation_id,
+  rotation_play_freq: raw.rotation_play_freq,
+  request_flag: raw.request_flag,
+  message: raw.message,
+  play_order: raw.play_order,
+  add_time: raw.add_time,
+  metadata: {
+    artwork_url: raw.artwork_url,
+    discogs_url: raw.discogs_url,
+    release_year: raw.release_year,
+    spotify_url: raw.spotify_url,
+    apple_music_url: raw.apple_music_url,
+    youtube_music_url: raw.youtube_music_url,
+    bandcamp_url: raw.bandcamp_url,
+    soundcloud_url: raw.soundcloud_url,
+    artist_bio: raw.artist_bio,
+    artist_wikipedia_url: raw.artist_wikipedia_url,
+  },
+});
+
 /** Gets flowsheet entries by page with metadata joins */
 export const getEntriesByPage = async (offset: number, limit: number): Promise<IFSEntry[]> => {
-  return db
-    .select(FSEntryFields)
+  const raw = await db
+    .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
@@ -79,11 +137,12 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .orderBy(desc(flowsheet.play_order))
     .offset(offset)
     .limit(limit);
+  return raw.map(transformToIFSEntry);
 };
 
-export const getEntriesByRange = async (startId: number, endId: number) => {
-  const response = await db
-    .select(FSEntryFields)
+export const getEntriesByRange = async (startId: number, endId: number): Promise<IFSEntry[]> => {
+  const raw = await db
+    .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
@@ -92,15 +151,15 @@ export const getEntriesByRange = async (startId: number, endId: number) => {
     .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
     .orderBy(desc(flowsheet.play_order));
 
-  return response;
+  return raw.map(transformToIFSEntry);
 };
 
-export const getEntriesByShow = async (...show_ids: number[]) => {
+export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[]> => {
   if (show_ids.length === 0) return [];
 
   // Get all entries from these shows
-  const response = await db
-    .select(FSEntryFields)
+  const raw = await db
+    .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
@@ -109,7 +168,7 @@ export const getEntriesByShow = async (...show_ids: number[]) => {
     .where(inArray(flowsheet.show_id, show_ids))
     .orderBy(desc(flowsheet.play_order));
 
-  return response;
+  return raw.map(transformToIFSEntry);
 };
 
 export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
@@ -311,7 +370,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
     .where(and(eq(show_djs.show_id, currentShow.id), eq(show_djs.active, true)));
 
   await Promise.all(
-    remaining_djs.map(async (dj) => {
+    remaining_djs.map(async (dj: ShowDJ) => {
       await db.update(show_djs).set({ active: false }).where(eq(show_djs.dj_id, dj.dj_id));
       if (dj.dj_id === primary_dj_id) return;
       await createLeaveNotification(dj.dj_id, currentShow.id);
@@ -401,18 +460,18 @@ export const getOnAirStatusForDJ = async (dj_id: string): Promise<boolean> => {
   return show_djs.some((dj) => dj.id == dj_id);
 };
 
-export const getDJsInCurrentShow = async () => {
+export const getDJsInCurrentShow = async (): Promise<User[]> => {
   const current_show = await getLatestShow();
 
   //Avoid a round trip to db with this check
   if (current_show.end_time !== null) {
-    return Array(0);
+    return [];
   }
 
   return getDJsInShow(current_show.id, true);
 };
 
-export const getDJsInShow = async (show_id: number, activeOnly: boolean) => {
+export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promise<User[]> => {
   let showDJsInstance: ShowDJ[];
   if (activeOnly) {
     showDJsInstance = await db
@@ -433,6 +492,7 @@ export const getDJsInShow = async (show_id: number, activeOnly: boolean) => {
 export const getAlbumFromDB = async (album_id: number) => {
   const album = await db
     .select({
+      artist_id: library.artist_id,
       artist_name: artists.artist_name,
       album_title: library.album_title,
       record_label: library.label,
@@ -450,34 +510,29 @@ export const getAlbumFromDB = async (album_id: number) => {
 export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry> => {
   await db.transaction(
     async (trx) => {
-      try {
-        const position_old = (
-          await trx
-            .select({
-              play_order: flowsheet.play_order,
-            })
-            .from(flowsheet)
-            .where(eq(flowsheet.id, entry_id))
-            .limit(1)
-        )[0].play_order;
+      const position_old = (
+        await trx
+          .select({
+            play_order: flowsheet.play_order,
+          })
+          .from(flowsheet)
+          .where(eq(flowsheet.id, entry_id))
+          .limit(1)
+      )[0].play_order;
 
-        if (position_new < position_old) {
-          await trx
-            .update(flowsheet)
-            .set({ play_order: sql`play_order + 1` })
-            .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
-        } else if (position_new > position_old) {
-          await trx
-            .update(flowsheet)
-            .set({ play_order: sql`play_order - 1` })
-            .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
-        }
-
-        await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, entry_id));
-      } catch (error) {
-        trx.rollback();
-        throw error;
+      if (position_new < position_old) {
+        await trx
+          .update(flowsheet)
+          .set({ play_order: sql`play_order + 1` })
+          .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
+      } else if (position_new > position_old) {
+        await trx
+          .update(flowsheet)
+          .set({ play_order: sql`play_order - 1` })
+          .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
       }
+
+      await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, entry_id));
     },
     {
       isolationLevel: 'read committed',
