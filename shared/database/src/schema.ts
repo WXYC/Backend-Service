@@ -17,7 +17,9 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
-export const wxyc_schema = pgSchema('wxyc_schema');
+// Schema name is configurable for parallel test isolation (each Jest worker gets its own schema)
+const WXYC_SCHEMA_NAME = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+export const wxyc_schema = pgSchema(WXYC_SCHEMA_NAME);
 
 export const user = pgTable(
   'auth_user',

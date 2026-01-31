@@ -2,20 +2,20 @@ FROM node:22-alpine
 
 WORKDIR /init
 
-# Copy package files
-COPY package.json ./
+# Copy slim package file with only required dependencies
+COPY dev_env/package.init.json ./package.json
 
-# Install dependencies needed for init script
-RUN npm install
+# Install minimal dependencies (postgres, drizzle-kit, drizzle-orm)
+RUN npm install --omit=dev
 
-# Copy necessary database files and set drizzle env vars
+# Set drizzle env vars for migration paths (matches docker-compose volume mounts)
 ENV SCHEMA_LOC='/init/database'
 ENV MIGRATION_LOC='/init/database/migrations'
 
-# Copy init script and seed data
+# Copy init script
 COPY dev_env/init-db.mjs ./
 
-# Dummy .env file for npm script compatibility
+# Dummy .env file for compatibility
 RUN touch .env
 
-CMD sleep 1 && node init-db.mjs
+CMD ["node", "init-db.mjs"]

@@ -1,0 +1,14 @@
+{
+  "name": "wxyc-db-init",
+  "version": "1.0.0",
+  "description": "Minimal dependencies for database initialization",
+  "type": "module",
+  "scripts": {
+    "drizzle:migrate": "drizzle-kit migrate --config 'drizzle.config.ts'"
+  },
+  "dependencies": {
+    "drizzle-kit": "^0.31.5",
+    "drizzle-orm": "^0.41.0",
+    "postgres": "^3.4.7"
+  }
+}
