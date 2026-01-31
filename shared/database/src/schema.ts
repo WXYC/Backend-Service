@@ -47,6 +47,9 @@ export const user = pgTable(
   ]
 );
 
+export type User = InferSelectModel<typeof user>;
+export type NewUser = InferInsertModel<typeof user>;
+
 export const session = pgTable(
   'auth_session',
   {
@@ -511,3 +514,22 @@ export const artist_metadata = wxyc_schema.table(
     };
   }
 );
+
+// Anonymous device tracking for song requests
+export const anonymous_devices = pgTable(
+  'anonymous_devices',
+  {
+    id: serial('id').primaryKey(),
+    deviceId: varchar('device_id', { length: 255 }).notNull().unique(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    blocked: boolean('blocked').notNull().default(false),
+    blockedAt: timestamp('blocked_at', { withTimezone: true }),
+    blockedReason: text('blocked_reason'),
+    requestCount: integer('request_count').notNull().default(0),
+  },
+  (table) => [uniqueIndex('anonymous_devices_device_id_key').on(table.deviceId)]
+);
+
+export type AnonymousDevice = InferSelectModel<typeof anonymous_devices>;
+export type NewAnonymousDevice = InferInsertModel<typeof anonymous_devices>;

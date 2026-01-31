@@ -150,6 +150,8 @@ services:
       - METADATA_ARTIST_CACHE_MAX_SIZE=${METADATA_ARTIST_CACHE_MAX_SIZE:-500}
       - METADATA_ROTATION_PRIORITY=${METADATA_ROTATION_PRIORITY:-2.0}
       - USE_MOCK_SERVICES=true
+      # Anonymous device authentication
+      - ANON_DEVICE_JWT_SECRET=${ANON_DEVICE_JWT_SECRET:-ci-test-secret-key-for-anonymous-devices}
     ports:
       - '${CI_PORT:-8081}:8080'
 

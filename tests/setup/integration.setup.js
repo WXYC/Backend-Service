@@ -1,5 +1,4 @@
 const get_access_token = require('../utils/better_auth');
-const waitOn = require('wait-on');
 const postgres = require('postgres');
 
 // Ensure mock services are enabled for testing
@@ -9,25 +8,6 @@ process.env.USE_MOCK_SERVICES = 'true';
 global.primary_dj_id = null;
 global.secondary_dj_id = null;
 global.access_token = '';
-
-// Sensible defaults for ports/hosts used in CI
-const backendHost = process.env.BACKEND_HOST || 'localhost';
-const backendPort = process.env.PORT || process.env.BACKEND_PORT || process.env.CI_PORT || 8081;
-const backendHealthcheckUrl = `http://${backendHost}:${backendPort}/healthcheck`;
-
-// BETTER_AUTH_URL may be a full URL; if not present, fall back to AUTH_HOST/AUTH_PORT
-let authBaseUrl;
-if (process.env.BETTER_AUTH_URL) {
-  try {
-    authBaseUrl = new URL(process.env.BETTER_AUTH_URL).origin;
-  } catch (err) {
-    console.warn('Malformed BETTER_AUTH_URL, falling back to AUTH_HOST/AUTH_PORT');
-    authBaseUrl = `http://${process.env.AUTH_HOST || 'localhost'}:${process.env.AUTH_PORT || process.env.CI_AUTH_PORT || 8083}`;
-  }
-} else {
-  authBaseUrl = `http://${process.env.AUTH_HOST || 'localhost'}:${process.env.AUTH_PORT || process.env.CI_AUTH_PORT || 8083}`;
-}
-const authHealthcheckUrl = `${authBaseUrl}/healthcheck`;
 
 // DB config with defaults to avoid connecting as root when envs are missing
 const dbConfig = {
@@ -66,35 +46,8 @@ async function getUserIdsFromDatabase() {
   }
 }
 
+// Note: Service readiness is checked in globalSetup.js (runs once for all tests)
 beforeAll(async () => {
-  // Log resolved endpoints/DB config to make CI failures easier to debug
-  console.log('Resolved healthcheck URLs:', backendHealthcheckUrl, authHealthcheckUrl);
-  console.log('Resolved DB config:', {
-    host: dbConfig.host,
-    port: dbConfig.port,
-    database: dbConfig.database,
-    username: dbConfig.username ? '***' : '(none)',
-  });
-
-  const waitOnOptions = {
-    resources: [backendHealthcheckUrl, authHealthcheckUrl],
-    delay: 1000,
-    interval: 500,
-    timeout: 60000,
-    tcpTimeout: 1000,
-    httpTimeout: 2000,
-    log: true,
-  };
-
-  console.log(`Waiting for services to be ready: ${waitOnOptions.resources.join(', ')}`);
-  try {
-    await waitOn(waitOnOptions);
-    console.log('Services are ready!');
-  } catch (err) {
-    console.error('Error waiting for services:', err);
-    throw err;
-  }
-
   await getUserIdsFromDatabase();
 
   if (process.env.AUTH_BYPASS === 'true') {
