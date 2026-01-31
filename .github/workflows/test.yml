@@ -384,6 +384,7 @@ jobs:
           retention-days: 14
 
       # On push to main, push built images to ECR with SHA tags for cache
+      # Note: db-init is skipped as it doesn't have an ECR repository (CI-only image)
       - name: Push images to ECR cache
         if: env.RUN_TESTS == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
         env:
@@ -395,15 +396,6 @@ jobs:
           ECR_URI="${{ secrets.AWS_ECR_URI }}"
 
           echo "Pushing images to ECR with SHA tag: ${SHA_TAG}"
-
-          # Push db-init if it was built
-          if docker image inspect wxyc-db-init-image > /dev/null 2>&1; then
-            echo "📦 Pushing db-init..."
-            docker tag wxyc-db-init-image ${ECR_URI}/db-init:${SHA_TAG}
-            docker tag wxyc-db-init-image ${ECR_URI}/db-init:latest
-            docker push ${ECR_URI}/db-init:${SHA_TAG}
-            docker push ${ECR_URI}/db-init:latest
-          fi
 
           # Push auth if it was built
           if docker image inspect wxyc_auth_service:ci > /dev/null 2>&1; then
