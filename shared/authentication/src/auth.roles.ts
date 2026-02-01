@@ -9,6 +9,7 @@ const statement = {
   catalog: ["read", "write"],
   bin: ["read", "write"],
   flowsheet: ["read", "write"],
+  roster: ["read", "write"],
 } as const;
 
 export type AccessControlStatement = typeof statement;
@@ -38,6 +39,15 @@ export const stationManager = accessControl.newRole({
   bin: ["read", "write"],
   catalog: ["read", "write"],
   flowsheet: ["read", "write"],
+  roster: ["read", "write"],
+});
+
+export const admin = accessControl.newRole({
+  ...adminAc.statements,
+  bin: ["read", "write"],
+  catalog: ["read", "write"],
+  flowsheet: ["read", "write"],
+  roster: ["read", "write"],
 });
 
 export const WXYCRoles = {
@@ -45,6 +55,7 @@ export const WXYCRoles = {
   dj,
   musicDirector,
   stationManager,
+  admin,
 };
 
 export type WXYCRole = keyof typeof WXYCRoles;
