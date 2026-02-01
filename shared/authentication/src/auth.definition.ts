@@ -22,7 +22,7 @@ import {
 } from 'better-auth/plugins';
 import { eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
-import { sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
+import { sendEmail, sendVerificationEmailMessage } from './email';
 import { rewriteUrlForFrontend } from './url-rewrite';
 
 const buildResetUrl = (url: string, redirectTo?: string) => {
@@ -79,11 +79,24 @@ export const auth: Auth = betterAuth({
       const redirectTo = process.env.PASSWORD_RESET_REDIRECT_URL?.trim();
       const resetUrl = buildResetUrl(url, redirectTo);
 
-      void sendResetPasswordEmail({
+      // Detect if this is a new user setup or actual password reset
+      // New users created by admin don't have realName filled in yet
+      const userWithCustomFields = user as typeof user & {
+        realName?: string | null;
+      };
+      const isNewUserSetup =
+        !userWithCustomFields.realName ||
+        (typeof userWithCustomFields.realName === 'string' &&
+          userWithCustomFields.realName.trim() === '');
+
+      const emailType = isNewUserSetup ? 'accountSetup' : 'passwordReset';
+
+      void sendEmail({
+        type: emailType,
         to: user.email,
-        resetUrl,
+        url: resetUrl,
       }).catch((error) => {
-        console.error('Error sending password reset email:', error);
+        console.error(`Error sending ${emailType} email:`, error);
       });
     },
     onPasswordReset: async ({ user }, request) => {

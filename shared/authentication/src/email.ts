@@ -25,17 +25,8 @@ const getSesClient = () => {
   return sesClient;
 };
 
-type ResetEmailInput = {
-  to: string;
-  resetUrl: string;
-};
-
-type VerificationEmailInput = {
-  to: string;
-  verificationUrl: string;
-};
-
 type EmailTemplateInput = {
+  subject: string;
   title: string;
   intro: string;
   actionText: string;
@@ -43,13 +34,59 @@ type EmailTemplateInput = {
   footer?: string;
 };
 
+// Discriminated union for all transactional emails
+export type WXYCEmail =
+  | { type: 'passwordReset'; to: string; url: string }
+  | { type: 'emailVerification'; to: string; url: string }
+  | { type: 'accountSetup'; to: string; url: string };
+
+/**
+ * Content factory for each email type
+ */
+function getEmailContent(
+  type: WXYCEmail['type'],
+  url: string,
+  orgName: string
+): EmailTemplateInput {
+  switch (type) {
+    case 'passwordReset':
+      return {
+        subject: 'Reset your password',
+        title: 'Reset your password',
+        intro:
+          'We received a request to reset your password. Use the button below to continue.',
+        actionText: 'Reset password',
+        actionUrl: url,
+      };
+
+    case 'emailVerification':
+      return {
+        subject: `Welcome to ${orgName}! Verify your email address`,
+        title: 'Verify your email address',
+        intro: `Welcome to ${orgName}! Please verify your email address to activate your account.`,
+        actionText: 'Verify email',
+        actionUrl: url,
+      };
+
+    case 'accountSetup':
+      return {
+        subject: `Welcome to ${orgName}! Set up your password`,
+        title: 'Welcome! Set up your account',
+        intro: `You've been added to ${orgName}. Click below to set your password and get started.`,
+        actionText: 'Set up password',
+        actionUrl: url,
+        footer: `You're receiving this because an administrator added you to ${orgName}. If you didn't expect this, please contact your station manager.`,
+      };
+  }
+}
+
 const buildEmailHtml = ({
   title,
   intro,
   actionText,
   actionUrl,
   footer,
-}: EmailTemplateInput) => `
+}: Omit<EmailTemplateInput, 'subject'>) => `
   <div style="background-color:#0b0a10;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;color:#fce7f3;">
     <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:600px;margin:0 auto;background:#14101a;border-radius:12px;overflow:hidden;">
       <tr>
@@ -87,29 +124,26 @@ const buildEmailHtml = ({
   </div>
 `.trim();
 
-export const sendResetPasswordEmail = async ({
-  to,
-  resetUrl,
-}: ResetEmailInput) => {
+/**
+ * Send a transactional email using the unified email system
+ */
+export async function sendEmail(email: WXYCEmail): Promise<void> {
   const from = process.env.SES_FROM_EMAIL;
   if (!from) {
     throw new Error('Missing AWS SES configuration: SES_FROM_EMAIL');
   }
 
-  const subject = 'Reset your password';
-  const textBody = `Click the link to reset your password: ${resetUrl}`;
-  const htmlBody = buildEmailHtml({
-    title: 'Reset your password',
-    intro: 'We received a request to reset your password. Use the button below to continue.',
-    actionText: 'Reset password',
-    actionUrl: resetUrl,
-  });
+  const orgName = process.env.DEFAULT_ORG_NAME || 'WXYC';
+  const content = getEmailContent(email.type, email.url, orgName);
+
+  const textBody = `${content.intro} ${content.actionUrl}`;
+  const htmlBody = buildEmailHtml(content);
 
   const command = new SendEmailCommand({
     Source: from,
-    Destination: { ToAddresses: [to] },
+    Destination: { ToAddresses: [email.to] },
     Message: {
-      Subject: { Data: subject },
+      Subject: { Data: content.subject },
       Body: {
         Text: { Data: textBody },
         Html: { Data: htmlBody },
@@ -119,38 +153,29 @@ export const sendResetPasswordEmail = async ({
 
   const client = getSesClient();
   await client.send(command);
-};
+}
+
+// Backward-compatible wrappers
+export const sendResetPasswordEmail = async ({
+  to,
+  resetUrl,
+}: {
+  to: string;
+  resetUrl: string;
+}) => sendEmail({ type: 'passwordReset', to, url: resetUrl });
 
 export const sendVerificationEmailMessage = async ({
   to,
   verificationUrl,
-}: VerificationEmailInput) => {
-  const from = process.env.SES_FROM_EMAIL;
-  if (!from) {
-    throw new Error('Missing AWS SES configuration: SES_FROM_EMAIL');
-  }
+}: {
+  to: string;
+  verificationUrl: string;
+}) => sendEmail({ type: 'emailVerification', to, url: verificationUrl });
 
-  const subject = 'Welcome to ' + process.env.DEFAULT_ORG_NAME + '! Verify your email address';
-  const textBody = `Click the link to verify your email: ${verificationUrl}`;
-  const htmlBody = buildEmailHtml({
-    title: 'Verify your email address',
-    intro: `Welcome to ${process.env.DEFAULT_ORG_NAME}! Please verify your email address to activate your account.`,
-    actionText: 'Verify email',
-    actionUrl: verificationUrl,
-  });
-
-  const command = new SendEmailCommand({
-    Source: from,
-    Destination: { ToAddresses: [to] },
-    Message: {
-      Subject: { Data: subject },
-      Body: {
-        Text: { Data: textBody },
-        Html: { Data: htmlBody },
-      },
-    },
-  });
-
-  const client = getSesClient();
-  await client.send(command);
-};
+export const sendAccountSetupEmail = async ({
+  to,
+  setupUrl,
+}: {
+  to: string;
+  setupUrl: string;
+}) => sendEmail({ type: 'accountSetup', to, url: setupUrl });
