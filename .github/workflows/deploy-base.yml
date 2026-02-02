@@ -60,6 +60,7 @@ jobs:
       targets: ${{ steps.detect_targets.outputs.TARGETS }}
       has_targets: ${{ steps.detect_targets.outputs.HAS_TARGETS }}
       build_id: ${{ steps.generate_build_id.outputs.id }}
+      migration_tag: ${{ steps.detect_migration.outputs.MIGRATION_TAG }}
 
     steps:
       - name: Checkout code
@@ -94,6 +95,23 @@ jobs:
           ID=$(head -c 8 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 7)
           echo "Build ID: $ID"
           echo "id=$ID" >> $GITHUB_OUTPUT
+
+      - name: Detect Migration Version
+        id: detect_migration
+        run: |
+          # Find the highest migration number from SQL files
+          MIGRATION_TAG=$(ls shared/database/src/migrations/*.sql 2>/dev/null | \
+            sed 's/.*\/\([0-9]*\)_.*/\1/' | \
+            sort -n | \
+            tail -1)
+
+          if [ -z "$MIGRATION_TAG" ]; then
+            echo "No migrations found"
+            echo "MIGRATION_TAG=" >> $GITHUB_OUTPUT
+          else
+            echo "Highest migration: $MIGRATION_TAG"
+            echo "MIGRATION_TAG=$MIGRATION_TAG" >> $GITHUB_OUTPUT
+          fi
 
   handle-git-tags:
     needs: setup
@@ -277,10 +295,94 @@ jobs:
           docker push $IMAGE_URI:latest
           fi
 
-  deploy:
-    needs: [setup, handle-git-tags, build]
+  build-migrate:
+    needs: [setup]
     runs-on: ubuntu-latest
-    if: needs.setup.outputs.has_targets == 'true'
+    if: needs.setup.outputs.has_targets == 'true' && needs.setup.outputs.migration_tag != ''
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Amazon ECR
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_URI }}
+
+      - name: Create ECR repository if not exists
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws ecr describe-repositories --repository-names migrate --region $AWS_REGION 2>/dev/null || \
+          aws ecr create-repository --repository-name migrate --region $AWS_REGION
+
+      - name: Check if migration image exists
+        id: check_migrate_image
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          MIGRATION_TAG=${{ needs.setup.outputs.migration_tag }}
+
+          if aws ecr describe-images --repository-name migrate --image-ids imageTag=$MIGRATION_TAG --region $AWS_REGION > /dev/null 2>&1; then
+            echo "Migration image migrate:$MIGRATION_TAG already exists. Skipping build."
+            echo "image_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Migration image migrate:$MIGRATION_TAG not found. Building..."
+            echo "image_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Migration Image
+        if: steps.check_migrate_image.outputs.image_exists == 'false'
+        run: |
+          docker build --platform linux/amd64 -f Dockerfile.migrate -t migrate:ci .
+
+      - name: Tag and Push Migration Image
+        if: steps.check_migrate_image.outputs.image_exists == 'false'
+        run: |
+          MIGRATION_TAG=${{ needs.setup.outputs.migration_tag }}
+          IMAGE_URI="${{ secrets.AWS_ECR_URI }}/migrate"
+
+          echo "Tagging migration image with $MIGRATION_TAG..."
+          docker tag migrate:ci $IMAGE_URI:$MIGRATION_TAG
+
+          echo "Pushing migration image to ECR..."
+          docker push $IMAGE_URI:$MIGRATION_TAG
+
+  migrate:
+    needs: [setup, build-migrate, build]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.has_targets == 'true' && needs.setup.outputs.migration_tag != ''
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Run Database Migrations
+        uses: ./.github/actions/run-migrations
+        with:
+          migration_tag: ${{ needs.setup.outputs.migration_tag }}
+          ec2_host: ${{ secrets.EC2_HOST }}
+          ec2_user: ${{ secrets.EC2_USER }}
+          ec2_ssh_key: ${{ secrets.EC2_SSH_KEY }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: ${{ secrets.AWS_REGION }}
+          aws_ecr_uri: ${{ secrets.AWS_ECR_URI }}
+
+  deploy:
+    needs: [setup, handle-git-tags, build, migrate]
+    runs-on: ubuntu-latest
+    if: always() && needs.setup.outputs.has_targets == 'true' && needs.build.result == 'success' && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped')
     strategy:
       matrix:
         target: ${{ fromJSON(needs.setup.outputs.targets) }}
