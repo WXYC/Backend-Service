@@ -64,7 +64,26 @@ export const library_artist_view = {};
 export const flowsheet = { id: 'id', show_id: 'show_id', album_id: 'album_id', entry_type: 'entry_type', track_title: 'track_title', album_title: 'album_title', artist_name: 'artist_name', record_label: 'record_label', rotation_id: 'rotation_id', play_order: 'play_order', request_flag: 'request_flag', message: 'message', add_time: 'add_time' };
 export const shows = {};
 export const show_djs = {};
-export const user = {};
+export const user = {
+  id: 'id',
+  name: 'name',
+  email: 'email',
+  emailVerified: 'email_verified',
+  image: 'image',
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+  role: 'role',
+  banned: 'banned',
+  banReason: 'ban_reason',
+  banExpires: 'ban_expires',
+  username: 'username',
+  displayUsername: 'display_username',
+  realName: 'real_name',
+  djName: 'dj_name',
+  appSkin: 'app_skin',
+  isAnonymous: 'is_anonymous',
+  capabilities: 'capabilities',
+};
 export const specialty_shows = {};
 
 // Mock enum

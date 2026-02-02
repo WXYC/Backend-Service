@@ -131,7 +131,7 @@ export const auth: Auth = betterAuth({
     jwt({
       // JWT plugin configuration
       // JWKS endpoint automatically exposed at /api/auth/jwks
-      // Custom payload to include organization member role
+      // Custom payload to include organization member role and capabilities
       jwt: {
         definePayload: async ({ user }) => {
           // Query organization membership to get member role
@@ -143,14 +143,26 @@ export const auth: Auth = betterAuth({
               .limit(1);
 
             if (memberRecord.length > 0) {
+              // Cast user to access capabilities field
+              const userWithCapabilities = user as typeof user & {
+                capabilities?: string[] | null;
+              };
               return {
                 ...user,
                 role: memberRecord[0].role, // Use organization member role instead of default user role
+                capabilities: userWithCapabilities.capabilities ?? [], // Include capabilities in JWT
               };
             }
           }
           // Fallback to default user data if no organization membership found
-          return user;
+          // Still include capabilities even without organization membership
+          const userWithCapabilities = user as typeof user & {
+            capabilities?: string[] | null;
+          };
+          return {
+            ...user,
+            capabilities: userWithCapabilities?.capabilities ?? [],
+          };
         },
       },
     }),
@@ -357,6 +369,8 @@ export const auth: Auth = betterAuth({
       djName: { type: 'string', required: false },
       appSkin: { type: 'string', required: true, defaultValue: 'modern-light' },
       isAnonymous: { type: 'boolean', required: false, defaultValue: false },
+      // Cross-cutting capabilities independent of role hierarchy (e.g., 'editor', 'webmaster')
+      capabilities: { type: 'string[]', required: false, defaultValue: [] },
     },
   },
 });
