@@ -1,0 +1,57 @@
+name: 'Run Database Migrations'
+description: 'Runs Drizzle database migrations on the production database via EC2'
+inputs:
+  migration_tag:
+    description: 'The migration image tag (e.g., 0028)'
+    required: true
+  ec2_host:
+    description: 'The EC2 host address'
+    required: true
+  ec2_user:
+    description: 'The EC2 username'
+    required: true
+  ec2_ssh_key:
+    description: 'The SSH private key for EC2 access'
+    required: true
+  aws_access_key_id:
+    description: 'AWS Access Key ID'
+    required: true
+  aws_secret_access_key:
+    description: 'AWS Secret Access Key'
+    required: true
+  aws_region:
+    description: 'AWS Region'
+    required: true
+  aws_ecr_uri:
+    description: 'AWS ECR URI'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Run Database Migrations
+      uses: appleboy/ssh-action@v1
+      with:
+        host: ${{ inputs.ec2_host }}
+        username: ${{ inputs.ec2_user }}
+        key: ${{ inputs.ec2_ssh_key }}
+        script: |
+          set -e
+          export AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }}
+          export AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }}
+
+          MIGRATION_TAG=${{ inputs.migration_tag }}
+          IMAGE_URI="${{ inputs.aws_ecr_uri }}/migrate:$MIGRATION_TAG"
+
+          echo "Logging into AWS ECR..."
+          aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin ${{ inputs.aws_ecr_uri }}
+
+          echo "Pulling migration image (migrate:$MIGRATION_TAG)..."
+          docker pull $IMAGE_URI
+
+          echo "Running database migrations..."
+          docker run --rm --env-file .env $IMAGE_URI
+
+          echo "Migrations completed successfully (up to migration $MIGRATION_TAG)"
+
+          echo "Cleaning up migration image..."
+          docker rmi $IMAGE_URI || true

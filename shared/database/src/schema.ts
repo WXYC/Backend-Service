@@ -289,21 +289,31 @@ export const rotation = wxyc_schema.table(
 
 export type NewFSEntry = InferInsertModel<typeof flowsheet>;
 export type FSEntry = InferSelectModel<typeof flowsheet>;
-export const flowsheet = wxyc_schema.table('flowsheet', {
-  id: serial('id').primaryKey(),
-  show_id: integer('show_id').references(() => shows.id),
-  album_id: integer('album_id').references(() => library.id),
-  rotation_id: integer('rotation_id').references(() => rotation.id),
-  entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
-  track_title: varchar('track_title', { length: 128 }),
-  album_title: varchar('album_title', { length: 128 }),
-  artist_name: varchar('artist_name', { length: 128 }),
-  record_label: varchar('record_label', { length: 128 }),
-  play_order: serial('play_order').notNull(),
-  request_flag: boolean('request_flag').default(false).notNull(),
-  message: varchar('message', { length: 250 }),
-  add_time: timestamp('add_time').defaultNow().notNull(),
-});
+export const flowsheet = wxyc_schema.table(
+  'flowsheet',
+  {
+    id: serial('id').primaryKey(),
+    show_id: integer('show_id').references(() => shows.id),
+    album_id: integer('album_id').references(() => library.id),
+    rotation_id: integer('rotation_id').references(() => rotation.id),
+    entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
+    track_title: varchar('track_title', { length: 128 }),
+    album_title: varchar('album_title', { length: 128 }),
+    artist_name: varchar('artist_name', { length: 128 }),
+    record_label: varchar('record_label', { length: 128 }),
+    play_order: serial('play_order').notNull(),
+    request_flag: boolean('request_flag').default(false).notNull(),
+    message: varchar('message', { length: 250 }),
+    add_time: timestamp('add_time').defaultNow().notNull(),
+  },
+  (table) => {
+    return {
+      showIdIdx: index('flowsheet_show_id_idx').on(table.show_id),
+      albumIdIdx: index('flowsheet_album_id_idx').on(table.album_id),
+      rotationIdIdx: index('flowsheet_rotation_id_idx').on(table.rotation_id),
+    };
+  }
+);
 
 export type NewGenre = InferInsertModel<typeof genres>;
 export type Genre = InferSelectModel<typeof genres>;
@@ -332,16 +342,25 @@ export const reviews = wxyc_schema.table('reviews', {
 
 export type NewBinEntry = InferInsertModel<typeof bins>;
 export type BinEntry = InferSelectModel<typeof bins>;
-export const bins = wxyc_schema.table('bins', {
-  id: serial('id').primaryKey(),
-  dj_id: varchar('dj_id', { length: 255 })
-    .references(() => user.id, { onDelete: 'cascade' })
-    .notNull(),
-  album_id: integer('album_id')
-    .references(() => library.id)
-    .notNull(),
-  track_title: varchar('track_title', { length: 128 }),
-});
+export const bins = wxyc_schema.table(
+  'bins',
+  {
+    id: serial('id').primaryKey(),
+    dj_id: varchar('dj_id', { length: 255 })
+      .references(() => user.id, { onDelete: 'cascade' })
+      .notNull(),
+    album_id: integer('album_id')
+      .references(() => library.id)
+      .notNull(),
+    track_title: varchar('track_title', { length: 128 }),
+  },
+  (table) => {
+    return {
+      djIdIdx: index('bins_dj_id_idx').on(table.dj_id),
+      albumIdIdx: index('bins_album_id_idx').on(table.album_id),
+    };
+  }
+);
 
 export type NewGenreArtistCrossreference = InferInsertModel<typeof genre_artist_crossreference>;
 export type GenreArtistCrossreference = InferSelectModel<typeof genre_artist_crossreference>;
@@ -384,15 +403,24 @@ export const shows = wxyc_schema.table('shows', {
 
 export type NewShowDJ = InferInsertModel<typeof show_djs>;
 export type ShowDJ = InferSelectModel<typeof show_djs>;
-export const show_djs = wxyc_schema.table('show_djs', {
-  show_id: integer('show_id')
-    .references(() => shows.id)
-    .notNull(),
-  dj_id: varchar('dj_id', { length: 255 })
-    .references(() => user.id, { onDelete: 'cascade' })
-    .notNull(),
-  active: boolean('active').default(true),
-});
+export const show_djs = wxyc_schema.table(
+  'show_djs',
+  {
+    show_id: integer('show_id')
+      .references(() => shows.id)
+      .notNull(),
+    dj_id: varchar('dj_id', { length: 255 })
+      .references(() => user.id, { onDelete: 'cascade' })
+      .notNull(),
+    active: boolean('active').default(true),
+  },
+  (table) => {
+    return {
+      showDjIdx: index('show_djs_show_id_dj_id_idx').on(table.show_id, table.dj_id),
+      djIdIdx: index('show_djs_dj_id_idx').on(table.dj_id),
+    };
+  }
+);
 
 //create entry w/ ID 0 for regular shows
 export type NewSpecialtyShow = InferInsertModel<typeof specialty_shows>;
