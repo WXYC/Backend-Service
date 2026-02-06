@@ -24,17 +24,38 @@ import { eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
 import { sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 
-const buildResetUrl = (url: string, redirectTo?: string) => {
-  if (!redirectTo) {
+/**
+ * Rewrites a URL to use the frontend host and protocol while preserving path and query params.
+ * This allows email links to point to the frontend domain while keeping all Better Auth parameters intact.
+ */
+const rewriteUrlForFrontend = (url: string): string => {
+  try {
+    const parsed = new URL(url);
+    const frontend = new URL(
+      process.env.FRONTEND_SOURCE || 'http://localhost:3000'
+    );
+    parsed.host = frontend.host;
+    parsed.protocol = frontend.protocol;
+    return parsed.toString();
+  } catch {
+    // If URL parsing fails, return original URL
     return url;
+  }
+};
+
+const buildResetUrl = (url: string, redirectTo?: string) => {
+  const rewrittenUrl = rewriteUrlForFrontend(url);
+  
+  if (!redirectTo) {
+    return rewrittenUrl;
   }
 
   try {
-    const parsed = new URL(url);
+    const parsed = new URL(rewrittenUrl);
     parsed.searchParams.set('redirectTo', redirectTo);
     return parsed.toString();
   } catch {
-    return url;
+    return rewrittenUrl;
   }
 };
 
@@ -90,9 +111,11 @@ export const auth: Auth = betterAuth({
 
   emailVerification: {
     sendVerificationEmail: async ({ user, url }, request) => {
+      const verificationUrl = rewriteUrlForFrontend(url);
+      
       void sendVerificationEmailMessage({
         to: user.email,
-        verificationUrl: url,
+        verificationUrl,
       }).catch((error) => {
         console.error('Error sending verification email:', error);
       });
