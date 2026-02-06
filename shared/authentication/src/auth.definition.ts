@@ -28,7 +28,7 @@ import { sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
  * Rewrites a URL to use the frontend host and protocol while preserving path and query params.
  * This allows email links to point to the frontend domain while keeping all Better Auth parameters intact.
  */
-const rewriteUrlForFrontend = (url: string): string => {
+export const rewriteUrlForFrontend = (url: string): string => {
   try {
     const parsed = new URL(url);
     const frontend = new URL(
