@@ -1,4 +1,4 @@
-import { rewriteUrlForFrontend } from '../../../shared/authentication/src/auth.definition';
+import { rewriteUrlForFrontend } from '../../../shared/authentication/src/url-rewrite';
 
 describe('rewriteUrlForFrontend', () => {
   const originalEnv = process.env.FRONTEND_SOURCE;
