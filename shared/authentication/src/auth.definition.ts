@@ -23,18 +23,21 @@ import {
 import { eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
 import { sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
+import { rewriteUrlForFrontend } from './url-rewrite';
 
 const buildResetUrl = (url: string, redirectTo?: string) => {
+  const rewrittenUrl = rewriteUrlForFrontend(url);
+  
   if (!redirectTo) {
-    return url;
+    return rewrittenUrl;
   }
 
   try {
-    const parsed = new URL(url);
+    const parsed = new URL(rewrittenUrl);
     parsed.searchParams.set('redirectTo', redirectTo);
     return parsed.toString();
   } catch {
-    return url;
+    return rewrittenUrl;
   }
 };
 
@@ -90,9 +93,11 @@ export const auth: Auth = betterAuth({
 
   emailVerification: {
     sendVerificationEmail: async ({ user, url }, request) => {
+      const verificationUrl = rewriteUrlForFrontend(url);
+      
       void sendVerificationEmailMessage({
         to: user.email,
-        verificationUrl: url,
+        verificationUrl,
       }).catch((error) => {
         console.error('Error sending verification email:', error);
       });
