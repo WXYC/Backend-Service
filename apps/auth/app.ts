@@ -55,7 +55,6 @@ if (process.env.NODE_ENV !== 'production') {
       }
 
       const userId = userResult[0].id;
-
       const tokenPrefix = `${type}:`;
       const result = await db
         .select()
