@@ -283,7 +283,7 @@ export async function searchLibrary(
     `;
 
     const response = await db.execute(searchQuery);
-    results = response.rows as LibraryArtistViewEntry[];
+    results = response as unknown as LibraryArtistViewEntry[];
 
     // If no results with trigram, try LIKE fallback with significant words
     if (results.length === 0) {
@@ -301,13 +301,13 @@ export async function searchLibrary(
         `);
 
         const fallbackResponse = await db.execute(fallbackQuery);
-        results = fallbackResponse.rows as LibraryArtistViewEntry[];
+        results = fallbackResponse as unknown as LibraryArtistViewEntry[];
       }
     }
   } else if (artist || title) {
     // Filtered search by artist and/or title
     const response = await fuzzySearchLibrary(artist, title, limit);
-    results = response.rows as LibraryArtistViewEntry[];
+    results = response as unknown as LibraryArtistViewEntry[];
   }
 
   return results.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
@@ -337,7 +337,7 @@ export async function findSimilarArtist(
   `;
 
   const response = await db.execute(query);
-  const rows = response.rows as Array<{ artist_name: string; sim: number }>;
+  const rows = response as unknown as Array<{ artist_name: string; sim: number }>;
 
   if (rows.length > 0) {
     const match = rows[0];
@@ -376,7 +376,7 @@ export async function searchAlbumsByTitle(
   `;
 
   const response = await db.execute(query);
-  const rows = response.rows as LibraryArtistViewEntry[];
+  const rows = response as unknown as LibraryArtistViewEntry[];
 
   // If no trigram matches, try keyword search
   if (rows.length === 0) {
@@ -394,7 +394,7 @@ export async function searchAlbumsByTitle(
       `);
 
       const fallbackResponse = await db.execute(fallbackQuery);
-      return (fallbackResponse.rows as LibraryArtistViewEntry[]).map((row) =>
+      return (fallbackResponse as unknown as LibraryArtistViewEntry[]).map((row) =>
         enrichLibraryResult(viewRowToLibraryResult(row))
       );
     }
@@ -424,7 +424,7 @@ export async function searchByArtist(
   `;
 
   const response = await db.execute(query);
-  const rows = response.rows as LibraryArtistViewEntry[];
+  const rows = response as unknown as LibraryArtistViewEntry[];
 
   return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
 }

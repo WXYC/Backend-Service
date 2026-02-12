@@ -1,7 +1,7 @@
 /**
  * Metadata storage - simple database operations for metadata persistence
  */
-import { db } from '../../../../shared/database/src/client.js';
+import { db } from '@wxyc/database';
 import {
   album_metadata,
   artist_metadata,

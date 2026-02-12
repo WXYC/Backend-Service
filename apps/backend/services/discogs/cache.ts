@@ -26,17 +26,17 @@ export function makeCacheKey(funcName: string, args: unknown[]): string {
 /**
  * Cache instances for different types of Discogs requests.
  */
-let trackCache: LRUCache<string, unknown> | null = null;
-let releaseCache: LRUCache<string, unknown> | null = null;
-let searchCache: LRUCache<string, unknown> | null = null;
+let trackCache: LRUCache<string, object> | null = null;
+let releaseCache: LRUCache<string, object> | null = null;
+let searchCache: LRUCache<string, object> | null = null;
 
 /**
  * Get or create the track search cache.
  */
-export function getTrackCache(): LRUCache<string, unknown> {
+export function getTrackCache(): LRUCache<string, object> {
   if (!trackCache) {
     const config = getConfig();
-    trackCache = new LRUCache({
+    trackCache = new LRUCache<string, object>({
       max: config.discogsCacheMaxSize,
       ttl: config.discogsCacheTtlTrack * 1000, // Convert seconds to ms
     });
@@ -47,11 +47,11 @@ export function getTrackCache(): LRUCache<string, unknown> {
 /**
  * Get or create the release metadata cache.
  */
-export function getReleaseCache(): LRUCache<string, unknown> {
+export function getReleaseCache(): LRUCache<string, object> {
   if (!releaseCache) {
     const config = getConfig();
     // Release cache uses half the maxsize since entries are larger
-    releaseCache = new LRUCache({
+    releaseCache = new LRUCache<string, object>({
       max: Math.floor(config.discogsCacheMaxSize / 2),
       ttl: config.discogsCacheTtlRelease * 1000,
     });
@@ -62,10 +62,10 @@ export function getReleaseCache(): LRUCache<string, unknown> {
 /**
  * Get or create the general search cache.
  */
-export function getSearchCache(): LRUCache<string, unknown> {
+export function getSearchCache(): LRUCache<string, object> {
   if (!searchCache) {
     const config = getConfig();
-    searchCache = new LRUCache({
+    searchCache = new LRUCache<string, object>({
       max: config.discogsCacheMaxSize,
       ttl: config.discogsCacheTtlSearch * 1000,
     });
@@ -99,7 +99,7 @@ export function resetAllCaches(): void {
  * @param fn - Async function to cache
  */
 export function cached<T>(
-  cache: LRUCache<string, unknown>,
+  cache: LRUCache<string, object>,
   funcName: string,
   fn: (...args: unknown[]) => Promise<T>
 ): (...args: unknown[]) => Promise<T & { cached?: boolean }> {
@@ -112,9 +112,9 @@ export function cached<T>(
       console.log(`[Discogs Cache] Hit for ${funcName}`);
       // Add cached flag if result is an object
       if (typeof cached === 'object' && cached !== null) {
-        return { ...cached, cached: true } as T & { cached: boolean };
+        return { ...(cached as object), cached: true } as T & { cached: boolean };
       }
-      return cached as T;
+      return cached as T & { cached?: boolean };
     }
 
     // Cache miss - call function
@@ -123,7 +123,7 @@ export function cached<T>(
 
     // Don't cache null/undefined results
     if (result !== null && result !== undefined) {
-      cache.set(key, result);
+      cache.set(key, result as object);
     }
 
     return result as T & { cached?: boolean };

@@ -1,5 +1,6 @@
 {
     "extends": ["../../tsconfig.base.json"],
+    "references": [{ "path": "../database" }],
     "include": ["src/**/*.ts"],
     "exclude": ["node_modules", "dist"],
     "compilerOptions": {

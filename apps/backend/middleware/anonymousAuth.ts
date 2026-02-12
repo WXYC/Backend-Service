@@ -43,11 +43,12 @@ export const requireAnonymousAuth: RequestHandler = async (
       return;
     }
 
-    // Check if user is banned (better-auth admin plugin)
-    if (session.user.banned) {
+    // Check if user is banned (better-auth admin plugin adds these fields)
+    const userWithBan = session.user as typeof session.user & { banned?: boolean; banReason?: string | null };
+    if (userWithBan.banned) {
       res.status(403).json({
         message: 'Access denied',
-        reason: session.user.banReason || 'Account suspended',
+        reason: userWithBan.banReason || 'Account suspended',
       });
       return;
     }
