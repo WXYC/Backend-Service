@@ -19,3 +19,7 @@ const queryClient = postgres({
 });
 
 export const db = drizzle(queryClient, { schema });
+
+export function closeDatabaseConnection(): Promise<void> {
+  return queryClient.end().then(() => console.log('Database connection closed.'));
+}

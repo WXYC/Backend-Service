@@ -3,7 +3,7 @@ import { EventData, MirrorEvents, serverEventsMgr } from '../../utils/serverEven
 import { promises } from 'fs';
 import { EventEmitter } from 'node:events';
 import path from 'path';
-import { MirrorSQL } from './sql.mirror';
+import { MirrorSQL } from '@wxyc/database';
 import { cryptoRandomId, expBackoffMs } from './utilities.mirror';
 
 const CommandQueueEvents = {
