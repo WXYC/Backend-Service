@@ -103,17 +103,17 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   id: raw.id,
   show_id: raw.show_id,
   album_id: raw.album_id,
-  entry_type: raw.entry_type,
+  entry_type: raw.entry_type as FSEntry['entry_type'],
   artist_name: raw.artist_name,
   album_title: raw.album_title,
   track_title: raw.track_title,
   record_label: raw.record_label,
   rotation_id: raw.rotation_id,
   rotation_play_freq: raw.rotation_play_freq,
-  request_flag: raw.request_flag,
+  request_flag: raw.request_flag ?? false,
   message: raw.message,
-  play_order: raw.play_order,
-  add_time: raw.add_time,
+  play_order: raw.play_order ?? 0,
+  add_time: raw.add_time ?? new Date(),
   metadata: {
     artwork_url: raw.artwork_url,
     discogs_url: raw.discogs_url,
@@ -600,16 +600,16 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         record_label: entry.record_label,
         request_flag: entry.request_flag,
         rotation_play_freq: entry.rotation_play_freq,
-        artwork_url: entry.artwork_url,
-        discogs_url: entry.discogs_url,
-        release_year: entry.release_year,
-        spotify_url: entry.spotify_url,
-        apple_music_url: entry.apple_music_url,
-        youtube_music_url: entry.youtube_music_url,
-        bandcamp_url: entry.bandcamp_url,
-        soundcloud_url: entry.soundcloud_url,
-        artist_bio: entry.artist_bio,
-        artist_wikipedia_url: entry.artist_wikipedia_url,
+        artwork_url: entry.metadata.artwork_url,
+        discogs_url: entry.metadata.discogs_url,
+        release_year: entry.metadata.release_year,
+        spotify_url: entry.metadata.spotify_url,
+        apple_music_url: entry.metadata.apple_music_url,
+        youtube_music_url: entry.metadata.youtube_music_url,
+        bandcamp_url: entry.metadata.bandcamp_url,
+        soundcloud_url: entry.metadata.soundcloud_url,
+        artist_bio: entry.metadata.artist_bio,
+        artist_wikipedia_url: entry.metadata.artist_wikipedia_url,
       };
 
     case 'show_start':
@@ -682,6 +682,6 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
 
     default:
       // Fallback for unknown types - return all fields
-      return entry as Record<string, unknown>;
+      return { ...baseFields, ...entry.metadata } as Record<string, unknown>;
   }
 };

@@ -2,7 +2,6 @@ import { createAuthClient } from 'better-auth/client';
 import {
   adminClient,
   anonymousClient,
-  bearerClient,
   jwtClient,
   usernameClient,
   organizationClient,
@@ -16,7 +15,6 @@ export const authClient = createAuthClient({
     adminClient(),
     usernameClient(),
     anonymousClient(),
-    bearerClient(),
     jwtClient(),
     organizationClient(),
   ],

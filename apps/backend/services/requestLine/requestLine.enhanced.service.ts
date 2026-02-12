@@ -19,7 +19,7 @@ import {
 } from './types.js';
 import { getConfig, isParsingEnabled, isDiscogsEnabled } from './config.js';
 import { parseRequest, isParserAvailable } from '../ai/index.js';
-import { executeSearchPipeline, getSearchTypeFromState } from './search/index.js';
+import { executeSearchPipeline, getSearchTypeFromState, type PipelineOptions } from './search/index.js';
 import { findSimilarArtist } from '../library.service.js';
 import { DiscogsService, isDiscogsAvailable } from '../discogs/index.js';
 import { fetchArtworkForItems } from '../artwork/index.js';
@@ -231,7 +231,7 @@ export async function processRequest(
   // Step 3: Execute search strategy pipeline
   if (config.enableLibrarySearch) {
     const searchState = await executeSearchPipeline(parsed, message, {
-      discogsService: isDiscogsAvailable() ? DiscogsService : undefined,
+      discogsService: isDiscogsAvailable() ? DiscogsService as unknown as PipelineOptions['discogsService'] : undefined,
       albumsForSearch,
     });
 

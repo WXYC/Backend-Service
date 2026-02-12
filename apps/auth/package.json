@@ -10,7 +10,8 @@
     "build": "tsup --minify",
     "clean": "rm -rf dist",
     "docker:build": "docker build -t wxyc_auth_service:ci -f ../../Dockerfile.auth ../../",
-    "dev": "tsup --watch"
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
   },
   "author": "Jackson Meade",
   "license": "MIT",

@@ -5,4 +5,4 @@ dist
 mirror-logs
 .env
 .DS_STORE
-shared/authentication/tsconfig.tsbuildinfo
+*.tsbuildinfo
