@@ -79,6 +79,14 @@ The dev experience makes extensive use of Node.js project scripts. Here's a rund
 - `npm run drizzle:migrate` : Applies the generated migrations to the database specified by the environment variables `DB_HOST`, `DB_NAME`, and `DB_PORT`. It also requires `DB_USERNAME` and `DB_PASSWORD`.
 - `npm run drizzle:drop` : Deletes a given migration file from the migrations directory and removes it from the drizzle cache.
 
+#### Code Quality
+
+- `npm run typecheck` : Runs `tsc --noEmit` across all workspaces to verify type safety without emitting files.
+- `npm run lint` : Runs ESLint with TypeScript type-checked rules and security analysis.
+- `npm run lint:fix` : Runs ESLint with auto-fix enabled.
+- `npm run format` : Formats all files with Prettier.
+- `npm run format:check` : Verifies all files match Prettier formatting (used in CI).
+
 #### Environment Variables
 
 Here is an example environment variable file. Create a file with these contents named `.env` in the root of your locally cloned project to ensure your dev environment works properly.

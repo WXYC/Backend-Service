@@ -683,8 +683,10 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         message: entry.message,
       };
 
-    default:
+    default: {
       // Fallback for unknown types - return all fields
-      return { ...baseFields, ...entry.metadata } as Record<string, unknown>;
+      const { metadata, ...rest } = entry;
+      return { ...rest, ...metadata } as Record<string, unknown>;
+    }
   }
 };
