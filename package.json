@@ -7,6 +7,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "lint:env": "node scripts/lint-env.js",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "build": "npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
     "dev": "dotenvx run -f .env -- concurrently \"npm:dev:auth\" \"npm:dev:backend\"",
     "dev:backend": "npm run dev --workspace=@wxyc/backend",
