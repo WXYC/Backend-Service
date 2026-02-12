@@ -55,8 +55,6 @@ if (process.env.NODE_ENV !== 'production') {
       }
 
       const userId = userResult[0].id;
-
-      // Now find the verification token where value = userId and identifier starts with type prefix
       const tokenPrefix = `${type}:`;
       const result = await db
         .select()

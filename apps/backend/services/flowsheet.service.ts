@@ -45,6 +45,7 @@ const FSEntryFieldsRaw = {
   id: flowsheet.id,
   show_id: flowsheet.show_id,
   album_id: flowsheet.album_id,
+  entry_type: flowsheet.entry_type,
   artist_name: flowsheet.artist_name,
   album_title: flowsheet.album_title,
   track_title: flowsheet.track_title,
@@ -74,6 +75,7 @@ type FSEntryRaw = {
   id: number;
   show_id: number | null;
   album_id: number | null;
+  entry_type: string;
   artist_name: string | null;
   album_title: string | null;
   track_title: string | null;
@@ -101,6 +103,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   id: raw.id,
   show_id: raw.show_id,
   album_id: raw.album_id,
+  entry_type: raw.entry_type,
   artist_name: raw.artist_name,
   album_title: raw.album_title,
   track_title: raw.track_title,
@@ -290,6 +293,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
 
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
+    entry_type: 'show_start',
     message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
@@ -349,6 +353,7 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
     .insert(flowsheet)
     .values({
       show_id: show_id,
+      entry_type: 'dj_join',
       message: message,
     })
     .returning();
@@ -382,6 +387,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
 
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
+    entry_type: 'show_end',
     message: `End of Show: ${dj_name} left the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
@@ -426,6 +432,7 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
     .insert(flowsheet)
     .values({
       show_id: show_id,
+      entry_type: 'dj_leave',
       message: message,
     })
     .returning();
@@ -566,4 +573,115 @@ export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
     show_djs: showDJs,
     entries: entries,
   };
+};
+
+/**
+ * Transform a V1 flowsheet entry to V2 discriminated union format.
+ * Removes irrelevant fields based on entry_type for cleaner API responses.
+ */
+export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
+  const baseFields = {
+    id: entry.id,
+    show_id: entry.show_id,
+    play_order: entry.play_order,
+    add_time: entry.add_time,
+    entry_type: entry.entry_type,
+  };
+
+  switch (entry.entry_type) {
+    case 'track':
+      return {
+        ...baseFields,
+        album_id: entry.album_id,
+        rotation_id: entry.rotation_id,
+        artist_name: entry.artist_name,
+        album_title: entry.album_title,
+        track_title: entry.track_title,
+        record_label: entry.record_label,
+        request_flag: entry.request_flag,
+        rotation_play_freq: entry.rotation_play_freq,
+        artwork_url: entry.artwork_url,
+        discogs_url: entry.discogs_url,
+        release_year: entry.release_year,
+        spotify_url: entry.spotify_url,
+        apple_music_url: entry.apple_music_url,
+        youtube_music_url: entry.youtube_music_url,
+        bandcamp_url: entry.bandcamp_url,
+        soundcloud_url: entry.soundcloud_url,
+        artist_bio: entry.artist_bio,
+        artist_wikipedia_url: entry.artist_wikipedia_url,
+      };
+
+    case 'show_start':
+    case 'show_end': {
+      // Parse DJ name and timestamp from message
+      // Format: "Start of Show: DJ {name} joined the set at {timestamp}"
+      // Format: "End of Show: {name} left the set at {timestamp}"
+      const message = entry.message || '';
+      let dj_name = '';
+      let timestamp = '';
+
+      if (entry.entry_type === 'show_start') {
+        const match = message.match(/^Start of Show: DJ (.+) joined the set at (.+)$/);
+        if (match) {
+          dj_name = match[1];
+          timestamp = match[2];
+        }
+      } else {
+        const match = message.match(/^End of Show: (.+) left the set at (.+)$/);
+        if (match) {
+          dj_name = match[1];
+          timestamp = match[2];
+        }
+      }
+
+      return {
+        ...baseFields,
+        dj_name,
+        timestamp,
+      };
+    }
+
+    case 'dj_join':
+    case 'dj_leave': {
+      // Parse DJ name from message
+      // Format: "{name} joined the set!" or "{name} left the set!"
+      const message = entry.message || '';
+      let dj_name = '';
+
+      if (entry.entry_type === 'dj_join') {
+        const match = message.match(/^(.+) joined the set!$/);
+        if (match) {
+          dj_name = match[1];
+        }
+      } else {
+        const match = message.match(/^(.+) left the set!$/);
+        if (match) {
+          dj_name = match[1];
+        }
+      }
+
+      return {
+        ...baseFields,
+        dj_name,
+      };
+    }
+
+    case 'talkset':
+    case 'message':
+      return {
+        ...baseFields,
+        message: entry.message,
+      };
+
+    case 'breakpoint':
+      return {
+        ...baseFields,
+        message: entry.message,
+      };
+
+    default:
+      // Fallback for unknown types - return all fields
+      return entry as Record<string, unknown>;
+  }
 };
