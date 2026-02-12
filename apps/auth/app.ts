@@ -300,11 +300,11 @@ const syncAdminRoles = async () => {
 };
 
 // Initialize default user and sync admin roles before starting the server
-(async () => {
+void (async () => {
   await createDefaultUser();
   await syncAdminRoles();
 
-  app.listen(parseInt(port), async () => {
+  app.listen(parseInt(port), () => {
     console.log(`listening on port: ${port}! (auth service)`);
   });
 })();

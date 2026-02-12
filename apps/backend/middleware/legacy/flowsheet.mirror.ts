@@ -69,7 +69,7 @@ const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
          @NEW_RS_ID);`                        // SHOW_ID (same as ID)
   );
 
-  var announcementEntry = await db
+  const announcementEntry = await db
     .select()
     .from(flowsheet)
     .where(eq(flowsheet.show_id, show.id))
@@ -100,7 +100,7 @@ export const endShow = createBackendMirrorMiddleware<Show>(
      LIMIT 1;`
     );
 
-    var announcementEntry = await db
+    const announcementEntry = await db
       .select()
       .from(flowsheet)
       .where(eq(flowsheet.show_id, show.id))
@@ -162,7 +162,7 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
 
     let message = entry.message?.trim() ?? '';
     let entryTypeCode = 7; // Default to talkset
-    let nowPlayingFlag = 0;
+    const nowPlayingFlag = 0;
     let startTime = 0;
 
     // Map entry_type to legacy type codes
