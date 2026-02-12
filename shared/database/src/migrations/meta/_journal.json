@@ -169,6 +169,20 @@
       "when": 1769990400000,
       "tag": "0026_capabilities_column",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1770055336927,
+      "tag": "0027_add-performance-indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1770055400000,
+      "tag": "0028_anonymous_devices",
+      "breakpoints": true
     }
   ]
 }

@@ -143,6 +143,10 @@ jobs:
       - name: Build (includes type checking)
         run: npm run build
 
+      - name: Lint migration files
+        if: needs.detect-changes.outputs.shared == 'true'
+        run: npm run lint:migrations:changed
+
   # Unit tests - runs affected tests only
   unit-tests:
     needs: detect-changes
