@@ -26,8 +26,8 @@ jobs:
         run: |
           TARGET_INPUT="${{ inputs.target }}"
 
-          if [ ! -d "apps/$TARGET_INPUT" ]; then
-            echo "Error: The target directory 'apps/$TARGET_INPUT' does not exist." >&2
+          if [ ! -d "apps/$TARGET_INPUT" ] && [ ! -d "jobs/$TARGET_INPUT" ]; then
+            echo "Error: The target directory 'apps/$TARGET_INPUT' or 'jobs/$TARGET_INPUT' does not exist." >&2
             exit 1
           fi
           echo "target input '$TARGET_INPUT' is valid."
@@ -75,7 +75,7 @@ jobs:
             TARGETS="${{ inputs.target }}"
           else
             echo "Detecting targets from git diff..."
-            TARGETS=$(git diff --name-only HEAD~1..HEAD | grep '^apps' | cut -d '/' -f 2 | sort -u)
+            TARGETS=$(git diff --name-only HEAD~1..HEAD | awk -F/ '/^(apps|jobs)\//{print $2}' | sort -u)
           fi
 
           if [ -z "$TARGETS" ] ; then
@@ -309,11 +309,24 @@ jobs:
         id: deploy_vars
         run: |
           TARGET_APP=${{ matrix.target }}
-          PUBLISH_PORT=$(yq .publishPort apps/$TARGET_APP/package.json)
+          if [ -f "jobs/$TARGET_APP/package.json" ]; then
+            TARGET_TYPE="job"
+            CRON_SCHEDULE=$(yq '.["cron-schedule"]' jobs/$TARGET_APP/package.json)
+            if [ -z "$CRON_SCHEDULE" ] || [ "$CRON_SCHEDULE" = "null" ]; then
+              echo "Missing cron-schedule in jobs/$TARGET_APP/package.json" >&2
+              exit 1
+            fi
+            echo "cron_schedule=$CRON_SCHEDULE" >> $GITHUB_OUTPUT
+          else
+            TARGET_TYPE="app"
+            PUBLISH_PORT=$(yq .publishPort apps/$TARGET_APP/package.json)
+            echo "publish_port=$PUBLISH_PORT" >> $GITHUB_OUTPUT
+          fi
 
-          echo "publish_port=$PUBLISH_PORT" >> $GITHUB_OUTPUT
+          echo "target_type=$TARGET_TYPE" >> $GITHUB_OUTPUT
 
       - name: Deploy Service
+        if: steps.deploy_vars.outputs.target_type == 'app'
         uses: ./.github/actions/deploy-service
         with:
           target_app: ${{ matrix.target }}
@@ -327,7 +340,39 @@ jobs:
           aws_region: ${{ secrets.AWS_REGION }}
           aws_ecr_uri: ${{ secrets.AWS_ECR_URI }}
 
+      - name: Deploy Cron Job
+        if: steps.deploy_vars.outputs.target_type == 'job'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            TARGET_APP=${{ matrix.target }}
+            DEPLOY_TAG=${{ steps.determine_version.outputs.deploy_version }}
+            CRON_SCHEDULE='${{ steps.deploy_vars.outputs.cron_schedule }}'
+            AWS_ECR_URI=${{ secrets.AWS_ECR_URI }}
+            AWS_REGION=${{ secrets.AWS_REGION }}
+
+            CRON_ID="wxyc_${TARGET_APP}"
+            echo "Logging into AWS ECR..."
+            aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ECR_URI
+
+            echo "Pulling Docker image for deploy..."
+            docker pull $AWS_ECR_URI/$TARGET_APP:$DEPLOY_TAG
+
+            CRON_CMD="docker rm -f ${TARGET_APP}-cron >/dev/null 2>&1 || true; docker run --rm --name ${TARGET_APP}-cron --env-file .env $AWS_ECR_URI/$TARGET_APP:$DEPLOY_TAG"
+
+            (crontab -l 2>/dev/null | grep -v "$CRON_ID"; echo "$CRON_SCHEDULE $CRON_CMD # $CRON_ID") | crontab -
+
+            echo "Cron schedule updated."
+
       - name: Confirm server is up
+        if: steps.deploy_vars.outputs.target_type == 'app'
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -342,5 +387,25 @@ jobs:
               echo "Server is up and running."
             else
               echo "Server is not running. Deployment failed." >&2
+              exit 1
+            fi
+
+      - name: Confirm cron is updated
+        if: steps.deploy_vars.outputs.target_type == 'job'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            TARGET_APP=${{ matrix.target }}
+            CRON_ID="wxyc_${TARGET_APP}"
+
+            echo "Verifying crontab entry..."
+            if crontab -l 2>/dev/null | grep -F "$CRON_ID" > /dev/null; then
+              echo "Cronjob entry verified."
+            else
+              echo "Cronjob not updated properly. Deployment failed" >&2
               exit 1
             fi
