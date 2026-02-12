@@ -140,7 +140,16 @@ jobs:
         if: steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false'
         run: npm ci
 
-      - name: Build (includes type checking)
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Build
         run: npm run build
 
   # Unit tests - runs affected tests only
