@@ -302,7 +302,7 @@ export class DiscogsProvider {
         bio = bio.replace(/\[l=([^\]]+)\]/g, '$1');
         bio = bio.replace(/\[r=([^\]]+)\]/g, '$1');
         bio = bio.replace(/\[m=([^\]]+)\]/g, '$1');
-        bio = bio.replace(/\[url=([^\]]+)\]([^\[]*)\[\/url\]/g, '$2');
+        bio = bio.replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
       }
 
       return {
@@ -341,7 +341,7 @@ export class DiscogsProvider {
       bio = bio.replace(/\[l=([^\]]+)\]/g, '$1');
       bio = bio.replace(/\[r=([^\]]+)\]/g, '$1');
       bio = bio.replace(/\[m=([^\]]+)\]/g, '$1');
-      bio = bio.replace(/\[url=([^\]]+)\]([^\[]*)\[\/url\]/g, '$2');
+      bio = bio.replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
     }
 
     return {

@@ -21,8 +21,8 @@ const songRequestStore = new MemoryStore();
  */
 export const resetRateLimitStores = (): void => {
   if (isTestEnv) {
-    registrationStore.resetAll();
-    songRequestStore.resetAll();
+    void registrationStore.resetAll();
+    void songRequestStore.resetAll();
   }
 };
 

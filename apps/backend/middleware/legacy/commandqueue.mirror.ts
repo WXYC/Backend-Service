@@ -69,7 +69,7 @@ export class MirrorCommandQueue extends EventEmitter {
   }
 
   private static createTrigger =
-    (eventType: keyof typeof MirrorEvents) => async (cmd: MirrorCommand) => {
+    (eventType: keyof typeof MirrorEvents) => (cmd: MirrorCommand) => {
       const data: EventData = {
         type: eventType,
         payload: cmd,
