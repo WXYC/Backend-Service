@@ -75,10 +75,7 @@ export class DiscogsProvider {
   /**
    * Search for a release by artist and album title
    */
-  async searchRelease(
-    artistName: string,
-    albumTitle: string
-  ): Promise<DiscogsSearchResult | null> {
+  async searchRelease(artistName: string, albumTitle: string): Promise<DiscogsSearchResult | null> {
     if (!this.apiKey) return null;
 
     // Handle self-titled albums
@@ -95,9 +92,7 @@ export class DiscogsProvider {
     });
 
     try {
-      const response = await this.throttledFetch(
-        `${DISCOGS_API_BASE}/database/search?${params}`
-      );
+      const response = await this.throttledFetch(`${DISCOGS_API_BASE}/database/search?${params}`);
 
       if (!response.ok) {
         console.error(`[DiscogsProvider] Search failed: ${response.status}`);
@@ -191,10 +186,7 @@ export class DiscogsProvider {
   /**
    * Fetch full album metadata for a given artist and album
    */
-  async fetchAlbumMetadata(
-    artistName: string,
-    albumTitle: string
-  ): Promise<AlbumMetadataResult | null> {
+  async fetchAlbumMetadata(artistName: string, albumTitle: string): Promise<AlbumMetadataResult | null> {
     const searchResult = await this.searchRelease(artistName, albumTitle);
     if (!searchResult) return null;
 
@@ -264,9 +256,7 @@ export class DiscogsProvider {
     });
 
     try {
-      const searchResponse = await this.throttledFetch(
-        `${DISCOGS_API_BASE}/database/search?${params}`
-      );
+      const searchResponse = await this.throttledFetch(`${DISCOGS_API_BASE}/database/search?${params}`);
 
       if (!searchResponse.ok) {
         return null;

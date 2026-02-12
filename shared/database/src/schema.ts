@@ -265,7 +265,14 @@ export type RotationRelease = InferSelectModel<typeof rotation>;
 export const freqEnum = pgEnum('freq_enum', ['S', 'L', 'M', 'H']);
 
 export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
-  'track', 'show_start', 'show_end', 'dj_join', 'dj_leave', 'talkset', 'breakpoint', 'message'
+  'track',
+  'show_start',
+  'show_end',
+  'dj_join',
+  'dj_leave',
+  'talkset',
+  'breakpoint',
+  'message',
 ]);
 export const rotation = wxyc_schema.table(
   'rotation',
@@ -464,7 +471,9 @@ export const album_metadata = wxyc_schema.table(
   'album_metadata',
   {
     id: serial('id').primaryKey(),
-    album_id: integer('album_id').references(() => library.id).unique(), // FK to library - for known albums
+    album_id: integer('album_id')
+      .references(() => library.id)
+      .unique(), // FK to library - for known albums
     cache_key: varchar('cache_key', { length: 512 }).unique(), // For unknown albums (no album_id)
 
     // Discogs metadata
@@ -500,7 +509,9 @@ export const artist_metadata = wxyc_schema.table(
   'artist_metadata',
   {
     id: serial('id').primaryKey(),
-    artist_id: integer('artist_id').references(() => artists.id).unique(), // FK to artists - for known artists
+    artist_id: integer('artist_id')
+      .references(() => artists.id)
+      .unique(), // FK to artists - for known artists
     cache_key: varchar('cache_key', { length: 256 }).unique(), // For unknown artists (no artist_id)
 
     // Discogs artist data

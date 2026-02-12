@@ -38,22 +38,16 @@ import { MAX_SEARCH_RESULTS } from './matching/index.js';
  *
  * Searches Discogs for ALL releases containing the track, not just the first one.
  */
-async function resolveAlbumsForTrack(
-  parsed: ParsedRequest
-): Promise<{ albums: string[]; songNotFound: boolean }> {
+async function resolveAlbumsForTrack(parsed: ParsedRequest): Promise<{ albums: string[]; songNotFound: boolean }> {
   // Check if album is missing or if album == artist (parser error)
   const albumIsMissing = !parsed.album;
   const albumIsArtist =
-    parsed.album &&
-    parsed.artist &&
-    parsed.album.toLowerCase().trim() === parsed.artist.toLowerCase().trim();
+    parsed.album && parsed.artist && parsed.album.toLowerCase().trim() === parsed.artist.toLowerCase().trim();
 
   // Only do track lookup if we have an artist
   if (parsed.song && parsed.artist && (albumIsMissing || albumIsArtist)) {
     if (albumIsArtist) {
-      console.log(
-        `[RequestLine] Album '${parsed.album}' appears to be artist name, looking up albums`
-      );
+      console.log(`[RequestLine] Album '${parsed.album}' appears to be artist name, looking up albums`);
     }
 
     if (!isDiscogsAvailable()) {
@@ -63,11 +57,7 @@ async function resolveAlbumsForTrack(
 
     try {
       // Get ALL releases containing this track
-      const releases = await discogsProvider.searchReleasesByTrack(
-        parsed.song,
-        parsed.artist,
-        10
-      );
+      const releases = await discogsProvider.searchReleasesByTrack(parsed.song, parsed.artist, 10);
 
       if (releases.length > 0) {
         // Extract unique album names, filtering to releases by this artist
@@ -84,9 +74,7 @@ async function resolveAlbumsForTrack(
         }
 
         if (albums.length > 0) {
-          console.log(
-            `[RequestLine] Found ${albums.length} albums for song '${parsed.song}': ${albums.join(', ')}`
-          );
+          console.log(`[RequestLine] Found ${albums.length} albums for song '${parsed.song}': ${albums.join(', ')}`);
           return { albums, songNotFound: false };
         }
       }
@@ -165,9 +153,7 @@ async function postResultsToSlack(
  *
  * This is the main entry point for the enhanced request line service.
  */
-export async function processRequest(
-  body: RequestLineRequestBody
-): Promise<UnifiedRequestResponse> {
+export async function processRequest(body: RequestLineRequestBody): Promise<UnifiedRequestResponse> {
   const config = getConfig();
   const message = body.message.trim();
 
@@ -187,9 +173,7 @@ export async function processRequest(
   if (!body.skipParsing && isParserAvailable()) {
     try {
       parsed = await parseRequest(message);
-      console.log(
-        `[RequestLine] Parsed request: is_request=${parsed.isRequest}, type=${parsed.messageType}`
-      );
+      console.log(`[RequestLine] Parsed request: is_request=${parsed.isRequest}, type=${parsed.messageType}`);
     } catch (error) {
       console.error('[RequestLine] Parsing failed:', error);
       // Per the plan: "Requests fail if Groq is unavailable"
@@ -224,14 +208,15 @@ export async function processRequest(
   }
 
   // Step 2: Look up albums from Discogs if we have a song but no album
-  const { albums: albumsForSearch, songNotFound: initialSongNotFound } =
-    await resolveAlbumsForTrack(parsed);
+  const { albums: albumsForSearch, songNotFound: initialSongNotFound } = await resolveAlbumsForTrack(parsed);
   songNotFound = initialSongNotFound;
 
   // Step 3: Execute search strategy pipeline
   if (config.enableLibrarySearch) {
     const searchState = await executeSearchPipeline(parsed, message, {
-      discogsService: isDiscogsAvailable() ? DiscogsService as unknown as PipelineOptions['discogsService'] : undefined,
+      discogsService: isDiscogsAvailable()
+        ? (DiscogsService as unknown as PipelineOptions['discogsService'])
+        : undefined,
       albumsForSearch,
     });
 
@@ -258,12 +243,7 @@ export async function processRequest(
   let slackResult: SlackPostResult = { success: true, message: 'Slack posting skipped' };
 
   if (!body.skipSlack) {
-    const context = buildContextMessage(
-      parsed,
-      foundOnCompilation,
-      songNotFound,
-      libraryResults.length > 0
-    );
+    const context = buildContextMessage(parsed, foundOnCompilation, songNotFound, libraryResults.length > 0);
 
     try {
       slackResult = await postResultsToSlack(message, parsed, itemsWithArtwork, context);
@@ -277,8 +257,7 @@ export async function processRequest(
   }
 
   // Extract main artwork from first result
-  const artwork =
-    itemsWithArtwork.find(([_, art]) => art !== null)?.[1] || null;
+  const artwork = itemsWithArtwork.find(([_, art]) => art !== null)?.[1] || null;
 
   return {
     success: true,

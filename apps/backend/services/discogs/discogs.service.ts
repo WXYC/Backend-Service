@@ -94,11 +94,7 @@ class DiscogsServiceClass {
   /**
    * Search for ALL releases containing a track.
    */
-  async searchReleasesByTrack(
-    track: string,
-    artist?: string,
-    limit = 20
-  ): Promise<DiscogsTrackReleasesResponse> {
+  async searchReleasesByTrack(track: string, artist?: string, limit = 20): Promise<DiscogsTrackReleasesResponse> {
     const cache = getTrackCache();
     const cacheKey = makeCacheKey('searchReleasesByTrack', [track, artist, limit]);
 
@@ -192,10 +188,7 @@ class DiscogsServiceClass {
   /**
    * Process a single search result into a DiscogsReleaseInfo.
    */
-  private processSearchResult(
-    result: RawDiscogsSearchResult,
-    seenAlbums: Set<string>
-  ): DiscogsReleaseInfo | null {
+  private processSearchResult(result: RawDiscogsSearchResult, seenAlbums: Set<string>): DiscogsReleaseInfo | null {
     const { artist, album } = parseTitle(result.title);
 
     if (!album) {
@@ -303,10 +296,7 @@ class DiscogsServiceClass {
       let response = await discogsClient.get<RawDiscogsSearchResponse>('/database/search', { params });
 
       // If strict search returned nothing, try fuzzy query
-      if (
-        (!response.data.results || response.data.results.length === 0) &&
-        (request.artist || request.album)
-      ) {
+      if ((!response.data.results || response.data.results.length === 0) && (request.artist || request.album)) {
         const queryParts: string[] = [];
         if (request.artist) queryParts.push(request.artist);
         if (request.album) queryParts.push(request.album);
@@ -332,12 +322,7 @@ class DiscogsServiceClass {
 
         const { artist, album } = parseTitle(item.title);
 
-        const confidence = calculateConfidence(
-          request.artist,
-          request.album,
-          artist,
-          album
-        );
+        const confidence = calculateConfidence(request.artist, request.album, artist, album);
 
         const releaseUrl = `https://www.discogs.com/release/${item.id}`;
 
@@ -375,10 +360,7 @@ class DiscogsServiceClass {
   /**
    * Build search params using Discogs-specific fields.
    */
-  private buildSearchParams(
-    request: DiscogsSearchRequest,
-    limit: number
-  ): Record<string, string | number> {
+  private buildSearchParams(request: DiscogsSearchRequest, limit: number): Record<string, string | number> {
     const params: Record<string, string | number> = {
       type: 'release',
       per_page: limit,
@@ -399,11 +381,7 @@ class DiscogsServiceClass {
   /**
    * Validate that a track by an artist exists on a release.
    */
-  async validateTrackOnRelease(
-    releaseId: number,
-    track: string,
-    artist: string
-  ): Promise<boolean> {
+  async validateTrackOnRelease(releaseId: number, track: string, artist: string): Promise<boolean> {
     const release = await this.getRelease(releaseId);
     if (!release) {
       return false;
@@ -425,9 +403,7 @@ class DiscogsServiceClass {
       releaseArtist = releaseArtist.split('(')[0].trim();
 
       if (artistLower.includes(releaseArtist) || releaseArtist.includes(artistLower)) {
-        console.log(
-          `[Discogs] Validated: '${track}' by '${artist}' found on release ${releaseId}`
-        );
+        console.log(`[Discogs] Validated: '${track}' by '${artist}' found on release ${releaseId}`);
         return true;
       }
     }
@@ -439,10 +415,7 @@ class DiscogsServiceClass {
   /**
    * Search for releases by artist (for song-as-artist fallback).
    */
-  async searchReleasesByArtist(
-    artist: string,
-    limit = 10
-  ): Promise<Array<{ artist: string; album: string }>> {
+  async searchReleasesByArtist(artist: string, limit = 10): Promise<Array<{ artist: string; album: string }>> {
     const params = {
       type: 'release',
       artist: artist,

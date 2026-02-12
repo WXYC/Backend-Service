@@ -14,20 +14,13 @@ import { isCompilationArtist, MAX_SEARCH_RESULTS } from '../../matching/index.js
 
 // Forward declaration - will be imported when Discogs service is ready
 type DiscogsService = {
-  searchReleasesByArtist: (
-    artist: string,
-    limit?: number
-  ) => Promise<Array<{ artist: string; album: string }>>;
+  searchReleasesByArtist: (artist: string, limit?: number) => Promise<Array<{ artist: string; album: string }>>;
 };
 
 /**
  * Check if this strategy should run.
  */
-export function shouldRunSongAsArtist(
-  parsed: ParsedRequest,
-  state: SearchState,
-  _rawMessage: string
-): boolean {
+export function shouldRunSongAsArtist(parsed: ParsedRequest, state: SearchState, _rawMessage: string): boolean {
   // Only run if no results AND parsed song but no artist
   return state.results.length === 0 && !!parsed.song && !parsed.artist;
 }
@@ -91,15 +84,10 @@ export async function executeSongAsArtist(
 
       // Accept if it's the actual artist or a compilation
       const itemArtist = (item.artist || '').toLowerCase();
-      if (
-        itemArtist.startsWith(songAsArtist.toLowerCase()) ||
-        isCompilationArtist(item.artist)
-      ) {
+      if (itemArtist.startsWith(songAsArtist.toLowerCase()) || isCompilationArtist(item.artist)) {
         crossRefResults.push(item);
         seenIds.add(item.id);
-        console.log(
-          `[Search] Found '${item.artist} - ${item.title}' via Discogs cross-reference`
-        );
+        console.log(`[Search] Found '${item.artist} - ${item.title}' via Discogs cross-reference`);
       }
     }
 
@@ -109,9 +97,7 @@ export async function executeSongAsArtist(
   }
 
   if (crossRefResults.length > 0) {
-    console.log(
-      `[Search] Found ${crossRefResults.length} results via Discogs cross-reference for '${songAsArtist}'`
-    );
+    console.log(`[Search] Found ${crossRefResults.length} results via Discogs cross-reference for '${songAsArtist}'`);
   }
 
   return crossRefResults.slice(0, MAX_SEARCH_RESULTS);

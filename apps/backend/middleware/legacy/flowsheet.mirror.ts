@@ -1,24 +1,22 @@
-import { QueryParams } from "../../controllers/flowsheet.controller";
-import { db } from "@wxyc/database";
-import { user, flowsheet, FSEntry, Show } from "@wxyc/database"
-import { asc, desc, eq } from "drizzle-orm";
-import { Request } from "express";
-import { createBackendMirrorMiddleware } from "./mirror.middleware.js";
-import { safeSql, safeSqlNum, toMs } from "./utilities.mirror.js";
+import { QueryParams } from '../../controllers/flowsheet.controller';
+import { db } from '@wxyc/database';
+import { user, flowsheet, FSEntry, Show } from '@wxyc/database';
+import { asc, desc, eq } from 'drizzle-orm';
+import { Request } from 'express';
+import { createBackendMirrorMiddleware } from './mirror.middleware.js';
+import { safeSql, safeSqlNum, toMs } from './utilities.mirror.js';
 
-const FLOWSHEET_ENTRY_TABLE = "FLOWSHEET_ENTRY_PROD";
-const RADIO_SHOW_TABLE = "FLOWSHEET_RADIO_SHOW_PROD";
+const FLOWSHEET_ENTRY_TABLE = 'FLOWSHEET_ENTRY_PROD';
+const RADIO_SHOW_TABLE = 'FLOWSHEET_RADIO_SHOW_PROD';
 
 const getEntries = createBackendMirrorMiddleware<any>(async (req, data) => {
   const query = req.query as QueryParams;
 
-  const page = parseInt(query.page ?? "0");
-  const limit = parseInt(query.limit ?? "30");
+  const page = parseInt(query.page ?? '0');
+  const limit = parseInt(query.limit ?? '30');
   const offset = page * limit;
 
-  return [
-    `SELECT * FROM ${FLOWSHEET_ENTRY_TABLE} LIMIT ${limit} OFFSET ${offset};`,
-  ];
+  return [`SELECT * FROM ${FLOWSHEET_ENTRY_TABLE} LIMIT ${limit} OFFSET ${offset};`];
 });
 
 const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
@@ -32,7 +30,11 @@ const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
   if (!show) return statements; // no show, nothing to do
 
   const dj = (
-    await db.select().from(user).where(eq(user.id, djId as string)).limit(1)
+    await db
+      .select()
+      .from(user)
+      .where(eq(user.id, djId as string))
+      .limit(1)
   )?.[0];
 
   if (!dj) return statements; // DJ not found
@@ -66,7 +68,7 @@ const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
          ${safeSqlNum(timeModified)},         -- TIME_LAST_MODIFIED
          ${safeSqlNum(timeCreated)},          -- TIME_CREATED
          0,                                   -- MODLOCK (0 for active, 1 when completed)
-         @NEW_RS_ID);`                        // SHOW_ID (same as ID)
+         @NEW_RS_ID);` // SHOW_ID (same as ID)
   );
 
   const announcementEntry = await db
@@ -83,14 +85,13 @@ const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
   return statements;
 });
 
-export const endShow = createBackendMirrorMiddleware<Show>(
-  async (req, show) => {
-    const endMs = toMs(show.end_time ?? Date.now());
-    const statements: string[] = [];
+export const endShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
+  const endMs = toMs(show.end_time ?? Date.now());
+  const statements: string[] = [];
 
-    // Update the most recent active show (SIGNOFF_TIME = 0, MODLOCK = 0)
-    statements.push(
-      `UPDATE ${RADIO_SHOW_TABLE}
+  // Update the most recent active show (SIGNOFF_TIME = 0, MODLOCK = 0)
+  statements.push(
+    `UPDATE ${RADIO_SHOW_TABLE}
        SET SIGNOFF_TIME = ${safeSqlNum(endMs)},
            TIME_LAST_MODIFIED = ${safeSqlNum(endMs)},
            MODLOCK = 1
@@ -98,27 +99,24 @@ export const endShow = createBackendMirrorMiddleware<Show>(
        AND MODLOCK = 0
      ORDER BY STARTING_RADIO_HOUR DESC
      LIMIT 1;`
-    );
+  );
 
-    const announcementEntry = await db
-      .select()
-      .from(flowsheet)
-      .where(eq(flowsheet.show_id, show.id))
-      .orderBy(desc(flowsheet.play_order))
-      .limit(1);
+  const announcementEntry = await db
+    .select()
+    .from(flowsheet)
+    .where(eq(flowsheet.show_id, show.id))
+    .orderBy(desc(flowsheet.play_order))
+    .limit(1);
 
-    if (announcementEntry && announcementEntry.length > 0) {
-      statements.push(...(await getAddEntrySQL(req, announcementEntry[0])));
-    }
-
-    return statements;
+  if (announcementEntry && announcementEntry.length > 0) {
+    statements.push(...(await getAddEntrySQL(req, announcementEntry[0])));
   }
-);
+
+  return statements;
+});
 
 const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
-  const startMs = entry?.add_time
-    ? new Date(entry.add_time).getTime()
-    : Date.now();
+  const startMs = entry?.add_time ? new Date(entry.add_time).getTime() : Date.now();
   const radioHour = Math.floor(startMs / 3_600_000) * 3_600_000;
 
   const statements: string[] = [];
@@ -155,11 +153,16 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
   const entryType = entry.entry_type;
 
   // Non-track entries (messages, events, etc.)
-  if (entryType === 'show_start' || entryType === 'show_end' ||
-      entryType === 'dj_join' || entryType === 'dj_leave' ||
-      entryType === 'talkset' || entryType === 'breakpoint' || entryType === 'message' ||
-      (entry?.message && entry.message.trim() !== "" && entryType !== 'track')) {
-
+  if (
+    entryType === 'show_start' ||
+    entryType === 'show_end' ||
+    entryType === 'dj_join' ||
+    entryType === 'dj_leave' ||
+    entryType === 'talkset' ||
+    entryType === 'breakpoint' ||
+    entryType === 'message' ||
+    (entry?.message && entry.message.trim() !== '' && entryType !== 'track')
+  ) {
     let message = entry.message?.trim() ?? '';
     let entryTypeCode = 7; // Default to talkset
     const nowPlayingFlag = 0;
@@ -176,23 +179,23 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
       entryTypeCode = 7; // Map to talkset in legacy
     } else if (entryType === 'talkset' || entryType === 'message') {
       entryTypeCode = 7;
-      message = "------ talkset -------";
+      message = '------ talkset -------';
     } else if (entryType === 'breakpoint') {
       entryTypeCode = 8;
       message = message.toUpperCase() || 'BREAKPOINT';
     } else {
       // Fallback to pattern matching for backwards compatibility
-      if (message.toLowerCase().includes("breakpoint")) {
+      if (message.toLowerCase().includes('breakpoint')) {
         entryTypeCode = 8;
         message = message.toUpperCase();
-      } else if (message.toLowerCase().includes("start of show") || message.toLowerCase().includes("signed on")) {
+      } else if (message.toLowerCase().includes('start of show') || message.toLowerCase().includes('signed on')) {
         entryTypeCode = 9;
         startTime = startMs;
-      } else if (message.toLowerCase().includes("end of show") || message.toLowerCase().includes("signed off")) {
+      } else if (message.toLowerCase().includes('end of show') || message.toLowerCase().includes('signed off')) {
         entryTypeCode = 10;
         startTime = startMs;
       } else {
-        message = "------ talkset -------";
+        message = '------ talkset -------';
       }
     }
 
@@ -274,34 +277,31 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
 
 export const addEntry = createBackendMirrorMiddleware<FSEntry>(getAddEntrySQL);
 
-export const updateEntry = createBackendMirrorMiddleware<FSEntry>(
-  async (req, entry) => {
-    // Message-only rows aren't updateable
-    if (entry?.message && entry.message.trim() !== "") return [];
+export const updateEntry = createBackendMirrorMiddleware<FSEntry>(async (req, entry) => {
+  // Message-only rows aren't updateable
+  if (entry?.message && entry.message.trim() !== '') return [];
 
-    const nowMs = Date.now();
-    const statements: string[] = [];
+  const nowMs = Date.now();
+  const statements: string[] = [];
 
-    // Resolve the RADIO_SHOW_ID first
-    statements.push(
-      `SET @RS_ID := (SELECT IFNULL(MAX(ID), 0) FROM ${RADIO_SHOW_TABLE});`
-    );
+  // Resolve the RADIO_SHOW_ID first
+  statements.push(`SET @RS_ID := (SELECT IFNULL(MAX(ID), 0) FROM ${RADIO_SHOW_TABLE});`);
 
-    // Determine entry type code based on rotation and library IDs
-    // Type codes: 1-4 for different rotation types, 6 for library, 0 for manual/unknown
-    let entryTypeCode = 0;
-    if (entry.rotation_id && entry.rotation_id > 0) {
-      // Rotation entries - default to type 2 (general rotation)
-      // Would need rotation type lookup for accurate 1-4 classification
-      entryTypeCode = 2;
-    } else if (entry.album_id && entry.album_id > 0) {
-      entryTypeCode = 6; // Library entry
-    }
+  // Determine entry type code based on rotation and library IDs
+  // Type codes: 1-4 for different rotation types, 6 for library, 0 for manual/unknown
+  let entryTypeCode = 0;
+  if (entry.rotation_id && entry.rotation_id > 0) {
+    // Rotation entries - default to type 2 (general rotation)
+    // Would need rotation type lookup for accurate 1-4 classification
+    entryTypeCode = 2;
+  } else if (entry.album_id && entry.album_id > 0) {
+    entryTypeCode = 6; // Library entry
+  }
 
-    // Update by RADIO_SHOW_ID and SEQUENCE_WITHIN_SHOW
-    // GLOBAL_ORDER_ID is calculated as RADIO_SHOW_ID * 1000 + SEQUENCE_WITHIN_SHOW
-    statements.push(
-      `UPDATE ${FLOWSHEET_ENTRY_TABLE}
+  // Update by RADIO_SHOW_ID and SEQUENCE_WITHIN_SHOW
+  // GLOBAL_ORDER_ID is calculated as RADIO_SHOW_ID * 1000 + SEQUENCE_WITHIN_SHOW
+  statements.push(
+    `UPDATE ${FLOWSHEET_ENTRY_TABLE}
         SET ARTIST_NAME = ${safeSql(entry.artist_name)},
             SONG_TITLE = ${safeSql(entry.track_title)},
             RELEASE_TITLE = ${safeSql(entry.album_title)},
@@ -314,32 +314,27 @@ export const updateEntry = createBackendMirrorMiddleware<FSEntry>(
       WHERE RADIO_SHOW_ID = @RS_ID
         AND SEQUENCE_WITHIN_SHOW = ${safeSqlNum(entry.play_order)}
       LIMIT 1;`
-    );
+  );
 
-    return statements;
-  }
-);
+  return statements;
+});
 
-export const deleteEntry = createBackendMirrorMiddleware<FSEntry>(
-  async (req, removed) => {
-    const statements: string[] = [];
+export const deleteEntry = createBackendMirrorMiddleware<FSEntry>(async (req, removed) => {
+  const statements: string[] = [];
 
-    // Resolve the RADIO_SHOW_ID first
-    statements.push(
-      `SET @RS_ID := (SELECT IFNULL(MAX(ID), 0) FROM ${RADIO_SHOW_TABLE});`
-    );
+  // Resolve the RADIO_SHOW_ID first
+  statements.push(`SET @RS_ID := (SELECT IFNULL(MAX(ID), 0) FROM ${RADIO_SHOW_TABLE});`);
 
-    // Delete by RADIO_SHOW_ID and SEQUENCE_WITHIN_SHOW
-    statements.push(
-      `DELETE FROM ${FLOWSHEET_ENTRY_TABLE}
+  // Delete by RADIO_SHOW_ID and SEQUENCE_WITHIN_SHOW
+  statements.push(
+    `DELETE FROM ${FLOWSHEET_ENTRY_TABLE}
       WHERE RADIO_SHOW_ID = @RS_ID
         AND SEQUENCE_WITHIN_SHOW = ${safeSqlNum(removed.play_order)}
       LIMIT 1;`
-    );
+  );
 
-    return statements;
-  }
-);
+  return statements;
+});
 
 /*
 export const changeOrder = createBackendMirrorMiddleware<FSEntry>(

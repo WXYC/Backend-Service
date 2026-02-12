@@ -14,7 +14,7 @@ import {
   library_artist_view,
   rotation,
   LibraryArtistViewEntry,
-} from "@wxyc/database";
+} from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
 import { extractSignificantWords } from './requestLine/matching/index.js';
 
@@ -322,10 +322,7 @@ export async function searchLibrary(
  * @param threshold - Minimum similarity score (0.0 to 1.0) to accept
  * @returns Corrected artist name if a good match is found, null otherwise
  */
-export async function findSimilarArtist(
-  artistName: string,
-  threshold = 0.85
-): Promise<string | null> {
+export async function findSimilarArtist(artistName: string, threshold = 0.85): Promise<string | null> {
   // Use pg_trgm similarity function to find close matches
   const query = sql`
     SELECT DISTINCT artist_name,
@@ -362,10 +359,7 @@ export async function findSimilarArtist(
  * @param limit - Maximum results to return
  * @returns Array of enriched library results
  */
-export async function searchAlbumsByTitle(
-  albumTitle: string,
-  limit = 5
-): Promise<EnrichedLibraryResult[]> {
+export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promise<EnrichedLibraryResult[]> {
   const query = sql`
     SELECT *,
       similarity(${library_artist_view.album_title}, ${albumTitle}) as sim
@@ -383,9 +377,7 @@ export async function searchAlbumsByTitle(
     const words = extractSignificantWords(albumTitle);
     if (words.length > 0) {
       const significantWords = words.slice(0, 4); // Use up to 4 significant words
-      const likeConditions = significantWords
-        .map((w) => `album_title ILIKE '%${w}%'`)
-        .join(' AND ');
+      const likeConditions = significantWords.map((w) => `album_title ILIKE '%${w}%'`).join(' AND ');
 
       const fallbackQuery = sql.raw(`
         SELECT * FROM wxyc_schema.library_artist_view
@@ -410,10 +402,7 @@ export async function searchAlbumsByTitle(
  * @param limit - Maximum results to return
  * @returns Array of enriched library results
  */
-export async function searchByArtist(
-  artistName: string,
-  limit = 5
-): Promise<EnrichedLibraryResult[]> {
+export async function searchByArtist(artistName: string, limit = 5): Promise<EnrichedLibraryResult[]> {
   const query = sql`
     SELECT *,
       similarity(${library_artist_view.artist_name}, ${artistName}) as sim
@@ -457,9 +446,7 @@ export function filterResultsByArtist(
   });
 
   if (filtered.length < results.length) {
-    console.log(
-      `[Library] Filtered ${results.length} results to ${filtered.length} matching artist '${artist}'`
-    );
+    console.log(`[Library] Filtered ${results.length} results to ${filtered.length} matching artist '${artist}'`);
   }
 
   return filtered;

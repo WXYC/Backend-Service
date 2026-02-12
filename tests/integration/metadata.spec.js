@@ -490,9 +490,7 @@ describe('Conditional GET (304 Not Modified)', () => {
       expect(updatedRes.body.length).toBeGreaterThan(0);
       expect(updatedRes.headers['last-modified']).toBeDefined();
       // The new Last-Modified should be different (later) than the old one
-      expect(new Date(updatedRes.headers['last-modified']).getTime()).toBeGreaterThan(
-        new Date(lastModified).getTime()
-      );
+      expect(new Date(updatedRes.headers['last-modified']).getTime()).toBeGreaterThan(new Date(lastModified).getTime());
     });
 
     test('/flowsheet/latest returns 304 when not modified', async () => {
@@ -533,11 +531,7 @@ describe('Conditional GET (304 Not Modified)', () => {
       const lastModified = initialRes.headers['last-modified'];
 
       // Second request with since query param
-      const cachedRes = await request
-        .get('/flowsheet')
-        .query({ limit: 10, since: lastModified })
-        .send()
-        .expect(304);
+      const cachedRes = await request.get('/flowsheet').query({ limit: 10, since: lastModified }).send().expect(304);
 
       expect(cachedRes.body).toEqual({});
     });
@@ -558,21 +552,13 @@ describe('Conditional GET (304 Not Modified)', () => {
         .expect(200);
 
       // Request with old since param should return 200 with new data
-      const updatedRes = await request
-        .get('/flowsheet')
-        .query({ limit: 10, since: lastModified })
-        .send()
-        .expect(200);
+      const updatedRes = await request.get('/flowsheet').query({ limit: 10, since: lastModified }).send().expect(200);
 
       expect(updatedRes.body.length).toBeGreaterThan(0);
     });
 
     test('Returns 200 when since param is invalid date', async () => {
-      const res = await request
-        .get('/flowsheet')
-        .query({ limit: 10, since: 'invalid-date' })
-        .send()
-        .expect(200);
+      const res = await request.get('/flowsheet').query({ limit: 10, since: 'invalid-date' }).send().expect(200);
 
       expect(res.headers['last-modified']).toBeDefined();
     });

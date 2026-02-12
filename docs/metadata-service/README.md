@@ -19,14 +19,18 @@ This document describes the metadata service integration that moves metadata fet
 ## Overview
 
 ### Problem
+
 The iOS client was responsible for fetching metadata (album art, streaming links, artist bios) from multiple external APIs (Discogs, Spotify, Apple Music). This created:
+
 - Redundant API calls across multiple clients
 - Inconsistent caching strategies
 - Poor offline experience
 - API rate limiting issues
 
 ### Solution
+
 Move metadata fetching to the backend with:
+
 - **Database-backed storage** for persistent metadata
 - **Fire-and-forget fetching** for non-blocking metadata retrieval
 - **LEFT JOINs** to include metadata in flowsheet responses automatically
@@ -41,19 +45,20 @@ The overall system architecture showing how components interact:
 ![Architecture Diagram](./architecture.svg)
 
 > **Note:** Diagram source files are in `diagrams/*.mmd` (Mermaid format). Regenerate SVGs with:
+>
 > ```bash
 > npx @mermaid-js/mermaid-cli -i diagrams/architecture.mmd -o architecture.svg -b transparent
 > ```
 
 ### Key Components
 
-| Component | Responsibility |
-|-----------|---------------|
-| **Flowsheet Controller** | Handles HTTP requests, triggers async metadata fetch |
-| **Flowsheet Service** | Database queries with metadata JOINs, last-modified tracking |
-| **Metadata Service** | Coordinates external API calls, stores results |
-| **PostgreSQL** | Persistent storage for flowsheet and metadata tables |
-| **External APIs** | Discogs, Spotify, Apple Music for metadata |
+| Component                | Responsibility                                               |
+| ------------------------ | ------------------------------------------------------------ |
+| **Flowsheet Controller** | Handles HTTP requests, triggers async metadata fetch         |
+| **Flowsheet Service**    | Database queries with metadata JOINs, last-modified tracking |
+| **Metadata Service**     | Coordinates external API calls, stores results               |
+| **PostgreSQL**           | Persistent storage for flowsheet and metadata tables         |
+| **External APIs**        | Discogs, Spotify, Apple Music for metadata                   |
 
 ---
 
@@ -64,6 +69,7 @@ The flowsheet service tracks when the flowsheet was last modified to support con
 ### Modification Triggers
 
 The `lastModifiedAt` timestamp is updated when:
+
 - Track is added (`addTrack`)
 - Track is deleted (`removeTrack`)
 - Track is updated (`updateEntry`)
@@ -90,10 +96,10 @@ The flowsheet endpoints support conditional requests via the `Last-Modified` hea
 
 ### Supported Endpoints
 
-| Endpoint | Support |
-|----------|---------|
-| `GET /flowsheet` | Yes |
-| `GET /flowsheet/latest` | Yes |
+| Endpoint                | Support |
+| ----------------------- | ------- |
+| `GET /flowsheet`        | Yes     |
+| `GET /flowsheet/latest` | Yes     |
 
 ### Example Flow
 
@@ -148,12 +154,12 @@ When a track is added, metadata is fetched asynchronously without blocking the r
 
 ### Provider Pipeline
 
-| Provider | Data Retrieved |
-|----------|---------------|
-| **Discogs** | `artwork_url`, `release_year`, `discogs_url`, `bio`, `wikipedia_url` |
-| **Spotify** | `spotify_url` |
-| **Apple Music** | `apple_music_url` |
-| **Search URLs** | `youtube_music_url`, `bandcamp_url`, `soundcloud_url` |
+| Provider        | Data Retrieved                                                       |
+| --------------- | -------------------------------------------------------------------- |
+| **Discogs**     | `artwork_url`, `release_year`, `discogs_url`, `bio`, `wikipedia_url` |
+| **Spotify**     | `spotify_url`                                                        |
+| **Apple Music** | `apple_music_url`                                                    |
+| **Search URLs** | `youtube_music_url`, `bandcamp_url`, `soundcloud_url`                |
 
 ---
 
@@ -165,43 +171,43 @@ The database migration adds two new tables for metadata storage:
 
 ### Migration History
 
-| Migration | Purpose |
-|-----------|---------|
-| `0021_user-table-migration.sql` | DJ refactor (already applied) |
-| `0022_library_cross_reference.sql` | Artist/library crossreference tables |
-| `0023_metadata_tables.sql` | **NEW** - album_metadata + artist_metadata |
+| Migration                          | Purpose                                    |
+| ---------------------------------- | ------------------------------------------ |
+| `0021_user-table-migration.sql`    | DJ refactor (already applied)              |
+| `0022_library_cross_reference.sql` | Artist/library crossreference tables       |
+| `0023_metadata_tables.sql`         | **NEW** - album_metadata + artist_metadata |
 
 ### New Tables
 
 #### `wxyc_schema.album_metadata`
 
-| Column | Type | Purpose |
-|--------|------|---------|
-| `id` | serial | Primary key |
-| `album_id` | integer (FK, unique) | Link to library for known albums |
-| `cache_key` | varchar (unique) | Key for non-library entries |
-| `artwork_url` | varchar | Album cover image URL |
-| `spotify_url` | varchar | Spotify album link |
-| `apple_music_url` | varchar | Apple Music album link |
-| `discogs_url` | varchar | Discogs release link |
-| `youtube_music_url` | varchar | YouTube Music search URL |
-| `bandcamp_url` | varchar | Bandcamp search URL |
-| `soundcloud_url` | varchar | SoundCloud search URL |
-| `release_year` | smallint | Album release year |
-| `is_rotation` | boolean | Whether album is in rotation |
-| `last_accessed` | timestamp | For tracking usage |
+| Column              | Type                 | Purpose                          |
+| ------------------- | -------------------- | -------------------------------- |
+| `id`                | serial               | Primary key                      |
+| `album_id`          | integer (FK, unique) | Link to library for known albums |
+| `cache_key`         | varchar (unique)     | Key for non-library entries      |
+| `artwork_url`       | varchar              | Album cover image URL            |
+| `spotify_url`       | varchar              | Spotify album link               |
+| `apple_music_url`   | varchar              | Apple Music album link           |
+| `discogs_url`       | varchar              | Discogs release link             |
+| `youtube_music_url` | varchar              | YouTube Music search URL         |
+| `bandcamp_url`      | varchar              | Bandcamp search URL              |
+| `soundcloud_url`    | varchar              | SoundCloud search URL            |
+| `release_year`      | smallint             | Album release year               |
+| `is_rotation`       | boolean              | Whether album is in rotation     |
+| `last_accessed`     | timestamp            | For tracking usage               |
 
 #### `wxyc_schema.artist_metadata`
 
-| Column | Type | Purpose |
-|--------|------|---------|
-| `id` | serial | Primary key |
-| `artist_id` | integer (FK, unique) | Link to artists for known artists |
-| `cache_key` | varchar (unique) | Key for non-library artists |
-| `discogs_artist_id` | integer | Discogs artist ID |
-| `bio` | text | Artist biography |
-| `wikipedia_url` | varchar | Wikipedia article link |
-| `last_accessed` | timestamp | For tracking usage |
+| Column              | Type                 | Purpose                           |
+| ------------------- | -------------------- | --------------------------------- |
+| `id`                | serial               | Primary key                       |
+| `artist_id`         | integer (FK, unique) | Link to artists for known artists |
+| `cache_key`         | varchar (unique)     | Key for non-library artists       |
+| `discogs_artist_id` | integer              | Discogs artist ID                 |
+| `bio`               | text                 | Artist biography                  |
+| `wikipedia_url`     | varchar              | Wikipedia article link            |
+| `last_accessed`     | timestamp            | For tracking usage                |
 
 ---
 
@@ -214,6 +220,7 @@ This diagram shows the complete request/response flow between all systems:
 ### Scenarios
 
 #### 1. Add Track
+
 - Client POSTs new track
 - Backend inserts to DB
 - Fire-and-forget metadata fetch starts
@@ -222,6 +229,7 @@ This diagram shows the complete request/response flow between all systems:
 - Metadata saved to DB for future requests
 
 #### 2. Get Entries
+
 - Client GETs flowsheet entries
 - Query database with LEFT JOINs to include metadata
 - Return entries with metadata
@@ -232,12 +240,12 @@ This diagram shows the complete request/response flow between all systems:
 
 ### Changes Made
 
-| Area | Change |
-|------|--------|
-| **Migration** | Created 0023_metadata_tables.sql |
-| **Flowsheet Service** | Added LEFT JOINs, last-modified tracking |
-| **Flowsheet Controller** | Fire-and-forget metadata fetch on new entries |
-| **Database** | New `album_metadata` and `artist_metadata` tables |
+| Area                     | Change                                            |
+| ------------------------ | ------------------------------------------------- |
+| **Migration**            | Created 0023_metadata_tables.sql                  |
+| **Flowsheet Service**    | Added LEFT JOINs, last-modified tracking          |
+| **Flowsheet Controller** | Fire-and-forget metadata fetch on new entries     |
+| **Database**             | New `album_metadata` and `artist_metadata` tables |
 
 ### Data Flow Summary
 
@@ -249,19 +257,19 @@ This diagram shows the complete request/response flow between all systems:
 
 ### Core Implementation
 
-| File | Change |
-|------|--------|
-| `apps/backend/services/flowsheet.service.ts` | Added LEFT JOINs, last-modified tracking |
-| `apps/backend/controllers/flowsheet.controller.ts` | Fire-and-forget metadata fetch |
-| `apps/backend/services/metadata/*` | Metadata service implementation |
+| File                                               | Change                                   |
+| -------------------------------------------------- | ---------------------------------------- |
+| `apps/backend/services/flowsheet.service.ts`       | Added LEFT JOINs, last-modified tracking |
+| `apps/backend/controllers/flowsheet.controller.ts` | Fire-and-forget metadata fetch           |
+| `apps/backend/services/metadata/*`                 | Metadata service implementation          |
 
 ### Database
 
-| File | Change |
-|------|--------|
-| `shared/database/src/schema.ts` | Added `album_metadata` and `artist_metadata` tables |
-| `shared/database/src/migrations/0023_metadata_tables.sql` | Migration for metadata tables |
-| `shared/database/src/migrations/meta/_journal.json` | Added 0023 entry |
+| File                                                      | Change                                              |
+| --------------------------------------------------------- | --------------------------------------------------- |
+| `shared/database/src/schema.ts`                           | Added `album_metadata` and `artist_metadata` tables |
+| `shared/database/src/migrations/0023_metadata_tables.sql` | Migration for metadata tables                       |
+| `shared/database/src/migrations/meta/_journal.json`       | Added 0023 entry                                    |
 
 ---
 

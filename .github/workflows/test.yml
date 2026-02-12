@@ -45,7 +45,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Need full history for merge-base
+          fetch-depth: 0 # Need full history for merge-base
 
       - name: Get merge-base SHA
         id: merge-base
@@ -152,7 +152,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Need full history for --changedSince
+          fetch-depth: 0 # Need full history for --changedSince
 
       - name: Set Up Node.js
         uses: actions/setup-node@v4

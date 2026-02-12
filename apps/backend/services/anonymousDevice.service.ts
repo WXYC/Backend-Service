@@ -90,11 +90,7 @@ export const tokenNeedsRefresh = (exp: number): boolean => {
  * Gets a device by its device ID
  */
 export const getDeviceByDeviceId = async (deviceId: string): Promise<AnonymousDevice | null> => {
-  const result = await db
-    .select()
-    .from(anonymous_devices)
-    .where(eq(anonymous_devices.deviceId, deviceId))
-    .limit(1);
+  const result = await db.select().from(anonymous_devices).where(eq(anonymous_devices.deviceId, deviceId)).limit(1);
 
   return result[0] || null;
 };

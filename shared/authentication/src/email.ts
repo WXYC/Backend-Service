@@ -12,9 +12,7 @@ const getSesClient = () => {
   const region = process.env.AWS_REGION;
 
   if (!accessKeyId || !secretAccessKey || !region) {
-    throw new Error(
-      'Missing AWS SES configuration: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION'
-    );
+    throw new Error('Missing AWS SES configuration: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION');
   }
 
   sesClient = new SESClient({
@@ -43,13 +41,8 @@ type EmailTemplateInput = {
   footer?: string;
 };
 
-const buildEmailHtml = ({
-  title,
-  intro,
-  actionText,
-  actionUrl,
-  footer,
-}: EmailTemplateInput) => `
+const buildEmailHtml = ({ title, intro, actionText, actionUrl, footer }: EmailTemplateInput) =>
+  `
   <div style="background-color:#0b0a10;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;color:#fce7f3;">
     <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:600px;margin:0 auto;background:#14101a;border-radius:12px;overflow:hidden;">
       <tr>
@@ -87,10 +80,7 @@ const buildEmailHtml = ({
   </div>
 `.trim();
 
-export const sendResetPasswordEmail = async ({
-  to,
-  resetUrl,
-}: ResetEmailInput) => {
+export const sendResetPasswordEmail = async ({ to, resetUrl }: ResetEmailInput) => {
   const from = process.env.SES_FROM_EMAIL;
   if (!from) {
     throw new Error('Missing AWS SES configuration: SES_FROM_EMAIL');
@@ -121,10 +111,7 @@ export const sendResetPasswordEmail = async ({
   await client.send(command);
 };
 
-export const sendVerificationEmailMessage = async ({
-  to,
-  verificationUrl,
-}: VerificationEmailInput) => {
+export const sendVerificationEmailMessage = async ({ to, verificationUrl }: VerificationEmailInput) => {
   const from = process.env.SES_FROM_EMAIL;
   if (!from) {
     throw new Error('Missing AWS SES configuration: SES_FROM_EMAIL');

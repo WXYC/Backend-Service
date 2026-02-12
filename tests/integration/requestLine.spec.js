@@ -74,30 +74,21 @@ describe('Request Line Endpoint', () => {
     });
 
     it('should return 400 when message field is missing', async () => {
-      const response = await request
-        .post('/request')
-        .set('Authorization', `Bearer ${testToken}`)
-        .send({});
+      const response = await request.post('/request').set('Authorization', `Bearer ${testToken}`).send({});
 
       expect(response.status).toBe(400);
       expect(response.body.message).toMatch(/missing/i);
     });
 
     it('should return 400 when request body is empty object', async () => {
-      const response = await request
-        .post('/request')
-        .set('Authorization', `Bearer ${testToken}`)
-        .send({});
+      const response = await request.post('/request').set('Authorization', `Bearer ${testToken}`).send({});
 
       expect(response.status).toBe(400);
       expect(response.body.message).toMatch(/missing/i);
     });
 
     it('should return 400 for empty string message', async () => {
-      const response = await request
-        .post('/request')
-        .set('Authorization', `Bearer ${testToken}`)
-        .send({ message: '' });
+      const response = await request.post('/request').set('Authorization', `Bearer ${testToken}`).send({ message: '' });
 
       expect(response.status).toBe(400);
       expect(response.body.message).toMatch(/empty/i);
@@ -265,14 +256,11 @@ describe('Request Line Endpoint', () => {
     });
 
     it('should ignore extra fields in request body', async () => {
-      const response = await request
-        .post('/request')
-        .set('Authorization', `Bearer ${testToken}`)
-        .send({
-          message: 'Test message',
-          extraField: 'should be ignored',
-          anotherExtra: 123,
-        });
+      const response = await request.post('/request').set('Authorization', `Bearer ${testToken}`).send({
+        message: 'Test message',
+        extraField: 'should be ignored',
+        anotherExtra: 123,
+      });
 
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);

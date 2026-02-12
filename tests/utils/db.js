@@ -63,12 +63,14 @@ async function closeTestDb() {
  */
 async function withRollback(fn) {
   const sql = getTestDb();
-  await sql.begin(async (tx) => {
-    await fn(tx);
-    throw new Error('ROLLBACK'); // Force rollback
-  }).catch((err) => {
-    if (err.message !== 'ROLLBACK') throw err;
-  });
+  await sql
+    .begin(async (tx) => {
+      await fn(tx);
+      throw new Error('ROLLBACK'); // Force rollback
+    })
+    .catch((err) => {
+      if (err.message !== 'ROLLBACK') throw err;
+    });
 }
 
 module.exports = {

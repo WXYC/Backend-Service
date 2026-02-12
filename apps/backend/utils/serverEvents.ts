@@ -35,7 +35,7 @@ export const MirrorEvents = {
   syncComplete: 'sync-complete',
   syncRetry: 'sync-retry',
   syncError: 'sync-error',
-}
+};
 
 export type EventClient = {
   id: string; //uuid

@@ -41,7 +41,10 @@ describe('Library Catalog', () => {
     });
 
     test('searches by both artist and album', async () => {
-      const res = await auth.get('/library').query({ artist_name: 'Built to Spill', album_title: 'Keep it' }).expect(200);
+      const res = await auth
+        .get('/library')
+        .query({ artist_name: 'Built to Spill', album_title: 'Keep it' })
+        .expect(200);
 
       expectArray(res);
     });

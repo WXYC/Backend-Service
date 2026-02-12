@@ -44,11 +44,7 @@ if (process.env.NODE_ENV !== 'production') {
       const { eq, desc, like, and } = await import('drizzle-orm');
 
       // First, look up the user by email to get their userId
-      const userResult = await db
-        .select({ id: user.id })
-        .from(user)
-        .where(eq(user.email, identifier))
-        .limit(1);
+      const userResult = await db.select({ id: user.id }).from(user).where(eq(user.email, identifier)).limit(1);
 
       if (userResult.length === 0) {
         return res.status(404).json({ error: 'User not found with this email' });
@@ -59,10 +55,7 @@ if (process.env.NODE_ENV !== 'production') {
       const result = await db
         .select()
         .from(verification)
-        .where(and(
-          eq(verification.value, userId),
-          like(verification.identifier, `${tokenPrefix}%`)
-        ))
+        .where(and(eq(verification.value, userId), like(verification.identifier, `${tokenPrefix}%`)))
         .orderBy(desc(verification.createdAt))
         .limit(1);
 
@@ -72,9 +65,7 @@ if (process.env.NODE_ENV !== 'production') {
 
       // Extract the actual token from the identifier (e.g., "reset-password:abc123" -> "abc123")
       const fullIdentifier = result[0].identifier;
-      const token = fullIdentifier.startsWith(tokenPrefix)
-        ? fullIdentifier.slice(tokenPrefix.length)
-        : fullIdentifier;
+      const token = fullIdentifier.startsWith(tokenPrefix) ? fullIdentifier.slice(tokenPrefix.length) : fullIdentifier;
 
       res.json({
         token,
@@ -110,7 +101,9 @@ if (process.env.NODE_ENV !== 'production') {
     }
   });
 
-  console.log('[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session)');
+  console.log(
+    '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session)'
+  );
 }
 
 // Mount the Better Auth handler for all auth routes
@@ -240,10 +233,7 @@ const createDefaultUser = async () => {
     // This ensures the user has admin permissions for Better Auth Admin plugin
     const { db, user } = await import('@wxyc/database');
     const { eq } = await import('drizzle-orm');
-    await db
-      .update(user)
-      .set({ role: 'admin' })
-      .where(eq(user.id, newUser.id));
+    await db.update(user).set({ role: 'admin' }).where(eq(user.id, newUser.id));
 
     console.log('Default user created successfully with admin role.');
   } catch (error) {
@@ -257,7 +247,7 @@ const syncAdminRoles = async () => {
   try {
     const { db, user, member, organization } = await import('@wxyc/database');
     const { eq, sql } = await import('drizzle-orm');
-    
+
     const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
     if (!defaultOrgSlug) {
       console.log('[ADMIN PERMISSIONS] DEFAULT_ORG_SLUG not set, skipping admin role fix');
@@ -285,10 +275,7 @@ const syncAdminRoles = async () => {
       console.log(`[ADMIN PERMISSIONS] Found ${usersNeedingFix.length} users needing admin role fix: `);
       for (const u of usersNeedingFix) {
         console.log(`[ADMIN PERMISSIONS] - ${u.userEmail} (${u.memberRole}) - current role: ${u.userRole || 'null'}`);
-        await db
-          .update(user)
-          .set({ role: 'admin' })
-          .where(eq(user.id, u.userId));
+        await db.update(user).set({ role: 'admin' }).where(eq(user.id, u.userId));
         console.log(`[ADMIN PERMISSIONS] - Fixed: ${u.userEmail} now has admin role`);
       }
     } else {

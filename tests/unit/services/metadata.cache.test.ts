@@ -9,10 +9,7 @@ jest.mock('drizzle-orm', () => ({
   eq: jest.fn(),
 }));
 
-import {
-  generateAlbumCacheKey,
-  generateArtistCacheKey,
-} from '../../../apps/backend/services/metadata/metadata.cache';
+import { generateAlbumCacheKey, generateArtistCacheKey } from '../../../apps/backend/services/metadata/metadata.cache';
 
 describe('metadata.cache', () => {
   describe('generateAlbumCacheKey', () => {

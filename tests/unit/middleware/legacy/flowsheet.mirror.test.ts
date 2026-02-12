@@ -118,13 +118,24 @@ describe('flowsheet.mirror SQL generation', () => {
 
       it('generates INSERT statement with all required columns', () => {
         const requiredColumns = [
-          'ID', 'STARTING_RADIO_HOUR', 'DJ_NAME', 'DJ_ID', 'DJ_HANDLE',
-          'SHOW_NAME', 'SPECIALTY_SHOW_ID', 'WORKING_HOUR', 'SIGNON_TIME',
-          'SIGNOFF_TIME', 'TIME_LAST_MODIFIED', 'TIME_CREATED', 'MODLOCK', 'SHOW_ID'
+          'ID',
+          'STARTING_RADIO_HOUR',
+          'DJ_NAME',
+          'DJ_ID',
+          'DJ_HANDLE',
+          'SHOW_NAME',
+          'SPECIALTY_SHOW_ID',
+          'WORKING_HOUR',
+          'SIGNON_TIME',
+          'SIGNOFF_TIME',
+          'TIME_LAST_MODIFIED',
+          'TIME_CREATED',
+          'MODLOCK',
+          'SHOW_ID',
         ];
         const insertTemplate = `INSERT INTO ${RADIO_SHOW_TABLE}`;
         expect(insertTemplate).toContain(RADIO_SHOW_TABLE);
-        requiredColumns.forEach(col => {
+        requiredColumns.forEach((col) => {
           expect(requiredColumns).toContain(col);
         });
       });
@@ -179,14 +190,30 @@ describe('flowsheet.mirror SQL generation', () => {
 
       it('generates INSERT with all required columns for track entry', () => {
         const requiredColumns = [
-          'ID', 'ARTIST_NAME', 'ARTIST_ID', 'SONG_TITLE', 'RELEASE_TITLE',
-          'RELEASE_FORMAT_ID', 'LIBRARY_RELEASE_ID', 'ROTATION_RELEASE_ID',
-          'LABEL_NAME', 'RADIO_HOUR', 'START_TIME', 'STOP_TIME', 'RADIO_SHOW_ID',
-          'SEQUENCE_WITHIN_SHOW', 'NOW_PLAYING_FLAG', 'FLOWSHEET_ENTRY_TYPE_CODE_ID',
-          'TIME_LAST_MODIFIED', 'TIME_CREATED', 'REQUEST_FLAG', 'GLOBAL_ORDER_ID', 'BMI_COMPOSER'
+          'ID',
+          'ARTIST_NAME',
+          'ARTIST_ID',
+          'SONG_TITLE',
+          'RELEASE_TITLE',
+          'RELEASE_FORMAT_ID',
+          'LIBRARY_RELEASE_ID',
+          'ROTATION_RELEASE_ID',
+          'LABEL_NAME',
+          'RADIO_HOUR',
+          'START_TIME',
+          'STOP_TIME',
+          'RADIO_SHOW_ID',
+          'SEQUENCE_WITHIN_SHOW',
+          'NOW_PLAYING_FLAG',
+          'FLOWSHEET_ENTRY_TYPE_CODE_ID',
+          'TIME_LAST_MODIFIED',
+          'TIME_CREATED',
+          'REQUEST_FLAG',
+          'GLOBAL_ORDER_ID',
+          'BMI_COMPOSER',
         ];
 
-        requiredColumns.forEach(col => {
+        requiredColumns.forEach((col) => {
           expect(requiredColumns).toContain(col);
         });
       });
@@ -314,7 +341,7 @@ describe('flowsheet.mirror SQL generation', () => {
     it('detects breakpoint from message pattern (legacy)', () => {
       const entry = createMockEntry({
         entry_type: undefined,
-        message: 'BREAKPOINT - TOP OF HOUR'
+        message: 'BREAKPOINT - TOP OF HOUR',
       });
       expect(entry.message?.toLowerCase()).toContain('breakpoint');
     });
@@ -322,7 +349,7 @@ describe('flowsheet.mirror SQL generation', () => {
     it('detects show start from message pattern (legacy)', () => {
       const entry = createMockEntry({
         entry_type: undefined,
-        message: 'DJ Name signed on at 10:00 AM'
+        message: 'DJ Name signed on at 10:00 AM',
       });
       expect(entry.message?.toLowerCase()).toContain('signed on');
     });
@@ -330,7 +357,7 @@ describe('flowsheet.mirror SQL generation', () => {
     it('detects show end from message pattern (legacy)', () => {
       const entry = createMockEntry({
         entry_type: undefined,
-        message: 'DJ Name signed off at 12:00 PM'
+        message: 'DJ Name signed off at 12:00 PM',
       });
       expect(entry.message?.toLowerCase()).toContain('signed off');
     });
@@ -338,7 +365,7 @@ describe('flowsheet.mirror SQL generation', () => {
     it('defaults to talkset for unrecognized messages', () => {
       const entry = createMockEntry({
         entry_type: 'message',
-        message: 'Random DJ comment'
+        message: 'Random DJ comment',
       });
       // Should map to talkset (type 7)
       expect(entry.entry_type).toBe('message');
