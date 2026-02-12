@@ -7,13 +7,7 @@
 /**
  * Keywords indicating a compilation/soundtrack album (case-insensitive substring match).
  */
-export const COMPILATION_KEYWORDS = new Set([
-  'various',
-  'soundtrack',
-  'compilation',
-  'v/a',
-  'v.a.',
-]);
+export const COMPILATION_KEYWORDS = new Set(['various', 'soundtrack', 'compilation', 'v/a', 'v.a.']);
 
 /**
  * Check if an artist name indicates a compilation/soundtrack album.

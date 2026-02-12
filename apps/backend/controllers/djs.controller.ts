@@ -1,6 +1,6 @@
 import { RequestHandler } from 'express';
 import * as DJService from '../services/djs.service';
-import { NewBinEntry } from "@wxyc/database";
+import { NewBinEntry } from '@wxyc/database';
 
 export type binBody = {
   dj_id: string;

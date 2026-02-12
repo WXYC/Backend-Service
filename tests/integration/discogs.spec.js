@@ -134,19 +134,14 @@ describe('Discogs Service', () => {
     it('should handle malformed requests gracefully', async () => {
       const { token } = await getTestToken();
 
-      const response = await request
-        .post('/request')
-        .set('Authorization', `Bearer ${token}`)
-        .send({ message: '' });
+      const response = await request.post('/request').set('Authorization', `Bearer ${token}`).send({ message: '' });
 
       // Should handle empty messages
       expect(response.status).toBe(400);
     });
 
     it('should handle requests without authentication', async () => {
-      const response = await request
-        .post('/request')
-        .send({ message: 'Play something' });
+      const response = await request.post('/request').send({ message: 'Play something' });
 
       expect(response.status).toBe(401);
     });

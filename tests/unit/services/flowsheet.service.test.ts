@@ -337,15 +337,16 @@ describe('flowsheet.service', () => {
             id: 42,
             show_id: 100,
             play_order: 5,
-            message: entryType === 'show_start'
-              ? 'Start of Show: DJ Test joined the set at 1/1/2024, 12:00:00 PM'
-              : entryType === 'show_end'
-              ? 'End of Show: Test left the set at 1/1/2024, 1:00:00 PM'
-              : entryType === 'dj_join'
-              ? 'Test joined the set!'
-              : entryType === 'dj_leave'
-              ? 'Test left the set!'
-              : 'Test message',
+            message:
+              entryType === 'show_start'
+                ? 'Start of Show: DJ Test joined the set at 1/1/2024, 12:00:00 PM'
+                : entryType === 'show_end'
+                  ? 'End of Show: Test left the set at 1/1/2024, 1:00:00 PM'
+                  : entryType === 'dj_join'
+                    ? 'Test joined the set!'
+                    : entryType === 'dj_leave'
+                      ? 'Test left the set!'
+                      : 'Test message',
           });
 
           const result = transformToV2(entry);

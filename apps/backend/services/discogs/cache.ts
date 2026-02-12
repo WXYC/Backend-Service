@@ -112,7 +112,7 @@ export function cached<T>(
       console.log(`[Discogs Cache] Hit for ${funcName}`);
       // Add cached flag if result is an object
       if (typeof cached === 'object' && cached !== null) {
-        return { ...(cached), cached: true } as T & { cached: boolean };
+        return { ...cached, cached: true } as T & { cached: boolean };
       }
       return cached as T & { cached?: boolean };
     }

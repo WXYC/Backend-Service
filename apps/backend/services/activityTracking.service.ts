@@ -32,10 +32,6 @@ export async function recordActivity(userId: string): Promise<void> {
  * @returns The user activity record or null if not found
  */
 export async function getActivity(userId: string) {
-  const result = await db
-    .select()
-    .from(user_activity)
-    .where(eq(user_activity.userId, userId))
-    .limit(1);
+  const result = await db.select().from(user_activity).where(eq(user_activity.userId, userId)).limit(1);
   return result[0] || null;
 }

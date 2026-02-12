@@ -1,15 +1,15 @@
 {
-    "extends": ["../../tsconfig.base.json"],
-    "references": [{ "path": "../database" }],
-    "include": ["src/**/*.ts"],
-    "exclude": ["node_modules", "dist"],
-    "compilerOptions": {
-        "composite": true,
-        "baseUrl": ".",
-        "rootDir": ".",
-        "outDir": "./dist",
-        "module": "esnext",
-        "moduleResolution": "bundler",
-        "strict": true
-    }
+  "extends": ["../../tsconfig.base.json"],
+  "references": [{ "path": "../database" }],
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"],
+  "compilerOptions": {
+    "composite": true,
+    "baseUrl": ".",
+    "rootDir": ".",
+    "outDir": "./dist",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true
+  }
 }

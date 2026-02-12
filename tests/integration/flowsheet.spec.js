@@ -626,10 +626,7 @@ describe('On Air Status', () => {
       // Ensure no active show
       await fls_util.leave_show(global.primary_dj_id, global.access_token);
 
-      const res = await request
-        .get('/flowsheet/djs-on-air')
-        .set('Authorization', global.access_token)
-        .expect(200);
+      const res = await request.get('/flowsheet/djs-on-air').set('Authorization', global.access_token).expect(200);
 
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body.length).toBe(0);
@@ -639,10 +636,7 @@ describe('On Air Status', () => {
       // Start a show
       await fls_util.join_show(global.primary_dj_id, global.access_token);
 
-      const res = await request
-        .get('/flowsheet/djs-on-air')
-        .set('Authorization', global.access_token)
-        .expect(200);
+      const res = await request.get('/flowsheet/djs-on-air').set('Authorization', global.access_token).expect(200);
 
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body.length).toBeGreaterThan(0);
@@ -659,10 +653,7 @@ describe('On Air Status', () => {
       // Secondary DJ joins
       await fls_util.join_show(global.secondary_dj_id, global.access_token);
 
-      const res = await request
-        .get('/flowsheet/djs-on-air')
-        .set('Authorization', global.access_token)
-        .expect(200);
+      const res = await request.get('/flowsheet/djs-on-air').set('Authorization', global.access_token).expect(200);
 
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body.length).toBe(2);
@@ -764,16 +755,9 @@ describe('V2 Playlist - Discriminated Union Format', () => {
     // All entries should have entry_type
     playlist.body.entries.forEach((entry) => {
       expect(entry.entry_type).toBeDefined();
-      expect([
-        'track',
-        'show_start',
-        'show_end',
-        'dj_join',
-        'dj_leave',
-        'talkset',
-        'breakpoint',
-        'message',
-      ]).toContain(entry.entry_type);
+      expect(['track', 'show_start', 'show_end', 'dj_join', 'dj_leave', 'talkset', 'breakpoint', 'message']).toContain(
+        entry.entry_type
+      );
     });
 
     // Track entries should not have message field

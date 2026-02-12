@@ -7,11 +7,7 @@ import * as flowsheet_service from '../services/flowsheet.service.js';
  * Returns 304 Not Modified if data hasn't changed since the client's timestamp.
  * Sets `Last-Modified` header on responses for client caching.
  */
-export const conditionalGet: RequestHandler = (
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void => {
+export const conditionalGet: RequestHandler = (req: Request, res: Response, next: NextFunction): void => {
   const lastModified = flowsheet_service.getLastModifiedAt();
 
   // Check query param first, then header

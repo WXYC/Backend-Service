@@ -47,12 +47,7 @@ export class DiscogsProvider implements ArtworkProvider {
       }
 
       // Calculate confidence score for this result
-      const confidence = calculateConfidence(
-        request.artist,
-        request.album,
-        item.artist || '',
-        item.album || ''
-      );
+      const confidence = calculateConfidence(request.artist, request.album, item.artist || '', item.album || '');
 
       results.push({
         artworkUrl: item.artworkUrl,
@@ -89,11 +84,7 @@ export class DiscogsProvider implements ArtworkProvider {
    *
    * @returns List of [artist, album] tuples for releases containing the track.
    */
-  async searchReleasesByTrack(
-    track: string,
-    artist?: string,
-    limit = 20
-  ): Promise<Array<[string, string]>> {
+  async searchReleasesByTrack(track: string, artist?: string, limit = 20): Promise<Array<[string, string]>> {
     if (!isDiscogsAvailable()) {
       return [];
     }
@@ -105,15 +96,9 @@ export class DiscogsProvider implements ArtworkProvider {
     for (const releaseInfo of response.releases) {
       // For Various Artists / compilations, validate the tracklist
       if (artist && releaseInfo.isCompilation) {
-        const isValid = await DiscogsService.validateTrackOnRelease(
-          releaseInfo.releaseId,
-          track,
-          artist
-        );
+        const isValid = await DiscogsService.validateTrackOnRelease(releaseInfo.releaseId, track, artist);
         if (!isValid) {
-          console.log(
-            `[DiscogsProvider] Skipping '${releaseInfo.album}' - track/artist not validated on release`
-          );
+          console.log(`[DiscogsProvider] Skipping '${releaseInfo.album}' - track/artist not validated on release`);
           continue;
         }
       }
@@ -127,11 +112,7 @@ export class DiscogsProvider implements ArtworkProvider {
   /**
    * Validate that a track by an artist exists on a release.
    */
-  async validateTrackOnRelease(
-    releaseId: number,
-    track: string,
-    artist: string
-  ): Promise<boolean> {
+  async validateTrackOnRelease(releaseId: number, track: string, artist: string): Promise<boolean> {
     if (!isDiscogsAvailable()) {
       return false;
     }

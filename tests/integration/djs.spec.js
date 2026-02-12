@@ -107,10 +107,7 @@ describe('DJ Bin', () => {
     });
 
     test('removes entry from bin successfully', async () => {
-      const res = await auth
-        .delete('/djs/bin')
-        .query({ dj_id: global.primary_dj_id, album_id: 2 })
-        .expect(200);
+      const res = await auth.delete('/djs/bin').query({ dj_id: global.primary_dj_id, album_id: 2 }).expect(200);
 
       expect(res.body).toBeDefined();
 

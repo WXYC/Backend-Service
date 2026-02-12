@@ -16,11 +16,7 @@ import { MAX_SEARCH_RESULTS } from '../../matching/index.js';
 /**
  * Check if this strategy should run.
  */
-export function shouldRunArtistPlusAlbum(
-  parsed: ParsedRequest,
-  state: SearchState,
-  _rawMessage: string
-): boolean {
+export function shouldRunArtistPlusAlbum(parsed: ParsedRequest, state: SearchState, _rawMessage: string): boolean {
   return !!(parsed.artist && (state.albumsForSearch.length > 0 || parsed.song));
 }
 

@@ -30,9 +30,7 @@ export function shouldRunSwappedInterpretation(
 /**
  * Execute the swapped interpretation search strategy.
  */
-export async function executeSwappedInterpretation(
-  rawMessage: string
-): Promise<EnrichedLibraryResult[]> {
+export async function executeSwappedInterpretation(rawMessage: string): Promise<EnrichedLibraryResult[]> {
   const parts = detectAmbiguousFormat(rawMessage);
   if (!parts) {
     return [];

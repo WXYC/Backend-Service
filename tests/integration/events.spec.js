@@ -135,7 +135,10 @@ describe('Server-Sent Events', () => {
 
   describe('PUT /events/subscribe', () => {
     test('returns 400 when client_id is missing', async () => {
-      const res = await auth.put('/events/subscribe').send({ topics: ['test'] }).expect(400);
+      const res = await auth
+        .put('/events/subscribe')
+        .send({ topics: ['test'] })
+        .expect(400);
 
       expectErrorContains(res, 'client_id');
     });

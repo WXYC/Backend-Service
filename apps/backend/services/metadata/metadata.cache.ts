@@ -28,25 +28,14 @@ export function generateArtistCacheKey(artistName: string): string {
 /**
  * Get album metadata by album_id or cache_key
  */
-export async function getAlbumMetadata(
-  albumId: number | null,
-  cacheKey?: string
-): Promise<AlbumMetadataResult | null> {
+export async function getAlbumMetadata(albumId: number | null, cacheKey?: string): Promise<AlbumMetadataResult | null> {
   let row: AlbumMetadataRow | undefined;
 
   if (albumId) {
-    const result = await db
-      .select()
-      .from(album_metadata)
-      .where(eq(album_metadata.album_id, albumId))
-      .limit(1);
+    const result = await db.select().from(album_metadata).where(eq(album_metadata.album_id, albumId)).limit(1);
     row = result[0];
   } else if (cacheKey) {
-    const result = await db
-      .select()
-      .from(album_metadata)
-      .where(eq(album_metadata.cache_key, cacheKey))
-      .limit(1);
+    const result = await db.select().from(album_metadata).where(eq(album_metadata.cache_key, cacheKey)).limit(1);
     row = result[0];
   }
 
@@ -117,10 +106,7 @@ export async function setAlbumMetadata(
 /**
  * Check if album metadata exists
  */
-export async function albumMetadataExists(
-  albumId: number | null,
-  cacheKey?: string
-): Promise<boolean> {
+export async function albumMetadataExists(albumId: number | null, cacheKey?: string): Promise<boolean> {
   if (albumId) {
     const result = await db
       .select({ id: album_metadata.id })
@@ -149,18 +135,10 @@ export async function getArtistMetadata(
   let row: ArtistMetadataRow | undefined;
 
   if (artistId) {
-    const result = await db
-      .select()
-      .from(artist_metadata)
-      .where(eq(artist_metadata.artist_id, artistId))
-      .limit(1);
+    const result = await db.select().from(artist_metadata).where(eq(artist_metadata.artist_id, artistId)).limit(1);
     row = result[0];
   } else if (cacheKey) {
-    const result = await db
-      .select()
-      .from(artist_metadata)
-      .where(eq(artist_metadata.cache_key, cacheKey))
-      .limit(1);
+    const result = await db.select().from(artist_metadata).where(eq(artist_metadata.cache_key, cacheKey)).limit(1);
     row = result[0];
   }
 
@@ -223,10 +201,7 @@ export async function setArtistMetadata(
 /**
  * Check if artist metadata exists
  */
-export async function artistMetadataExists(
-  artistId: number | null,
-  cacheKey?: string
-): Promise<boolean> {
+export async function artistMetadataExists(artistId: number | null, cacheKey?: string): Promise<boolean> {
   if (artistId) {
     const result = await db
       .select({ id: artist_metadata.id })

@@ -163,11 +163,7 @@ export class SpotifyProvider {
   /**
    * Get Spotify URL for an album (preferred) or track
    */
-  async getSpotifyUrl(
-    artistName: string,
-    albumTitle?: string,
-    trackTitle?: string
-  ): Promise<string | null> {
+  async getSpotifyUrl(artistName: string, albumTitle?: string, trackTitle?: string): Promise<string | null> {
     // Try album search first if we have an album title
     if (albumTitle) {
       const albumUrl = await this.searchAlbum(artistName, albumTitle);

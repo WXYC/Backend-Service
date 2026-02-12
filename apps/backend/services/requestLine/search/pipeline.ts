@@ -25,10 +25,7 @@ interface DiscogsService {
     artist?: string,
     limit?: number
   ) => Promise<Array<{ artist: string; album: string; releaseId: number; isCompilation: boolean }>>;
-  searchReleasesByArtist: (
-    artist: string,
-    limit?: number
-  ) => Promise<Array<{ artist: string; album: string }>>;
+  searchReleasesByArtist: (artist: string, limit?: number) => Promise<Array<{ artist: string; album: string }>>;
   validateTrackOnRelease: (releaseId: number, track: string, artist: string) => Promise<boolean>;
 }
 

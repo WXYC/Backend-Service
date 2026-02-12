@@ -17,7 +17,7 @@ import {
   specialty_shows,
   album_metadata,
   artist_metadata,
-} from "@wxyc/database";
+} from '@wxyc/database';
 import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -294,9 +294,12 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
     entry_type: 'show_start',
-    message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString('en-US', {
-      timeZone: 'America/New_York',
-    })}`,
+    message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString(
+      'en-US',
+      {
+        timeZone: 'America/New_York',
+      }
+    )}`,
   });
   updateLastModified();
 
