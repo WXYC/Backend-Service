@@ -2,7 +2,7 @@
   "name": "@wxyc/library-etl",
   "cron-schedule": "*/30 * * * *",
   "version": "1.0.0",
-  "description": "WXYC Authentication Service using Better Auth",
+  "description": "WXYC Legacy Library ETL Job",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {
