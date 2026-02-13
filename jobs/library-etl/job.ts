@@ -434,6 +434,19 @@ const run = async () => {
   }
 };
 
+// Exported for unit testing
+export {
+  parseTabRow,
+  toNullableString,
+  toNullableNumber,
+  isDbOnlyGenre,
+  normalizeArtistName,
+  normalizeCodeLetters,
+  parseFormatAndDiscs,
+  toDateOrUndefined,
+  toDateOnlyString,
+};
+
 run().catch((error) => {
   console.error('[library-etl] Failed:', error);
   process.exitCode = 1;
