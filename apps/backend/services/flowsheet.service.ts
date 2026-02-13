@@ -18,7 +18,7 @@ import {
   album_metadata,
   artist_metadata,
 } from '@wxyc/database';
-import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
+import { IFSEntry, ShowInfo, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 // Track when the flowsheet was last modified for conditional responses (304 Not Modified)
@@ -127,6 +127,14 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
     artist_wikipedia_url: raw.artist_wikipedia_url,
   },
 });
+
+/** Count total flowsheet entries (for pagination) */
+export const getEntryCount = async (): Promise<number> => {
+  const result = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(flowsheet);
+  return result[0].count;
+};
 
 /** Gets flowsheet entries by page with metadata joins */
 export const getEntriesByPage = async (offset: number, limit: number): Promise<IFSEntry[]> => {
@@ -557,12 +565,11 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
   return response[0];
 };
 
-export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
+/** Gets show metadata (DJs, specialty show name) without fetching entries */
+export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
 
   const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({ id: dj.id, dj_name: dj.djName || dj.name }));
-
-  const entries = await db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id));
 
   let specialty_show_name = '';
   if (show[0].specialty_id != null) {
@@ -574,7 +581,18 @@ export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
     ...show[0],
     specialty_show_name: specialty_show_name,
     show_djs: showDJs,
-    entries: entries,
+  };
+};
+
+export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
+  const [metadata, entries] = await Promise.all([
+    getShowMetadata(show_id),
+    db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id)),
+  ]);
+
+  return {
+    ...metadata,
+    entries,
   };
 };
 
