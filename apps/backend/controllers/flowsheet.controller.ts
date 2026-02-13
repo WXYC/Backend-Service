@@ -12,6 +12,7 @@ export type QueryParams = {
   shows_limit?: string;
 };
 
+
 export interface IFSEntryMetadata {
   // Album metadata from cache
   artwork_url: string | null;
@@ -39,7 +40,6 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
 
   const page = parseInt(query.page ?? '0');
   const limit = parseInt(query.limit ?? '30');
-  const offset = page * limit;
 
   if (query.shows_limit !== undefined) {
     try {
@@ -54,7 +54,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
       const entries = await flowsheet_service.getEntriesByShow(...recentShows.map((show) => show.id));
 
       if (entries.length) {
-        res.status(200).json(entries);
+        res.status(200).json(entries.map(flowsheet_service.transformToV2));
       } else {
         res.status(404).json({
           message: 'No Tracks found',
@@ -69,47 +69,72 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     }
   }
 
-  if (
-    parseInt(query.end_id ?? '0') - parseInt(query.start_id ?? '0') - DELETION_OFFSET > MAX_ITEMS ||
-    limit > MAX_ITEMS
-  ) {
-    res.status(400).json({
-      message: 'Requested too many entries',
-    });
-  } else if (isNaN(limit) || limit < 1) {
-    res.status(400).json({
-      message: 'limit must be a positive number',
-    });
-  } else {
+  if (query.start_id !== undefined && query.end_id !== undefined) {
+    if (parseInt(query.end_id) - parseInt(query.start_id) - DELETION_OFFSET > MAX_ITEMS) {
+      res.status(400).json({ message: 'Requested too many entries' });
+      return;
+    }
     try {
-      const entries: IFSEntry[] =
-        query.start_id !== undefined && query.end_id !== undefined
-          ? await flowsheet_service.getEntriesByRange(parseInt(query.start_id), parseInt(query.end_id))
-          : await flowsheet_service.getEntriesByPage(offset, limit);
+      const entries = await flowsheet_service.getEntriesByRange(parseInt(query.start_id), parseInt(query.end_id));
       if (entries.length) {
-        res.status(200).json(entries);
+        res.status(200).json(entries.map(flowsheet_service.transformToV2));
       } else {
-        console.error('No Tracks found');
-        res.status(404).json({
-          message: 'No Tracks found',
-        });
+        res.status(404).json({ message: 'No Tracks found' });
       }
     } catch (e) {
       console.error('Failed to retrieve tracks');
       console.error(`Error: ${e}`);
       next(e);
     }
+    return;
+  }
+
+  // Default: paginated entries with discriminated union format
+  if (isNaN(limit) || limit < 1) {
+    res.status(400).json({ message: 'limit must be a positive number' });
+    return;
+  }
+
+  if (limit > MAX_ITEMS) {
+    res.status(400).json({ message: 'Requested too many entries' });
+    return;
+  }
+
+  if (isNaN(page) || page < 0) {
+    res.status(400).json({ message: 'page must be a non-negative number' });
+    return;
+  }
+
+  try {
+    const offset = page * limit;
+    const [entries, total] = await Promise.all([
+      flowsheet_service.getEntriesByPage(offset, limit),
+      flowsheet_service.getEntryCount(),
+    ]);
+
+    const totalPages = Math.ceil(total / limit);
+
+    res.status(200).json({
+      entries: entries.map(flowsheet_service.transformToV2),
+      total,
+      page,
+      limit,
+      totalPages,
+    });
+  } catch (e) {
+    console.error('Failed to retrieve tracks');
+    console.error(`Error: ${e}`);
+    next(e);
   }
 };
 
 export const getLatest: RequestHandler = async (req, res, next) => {
   try {
-    const latest: IFSEntry[] = await flowsheet_service.getEntriesByPage(0, 1);
-    if (latest.length) {
-      res.status(200).json(latest[0]);
+    const entries = await flowsheet_service.getEntriesByPage(0, 1);
+    if (entries.length) {
+      res.status(200).json(flowsheet_service.transformToV2(entries[0]));
     } else {
-      console.error('No Tracks found');
-      res.status(404).send('Error: No Tracks found');
+      res.status(404).json({ message: 'No entries found' });
     }
   } catch (e) {
     console.error('Error: Failed to retrieve track');
@@ -406,25 +431,36 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   }
 };
 
-export interface ShowInfo extends Show {
+export interface ShowMetadata extends Show {
   specialty_show_name: string;
   show_djs: { id: string | null; dj_name: string | null }[];
+}
+
+export interface ShowInfo extends ShowMetadata {
   entries: FSEntry[];
 }
 
 export const getShowInfo: RequestHandler<object, unknown, object, { show_id: string }> = async (req, res, next) => {
   const showId = parseInt(req.query.show_id);
+
   if (isNaN(showId)) {
-    console.error('Bad Request, Missing Show Identifier: show_id');
-    res.status(400).send('Bad Request, Missing Show Identifier: show_id');
-  } else {
-    try {
-      const showInfo = await flowsheet_service.getPlaylist(showId);
-      res.status(200).json(showInfo);
-    } catch (e) {
-      console.error('Error: Failed to retrieve playlist');
-      console.error(e);
-      next(e);
-    }
+    res.status(400).json({ message: 'Missing or invalid show_id parameter' });
+    return;
+  }
+
+  try {
+    const [showMetadata, entries] = await Promise.all([
+      flowsheet_service.getShowMetadata(showId),
+      flowsheet_service.getEntriesByShow(showId),
+    ]);
+
+    res.status(200).json({
+      ...showMetadata,
+      entries: entries.map(flowsheet_service.transformToV2),
+    });
+  } catch (e) {
+    console.error('Error: Failed to retrieve playlist');
+    console.error(e);
+    next(e);
   }
 };

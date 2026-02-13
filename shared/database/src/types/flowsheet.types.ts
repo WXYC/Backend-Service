@@ -40,7 +40,7 @@ export interface TrackEntryV2 extends BaseEntry {
   track_title: string | null;
   record_label: string | null;
   request_flag: boolean;
-  rotation_rotation_bin: string | null;
+  rotation_bin: string | null;
   // Album metadata from cache
   artwork_url: string | null;
   discogs_url: string | null;
