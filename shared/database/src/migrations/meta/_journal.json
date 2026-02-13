@@ -162,6 +162,13 @@
       "when": 1768890229444,
       "tag": "0025_rate_limiting_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1769990400000,
+      "tag": "0026_capabilities_column",
+      "breakpoints": true
     }
   ]
 }
