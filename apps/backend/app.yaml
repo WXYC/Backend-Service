@@ -38,21 +38,47 @@ components:
         request_flag:
           type: boolean
 
-    FlowsheetEntryGet:
-      allOf:
-        - $ref: '#/components/schemas/FlowsheetEntry'
-        - type: object
-          properties:
-            id:
-              type: integer
-            play_order:
-              type: integer
-            show_id:
-              type: integer
-            rotation_bin:
-              type: string
-            message:
-              type: string
+    FlowsheetEntryV2:
+      type: object
+      required: [id, show_id, play_order, add_time, entry_type]
+      discriminator:
+        propertyName: entry_type
+      properties:
+        id:
+          type: integer
+        show_id:
+          type: integer
+        play_order:
+          type: integer
+        add_time:
+          type: string
+          format: date-time
+        entry_type:
+          type: string
+          enum: [track, show_start, show_end, dj_join, dj_leave, talkset, breakpoint, message]
+      description: >
+        Discriminated union keyed by entry_type.
+        track entries include artist_name, album_title, track_title, record_label, rotation_bin, metadata fields.
+        show_start/show_end entries include dj_name and timestamp.
+        dj_join/dj_leave entries include dj_name.
+        talkset/breakpoint/message entries include message.
+
+    FlowsheetPaginatedResponse:
+      type: object
+      required: [entries, total, page, limit, totalPages]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlowsheetEntryV2'
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+        totalPages:
+          type: integer
 
     FlowsheetEntryAdd:
       type: object
@@ -321,9 +347,7 @@ components:
         preview:
           type: array
           items:
-            allOf:
-              - $ref: '#/components/schemas/FlowsheetEntry'
-              - $ref: '#/components/schemas/FlowsheetEntryGet'
+            $ref: '#/components/schemas/FlowsheetEntryV2'
 
 security:
   - BearerAuth: []
@@ -361,13 +385,11 @@ paths:
           description: last play_order id in range ** Must be provided together with start_id
       responses:
         '200':
-          description: List of flowsheet entries
+          description: Paginated flowsheet entries (discriminated union format)
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/FlowsheetEntryGet'
+                $ref: '#/components/schemas/FlowsheetPaginatedResponse'
 
     post:
       summary: Add entry to flowsheet
@@ -480,11 +502,11 @@ paths:
       summary: Get the most recent flowsheet entry
       responses:
         '200':
-          description: Latest flowsheet entry
+          description: Latest flowsheet entry (discriminated union format)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/FlowsheetEntryGet'
+                $ref: '#/components/schemas/FlowsheetEntryV2'
 
   /flowsheet/join:
     post:
@@ -654,7 +676,7 @@ paths:
                   entries:
                     type: array
                     items:
-                      $ref: '#/components/schemas/FlowsheetEntry'
+                      $ref: '#/components/schemas/FlowsheetEntryV2'
 
   /djs:
     get:
