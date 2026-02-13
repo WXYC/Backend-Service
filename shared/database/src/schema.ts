@@ -194,6 +194,13 @@ export const shift_covers = wxyc_schema.table('shift_covers', {
   covered: boolean('covered').default(false),
 });
 
+export type NewCronjobRun = InferInsertModel<typeof cronjob_runs>;
+export type CronjobRun = InferSelectModel<typeof cronjob_runs>;
+export const cronjob_runs = wxyc_schema.table('cronjob_runs', {
+  job_name: varchar('job_name', { length: 64 }).primaryKey(),
+  last_run: timestamp('last_run', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export type NewArtist = InferInsertModel<typeof artists>;
 export type Artist = InferSelectModel<typeof artists>;
 export const artists = wxyc_schema.table(
@@ -204,7 +211,7 @@ export const artists = wxyc_schema.table(
       .references(() => genres.id)
       .notNull(),
     artist_name: varchar('artist_name', { length: 128 }).notNull(),
-    code_letters: varchar('code_letters', { length: 2 }).notNull(),
+    code_letters: varchar('code_letters', { length: 4 }).notNull(),
     code_artist_number: smallint('code_artist_number').notNull(),
     add_date: date('add_date').defaultNow().notNull(),
     last_modified: timestamp('last_modified').defaultNow().notNull(),
@@ -245,6 +252,7 @@ export const library = wxyc_schema.table(
     album_title: varchar('album_title', { length: 128 }).notNull(),
     label: varchar('label', { length: 128 }),
     code_number: smallint('code_number').notNull(),
+    code_volume_letters: varchar('code_volume_letters', { length: 4 }),
     disc_quantity: smallint('disc_quantity').default(1).notNull(),
     plays: integer('plays').default(0).notNull(),
     add_date: timestamp('add_date').defaultNow().notNull(),
@@ -444,7 +452,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
     .innerJoin(genres, eq(genres.id, library.genre_id))
     .leftJoin(
       rotation,
-      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} < CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
+      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
     );
 });
 

@@ -162,6 +162,13 @@
       "when": 1768890229444,
       "tag": "0025_rate_limiting_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1770938861646,
+      "tag": "0026_cron_job_tracking",
+      "breakpoints": true
     }
   ]
 }

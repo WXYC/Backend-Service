@@ -1,0 +1,27 @@
+#Build stage
+FROM node:22-alpine AS builder
+
+WORKDIR /library-etl-builder
+
+COPY ./package.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/library-etl ./jobs/library-etl
+
+RUN npm install && npm run build --workspace=@wxyc/database --workspace=@wxyc/library-etl
+
+#Production stage
+FROM node:22-alpine AS prod
+
+WORKDIR /library-etl
+
+COPY ./package* ./
+COPY ./jobs/library-etl/package* ./jobs/library-etl/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./library-etl-builder/jobs/library-etl/dist ./jobs/library-etl/dist
+COPY --from=builder ./library-etl-builder/shared/database/dist ./shared/database/dist
+
+CMD ["npm", "start", "--workspace=@wxyc/library-etl"]

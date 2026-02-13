@@ -22,7 +22,7 @@ const config: Config = {
     // Remove .js extensions from relative imports (ESM compatibility)
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },
-  collectCoverageFrom: ['apps/backend/**/*.ts', '!**/*.d.ts', '!**/dist/**'],
+  collectCoverageFrom: ['apps/backend/**/*.ts', 'jobs/**/*.ts', '!**/*.d.ts', '!**/dist/**'],
   clearMocks: true,
 };
 
