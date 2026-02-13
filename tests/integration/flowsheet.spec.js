@@ -331,29 +331,44 @@ describe('Retrieve Flowsheet Entries', () => {
   test('Properly Formatted Request w/o Query Param', async () => {
     const res = await request.get('/flowsheet').send().expect(200);
 
-    expect(res.body.length).toEqual(30);
+    expect(res.body.entries.length).toEqual(30);
+    expect(res.body.total).toBeDefined();
+    expect(res.body.page).toBeDefined();
+    expect(res.body.limit).toBeDefined();
+    expect(res.body.totalPages).toBeDefined();
   });
 
   test('Properly Formatted Request w/ 3 entries', async () => {
     const res = await request.get('/flowsheet').query({ limit: 3 }).send().expect(200);
 
-    expect(res.body[0].show_id).not.toBeNull();
-    expect(res.body[1].show_id).not.toBeNull();
-    expect(res.body[2].show_id).not.toBeNull();
+    const entries = res.body.entries;
 
-    expect(res.body[0].message).toMatch(
-      /End of Show: .* left the set at (0?[2-9]|1[0-2]?)\/(0?[1-9]|[1-2][0-9]|3[0-1])\/\d\d\d\d, (0?\d|1[0-2]):(0?\d|[1-5]\d):(0?\d|[1-5]\d) (AM|PM)/
-    );
-    expect(res.body[1].message).toBeNull();
-    expect(res.body[2].message).toMatch(
-      /Start of Show: .* joined the set at (0?[2-9]|1[0-2]?)\/(0?[1-9]|[1-2][0-9]|3[0-1])\/\d\d\d\d, (0?\d|1[0-2]):(0?\d|[1-5]\d):(0?\d|[1-5]\d) (AM|PM)/
-    );
+    expect(entries[0].show_id).not.toBeNull();
+    expect(entries[1].show_id).not.toBeNull();
+    expect(entries[2].show_id).not.toBeNull();
 
-    expect(res.body[1].artist_name).toEqual('Built to Spill');
-    expect(res.body[1].album_title).toEqual('Keep it Like a Secret');
-    expect(res.body[1].track_title).toEqual('Carry the Zero');
+    // All entries should have entry_type (discriminated union)
+    entries.forEach((entry) => {
+      expect(entry.entry_type).toBeDefined();
+    });
 
-    expect(res.body.length).toEqual(3);
+    // First entry is show_end (has dj_name and timestamp, not message)
+    expect(entries[0].entry_type).toEqual('show_end');
+    expect(entries[0].dj_name).toBeDefined();
+    expect(entries[0].timestamp).toBeDefined();
+
+    // Second entry is a track
+    expect(entries[1].entry_type).toEqual('track');
+    expect(entries[1].artist_name).toEqual('Built to Spill');
+    expect(entries[1].album_title).toEqual('Keep it Like a Secret');
+    expect(entries[1].track_title).toEqual('Carry the Zero');
+
+    // Third entry is show_start (has dj_name and timestamp)
+    expect(entries[2].entry_type).toEqual('show_start');
+    expect(entries[2].dj_name).toBeDefined();
+    expect(entries[2].timestamp).toBeDefined();
+
+    expect(entries.length).toEqual(3);
   });
 
   test('Get entries from 3 latest shows', async () => {
@@ -366,9 +381,9 @@ describe('Retrieve Flowsheet Entries', () => {
     const showIds = [...new Set(res.body.map((entry) => entry.show_id))];
     expect(showIds.length).toBe(3);
 
-    // Verify the content of entries
-    const songEntries = res.body.filter((entry) => !entry.message);
-    expect(songEntries).toEqual(
+    // Verify the content of track entries
+    const trackEntries = res.body.filter((entry) => entry.entry_type === 'track');
+    expect(trackEntries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           artist_name: 'Jockstrap',
@@ -399,9 +414,9 @@ describe('Retrieve Flowsheet Entries', () => {
     const showIds = [...new Set(res.body.map((entry) => entry.show_id))];
     expect(showIds.length).toBe(2);
 
-    // Verify the content of entries
-    const songEntries = res.body.filter((entry) => !entry.message);
-    expect(songEntries).toEqual(
+    // Verify the content of track entries
+    const trackEntries = res.body.filter((entry) => entry.entry_type === 'track');
+    expect(trackEntries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           artist_name: 'Ravyn Lenae',
@@ -462,7 +477,7 @@ describe('Delete Flowsheet Entries', () => {
       .send()
       .expect(200);
 
-    expect(get_res.body[0].id).toEqual(Number(global.entry_to_delete_id) - 1);
+    expect(get_res.body.entries[0].id).toEqual(Number(global.entry_to_delete_id) - 1);
   });
 });
 
@@ -549,7 +564,7 @@ describe('Shift Flowsheet Entries', () => {
 
   test('Start > Destination', async () => {
     let get_entries_res = await request.get('/flowsheet').query({ limit: 4 }).send().expect(200);
-    const entries = get_entries_res.body;
+    const entries = get_entries_res.body.entries;
 
     const res = await request
       .patch('/flowsheet/play-order')
@@ -562,7 +577,7 @@ describe('Shift Flowsheet Entries', () => {
 
   test('Destination > Start', async () => {
     let get_entries_res = await request.get('/flowsheet').query({ limit: 4 }).send().expect(200);
-    const entries = get_entries_res.body;
+    const entries = get_entries_res.body.entries;
     const res = await request
       .patch('/flowsheet/play-order')
       .set('Authorization', global.access_token)
@@ -702,63 +717,24 @@ describe('Retrieve Playlist Object', () => {
       { id: global.secondary_dj_id, dj_name: 'Test dj2' },
     ]);
 
-    expect(playlist.body.entries).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ message: expect.stringMatching(/Start of Show:.*joined the set at/) }),
-        expect.objectContaining({ message: expect.stringMatching(/.* joined the set!/) }),
-        expect.objectContaining({ artist_name: 'Jockstrap' }),
-        expect.objectContaining({ message: expect.stringMatching(/.* left the set!/) }),
-        expect.objectContaining({ message: expect.stringMatching(/End of Show:.*left the set at/) }),
-      ])
-    );
-    expect(new Date(playlist.body.date)).toBeInstanceOf(Date);
-  });
-});
-
-/*
- * V2 API - Playlist with Discriminated Union Format
- */
-describe('V2 Playlist - Discriminated Union Format', () => {
-  beforeEach(async () => {
-    // setup show
-    const res = await fls_util.join_show(global.primary_dj_id, global.access_token);
-    const body = await res.json();
-    global.CurrentShowID = body.id;
-
-    await fls_util.join_show(global.secondary_dj_id, global.access_token);
-
-    // Insert entry for show
-    await request
-      .post('/flowsheet')
-      .set('Authorization', global.access_token)
-      .send({
-        album_id: 3, //Jockstrap - I Love You Jennifer B
-        track_title: 'Debra',
-      })
-      .expect(200);
-
-    await fls_util.leave_show(global.primary_dj_id, global.access_token);
-  });
-
-  test('returns entries with entry_type discriminated union', async () => {
-    const playlist = await request
-      .get('/v2/flowsheet/playlist')
-      .query({ show_id: global.CurrentShowID })
-      .send()
-      .expect(200);
-
-    expect(playlist.body.show_djs).toEqual([
-      { id: global.primary_dj_id, dj_name: 'Test dj1' },
-      { id: global.secondary_dj_id, dj_name: 'Test dj2' },
-    ]);
-
-    // All entries should have entry_type
+    // All entries should have entry_type (discriminated union)
     playlist.body.entries.forEach((entry) => {
       expect(entry.entry_type).toBeDefined();
       expect(['track', 'show_start', 'show_end', 'dj_join', 'dj_leave', 'talkset', 'breakpoint', 'message']).toContain(
         entry.entry_type
       );
     });
+
+    // Verify expected entry types are present
+    expect(playlist.body.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ entry_type: 'show_start', dj_name: expect.any(String) }),
+        expect.objectContaining({ entry_type: 'dj_join', dj_name: expect.any(String) }),
+        expect.objectContaining({ entry_type: 'track', artist_name: 'Jockstrap' }),
+        expect.objectContaining({ entry_type: 'dj_leave', dj_name: expect.any(String) }),
+        expect.objectContaining({ entry_type: 'show_end', dj_name: expect.any(String) }),
+      ])
+    );
 
     // Track entries should not have message field
     const trackEntry = playlist.body.entries.find((e) => e.entry_type === 'track');
@@ -772,6 +748,8 @@ describe('V2 Playlist - Discriminated Union Format', () => {
     expect(showStartEntry.dj_name).toBeDefined();
     expect(showStartEntry.timestamp).toBeDefined();
     expect(showStartEntry.artist_name).toBeUndefined();
+
+    expect(new Date(playlist.body.date)).toBeInstanceOf(Date);
   });
 });
 
@@ -784,8 +762,8 @@ describe('V1 API - entry_type field', () => {
     await fls_util.leave_show(global.primary_dj_id, global.access_token);
   });
 
-  test('V1 API returns entry_type field (additive change)', async () => {
-    // Add a track via V1 API
+  test('entry_type field present in responses', async () => {
+    // Add a track
     const addRes = await request
       .post('/flowsheet')
       .set('Authorization', global.access_token)
@@ -795,11 +773,11 @@ describe('V1 API - entry_type field', () => {
       })
       .expect(200);
 
-    // V1 response should now include entry_type (additive change)
+    // POST response includes entry_type
     expect(addRes.body.entry_type).toBe('track');
 
-    // V1 GET should also include entry_type
+    // GET returns paginated entries with entry_type
     const getRes = await request.get('/flowsheet').query({ limit: 1 }).expect(200);
-    expect(getRes.body[0].entry_type).toBeDefined();
+    expect(getRes.body.entries[0].entry_type).toBeDefined();
   });
 });
