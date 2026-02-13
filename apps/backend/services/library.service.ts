@@ -44,7 +44,7 @@ export interface Rotation {
   rotation_id: number;
   add_date: Date;
   rotation_add_date: string;
-  play_freq: 'S' | 'L' | 'M' | 'H';
+  rotation_bin: 'S' | 'L' | 'M' | 'H';
   rotation_kill_date: string | null;
   plays: number;
 }
@@ -64,7 +64,7 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
       rotation_id: rotation.id,
       add_date: library.add_date,
       rotation_add_date: rotation.add_date,
-      play_freq: rotation.play_freq,
+      rotation_bin: rotation.rotation_bin,
       rotation_kill_date: rotation.kill_date,
       plays: library.plays,
     })
