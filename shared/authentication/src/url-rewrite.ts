@@ -5,9 +5,7 @@
 export const rewriteUrlForFrontend = (url: string): string => {
   try {
     const parsed = new URL(url);
-    const frontend = new URL(
-      process.env.FRONTEND_SOURCE || 'http://localhost:3000'
-    );
+    const frontend = new URL(process.env.FRONTEND_SOURCE || 'http://localhost:3000');
     parsed.host = frontend.host;
     parsed.protocol = frontend.protocol;
     return parsed.toString();
