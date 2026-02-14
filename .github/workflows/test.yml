@@ -95,14 +95,16 @@ jobs:
             echo "run-integration=false" >> $GITHUB_OUTPUT
           fi
 
-  # Fast lint and type check - always runs on code changes
-  lint-and-typecheck:
+  # Lint, type check, and unit tests - always runs on code changes
+  lint-typecheck-and-unit-tests:
     needs: detect-changes
     if: needs.detect-changes.outputs.src == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Need full history for --changedSince
 
       - name: Set Up Node.js
         uses: actions/setup-node@v4
@@ -144,45 +146,6 @@ jobs:
       - name: Build
         run: npm run build
 
-  # Unit tests - runs affected tests only
-  unit-tests:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.src == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Need full history for --changedSince
-
-      - name: Set Up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Cache node_modules
-        id: cache-node-modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
-
-      - name: Validate cached node_modules
-        id: validate-cache
-        if: steps.cache-node-modules.outputs.cache-hit == 'true'
-        run: |
-          if npm ls --depth=0 >/dev/null 2>&1; then
-            echo "valid=true" >> $GITHUB_OUTPUT
-          else
-            echo "valid=false" >> $GITHUB_OUTPUT
-            echo "⚠️ Cache corrupted, will reinstall"
-            rm -rf node_modules
-          fi
-
-      - name: Install Dependencies
-        if: steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false'
-        run: npm ci
-
       - name: Run affected unit tests
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -203,8 +166,8 @@ jobs:
   # Integration tests - only when backend/auth/shared changes
   # Note: Job always runs to report status, but steps are skipped when no relevant changes
   Integration-Tests:
-    needs: [detect-changes, lint-and-typecheck]
-    # Run when lint-and-typecheck succeeds or was skipped (no src changes).
+    needs: [detect-changes, lint-typecheck-and-unit-tests]
+    # Run when lint-typecheck-and-unit-tests succeeds or was skipped (no src changes).
     # This ensures the required check reports status on docs-only PRs.
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
