@@ -7,7 +7,7 @@
 
 type Statement = Record<string, readonly string[]>;
 
-export function createAccessControl<S extends Statement>(statements: S) {
+export function createAccessControl<S extends Statement>(_statements: S) {
   return {
     newRole(permissions: Partial<{ [K in keyof S]: readonly string[] }>) {
       return {
