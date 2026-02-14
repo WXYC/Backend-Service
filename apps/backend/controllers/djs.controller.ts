@@ -1,6 +1,6 @@
 import { RequestHandler } from 'express';
 import * as DJService from '../services/djs.service';
-import { NewBinEntry } from "@wxyc/database";
+import { NewBinEntry } from '@wxyc/database';
 
 export type binBody = {
   dj_id: string;
@@ -15,7 +15,7 @@ export const addToBin: RequestHandler<object, unknown, binBody> = async (req, re
     res.status(400).send('Bad Request, Missing DJ or album identifier: album_id');
   } else {
     const bin_entry: NewBinEntry = {
-      dj_id: req.body.dj_id as string,
+      dj_id: req.body.dj_id,
       album_id: req.body.album_id,
       track_title: req.body.track_title === undefined ? null : req.body.track_title,
     };

@@ -8,11 +8,7 @@ export class SearchUrlProvider {
    * Get YouTube Music search URL
    */
   getYoutubeMusicUrl(artistName: string, trackTitle?: string, albumTitle?: string): string {
-    const query = trackTitle
-      ? `${artistName} ${trackTitle}`
-      : albumTitle
-        ? `${artistName} ${albumTitle}`
-        : artistName;
+    const query = trackTitle ? `${artistName} ${trackTitle}` : albumTitle ? `${artistName} ${albumTitle}` : artistName;
     return `https://music.youtube.com/search?q=${encodeURIComponent(query)}`;
   }
 

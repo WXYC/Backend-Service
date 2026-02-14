@@ -40,10 +40,7 @@ export async function postTextToSlack(message: string): Promise<SlackPostResult>
  * @param blocks - Slack block array
  * @param fallbackText - Optional fallback text for notifications
  */
-export async function postBlocksToSlack(
-  blocks: SlackBlock[],
-  fallbackText?: string
-): Promise<SlackPostResult> {
+export async function postBlocksToSlack(blocks: SlackBlock[], fallbackText?: string): Promise<SlackPostResult> {
   const payload: { blocks: SlackBlock[]; text?: string } = { blocks };
 
   // Add fallback text for notifications (shown in push notifications, etc.)
@@ -114,8 +111,5 @@ async function postToSlack(payload: object): Promise<SlackPostResult> {
  * Check if Slack is configured.
  */
 export function isSlackConfigured(): boolean {
-  return !!(
-    process.env.SLACK_WXYC_REQUESTS_WEBHOOK &&
-    process.env.USE_MOCK_SERVICES !== 'true'
-  );
+  return !!(process.env.SLACK_WXYC_REQUESTS_WEBHOOK && process.env.USE_MOCK_SERVICES !== 'true');
 }

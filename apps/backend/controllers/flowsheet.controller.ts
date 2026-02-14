@@ -1,6 +1,6 @@
 import { Request, RequestHandler } from 'express';
 import { Mutex } from 'async-mutex';
-import { NewFSEntry, FSEntry, Show, ShowDJ, library } from "@wxyc/database";
+import { NewFSEntry, FSEntry, Show, ShowDJ, library } from '@wxyc/database';
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import { fetchAndCacheMetadata } from '../services/metadata/index.js';
 
@@ -28,7 +28,6 @@ export interface IFSEntryMetadata {
 }
 
 export interface IFSEntry extends FSEntry {
-  entry_type: string;
   rotation_play_freq: string | null;
   metadata: IFSEntryMetadata;
 }

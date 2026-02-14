@@ -21,11 +21,21 @@ export function createMockQueryChain(resolvedValue: unknown = []): MockQueryChai
   const chain: MockQueryChain = {} as MockQueryChain;
 
   const chainMethods = [
-    'select', 'from', 'where', 'innerJoin', 'leftJoin',
-    'orderBy', 'limit', 'insert', 'values', 'update', 'set', 'delete'
+    'select',
+    'from',
+    'where',
+    'innerJoin',
+    'leftJoin',
+    'orderBy',
+    'limit',
+    'insert',
+    'values',
+    'update',
+    'set',
+    'delete',
   ];
 
-  chainMethods.forEach(method => {
+  chainMethods.forEach((method) => {
     (chain as Record<string, jest.Mock>)[method] = jest.fn().mockReturnValue(chain);
   });
 
@@ -61,7 +71,21 @@ export const genres = {};
 export const format = {};
 export const rotation = {};
 export const library_artist_view = {};
-export const flowsheet = { id: 'id', show_id: 'show_id', album_id: 'album_id', entry_type: 'entry_type', track_title: 'track_title', album_title: 'album_title', artist_name: 'artist_name', record_label: 'record_label', rotation_id: 'rotation_id', play_order: 'play_order', request_flag: 'request_flag', message: 'message', add_time: 'add_time' };
+export const flowsheet = {
+  id: 'id',
+  show_id: 'show_id',
+  album_id: 'album_id',
+  entry_type: 'entry_type',
+  track_title: 'track_title',
+  album_title: 'album_title',
+  artist_name: 'artist_name',
+  record_label: 'record_label',
+  rotation_id: 'rotation_id',
+  play_order: 'play_order',
+  request_flag: 'request_flag',
+  message: 'message',
+  add_time: 'add_time',
+};
 export const shows = {};
 export const show_djs = {};
 export const user = {};

@@ -109,4 +109,3 @@ export type FlowsheetEntryV2 =
   | TalksetEntryV2
   | BreakpointEntryV2
   | MessageEntryV2;
-

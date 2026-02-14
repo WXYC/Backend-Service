@@ -5,12 +5,7 @@
  */
 
 import { ArtworkProvider, discogsProvider } from './providers/index.js';
-import {
-  ArtworkRequest,
-  ArtworkResponse,
-  ArtworkSearchResult,
-  EnrichedLibraryResult,
-} from '../requestLine/types.js';
+import { ArtworkRequest, ArtworkResponse, ArtworkSearchResult, EnrichedLibraryResult } from '../requestLine/types.js';
 import { isCompilationArtist } from '../requestLine/matching/index.js';
 import { getConfig } from '../requestLine/config.js';
 
@@ -131,9 +126,7 @@ export async function fetchArtworkForItems(
   const finder = getArtworkFinder();
   const discogsTitlesMap = discogsTitles || new Map<number, string>();
 
-  const fetchOne = async (
-    item: EnrichedLibraryResult
-  ): Promise<ArtworkResponse | null> => {
+  const fetchOne = async (item: EnrichedLibraryResult): Promise<ArtworkResponse | null> => {
     try {
       // Use Discogs album title if we have it (from compilation search)
       const album = discogsTitlesMap.get(item.id) || item.title;

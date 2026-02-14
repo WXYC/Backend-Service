@@ -17,7 +17,7 @@ import {
   specialty_shows,
   album_metadata,
   artist_metadata,
-} from "@wxyc/database";
+} from '@wxyc/database';
 import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -103,17 +103,17 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   id: raw.id,
   show_id: raw.show_id,
   album_id: raw.album_id,
-  entry_type: raw.entry_type,
+  entry_type: raw.entry_type as FSEntry['entry_type'],
   artist_name: raw.artist_name,
   album_title: raw.album_title,
   track_title: raw.track_title,
   record_label: raw.record_label,
   rotation_id: raw.rotation_id,
   rotation_play_freq: raw.rotation_play_freq,
-  request_flag: raw.request_flag,
+  request_flag: raw.request_flag ?? false,
   message: raw.message,
-  play_order: raw.play_order,
-  add_time: raw.add_time,
+  play_order: raw.play_order ?? 0,
+  add_time: raw.add_time ?? new Date(),
   metadata: {
     artwork_url: raw.artwork_url,
     discogs_url: raw.discogs_url,
@@ -294,9 +294,12 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
     entry_type: 'show_start',
-    message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString('en-US', {
-      timeZone: 'America/New_York',
-    })}`,
+    message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString(
+      'en-US',
+      {
+        timeZone: 'America/New_York',
+      }
+    )}`,
   });
   updateLastModified();
 
@@ -600,16 +603,16 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         record_label: entry.record_label,
         request_flag: entry.request_flag,
         rotation_play_freq: entry.rotation_play_freq,
-        artwork_url: entry.artwork_url,
-        discogs_url: entry.discogs_url,
-        release_year: entry.release_year,
-        spotify_url: entry.spotify_url,
-        apple_music_url: entry.apple_music_url,
-        youtube_music_url: entry.youtube_music_url,
-        bandcamp_url: entry.bandcamp_url,
-        soundcloud_url: entry.soundcloud_url,
-        artist_bio: entry.artist_bio,
-        artist_wikipedia_url: entry.artist_wikipedia_url,
+        artwork_url: entry.metadata?.artwork_url ?? null,
+        discogs_url: entry.metadata?.discogs_url ?? null,
+        release_year: entry.metadata?.release_year ?? null,
+        spotify_url: entry.metadata?.spotify_url ?? null,
+        apple_music_url: entry.metadata?.apple_music_url ?? null,
+        youtube_music_url: entry.metadata?.youtube_music_url ?? null,
+        bandcamp_url: entry.metadata?.bandcamp_url ?? null,
+        soundcloud_url: entry.metadata?.soundcloud_url ?? null,
+        artist_bio: entry.metadata?.artist_bio ?? null,
+        artist_wikipedia_url: entry.metadata?.artist_wikipedia_url ?? null,
       };
 
     case 'show_start':
@@ -680,8 +683,10 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         message: entry.message,
       };
 
-    default:
+    default: {
       // Fallback for unknown types - return all fields
-      return entry as Record<string, unknown>;
+      const { metadata, ...rest } = entry;
+      return { ...rest, ...metadata } as Record<string, unknown>;
+    }
   }
 };

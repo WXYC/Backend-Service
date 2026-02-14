@@ -1,6 +1,6 @@
 import { Request, RequestHandler } from 'express';
 import * as ScheduleService from '../services/schedule.service.js';
-import { NewShift } from "@wxyc/database";
+import { NewShift } from '@wxyc/database';
 
 export const getSchedule: RequestHandler<object, unknown, object, object> = async (req, res, next) => {
   try {
@@ -16,7 +16,7 @@ export const getSchedule: RequestHandler<object, unknown, object, object> = asyn
 export const addToSchedule: RequestHandler = async (req: Request<object, object, NewShift>, res, next) => {
   const { body } = req;
   try {
-    let response = await ScheduleService.addToSchedule(body);
+    const response = await ScheduleService.addToSchedule(body);
     res.status(200).json(response);
   } catch (e) {
     console.error('Error adding to schedule');

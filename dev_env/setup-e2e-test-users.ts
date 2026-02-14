@@ -57,14 +57,13 @@ async function setUpTestUsers() {
       try {
         // Use custom password if specified, otherwise default test password
         const passwordHash = user.password
-          ? (user.password === TEMP_PASSWORD ? hashedTempPassword : await context.password.hash(user.password))
+          ? user.password === TEMP_PASSWORD
+            ? hashedTempPassword
+            : await context.password.hash(user.password)
           : hashedTestPassword;
 
         // Update the account with the password hash
-        const result = await db
-          .update(account)
-          .set({ password: passwordHash })
-          .where(eq(account.userId, user.id));
+        const result = await db.update(account).set({ password: passwordHash }).where(eq(account.userId, user.id));
 
         const passwordType = user.password ? user.password : TEST_PASSWORD;
         console.log(`[+] Set password for ${user.username} (${passwordType})`);

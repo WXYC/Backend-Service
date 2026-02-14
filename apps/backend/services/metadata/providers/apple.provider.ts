@@ -12,9 +12,7 @@ export class AppleMusicProvider {
   async searchAlbum(artistName: string, albumTitle: string): Promise<string | null> {
     try {
       const query = encodeURIComponent(`${artistName} ${albumTitle}`);
-      const response = await fetch(
-        `${ITUNES_API_BASE}/search?term=${query}&entity=album&limit=1`
-      );
+      const response = await fetch(`${ITUNES_API_BASE}/search?term=${query}&entity=album&limit=1`);
 
       if (!response.ok) {
         console.error(`[AppleMusicProvider] Album search failed: ${response.status}`);
@@ -40,9 +38,7 @@ export class AppleMusicProvider {
   async searchTrack(artistName: string, trackTitle: string): Promise<string | null> {
     try {
       const query = encodeURIComponent(`${artistName} ${trackTitle}`);
-      const response = await fetch(
-        `${ITUNES_API_BASE}/search?term=${query}&entity=song&limit=1`
-      );
+      const response = await fetch(`${ITUNES_API_BASE}/search?term=${query}&entity=song&limit=1`);
 
       if (!response.ok) {
         console.error(`[AppleMusicProvider] Track search failed: ${response.status}`);
@@ -66,11 +62,7 @@ export class AppleMusicProvider {
   /**
    * Get Apple Music URL for an album (preferred) or track
    */
-  async getAppleMusicUrl(
-    artistName: string,
-    albumTitle?: string,
-    trackTitle?: string
-  ): Promise<string | null> {
+  async getAppleMusicUrl(artistName: string, albumTitle?: string, trackTitle?: string): Promise<string | null> {
     // Try album search first if we have an album title
     if (albumTitle) {
       const albumUrl = await this.searchAlbum(artistName, albumTitle);

@@ -13,7 +13,7 @@ import {
   shows,
   specialty_shows,
   user,
-} from "@wxyc/database";
+} from '@wxyc/database';
 import { and, eq, isNull } from 'drizzle-orm';
 
 export const addToBin = async (bin_entry: NewBinEntry): Promise<BinEntry> => {

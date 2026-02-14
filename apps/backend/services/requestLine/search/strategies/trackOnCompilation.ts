@@ -10,12 +10,7 @@
 
 import { ParsedRequest, EnrichedLibraryResult, SearchState, SearchStrategyType } from '../../types.js';
 import { searchLibrary, searchAlbumsByTitle, filterResultsByArtist } from '../../../library.service.js';
-import {
-  extractSignificantWords,
-  isCompilationArtist,
-  STOPWORDS,
-  MAX_SEARCH_RESULTS,
-} from '../../matching/index.js';
+import { extractSignificantWords, isCompilationArtist, STOPWORDS, MAX_SEARCH_RESULTS } from '../../matching/index.js';
 
 // Forward declaration - will be imported when Discogs service is ready
 type DiscogsService = {
@@ -30,11 +25,7 @@ type DiscogsService = {
 /**
  * Check if this strategy should run.
  */
-export function shouldRunTrackOnCompilation(
-  parsed: ParsedRequest,
-  state: SearchState,
-  _rawMessage: string
-): boolean {
+export function shouldRunTrackOnCompilation(parsed: ParsedRequest, state: SearchState, _rawMessage: string): boolean {
   // Only run if song not found AND we have both artist and song
   return state.songNotFound && !!parsed.artist && !!parsed.song;
 }
@@ -90,9 +81,7 @@ export async function executeTrackOnCompilation(
         }
 
         if (filtered.length > 0) {
-          console.log(
-            `[Search] Found ${filtered.length} matches via keyword search (after artist filter)`
-          );
+          console.log(`[Search] Found ${filtered.length} matches via keyword search (after artist filter)`);
           // Don't add to results yet - prefer Discogs results which know actual track listings
           keywordMatches = filtered;
         }
@@ -106,20 +95,13 @@ export async function executeTrackOnCompilation(
   // If Discogs service is available, use it for more accurate results
   if (discogsService) {
     try {
-      const releases = await discogsService.searchReleasesByTrack(
-        parsed.song,
-        parsed.artist,
-        20
-      );
+      const releases = await discogsService.searchReleasesByTrack(parsed.song, parsed.artist, 20);
       console.log(`[Search] Found ${releases.length} releases with '${parsed.song}' on Discogs`);
 
       // Check each release against our library
       for (const release of releases) {
         // Skip if the "album" is just the artist name (Discogs artifact)
-        if (
-          parsed.artist &&
-          release.album.toLowerCase().trim() === parsed.artist.toLowerCase().trim()
-        ) {
+        if (parsed.artist && release.album.toLowerCase().trim() === parsed.artist.toLowerCase().trim()) {
           console.log(`[Search] Skipping '${release.album}' - appears to be artist name, not album`);
           continue;
         }
@@ -131,15 +113,9 @@ export async function executeTrackOnCompilation(
 
         // For Various Artists / compilations, validate the tracklist
         if (release.isCompilation) {
-          const isValid = await discogsService.validateTrackOnRelease(
-            release.releaseId,
-            parsed.song,
-            parsed.artist
-          );
+          const isValid = await discogsService.validateTrackOnRelease(release.releaseId, parsed.song, parsed.artist);
           if (!isValid) {
-            console.log(
-              `[Search] Skipping '${release.album}' - track/artist not validated on release`
-            );
+            console.log(`[Search] Skipping '${release.album}' - track/artist not validated on release`);
             continue;
           }
         }

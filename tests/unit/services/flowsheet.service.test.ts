@@ -1,22 +1,9 @@
 import { transformToV2 } from '../../../apps/backend/services/flowsheet.service';
 import { IFSEntry } from '../../../apps/backend/controllers/flowsheet.controller';
 
-// Helper to create a base entry with common fields
-const createBaseEntry = (overrides: Partial<IFSEntry> = {}): IFSEntry => ({
-  id: 1,
-  show_id: 100,
-  album_id: null,
-  rotation_id: null,
-  entry_type: 'track',
-  track_title: null,
-  album_title: null,
-  artist_name: null,
-  record_label: null,
-  play_order: 1,
-  request_flag: false,
-  message: null,
-  add_time: new Date('2024-01-15T12:00:00Z'),
-  rotation_play_freq: null,
+import { IFSEntryMetadata } from '../../../apps/backend/controllers/flowsheet.controller';
+
+const defaultMetadata: IFSEntryMetadata = {
   artwork_url: null,
   discogs_url: null,
   release_year: null,
@@ -27,8 +14,58 @@ const createBaseEntry = (overrides: Partial<IFSEntry> = {}): IFSEntry => ({
   soundcloud_url: null,
   artist_bio: null,
   artist_wikipedia_url: null,
-  ...overrides,
-});
+};
+
+// Helper to create a base entry with common fields
+const createBaseEntry = (overrides: Partial<IFSEntry & IFSEntryMetadata> = {}): IFSEntry => {
+  const {
+    artwork_url,
+    discogs_url,
+    release_year,
+    spotify_url,
+    apple_music_url,
+    youtube_music_url,
+    bandcamp_url,
+    soundcloud_url,
+    artist_bio,
+    artist_wikipedia_url,
+    metadata: metadataOverride,
+    ...rest
+  } = overrides;
+
+  const metadata: IFSEntryMetadata = metadataOverride ?? {
+    ...defaultMetadata,
+    ...(artwork_url !== undefined && { artwork_url }),
+    ...(discogs_url !== undefined && { discogs_url }),
+    ...(release_year !== undefined && { release_year }),
+    ...(spotify_url !== undefined && { spotify_url }),
+    ...(apple_music_url !== undefined && { apple_music_url }),
+    ...(youtube_music_url !== undefined && { youtube_music_url }),
+    ...(bandcamp_url !== undefined && { bandcamp_url }),
+    ...(soundcloud_url !== undefined && { soundcloud_url }),
+    ...(artist_bio !== undefined && { artist_bio }),
+    ...(artist_wikipedia_url !== undefined && { artist_wikipedia_url }),
+  };
+
+  return {
+    id: 1,
+    show_id: 100,
+    album_id: null,
+    rotation_id: null,
+    entry_type: 'track',
+    track_title: null,
+    album_title: null,
+    artist_name: null,
+    record_label: null,
+    play_order: 1,
+    request_flag: false,
+    message: null,
+    add_time: new Date('2024-01-15T12:00:00Z'),
+    rotation_play_freq: null,
+    metadata,
+    ...rest,
+  };
+};
 
 describe('flowsheet.service', () => {
   describe('transformToV2', () => {
@@ -337,15 +374,16 @@ describe('flowsheet.service', () => {
             id: 42,
             show_id: 100,
             play_order: 5,
-            message: entryType === 'show_start'
-              ? 'Start of Show: DJ Test joined the set at 1/1/2024, 12:00:00 PM'
-              : entryType === 'show_end'
-              ? 'End of Show: Test left the set at 1/1/2024, 1:00:00 PM'
-              : entryType === 'dj_join'
-              ? 'Test joined the set!'
-              : entryType === 'dj_leave'
-              ? 'Test left the set!'
-              : 'Test message',
+            message:
+              entryType === 'show_start'
+                ? 'Start of Show: DJ Test joined the set at 1/1/2024, 12:00:00 PM'
+                : entryType === 'show_end'
+                  ? 'End of Show: Test left the set at 1/1/2024, 1:00:00 PM'
+                  : entryType === 'dj_join'
+                    ? 'Test joined the set!'
+                    : entryType === 'dj_leave'
+                      ? 'Test left the set!'
+                      : 'Test message',
           });
 
           const result = transformToV2(entry);

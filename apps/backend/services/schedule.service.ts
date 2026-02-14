@@ -1,4 +1,4 @@
-import { db, NewShift, schedule } from "@wxyc/database";
+import { db, NewShift, schedule } from '@wxyc/database';
 
 export const getSchedule = async () => {
   const response = await db.select().from(schedule);

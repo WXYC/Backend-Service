@@ -67,7 +67,9 @@ export function validateConfig(config: RequestLineConfig): string[] {
 
   // Discogs is optional but warn if not configured
   if (!config.discogsApiKey || !config.discogsApiSecret) {
-    console.warn('[RequestLine Config] DISCOGS_API_KEY or DISCOGS_API_SECRET not set - artwork lookup and compilation search will be disabled');
+    console.warn(
+      '[RequestLine Config] DISCOGS_API_KEY or DISCOGS_API_SECRET not set - artwork lookup and compilation search will be disabled'
+    );
   }
 
   return errors;

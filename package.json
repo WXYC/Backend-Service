@@ -3,7 +3,12 @@
   "version": "1.0.0",
   "description": "All necessary app services for the WXYC flowsheet backend",
   "scripts": {
+    "typecheck": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication && npm run typecheck --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "lint:env": "node scripts/lint-env.js",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "build": "npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
     "dev": "dotenvx run -f .env -- concurrently \"npm:dev:auth\" \"npm:dev:backend\"",
     "dev:backend": "npm run dev --workspace=@wxyc/backend",
@@ -43,6 +48,7 @@
   ],
   "devDependencies": {
     "@dotenvx/dotenvx": "^1.51.0",
+    "@eslint/js": "^9.39.2",
     "@types/jest": "^29.5.14",
     "@types/node": "^24.1.0",
     "@types/pg": "^8.11.10",
@@ -51,6 +57,9 @@
     "concurrently": "^9.1.2",
     "drizzle-kit": "^0.31.5",
     "drizzle-orm": "^0.41.0",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-security": "^3.0.1",
     "jest": "^30.0.5",
     "jest-html-reporters": "^3.1.7",
     "nodemon": "^3.1.7",
@@ -62,6 +71,7 @@
     "tsup": "^8.4.0",
     "tsx": "^4.21.0",
     "typescript": "^5.6.2",
+    "typescript-eslint": "^8.55.0",
     "wait-on": "^8.0.1"
   },
   "dependencies": {

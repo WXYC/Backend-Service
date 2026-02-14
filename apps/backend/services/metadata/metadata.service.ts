@@ -1,12 +1,7 @@
 /**
  * Metadata Service - Orchestrates fetching and storing metadata from external APIs
  */
-import {
-  MetadataRequest,
-  AlbumMetadataResult,
-  ArtistMetadataResult,
-  FlowsheetMetadata,
-} from './metadata.types.js';
+import { MetadataRequest, AlbumMetadataResult, ArtistMetadataResult, FlowsheetMetadata } from './metadata.types.js';
 import {
   setAlbumMetadata,
   setArtistMetadata,
@@ -27,9 +22,7 @@ const searchUrls = new SearchUrlProvider();
 /**
  * Fetch and store metadata for a single entry (called on insert)
  */
-export async function fetchAndCacheMetadata(
-  request: MetadataRequest
-): Promise<FlowsheetMetadata | null> {
+export async function fetchAndCacheMetadata(request: MetadataRequest): Promise<FlowsheetMetadata | null> {
   const result: FlowsheetMetadata = {};
 
   try {
@@ -43,12 +36,7 @@ export async function fetchAndCacheMetadata(
         ? null
         : generateAlbumCacheKey(request.artistName, request.albumTitle || request.trackTitle);
 
-      await setAlbumMetadata(
-        request.albumId || null,
-        cacheKey,
-        albumMetadata,
-        request.rotationId != null
-      );
+      await setAlbumMetadata(request.albumId || null, cacheKey, albumMetadata, request.rotationId != null);
     }
 
     // Fetch artist metadata

@@ -76,9 +76,7 @@ export function buildSlackBlocks(
     ];
 
     if (artwork && artwork.releaseUrl) {
-      textLines.push(
-        `<${artwork.releaseUrl}|Discogs> | <${item.libraryUrl}|WXYC>`
-      );
+      textLines.push(`<${artwork.releaseUrl}|Discogs> | <${item.libraryUrl}|WXYC>`);
     } else {
       textLines.push(`<${item.libraryUrl}|WXYC Library>`);
     }
@@ -111,10 +109,7 @@ export function buildSlackBlocks(
  * @param message - Original request message
  * @param context - Optional context message
  */
-export function buildSimpleSlackBlocks(
-  message: string,
-  context?: string
-): SlackBlock[] {
+export function buildSimpleSlackBlocks(message: string, context?: string): SlackBlock[] {
   const blocks: SlackBlock[] = [
     {
       type: 'section',
@@ -145,8 +140,5 @@ export function buildSimpleSlackBlocks(
  */
 function escapeSlackText(text: string): string {
   // Escape &, <, > which have special meaning in Slack
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

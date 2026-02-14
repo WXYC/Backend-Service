@@ -1,25 +1,8 @@
-import {
-  account,
-  db,
-  invitation,
-  jwks,
-  member,
-  organization,
-  session,
-  user,
-  verification,
-} from '@wxyc/database';
+import { account, db, invitation, jwks, member, organization, session, user, verification } from '@wxyc/database';
 import { betterAuth, type Auth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { createAuthMiddleware } from 'better-auth/api';
-import {
-  admin,
-  anonymous,
-  bearer,
-  jwt,
-  organization as organizationPlugin,
-  username,
-} from 'better-auth/plugins';
+import { admin, anonymous, bearer, jwt, organization as organizationPlugin, username } from 'better-auth/plugins';
 import { eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
 import { sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
@@ -27,7 +10,7 @@ import { rewriteUrlForFrontend } from './url-rewrite';
 
 const buildResetUrl = (url: string, redirectTo?: string) => {
   const rewrittenUrl = rewriteUrlForFrontend(url);
-  
+
   if (!redirectTo) {
     return rewrittenUrl;
   }
@@ -60,11 +43,7 @@ export const auth: Auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL || 'http://localhost:8082/auth',
 
   // Trusted origins for CORS
-  trustedOrigins: (
-    process.env.BETTER_AUTH_TRUSTED_ORIGINS ||
-    process.env.FRONTEND_SOURCE ||
-    'http://localhost:3000'
-  )
+  trustedOrigins: (process.env.BETTER_AUTH_TRUSTED_ORIGINS || process.env.FRONTEND_SOURCE || 'http://localhost:3000')
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean),
@@ -94,7 +73,7 @@ export const auth: Auth = betterAuth({
   emailVerification: {
     sendVerificationEmail: async ({ user, url }, request) => {
       const verificationUrl = rewriteUrlForFrontend(url);
-      
+
       void sendVerificationEmailMessage({
         to: user.email,
         verificationUrl,
@@ -108,9 +87,9 @@ export const auth: Auth = betterAuth({
   // Subdomain-friendly cookie setting (recommended over cross-site cookies)
   advanced: {
     defaultCookieAttributes: {
-      sameSite: "none",
-      secure: true
-    }
+      sameSite: 'none',
+      secure: true,
+    },
   },
 
   plugins: [
@@ -154,17 +133,11 @@ export const auth: Auth = betterAuth({
       // Role information is included via custom JWT definePayload function above
       organizationHooks: {
         // Sync global user.role when members are added to default organization
-        afterAddMember: async ({
-          member,
-          user: userData,
-          organization: orgData,
-        }) => {
+        afterAddMember: async ({ member, user: userData, organization: orgData }) => {
           try {
             const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
             if (!defaultOrgSlug) {
-              console.warn(
-                'DEFAULT_ORG_SLUG is not set, skipping admin role sync'
-              );
+              console.warn('DEFAULT_ORG_SLUG is not set, skipping admin role sync');
               return;
             }
 
@@ -178,10 +151,7 @@ export const auth: Auth = betterAuth({
             if (adminRoles.includes(member.role)) {
               // Update user.role to "admin" for Better Auth Admin plugin
               const userId = userData.id;
-              await db
-                .update(user)
-                .set({ role: 'admin' })
-                .where(eq(user.id, userId));
+              await db.update(user).set({ role: 'admin' }).where(eq(user.id, userId));
               console.log(
                 `Granted admin role to user ${userId} (${userData.email}) with ${member.role} role in default organization`
               );
@@ -192,18 +162,11 @@ export const auth: Auth = betterAuth({
         },
 
         // Sync global user.role when member roles are updated
-        afterUpdateMemberRole: async ({
-          member,
-          previousRole,
-          user: userData,
-          organization: orgData,
-        }) => {
+        afterUpdateMemberRole: async ({ member, previousRole, user: userData, organization: orgData }) => {
           try {
             const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
             if (!defaultOrgSlug) {
-              console.warn(
-                'DEFAULT_ORG_SLUG is not set, skipping admin role sync'
-              );
+              console.warn('DEFAULT_ORG_SLUG is not set, skipping admin role sync');
               return;
             }
 
@@ -219,42 +182,26 @@ export const auth: Auth = betterAuth({
             const userId = userData.id;
             if (shouldHaveAdmin && !previouslyHadAdmin) {
               // Promoted to admin role - grant admin
-              await db
-                .update(user)
-                .set({ role: 'admin' })
-                .where(eq(user.id, userId));
-              console.log(
-                `Granted admin role to user ${userId} (${userData.email}) after promotion to ${member.role}`
-              );
+              await db.update(user).set({ role: 'admin' }).where(eq(user.id, userId));
+              console.log(`Granted admin role to user ${userId} (${userData.email}) after promotion to ${member.role}`);
             } else if (!shouldHaveAdmin && previouslyHadAdmin) {
               // Demoted from admin role - remove admin
-              await db
-                .update(user)
-                .set({ role: null })
-                .where(eq(user.id, userId));
+              await db.update(user).set({ role: null }).where(eq(user.id, userId));
               console.log(
                 `Removed admin role from user ${userId} (${userData.email}) after demotion from ${previousRole} to ${member.role}`
               );
             }
           } catch (error) {
-            console.error(
-              'Error syncing admin role in afterUpdateMemberRole:',
-              error
-            );
+            console.error('Error syncing admin role in afterUpdateMemberRole:', error);
           }
         },
 
         // Sync global user.role when members are removed from default organization
-        afterRemoveMember: async ({
-          user: userData,
-          organization: orgData,
-        }) => {
+        afterRemoveMember: async ({ user: userData, organization: orgData }) => {
           try {
             const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
             if (!defaultOrgSlug) {
-              console.warn(
-                'DEFAULT_ORG_SLUG is not set, skipping admin role sync'
-              );
+              console.warn('DEFAULT_ORG_SLUG is not set, skipping admin role sync');
               return;
             }
 
@@ -267,10 +214,7 @@ export const auth: Auth = betterAuth({
             const otherAdminMemberships = await db
               .select({ role: member.role })
               .from(member)
-              .innerJoin(
-                organization,
-                sql`${member.organizationId} = ${organization.id}` as any
-              )
+              .innerJoin(organization, sql`${member.organizationId} = ${organization.id}` as any)
               .where(
                 sql`${member.userId} = ${userData.id}
                 AND ${organization.slug} = ${defaultOrgSlug}
@@ -281,19 +225,13 @@ export const auth: Auth = betterAuth({
             // If no other admin memberships exist, remove admin role
             if (otherAdminMemberships.length === 0) {
               const userId = userData.id;
-              await db
-                .update(user)
-                .set({ role: null })
-                .where(eq(user.id, userId));
+              await db.update(user).set({ role: null }).where(eq(user.id, userId));
               console.log(
                 `Removed admin role from user ${userId} (${userData.email}) after removal from default organization`
               );
             }
           } catch (error) {
-            console.error(
-              'Error syncing admin role in afterRemoveMember:',
-              error
-            );
+            console.error('Error syncing admin role in afterRemoveMember:', error);
           }
         },
       },
@@ -312,9 +250,7 @@ export const auth: Auth = betterAuth({
       }
 
       // Send verification email for admin-created users
-      const callbackURL =
-        process.env.EMAIL_VERIFICATION_REDIRECT_URL?.trim() ||
-        process.env.FRONTEND_SOURCE?.trim();
+      const callbackURL = process.env.EMAIL_VERIFICATION_REDIRECT_URL?.trim() || process.env.FRONTEND_SOURCE?.trim();
 
       void auth.api
         .sendVerificationEmail({

@@ -29,11 +29,7 @@ jest.mock('drizzle-orm', () => ({
 
 import { isValidDeviceId, tokenNeedsRefresh } from '../../../apps/backend/services/anonymousDevice.service';
 import { daysFromNow } from '../../utils/time';
-import {
-  VALID_UUIDS,
-  INVALID_UUIDS,
-  TEST_UUID_UPPERCASE,
-} from '../../utils/constants';
+import { VALID_UUIDS, INVALID_UUIDS, TEST_UUID_UPPERCASE } from '../../utils/constants';
 
 describe('anonymousDevice.service', () => {
   describe('isValidDeviceId', () => {
