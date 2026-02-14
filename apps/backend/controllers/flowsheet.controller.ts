@@ -28,7 +28,7 @@ export interface IFSEntryMetadata {
 }
 
 export interface IFSEntry extends FSEntry {
-  rotation_play_freq: string | null;
+  rotation_bin: string | null;
   metadata: IFSEntryMetadata;
 }
 

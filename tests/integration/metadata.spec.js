@@ -267,7 +267,7 @@ describe('Metadata with Rotation Entries', () => {
     await fls_util.leave_show(getTestDjId(), global.access_token);
   });
 
-  test('Rotation entries include rotation_play_freq', async () => {
+  test('Rotation entries include rotation_bin', async () => {
     // Add a track with rotation_id (album_id 4 is in rotation per seed with rotation_id 2)
     const addRes = await request
       .post('/flowsheet')
@@ -285,7 +285,7 @@ describe('Metadata with Rotation Entries', () => {
 
     expect(rotationEntry).toBeDefined();
     expect(rotationEntry.rotation_id).toEqual(2);
-    expect(rotationEntry.rotation_play_freq).toEqual('M'); // From seed data
+    expect(rotationEntry.rotation_bin).toEqual('M'); // From seed data
   });
 });
 
