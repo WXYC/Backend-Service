@@ -1,9 +1,10 @@
 #!/bin/bash
 # CI Environment Setup Script
-# Usage: ./scripts/ci-env.sh [--full]
+# Usage: ./scripts/ci-env.sh [--full] [--skip-build]
 #
 # Options:
-#   --full    Enable rate limiting and create default admin user for full test suite
+#   --full         Enable rate limiting and create default admin user for full test suite
+#   --skip-build   Skip Docker image builds (use when images are already built, e.g. in CI)
 
 set -e
 
@@ -12,17 +13,26 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Parse arguments
 FULL_MODE=false
+SKIP_BUILD=false
 for arg in "$@"; do
   case $arg in
     --full)
       FULL_MODE=true
       shift
       ;;
+    --skip-build)
+      SKIP_BUILD=true
+      shift
+      ;;
   esac
 done
 
-# Build the Docker images
-npm run ci:build
+# Build the Docker images (unless --skip-build is set, e.g. when CI has already built them)
+if [ "$SKIP_BUILD" = true ]; then
+  echo "Skipping Docker image builds (--skip-build)"
+else
+  npm run ci:build
+fi
 
 # Set up compose command with environment
 COMPOSE_CMD="docker compose -f $PROJECT_ROOT/dev_env/docker-compose.yml --env-file $PROJECT_ROOT/.env --profile ci"

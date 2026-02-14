@@ -369,7 +369,7 @@ jobs:
         if: env.RUN_TESTS == 'true'
         run: |
           touch .env
-          npm run ci:env
+          ./scripts/ci-env.sh --skip-build
 
       - name: Run Integration Tests
         if: env.RUN_TESTS == 'true'
