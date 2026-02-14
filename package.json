@@ -39,7 +39,7 @@
     "drizzle:migrate": "dotenvx run -f .env -- drizzle-kit migrate --config 'drizzle.config.ts'",
     "drizzle:drop": "dotenvx run -f .env -- drizzle-kit drop --out ./shared/database/src/migrations",
     "setup:e2e-users": "dotenvx run -f .env -- tsx dev_env/setup-e2e-test-users.ts",
-    "prepare": "husky"
+    "prepare": "husky || true"
   },
   "author": "AyBruno",
   "license": "MIT",
