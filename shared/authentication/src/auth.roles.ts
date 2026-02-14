@@ -40,11 +40,19 @@ export const stationManager = accessControl.newRole({
   flowsheet: ["read", "write"],
 });
 
+export const admin = accessControl.newRole({
+  ...adminAc.statements,
+  bin: ["read", "write"],
+  catalog: ["read", "write"],
+  flowsheet: ["read", "write"],
+});
+
 export const WXYCRoles = {
   member,
   dj,
   musicDirector,
   stationManager,
+  admin,
 };
 
 export type WXYCRole = keyof typeof WXYCRoles;
