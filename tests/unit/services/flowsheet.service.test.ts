@@ -61,7 +61,7 @@ const createBaseEntry = (overrides: Partial<IFSEntry & IFSEntryMetadata> = {}): 
     request_flag: false,
     message: null,
     add_time: new Date('2024-01-15T12:00:00Z'),
-    rotation_play_freq: null,
+    rotation_bin: null,
     metadata,
     ...rest,
   };
@@ -80,7 +80,7 @@ describe('flowsheet.service', () => {
           album_id: 1,
           rotation_id: 5,
           request_flag: true,
-          rotation_play_freq: 'H',
+          rotation_bin: 'H',
           artwork_url: 'https://example.com/art.jpg',
           spotify_url: 'https://open.spotify.com/track/123',
         });
@@ -95,7 +95,7 @@ describe('flowsheet.service', () => {
         expect(result.album_id).toBe(1);
         expect(result.rotation_id).toBe(5);
         expect(result.request_flag).toBe(true);
-        expect(result.rotation_play_freq).toBe('H');
+        expect(result.rotation_bin).toBe('H');
         expect(result.artwork_url).toBe('https://example.com/art.jpg');
         expect(result.spotify_url).toBe('https://open.spotify.com/track/123');
       });
@@ -169,7 +169,7 @@ describe('flowsheet.service', () => {
         expect(result.artist_name).toBeUndefined();
         expect(result.album_title).toBeUndefined();
         expect(result.track_title).toBeUndefined();
-        expect(result.rotation_play_freq).toBeUndefined();
+        expect(result.rotation_bin).toBeUndefined();
       });
 
       it('handles malformed show_start message gracefully', () => {
@@ -346,12 +346,12 @@ describe('flowsheet.service', () => {
         const entry = createBaseEntry({
           entry_type: 'message',
           message: 'Test message',
-          rotation_play_freq: 'H',
+          rotation_bin: 'H',
         });
 
         const result = transformToV2(entry);
 
-        expect(result.rotation_play_freq).toBeUndefined();
+        expect(result.rotation_bin).toBeUndefined();
       });
     });
 

@@ -49,7 +49,7 @@ components:
               type: integer
             show_id:
               type: integer
-            rotation_play_freq:
+            rotation_bin:
               type: string
             message:
               type: string
@@ -183,7 +183,7 @@ components:
           type: string
         genre_name:
           type: string
-        play_freq:
+        rotation_bin:
           type: string
           nullable: true
         add_date:
@@ -219,7 +219,7 @@ components:
         add_date:
           type: string
           format: date
-        play_freq:
+        rotation_bin:
           type: string
           enum: ['S', 'L', 'M', 'H']
         kill_date:
@@ -231,11 +231,11 @@ components:
 
     NewRotationRequest:
       type: object
-      required: ['album_id', 'play_freq']
+      required: ['album_id', 'rotation_bin']
       properties:
         album_id:
           type: integer
-        play_freq:
+        rotation_bin:
           type: string
           enum: ['S', 'L', 'M', 'H']
         kill_date:

@@ -183,7 +183,7 @@ describe('Library Rotation', () => {
       const res = await auth.get('/library/rotation').expect(200);
 
       if (res.body.length > 0) {
-        expectFields(res.body[0], 'id', 'artist_name', 'album_title', 'play_freq', 'rotation_id');
+        expectFields(res.body[0], 'id', 'artist_name', 'album_title', 'rotation_bin', 'rotation_id');
       }
     });
   });
@@ -194,13 +194,13 @@ describe('Library Rotation', () => {
         .post('/library/rotation')
         .send({
           album_id: 2,
-          play_freq: 'M',
+          rotation_bin: 'M',
         })
         .expect(200);
 
-      expectFields(res.body, 'id', 'album_id', 'play_freq');
+      expectFields(res.body, 'id', 'album_id', 'rotation_bin');
       expect(res.body.album_id).toBe(2);
-      expect(res.body.play_freq).toBe('M');
+      expect(res.body.rotation_bin).toBe('M');
 
       // Clean up
       if (res.body.id) {
@@ -212,14 +212,14 @@ describe('Library Rotation', () => {
       const res = await auth
         .post('/library/rotation')
         .send({
-          play_freq: 'M',
+          rotation_bin: 'M',
         })
         .expect(400);
 
       expectErrorContains(res, 'Missing Parameters');
     });
 
-    test('returns 400 when play_freq is missing', async () => {
+    test('returns 400 when rotation_bin is missing', async () => {
       const res = await auth
         .post('/library/rotation')
         .send({
@@ -237,7 +237,7 @@ describe('Library Rotation', () => {
     beforeEach(async () => {
       const res = await auth.post('/library/rotation').send({
         album_id: 3,
-        play_freq: 'L',
+        rotation_bin: 'L',
       });
 
       if (res.body && res.body.id) {
@@ -260,7 +260,7 @@ describe('Library Rotation', () => {
     test('kills rotation with specific date', async () => {
       const createRes = await auth.post('/library/rotation').send({
         album_id: 3,
-        play_freq: 'H',
+        rotation_bin: 'H',
       });
 
       if (createRes.body && createRes.body.id) {

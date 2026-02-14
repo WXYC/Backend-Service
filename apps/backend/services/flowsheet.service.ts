@@ -51,7 +51,7 @@ const FSEntryFieldsRaw = {
   track_title: flowsheet.track_title,
   record_label: flowsheet.record_label,
   rotation_id: flowsheet.rotation_id,
-  rotation_play_freq: rotation.play_freq,
+  rotation_bin: rotation.rotation_bin,
   request_flag: flowsheet.request_flag,
   message: flowsheet.message,
   play_order: flowsheet.play_order,
@@ -81,7 +81,7 @@ type FSEntryRaw = {
   track_title: string | null;
   record_label: string | null;
   rotation_id: number | null;
-  rotation_play_freq: string | null;
+  rotation_bin: string | null;
   request_flag: boolean | null;
   message: string | null;
   play_order: number | null;
@@ -109,7 +109,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   track_title: raw.track_title,
   record_label: raw.record_label,
   rotation_id: raw.rotation_id,
-  rotation_play_freq: raw.rotation_play_freq,
+  rotation_bin: raw.rotation_bin,
   request_flag: raw.request_flag ?? false,
   message: raw.message,
   play_order: raw.play_order ?? 0,
@@ -602,7 +602,7 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         track_title: entry.track_title,
         record_label: entry.record_label,
         request_flag: entry.request_flag,
-        rotation_play_freq: entry.rotation_play_freq,
+        rotation_bin: entry.rotation_bin,
         artwork_url: entry.metadata?.artwork_url ?? null,
         discogs_url: entry.metadata?.discogs_url ?? null,
         release_year: entry.metadata?.release_year ?? null,

@@ -156,7 +156,7 @@ INSERT INTO wxyc_schema.library(
     artist_id, genre_id, format_id, album_title, code_number)
     VALUES (6, 1, 2, 'Homogenic', 1);
 
-INSERT INTO wxyc_schema.rotation(album_id, play_freq) VALUES (1, 'L');
+INSERT INTO wxyc_schema.rotation(album_id, rotation_bin) VALUES (1, 'L');
 
 -- Add album 4 to rotation for metadata.spec.js rotation tests
-INSERT INTO wxyc_schema.rotation(album_id, play_freq) VALUES (4, 'M');
+INSERT INTO wxyc_schema.rotation(album_id, rotation_bin) VALUES (4, 'M');
