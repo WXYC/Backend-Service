@@ -4,9 +4,6 @@ on:
   pull_request:
     branches:
       - main
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       force_rebuild:
@@ -37,7 +34,6 @@ jobs:
       shared: ${{ steps.changes.outputs.shared }}
       tests: ${{ steps.changes.outputs.tests }}
       db-init: ${{ steps.changes.outputs.db-init }}
-      docs-only: ${{ steps.changes.outputs.docs-only }}
       src: ${{ steps.changes.outputs.src }}
       run-integration: ${{ steps.should-run.outputs.run-integration }}
       merge_base_sha: ${{ steps.merge-base.outputs.sha }}
@@ -51,12 +47,11 @@ jobs:
         id: merge-base
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # For PRs, get the merge-base between the PR and main
             MERGE_BASE=$(git merge-base origin/${{ github.base_ref }} ${{ github.sha }})
             echo "sha=$MERGE_BASE" >> $GITHUB_OUTPUT
             echo "Merge-base SHA: $MERGE_BASE"
           else
-            # For pushes to main, use the current SHA
+            # For workflow_dispatch, use the current SHA
             echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT
             echo "Current SHA: ${{ github.sha }}"
           fi
@@ -78,9 +73,6 @@ jobs:
               - 'dev_env/Dockerfile.init'
               - 'dev_env/init-db.mjs'
               - 'dev_env/package.init.json'
-            docs-only:
-              - '**/*.md'
-              - 'docs/**'
             src:
               - 'apps/**'
               - 'shared/**'
@@ -194,10 +186,9 @@ jobs:
       - name: Run affected unit tests
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # For PRs, run tests affected by changes since base branch
             npx jest --config jest.unit.config.ts --changedSince=origin/${{ github.base_ref }} --coverage --passWithNoTests
           else
-            # For pushes to main, run all unit tests
+            # workflow_dispatch: run all unit tests
             npm run test:unit:coverage
           fi
 
@@ -212,7 +203,10 @@ jobs:
   # Integration tests - only when backend/auth/shared changes
   # Note: Job always runs to report status, but steps are skipped when no relevant changes
   Integration-Tests:
-    needs: detect-changes
+    needs: [detect-changes, lint-and-typecheck]
+    # Run when lint-and-typecheck succeeds or was skipped (no src changes).
+    # This ensures the required check reports status on docs-only PRs.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     env:
       RUN_TESTS: ${{ needs.detect-changes.outputs.run-integration }}
@@ -391,40 +385,6 @@ jobs:
           name: integration-test-coverage
           path: coverage/
           retention-days: 14
-
-      # On push to main, push built images to ECR with SHA tags for cache
-      # Note: db-init is skipped as it doesn't have an ECR repository (CI-only image)
-      - name: Push images to ECR cache
-        if: env.RUN_TESTS == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        run: |
-          SHA_TAG="sha-${{ github.sha }}"
-          ECR_URI="${{ secrets.AWS_ECR_URI }}"
-
-          echo "Pushing images to ECR with SHA tag: ${SHA_TAG}"
-
-          # Push auth if it was built
-          if docker image inspect wxyc_auth_service:ci > /dev/null 2>&1; then
-            echo "📦 Pushing auth..."
-            docker tag wxyc_auth_service:ci ${ECR_URI}/auth:${SHA_TAG}
-            docker tag wxyc_auth_service:ci ${ECR_URI}/auth:latest
-            docker push ${ECR_URI}/auth:${SHA_TAG}
-            docker push ${ECR_URI}/auth:latest
-          fi
-
-          # Push backend if it was built
-          if docker image inspect wxyc_backend_service:ci > /dev/null 2>&1; then
-            echo "📦 Pushing backend..."
-            docker tag wxyc_backend_service:ci ${ECR_URI}/backend:${SHA_TAG}
-            docker tag wxyc_backend_service:ci ${ECR_URI}/backend:latest
-            docker push ${ECR_URI}/backend:${SHA_TAG}
-            docker push ${ECR_URI}/backend:latest
-          fi
-
-          echo "✅ ECR cache updated with SHA: ${SHA_TAG}"
 
       - name: Clean Up Test Environment
         if: env.RUN_TESTS == 'true' && always()

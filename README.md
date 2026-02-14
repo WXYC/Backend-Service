@@ -87,6 +87,18 @@ The dev experience makes extensive use of Node.js project scripts. Here's a rund
 - `npm run format` : Formats all files with Prettier.
 - `npm run format:check` : Verifies all files match Prettier formatting (used in CI).
 
+#### Git Hooks
+
+This project uses [husky](https://typicode.github.io/husky/) to run a **pre-push** hook that validates your code before it reaches CI. When you run `git push`, the hook automatically runs:
+
+```bash
+npm run typecheck && npm run lint
+```
+
+This catches type errors and lint violations locally (in ~15-30s) instead of waiting for CI to report them. The hooks are set up automatically when you run `npm install`.
+
+If you need to bypass the hook in exceptional cases, use `git push --no-verify`.
+
 #### Environment Variables
 
 Here is an example environment variable file. Create a file with these contents named `.env` in the root of your locally cloned project to ensure your dev environment works properly.
