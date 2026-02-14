@@ -406,9 +406,12 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   }
 };
 
-export interface ShowInfo extends Show {
+export interface ShowMetadata extends Show {
   specialty_show_name: string;
   show_djs: { id: string | null; dj_name: string | null }[];
+}
+
+export interface ShowInfo extends ShowMetadata {
   entries: FSEntry[];
 }
 
