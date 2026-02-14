@@ -108,7 +108,7 @@ describe('requirePermissions middleware', () => {
 
       expect(res.status).toHaveBeenCalledWith(403);
       expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ error: expect.stringContaining('Invalid role') }),
+        expect.objectContaining({ error: expect.stringContaining('Invalid role') })
       );
       expect(next).not.toHaveBeenCalled();
     });
@@ -149,7 +149,7 @@ describe('requirePermissions middleware', () => {
 
         expect(next).toHaveBeenCalled();
         expect(res.status).not.toHaveBeenCalled();
-      },
+      }
     );
 
     it('should return 403 "insufficient permissions" when role lacks required permission', async () => {
@@ -161,7 +161,7 @@ describe('requirePermissions middleware', () => {
 
       expect(res.status).toHaveBeenCalledWith(403);
       expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ error: expect.stringContaining('insufficient permissions') }),
+        expect.objectContaining({ error: expect.stringContaining('insufficient permissions') })
       );
       expect(next).not.toHaveBeenCalled();
     });

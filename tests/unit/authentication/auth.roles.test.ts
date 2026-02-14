@@ -13,13 +13,10 @@ describe('WXYCRoles', () => {
    * If any of them are missing from WXYCRoles, the requirePermissions
    * middleware will return 403 "Invalid role" for those users.
    */
-  it.each(['member', 'dj', 'musicDirector', 'stationManager', 'admin'])(
-    'should recognize the "%s" role',
-    (role) => {
-      expect(WXYCRoles).toHaveProperty(role);
-      expect(WXYCRoles[role as WXYCRole]).toBeDefined();
-    }
-  );
+  it.each(['member', 'dj', 'musicDirector', 'stationManager', 'admin'])('should recognize the "%s" role', (role) => {
+    expect(WXYCRoles).toHaveProperty(role);
+    expect(WXYCRoles[role as WXYCRole]).toBeDefined();
+  });
 
   describe('role permissions', () => {
     it.each(allRoles)('"%s" should have an authorize function', (role) => {

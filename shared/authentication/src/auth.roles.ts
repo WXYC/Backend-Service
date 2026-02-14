@@ -39,9 +39,9 @@ export const stationManager = accessControl.newRole({
 
 export const admin = accessControl.newRole({
   ...adminAc.statements,
-  bin: ["read", "write"],
-  catalog: ["read", "write"],
-  flowsheet: ["read", "write"],
+  bin: ['read', 'write'],
+  catalog: ['read', 'write'],
+  flowsheet: ['read', 'write'],
 });
 
 export const WXYCRoles = {
