@@ -281,7 +281,7 @@ export const rotation = wxyc_schema.table(
     album_id: integer('album_id')
       .references(() => library.id)
       .notNull(),
-    play_freq: freqEnum('play_freq').notNull(),
+    rotation_bin: freqEnum('rotation_bin').notNull(),
     add_date: date('add_date').defaultNow().notNull(),
     kill_date: date('kill_date'),
   },
@@ -419,7 +419,7 @@ export type LibraryArtistViewEntry = {
   album_title: string;
   format_name: string;
   genre_name: string;
-  play_freq: string | null;
+  rotation_bin: string | null;
   add_date: Date;
   label: string | null;
 };
@@ -434,7 +434,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       album_title: library.album_title,
       format_name: format.format_name,
       genre_name: genres.genre_name,
-      play_freq: rotation.play_freq,
+      rotation_bin: rotation.rotation_bin,
       add_date: library.add_date,
       label: library.label,
     })
@@ -454,7 +454,7 @@ export const rotation_library_view = wxyc_schema.view('rotation_library_view').a
       library_id: library.id,
       rotation_id: rotation.id,
       label: library.label,
-      play_freq: rotation.play_freq,
+      rotation_bin: rotation.rotation_bin,
       album_title: library.album_title,
       artist_name: artists.artist_name,
       kill_date: rotation.kill_date,
