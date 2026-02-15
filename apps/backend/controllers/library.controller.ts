@@ -10,6 +10,7 @@ import {
   RotationRelease,
 } from '@wxyc/database';
 import * as libraryService from '../services/library.service.js';
+import * as labelsService from '../services/labels.service.js';
 
 type NewAlbumRequest = {
   album_title: string;
@@ -17,6 +18,7 @@ type NewAlbumRequest = {
   artist_id?: number;
   alternate_artist_name?: string;
   label: string;
+  label_id?: number;
   genre_id: number;
   format_id: number;
   disc_quantity?: number;
@@ -55,12 +57,20 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
       );
     } else {
       try {
+        // Resolve label string to label_id via upsert
+        let label_id = body.label_id;
+        if (label_id === undefined && body.label) {
+          const resolvedLabel = await labelsService.createLabel(body.label);
+          label_id = resolvedLabel.id;
+        }
+
         const new_album: NewAlbum = {
           artist_id: artist_id,
           genre_id: body.genre_id,
           format_id: body.format_id,
           album_title: body.album_title,
           label: body.label,
+          label_id: label_id,
           code_number: await libraryService.generateAlbumCodeNumber(artist_id),
           alternate_artist_name: body.alternate_artist_name,
           disc_quantity: body.disc_quantity,

@@ -39,6 +39,7 @@ export interface Rotation {
   artist_name: string;
   album_title: string;
   record_label: string | null;
+  label_id: number | null;
   genre_name: string;
   format_name: string;
   rotation_id: number;
@@ -59,6 +60,7 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
       artist_name: artists.artist_name,
       album_title: library.album_title,
       record_label: library.label,
+      label_id: library.label_id,
       genre_name: genres.genre_name,
       format_name: format.format_name,
       rotation_id: rotation.id,
@@ -197,6 +199,7 @@ export const getAlbumFromDB = async (album_id: number) => {
       artist_name: artists.artist_name,
       album_title: library.album_title,
       record_label: library.label,
+      label_id: library.label_id,
       plays: library.plays,
       add_date: library.add_date,
       last_modified: library.last_modified,
