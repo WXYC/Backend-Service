@@ -28,6 +28,7 @@ export interface IFSEntryMetadata {
 }
 
 export interface IFSEntry extends FSEntry {
+  label_id: number | null;
   rotation_play_freq: string | null;
   metadata: IFSEntryMetadata;
 }
@@ -125,6 +126,7 @@ export type FSEntryRequestBody = {
   album_id?: number;
   rotation_id?: number;
   record_label: string;
+  label_id?: number;
   request_flag?: boolean;
   message?: string;
 };
@@ -261,6 +263,7 @@ export type UpdateRequestBody = {
   album_title?: string;
   track_title?: string;
   record_label?: string;
+  label_id?: number;
   request_flag?: boolean;
   message?: string;
 };
