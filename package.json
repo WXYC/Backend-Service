@@ -38,7 +38,8 @@
     "drizzle:generate": "read -p \"Enter migration name (optional): \" MIGRATION_NAME && dotenvx run -f .env -- drizzle-kit generate --config 'drizzle.config.ts' --name \"$MIGRATION_NAME\"",
     "drizzle:migrate": "dotenvx run -f .env -- drizzle-kit migrate --config 'drizzle.config.ts'",
     "drizzle:drop": "dotenvx run -f .env -- drizzle-kit drop --out ./shared/database/src/migrations",
-    "setup:e2e-users": "dotenvx run -f .env -- tsx dev_env/setup-e2e-test-users.ts"
+    "setup:e2e-users": "dotenvx run -f .env -- tsx dev_env/setup-e2e-test-users.ts",
+    "prepare": "husky || true"
   },
   "author": "AyBruno",
   "license": "MIT",
@@ -60,6 +61,7 @@
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-security": "^3.0.1",
+    "husky": "^9.1.7",
     "jest": "^30.0.5",
     "jest-html-reporters": "^3.1.7",
     "nodemon": "^3.1.7",
