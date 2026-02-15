@@ -10,7 +10,7 @@ import { rewriteUrlForFrontend } from './url-rewrite';
 
 const buildResetUrl = (url: string, redirectTo?: string) => {
   const rewrittenUrl = rewriteUrlForFrontend(url);
-
+  
   if (!redirectTo) {
     return rewrittenUrl;
   }
@@ -73,7 +73,7 @@ export const auth: Auth = betterAuth({
   emailVerification: {
     sendVerificationEmail: async ({ user, url }, request) => {
       const verificationUrl = rewriteUrlForFrontend(url);
-
+      
       void sendVerificationEmailMessage({
         to: user.email,
         verificationUrl,

@@ -13,10 +13,13 @@ describe('rewriteUrlForFrontend', () => {
 
   it('replaces host and protocol while preserving path and query params', () => {
     process.env.FRONTEND_SOURCE = 'https://dj.wxyc.org';
-    const input = 'https://api.wxyc.org/auth/verify-email?token=abc123&callbackURL=%2Fonboarding';
+    const input =
+      'https://api.wxyc.org/auth/verify-email?token=abc123&callbackURL=%2Fonboarding';
     const result = rewriteUrlForFrontend(input);
 
-    expect(result).toBe('https://dj.wxyc.org/auth/verify-email?token=abc123&callbackURL=%2Fonboarding');
+    expect(result).toBe(
+      'https://dj.wxyc.org/auth/verify-email?token=abc123&callbackURL=%2Fonboarding'
+    );
   });
 
   it('handles URLs without query params', () => {
@@ -29,10 +32,13 @@ describe('rewriteUrlForFrontend', () => {
 
   it('preserves complex query parameters', () => {
     process.env.FRONTEND_SOURCE = 'https://dj.wxyc.org';
-    const input = 'https://api.wxyc.org/auth/verify-email?token=xyz&callbackURL=%2Fdashboard&redirectTo=%2Fhome';
+    const input =
+      'https://api.wxyc.org/auth/verify-email?token=xyz&callbackURL=%2Fdashboard&redirectTo=%2Fhome';
     const result = rewriteUrlForFrontend(input);
 
-    expect(result).toBe('https://dj.wxyc.org/auth/verify-email?token=xyz&callbackURL=%2Fdashboard&redirectTo=%2Fhome');
+    expect(result).toBe(
+      'https://dj.wxyc.org/auth/verify-email?token=xyz&callbackURL=%2Fdashboard&redirectTo=%2Fhome'
+    );
   });
 
   it('handles invalid URLs gracefully by returning original', () => {
