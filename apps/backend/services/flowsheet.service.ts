@@ -50,6 +50,7 @@ const FSEntryFieldsRaw = {
   album_title: flowsheet.album_title,
   track_title: flowsheet.track_title,
   record_label: flowsheet.record_label,
+  label_id: flowsheet.label_id,
   rotation_id: flowsheet.rotation_id,
   rotation_bin: rotation.rotation_bin,
   request_flag: flowsheet.request_flag,
@@ -80,6 +81,7 @@ type FSEntryRaw = {
   album_title: string | null;
   track_title: string | null;
   record_label: string | null;
+  label_id: number | null;
   rotation_id: number | null;
   rotation_bin: string | null;
   request_flag: boolean | null;
@@ -108,6 +110,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   album_title: raw.album_title,
   track_title: raw.track_title,
   record_label: raw.record_label,
+  label_id: raw.label_id,
   rotation_id: raw.rotation_id,
   rotation_bin: raw.rotation_bin,
   request_flag: raw.request_flag ?? false,
@@ -512,6 +515,7 @@ export const getAlbumFromDB = async (album_id: number) => {
       artist_name: artists.artist_name,
       album_title: library.album_title,
       record_label: library.label,
+      label_id: library.label_id,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -617,6 +621,7 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         album_title: entry.album_title,
         track_title: entry.track_title,
         record_label: entry.record_label,
+        label_id: entry.label_id,
         request_flag: entry.request_flag,
         rotation_bin: entry.rotation_bin,
         artwork_url: entry.metadata?.artwork_url ?? null,
