@@ -78,6 +78,9 @@ jobs:
               - 'dev_env/Dockerfile.init'
               - 'dev_env/init-db.mjs'
               - 'dev_env/package.init.json'
+              - 'dev_env/seed_db.sql'
+              - 'shared/database/src/migrations/**'
+              - 'shared/database/src/schema.ts'
             docs-only:
               - '**/*.md'
               - 'docs/**'

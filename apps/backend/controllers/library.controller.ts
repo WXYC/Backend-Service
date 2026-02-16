@@ -165,8 +165,8 @@ export const getRotation: RequestHandler = async (req, res, next) => {
 
 export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
 export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res, next) => {
-  if (req.body.album_id === undefined || req.body.play_freq === undefined) {
-    res.status(400).send('Missing Parameters: album_id or play_freq');
+  if (req.body.album_id === undefined || req.body.rotation_bin === undefined) {
+    res.status(400).send('Missing Parameters: album_id or rotation_bin');
   } else {
     try {
       const rotationRelease: RotationRelease = await libraryService.addToRotation(req.body);
