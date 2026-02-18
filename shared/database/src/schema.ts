@@ -244,6 +244,7 @@ export const library = wxyc_schema.table(
     alternate_artist_name: varchar('alternate_artist_name', { length: 128 }),
     album_title: varchar('album_title', { length: 128 }).notNull(),
     label: varchar('label', { length: 128 }),
+    label_id: integer('label_id').references(() => labels.id),
     code_number: smallint('code_number').notNull(),
     disc_quantity: smallint('disc_quantity').default(1).notNull(),
     plays: integer('plays').default(0).notNull(),
@@ -304,6 +305,7 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   album_title: varchar('album_title', { length: 128 }),
   artist_name: varchar('artist_name', { length: 128 }),
   record_label: varchar('record_label', { length: 128 }),
+  label_id: integer('label_id').references(() => labels.id),
   play_order: serial('play_order').notNull(),
   request_flag: boolean('request_flag').default(false).notNull(),
   message: varchar('message', { length: 250 }),
@@ -319,6 +321,14 @@ export const genres = wxyc_schema.table('genres', {
   plays: integer('plays').default(0).notNull(),
   add_date: date('add_date').defaultNow().notNull(),
   last_modified: timestamp('last_modified').defaultNow().notNull(),
+});
+
+export type NewLabel = InferInsertModel<typeof labels>;
+export type Label = InferSelectModel<typeof labels>;
+export const labels = wxyc_schema.table('labels', {
+  id: serial('id').primaryKey(),
+  label_name: varchar('label_name', { length: 128 }).notNull().unique(),
+  parent_label_id: integer('parent_label_id'),
 });
 
 export type NewReview = InferInsertModel<typeof reviews>;
@@ -422,6 +432,7 @@ export type LibraryArtistViewEntry = {
   play_freq: string | null;
   add_date: Date;
   label: string | null;
+  label_id: number | null;
 };
 export const library_artist_view = wxyc_schema.view('library_artist_view').as((qb) => {
   return qb
@@ -437,6 +448,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       play_freq: rotation.play_freq,
       add_date: library.add_date,
       label: library.label,
+      label_id: library.label_id,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -454,6 +466,7 @@ export const rotation_library_view = wxyc_schema.view('rotation_library_view').a
       library_id: library.id,
       rotation_id: rotation.id,
       label: library.label,
+      label_id: library.label_id,
       play_freq: rotation.play_freq,
       album_title: library.album_title,
       artist_name: artists.artist_name,
