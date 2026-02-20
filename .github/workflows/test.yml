@@ -11,8 +11,7 @@ jobs:
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      backend: ${{ steps.changes.outputs.backend }}
-      auth: ${{ steps.changes.outputs.auth }}
+      apps: ${{ steps.changes.outputs.apps }}
       shared: ${{ steps.changes.outputs.shared }}
       tests: ${{ steps.changes.outputs.tests }}
       src: ${{ steps.changes.outputs.src }}
@@ -26,10 +25,8 @@ jobs:
         id: changes
         with:
           filters: |
-            backend:
-              - 'apps/backend/**'
-            auth:
-              - 'apps/auth/**'
+            apps:
+              - 'apps/**'
             shared:
               - 'shared/**'
             tests:
@@ -46,8 +43,7 @@ jobs:
         id: should-run
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" || \
-                "${{ steps.changes.outputs.backend }}" == "true" || \
-                "${{ steps.changes.outputs.auth }}" == "true" || \
+                "${{ steps.changes.outputs.apps }}" == "true" || \
                 "${{ steps.changes.outputs.shared }}" == "true" || \
                 "${{ steps.changes.outputs.tests }}" == "true" ]]; then
             echo "run-integration=true" >> $GITHUB_OUTPUT
