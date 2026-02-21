@@ -20,6 +20,7 @@ import {
 } from '@wxyc/database';
 import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
+import WxycError from '../utils/error.js';
 
 // Track when the flowsheet was last modified for conditional responses (304 Not Modified)
 let lastModifiedAt: Date = new Date();
@@ -273,6 +274,10 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
 
 export const startShow = async (dj_id: string, show_name?: string, specialty_id?: number): Promise<Show> => {
   const dj_info = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
+
+  if (!dj_info) {
+    throw new WxycError(`DJ with id '${dj_id}' not found`, 404);
+  }
 
   const new_show = await db
     .insert(shows)
