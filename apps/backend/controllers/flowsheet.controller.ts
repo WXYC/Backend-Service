@@ -182,7 +182,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
               }).catch((err) => console.error('[Flowsheet] Metadata fetch failed:', err));
             }
 
-            res.status(200).json(completedEntry);
+            res.status(201).json(completedEntry);
           } else if (
             body.album_title === undefined ||
             body.artist_name === undefined ||
@@ -210,7 +210,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
               }).catch((err) => console.error('[Flowsheet] Metadata fetch failed:', err));
             }
 
-            res.status(200).json(completedEntry);
+            res.status(201).json(completedEntry);
           }
         } catch (e) {
           console.error('Error: Failed to add track to flowsheet');
@@ -229,7 +229,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       };
       try {
         const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-        res.status(200).json(completedEntry);
+        res.status(201).json(completedEntry);
       } catch (e) {
         console.error('Error: Failed to add message to flowsheet');
         console.error(e);
