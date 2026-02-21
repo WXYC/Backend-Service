@@ -178,6 +178,8 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   } catch (e) {
     console.error('Error: Failed to retrieve most recent show ');
     console.error(e);
+    next(e);
+    return;
   }
   if (latestShow?.end_time !== null) {
     throw new WxycError('Bad Request, There are no active shows', 400);
