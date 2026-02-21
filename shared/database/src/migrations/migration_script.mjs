@@ -15,6 +15,6 @@ const migrationClient = postgres(
 
 const db = drizzle(migrationClient);
 
-migrate(db, { migrationsFolder: 'src/db/migrations' })
+migrate(db, { migrationsFolder: 'shared/database/src/migrations' })
   .catch((e) => console.error(e))
   .then(() => console.log('MIGRATION COMPLETE!'));
