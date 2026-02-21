@@ -18,6 +18,8 @@ import { requirePermissions } from '@wxyc/authentication';
 const port = process.env.PORT || 8080;
 const app = express();
 
+app.set('trust proxy', true);
+
 //Interpret parse json into js objects
 app.use(express.json());
 
