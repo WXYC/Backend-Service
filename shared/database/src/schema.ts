@@ -186,7 +186,7 @@ export type NewShiftCover = InferInsertModel<typeof shift_covers>;
 export type ShiftCover = InferSelectModel<typeof shift_covers>;
 export const shift_covers = wxyc_schema.table('shift_covers', {
   id: serial('id').primaryKey(),
-  schedule_id: serial('schedule_id')
+  schedule_id: integer('schedule_id')
     .references(() => schedule.id)
     .notNull(),
   shift_timestamp: timestamp('shift_timestamp').notNull(), //Timestamp to expire cover requests
