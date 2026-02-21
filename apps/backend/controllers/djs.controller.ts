@@ -21,7 +21,7 @@ export const addToBin: RequestHandler<object, unknown, binBody> = async (req, re
     };
     try {
       const added_bin_item = await DJService.addToBin(bin_entry);
-      res.status(200).json(added_bin_item);
+      res.status(201).json(added_bin_item);
     } catch (e) {
       console.error('Server error: Failed to insert into bin');
       console.error(e);
