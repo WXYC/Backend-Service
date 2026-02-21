@@ -192,7 +192,7 @@ export const getAlbumFromDB = async (album_id: number) => {
     .select({
       id: library.id,
       code_letters: artists.code_letters,
-      code_artist_number: artists.code_letters,
+      code_artist_number: artists.code_artist_number,
       code_number: library.code_number,
       artist_name: artists.artist_name,
       album_title: library.album_title,
