@@ -1,6 +1,6 @@
 import { requirePermissions } from '@wxyc/authentication';
 import { Router } from 'express';
-import * as serverEvents from '../controllers/events.conroller.js';
+import * as serverEvents from '../controllers/events.controller.js';
 
 export const events_route = Router();
 
