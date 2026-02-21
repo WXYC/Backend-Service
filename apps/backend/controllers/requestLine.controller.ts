@@ -41,7 +41,7 @@ export const registerDevice: RequestHandler<object, unknown, RegisterDeviceBody>
     timestamp: new Date().toISOString(),
   });
 
-  res.status(301).json({
+  res.status(410).json({
     message: 'This endpoint is deprecated. Use POST /auth/sign-in/anonymous for registration.',
     endpoint: `${authUrl}/sign-in/anonymous`,
   });
