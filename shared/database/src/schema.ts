@@ -175,9 +175,9 @@ export const schedule = wxyc_schema.table('schedule', {
   day: smallint('day').notNull(),
   start_time: time('start_time').notNull(),
   show_duration: smallint('show_duration').notNull(), // In 15-minute blocs
-  specialty_id: integer('specialty_id').references(() => specialty_shows.id), //null for regular shows
-  assigned_dj_id: varchar('assigned_dj_id', { length: 255 }).references(() => user.id),
-  assigned_dj_id2: varchar('assigned_dj_id2', { length: 255 }).references(() => user.id),
+  specialty_id: integer('specialty_id').references(() => specialty_shows.id, { onDelete: 'set null' }), //null for regular shows
+  assigned_dj_id: varchar('assigned_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+  assigned_dj_id2: varchar('assigned_dj_id2', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
 });
 
 //SELECT date_trunc('week', current_timestamp + timestamp '${n} weeks') + interval '${schedule.day} days' + ${schedule.time}
@@ -190,7 +190,7 @@ export const shift_covers = wxyc_schema.table('shift_covers', {
     .references(() => schedule.id)
     .notNull(),
   shift_timestamp: timestamp('shift_timestamp').notNull(), //Timestamp to expire cover requests
-  cover_dj_id: varchar('cover_dj_id', { length: 255 }).references(() => user.id),
+  cover_dj_id: varchar('cover_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
   covered: boolean('covered').default(false),
 });
 
@@ -279,7 +279,7 @@ export const rotation = wxyc_schema.table(
   {
     id: serial('id').primaryKey(), //need to create an entry w/ id 0 for items not currently on rotation and items from outside the station
     album_id: integer('album_id')
-      .references(() => library.id)
+      .references(() => library.id, { onDelete: 'cascade' })
       .notNull(),
     play_freq: freqEnum('play_freq').notNull(),
     add_date: date('add_date').defaultNow().notNull(),
@@ -296,9 +296,9 @@ export type NewFSEntry = InferInsertModel<typeof flowsheet>;
 export type FSEntry = InferSelectModel<typeof flowsheet>;
 export const flowsheet = wxyc_schema.table('flowsheet', {
   id: serial('id').primaryKey(),
-  show_id: integer('show_id').references(() => shows.id),
-  album_id: integer('album_id').references(() => library.id),
-  rotation_id: integer('rotation_id').references(() => rotation.id),
+  show_id: integer('show_id').references(() => shows.id, { onDelete: 'set null' }),
+  album_id: integer('album_id').references(() => library.id, { onDelete: 'set null' }),
+  rotation_id: integer('rotation_id').references(() => rotation.id, { onDelete: 'set null' }),
   entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
   track_title: varchar('track_title', { length: 128 }),
   album_title: varchar('album_title', { length: 128 }),
@@ -326,7 +326,7 @@ export type Review = InferSelectModel<typeof reviews>;
 export const reviews = wxyc_schema.table('reviews', {
   id: serial('id').primaryKey(),
   album_id: integer('album_id')
-    .references(() => library.id)
+    .references(() => library.id, { onDelete: 'cascade' })
     .notNull()
     .unique(),
   review: text('review'),
@@ -355,10 +355,10 @@ export const genre_artist_crossreference = wxyc_schema.table(
   {
     artist_id: integer('artist_id')
       .notNull()
-      .references(() => artists.id),
+      .references(() => artists.id, { onDelete: 'cascade' }),
     genre_id: integer('genre_id')
       .notNull()
-      .references(() => genres.id),
+      .references(() => genres.id, { onDelete: 'cascade' }),
     artist_genre_code: integer('artist_genre_code').notNull(),
   },
   (table) => [uniqueIndex('artist_genre_key').on(table.artist_id, table.genre_id)]
@@ -369,8 +369,8 @@ export type ArtistLibraryCrossreference = InferSelectModel<typeof artist_library
 export const artist_library_crossreference = wxyc_schema.table(
   'artist_library_crossreference',
   {
-    artist_id: integer('artist_id').references(() => artists.id),
-    library_id: integer('library_id').references(() => library.id),
+    artist_id: integer('artist_id').references(() => artists.id, { onDelete: 'cascade' }),
+    library_id: integer('library_id').references(() => library.id, { onDelete: 'cascade' }),
   },
   (table) => [uniqueIndex('library_id_artist_id').on(table.artist_id, table.library_id)]
 );
@@ -379,7 +379,7 @@ export type NewShow = InferInsertModel<typeof shows>;
 export type Show = InferSelectModel<typeof shows>;
 export const shows = wxyc_schema.table('shows', {
   id: serial('id').primaryKey(),
-  primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => user.id),
+  primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
   specialty_id: integer('specialty_id') //Null for regular shows
     .references(() => specialty_shows.id),
   show_name: varchar('show_name', { length: 128 }), //Null if not provided or specialty show
@@ -391,7 +391,7 @@ export type NewShowDJ = InferInsertModel<typeof show_djs>;
 export type ShowDJ = InferSelectModel<typeof show_djs>;
 export const show_djs = wxyc_schema.table('show_djs', {
   show_id: integer('show_id')
-    .references(() => shows.id)
+    .references(() => shows.id, { onDelete: 'cascade' })
     .notNull(),
   dj_id: varchar('dj_id', { length: 255 })
     .references(() => user.id, { onDelete: 'cascade' })
