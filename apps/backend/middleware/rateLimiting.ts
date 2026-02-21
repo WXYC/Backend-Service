@@ -80,8 +80,7 @@ export const songRequestRateLimit = shouldEnableRateLimiting
         if (req.user?.id) {
           return req.user.id;
         }
-        // Fall back to 'unknown' - this shouldn't happen since auth middleware runs first
-        return 'unknown';
+        return req.ip || 'unknown';
       },
       handler: (_req: Request, res: Response) => {
         res.status(429).json({
