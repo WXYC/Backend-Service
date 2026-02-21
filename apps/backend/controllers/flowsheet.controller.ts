@@ -109,7 +109,7 @@ export const getLatest: RequestHandler = async (req, res, next) => {
       res.status(200).json(latest[0]);
     } else {
       console.error('No Tracks found');
-      res.status(404).send('Error: No Tracks found');
+      res.status(404).json({ message: 'No Tracks found' });
     }
   } catch (e) {
     console.error('Error: Failed to retrieve track');
@@ -142,13 +142,13 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   }
   if (latestShow?.end_time !== null) {
     console.error('Bad Request, There are no active shows');
-    res.status(400).send('Bad Request, There are no active shows');
+    res.status(400).json({ message: 'Bad Request, There are no active shows' });
   } else {
     if (body.message === undefined) {
       // no message passed, so we assume we're adding a track to the flowsheet
       if (body.track_title === undefined) {
         console.error('Bad Request, Missing query parameter: track_title');
-        res.status(400).send('Bad Request, Missing query parameter: track_title');
+        res.status(400).json({ message: 'Bad Request, Missing query parameter: track_title' });
       } else {
         try {
           if (body.album_id !== undefined) {
@@ -189,7 +189,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
             body.track_title === undefined
           ) {
             console.error('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
-            res.status(400).send('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
+            res.status(400).json({ message: 'Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title' });
           } else {
             const fsEntry: NewFSEntry = {
               ...body,
@@ -243,7 +243,7 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   const { entry_id } = req.body;
   if (entry_id === undefined) {
     console.error('Bad Request, Missing entry identifier: entry_id');
-    res.status(400).send('Bad Request, Missing entry identifier: entry_id');
+    res.status(400).json({ message: 'Bad Request, Missing entry identifier: entry_id' });
   } else {
     try {
       const removedEntry: FSEntry = await flowsheet_service.removeTrack(entry_id);
@@ -273,7 +273,7 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
   const { entry_id, data } = req.body;
   if (entry_id === undefined) {
     console.error('Bad Request, Missing entry identifier: entry_id');
-    res.status(400).send('Bad Request, Missing entry identifier: entry_id');
+    res.status(400).json({ message: 'Bad Request, Missing entry identifier: entry_id' });
   } else {
     try {
       const updatedEntry: FSEntry = await flowsheet_service.updateEntry(entry_id, data);
@@ -296,7 +296,7 @@ export type JoinRequestBody = {
 export const joinShow: RequestHandler = async (req: Request<object, object, JoinRequestBody>, res, next) => {
   const current_show = await flowsheet_service.getLatestShow();
   if (req.body.dj_id === undefined) {
-    res.status(400).send('Bad Request, Must include a dj_id to join show');
+    res.status(400).json({ message: 'Bad Request, Must include a dj_id to join show' });
   } else if (current_show?.end_time !== null) {
     try {
       const show_session: Show = await flowsheet_service.startShow(
@@ -416,7 +416,7 @@ export const getShowInfo: RequestHandler<object, unknown, object, { show_id: str
   const showId = parseInt(req.query.show_id);
   if (isNaN(showId)) {
     console.error('Bad Request, Missing Show Identifier: show_id');
-    res.status(400).send('Bad Request, Missing Show Identifier: show_id');
+    res.status(400).json({ message: 'Bad Request, Missing Show Identifier: show_id' });
   } else {
     try {
       const showInfo = await flowsheet_service.getPlaylist(showId);
