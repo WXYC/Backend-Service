@@ -12,7 +12,7 @@ export type binBody = {
 export const addToBin: RequestHandler<object, unknown, binBody> = async (req, res, next) => {
   if (req.body.album_id === undefined || req.body.dj_id === undefined) {
     console.error('Bad Request, Missing Album Identifier: album_id');
-    res.status(400).send('Bad Request, Missing DJ or album identifier: album_id');
+    res.status(400).json({ message: 'Bad Request, Missing DJ or album identifier: album_id' });
   } else {
     const bin_entry: NewBinEntry = {
       dj_id: req.body.dj_id,
@@ -40,7 +40,7 @@ export type binQuery = {
 export const deleteFromBin: RequestHandler<object, unknown, unknown, binQuery> = async (req, res, next) => {
   if (req.query.album_id === undefined || req.query.dj_id === undefined) {
     console.error('Bad Request, Missing Bin Entry Identifier: album_id or dj_id');
-    res.status(400).send('Bad Request, Missing Bin Entry Identifier: album_id or dj_id');
+    res.status(400).json({ message: 'Bad Request, Missing Bin Entry Identifier: album_id or dj_id' });
   } else {
     try {
       //check that the dj_id === dj_id of bin entry
@@ -56,7 +56,7 @@ export const deleteFromBin: RequestHandler<object, unknown, unknown, binQuery> =
 export const getBin: RequestHandler<object, unknown, object, { dj_id: string }> = async (req, res, next) => {
   if (req.query.dj_id === undefined) {
     console.error('Bad Request, Missing DJ Identifier: dj_id');
-    res.status(400).send('Bad Request, Missing DJ Identifier: dj_id');
+    res.status(400).json({ message: 'Bad Request, Missing DJ Identifier: dj_id' });
   } else {
     try {
       const dj_bin = await DJService.getBinFromDB(req.query.dj_id);
@@ -72,7 +72,7 @@ export const getBin: RequestHandler<object, unknown, object, { dj_id: string }> 
 export const getPlaylistsForDJ: RequestHandler<object, unknown, object, { dj_id: string }> = async (req, res, next) => {
   if (req.query.dj_id === undefined) {
     console.error('Bad Request, Missing DJ Identifier: dj_id');
-    res.status(400).send('Bad Request, Missing DJ Identifier: dj_id');
+    res.status(400).json({ message: 'Bad Request, Missing DJ Identifier: dj_id' });
   } else {
     try {
       const playlists = await DJService.getPlaylistsForDJ(req.query.dj_id);
@@ -88,7 +88,7 @@ export const getPlaylistsForDJ: RequestHandler<object, unknown, object, { dj_id:
 export const getPlaylist: RequestHandler<object, unknown, object, { playlist_id: string }> = async (req, res, next) => {
   if (req.query.playlist_id === undefined) {
     console.error('Bad Request, Missing Playlist Identifier: playlist_id');
-    res.status(400).send('Bad Request, Missing Playlist Identifier: playlist_id');
+    res.status(400).json({ message: 'Bad Request, Missing Playlist Identifier: playlist_id' });
   } else {
     try {
       const playlist = await DJService.getPlaylist(parseInt(req.query.playlist_id));
