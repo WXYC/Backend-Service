@@ -52,7 +52,7 @@ export type RequiredPermissions = {
 
 export function requirePermissions(required: RequiredPermissions) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    if (process.env.AUTH_BYPASS === 'true') {
+    if (process.env.AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production') {
       // In bypass mode, try to decode the JWT (without verification) so that
       // req.auth is populated for controllers that rely on req.auth.id.
       // If the token is not a valid JWT (e.g. integration tests pass a raw
