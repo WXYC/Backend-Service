@@ -3,6 +3,7 @@ import { Router } from 'express';
 import * as flowsheetController from '../controllers/flowsheet.controller';
 import { flowsheetMirror } from '../middleware/legacy/flowsheet.mirror';
 import { conditionalGet } from '../middleware/conditionalGet';
+import { showMemberMiddleware } from '../middleware/checkShowMember';
 
 export const flowsheet_route = Router();
 
@@ -11,6 +12,7 @@ flowsheet_route.get('/', conditionalGet, flowsheetMirror.getEntries, flowsheetCo
 flowsheet_route.post(
   '/',
   requirePermissions({ flowsheet: ['write'] }),
+  showMemberMiddleware,
   flowsheetMirror.addEntry,
   flowsheetController.addEntry
 );
@@ -18,6 +20,7 @@ flowsheet_route.post(
 flowsheet_route.patch(
   '/',
   requirePermissions({ flowsheet: ['write'] }),
+  showMemberMiddleware,
   flowsheetMirror.updateEntry,
   flowsheetController.updateEntry
 );
@@ -25,6 +28,7 @@ flowsheet_route.patch(
 flowsheet_route.delete(
   '/',
   requirePermissions({ flowsheet: ['write'] }),
+  showMemberMiddleware,
   flowsheetMirror.deleteEntry,
   flowsheetController.deleteEntry
 );
