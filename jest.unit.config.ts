@@ -22,6 +22,8 @@ const config: Config = {
     // Mock better-auth access control modules (ESM-only, can't be transformed by ts-jest)
     '^better-auth/plugins/access$': '<rootDir>/tests/mocks/better-auth-access.mock.ts',
     '^better-auth/plugins/organization/access$': '<rootDir>/tests/mocks/better-auth-org-access.mock.ts',
+    // Mock workspace authentication package
+    '^@wxyc/authentication$': '<rootDir>/tests/mocks/authentication.mock.ts',
     // Remove .js extensions from relative imports (ESM compatibility)
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },
