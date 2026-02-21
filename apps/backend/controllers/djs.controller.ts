@@ -10,12 +10,12 @@ export type binBody = {
 };
 
 export const addToBin: RequestHandler<object, unknown, binBody> = async (req, res, next) => {
-  if (req.body.album_id === undefined || req.body.dj_id === undefined) {
+  if (req.body.album_id === undefined) {
     console.error('Bad Request, Missing Album Identifier: album_id');
-    res.status(400).send('Bad Request, Missing DJ or album identifier: album_id');
+    res.status(400).send('Bad Request, Missing album identifier: album_id');
   } else {
     const bin_entry: NewBinEntry = {
-      dj_id: req.body.dj_id,
+      dj_id: req.auth!.id!,
       album_id: req.body.album_id,
       track_title: req.body.track_title === undefined ? null : req.body.track_title,
     };
@@ -38,13 +38,12 @@ export type binQuery = {
 };
 
 export const deleteFromBin: RequestHandler<object, unknown, unknown, binQuery> = async (req, res, next) => {
-  if (req.query.album_id === undefined || req.query.dj_id === undefined) {
-    console.error('Bad Request, Missing Bin Entry Identifier: album_id or dj_id');
-    res.status(400).send('Bad Request, Missing Bin Entry Identifier: album_id or dj_id');
+  if (req.query.album_id === undefined) {
+    console.error('Bad Request, Missing Bin Entry Identifier: album_id');
+    res.status(400).send('Bad Request, Missing Bin Entry Identifier: album_id');
   } else {
     try {
-      //check that the dj_id === dj_id of bin entry
-      const removed_bin_item = await DJService.removeFromBin(parseInt(req.query.album_id), req.query.dj_id);
+      const removed_bin_item = await DJService.removeFromBin(parseInt(req.query.album_id), req.auth!.id!);
       res.status(200).json(removed_bin_item);
     } catch (e) {
       console.error(e);
@@ -53,19 +52,14 @@ export const deleteFromBin: RequestHandler<object, unknown, unknown, binQuery> =
   }
 };
 
-export const getBin: RequestHandler<object, unknown, object, { dj_id: string }> = async (req, res, next) => {
-  if (req.query.dj_id === undefined) {
-    console.error('Bad Request, Missing DJ Identifier: dj_id');
-    res.status(400).send('Bad Request, Missing DJ Identifier: dj_id');
-  } else {
-    try {
-      const dj_bin = await DJService.getBinFromDB(req.query.dj_id);
-      res.status(200).json(dj_bin);
-    } catch (e) {
-      console.error("Error: Failed to retrieve dj's bin");
-      console.error(e);
-      next(e);
-    }
+export const getBin: RequestHandler = async (req, res, next) => {
+  try {
+    const dj_bin = await DJService.getBinFromDB(req.auth!.id!);
+    res.status(200).json(dj_bin);
+  } catch (e) {
+    console.error("Error: Failed to retrieve dj's bin");
+    console.error(e);
+    next(e);
   }
 };
 
