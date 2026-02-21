@@ -361,7 +361,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = async (req, res, next) => {
   const currentShow = await flowsheet_service.getLatestShow();
   if (currentShow?.end_time !== null) {
-    res.status(404).json({ message: 'Bad Request: No active show session found.' });
+    res.status(400).json({ message: 'Bad Request: No active show session found.' });
   } else {
     try {
       // Show membership is verified by showMemberMiddleware on the route
