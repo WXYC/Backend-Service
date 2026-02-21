@@ -1,4 +1,4 @@
-import { RequestHandler, Response } from 'express';
+import { Request, RequestHandler } from 'express';
 import { serverEventsMgr, TestEvents, Topics, type EventData } from '../utils/serverEvents';
 
 // Role constants for event authorization
@@ -14,17 +14,12 @@ const TopicAuthz: Record<string, string[]> = {
   [Topics.mirror]: [ROLE_DJ],
 };
 
-const filterAuthorizedTopics = (res: Response, topics: string[]) => {
-  const user = res.locals?.user;
-
-  // If user is authenticated, they have DJ access
-  const hasAuth = !!user;
+const filterAuthorizedTopics = (req: Request, topics: string[]) => {
+  const hasAuth = !!req.auth;
 
   return topics.filter((topic) => {
     if (TopicAuthz[topic] === undefined) return false;
-    // Empty = anyone can access topic
     if (!TopicAuthz[topic].length) return true;
-    // If requires auth and user is authenticated, allow
     return hasAuth;
   });
 };
@@ -36,7 +31,7 @@ type regReqBody = {
 export const registerEventClient: RequestHandler<object, unknown, regReqBody> = (req, res) => {
   const client = serverEventsMgr.registerClient(res);
 
-  const topics = filterAuthorizedTopics(res, req.body.topics || []);
+  const topics = filterAuthorizedTopics(req, req.body.topics || []);
 
   serverEventsMgr.subscribe(topics, client.id);
 };
