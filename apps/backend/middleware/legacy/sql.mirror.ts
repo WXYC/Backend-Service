@@ -3,6 +3,7 @@ import { Config, NodeSSH } from 'node-ssh';
 export class MirrorSQL {
   private static _instance: MirrorSQL | null = null;
   private static _ssh: NodeSSH | null = null;
+  private static _timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
   static instance() {
     if (!this._instance) this._instance = new MirrorSQL();
@@ -24,15 +25,19 @@ export class MirrorSQL {
       await this._ssh.connect(sshConfig);
     }
 
-    setTimeout(
+    if (this._timeoutHandle) {
+      clearTimeout(this._timeoutHandle);
+    }
+    this._timeoutHandle = setTimeout(
       () => {
         if (this._ssh && this._ssh.isConnected()) {
           this._ssh.dispose();
           this._ssh = null;
         }
+        this._timeoutHandle = null;
       },
       5 * 60 * 1000
-    ); // auto-dispose after 5 minutes of inactivity
+    );
 
     return this._ssh;
   }
