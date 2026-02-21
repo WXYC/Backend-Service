@@ -304,7 +304,7 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   album_title: varchar('album_title', { length: 128 }),
   artist_name: varchar('artist_name', { length: 128 }),
   record_label: varchar('record_label', { length: 128 }),
-  play_order: serial('play_order').notNull(),
+  play_order: integer('play_order').notNull(),
   request_flag: boolean('request_flag').default(false).notNull(),
   message: varchar('message', { length: 250 }),
   add_time: timestamp('add_time').defaultNow().notNull(),
