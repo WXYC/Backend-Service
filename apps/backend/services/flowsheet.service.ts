@@ -19,6 +19,7 @@ import {
   artist_metadata,
 } from '@wxyc/database';
 import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
+import WxycError from '../utils/error.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 // Track when the flowsheet was last modified for conditional responses (304 Not Modified)
@@ -520,15 +521,19 @@ export const getAlbumFromDB = async (album_id: number) => {
 export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry> => {
   await db.transaction(
     async (trx) => {
-      const position_old = (
-        await trx
-          .select({
-            play_order: flowsheet.play_order,
-          })
-          .from(flowsheet)
-          .where(eq(flowsheet.id, entry_id))
-          .limit(1)
-      )[0].play_order;
+      const result = await trx
+        .select({
+          play_order: flowsheet.play_order,
+        })
+        .from(flowsheet)
+        .where(eq(flowsheet.id, entry_id))
+        .limit(1);
+
+      if (result.length === 0) {
+        throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
+      }
+
+      const position_old = result[0].play_order;
 
       if (position_new < position_old) {
         await trx
