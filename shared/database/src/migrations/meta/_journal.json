@@ -169,6 +169,13 @@
       "when": 1771099200000,
       "tag": "0029_rename_play_freq_to_rotation_bin",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1740153600000,
+      "tag": "0026_schema_audit_fixes",
+      "breakpoints": true
     }
   ]
 }
