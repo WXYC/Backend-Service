@@ -19,7 +19,7 @@
     "@wxyc/database": "*",
     "async-mutex": "^0.5.0",
     "aws-jwt-verify": "^5.1.0",
-    "axios": "^1.7.0",
+    "axios": "^1.13.5",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "express-rate-limit": "^8.2.1",
