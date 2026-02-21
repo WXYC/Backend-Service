@@ -90,6 +90,7 @@ export const shows = {};
 export const show_djs = {};
 export const user = {};
 export const specialty_shows = {};
+export const schedule = {};
 
 // Mock enum
 export const flowsheetEntryTypeEnum = () => ({});
@@ -131,3 +132,4 @@ export type NewFSEntry = Partial<FSEntry>;
 export type Show = Record<string, unknown>;
 export type ShowDJ = Record<string, unknown>;
 export type User = Record<string, unknown>;
+export type NewShift = Record<string, unknown>;
