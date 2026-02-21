@@ -550,7 +550,7 @@ export const anonymous_devices = pgTable(
   'anonymous_devices',
   {
     id: serial('id').primaryKey(),
-    deviceId: varchar('device_id', { length: 255 }).notNull().unique(),
+    deviceId: varchar('device_id', { length: 255 }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
     blocked: boolean('blocked').notNull().default(false),
