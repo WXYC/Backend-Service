@@ -115,6 +115,7 @@ export const user = {
   capabilities: 'capabilities',
 };
 export const specialty_shows = {};
+export const schedule = {};
 
 // Mock enum
 export const flowsheetEntryTypeEnum = () => ({});
@@ -166,6 +167,7 @@ export type Show = Record<string, unknown>;
 export type ShowDJ = Record<string, unknown>;
 export type User = Record<string, unknown>;
 
+
 export type BinEntry = {
   id: number;
   dj_id: string;
@@ -173,3 +175,4 @@ export type BinEntry = {
   track_title: string | null;
 };
 export type NewBinEntry = Omit<BinEntry, 'id'>;
+export type NewShift = Record<string, unknown>;
