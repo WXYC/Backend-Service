@@ -67,7 +67,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
         };
 
         const inserted_album: Album = await libraryService.insertAlbum(new_album);
-        res.status(200).json(inserted_album);
+        res.status(201).json(inserted_album);
       } catch (e) {
         console.error('Error: Could not insert new album');
         console.error(e);
@@ -155,7 +155,7 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
 
       const response: Artist = await libraryService.insertArtist(new_artist);
       await libraryService.insertArtistGenreCrossreference(response.id, body.genre_id, body.code_number);
-      res.status(200);
+      res.status(201);
       res.json({
         ...response,
         code_number: body.code_number,
@@ -221,7 +221,7 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
   } else {
     try {
       const rotationRelease: RotationRelease = await libraryService.addToRotation(req.body);
-      res.status(200).json(rotationRelease);
+      res.status(201).json(rotationRelease);
     } catch (e) {
       console.error(e);
       next(e);
@@ -279,7 +279,7 @@ export const addFormat: RequestHandler = async (req, res, next) => {
       };
 
       const insertion = await libraryService.insertFormat(newFormat);
-      res.status(200).json(insertion);
+      res.status(201).json(insertion);
     } catch (e) {
       console.error('Failed to add new format');
       console.error(e);
@@ -309,7 +309,7 @@ export const addGenre: RequestHandler = async (req, res, next) => {
 
       const insertion = await libraryService.insertGenre(newGenre);
 
-      res.status(200).json(insertion);
+      res.status(201).json(insertion);
     } catch (e) {
       console.error('Failed to add new genre');
       console.error(e);
