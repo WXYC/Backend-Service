@@ -369,8 +369,8 @@ export type ArtistLibraryCrossreference = InferSelectModel<typeof artist_library
 export const artist_library_crossreference = wxyc_schema.table(
   'artist_library_crossreference',
   {
-    artist_id: integer('artist_id').references(() => artists.id),
-    library_id: integer('library_id').references(() => library.id),
+    artist_id: integer('artist_id').references(() => artists.id).notNull(),
+    library_id: integer('library_id').references(() => library.id).notNull(),
   },
   (table) => [uniqueIndex('library_id_artist_id').on(table.artist_id, table.library_id)]
 );
