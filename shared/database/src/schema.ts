@@ -389,15 +389,19 @@ export const shows = wxyc_schema.table('shows', {
 
 export type NewShowDJ = InferInsertModel<typeof show_djs>;
 export type ShowDJ = InferSelectModel<typeof show_djs>;
-export const show_djs = wxyc_schema.table('show_djs', {
-  show_id: integer('show_id')
-    .references(() => shows.id)
-    .notNull(),
-  dj_id: varchar('dj_id', { length: 255 })
-    .references(() => user.id, { onDelete: 'cascade' })
-    .notNull(),
-  active: boolean('active').default(true),
-});
+export const show_djs = wxyc_schema.table(
+  'show_djs',
+  {
+    show_id: integer('show_id')
+      .references(() => shows.id)
+      .notNull(),
+    dj_id: varchar('dj_id', { length: 255 })
+      .references(() => user.id, { onDelete: 'cascade' })
+      .notNull(),
+    active: boolean('active').default(true),
+  },
+  (table) => [uniqueIndex('show_djs_show_id_dj_id_unique').on(table.show_id, table.dj_id)]
+);
 
 //create entry w/ ID 0 for regular shows
 export type NewSpecialtyShow = InferInsertModel<typeof specialty_shows>;
