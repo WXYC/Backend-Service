@@ -189,7 +189,7 @@ export const shift_covers = wxyc_schema.table('shift_covers', {
   schedule_id: serial('schedule_id')
     .references(() => schedule.id)
     .notNull(),
-  shift_timestamp: timestamp('shift_timestamp').notNull(), //Timestamp to expire cover requests
+  shift_timestamp: timestamp('shift_timestamp', { withTimezone: true }).notNull(), //Timestamp to expire cover requests
   cover_dj_id: varchar('cover_dj_id', { length: 255 }).references(() => user.id),
   covered: boolean('covered').default(false),
 });
@@ -207,7 +207,7 @@ export const artists = wxyc_schema.table(
     code_letters: varchar('code_letters', { length: 2 }).notNull(),
     code_artist_number: smallint('code_artist_number').notNull(),
     add_date: date('add_date').defaultNow().notNull(),
-    last_modified: timestamp('last_modified').defaultNow().notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => {
     return {
@@ -247,8 +247,8 @@ export const library = wxyc_schema.table(
     code_number: smallint('code_number').notNull(),
     disc_quantity: smallint('disc_quantity').default(1).notNull(),
     plays: integer('plays').default(0).notNull(),
-    add_date: timestamp('add_date').defaultNow().notNull(),
-    last_modified: timestamp('last_modified').defaultNow().notNull(),
+    add_date: timestamp('add_date', { withTimezone: true }).defaultNow().notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => {
     return {
@@ -307,7 +307,7 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   play_order: serial('play_order').notNull(),
   request_flag: boolean('request_flag').default(false).notNull(),
   message: varchar('message', { length: 250 }),
-  add_time: timestamp('add_time').defaultNow().notNull(),
+  add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
 });
 
 export type NewGenre = InferInsertModel<typeof genres>;
@@ -318,7 +318,7 @@ export const genres = wxyc_schema.table('genres', {
   description: text('description'),
   plays: integer('plays').default(0).notNull(),
   add_date: date('add_date').defaultNow().notNull(),
-  last_modified: timestamp('last_modified').defaultNow().notNull(),
+  last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
 });
 
 export type NewReview = InferInsertModel<typeof reviews>;
@@ -331,7 +331,7 @@ export const reviews = wxyc_schema.table('reviews', {
     .unique(),
   review: text('review'),
   add_date: date('add_date').defaultNow().notNull(),
-  last_modified: timestamp('last_modified').defaultNow().notNull(),
+  last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   author: varchar('author', { length: 32 }),
 });
 
@@ -383,8 +383,8 @@ export const shows = wxyc_schema.table('shows', {
   specialty_id: integer('specialty_id') //Null for regular shows
     .references(() => specialty_shows.id),
   show_name: varchar('show_name', { length: 128 }), //Null if not provided or specialty show
-  start_time: timestamp('start_time').defaultNow().notNull(),
-  end_time: timestamp('end_time'),
+  start_time: timestamp('start_time', { withTimezone: true }).defaultNow().notNull(),
+  end_time: timestamp('end_time', { withTimezone: true }),
 });
 
 export type NewShowDJ = InferInsertModel<typeof show_djs>;
@@ -407,7 +407,7 @@ export const specialty_shows = wxyc_schema.table('specialty_shows', {
   specialty_name: varchar('specialty_name', { length: 64 }).notNull(),
   description: text('description'),
   add_date: date('add_date').defaultNow().notNull(),
-  last_modified: timestamp('last_modified').defaultNow().notNull(),
+  last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
 });
 
 export type LibraryArtistViewEntry = {
@@ -491,8 +491,8 @@ export const album_metadata = wxyc_schema.table(
 
     // LRU cache management
     is_rotation: boolean('is_rotation').default(false).notNull(),
-    last_accessed: timestamp('last_accessed').defaultNow().notNull(),
-    created_at: timestamp('created_at').defaultNow().notNull(),
+    last_accessed: timestamp('last_accessed', { withTimezone: true }).defaultNow().notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => {
     return {
@@ -520,8 +520,8 @@ export const artist_metadata = wxyc_schema.table(
     wikipedia_url: varchar('wikipedia_url', { length: 512 }),
 
     // LRU cache management
-    last_accessed: timestamp('last_accessed').defaultNow().notNull(),
-    created_at: timestamp('created_at').defaultNow().notNull(),
+    last_accessed: timestamp('last_accessed', { withTimezone: true }).defaultNow().notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => {
     return {
