@@ -19,6 +19,8 @@ const config: Config = {
     '^@wxyc/database$': '<rootDir>/tests/mocks/database.mock.ts',
     // Mock database client for any path resolving to shared/database/src/client
     '^.*/shared/database/src/client(\\.js)?$': '<rootDir>/tests/mocks/database.mock.ts',
+    // Mock workspace authentication package
+    '^@wxyc/authentication$': '<rootDir>/tests/mocks/authentication.mock.ts',
     // Remove .js extensions from relative imports (ESM compatibility)
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },
