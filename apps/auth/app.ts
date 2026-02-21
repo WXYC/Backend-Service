@@ -6,6 +6,7 @@ import { auth } from '@wxyc/authentication';
 import { toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 
 const port = process.env.AUTH_PORT || '8080';
 
@@ -106,9 +107,15 @@ if (process.env.NODE_ENV !== 'production') {
   );
 }
 
-// Mount the Better Auth handler for all auth routes
-// app.use() will handle all methods and paths under /auth
-app.use('/auth', toNodeHandler(auth));
+const authRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' },
+});
+
+app.use('/auth', authRateLimit, toNodeHandler(auth));
 
 //endpoint for healthchecks
 app.get('/healthcheck', async (req, res) => {
