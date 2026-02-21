@@ -14,7 +14,7 @@ import {
   specialty_shows,
   user,
 } from '@wxyc/database';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 
 export const addToBin = async (bin_entry: NewBinEntry): Promise<BinEntry> => {
   const added_bin_entry = await db.insert(bins).values(bin_entry).returning();
@@ -63,47 +63,60 @@ type ShowPeek = {
 
 // ERRORS IN SERVICES ARE 500 ERRORS
 export const getPlaylistsForDJ = async (dj_id: string) => {
-  // gets a 'preview set' of 4 artists/albums and the show id for each show the dj has been in
   const this_djs_shows = await db.select().from(show_djs).where(eq(show_djs.dj_id, dj_id));
 
-  const show_previews = [];
-  for (let i = 0; i < this_djs_shows.length; i++) {
-    const show = await db.select().from(shows).where(eq(shows.id, this_djs_shows[i].show_id));
+  if (this_djs_shows.length === 0) return [];
 
-    const djs_involved = await db
-      .select({ dj_id: show_djs.dj_id, dj_name: user.djName })
-      .from(show_djs)
-      .innerJoin(user, and(eq(show_djs.show_id, show[0].id), eq(show_djs.dj_id, user.id)));
+  const showIds = this_djs_shows.map((s) => s.show_id);
 
-    const peek_object: ShowPeek = {
-      show: show[0].id,
-      show_name: show[0].show_name ?? '',
-      date: show[0].start_time,
-      djs: djs_involved,
-      specialty_show: '',
-      preview: [],
-    };
+  const allShows = await db.select().from(shows).where(inArray(shows.id, showIds));
 
-    if (show[0].specialty_id != null) {
-      const specialty_show = await db
-        .select()
-        .from(specialty_shows)
-        .where(eq(specialty_shows.id, show[0].specialty_id));
-      peek_object.specialty_show = specialty_show[0].specialty_name;
-    }
+  const allDjs = await db
+    .select({ dj_id: show_djs.dj_id, dj_name: user.djName, show_id: show_djs.show_id })
+    .from(show_djs)
+    .innerJoin(user, eq(show_djs.dj_id, user.id))
+    .where(inArray(show_djs.show_id, showIds));
 
-    //get 4 track entries to display in preview
-    const entries: FSEntry[] = await db
-      .select()
-      .from(flowsheet)
-      .limit(4)
-      .where(and(eq(flowsheet.show_id, show[0].id), isNull(flowsheet.message)));
+  const specialtyIds = allShows
+    .filter((s) => s.specialty_id != null)
+    .map((s) => s.specialty_id!);
 
-    peek_object.preview = entries;
-    show_previews.push(peek_object);
+  const allSpecialties =
+    specialtyIds.length > 0
+      ? await db.select().from(specialty_shows).where(inArray(specialty_shows.id, specialtyIds))
+      : [];
+
+  const allEntries: FSEntry[] = await db
+    .select()
+    .from(flowsheet)
+    .where(and(inArray(flowsheet.show_id, showIds), isNull(flowsheet.message)));
+
+  const specialtyMap = new Map(allSpecialties.map((s) => [s.id, s.specialty_name]));
+  const djsByShow = new Map<number, { dj_id: string; dj_name: string | null }[]>();
+  for (const dj of allDjs) {
+    const list = djsByShow.get(dj.show_id) ?? [];
+    list.push({ dj_id: dj.dj_id, dj_name: dj.dj_name });
+    djsByShow.set(dj.show_id, list);
+  }
+  const entriesByShow = new Map<number, FSEntry[]>();
+  for (const entry of allEntries) {
+    if (entry.show_id == null) continue;
+    const list = entriesByShow.get(entry.show_id) ?? [];
+    list.push(entry);
+    entriesByShow.set(entry.show_id, list);
   }
 
-  return show_previews;
+  return allShows.map((show) => {
+    const preview = (entriesByShow.get(show.id) ?? []).slice(0, 4);
+    return {
+      show: show.id,
+      show_name: show.show_name ?? '',
+      date: show.start_time,
+      djs: djsByShow.get(show.id) ?? [],
+      specialty_show: specialtyMap.get(show.specialty_id!) ?? '',
+      preview,
+    } satisfies ShowPeek;
+  });
 };
 
 export const getPlaylist = async (show_id: number) => {
