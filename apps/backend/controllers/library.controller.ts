@@ -34,7 +34,6 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     (body.artist_name === undefined && body.artist_id === undefined)
   ) {
     res.status(400).json({
-      status: 400,
       message: 'Missing Parameters: album_title, label, genre_id, format_id, artist_name, or artist_id',
     });
   } else {
@@ -49,10 +48,10 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
       }
     }
     if (!artist_id) {
-      res.status(400);
-      res.send(
-        "Artist doesn't exist or hasn't released an album in this genre before. Add a new artist entry to the library"
-      );
+      res.status(400).json({
+        message:
+          "Artist doesn't exist or hasn't released an album in this genre before. Add a new artist entry to the library",
+      });
     } else {
       try {
         const new_album: NewAlbum = {
@@ -98,14 +97,13 @@ export const searchForAlbum: RequestHandler = async (
     query.album_title === undefined &&
     (query.code_letters === undefined || query.code_artist_number === undefined)
   ) {
-    res.status(400);
-    res.send(
-      'Missing query parameter. Query must include: artist_name, album_title, or code_letters, code_artist_number, and code_number'
-    );
+    res.status(400).json({
+      message:
+        'Missing query parameter. Query must include: artist_name, album_title, or code_letters, code_artist_number, and code_number',
+    });
   } else if (query.code_letters !== undefined && query.code_artist_number !== undefined) {
     //quickly look up albums by that artist
-    res.status(501);
-    res.send('TODO: Library Code Lookup');
+    res.status(501).json({ message: 'TODO: Library Code Lookup' });
   } else {
     try {
       const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n);
@@ -128,8 +126,7 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   const { body } = req;
   //TODO auto_generate artist code letters and make it an optional parameter
   if (body.artist_name === undefined || body.code_letters === undefined || body.genre_id === undefined) {
-    res.status(400);
-    res.send('Missing Request Parameters: artist_name, code_letters, or genre_id');
+    res.status(400).json({ message: 'Missing Request Parameters: artist_name, code_letters, or genre_id' });
   } else {
     try {
       const generatedArtistNumber = await libraryService.generateArtistNumber(body.code_letters, body.genre_id);
@@ -166,7 +163,7 @@ export const getRotation: RequestHandler = async (req, res, next) => {
 export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
 export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res, next) => {
   if (req.body.album_id === undefined || req.body.play_freq === undefined) {
-    res.status(400).send('Missing Parameters: album_id or play_freq');
+    res.status(400).json({ message: 'Missing Parameters: album_id or play_freq' });
   } else {
     try {
       const rotationRelease: RotationRelease = await libraryService.addToRotation(req.body);
@@ -187,16 +184,16 @@ export const killRotation: RequestHandler<object, unknown, KillRotationRelease> 
   const { body } = req;
 
   if (body.rotation_id === undefined) {
-    res.status(400).send('Bad Request, Missing Parameter: rotation_id');
+    res.status(400).json({ message: 'Bad Request, Missing Parameter: rotation_id' });
   } else if (body.kill_date !== undefined && !libraryService.isISODate(body.kill_date)) {
-    res.status(400).send('Bad Request, Incorrect Date Format: kill_date should be of form YYYY-MM-DD');
+    res.status(400).json({ message: 'Bad Request, Incorrect Date Format: kill_date should be of form YYYY-MM-DD' });
   } else {
     try {
       const updatedRotation: RotationRelease = await libraryService.killRotationInDB(body.rotation_id, body.kill_date);
       if (updatedRotation !== undefined) {
         res.status(200).json(updatedRotation);
       } else {
-        res.status(400).json({ status: 400, message: 'Rotation entry not found' });
+        res.status(400).json({ message: 'Rotation entry not found' });
       }
     } catch (e) {
       console.error('Failed to update rotation kill_date');
@@ -220,7 +217,7 @@ export const getFormats: RequestHandler = async (req, res, next) => {
 export const addFormat: RequestHandler = async (req, res, next) => {
   const { body } = req;
   if (body.name === undefined) {
-    res.status(400).send('Bad Request, Missing Parameter: name');
+    res.status(400).json({ message: 'Bad Request, Missing Parameter: name' });
   } else {
     try {
       const newFormat: NewAlbumFormat = {
@@ -245,7 +242,7 @@ export const getGenres: RequestHandler = async (req, res) => {
 export const addGenre: RequestHandler = async (req, res, next) => {
   const { body } = req;
   if (body.name === undefined || body.description === undefined) {
-    res.status(400).send('Bad Request, Parameters name and description are required.');
+    res.status(400).json({ message: 'Bad Request, Parameters name and description are required.' });
   } else {
     try {
       const newGenre: NewGenre = {
@@ -271,7 +268,7 @@ export const getAlbum: RequestHandler<object, unknown, unknown, { album_id: stri
   const { query } = req;
   if (query.album_id === undefined) {
     console.error('Bad Request, missing album identifier: album_id');
-    res.status(400).send('Bad Request, missing album identifier: album_id');
+    res.status(400).json({ message: 'Bad Request, missing album identifier: album_id' });
   } else {
     try {
       const album = await libraryService.getAlbumFromDB(parseInt(query.album_id));
