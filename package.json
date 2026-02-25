@@ -2,6 +2,7 @@
   "name": "@wxyc/backend-services",
   "version": "1.0.0",
   "description": "All necessary app services for the WXYC flowsheet backend",
+  "packageManager": "npm@10.9.4",
   "scripts": {
     "typecheck": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication && npm run typecheck --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
     "lint": "eslint --cache --cache-strategy content --cache-location .cache/eslint/ .",
@@ -71,6 +72,7 @@
     "supertest": "^7.0.0",
     "ts-jest": "^29.4.6",
     "ts-node": "^10.9.2",
+    "turbo": "^2.3.0",
     "tsup": "^8.4.0",
     "tsx": "^4.21.0",
     "typescript": "^5.6.2",
