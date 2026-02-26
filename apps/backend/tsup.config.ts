@@ -11,6 +11,8 @@ export default defineConfig((options) => ({
   format: ['esm'],
   outDir: 'dist',
   clean: true,
+  sourcemap: true,
+  external: ['@sentry/node'],
   onSuccess: options.watch ? 'node ./dist/app.js' : undefined,
   minify: !options.watch,
 

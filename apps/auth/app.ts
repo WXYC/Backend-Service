@@ -1,4 +1,6 @@
 // Auth service using Express
+import './instrument.js';
+import * as Sentry from '@sentry/node';
 import { config } from 'dotenv';
 const dotenvResult = config();
 
@@ -6,6 +8,7 @@ import { auth } from '@wxyc/authentication';
 import { toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
 import express from 'express';
+import type { Request, Response, NextFunction } from 'express';
 
 const port = process.env.AUTH_PORT || '8080';
 
@@ -126,6 +129,14 @@ app.get('/healthcheck', async (req, res) => {
     // If the internal call fails, it indicates a problem with the auth service itself
     res.status(500).json({ message: 'Healthcheck failed: Could not reach internal /auth/ok endpoint' });
   }
+});
+
+Sentry.setupExpressErrorHandler(app);
+
+// Fallback error handler
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  const message = err instanceof Error ? err.message : String(err);
+  res.status(500).json({ error: message });
 });
 
 // Create default user if needed
