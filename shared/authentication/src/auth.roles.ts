@@ -44,16 +44,28 @@ export const WXYCRoles = {
   stationManager,
 };
 
-export type WXYCRole = keyof typeof WXYCRoles;
+import type { WXYCRole } from '@wxyc/shared/auth-client/auth';
+export type { WXYCRole } from '@wxyc/shared/auth-client/auth';
+export { roleToAuthorization, Authorization } from '@wxyc/shared/auth-client/auth';
+
+// Compile-time assertion: every role in WXYCRoles is a valid shared WXYCRole.
+// The reverse is intentionally not asserted -- shared includes "admin", which
+// Backend-Service maps to "stationManager" via normalizeRole() rather than
+// defining as a separate better-auth role.
+type _AssertLocalRolesAreShared = [keyof typeof WXYCRoles] extends [WXYCRole] ? true : never;
+const _localRolesValid: _AssertLocalRolesAreShared = true;
+
+/** The set of roles that have a better-auth access control implementation. */
+export type ImplementedRole = keyof typeof WXYCRoles;
 
 /** Maps better-auth system roles to their WXYC equivalent. */
-const systemRoleMap: Record<string, WXYCRole> = {
+const systemRoleMap: Record<string, ImplementedRole> = {
   admin: 'stationManager',
   owner: 'stationManager',
 };
 
-/** Normalizes a role string to a WXYCRole, mapping better-auth system roles. */
-export function normalizeRole(role: string): WXYCRole | undefined {
-  if (role in WXYCRoles) return role as WXYCRole;
+/** Normalizes a role string to an implemented role, mapping better-auth system roles. */
+export function normalizeRole(role: string): ImplementedRole | undefined {
+  if (role in WXYCRoles) return role as ImplementedRole;
   return systemRoleMap[role];
 }

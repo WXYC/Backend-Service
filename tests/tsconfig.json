@@ -5,6 +5,7 @@
     "moduleResolution": "Node",
     "esModuleInterop": true,
     "strict": false,
+    "allowJs": true,
     "skipLibCheck": true,
     "declaration": false,
     "noEmit": true,
