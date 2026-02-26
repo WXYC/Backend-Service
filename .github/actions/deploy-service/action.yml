@@ -71,7 +71,7 @@ runs:
           docker ps -a --filter "publish=$PUBLISH_PORT" --format "{{.ID}}" | xargs -r docker rm 
 
           echo "Starting new Docker container..."
-          docker run -d --name $TARGET_APP -p $PUBLISH_PORT:8080 --restart unless-stopped --env-file .env ${{ inputs.aws_ecr_uri }}/$TARGET_APP:$DEPLOY_TAG
+          docker run -d --name $TARGET_APP -p $PUBLISH_PORT:8080 --restart unless-stopped --env-file .env -e SENTRY_RELEASE=$TARGET_APP@$DEPLOY_TAG ${{ inputs.aws_ecr_uri }}/$TARGET_APP:$DEPLOY_TAG
 
           echo "Cleaning up old Docker images..."
           docker images --format '{{.Repository}} {{.Tag}}' | \
