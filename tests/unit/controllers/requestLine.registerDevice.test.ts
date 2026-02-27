@@ -76,8 +76,6 @@ describe('registerDevice', () => {
     await registerDevice(req, res as unknown as Response, next);
 
     expect(res._status).toBe(410);
-    expect((res._json as { endpoint: string }).endpoint).toBe(
-      'http://localhost:8082/auth/sign-in/anonymous'
-    );
+    expect((res._json as { endpoint: string }).endpoint).toBe('http://localhost:8082/auth/sign-in/anonymous');
   });
 });
