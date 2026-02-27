@@ -20,10 +20,14 @@ import { leaveShow } from '../../../apps/backend/controllers/flowsheet.controlle
 import type { Request, Response, NextFunction } from 'express';
 
 function createMockRes() {
+  const statusMock = jest.fn();
+  const jsonMock = jest.fn();
   const res: Partial<Response> = {};
-  res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
-  res.json = jest.fn().mockReturnValue(res) as unknown as Response['json'];
-  return res as Response;
+  statusMock.mockReturnValue(res);
+  jsonMock.mockReturnValue(res);
+  res.status = statusMock as unknown as Response['status'];
+  res.json = jsonMock as unknown as Response['json'];
+  return { res: res as Response, statusMock, jsonMock };
 }
 
 describe('leaveShow', () => {
@@ -36,13 +40,13 @@ describe('leaveShow', () => {
     });
 
     const req = { body: { dj_id: 'dj-1' } } as Request;
-    const res = createMockRes();
+    const { res, statusMock, jsonMock } = createMockRes();
     const next = jest.fn() as unknown as NextFunction;
 
     await leaveShow(req, res, next);
 
-    expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({
+    expect(statusMock).toHaveBeenCalledWith(400);
+    expect(jsonMock).toHaveBeenCalledWith({
       message: 'Bad Request: No active show session found.',
     });
   });
