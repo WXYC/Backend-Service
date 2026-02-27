@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from 'express';
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { createRemoteJWKSet, decodeJwt, jwtVerify, type JWTPayload } from 'jose';
 import { AccessControlStatement, WXYCRole, WXYCRoles, normalizeRole } from './auth.roles';
 
 // JWT payload structure expected from better-auth JWT plugin
@@ -53,6 +53,23 @@ export type RequiredPermissions = {
 export function requirePermissions(required: RequiredPermissions) {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (process.env.AUTH_BYPASS === 'true') {
+      // In bypass mode, still decode the JWT (without verification) so that
+      // req.auth is populated for controllers that rely on req.auth.id.
+      const authHeader = req.headers.authorization;
+      if (authHeader) {
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader.trim();
+        if (token) {
+          try {
+            const payload = decodeJwt(token) as WXYCAuthJwtPayload;
+            const userId = payload.id || payload.sub;
+            if (userId) {
+              req.auth = { ...payload, id: userId } as WXYCAuthJwtPayload;
+            }
+          } catch {
+            // Token may not be a valid JWT in bypass mode; ignore decode errors
+          }
+        }
+      }
       return next();
     }
 
