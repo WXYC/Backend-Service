@@ -13,11 +13,7 @@ describe('anonymous_devices schema', () => {
 
     // uniqueIndex() in the table's third argument appears in config.indexes
     const uniqueIndexesOnDeviceId = config.indexes.filter(
-      (idx) =>
-        idx.config.unique &&
-        idx.config.columns.some(
-          (c) => 'name' in c && c.name === 'device_id'
-        )
+      (idx) => idx.config.unique && idx.config.columns.some((c) => 'name' in c && c.name === 'device_id')
     );
     uniqueCount += uniqueIndexesOnDeviceId.length;
 
