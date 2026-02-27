@@ -6,7 +6,7 @@ const mockGetEntriesByPage = jest.fn<() => Promise<unknown[]>>();
 const mockGetEntryCount = jest.fn<() => Promise<number>>();
 const mockGetEntriesByShow = jest.fn<() => Promise<unknown[]>>();
 const mockGetShowMetadata = jest.fn<() => Promise<Record<string, unknown>>>();
-const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...entry as Record<string, unknown>, v2: true }));
+const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...(entry as Record<string, unknown>), v2: true }));
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByPage: mockGetEntriesByPage,
@@ -61,7 +61,7 @@ describe('flowsheet.controller', () => {
       expect(mockGetEntryCount).toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({
-        entries: entries.map(e => ({ ...e, v2: true })),
+        entries: entries.map((e) => ({ ...e, v2: true })),
         total: 2,
         page: 0,
         limit: 30,
@@ -90,9 +90,7 @@ describe('flowsheet.controller', () => {
 
       await getEntries(req as Request, res as Response, mockNext);
 
-      expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ totalPages: 3 }),
-      );
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ totalPages: 3 }));
     });
 
     it('returns totalPages=0 when no entries exist', async () => {
@@ -104,9 +102,7 @@ describe('flowsheet.controller', () => {
 
       await getEntries(req as Request, res as Response, mockNext);
 
-      expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ entries: [], total: 0, totalPages: 0 }),
-      );
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ entries: [], total: 0, totalPages: 0 }));
     });
 
     it('transforms each entry through transformToV2', async () => {
@@ -268,7 +264,7 @@ describe('flowsheet.controller', () => {
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({
         ...mockShowMetadata,
-        entries: entries.map(e => ({ ...e, v2: true })),
+        entries: entries.map((e) => ({ ...e, v2: true })),
       });
     });
 
@@ -293,10 +289,7 @@ describe('flowsheet.controller', () => {
       expect(mockGetEntriesByShow).toHaveBeenCalledWith(1);
     });
 
-    it.each([
-      ['abc'],
-      [undefined],
-    ])('returns 400 for invalid show_id=%s', async (show_id) => {
+    it.each([['abc'], [undefined]])('returns 400 for invalid show_id=%s', async (show_id) => {
       const query = show_id !== undefined ? { show_id } : {};
       const req = createMockReq(query as Record<string, string>);
       const res = createMockRes();

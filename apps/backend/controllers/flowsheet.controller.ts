@@ -12,7 +12,6 @@ export type QueryParams = {
   shows_limit?: string;
 };
 
-
 export interface IFSEntryMetadata {
   // Album metadata from cache
   artwork_url: string | null;
