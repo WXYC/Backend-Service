@@ -274,11 +274,11 @@ describe('flowsheet.controller', () => {
 
     it('fetches show metadata and entries in parallel', async () => {
       const callOrder: string[] = [];
-      mockGetShowMetadata.mockImplementation(async () => {
+      mockGetShowMetadata.mockImplementation(() => {
         callOrder.push('metadata');
         return mockShowMetadata;
       });
-      mockGetEntriesByShow.mockImplementation(async () => {
+      mockGetEntriesByShow.mockImplementation(() => {
         callOrder.push('entries');
         return [];
       });
