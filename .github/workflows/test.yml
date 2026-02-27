@@ -274,6 +274,8 @@ jobs:
 
       - name: Initialize database
         if: env.RUN_TESTS == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           touch .env
           node dev_env/init-db.mjs

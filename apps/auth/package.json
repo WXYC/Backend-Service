@@ -9,7 +9,7 @@
     "start": "node dist/app.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
-    "docker:build": "docker build -t wxyc_auth_service:ci -f ../../Dockerfile.auth ../../",
+    "docker:build": "docker build --build-arg NPM_TOKEN=$NPM_TOKEN -t wxyc_auth_service:ci -f ../../Dockerfile.auth ../../",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit"
   },
