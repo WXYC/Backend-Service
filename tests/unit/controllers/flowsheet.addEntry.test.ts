@@ -16,7 +16,9 @@ describe('addEntry', () => {
   const mockSend = jest.fn();
   const mockJson = jest.fn();
 
-  const req = { body: { track_title: 'Test', artist_name: 'Artist', album_title: 'Album', record_label: 'Label' } } as any;
+  const req = {
+    body: { track_title: 'Test', artist_name: 'Artist', album_title: 'Album', record_label: 'Label' },
+  } as any;
   const res = { status: mockStatus, send: mockSend, json: mockJson } as any;
   const next = jest.fn();
 
