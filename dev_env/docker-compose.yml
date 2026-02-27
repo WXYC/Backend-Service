@@ -92,6 +92,7 @@ services:
         NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [ci]
     environment:
+      - NODE_ENV=test
       - DB_HOST=ci-db
       - DB_PORT=5432
       - DB_USERNAME=${DB_USERNAME}
