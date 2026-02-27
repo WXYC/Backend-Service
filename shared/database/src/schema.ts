@@ -369,8 +369,12 @@ export type ArtistLibraryCrossreference = InferSelectModel<typeof artist_library
 export const artist_library_crossreference = wxyc_schema.table(
   'artist_library_crossreference',
   {
-    artist_id: integer('artist_id').references(() => artists.id, { onDelete: 'cascade' }).notNull(),
-    library_id: integer('library_id').references(() => library.id, { onDelete: 'cascade' }).notNull(),
+    artist_id: integer('artist_id')
+      .references(() => artists.id, { onDelete: 'cascade' })
+      .notNull(),
+    library_id: integer('library_id')
+      .references(() => library.id, { onDelete: 'cascade' })
+      .notNull(),
   },
   (table) => [uniqueIndex('library_id_artist_id').on(table.artist_id, table.library_id)]
 );
@@ -380,8 +384,7 @@ export type Show = InferSelectModel<typeof shows>;
 export const shows = wxyc_schema.table('shows', {
   id: serial('id').primaryKey(),
   primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
-  specialty_id: integer('specialty_id')
-    .references(() => specialty_shows.id, { onDelete: 'set null' }),
+  specialty_id: integer('specialty_id').references(() => specialty_shows.id, { onDelete: 'set null' }),
   show_name: varchar('show_name', { length: 128 }),
   start_time: timestamp('start_time', { withTimezone: true }).defaultNow().notNull(),
   end_time: timestamp('end_time', { withTimezone: true }),
