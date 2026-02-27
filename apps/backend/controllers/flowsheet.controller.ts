@@ -213,7 +213,9 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
             body.track_title === undefined
           ) {
             console.error('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
-            res.status(400).json({ message: 'Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title' });
+            res
+              .status(400)
+              .json({ message: 'Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title' });
           } else {
             const fsEntry: NewFSEntry = {
               ...body,
