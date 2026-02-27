@@ -30,9 +30,7 @@ describe('djs.controller bin endpoints – IDOR protection', () => {
 
       await addToBin(req, mockResponse(), next);
 
-      expect(DJService.addToBin).toHaveBeenCalledWith(
-        expect.objectContaining({ dj_id: 'user-A' })
-      );
+      expect(DJService.addToBin).toHaveBeenCalledWith(expect.objectContaining({ dj_id: 'user-A' }));
     });
   });
 
