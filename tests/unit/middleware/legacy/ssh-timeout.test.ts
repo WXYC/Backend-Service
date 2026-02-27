@@ -30,9 +30,7 @@ describe('MirrorSQL SSH timeout stacking', () => {
     await MirrorSQL.sshInstance();
     await MirrorSQL.sshInstance();
 
-    const timeoutCalls = setTimeoutSpy.mock.calls.filter(
-      ([, ms]) => ms === 5 * 60 * 1000
-    );
+    const timeoutCalls = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 5 * 60 * 1000);
 
     expect(timeoutCalls).toHaveLength(3);
     // After 3 calls, the first 2 timeouts should have been cleared
