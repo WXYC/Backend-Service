@@ -37,7 +37,7 @@ describe('events controller', () => {
 
       expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
         expect.arrayContaining([Topics.showDj, Topics.primaryDj]),
-        'client-1',
+        'client-1'
       );
     });
 
@@ -53,7 +53,7 @@ describe('events controller', () => {
 
       expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
         expect.not.arrayContaining([Topics.showDj, Topics.primaryDj]),
-        'client-1',
+        'client-1'
       );
     });
   });
