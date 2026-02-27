@@ -130,9 +130,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
 
 /** Count total flowsheet entries (for pagination) */
 export const getEntryCount = async (): Promise<number> => {
-  const result = await db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(flowsheet);
+  const result = await db.select({ count: sql<number>`count(*)::int` }).from(flowsheet);
   return result[0].count;
 };
 
