@@ -1,10 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const schemaSource = fs.readFileSync(
-  path.resolve(__dirname, '../../../shared/database/src/schema.ts'),
-  'utf-8'
-);
+const schemaSource = fs.readFileSync(path.resolve(__dirname, '../../../shared/database/src/schema.ts'), 'utf-8');
 
 /**
  * Extract the full column definition block for a given column in a given table.
