@@ -1,10 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const MIGRATION_SCRIPT_PATH = path.resolve(
-  __dirname,
-  '../../../shared/database/src/migrations/migration_script.mjs'
-);
+const MIGRATION_SCRIPT_PATH = path.resolve(__dirname, '../../../shared/database/src/migrations/migration_script.mjs');
 
 const EXPECTED_MIGRATIONS_FOLDER = 'shared/database/src/migrations';
 
@@ -14,7 +11,7 @@ describe('migration_script.mjs', () => {
     const match = content.match(/migrationsFolder:\s*['"]([^'"]+)['"]/);
     expect(match).not.toBeNull();
 
-    const migrationsFolder = match![1];
+    const migrationsFolder = match[1];
     expect(migrationsFolder).toBe(EXPECTED_MIGRATIONS_FOLDER);
   });
 
