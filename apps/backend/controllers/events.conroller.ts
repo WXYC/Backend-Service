@@ -14,7 +14,7 @@ const TopicAuthz: Record<string, string[]> = {
   [Topics.mirror]: [ROLE_DJ],
 };
 
-const filterAuthorizedTopics = (req: Request, topics: string[]) => {
+const filterAuthorizedTopics = (req: Pick<Request, 'auth'>, topics: string[]) => {
   const hasAuth = !!req.auth;
 
   return topics.filter((topic) => {
