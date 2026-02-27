@@ -52,7 +52,7 @@ export type RequiredPermissions = {
 
 export function requirePermissions(required: RequiredPermissions) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    if (process.env.AUTH_BYPASS === 'true') {
+    if (process.env.AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production') {
       return next();
     }
 
