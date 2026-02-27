@@ -13,10 +13,12 @@ describe('schema timestamp consistency', () => {
     const matches = schemaSource.match(timestampCallRegex);
 
     expect(matches).not.toBeNull();
-    expect(matches!.length).toBeGreaterThan(0);
+    if (!matches) return;
+
+    expect(matches.length).toBeGreaterThan(0);
 
     const missing: string[] = [];
-    for (const match of matches!) {
+    for (const match of matches) {
       if (!match.includes('withTimezone: true')) {
         missing.push(match);
       }
