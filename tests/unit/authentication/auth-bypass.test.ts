@@ -5,7 +5,7 @@ import { Request, Response, NextFunction } from 'express';
 jest.mock('better-auth/plugins/access', () => ({
   createAccessControl: () => ({
     newRole: (statements: any) => ({
-      authorize: (req: any) => ({ success: true }),
+      authorize: () => ({ success: true }),
       statements,
     }),
   }),
