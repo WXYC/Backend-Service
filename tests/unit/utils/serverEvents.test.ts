@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { ServerEventsManager, Topics } from '../../../apps/backend/utils/serverEvents';
+import { ServerEventsManager } from '../../../apps/backend/utils/serverEvents';
 import { Response } from 'express';
 
 function createMockResponse(): Response {
@@ -27,7 +27,7 @@ describe('ServerEventsManager', () => {
     it('disconnects an idle client after 5 minutes', () => {
       const mgr = new ServerEventsManager('topic-a');
       const res = createMockResponse();
-      const client = mgr.registerClient(res);
+      const _client = mgr.registerClient(res);
 
       jest.advanceTimersByTime(5 * 60 * 1000);
 
