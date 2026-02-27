@@ -2,10 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 describe('auth.definition.ts cookie configuration', () => {
-  const authDefPath = path.resolve(
-    __dirname,
-    '../../../shared/authentication/src/auth.definition.ts'
-  );
+  const authDefPath = path.resolve(__dirname, '../../../shared/authentication/src/auth.definition.ts');
   let source: string;
 
   beforeAll(() => {
