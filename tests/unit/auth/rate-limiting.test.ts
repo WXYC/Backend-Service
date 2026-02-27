@@ -12,11 +12,14 @@ describe('Auth service rate limiting', () => {
     expect(authAppSource).toMatch(/rateLimit\s*\(/);
   });
 
-  it('applies rate limiting before the auth handler', () => {
-    const rateLimitIndex = authAppSource.search(/rateLimit\s*\(/);
-    const authHandlerIndex = authAppSource.search(/toNodeHandler\s*\(\s*auth\s*\)/);
-    expect(rateLimitIndex).toBeGreaterThan(-1);
-    expect(authHandlerIndex).toBeGreaterThan(-1);
-    expect(rateLimitIndex).toBeLessThan(authHandlerIndex);
+  it('applies rate limiting to the auth handler in production', () => {
+    // The rate limiter is applied conditionally: skipped in test env, active otherwise.
+    // Verify the production branch wires authRateLimit before toNodeHandler(auth).
+    expect(authAppSource).toMatch(/authRateLimit,\s*toNodeHandler\s*\(\s*auth\s*\)/);
+  });
+
+  it('disables rate limiting in test environments', () => {
+    expect(authAppSource).toMatch(/isTestEnv/);
+    expect(authAppSource).toMatch(/NODE_ENV.*test|USE_MOCK_SERVICES/);
   });
 });

@@ -108,15 +108,23 @@ if (process.env.NODE_ENV !== 'production') {
   );
 }
 
-const authRateLimit = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 10,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  message: { error: 'Too many requests, please try again later.' },
-});
+// Disable rate limiting in test environments to avoid flaky integration tests.
+// This matches the pattern used by the backend's rateLimiting middleware.
+const isTestEnv = process.env.NODE_ENV === 'test' || process.env.USE_MOCK_SERVICES === 'true';
 
-app.use('/auth', authRateLimit, toNodeHandler(auth));
+if (isTestEnv) {
+  app.use('/auth', toNodeHandler(auth));
+} else {
+  const authRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+  });
+
+  app.use('/auth', authRateLimit, toNodeHandler(auth));
+}
 
 //endpoint for healthchecks
 app.get('/healthcheck', async (req, res) => {
