@@ -35,6 +35,6 @@ describe('addAlbum', () => {
     await addAlbum(req, res, next);
 
     expect(next).toHaveBeenCalledWith(error);
-    expect((res.send as jest.Mock)).not.toHaveBeenCalled();
+    expect(res.send as jest.Mock).not.toHaveBeenCalled();
   });
 });
