@@ -7,8 +7,9 @@ describe('server timeout configuration', () => {
   it('should set server timeout to at least 30 seconds', () => {
     const match = appSource.match(/server\.setTimeout\((\d+)\)/);
     expect(match).not.toBeNull();
+    if (!match) return;
 
-    const timeoutMs = Number(match![1]);
+    const timeoutMs = Number(match[1]);
     expect(timeoutMs).toBeGreaterThanOrEqual(30_000);
   });
 });
