@@ -115,14 +115,14 @@ describe('djs.service - getPlaylistsForDJ', () => {
     // Batched order: [showDjs, shows, allDjs, specialties, flowsheet]
     // N+1 order: [showDjs, show1, djs1, specialty1, fs1, show2, djs2, fs2, ...]
     // We fill enough slots so either code path can run without crashing.
-    queryResults.push(showDjRows);                // 0: show_djs for DJ
-    queryResults.push(showRows);                  // 1: batched shows / N+1 show[0]
-    queryResults.push(djRows);                    // 2: batched djs / N+1 djs[0]
-    queryResults.push(specialtyRows);             // 3: batched specialty / N+1 specialty[0]
-    queryResults.push(flowsheetRows);             // 4: batched flowsheet / N+1 flowsheet[0]
+    queryResults.push(showDjRows); // 0: show_djs for DJ
+    queryResults.push(showRows); // 1: batched shows / N+1 show[0]
+    queryResults.push(djRows); // 2: batched djs / N+1 djs[0]
+    queryResults.push(specialtyRows); // 3: batched specialty / N+1 specialty[0]
+    queryResults.push(flowsheetRows); // 4: batched flowsheet / N+1 flowsheet[0]
     // Extra slots for N+1 loop iterations (shows 2-5)
     for (let i = 1; i < NUM_SHOWS; i++) {
-      queryResults.push([showRows[i]]);           // show
+      queryResults.push([showRows[i]]); // show
       queryResults.push([{ dj_id: DJ_ID, dj_name: 'DJ One' }]); // djs
       if (showRows[i].specialty_id != null) {
         queryResults.push(specialtyRows);

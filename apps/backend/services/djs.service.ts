@@ -77,9 +77,7 @@ export const getPlaylistsForDJ = async (dj_id: string) => {
     .innerJoin(user, eq(show_djs.dj_id, user.id))
     .where(inArray(show_djs.show_id, showIds));
 
-  const specialtyIds = allShows
-    .filter((s) => s.specialty_id != null)
-    .map((s) => s.specialty_id!);
+  const specialtyIds = allShows.filter((s) => s.specialty_id != null).map((s) => s.specialty_id!);
 
   const allSpecialties =
     specialtyIds.length > 0
