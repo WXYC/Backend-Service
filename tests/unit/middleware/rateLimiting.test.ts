@@ -35,11 +35,9 @@ describe('songRequestRateLimit keyGenerator', () => {
 
     await import('../../../apps/backend/middleware/rateLimiting');
 
-    const songRequestConfig = capturedConfigs.find(
-      (c) => typeof c.keyGenerator === 'function'
-    );
+    const songRequestConfig = capturedConfigs.find((c) => typeof c.keyGenerator === 'function');
     expect(songRequestConfig).toBeDefined();
-    keyGenerator = songRequestConfig!.keyGenerator as (req: Request) => string;
+    keyGenerator = songRequestConfig.keyGenerator as (req: Request) => string;
   });
 
   afterAll(() => {
