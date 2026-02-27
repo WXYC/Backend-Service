@@ -2,10 +2,7 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
 describe('Auth service rate limiting', () => {
-  const authAppSource = readFileSync(
-    resolve(__dirname, '../../../apps/auth/app.ts'),
-    'utf-8'
-  );
+  const authAppSource = readFileSync(resolve(__dirname, '../../../apps/auth/app.ts'), 'utf-8');
 
   it('imports express-rate-limit', () => {
     expect(authAppSource).toMatch(/express-rate-limit/);
