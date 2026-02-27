@@ -10,10 +10,10 @@ const getTestToken = async () => {
 
 describe('Request Line Endpoint', () => {
   describe('Device Registration (Legacy Endpoint)', () => {
-    it('should return 301 redirect for legacy registration endpoint', async () => {
+    it('should return 410 Gone for legacy registration endpoint', async () => {
       const response = await request.post('/request/register').send({ deviceId: 'test-uuid' });
 
-      expect(response.status).toBe(301);
+      expect(response.status).toBe(410);
       expect(response.body.message).toMatch(/deprecated/i);
       expect(response.body.endpoint).toMatch(/sign-in\/anonymous/);
     });
