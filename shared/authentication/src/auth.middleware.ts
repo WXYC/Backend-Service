@@ -104,7 +104,7 @@ export function requirePermissions(required: RequiredPermissions) {
     }
 
     // Update req.auth with normalized role so downstream sees a valid WXYCRole
-    req.auth = { ...req.auth!, role: normalizedRole };
+    req.auth = { ...req.auth, role: normalizedRole };
 
     const roleImpl = WXYCRoles[normalizedRole];
 
