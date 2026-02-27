@@ -15,7 +15,7 @@ describe('flowsheet.service', () => {
         update: jest.fn().mockReturnValue(emptyChain),
       };
 
-      (db as any).transaction = jest.fn().mockImplementation(async (cb: Function) => {
+      (db as any).transaction = jest.fn().mockImplementation(async (cb: (trx: typeof mockTrx) => Promise<void>) => {
         return cb(mockTrx);
       });
 
