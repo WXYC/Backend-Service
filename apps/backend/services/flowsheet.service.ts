@@ -40,12 +40,9 @@ const updateLastModified = () => {
   }
 };
 
-/** Get the next play_order value for a given show (max + 1, or 1 if no entries exist) */
-export const getNextPlayOrder = async (showId: number): Promise<number> => {
-  const result = await db
-    .select({ maxOrder: max(flowsheet.play_order) })
-    .from(flowsheet)
-    .where(eq(flowsheet.show_id, showId));
+/** Get the next play_order value (global max + 1, or 1 if no entries exist) */
+export const getNextPlayOrder = async (): Promise<number> => {
+  const result = await db.select({ maxOrder: max(flowsheet.play_order) }).from(flowsheet);
   return (result[0]?.maxOrder ?? 0) + 1;
 };
 
@@ -213,7 +210,7 @@ export const addTrack = async (entry: Omit<NewFSEntry, 'play_order'> & { play_or
 
   // Compute play_order if not already set
   if (entry.show_id != null && !entry.play_order) {
-    entry = { ...entry, play_order: await getNextPlayOrder(entry.show_id) };
+    entry = { ...entry, play_order: await getNextPlayOrder() };
   }
 
   const response = await db
@@ -308,7 +305,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
     })
     .returning();
 
-  const startPlayOrder = await getNextPlayOrder(new_show[0].id);
+  const startPlayOrder = await getNextPlayOrder();
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
     play_order: startPlayOrder,
@@ -371,7 +368,7 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
 
   const message = `${dj_name} joined the set!`;
 
-  const joinPlayOrder = await getNextPlayOrder(show_id);
+  const joinPlayOrder = await getNextPlayOrder();
   const notification = await db
     .insert(flowsheet)
     .values({
@@ -409,7 +406,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   const dj_information = (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0];
   const dj_name = dj_information?.djName || dj_information?.name || 'A DJ';
 
-  const endPlayOrder = await getNextPlayOrder(currentShow.id);
+  const endPlayOrder = await getNextPlayOrder();
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
     play_order: endPlayOrder,
@@ -454,7 +451,7 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
 
   const message = `${dj_name} left the set!`;
 
-  const leavePlayOrder = await getNextPlayOrder(show_id);
+  const leavePlayOrder = await getNextPlayOrder();
   const notification = await db
     .insert(flowsheet)
     .values({
