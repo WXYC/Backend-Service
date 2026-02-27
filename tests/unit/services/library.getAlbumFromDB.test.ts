@@ -27,7 +27,16 @@ jest.mock('@wxyc/database', () => ({
     update: jest.fn().mockReturnThis(),
     delete: jest.fn().mockReturnThis(),
   },
-  library: { id: 'lib.id', code_number: 'lib.code_number', album_title: 'lib.album_title', label: 'lib.label', plays: 'lib.plays', add_date: 'lib.add_date', last_modified: 'lib.last_modified', artist_id: 'lib.artist_id' },
+  library: {
+    id: 'lib.id',
+    code_number: 'lib.code_number',
+    album_title: 'lib.album_title',
+    label: 'lib.label',
+    plays: 'lib.plays',
+    add_date: 'lib.add_date',
+    last_modified: 'lib.last_modified',
+    artist_id: 'lib.artist_id',
+  },
   artists: {
     id: 'artists.id',
     code_letters: CODE_LETTERS_SENTINEL,
