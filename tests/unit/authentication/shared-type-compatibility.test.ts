@@ -48,7 +48,10 @@ describe('shared type compatibility', () => {
         // Backend path: normalizeRole returns the role as-is, then shared maps it
         const normalized = normalizeRole(role);
         expect(normalized).toBe(role);
-        expect(roleToAuthorization(normalized!)).toBe(sharedAuth);
+        expect(normalized).toBeDefined();
+        if (normalized) {
+          expect(roleToAuthorization(normalized)).toBe(sharedAuth);
+        }
       },
     );
   });

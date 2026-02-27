@@ -53,6 +53,7 @@ export { roleToAuthorization, Authorization } from '@wxyc/shared/auth-client/aut
 // Backend-Service maps to "stationManager" via normalizeRole() rather than
 // defining as a separate better-auth role.
 type _AssertLocalRolesAreShared = [keyof typeof WXYCRoles] extends [WXYCRole] ? true : never;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const _localRolesValid: _AssertLocalRolesAreShared = true;
 
 /** The set of roles that have a better-auth access control implementation. */

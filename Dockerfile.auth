@@ -1,8 +1,10 @@
 #Build stage
 FROM node:22-alpine AS builder
 
+ARG NPM_TOKEN
 WORKDIR /auth-builder
 
+COPY ./.npmrc ./
 COPY ./package.json ./package-lock.json ./
 COPY ./tsconfig.base.json ./
 COPY ./shared ./shared
@@ -13,14 +15,16 @@ RUN npm ci && npm run build --workspace=@wxyc/database --workspace=shared/** --w
 #Production stage
 FROM node:22-alpine AS prod
 
+ARG NPM_TOKEN
 WORKDIR /auth-service
 
+COPY ./.npmrc ./
 COPY ./package* ./
 COPY ./apps/auth/package* ./apps/auth/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/authentication/package* ./shared/authentication/
 
-RUN npm install --omit=dev
+RUN npm install --omit=dev && rm -f .npmrc
 
 COPY --from=builder ./auth-builder/apps/auth/dist ./apps/auth/dist
 COPY --from=builder ./auth-builder/shared/database/dist ./shared/database/dist
