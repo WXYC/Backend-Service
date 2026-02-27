@@ -84,7 +84,7 @@ describe('End Show', () => {
       .send({
         dj_id: global.secondary_dj_id,
       })
-      .expect(404);
+      .expect(400);
     expect(res.body.message).toBeDefined();
   });
 });
@@ -139,7 +139,7 @@ describe('Leave Show', () => {
       .send({
         dj_id: global.secondary_dj_id,
       })
-      .expect(404);
+      .expect(400);
     expect(res.body.message).toBeDefined();
   });
 });
