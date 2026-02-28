@@ -53,8 +53,10 @@ export type RequiredPermissions = {
 export function requirePermissions(required: RequiredPermissions) {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (process.env.AUTH_BYPASS === 'true') {
-      // In bypass mode, still decode the JWT (without verification) so that
+      // In bypass mode, try to decode the JWT (without verification) so that
       // req.auth is populated for controllers that rely on req.auth.id.
+      // If the token is not a valid JWT (e.g. integration tests pass a raw
+      // user ID), fall back to using the token value as the user ID directly.
       const authHeader = req.headers.authorization;
       if (authHeader) {
         const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader.trim();
@@ -66,7 +68,8 @@ export function requirePermissions(required: RequiredPermissions) {
               req.auth = { ...payload, id: userId } as WXYCAuthJwtPayload;
             }
           } catch {
-            // Token may not be a valid JWT in bypass mode; ignore decode errors
+            // Token is not a valid JWT -- treat it as a raw user ID.
+            req.auth = { id: token } as WXYCAuthJwtPayload;
           }
         }
       }

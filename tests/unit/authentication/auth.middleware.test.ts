@@ -6,17 +6,19 @@ process.env.BETTER_AUTH_ISSUER = 'https://test.example.com';
 process.env.BETTER_AUTH_AUDIENCE = 'https://test.example.com';
 
 // Mock jose -- the middleware calls createRemoteJWKSet at module scope
-// and jwtVerify on each request
+// and jwtVerify on each request. decodeJwt is used in AUTH_BYPASS mode.
 jest.mock('jose', () => ({
   createRemoteJWKSet: jest.fn(() => jest.fn()),
   jwtVerify: jest.fn(),
+  decodeJwt: jest.fn(),
 }));
 
-import { jwtVerify } from 'jose';
+import { jwtVerify, decodeJwt } from 'jose';
 import { requirePermissions } from '../../../shared/authentication/src/auth.middleware';
 import type { Request, Response, NextFunction } from 'express';
 
 const mockedJwtVerify = jwtVerify as jest.MockedFunction<typeof jwtVerify>;
+const mockedDecodeJwt = decodeJwt as jest.MockedFunction<typeof decodeJwt>;
 
 function createMocks(authHeader?: string) {
   const req = {
@@ -62,8 +64,11 @@ describe('requirePermissions middleware', () => {
   });
 
   describe('AUTH_BYPASS', () => {
-    it('should skip all validation when AUTH_BYPASS is "true"', async () => {
+    beforeEach(() => {
       process.env.AUTH_BYPASS = 'true';
+    });
+
+    it('should skip all validation when AUTH_BYPASS is "true"', async () => {
       const { req, res, next } = createMocks();
       const middleware = requirePermissions({ catalog: ['read'] });
 
@@ -71,6 +76,35 @@ describe('requirePermissions middleware', () => {
 
       expect(next).toHaveBeenCalled();
       expect(res.status).not.toHaveBeenCalled();
+    });
+
+    it('should populate req.auth from decoded JWT when token is a valid JWT', async () => {
+      mockedDecodeJwt.mockReturnValue({
+        sub: 'jwt-user-id',
+        email: 'test@wxyc.org',
+        role: 'dj',
+      } as any);
+      const { req, res, next } = createMocks('Bearer some.jwt.token');
+      const middleware = requirePermissions({ bin: ['read'] });
+
+      await middleware(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(req.auth?.id).toBe('jwt-user-id');
+    });
+
+    it('should use raw token as user ID when token is not a valid JWT', async () => {
+      mockedDecodeJwt.mockImplementation(() => {
+        throw new Error('Invalid token');
+      });
+      const userId = 'abc-123-user-id';
+      const { req, res, next } = createMocks(`Bearer ${userId}`);
+      const middleware = requirePermissions({ bin: ['read'] });
+
+      await middleware(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(req.auth?.id).toBe(userId);
     });
   });
 

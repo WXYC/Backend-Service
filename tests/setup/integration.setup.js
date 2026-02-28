@@ -51,7 +51,9 @@ beforeAll(async () => {
   await getUserIdsFromDatabase();
 
   if (process.env.AUTH_BYPASS === 'true') {
-    global.access_token = 'Auth Bypass Enabled';
+    // Pass the DJ's user ID as the token so the bypass middleware can
+    // populate req.auth.id for endpoints that derive identity from the JWT.
+    global.access_token = `Bearer ${global.primary_dj_id}`;
   } else {
     global.access_token = await get_access_token();
   }
