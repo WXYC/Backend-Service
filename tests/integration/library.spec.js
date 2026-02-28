@@ -183,7 +183,7 @@ describe('Library Rotation', () => {
       const res = await auth.get('/library/rotation').expect(200);
 
       if (res.body.length > 0) {
-        expectFields(res.body[0], 'id', 'artist_name', 'album_title', 'play_freq', 'rotation_id');
+        expectFields(res.body[0], 'id', 'artist_name', 'alphabetical_name', 'album_title', 'play_freq', 'rotation_id');
       }
     });
   });
@@ -317,8 +317,9 @@ describe('Library Artists', () => {
         })
         .expect(200);
 
-      expectFields(res.body, 'id', 'artist_name', 'code_letters', 'code_number');
+      expectFields(res.body, 'id', 'artist_name', 'alphabetical_name', 'code_letters', 'code_number');
       expect(res.body.artist_name).toContain('Test Artist');
+      expect(res.body.alphabetical_name).toBeDefined();
       expect(res.body.code_letters).toBe(uniqueSuffix);
     });
 
@@ -372,6 +373,22 @@ describe('Library Artists', () => {
         .expect(400);
 
       expectErrorContains(res, 'Missing Request Parameters');
+    });
+
+    test('accepts optional alphabetical_name and returns it', async () => {
+      const uniqueSuffix = Date.now().toString(36).toUpperCase().slice(-3);
+      const res = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `The Band ${uniqueSuffix}`,
+          alphabetical_name: `Band ${uniqueSuffix}, The`,
+          code_letters: uniqueSuffix,
+          genre_id: 1,
+          code_number: 1,
+        })
+        .expect(200);
+
+      expect(res.body.alphabetical_name).toBe(`Band ${uniqueSuffix}, The`);
     });
   });
 });
@@ -511,14 +528,14 @@ describe('Library Album Info', () => {
     test('returns album info for valid album_id', async () => {
       const res = await auth.get('/library/info').query({ album_id: 1 }).expect(200);
 
-      expectFields(res.body, 'id', 'artist_name', 'album_title');
+      expectFields(res.body, 'id', 'artist_name', 'alphabetical_name', 'album_title');
       expect(res.body.id).toBe(1);
     });
 
     test('returns album with all expected fields', async () => {
       const res = await auth.get('/library/info').query({ album_id: 1 }).expect(200);
 
-      expectFields(res.body, 'id', 'artist_name', 'album_title', 'code_letters', 'code_number', 'plays');
+      expectFields(res.body, 'id', 'artist_name', 'alphabetical_name', 'album_title', 'code_letters', 'code_number', 'plays');
     });
 
     test('returns 400 when album_id is missing', async () => {

@@ -5,6 +5,7 @@
 export const testArtist = {
   id: 1,
   artist_name: 'Test Artist',
+  alphabetical_name: 'Test Artist',
   code_letters: 'RO',
 };
 

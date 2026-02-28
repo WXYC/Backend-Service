@@ -208,6 +208,7 @@ export const artists = wxyc_schema.table(
   {
     id: serial('id').primaryKey(),
     artist_name: varchar('artist_name', { length: 128 }).notNull(),
+    alphabetical_name: varchar('alphabetical_name', { length: 128 }).notNull(),
     code_letters: varchar('code_letters', { length: 4 }).notNull(),
     add_date: date('add_date').defaultNow().notNull(),
     last_modified: timestamp('last_modified').defaultNow().notNull(),
@@ -420,6 +421,7 @@ export type LibraryArtistViewEntry = {
   code_artist_number: number;
   code_number: number;
   artist_name: string;
+  alphabetical_name: string;
   album_title: string;
   format_name: string;
   genre_name: string;
@@ -435,6 +437,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
       album_title: library.album_title,
       format_name: format.format_name,
       genre_name: genres.genre_name,
@@ -468,6 +471,7 @@ export const rotation_library_view = wxyc_schema.view('rotation_library_view').a
       play_freq: rotation.play_freq,
       album_title: library.album_title,
       artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
       kill_date: rotation.kill_date,
     })
     .from(library)

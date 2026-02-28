@@ -51,6 +51,8 @@ export interface LibraryResult {
   title: string | null;
   /** Artist name */
   artist: string | null;
+  /** Alphabetical sort name (e.g. "Beatles, The") */
+  alphabeticalName?: string | null;
   /** Genre code letters (e.g., "RO" for Rock) */
   codeLetters: string | null;
   /** Artist number within genre */

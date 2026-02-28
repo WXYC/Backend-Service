@@ -36,6 +36,7 @@ export const getBinFromDB = async (dj_id: string) => {
       album_id: bins.album_id,
       album_title: library.album_title,
       artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
       label: library.label,
       code_letters: artists.code_letters,
       code_artist_number: genre_artist_crossreference.artist_genre_code,

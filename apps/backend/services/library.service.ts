@@ -38,6 +38,7 @@ export interface Rotation {
   code_artist_number: number;
   code_number: number;
   artist_name: string;
+  alphabetical_name: string;
   album_title: string;
   record_label: string | null;
   genre_name: string;
@@ -58,6 +59,7 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
       code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
       album_title: library.album_title,
       record_label: library.label,
       genre_name: genres.genre_name,
@@ -249,6 +251,7 @@ export const getAlbumFromDB = async (album_id: number) => {
       code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
       album_title: library.album_title,
       record_label: library.label,
       plays: library.plays,
@@ -297,6 +300,7 @@ function viewRowToLibraryResult(row: LibraryArtistViewEntry): LibraryResult {
     id: row.id,
     title: row.album_title,
     artist: row.artist_name,
+    alphabeticalName: row.alphabetical_name,
     codeLetters: row.code_letters,
     codeArtistNumber: row.code_artist_number,
     codeNumber: row.code_number,

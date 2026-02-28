@@ -120,6 +120,7 @@ export const searchForAlbum: RequestHandler = async (
 
 type NewArtistRequest = {
   artist_name: string;
+  alphabetical_name?: string;
   code_letters: string;
   genre_id: number;
   code_number: number;
@@ -127,7 +128,6 @@ type NewArtistRequest = {
 
 export const addArtist: RequestHandler = async (req: Request<object, object, NewArtistRequest>, res, next) => {
   const { body } = req;
-  //TODO auto_generate artist code letters and make it an optional parameter
   if (
     body.artist_name === undefined ||
     body.code_letters === undefined ||
@@ -138,11 +138,7 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
     res.send('Missing Request Parameters: artist_name, code_letters, genre_id, or code_number');
   } else {
     try {
-      const existingArtist = await libraryService.getArtistByCode(
-        body.code_letters,
-        body.genre_id,
-        body.code_number
-      );
+      const existingArtist = await libraryService.getArtistByCode(body.code_letters, body.genre_id, body.code_number);
       if (existingArtist) {
         res.status(409).json({
           message: 'Artist code already exists for that genre and code letters.',
@@ -153,6 +149,7 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
 
       const new_artist: NewArtist = {
         artist_name: body.artist_name,
+        alphabetical_name: body.alphabetical_name ?? body.artist_name,
         code_letters: body.code_letters,
       };
 

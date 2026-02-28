@@ -73,6 +73,7 @@ import {
   toNullableNumber,
   isDbOnlyGenre,
   normalizeArtistName,
+  toAlphabeticalName,
   normalizeCodeLetters,
   parseFormatAndDiscs,
   toDateOrUndefined,
@@ -168,6 +169,24 @@ describe('library-etl job helpers', () => {
       const r = normalizeArtistName('Various Artists');
       expect(r.name).toBe('Various Artists');
       expect(r.isVarious).toBe(false);
+    });
+  });
+
+  describe('toAlphabeticalName', () => {
+    it('uses legacy value when provided and non-empty', () => {
+      expect(toAlphabeticalName('The Beatles', 'Beatles, The')).toBe('Beatles, The');
+      expect(toAlphabeticalName('Some Artist', 'Artist, Some')).toBe('Artist, Some');
+    });
+
+    it('derives "The X" as "X, The" when no legacy', () => {
+      expect(toAlphabeticalName('The Beatles', null)).toBe('Beatles, The');
+      expect(toAlphabeticalName('The Beatles', '')).toBe('Beatles, The');
+      expect(toAlphabeticalName('  The Rolling Stones  ', undefined)).toBe('Rolling Stones, The');
+    });
+
+    it('returns trimmed artist name when no "The" prefix and no legacy', () => {
+      expect(toAlphabeticalName('Built to Spill', null)).toBe('Built to Spill');
+      expect(toAlphabeticalName('  FKA twigs  ', '')).toBe('FKA twigs');
     });
   });
 

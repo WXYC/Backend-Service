@@ -66,6 +66,18 @@ const normalizeArtistName = (name: string) => {
   return { name: trimmed, isVarious: false };
 };
 
+/**
+ * Derive alphabetical sort name (e.g. "The Beatles" -> "Beatles, The").
+ * Uses legacy value when provided and non-empty.
+ */
+const toAlphabeticalName = (artistName: string, fromLegacy?: string | null): string => {
+  const legacy = fromLegacy?.trim();
+  if (legacy && legacy.length > 0) return legacy;
+  // This shouldn't be necessary, but just in case since alphabetical_name is not nullable in database
+  const match = artistName.trim().match(/^The\s+(.+)$/i);
+  return match ? `${match[1]}, The` : artistName.trim();
+};
+
 const normalizeCodeLetters = (code: string | null) => {
   if (!code) return null;
   const trimmed = code.trim();
@@ -203,6 +215,7 @@ const fetchLegacyReleases = async (lastRunMs: number | null) => {
 const ensureArtist = async (
   dbClient: DbClient,
   artistName: string,
+  alphabeticalName: string,
   isVarious: boolean,
   genreId: number,
   codeLetters: string | null,
@@ -248,6 +261,7 @@ const ensureArtist = async (
     .insert(artists)
     .values({
       artist_name: artistName,
+      alphabetical_name: alphabeticalName,
       code_letters: normalizedLetters,
       add_date: addDate,
       last_modified: lastModified,
@@ -366,16 +380,16 @@ const run = async () => {
           skippedCount += 1;
           continue;
         }
+        const alphabeticalName = toAlphabeticalName(artistInfo.name, release.artist_alpha_name);
         const codeLetters = artistInfo.isVarious
           ? VARIOUS_ARTISTS_CODE_LETTERS
           : normalizeCodeLetters(release.artist_call_letters);
-        const artistGenreCode = artistInfo.isVarious
-          ? VARIOUS_ARTISTS_CODE_NUMBER
-          : (release.artist_call_numbers ?? 0);
+        const artistGenreCode = artistInfo.isVarious ? VARIOUS_ARTISTS_CODE_NUMBER : (release.artist_call_numbers ?? 0);
 
         const artistId = await ensureArtist(
           tx,
           artistInfo.name,
+          alphabeticalName,
           artistInfo.isVarious,
           genreId,
           codeLetters,
@@ -385,12 +399,7 @@ const run = async () => {
           toDateOrUndefined(release.release_last_modified)
         );
 
-        await ensureGenreArtistCrossref(
-          tx,
-          artistId,
-          genreId,
-          artistGenreCode
-        );
+        await ensureGenreArtistCrossref(tx, artistId, genreId, artistGenreCode);
 
         const albumTitle = release.release_title.trim();
         if (albumTitle.length === 0) {
@@ -448,6 +457,7 @@ export {
   toNullableNumber,
   isDbOnlyGenre,
   normalizeArtistName,
+  toAlphabeticalName,
   normalizeCodeLetters,
   parseFormatAndDiscs,
   toDateOrUndefined,
