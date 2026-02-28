@@ -1,4 +1,4 @@
-CREATE TABLE "wxyc_schema"."cronjob_runs" (
+CREATE TABLE IF NOT EXISTS "wxyc_schema"."cronjob_runs" (
 	"job_name" varchar(64) PRIMARY KEY NOT NULL,
 	"last_run" timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -11,7 +11,7 @@ DROP VIEW IF EXISTS "wxyc_schema"."library_artist_view";
 ALTER TABLE "wxyc_schema"."artists" ALTER COLUMN "code_letters" SET DATA TYPE varchar(4);
 --> statement-breakpoint
 
-ALTER TABLE "wxyc_schema"."library" ADD COLUMN "code_volume_letters" varchar(4);
+ALTER TABLE "wxyc_schema"."library" ADD COLUMN IF NOT EXISTS "code_volume_letters" varchar(4);
 --> statement-breakpoint
 
 --> Recreate view with the altered column in the artists table
