@@ -358,11 +358,19 @@ class DiscogsServiceClass {
   }
 
   /**
+   * Search for releases by UPC/EAN barcode.
+   */
+  async searchByBarcode(barcode: string): Promise<DiscogsSearchResponse> {
+    const response = await this.search({ barcode, type: 'release' });
+    return response;
+  }
+
+  /**
    * Build search params using Discogs-specific fields.
    */
   private buildSearchParams(request: DiscogsSearchRequest, limit: number): Record<string, string | number> {
     const params: Record<string, string | number> = {
-      type: 'release',
+      type: request.type || 'release',
       per_page: limit,
     };
 
@@ -373,6 +381,9 @@ class DiscogsServiceClass {
       params.release_title = request.album;
     } else if (request.track) {
       params.release_title = request.track;
+    }
+    if (request.barcode) {
+      params.barcode = request.barcode;
     }
 
     return params;

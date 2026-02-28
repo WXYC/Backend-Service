@@ -271,6 +271,8 @@ export interface DiscogsSearchRequest {
   artist?: string;
   album?: string;
   track?: string;
+  barcode?: string;
+  type?: string;
 }
 
 /**
