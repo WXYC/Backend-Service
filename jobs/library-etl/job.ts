@@ -206,28 +206,37 @@ const ensureArtist = async (
   isVarious: boolean,
   genreId: number,
   codeLetters: string | null,
-  codeArtistNumber: number | null,
+  artistGenreCode: number,
   artistCache: Map<string, number>,
   addDate?: string,
   lastModified?: Date
 ) => {
   const normalizedLetters = codeLetters ?? '??';
-  const normalizedNumber = codeArtistNumber ?? 0;
-  const artistKey = `${artistName.toLowerCase()}|${normalizedLetters}|${normalizedNumber}`;
+  const artistKey = isVarious
+    ? `${artistName.toLowerCase()}|${normalizedLetters}`
+    : `${artistName.toLowerCase()}|${normalizedLetters}|${genreId}|${artistGenreCode}`;
   const cached = artistCache.get(artistKey);
   if (cached) return cached;
 
-  const baseConditions = [
-    eq(artists.artist_name, artistName),
-    eq(artists.code_letters, normalizedLetters),
-    eq(artists.code_artist_number, normalizedNumber),
-  ];
-
-  const query = dbClient
-    .select({ id: artists.id })
-    .from(artists)
-    .where(isVarious ? and(...baseConditions) : and(...baseConditions, eq(artists.genre_id, genreId)))
-    .limit(1);
+  const query = isVarious
+    ? dbClient
+        .select({ id: artists.id })
+        .from(artists)
+        .where(and(eq(artists.artist_name, artistName), eq(artists.code_letters, normalizedLetters)))
+        .limit(1)
+    : dbClient
+        .select({ id: artists.id })
+        .from(artists)
+        .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+        .where(
+          and(
+            eq(artists.artist_name, artistName),
+            eq(artists.code_letters, normalizedLetters),
+            eq(genre_artist_crossreference.genre_id, genreId),
+            eq(genre_artist_crossreference.artist_genre_code, artistGenreCode)
+          )
+        )
+        .limit(1);
 
   const existing = await query;
   if (existing.length) {
@@ -239,9 +248,7 @@ const ensureArtist = async (
     .insert(artists)
     .values({
       artist_name: artistName,
-      genre_id: genreId,
       code_letters: normalizedLetters,
-      code_artist_number: normalizedNumber,
       add_date: addDate,
       last_modified: lastModified,
     })
@@ -362,7 +369,7 @@ const run = async () => {
         const codeLetters = artistInfo.isVarious
           ? VARIOUS_ARTISTS_CODE_LETTERS
           : normalizeCodeLetters(release.artist_call_letters);
-        const codeArtistNumber = artistInfo.isVarious
+        const artistGenreCode = artistInfo.isVarious
           ? VARIOUS_ARTISTS_CODE_NUMBER
           : (release.artist_call_numbers ?? 0);
 
@@ -372,7 +379,7 @@ const run = async () => {
           artistInfo.isVarious,
           genreId,
           codeLetters,
-          codeArtistNumber,
+          artistGenreCode,
           artistCache,
           toDateOnlyString(release.release_time_created),
           toDateOrUndefined(release.release_last_modified)
@@ -382,7 +389,7 @@ const run = async () => {
           tx,
           artistId,
           genreId,
-          artistInfo.isVarious ? VARIOUS_ARTISTS_CODE_NUMBER : (release.artist_call_numbers ?? 0)
+          artistGenreCode
         );
 
         const albumTitle = release.release_title.trim();
