@@ -9,8 +9,5 @@ export default defineConfig((options) => ({
   clean: true,
   sourcemap: true,
   external: ['@wxyc/database', 'better-auth', 'drizzle-orm', 'express', 'cors', 'postgres'],
-  env: {
-    NODE_ENV: process.env.NODE_ENV || 'development',
-  },
   onSuccess: options.watch ? 'node ./dist/app.js' : undefined,
 }));
