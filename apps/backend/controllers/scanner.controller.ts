@@ -1,11 +1,13 @@
 /**
- * Scanner controller for vinyl record image scanning and UPC lookup.
+ * Scanner controller for vinyl record image scanning, UPC lookup,
+ * and batch processing.
  */
 
 import { RequestHandler } from 'express';
 import { processImages } from '../services/scanner/processor.js';
 import { ScanContext } from '../services/scanner/types.js';
 import { DiscogsService } from '../services/discogs/discogs.service.js';
+import * as batchService from '../services/scanner/batch.js';
 
 /**
  * POST /library/scan
@@ -93,6 +95,125 @@ export const upcLookup: RequestHandler = async (req, res, next) => {
     res.status(200).json(results);
   } catch (error) {
     console.error('Error looking up UPC:', error);
+    next(error);
+  }
+};
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const MAX_BATCH_ITEMS = 10;
+const MAX_IMAGES_PER_ITEM = 5;
+const MAX_TOTAL_IMAGES = 50;
+
+/**
+ * POST /library/scan/batch
+ *
+ * Accepts multipart form data with vinyl record images and a JSON manifest
+ * describing how images map to items. Returns 202 with a job ID for polling.
+ *
+ * Form fields:
+ * - images: up to 50 JPEG files (via multer)
+ * - manifest: JSON string with item groupings:
+ *   {
+ *     "items": [
+ *       { "imageCount": 2, "photoTypes": ["front_cover", "center_label"], "context": { "artistName": "..." } }
+ *     ]
+ *   }
+ */
+export const createBatchScan: RequestHandler = async (req, res, next) => {
+  try {
+    const files = req.files as Express.Multer.File[] | undefined;
+    if (!files || files.length === 0) {
+      res.status(400).json({ status: 400, message: 'No images provided' });
+      return;
+    }
+
+    // Parse manifest
+    const rawManifest = req.body.manifest;
+    if (!rawManifest || typeof rawManifest !== 'string') {
+      res.status(400).json({ status: 400, message: 'Missing or invalid manifest field' });
+      return;
+    }
+
+    let manifest: { items: batchService.BatchItem[] };
+    try {
+      manifest = JSON.parse(rawManifest);
+    } catch {
+      res.status(400).json({ status: 400, message: 'Invalid JSON in manifest field' });
+      return;
+    }
+
+    if (!manifest.items || !Array.isArray(manifest.items) || manifest.items.length === 0) {
+      res.status(400).json({ status: 400, message: 'Manifest must contain a non-empty items array' });
+      return;
+    }
+
+    // Validate limits
+    if (manifest.items.length > MAX_BATCH_ITEMS) {
+      res.status(400).json({ status: 400, message: `Batch cannot exceed ${MAX_BATCH_ITEMS} items` });
+      return;
+    }
+
+    const totalExpectedImages = manifest.items.reduce((sum, item) => sum + (item.imageCount || 0), 0);
+
+    if (totalExpectedImages > MAX_TOTAL_IMAGES) {
+      res.status(400).json({ status: 400, message: `Total images cannot exceed ${MAX_TOTAL_IMAGES}` });
+      return;
+    }
+
+    for (const item of manifest.items) {
+      if (item.imageCount > MAX_IMAGES_PER_ITEM) {
+        res.status(400).json({ status: 400, message: `Each item cannot exceed ${MAX_IMAGES_PER_ITEM} images` });
+        return;
+      }
+    }
+
+    if (files.length !== totalExpectedImages) {
+      res.status(400).json({
+        status: 400,
+        message: `Image count mismatch: ${files.length} files uploaded but manifest expects ${totalExpectedImages}`,
+      });
+      return;
+    }
+
+    const imageBuffers = files.map((file) => file.buffer);
+    const userId = req.auth!.id!;
+
+    const result = await batchService.createBatchJob(userId, manifest.items, imageBuffers);
+
+    res.status(202).json(result);
+  } catch (error) {
+    console.error('Error creating batch scan:', error);
+    next(error);
+  }
+};
+
+/**
+ * GET /library/scan/batch/:jobId
+ *
+ * Returns the current status of a batch scan job, including individual
+ * result statuses and extraction data.
+ */
+export const getBatchStatus: RequestHandler = async (req, res, next) => {
+  try {
+    const { jobId } = req.params;
+
+    if (!UUID_REGEX.test(jobId)) {
+      res.status(400).json({ status: 400, message: 'Invalid job ID format' });
+      return;
+    }
+
+    const userId = req.auth!.id!;
+    const status = await batchService.getJobStatus(jobId, userId);
+
+    if (!status) {
+      res.status(404).json({ status: 404, message: 'Job not found' });
+      return;
+    }
+
+    res.status(200).json(status);
+  } catch (error) {
+    console.error('Error getting batch status:', error);
     next(error);
   }
 };

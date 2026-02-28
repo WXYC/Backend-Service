@@ -1,5 +1,6 @@
 /**
- * Scanner routes for vinyl record image scanning and UPC lookup.
+ * Scanner routes for vinyl record image scanning, UPC lookup,
+ * and batch processing.
  */
 
 import { requirePermissions } from '@wxyc/authentication';
@@ -20,5 +21,14 @@ scanner_route.post(
   upload.array('images', 5),
   scannerController.scanImages
 );
+
+scanner_route.post(
+  '/batch',
+  requirePermissions({ catalog: ['write'] }),
+  upload.array('images', 50),
+  scannerController.createBatchScan
+);
+
+scanner_route.get('/batch/:jobId', requirePermissions({ catalog: ['read'] }), scannerController.getBatchStatus);
 
 scanner_route.post('/upc-lookup', requirePermissions({ catalog: ['read'] }), scannerController.upcLookup);

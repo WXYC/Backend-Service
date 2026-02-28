@@ -15,6 +15,8 @@ import {
   pgEnum,
   date,
   uniqueIndex,
+  uuid,
+  jsonb,
 } from 'drizzle-orm/pg-core';
 
 // Schema name is configurable for parallel test isolation (each Jest worker gets its own schema)
@@ -563,3 +565,55 @@ export const anonymous_devices = pgTable(
 
 export type AnonymousDevice = InferSelectModel<typeof anonymous_devices>;
 export type NewAnonymousDevice = InferInsertModel<typeof anonymous_devices>;
+
+// Scanner batch processing tables
+export const scanJobStatusEnum = wxyc_schema.enum('scan_job_status', ['pending', 'processing', 'completed', 'failed']);
+
+export const scanResultStatusEnum = wxyc_schema.enum('scan_result_status', [
+  'pending',
+  'processing',
+  'completed',
+  'failed',
+]);
+
+export const scan_jobs = wxyc_schema.table('scan_jobs', {
+  id: uuid('id').primaryKey(),
+  user_id: varchar('user_id', { length: 255 })
+    .notNull()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  status: scanJobStatusEnum('status').notNull().default('pending'),
+  total_items: smallint('total_items').notNull(),
+  completed_items: smallint('completed_items').notNull().default(0),
+  failed_items: smallint('failed_items').notNull().default(0),
+  created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ScanJobRow = InferSelectModel<typeof scan_jobs>;
+export type NewScanJobRow = InferInsertModel<typeof scan_jobs>;
+
+export const scan_results = wxyc_schema.table(
+  'scan_results',
+  {
+    id: serial('id').primaryKey(),
+    job_id: uuid('job_id')
+      .notNull()
+      .references(() => scan_jobs.id, { onDelete: 'cascade' }),
+    item_index: smallint('item_index').notNull(),
+    status: scanResultStatusEnum('status').notNull().default('pending'),
+    context: jsonb('context'),
+    extraction: jsonb('extraction'),
+    matched_album_id: integer('matched_album_id').references(() => library.id),
+    error_message: text('error_message'),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completed_at: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => {
+    return {
+      jobIdIdx: index('scan_results_job_id_idx').on(table.job_id),
+    };
+  }
+);
+
+export type ScanResultRow = InferSelectModel<typeof scan_results>;
+export type NewScanResultRow = InferInsertModel<typeof scan_results>;

@@ -90,9 +90,13 @@ export const shows = {};
 export const show_djs = {};
 export const user = {};
 export const specialty_shows = {};
+export const scan_jobs = {};
+export const scan_results = {};
 
-// Mock enum
+// Mock enums
 export const flowsheetEntryTypeEnum = () => ({});
+export const scanJobStatusEnum = () => ({});
+export const scanResultStatusEnum = () => ({});
 
 // Mock types
 export type AnonymousDevice = {
@@ -131,3 +135,8 @@ export type NewFSEntry = Partial<FSEntry>;
 export type Show = Record<string, unknown>;
 export type ShowDJ = Record<string, unknown>;
 export type User = Record<string, unknown>;
+
+export type ScanJobRow = Record<string, unknown>;
+export type NewScanJobRow = Record<string, unknown>;
+export type ScanResultRow = Record<string, unknown>;
+export type NewScanResultRow = Record<string, unknown>;
