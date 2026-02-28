@@ -301,11 +301,7 @@ type UpdateAlbumBody = {
   album_title?: string;
 };
 
-export const updateAlbum: RequestHandler = async (
-  req: Request<object, object, UpdateAlbumBody>,
-  res,
-  next
-) => {
+export const updateAlbum: RequestHandler = async (req: Request<object, object, UpdateAlbumBody>, res, next) => {
   const { body } = req;
   if (body.album_id === undefined) {
     res.status(400).send('Bad Request, Missing Parameter: album_id');

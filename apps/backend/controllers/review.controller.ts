@@ -27,11 +27,7 @@ type UpsertReviewBody = {
   author?: string;
 };
 
-export const upsertReview: RequestHandler = async (
-  req: Request<object, object, UpsertReviewBody>,
-  res,
-  next
-) => {
+export const upsertReview: RequestHandler = async (req: Request<object, object, UpsertReviewBody>, res, next) => {
   const { body } = req;
   if (body.album_id === undefined || body.review === undefined) {
     res.status(400).send('Bad Request, Missing Parameters: album_id and review are required');

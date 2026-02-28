@@ -3,11 +3,7 @@ import { db } from '@wxyc/database';
 import { reviews } from '@wxyc/database';
 
 export const getReviewByAlbumId = async (albumId: number) => {
-  const result = await db
-    .select()
-    .from(reviews)
-    .where(eq(reviews.album_id, albumId))
-    .limit(1);
+  const result = await db.select().from(reviews).where(eq(reviews.album_id, albumId)).limit(1);
   return result[0];
 };
 

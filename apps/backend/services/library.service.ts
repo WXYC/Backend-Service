@@ -251,10 +251,7 @@ export const lookupByLibraryCode = async (
   return result as LibraryArtistViewEntry[];
 };
 
-export const updateAlbumFields = async (
-  albumId: number,
-  fields: { label?: string; album_title?: string }
-) => {
+export const updateAlbumFields = async (albumId: number, fields: { label?: string; album_title?: string }) => {
   const result = await db
     .update(library)
     .set({
