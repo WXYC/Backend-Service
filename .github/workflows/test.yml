@@ -5,6 +5,26 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild all images (ignore cache)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TEST_HOST: http://localhost
+  CI_DB_PORT: 5433
+  CI_PORT: 8081
+  PORT: 8081
+  CI_BETTER_AUTH_URL: http://localhost:8083/auth
+  BETTER_AUTH_URL: http://localhost:8083/auth
+  DB_USERNAME: test-user
+  DB_PASSWORD: test-pw
+  DB_NAME: wxyc_db
+  AUTH_BYPASS: true
+  AUTH_USERNAME: test_dj1
+  AUTH_PASSWORD: testpassword123
 
 jobs:
   # Detect what changed to conditionally run jobs
