@@ -162,27 +162,6 @@
       "when": 1768890229444,
       "tag": "0025_rate_limiting_tables",
       "breakpoints": true
-    },
-    {
-      "idx": 26,
-      "version": "7",
-      "when": 1770938861646,
-      "tag": "0026_cron_job_tracking",
-      "breakpoints": true
-    },
-    {
-      "idx": 27,
-      "version": "7",
-      "when": 1770992362056,
-      "tag": "0027_drop_genre_from_artist_table",
-      "breakpoints": true
-    },
-    {
-      "idx": 28,
-      "version": "7",
-      "when": 1772287838030,
-      "tag": "0028_add_artists_alphabetical_name",
-      "breakpoints": true
     }
   ]
 }
