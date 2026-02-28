@@ -70,10 +70,7 @@ describe('Library Catalog', () => {
     });
 
     test('code lookup returns albums matching library code', async () => {
-      const res = await auth
-        .get('/library')
-        .query({ code_letters: 'BU', code_artist_number: '60' })
-        .expect(200);
+      const res = await auth.get('/library').query({ code_letters: 'BU', code_artist_number: '60' }).expect(200);
 
       expectArray(res);
       expect(res.body.length).toBeGreaterThan(0);
