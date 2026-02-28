@@ -90,6 +90,7 @@ services:
       dockerfile: Dockerfile.auth
     profiles: [ci]
     environment:
+      - NODE_ENV=test
       - DB_HOST=ci-db
       - DB_PORT=5432
       - DB_USERNAME=${DB_USERNAME}
