@@ -6,9 +6,9 @@ const { createAuthRequest, expectErrorContains, expectFields, expectArray } = re
  * DJ Endpoints Integration Tests
  *
  * Tests for:
- * - GET /djs/bin - Retrieve DJ's bin
- * - POST /djs/bin - Add entry to bin
- * - DELETE /djs/bin - Remove entry from bin
+ * - GET /djs/bin - Retrieve authenticated DJ's bin
+ * - POST /djs/bin - Add entry to authenticated DJ's bin
+ * - DELETE /djs/bin - Remove entry from authenticated DJ's bin
  * - GET /djs/playlists - Get playlists for a DJ
  */
 
@@ -20,20 +20,8 @@ describe('DJ Bin', () => {
   });
 
   describe('GET /djs/bin', () => {
-    test('returns array for DJ', async () => {
-      const res = await auth.get('/djs/bin').query({ dj_id: global.primary_dj_id }).expect(200);
-
-      expectArray(res);
-    });
-
-    test('returns 400 when dj_id is missing', async () => {
-      const res = await auth.get('/djs/bin').expect(400);
-
-      expectErrorContains(res, 'Missing DJ Identifier');
-    });
-
-    test('returns empty array for DJ with no bin entries', async () => {
-      const res = await auth.get('/djs/bin').query({ dj_id: global.secondary_dj_id }).expect(200);
+    test('returns array for authenticated DJ', async () => {
+      const res = await auth.get('/djs/bin').expect(200);
 
       expectArray(res);
     });
@@ -42,28 +30,25 @@ describe('DJ Bin', () => {
   describe('POST /djs/bin', () => {
     afterEach(async () => {
       // Clean up any bin entries created during tests
-      await auth.delete('/djs/bin').query({ dj_id: global.primary_dj_id, album_id: 1 });
+      await auth.delete('/djs/bin').query({ album_id: 1 });
     });
 
     test('adds entry to bin successfully', async () => {
       const res = await auth
         .post('/djs/bin')
         .send({
-          dj_id: global.primary_dj_id,
           album_id: 1,
         })
         .expect(200);
 
       expectFields(res.body, 'album_id', 'dj_id');
       expect(res.body.album_id).toBe(1);
-      expect(res.body.dj_id).toBe(global.primary_dj_id);
     });
 
     test('adds entry with track title to bin', async () => {
       const res = await auth
         .post('/djs/bin')
         .send({
-          dj_id: global.primary_dj_id,
           album_id: 1,
           track_title: 'Carry the Zero',
         })
@@ -75,23 +60,7 @@ describe('DJ Bin', () => {
     });
 
     test('returns 400 when album_id is missing', async () => {
-      const res = await auth
-        .post('/djs/bin')
-        .send({
-          dj_id: global.primary_dj_id,
-        })
-        .expect(400);
-
-      expectErrorContains(res, 'Missing');
-    });
-
-    test('returns 400 when dj_id is missing', async () => {
-      const res = await auth
-        .post('/djs/bin')
-        .send({
-          album_id: 1,
-        })
-        .expect(400);
+      const res = await auth.post('/djs/bin').send({}).expect(400);
 
       expectErrorContains(res, 'Missing');
     });
@@ -101,31 +70,24 @@ describe('DJ Bin', () => {
     beforeEach(async () => {
       // Set up a bin entry to delete
       await auth.post('/djs/bin').send({
-        dj_id: global.primary_dj_id,
         album_id: 2,
       });
     });
 
     test('removes entry from bin successfully', async () => {
-      const res = await auth.delete('/djs/bin').query({ dj_id: global.primary_dj_id, album_id: 2 }).expect(200);
+      const res = await auth.delete('/djs/bin').query({ album_id: 2 }).expect(200);
 
       expect(res.body).toBeDefined();
 
       // Verify it was removed
-      const binRes = await auth.get('/djs/bin').query({ dj_id: global.primary_dj_id }).expect(200);
+      const binRes = await auth.get('/djs/bin').expect(200);
 
       const entry = binRes.body.find((e) => e.album_id === 2);
       expect(entry).toBeUndefined();
     });
 
     test('returns 400 when album_id is missing', async () => {
-      const res = await auth.delete('/djs/bin').query({ dj_id: global.primary_dj_id }).expect(400);
-
-      expectErrorContains(res, 'Missing');
-    });
-
-    test('returns 400 when dj_id is missing', async () => {
-      const res = await auth.delete('/djs/bin').query({ album_id: 2 }).expect(400);
+      const res = await auth.delete('/djs/bin').expect(400);
 
       expectErrorContains(res, 'Missing');
     });

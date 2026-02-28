@@ -26,6 +26,8 @@ env:
   DB_PASSWORD: test-pw
   DB_NAME: wxyc_db
   AUTH_BYPASS: true
+  AUTH_USERNAME: test_dj1
+  AUTH_PASSWORD: testpassword123
 
 jobs:
   # Detect what changed to conditionally run jobs
