@@ -1,4 +1,4 @@
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
 import {
@@ -222,6 +222,48 @@ export const insertGenre = async (genre: NewGenre) => {
 export const isISODate = (date: string): boolean => {
   const regex = /^\d{4}-\d{2}-\d{2}$/;
   return date.match(regex) !== null;
+};
+
+export const lookupByLibraryCode = async (
+  code_letters: string,
+  code_artist_number: number,
+  code_number?: number,
+  genre_name?: string
+): Promise<LibraryArtistViewEntry[]> => {
+  const conditions = [
+    eq(library_artist_view.code_letters, code_letters),
+    eq(library_artist_view.code_artist_number, code_artist_number),
+  ];
+
+  if (code_number !== undefined) {
+    conditions.push(eq(library_artist_view.code_number, code_number));
+  }
+
+  if (genre_name !== undefined) {
+    conditions.push(eq(library_artist_view.genre_name, genre_name));
+  }
+
+  const result = await db
+    .select()
+    .from(library_artist_view)
+    .where(and(...conditions));
+
+  return result as LibraryArtistViewEntry[];
+};
+
+export const updateAlbumFields = async (
+  albumId: number,
+  fields: { label?: string; album_title?: string }
+) => {
+  const result = await db
+    .update(library)
+    .set({
+      ...fields,
+      last_modified: sql`now()`,
+    })
+    .where(eq(library.id, albumId))
+    .returning();
+  return result[0];
 };
 
 // =============================================================================

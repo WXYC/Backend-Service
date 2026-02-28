@@ -83,6 +83,7 @@ type AlbumQueryParams = {
   code_letters?: string;
   code_artist_number?: string;
   code_number?: number;
+  genre_name?: string;
   n?: number;
   page?: number;
 };
@@ -103,9 +104,19 @@ export const searchForAlbum: RequestHandler = async (
       'Missing query parameter. Query must include: artist_name, album_title, or code_letters, code_artist_number, and code_number'
     );
   } else if (query.code_letters !== undefined && query.code_artist_number !== undefined) {
-    //quickly look up albums by that artist
-    res.status(501);
-    res.send('TODO: Library Code Lookup');
+    try {
+      const response = await libraryService.lookupByLibraryCode(
+        query.code_letters,
+        parseInt(query.code_artist_number),
+        query.code_number !== undefined ? Number(query.code_number) : undefined,
+        query.genre_name
+      );
+      res.status(200).json(response);
+    } catch (e) {
+      console.error('Error: Library code lookup failed');
+      console.error(e);
+      next(e);
+    }
   } else {
     try {
       const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n);
@@ -278,6 +289,36 @@ export const getAlbum: RequestHandler<object, unknown, unknown, { album_id: stri
       res.status(200).json(album);
     } catch (e) {
       console.error('Failed to retrieve album');
+      console.error(e);
+      next(e);
+    }
+  }
+};
+
+type UpdateAlbumBody = {
+  album_id?: number;
+  label?: string;
+  album_title?: string;
+};
+
+export const updateAlbum: RequestHandler = async (
+  req: Request<object, object, UpdateAlbumBody>,
+  res,
+  next
+) => {
+  const { body } = req;
+  if (body.album_id === undefined) {
+    res.status(400).send('Bad Request, Missing Parameter: album_id');
+  } else {
+    try {
+      const fields: { label?: string; album_title?: string } = {};
+      if (body.label !== undefined) fields.label = body.label;
+      if (body.album_title !== undefined) fields.album_title = body.album_title;
+
+      const updated = await libraryService.updateAlbumFields(body.album_id, fields);
+      res.status(200).json(updated);
+    } catch (e) {
+      console.error('Error updating album');
       console.error(e);
       next(e);
     }
