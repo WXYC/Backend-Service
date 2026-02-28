@@ -18,7 +18,7 @@ import {
   album_metadata,
   artist_metadata,
 } from '@wxyc/database';
-import { IFSEntry, ShowInfo, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
+import { IFSEntry, ShowInfo, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 // Track when the flowsheet was last modified for conditional responses (304 Not Modified)
@@ -51,7 +51,7 @@ const FSEntryFieldsRaw = {
   track_title: flowsheet.track_title,
   record_label: flowsheet.record_label,
   rotation_id: flowsheet.rotation_id,
-  rotation_play_freq: rotation.play_freq,
+  rotation_bin: rotation.rotation_bin,
   request_flag: flowsheet.request_flag,
   message: flowsheet.message,
   play_order: flowsheet.play_order,
@@ -81,7 +81,7 @@ type FSEntryRaw = {
   track_title: string | null;
   record_label: string | null;
   rotation_id: number | null;
-  rotation_play_freq: string | null;
+  rotation_bin: string | null;
   request_flag: boolean | null;
   message: string | null;
   play_order: number | null;
@@ -109,7 +109,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   track_title: raw.track_title,
   record_label: raw.record_label,
   rotation_id: raw.rotation_id,
-  rotation_play_freq: raw.rotation_play_freq,
+  rotation_bin: raw.rotation_bin,
   request_flag: raw.request_flag ?? false,
   message: raw.message,
   play_order: raw.play_order ?? 0,
@@ -127,6 +127,12 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
     artist_wikipedia_url: raw.artist_wikipedia_url,
   },
 });
+
+/** Count total flowsheet entries (for pagination) */
+export const getEntryCount = async (): Promise<number> => {
+  const result = await db.select({ count: sql<number>`count(*)::int` }).from(flowsheet);
+  return result[0].count;
+};
 
 /** Gets flowsheet entries by page with metadata joins */
 export const getEntriesByPage = async (offset: number, limit: number): Promise<IFSEntry[]> => {
@@ -557,12 +563,11 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
   return response[0];
 };
 
-export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
+/** Gets show metadata (DJs, specialty show name) without fetching entries */
+export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
 
   const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({ id: dj.id, dj_name: dj.djName || dj.name }));
-
-  const entries = await db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id));
 
   let specialty_show_name = '';
   if (show[0].specialty_id != null) {
@@ -574,7 +579,18 @@ export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
     ...show[0],
     specialty_show_name: specialty_show_name,
     show_djs: showDJs,
-    entries: entries,
+  };
+};
+
+export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
+  const [metadata, entries] = await Promise.all([
+    getShowMetadata(show_id),
+    db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id)),
+  ]);
+
+  return {
+    ...metadata,
+    entries,
   };
 };
 
@@ -602,7 +618,7 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         track_title: entry.track_title,
         record_label: entry.record_label,
         request_flag: entry.request_flag,
-        rotation_play_freq: entry.rotation_play_freq,
+        rotation_bin: entry.rotation_bin,
         artwork_url: entry.metadata?.artwork_url ?? null,
         discogs_url: entry.metadata?.discogs_url ?? null,
         release_year: entry.metadata?.release_year ?? null,

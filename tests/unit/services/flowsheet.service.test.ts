@@ -1,9 +1,7 @@
 import { transformToV2 } from '../../../apps/backend/services/flowsheet.service';
-import { IFSEntry } from '../../../apps/backend/controllers/flowsheet.controller';
+import { IFSEntry, IFSEntryMetadata } from '../../../apps/backend/controllers/flowsheet.controller';
 
-import { IFSEntryMetadata } from '../../../apps/backend/controllers/flowsheet.controller';
-
-const defaultMetadata: IFSEntryMetadata = {
+const nullMetadata: IFSEntryMetadata = {
   artwork_url: null,
   discogs_url: null,
   release_year: null,
@@ -17,36 +15,8 @@ const defaultMetadata: IFSEntryMetadata = {
 };
 
 // Helper to create a base entry with common fields
-const createBaseEntry = (overrides: Partial<IFSEntry & IFSEntryMetadata> = {}): IFSEntry => {
-  const {
-    artwork_url,
-    discogs_url,
-    release_year,
-    spotify_url,
-    apple_music_url,
-    youtube_music_url,
-    bandcamp_url,
-    soundcloud_url,
-    artist_bio,
-    artist_wikipedia_url,
-    metadata: metadataOverride,
-    ...rest
-  } = overrides;
-
-  const metadata: IFSEntryMetadata = metadataOverride ?? {
-    ...defaultMetadata,
-    ...(artwork_url !== undefined && { artwork_url }),
-    ...(discogs_url !== undefined && { discogs_url }),
-    ...(release_year !== undefined && { release_year }),
-    ...(spotify_url !== undefined && { spotify_url }),
-    ...(apple_music_url !== undefined && { apple_music_url }),
-    ...(youtube_music_url !== undefined && { youtube_music_url }),
-    ...(bandcamp_url !== undefined && { bandcamp_url }),
-    ...(soundcloud_url !== undefined && { soundcloud_url }),
-    ...(artist_bio !== undefined && { artist_bio }),
-    ...(artist_wikipedia_url !== undefined && { artist_wikipedia_url }),
-  };
-
+const createBaseEntry = (overrides: Partial<IFSEntry & { metadata?: Partial<IFSEntryMetadata> }> = {}): IFSEntry => {
+  const { metadata: metadataOverrides, ...rest } = overrides;
   return {
     id: 1,
     show_id: 100,
@@ -61,8 +31,11 @@ const createBaseEntry = (overrides: Partial<IFSEntry & IFSEntryMetadata> = {}): 
     request_flag: false,
     message: null,
     add_time: new Date('2024-01-15T12:00:00Z'),
-    rotation_play_freq: null,
-    metadata,
+    rotation_bin: null,
+    metadata: {
+      ...nullMetadata,
+      ...metadataOverrides,
+    },
     ...rest,
   };
 };
@@ -80,9 +53,11 @@ describe('flowsheet.service', () => {
           album_id: 1,
           rotation_id: 5,
           request_flag: true,
-          rotation_play_freq: 'H',
-          artwork_url: 'https://example.com/art.jpg',
-          spotify_url: 'https://open.spotify.com/track/123',
+          rotation_bin: 'H',
+          metadata: {
+            artwork_url: 'https://example.com/art.jpg',
+            spotify_url: 'https://open.spotify.com/track/123',
+          },
         });
 
         const result = transformToV2(entry);
@@ -95,9 +70,31 @@ describe('flowsheet.service', () => {
         expect(result.album_id).toBe(1);
         expect(result.rotation_id).toBe(5);
         expect(result.request_flag).toBe(true);
-        expect(result.rotation_play_freq).toBe('H');
+        expect(result.rotation_bin).toBe('H');
         expect(result.artwork_url).toBe('https://example.com/art.jpg');
         expect(result.spotify_url).toBe('https://open.spotify.com/track/123');
+      });
+
+      it('includes rotation_bin field', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          rotation_bin: 'H',
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.rotation_bin).toBe('H');
+      });
+
+      it('includes rotation_bin as null when rotation_bin is null', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          rotation_bin: null,
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.rotation_bin).toBeNull();
       });
 
       it('excludes message field from track entries', () => {
@@ -115,16 +112,18 @@ describe('flowsheet.service', () => {
       it('includes all metadata fields for tracks', () => {
         const entry = createBaseEntry({
           entry_type: 'track',
-          artwork_url: 'art.jpg',
-          discogs_url: 'discogs.com',
-          release_year: 1999,
-          spotify_url: 'spotify.com',
-          apple_music_url: 'apple.com',
-          youtube_music_url: 'youtube.com',
-          bandcamp_url: 'bandcamp.com',
-          soundcloud_url: 'soundcloud.com',
-          artist_bio: 'A great band',
-          artist_wikipedia_url: 'wiki.com',
+          metadata: {
+            artwork_url: 'art.jpg',
+            discogs_url: 'discogs.com',
+            release_year: 1999,
+            spotify_url: 'spotify.com',
+            apple_music_url: 'apple.com',
+            youtube_music_url: 'youtube.com',
+            bandcamp_url: 'bandcamp.com',
+            soundcloud_url: 'soundcloud.com',
+            artist_bio: 'A great band',
+            artist_wikipedia_url: 'wiki.com',
+          },
         });
 
         const result = transformToV2(entry);
@@ -169,7 +168,7 @@ describe('flowsheet.service', () => {
         expect(result.artist_name).toBeUndefined();
         expect(result.album_title).toBeUndefined();
         expect(result.track_title).toBeUndefined();
-        expect(result.rotation_play_freq).toBeUndefined();
+        expect(result.rotation_bin).toBeUndefined();
       });
 
       it('handles malformed show_start message gracefully', () => {
@@ -346,12 +345,12 @@ describe('flowsheet.service', () => {
         const entry = createBaseEntry({
           entry_type: 'message',
           message: 'Test message',
-          rotation_play_freq: 'H',
+          rotation_bin: 'H',
         });
 
         const result = transformToV2(entry);
 
-        expect(result.rotation_play_freq).toBeUndefined();
+        expect(result.rotation_bin).toBeUndefined();
       });
     });
 

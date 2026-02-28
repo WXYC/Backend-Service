@@ -45,3 +45,15 @@ export const WXYCRoles = {
 };
 
 export type WXYCRole = keyof typeof WXYCRoles;
+
+/** Maps better-auth system roles to their WXYC equivalent. */
+const systemRoleMap: Record<string, WXYCRole> = {
+  admin: 'stationManager',
+  owner: 'stationManager',
+};
+
+/** Normalizes a role string to a WXYCRole, mapping better-auth system roles. */
+export function normalizeRole(role: string): WXYCRole | undefined {
+  if (role in WXYCRoles) return role as WXYCRole;
+  return systemRoleMap[role];
+}

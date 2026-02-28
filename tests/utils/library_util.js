@@ -102,7 +102,7 @@ exports.createGenre = async (genreData, access_token) => {
  *
  * @param {object} rotationData - Rotation data
  * @param {number} rotationData.album_id - Album ID
- * @param {string} rotationData.play_freq - Play frequency (S, L, M, H)
+ * @param {string} rotationData.rotation_bin - Play frequency (S, L, M, H)
  * @param {string} access_token - Authorization token
  * @returns {Promise<object>} Created rotation entry
  */

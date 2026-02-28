@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
-import { AccessControlStatement, WXYCRole, WXYCRoles } from './auth.roles';
+import { AccessControlStatement, WXYCRole, WXYCRoles, normalizeRole } from './auth.roles';
 
 // JWT payload structure expected from better-auth JWT plugin
 // When used with organization plugin, tokens include user info and organization role
@@ -93,15 +93,20 @@ export function requirePermissions(required: RequiredPermissions) {
       id: userId,
     } as WXYCAuthJwtPayload;
 
-    // Validate role exists
+    // Normalize and validate role
     if (!payload.role) {
       return res.status(403).json({ error: 'Forbidden: Missing role in token.' });
     }
 
-    const roleImpl = WXYCRoles[payload.role];
-    if (!roleImpl) {
+    const normalizedRole = normalizeRole(payload.role as string);
+    if (!normalizedRole) {
       return res.status(403).json({ error: 'Forbidden: Invalid role.' });
     }
+
+    // Update req.auth with normalized role so downstream sees a valid WXYCRole
+    req.auth = { ...req.auth!, role: normalizedRole };
+
+    const roleImpl = WXYCRoles[normalizedRole];
 
     // Check permissions
     const ok = Object.entries(required).every(([resource, actions]) => {

@@ -101,6 +101,7 @@ if (process.env.NODE_ENV !== 'production') {
     }
   });
 
+  // Report session
   console.log(
     '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session)'
   );
