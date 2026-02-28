@@ -110,7 +110,7 @@ if (process.env.NODE_ENV !== 'production') {
 
 // Disable rate limiting in test environments to avoid flaky integration tests.
 // This matches the pattern used by the backend's rateLimiting middleware.
-const isTestEnv = process.env.NODE_ENV === 'test' || process.env.USE_MOCK_SERVICES === 'true';
+const isTestEnv = process.env.NODE_ENV === 'test' || process.env.USE_MOCK_SERVICES === 'true' || process.env.AUTH_BYPASS === 'true';
 
 if (isTestEnv) {
   app.use('/auth', toNodeHandler(auth));
