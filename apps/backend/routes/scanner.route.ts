@@ -21,8 +21,4 @@ scanner_route.post(
   scannerController.scanImages
 );
 
-scanner_route.post(
-  '/upc-lookup',
-  requirePermissions({ catalog: ['read'] }),
-  scannerController.upcLookup
-);
+scanner_route.post('/upc-lookup', requirePermissions({ catalog: ['read'] }), scannerController.upcLookup);

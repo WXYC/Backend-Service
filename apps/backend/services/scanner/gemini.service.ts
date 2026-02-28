@@ -94,11 +94,7 @@ export async function extractFromImages(
       contents: [
         {
           role: 'user',
-          parts: [
-            { text: SCANNER_SYSTEM_PROMPT },
-            ...imageParts,
-            { text: userPrompt },
-          ],
+          parts: [{ text: SCANNER_SYSTEM_PROMPT }, ...imageParts, { text: userPrompt }],
         },
       ],
       generationConfig: {

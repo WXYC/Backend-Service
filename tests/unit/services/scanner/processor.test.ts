@@ -65,9 +65,7 @@ describe('processor', () => {
       };
 
       mockExtractFromImages.mockResolvedValue(mockExtraction);
-      mockFuzzySearchLibrary.mockResolvedValue([
-        { id: 101, artist_name: 'Nirvana', album_title: 'Bleach' },
-      ]);
+      mockFuzzySearchLibrary.mockResolvedValue([{ id: 101, artist_name: 'Nirvana', album_title: 'Bleach' }]);
 
       const context: ScanContext = {
         artistName: 'Nirvana',
@@ -137,9 +135,7 @@ describe('processor', () => {
     it('propagates errors from gemini service', async () => {
       mockExtractFromImages.mockRejectedValue(new Error('Gemini API failed'));
 
-      await expect(
-        processImages(mockImages, mockPhotoTypes, {})
-      ).rejects.toThrow('Gemini API failed');
+      await expect(processImages(mockImages, mockPhotoTypes, {})).rejects.toThrow('Gemini API failed');
     });
   });
 });

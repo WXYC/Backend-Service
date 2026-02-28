@@ -22,11 +22,7 @@ import * as libraryService from '../library.service.js';
  * @param context - Optional context about the known album
  * @returns Extraction results and optional matched album ID
  */
-export async function processImages(
-  images: Buffer[],
-  photoTypes: string[],
-  context: ScanContext
-): Promise<ScanResult> {
+export async function processImages(images: Buffer[], photoTypes: string[], context: ScanContext): Promise<ScanResult> {
   const extraction: ScanExtraction = await extractFromImages(images, photoTypes, context);
 
   // If context already includes a known catalog item, use it directly
@@ -52,10 +48,7 @@ export async function processImages(
  * Uses artist name and album title from context or extraction to perform
  * a fuzzy search of the library database.
  */
-async function tryMatchCatalog(
-  extraction: ScanExtraction,
-  context: ScanContext
-): Promise<number | undefined> {
+async function tryMatchCatalog(extraction: ScanExtraction, context: ScanContext): Promise<number | undefined> {
   const artistName = context.artistName || extraction.labelName?.value;
   const albumTitle = context.albumTitle;
 
@@ -64,11 +57,7 @@ async function tryMatchCatalog(
   }
 
   try {
-    const results = await libraryService.fuzzySearchLibrary(
-      artistName,
-      albumTitle,
-      1
-    );
+    const results = await libraryService.fuzzySearchLibrary(artistName, albumTitle, 1);
 
     if (Array.isArray(results) && results.length > 0) {
       const topResult = results[0] as { id?: number };

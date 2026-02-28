@@ -39,9 +39,10 @@ describe('gemini.service', () => {
     it('initializes the Gemini client with the API key', async () => {
       mockGenerateContent.mockResolvedValue({
         response: {
-          text: () => JSON.stringify({
-            label_name: { value: 'Sub Pop', confidence: 0.95 },
-          }),
+          text: () =>
+            JSON.stringify({
+              label_name: { value: 'Sub Pop', confidence: 0.95 },
+            }),
         },
       });
 
@@ -97,12 +98,13 @@ describe('gemini.service', () => {
     it('returns parsed ScanExtraction from the Gemini response', async () => {
       mockGenerateContent.mockResolvedValue({
         response: {
-          text: () => JSON.stringify({
-            label_name: { value: 'Merge Records', confidence: 0.92 },
-            catalog_number: { value: 'MRG-567', confidence: 0.85 },
-            review_text: { value: 'Great album, play track 3!', confidence: 0.7 },
-            upc: { value: '036172091928', confidence: 0.99 },
-          }),
+          text: () =>
+            JSON.stringify({
+              label_name: { value: 'Merge Records', confidence: 0.92 },
+              catalog_number: { value: 'MRG-567', confidence: 0.85 },
+              review_text: { value: 'Great album, play track 3!', confidence: 0.7 },
+              upc: { value: '036172091928', confidence: 0.99 },
+            }),
         },
       });
 
@@ -117,9 +119,10 @@ describe('gemini.service', () => {
     it('omits fields not present in the response', async () => {
       mockGenerateContent.mockResolvedValue({
         response: {
-          text: () => JSON.stringify({
-            label_name: { value: 'Sub Pop', confidence: 0.9 },
-          }),
+          text: () =>
+            JSON.stringify({
+              label_name: { value: 'Sub Pop', confidence: 0.9 },
+            }),
         },
       });
 
@@ -134,10 +137,11 @@ describe('gemini.service', () => {
     it('clamps confidence scores to [0, 1]', async () => {
       mockGenerateContent.mockResolvedValue({
         response: {
-          text: () => JSON.stringify({
-            label_name: { value: 'Test', confidence: 1.5 },
-            catalog_number: { value: 'X', confidence: -0.3 },
-          }),
+          text: () =>
+            JSON.stringify({
+              label_name: { value: 'Test', confidence: 1.5 },
+              catalog_number: { value: 'X', confidence: -0.3 },
+            }),
         },
       });
 
@@ -179,9 +183,9 @@ describe('gemini.service', () => {
       resetGeminiClient();
       delete process.env.GEMINI_API_KEY;
 
-      await expect(
-        extractFromImages(mockImages, mockPhotoTypes, mockContext)
-      ).rejects.toThrow('GEMINI_API_KEY is not configured');
+      await expect(extractFromImages(mockImages, mockPhotoTypes, mockContext)).rejects.toThrow(
+        'GEMINI_API_KEY is not configured'
+      );
     });
 
     it('throws on empty response from Gemini', async () => {
@@ -191,9 +195,9 @@ describe('gemini.service', () => {
         },
       });
 
-      await expect(
-        extractFromImages(mockImages, mockPhotoTypes, mockContext)
-      ).rejects.toThrow('Empty response from Gemini');
+      await expect(extractFromImages(mockImages, mockPhotoTypes, mockContext)).rejects.toThrow(
+        'Empty response from Gemini'
+      );
     });
 
     it('throws on invalid JSON from Gemini', async () => {
@@ -203,9 +207,9 @@ describe('gemini.service', () => {
         },
       });
 
-      await expect(
-        extractFromImages(mockImages, mockPhotoTypes, mockContext)
-      ).rejects.toThrow('Invalid JSON response from Gemini');
+      await expect(extractFromImages(mockImages, mockPhotoTypes, mockContext)).rejects.toThrow(
+        'Invalid JSON response from Gemini'
+      );
     });
 
     it('reuses the client on subsequent calls', async () => {
