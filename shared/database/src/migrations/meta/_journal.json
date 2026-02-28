@@ -167,7 +167,28 @@
       "idx": 26,
       "version": "7",
       "when": 1771099200000,
-      "tag": "0029_rename_play_freq_to_rotation_bin",
+      "tag": "0026_rename_play_freq_to_rotation_bin",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1772298699137,
+      "tag": "0027_cron_job_tracking",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1772298699138,
+      "tag": "0028_drop_genre_from_artist_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1772298699139,
+      "tag": "0029_add_artists_alphabetical_name",
       "breakpoints": true
     }
   ]
