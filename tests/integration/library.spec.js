@@ -69,10 +69,38 @@ describe('Library Catalog', () => {
       expect(res.body.length).toBe(0);
     });
 
-    test('code lookup returns 501 (not implemented)', async () => {
-      const res = await auth.get('/library').query({ code_letters: 'BUI', code_artist_number: '1' }).expect(501);
+    test('code lookup returns albums matching library code', async () => {
+      const res = await auth.get('/library').query({ code_letters: 'BUI', code_artist_number: '1' }).expect(200);
 
-      expectErrorContains(res, 'TODO');
+      expectArray(res);
+      expect(res.body.length).toBeGreaterThan(0);
+      res.body.forEach((album) => {
+        expectFields(album, 'id', 'code_letters', 'code_artist_number', 'code_number', 'artist_name', 'album_title');
+        expect(album.code_letters).toBe('BUI');
+        expect(album.code_artist_number).toBe(1);
+      });
+    });
+
+    test('code lookup with code_number returns specific album', async () => {
+      const res = await auth
+        .get('/library')
+        .query({ code_letters: 'BUI', code_artist_number: '1', code_number: 1 })
+        .expect(200);
+
+      expectArray(res);
+      expect(res.body.length).toBeLessThanOrEqual(1);
+      if (res.body.length > 0) {
+        expect(res.body[0].code_letters).toBe('BUI');
+        expect(res.body[0].code_artist_number).toBe(1);
+        expect(res.body[0].code_number).toBe(1);
+      }
+    });
+
+    test('code lookup returns empty array for non-existent code', async () => {
+      const res = await auth.get('/library').query({ code_letters: 'ZZZ', code_artist_number: '999' }).expect(200);
+
+      expectArray(res);
+      expect(res.body.length).toBe(0);
     });
   });
 
