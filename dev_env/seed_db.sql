@@ -106,17 +106,21 @@ INSERT INTO wxyc_schema.genres(genre_name) VALUES ('Hiphop');
 INSERT INTO wxyc_schema.format(format_name) VALUES ('cd');
 INSERT INTO wxyc_schema.format(format_name) VALUES ('vinyl');
 
-INSERT INTO wxyc_schema.artists(
-	artist_name, code_letters, code_artist_number, genre_id)
-	VALUES ('Built to Spill', 'BU', 60, 1);
+INSERT INTO wxyc_schema.artists(artist_name, code_letters)
+	VALUES ('Built to Spill', 'BU');
 
-INSERT INTO wxyc_schema.artists(
-	artist_name, code_letters, code_artist_number, genre_id)
-	VALUES ('Ravyn Lenae', 'LE', 35, 2);
+INSERT INTO wxyc_schema.artists(artist_name, code_letters)
+	VALUES ('Ravyn Lenae', 'LE');
 
-INSERT INTO wxyc_schema.artists(
-	artist_name, code_letters, code_artist_number, genre_id)
-	VALUES ('Jockstrap', 'JO', 108, 1);
+INSERT INTO wxyc_schema.artists(artist_name, code_letters)
+	VALUES ('Jockstrap', 'JO');
+
+INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
+	VALUES (1, 1, 60);
+INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
+	VALUES (2, 2, 35);
+INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
+	VALUES (3, 1, 108);
 
 INSERT INTO wxyc_schema.library(
     artist_id, genre_id, format_id, album_title, code_number) 
@@ -131,17 +135,21 @@ INSERT INTO wxyc_schema.library(
     VALUES (3, 1, 2, 'I Love You Jennifer B', 1);
 
 -- Additional artists for parallel test isolation (metadata.spec.js uses albums 4-6)
-INSERT INTO wxyc_schema.artists(
-	artist_name, code_letters, code_artist_number, genre_id)
-	VALUES ('Sufjan Stevens', 'ST', 42, 1);
+INSERT INTO wxyc_schema.artists(artist_name, code_letters)
+	VALUES ('Sufjan Stevens', 'ST');
 
-INSERT INTO wxyc_schema.artists(
-	artist_name, code_letters, code_artist_number, genre_id)
-	VALUES ('Kendrick Lamar', 'LA', 15, 2);
+INSERT INTO wxyc_schema.artists(artist_name, code_letters)
+	VALUES ('Kendrick Lamar', 'LA');
 
-INSERT INTO wxyc_schema.artists(
-	artist_name, code_letters, code_artist_number, genre_id)
-	VALUES ('Bjork', 'BJ', 22, 1);
+INSERT INTO wxyc_schema.artists(artist_name, code_letters)
+	VALUES ('Bjork', 'BJ');
+
+INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
+	VALUES (4, 1, 42);
+INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
+	VALUES (5, 2, 15);
+INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
+	VALUES (6, 1, 22);
 
 -- Additional albums for parallel test isolation (IDs 4, 5, 6 for metadata.spec.js)
 INSERT INTO wxyc_schema.library(

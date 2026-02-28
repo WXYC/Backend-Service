@@ -6,8 +6,12 @@ export const testArtist = {
   id: 1,
   artist_name: 'Test Artist',
   code_letters: 'RO',
-  code_artist_number: 1,
+};
+
+export const testArtistGenreCrossref = {
+  artist_id: 1,
   genre_id: 1,
+  artist_genre_code: 1,
 };
 
 export const testAlbum = {

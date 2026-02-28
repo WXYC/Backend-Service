@@ -1,4 +1,4 @@
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
 import {
@@ -8,6 +8,7 @@ import {
   NewGenre,
   RotationRelease,
   artists,
+  genre_artist_crossreference,
   format,
   genres,
   library,
@@ -54,7 +55,7 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
     .select({
       id: library.id,
       code_letters: artists.code_letters,
-      code_artist_number: artists.code_artist_number,
+      code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       artist_name: artists.artist_name,
       album_title: library.album_title,
@@ -71,8 +72,15 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
     .from(library)
     .innerJoin(rotation, eq(library.id, rotation.album_id))
     .innerJoin(artists, eq(artists.id, library.artist_id))
-    .innerJoin(genres, eq(artists.genre_id, genres.id))
     .innerJoin(format, eq(library.format_id, format.id))
+    .innerJoin(genres, eq(library.genre_id, genres.id))
+    .innerJoin(
+      genre_artist_crossreference,
+      and(
+        eq(genre_artist_crossreference.artist_id, library.artist_id),
+        eq(genre_artist_crossreference.genre_id, library.genre_id)
+      )
+    )
     .where(sql`${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL`);
 
   return rotation_albums;
@@ -142,7 +150,13 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
   const response = await db
     .select({ id: artists.id })
     .from(artists)
-    .where(sql`lower(${artists.artist_name}) = lower(${artist_name}) AND ${artists.genre_id} = ${genre_id}`)
+    .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(
+      and(
+        sql`lower(${artists.artist_name}) = lower(${artist_name})`,
+        eq(genre_artist_crossreference.genre_id, genre_id)
+      )
+    )
     .limit(1);
 
   if (!response.length) {
@@ -155,6 +169,44 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
 export const insertArtist = async (new_artist: NewArtist) => {
   const response = await db.insert(artists).values(new_artist).returning();
   return response[0];
+};
+
+export const insertArtistGenreCrossreference = async (
+  artist_id: number,
+  genre_id: number,
+  artist_genre_code: number
+) => {
+  const response = await db
+    .insert(genre_artist_crossreference)
+    .values({ artist_id, genre_id, artist_genre_code })
+    .returning();
+  return response[0];
+};
+
+export const getArtistByCode = async (
+  code_letters: string,
+  genre_id: number,
+  artist_genre_code: number
+): Promise<{ artist_id: number; artist_name: string; code_letters: string } | null> => {
+  const response = await db
+    .select({
+      artist_id: genre_artist_crossreference.artist_id,
+      artist_name: artists.artist_name,
+      code_letters: artists.code_letters,
+    })
+    .from(genre_artist_crossreference)
+    .innerJoin(artists, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(
+      and(
+        eq(artists.code_letters, code_letters),
+        eq(genre_artist_crossreference.genre_id, genre_id),
+        eq(genre_artist_crossreference.artist_genre_code, artist_genre_code)
+      )
+    )
+    .limit(1);
+
+  // return null if no artist found
+  return response[0] ?? null;
 };
 
 export const generateAlbumCodeNumber = async (artist_id: number): Promise<number> => {
@@ -174,17 +226,19 @@ export const generateAlbumCodeNumber = async (artist_id: number): Promise<number
 
 export const generateArtistNumber = async (code_letters: string, genre_id: number): Promise<number> => {
   const response = await db
-    .select({ code_artist_number: artists.code_artist_number })
-    .from(artists)
-    .where(sql`${artists.code_letters} = ${code_letters} AND ${artists.genre_id} = ${genre_id}`)
-    .orderBy(desc(artists.code_artist_number))
+    .select({ artist_genre_code: genre_artist_crossreference.artist_genre_code })
+    .from(genre_artist_crossreference)
+    .innerJoin(artists, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(and(eq(artists.code_letters, code_letters), eq(genre_artist_crossreference.genre_id, genre_id)))
+    .orderBy(desc(genre_artist_crossreference.artist_genre_code))
     .limit(1);
 
-  let code_artist_number = 1;
+  // default to being first artist in the genre
+  let artist_genre_code = 1;
   if (response.length) {
-    code_artist_number = response[0].code_artist_number + 1; //otherwise we increment on the last value
+    artist_genre_code = response[0].artist_genre_code + 1; //otherwise we increment on the last value
   }
-  return code_artist_number;
+  return artist_genre_code;
 };
 
 export const getAlbumFromDB = async (album_id: number) => {
@@ -192,7 +246,7 @@ export const getAlbumFromDB = async (album_id: number) => {
     .select({
       id: library.id,
       code_letters: artists.code_letters,
-      code_artist_number: artists.code_letters,
+      code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       artist_name: artists.artist_name,
       album_title: library.album_title,
@@ -203,6 +257,13 @@ export const getAlbumFromDB = async (album_id: number) => {
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
+    .innerJoin(
+      genre_artist_crossreference,
+      and(
+        eq(genre_artist_crossreference.artist_id, library.artist_id),
+        eq(genre_artist_crossreference.genre_id, library.genre_id)
+      )
+    )
     .where(eq(library.id, album_id))
     .limit(1);
 

@@ -1,5 +1,5 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
-import { sql, eq } from 'drizzle-orm';
+import { sql, eq, and } from 'drizzle-orm';
 import {
   pgSchema,
   pgTable,
@@ -207,12 +207,8 @@ export const artists = wxyc_schema.table(
   'artists',
   {
     id: serial('id').primaryKey(),
-    genre_id: integer('genre_id')
-      .references(() => genres.id)
-      .notNull(),
     artist_name: varchar('artist_name', { length: 128 }).notNull(),
     code_letters: varchar('code_letters', { length: 4 }).notNull(),
-    code_artist_number: smallint('code_artist_number').notNull(),
     add_date: date('add_date').defaultNow().notNull(),
     last_modified: timestamp('last_modified').defaultNow().notNull(),
   },
@@ -436,7 +432,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
     .select({
       id: library.id,
       code_letters: artists.code_letters,
-      code_artist_number: artists.code_artist_number,
+      code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       artist_name: artists.artist_name,
       album_title: library.album_title,
@@ -450,6 +446,13 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
     .innerJoin(artists, eq(artists.id, library.artist_id))
     .innerJoin(format, eq(format.id, library.format_id))
     .innerJoin(genres, eq(genres.id, library.genre_id))
+    .innerJoin(
+      genre_artist_crossreference,
+      and(
+        eq(genre_artist_crossreference.artist_id, library.artist_id),
+        eq(genre_artist_crossreference.genre_id, library.genre_id)
+      )
+    )
     .leftJoin(
       rotation,
       sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`

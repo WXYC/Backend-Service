@@ -885,9 +885,31 @@ paths:
                   type: string
                 genre_id:
                   type: integer
+                code_number:
+                  type: integer
       responses:
         '200':
           description: Successfully added artist
+
+  /library/artists/peek-code:
+    get:
+      summary: Peek next artist code number for a given genre and code letters
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - in: query
+          name: code_letters
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: genre_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Next available artist code number
 
   /library/formats:
     get:

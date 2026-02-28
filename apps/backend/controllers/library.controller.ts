@@ -122,33 +122,87 @@ type NewArtistRequest = {
   artist_name: string;
   code_letters: string;
   genre_id: number;
+  code_number: number;
 };
 
 export const addArtist: RequestHandler = async (req: Request<object, object, NewArtistRequest>, res, next) => {
   const { body } = req;
   //TODO auto_generate artist code letters and make it an optional parameter
-  if (body.artist_name === undefined || body.code_letters === undefined || body.genre_id === undefined) {
+  if (
+    body.artist_name === undefined ||
+    body.code_letters === undefined ||
+    body.genre_id === undefined ||
+    body.code_number === undefined
+  ) {
     res.status(400);
-    res.send('Missing Request Parameters: artist_name, code_letters, or genre_id');
+    res.send('Missing Request Parameters: artist_name, code_letters, genre_id, or code_number');
   } else {
     try {
-      const generatedArtistNumber = await libraryService.generateArtistNumber(body.code_letters, body.genre_id);
+      const existingArtist = await libraryService.getArtistByCode(
+        body.code_letters,
+        body.genre_id,
+        body.code_number
+      );
+      if (existingArtist) {
+        res.status(409).json({
+          message: 'Artist code already exists for that genre and code letters.',
+          artist: existingArtist,
+        });
+        return;
+      }
 
       const new_artist: NewArtist = {
         artist_name: body.artist_name,
         code_letters: body.code_letters,
-        code_artist_number: generatedArtistNumber,
-        genre_id: body.genre_id,
       };
 
       const response: Artist = await libraryService.insertArtist(new_artist);
+      await libraryService.insertArtistGenreCrossreference(response.id, body.genre_id, body.code_number);
       res.status(200);
-      res.send(response);
+      res.json({
+        ...response,
+        code_number: body.code_number,
+        genre_id: body.genre_id,
+      });
     } catch (e) {
       console.error('Error: Failed to add new artist');
       console.error(e);
       next(e);
     }
+  }
+};
+
+type ArtistNumberPeekQuery = {
+  code_letters?: string;
+  genre_id?: string;
+};
+
+export const peekArtistNumber: RequestHandler = async (
+  req: Request<object, object, object, ArtistNumberPeekQuery>,
+  res,
+  next
+) => {
+  const { query } = req;
+  if (!query.code_letters || !query.genre_id) {
+    res.status(400);
+    res.send('Missing query parameters: code_letters and genre_id');
+    return;
+  }
+
+  const genreId = Number(query.genre_id);
+  if (!Number.isFinite(genreId)) {
+    res.status(400);
+    res.send('Invalid genre_id');
+    return;
+  }
+
+  try {
+    const nextCode = await libraryService.generateArtistNumber(query.code_letters, genreId);
+    res.status(200).json({ next_code_number: nextCode });
+  } catch (e) {
+    console.error('Error: Failed to generate artist number');
+    console.error(e);
+    next(e);
   }
 };
 
