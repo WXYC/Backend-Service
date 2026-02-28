@@ -5,7 +5,7 @@ import { parse as parse_yaml } from 'yaml';
 import swaggerContent from './app.yaml';
 import { dj_route } from './routes/djs.route.js';
 import { flowsheet_route } from './routes/flowsheet.route.js';
-import { flowsheet_v2_route } from './routes/flowsheet.v2.route.js';
+
 import { library_route } from './routes/library.route.js';
 import { schedule_route } from './routes/schedule.route.js';
 import { events_route } from './routes/events.route.js';
@@ -40,8 +40,6 @@ app.use('/library', library_route);
 
 app.use('/flowsheet', flowsheet_route);
 
-app.use('/v2/flowsheet', flowsheet_v2_route);
-
 app.use('/djs', dj_route);
 
 app.use('/request', request_line_route);
@@ -75,4 +73,4 @@ const server = app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
 });
 
-server.setTimeout(5000);
+server.setTimeout(30000);
