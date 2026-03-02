@@ -1,5 +1,5 @@
 import { account, db, invitation, jwks, member, organization, session, user, verification } from '@wxyc/database';
-import { betterAuth, type Auth } from 'better-auth';
+import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { createAuthMiddleware } from 'better-auth/api';
 import { admin, anonymous, bearer, jwt, organization as organizationPlugin, username } from 'better-auth/plugins';
@@ -24,7 +24,7 @@ const buildResetUrl = (url: string, redirectTo?: string) => {
   }
 };
 
-export const auth: Auth = betterAuth({
+export const auth = betterAuth({
   database: drizzleAdapter(db, {
     provider: 'pg',
     schema: {
