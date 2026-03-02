@@ -29,6 +29,8 @@ scanner_route.post(
   scannerController.createBatchScan
 );
 
+scanner_route.get('/batch', requirePermissions({ catalog: ['read'] }), scannerController.listBatchJobs);
+
 scanner_route.get('/batch/:jobId', requirePermissions({ catalog: ['read'] }), scannerController.getBatchStatus);
 
 scanner_route.post('/upc-lookup', requirePermissions({ catalog: ['read'] }), scannerController.upcLookup);

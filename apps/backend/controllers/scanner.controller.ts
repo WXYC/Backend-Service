@@ -99,6 +99,30 @@ export const upcLookup: RequestHandler = async (req, res, next) => {
   }
 };
 
+/**
+ * GET /library/scan/batch
+ *
+ * Lists batch scan jobs for the authenticated user with pagination.
+ *
+ * Query params:
+ * - limit: max jobs to return (default 20, max 100)
+ * - offset: number of jobs to skip (default 0)
+ */
+export const listBatchJobs: RequestHandler = async (req, res, next) => {
+  try {
+    const userId = req.auth!.id!;
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 20, 1), 100);
+    const offset = Math.max(parseInt(req.query.offset as string, 10) || 0, 0);
+
+    const result = await batchService.listJobs(userId, limit, offset);
+
+    res.status(200).json(result);
+  } catch (error) {
+    console.error('Error listing batch jobs:', error);
+    next(error);
+  }
+};
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const MAX_BATCH_ITEMS = 10;

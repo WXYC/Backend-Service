@@ -12,6 +12,8 @@ const mockSelect = jest.fn().mockReturnThis();
 const mockFrom = jest.fn().mockReturnThis();
 const mockWhere = jest.fn().mockReturnThis();
 const mockOrderBy = jest.fn().mockReturnThis();
+const mockLimit = jest.fn().mockReturnThis();
+const mockOffset = jest.fn().mockReturnThis();
 const mockUpdate = jest.fn().mockReturnThis();
 const mockSet = jest.fn().mockReturnThis();
 const mockExecute = jest.fn<() => Promise<unknown[]>>().mockResolvedValue([]);
@@ -28,6 +30,7 @@ jest.mock('@wxyc/database', () => ({
     status: 'status',
     completed_items: 'completed_items',
     failed_items: 'failed_items',
+    created_at: 'created_at',
     updated_at: 'updated_at',
   },
   scan_results: {
@@ -53,16 +56,17 @@ jest.mock('@wxyc/database', () => ({
   },
 }));
 
-// Wire up the chain: insert().values().returning() and select().from().where().orderBy().execute()
+// Wire up the chain: insert().values().returning() and select().from().where().orderBy().limit().offset().execute()
 mockInsert.mockReturnValue({ values: mockValues });
 mockValues.mockReturnValue({ returning: mockReturning });
 mockSelect.mockReturnValue({ from: mockFrom });
 mockFrom.mockReturnValue({ where: mockWhere });
 mockWhere.mockReturnValue({ orderBy: mockOrderBy, execute: mockExecute });
-mockOrderBy.mockReturnValue({ execute: mockExecute });
+mockOrderBy.mockReturnValue({ limit: mockLimit, execute: mockExecute });
+mockLimit.mockReturnValue({ offset: mockOffset });
+mockOffset.mockReturnValue({ execute: mockExecute });
 mockUpdate.mockReturnValue({ set: mockSet });
 mockSet.mockReturnValue({ where: mockWhere });
-mockWhere.mockReturnValue({ orderBy: mockOrderBy, execute: mockExecute });
 
 // Mock the processor module
 const mockProcessImages = jest.fn<
@@ -84,6 +88,8 @@ jest.mock('drizzle-orm', () => ({
   eq: jest.fn((a, b) => ({ eq: [a, b] })),
   asc: jest.fn((col) => ({ asc: col })),
   inArray: jest.fn((col, values) => ({ inArray: [col, values] })),
+  desc: jest.fn((col) => ({ desc: col })),
+  count: jest.fn(() => ({ count: 'count(*)' })),
   sql: Object.assign(
     jest.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ sql: strings, values })),
     {
@@ -96,7 +102,7 @@ jest.mock('drizzle-orm', () => ({
 const mockUUID = '550e8400-e29b-41d4-a716-446655440000';
 jest.spyOn(crypto, 'randomUUID').mockReturnValue(mockUUID as `${string}-${string}-${string}-${string}-${string}`);
 
-import { createBatchJob, getJobStatus, processJobItems } from '../../../../apps/backend/services/scanner/batch';
+import { createBatchJob, getJobStatus, listJobs, processJobItems } from '../../../../apps/backend/services/scanner/batch';
 
 describe('batch service', () => {
   beforeEach(() => {
@@ -108,7 +114,9 @@ describe('batch service', () => {
     mockSelect.mockReturnValue({ from: mockFrom });
     mockFrom.mockReturnValue({ where: mockWhere });
     mockWhere.mockReturnValue({ orderBy: mockOrderBy, execute: mockExecute });
-    mockOrderBy.mockReturnValue({ execute: mockExecute });
+    mockOrderBy.mockReturnValue({ limit: mockLimit, execute: mockExecute });
+    mockLimit.mockReturnValue({ offset: mockOffset });
+    mockOffset.mockReturnValue({ execute: mockExecute });
     mockUpdate.mockReturnValue({ set: mockSet });
     mockSet.mockReturnValue({ where: mockWhere });
 
@@ -313,6 +321,89 @@ describe('batch service', () => {
         throw new Error('Expected non-null result');
       }
       expect(result.results[0].matchedAlbum).toBeNull();
+    });
+  });
+
+  describe('listJobs', () => {
+    const userId = 'user-123';
+
+    it('returns empty list when no jobs exist', async () => {
+      mockExecute.mockResolvedValueOnce([]).mockResolvedValueOnce([{ count: 0 }]);
+
+      const result = await listJobs(userId, 20, 0);
+
+      expect(result.jobs).toHaveLength(0);
+      expect(result.total).toBe(0);
+      expect(result.limit).toBe(20);
+      expect(result.offset).toBe(0);
+    });
+
+    it('returns job summaries sorted by created_at descending', async () => {
+      const jobRows = [
+        {
+          id: 'job-2',
+          user_id: userId,
+          status: 'completed',
+          total_items: 3,
+          completed_items: 3,
+          failed_items: 0,
+          created_at: new Date('2026-03-02'),
+          updated_at: new Date('2026-03-02'),
+        },
+        {
+          id: 'job-1',
+          user_id: userId,
+          status: 'pending',
+          total_items: 1,
+          completed_items: 0,
+          failed_items: 0,
+          created_at: new Date('2026-03-01'),
+          updated_at: new Date('2026-03-01'),
+        },
+      ];
+      mockExecute.mockResolvedValueOnce(jobRows).mockResolvedValueOnce([{ count: 2 }]);
+
+      const result = await listJobs(userId, 20, 0);
+
+      expect(result.jobs).toHaveLength(2);
+      expect(result.jobs[0].jobId).toBe('job-2');
+      expect(result.jobs[1].jobId).toBe('job-1');
+      expect(result.total).toBe(2);
+    });
+
+    it('passes limit and offset to the query', async () => {
+      mockExecute.mockResolvedValueOnce([]).mockResolvedValueOnce([{ count: 0 }]);
+
+      await listJobs(userId, 5, 10);
+
+      expect(mockLimit).toHaveBeenCalledWith(5);
+      expect(mockOffset).toHaveBeenCalledWith(10);
+    });
+
+    it('maps job rows to BatchJobSummary correctly', async () => {
+      const jobRow = {
+        id: 'job-abc',
+        user_id: userId,
+        status: 'completed',
+        total_items: 2,
+        completed_items: 1,
+        failed_items: 1,
+        created_at: new Date('2026-02-15'),
+        updated_at: new Date('2026-02-16'),
+      };
+      mockExecute.mockResolvedValueOnce([jobRow]).mockResolvedValueOnce([{ count: 1 }]);
+
+      const result = await listJobs(userId, 20, 0);
+
+      expect(result.jobs[0]).toEqual({
+        jobId: 'job-abc',
+        status: 'completed',
+        totalItems: 2,
+        completedItems: 1,
+        failedItems: 1,
+        createdAt: new Date('2026-02-15'),
+        updatedAt: new Date('2026-02-16'),
+      });
     });
   });
 
