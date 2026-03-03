@@ -11,9 +11,13 @@ const REGISTRATION_MAX = parseInt(process.env.RATE_LIMIT_REGISTRATION_MAX || '5'
 const REQUEST_WINDOW_MS = parseInt(process.env.RATE_LIMIT_REQUEST_WINDOW_MS || '900000', 10); // 15 min default
 const REQUEST_MAX = parseInt(process.env.RATE_LIMIT_REQUEST_MAX || '10', 10);
 
+const PROXY_WINDOW_MS = parseInt(process.env.RATE_LIMIT_PROXY_WINDOW_MS || '60000', 10); // 60 seconds default
+const PROXY_MAX = parseInt(process.env.RATE_LIMIT_PROXY_MAX || '120', 10);
+
 // Shared stores so we can reset them in tests
 const registrationStore = new MemoryStore();
 const songRequestStore = new MemoryStore();
+const proxyStore = new MemoryStore();
 
 /**
  * Reset all rate limit stores. Only works in test environment.
@@ -23,6 +27,7 @@ export const resetRateLimitStores = (): void => {
   if (isTestEnv) {
     void registrationStore.resetAll();
     void songRequestStore.resetAll();
+    void proxyStore.resetAll();
   }
 };
 
@@ -90,6 +95,39 @@ export const songRequestRateLimit = shouldEnableRateLimiting
         });
       },
       // Skip validation for keyGenerator since we're using device ID, not IP
+      validate: { xForwardedForHeader: false } as Partial<Options['validate']>,
+    })
+  : passThrough;
+
+/**
+ * Rate limiter for proxy endpoints (artwork, metadata, entity, Spotify).
+ * Limits requests per user ID (from anonymous auth session).
+ *
+ * Configurable via environment:
+ * - RATE_LIMIT_PROXY_WINDOW_MS (default: 60000 = 60 seconds)
+ * - RATE_LIMIT_PROXY_MAX (default: 120)
+ *
+ * Disabled in test environment unless TEST_RATE_LIMITING=true
+ */
+export const proxyRateLimit = shouldEnableRateLimiting
+  ? rateLimit({
+      windowMs: PROXY_WINDOW_MS,
+      max: PROXY_MAX,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: proxyStore,
+      keyGenerator: (req: Request) => {
+        if (req.user?.id) {
+          return req.user.id;
+        }
+        return 'unknown';
+      },
+      handler: (_req: Request, res: Response) => {
+        res.status(429).json({
+          message: 'Too many proxy requests. Please try again shortly.',
+          retryAfter: Math.ceil(PROXY_WINDOW_MS / 1000),
+        });
+      },
       validate: { xForwardedForHeader: false } as Partial<Options['validate']>,
     })
   : passThrough;
