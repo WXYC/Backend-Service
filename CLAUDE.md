@@ -19,16 +19,18 @@ npm workspaces with four packages:
 
 Express 5 application with these route groups:
 
-| Route           | Purpose                                 |
-| --------------- | --------------------------------------- |
-| `/library`      | Music library catalog                   |
-| `/flowsheet`    | V1 flowsheet (legacy)                   |
-| `/v2/flowsheet` | V2 flowsheet (uses `@wxyc/shared` DTOs) |
-| `/djs`          | DJ profiles and management              |
-| `/request`      | Song request line                       |
-| `/schedule`     | Schedule management                     |
-| `/events`       | SSE for real-time updates               |
-| `/healthcheck`  | Health check                            |
+| Route           | Purpose                                        |
+| --------------- | ---------------------------------------------- |
+| `/config`       | Public app bootstrap configuration             |
+| `/proxy`        | iOS proxy endpoints (anonymous auth + rate limit) |
+| `/library`      | Music library catalog                          |
+| `/flowsheet`    | V1 flowsheet (legacy)                          |
+| `/v2/flowsheet` | V2 flowsheet (uses `@wxyc/shared` DTOs)        |
+| `/djs`          | DJ profiles and management                     |
+| `/request`      | Song request line                              |
+| `/schedule`     | Schedule management                            |
+| `/events`       | SSE for real-time updates                      |
+| `/healthcheck`  | Health check                                   |
 
 Code is organized as controllers (HTTP handling) -> services (business logic) -> database (Drizzle queries).
 
