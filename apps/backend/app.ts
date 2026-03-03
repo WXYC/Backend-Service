@@ -10,6 +10,8 @@ import { library_route } from './routes/library.route.js';
 import { schedule_route } from './routes/schedule.route.js';
 import { events_route } from './routes/events.route.js';
 import { request_line_route } from './routes/requestLine.route.js';
+import { config_route } from './routes/config.route.js';
+import { proxy_route } from './routes/proxy.route.js';
 import { showMemberMiddleware } from './middleware/checkShowMember.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
@@ -34,6 +36,12 @@ app.use(
 // Serve documentation
 const swaggerDoc = parse_yaml(swaggerContent);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc));
+
+// Public configuration endpoint (unauthenticated)
+app.use('/config', config_route);
+
+// Proxy endpoints for iOS app (anonymous auth + rate limiting)
+app.use('/proxy', proxy_route);
 
 // Business logic routes
 app.use('/library', library_route);
