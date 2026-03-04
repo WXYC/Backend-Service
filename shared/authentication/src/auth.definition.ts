@@ -249,19 +249,12 @@ export const auth: Auth = betterAuth({
         return;
       }
 
-      // Send verification email for admin-created users
-      const callbackURL = process.env.EMAIL_VERIFICATION_REDIRECT_URL?.trim() || process.env.FRONTEND_SOURCE?.trim();
-
-      void auth.api
-        .sendVerificationEmail({
-          body: {
-            email,
-            callbackURL,
-          },
-        })
-        .catch((error) => {
-          console.error('Error triggering verification email:', error);
-        });
+      // Auto-verify email for admin-created users (trusted operation)
+      try {
+        await db.update(user).set({ emailVerified: true }).where(eq(user.email, email));
+      } catch (error) {
+        console.error('Error auto-verifying admin-created user:', error);
+      }
     }),
   },
 
