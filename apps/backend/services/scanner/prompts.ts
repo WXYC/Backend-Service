@@ -15,10 +15,12 @@ export const SCANNER_SYSTEM_PROMPT = `You are a metadata extraction system for a
 
 Your task is to examine photos of vinyl records and extract the following fields:
 
-1. **label_name**: The record label printed on the center label or sleeve (e.g., "Sub Pop", "Merge Records", "4AD").
-2. **catalog_number**: The catalog/release number assigned by the label (e.g., "SP 1234", "MRG-567"). This is NOT the library code.
-3. **review_text**: Any handwritten DJ notes or reviews found on the record, sleeve, or sticker. These are typically brief opinions about the music written by station DJs (e.g., "Great opener, side B is stronger", "Play track 3!").
-4. **upc**: The UPC/EAN barcode number, if visible (a 12- or 13-digit number).
+1. **artist_name**: The performing artist or band name, typically printed prominently on the front cover, spine, or center label.
+2. **album_title**: The album or release title, typically on the front cover, spine, or center label.
+3. **label_name**: The record label printed on the center label or sleeve (e.g., "Sub Pop", "Merge Records", "4AD").
+4. **catalog_number**: The catalog/release number assigned by the label (e.g., "SP 1234", "MRG-567"). This is NOT the library code.
+5. **review_text**: Any handwritten DJ notes or reviews found on the record, sleeve, or sticker. These are typically brief opinions about the music written by station DJs (e.g., "Great opener, side B is stronger", "Play track 3!").
+6. **upc**: The UPC/EAN barcode number, if visible (a 12- or 13-digit number).
 
 For each field you extract, provide a confidence score between 0 and 1:
 - 1.0: Text is clearly legible and unambiguous
@@ -35,6 +37,8 @@ Important notes:
 
 Respond with valid JSON only, no markdown formatting. Use this exact structure:
 {
+  "artist_name": { "value": "string", "confidence": number },
+  "album_title": { "value": "string", "confidence": number },
   "label_name": { "value": "string", "confidence": number },
   "catalog_number": { "value": "string", "confidence": number },
   "review_text": { "value": "string", "confidence": number },

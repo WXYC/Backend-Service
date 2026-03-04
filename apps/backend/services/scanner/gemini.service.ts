@@ -41,6 +41,8 @@ export function resetGeminiClient(): void {
  * Raw response shape from Gemini extraction.
  */
 interface RawExtractionResponse {
+  artist_name?: { value: string; confidence: number };
+  album_title?: { value: string; confidence: number };
   label_name?: { value: string; confidence: number };
   catalog_number?: { value: string; confidence: number };
   review_text?: { value: string; confidence: number };
@@ -113,6 +115,12 @@ export async function extractFromImages(
     console.log(`[Scanner] Raw extraction response:`, JSON.stringify(parsed));
 
     const extraction: ScanExtraction = {};
+
+    const artistName = parseField(parsed.artist_name);
+    if (artistName) extraction.artistName = artistName;
+
+    const albumTitle = parseField(parsed.album_title);
+    if (albumTitle) extraction.albumTitle = albumTitle;
 
     const labelName = parseField(parsed.label_name);
     if (labelName) extraction.labelName = labelName;
