@@ -49,8 +49,8 @@ export async function processImages(images: Buffer[], photoTypes: string[], cont
  * a fuzzy search of the library database.
  */
 async function tryMatchCatalog(extraction: ScanExtraction, context: ScanContext): Promise<number | undefined> {
-  const artistName = context.artistName || extraction.labelName?.value;
-  const albumTitle = context.albumTitle;
+  const artistName = context.artistName || extraction.artistName?.value;
+  const albumTitle = context.albumTitle || extraction.albumTitle?.value;
 
   if (!artistName && !albumTitle) {
     return undefined;

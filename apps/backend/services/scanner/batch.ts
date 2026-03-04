@@ -6,8 +6,8 @@
  * Gemini extraction pipeline.
  */
 
-import { eq, asc, sql } from 'drizzle-orm';
-import { db, scan_jobs, scan_results } from '@wxyc/database';
+import { eq, asc, sql, inArray } from 'drizzle-orm';
+import { db, scan_jobs, scan_results, library_artist_view } from '@wxyc/database';
 import { processImages } from './processor.js';
 import { ScanContext } from './types.js';
 
@@ -30,6 +30,21 @@ export interface BatchJobCreated {
 }
 
 /**
+ * Album details for a matched catalog item, hydrated from library_artist_view.
+ */
+export interface MatchedAlbumInfo {
+  id: number;
+  artistName: string;
+  albumTitle: string;
+  codeLetters: string;
+  codeArtistNumber: number;
+  codeNumber: number;
+  genreName: string;
+  formatName: string;
+  label: string | null;
+}
+
+/**
  * Status of a single scan result within a batch job.
  */
 export interface BatchResultStatus {
@@ -37,6 +52,7 @@ export interface BatchResultStatus {
   status: string;
   extraction: unknown;
   matchedAlbumId: number | null;
+  matchedAlbum: MatchedAlbumInfo | null;
   errorMessage: string | null;
 }
 
@@ -136,6 +152,34 @@ export async function getJobStatus(jobId: string, userId: string): Promise<Batch
     .orderBy(asc(scan_results.item_index))
     .execute();
 
+  // Hydrate matched album details from library_artist_view
+  const albumIds = results
+    .map((r) => r.matched_album_id)
+    .filter((id): id is number => id !== null);
+
+  const albumMap = new Map<number, MatchedAlbumInfo>();
+  if (albumIds.length > 0) {
+    const albums = await db
+      .select()
+      .from(library_artist_view)
+      .where(inArray(library_artist_view.id, albumIds))
+      .execute();
+
+    for (const album of albums) {
+      albumMap.set(album.id, {
+        id: album.id,
+        artistName: album.artist_name,
+        albumTitle: album.album_title,
+        codeLetters: album.code_letters,
+        codeArtistNumber: album.code_artist_number,
+        codeNumber: album.code_number,
+        genreName: album.genre_name,
+        formatName: album.format_name,
+        label: album.label,
+      });
+    }
+  }
+
   return {
     jobId: job.id,
     status: job.status,
@@ -149,6 +193,7 @@ export async function getJobStatus(jobId: string, userId: string): Promise<Batch
       status: r.status,
       extraction: r.extraction,
       matchedAlbumId: r.matched_album_id,
+      matchedAlbum: r.matched_album_id ? albumMap.get(r.matched_album_id) ?? null : null,
       errorMessage: r.error_message,
     })),
   };

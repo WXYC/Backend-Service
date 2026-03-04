@@ -77,9 +77,9 @@ describe('processor', () => {
       expect(result.matchedAlbumId).toBe(101);
     });
 
-    it('uses label name from extraction when no artist in context', async () => {
+    it('uses extracted artist name when no artist in context', async () => {
       const mockExtraction: ScanExtraction = {
-        labelName: { value: 'Merge Records', confidence: 0.9 },
+        artistName: { value: 'Superchunk', confidence: 0.9 },
       };
 
       mockExtractFromImages.mockResolvedValue(mockExtraction);
@@ -88,8 +88,23 @@ describe('processor', () => {
       const context: ScanContext = { albumTitle: 'Foolish' };
       const result = await processImages(mockImages, mockPhotoTypes, context);
 
-      expect(mockFuzzySearchLibrary).toHaveBeenCalledWith('Merge Records', 'Foolish', 1);
+      expect(mockFuzzySearchLibrary).toHaveBeenCalledWith('Superchunk', 'Foolish', 1);
       expect(result.matchedAlbumId).toBeUndefined();
+    });
+
+    it('uses extracted album title when no title in context', async () => {
+      const mockExtraction: ScanExtraction = {
+        albumTitle: { value: 'Bleach', confidence: 0.85 },
+      };
+
+      mockExtractFromImages.mockResolvedValue(mockExtraction);
+      mockFuzzySearchLibrary.mockResolvedValue([{ id: 55, artist_name: 'Nirvana', album_title: 'Bleach' }]);
+
+      const context: ScanContext = { artistName: 'Nirvana' };
+      const result = await processImages(mockImages, mockPhotoTypes, context);
+
+      expect(mockFuzzySearchLibrary).toHaveBeenCalledWith('Nirvana', 'Bleach', 1);
+      expect(result.matchedAlbumId).toBe(55);
     });
 
     it('returns undefined matchedAlbumId when no context for matching', async () => {

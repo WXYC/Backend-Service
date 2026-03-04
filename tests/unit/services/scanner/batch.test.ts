@@ -40,6 +40,17 @@ jest.mock('@wxyc/database', () => ({
     error_message: 'error_message',
     completed_at: 'completed_at',
   },
+  library_artist_view: {
+    id: 'id',
+    artist_name: 'artist_name',
+    album_title: 'album_title',
+    code_letters: 'code_letters',
+    code_artist_number: 'code_artist_number',
+    code_number: 'code_number',
+    genre_name: 'genre_name',
+    format_name: 'format_name',
+    label: 'label',
+  },
 }));
 
 // Wire up the chain: insert().values().returning() and select().from().where().orderBy().execute()
@@ -72,6 +83,7 @@ jest.mock('../../../../apps/backend/services/scanner/processor', () => ({
 jest.mock('drizzle-orm', () => ({
   eq: jest.fn((a, b) => ({ eq: [a, b] })),
   asc: jest.fn((col) => ({ asc: col })),
+  inArray: jest.fn((col, values) => ({ inArray: [col, values] })),
   sql: Object.assign(
     jest.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ sql: strings, values })),
     {
@@ -222,7 +234,23 @@ describe('batch service', () => {
           completed_at: null,
         },
       ];
-      mockExecute.mockResolvedValueOnce([jobRow]).mockResolvedValueOnce(resultRows);
+      const albumRows = [
+        {
+          id: 42,
+          artist_name: 'Nirvana',
+          album_title: 'Bleach',
+          code_letters: 'NI',
+          code_artist_number: 1,
+          code_number: 3,
+          genre_name: 'ROCK',
+          format_name: 'LP',
+          label: 'Sub Pop',
+        },
+      ];
+      mockExecute
+        .mockResolvedValueOnce([jobRow])
+        .mockResolvedValueOnce(resultRows)
+        .mockResolvedValueOnce(albumRows);
 
       const result = await getJobStatus(jobId, userId);
 
@@ -236,7 +264,55 @@ describe('batch service', () => {
       expect(result.failedItems).toBe(0);
       expect(result.results).toHaveLength(2);
       expect(result.results[0].status).toBe('completed');
+      expect(result.results[0].matchedAlbum).toEqual({
+        id: 42,
+        artistName: 'Nirvana',
+        albumTitle: 'Bleach',
+        codeLetters: 'NI',
+        codeArtistNumber: 1,
+        codeNumber: 3,
+        genreName: 'ROCK',
+        formatName: 'LP',
+        label: 'Sub Pop',
+      });
       expect(result.results[1].status).toBe('processing');
+      expect(result.results[1].matchedAlbum).toBeNull();
+    });
+
+    it('returns null matchedAlbum when no results have matched albums', async () => {
+      const jobRow = {
+        id: jobId,
+        user_id: userId,
+        status: 'completed',
+        total_items: 1,
+        completed_items: 1,
+        failed_items: 0,
+        created_at: new Date('2026-01-01'),
+        updated_at: new Date('2026-01-01'),
+      };
+      const resultRows = [
+        {
+          id: 1,
+          job_id: jobId,
+          item_index: 0,
+          status: 'completed',
+          context: {},
+          extraction: { labelName: { value: 'Merge', confidence: 0.9 } },
+          matched_album_id: null,
+          error_message: null,
+          created_at: new Date(),
+          completed_at: new Date(),
+        },
+      ];
+      // Only two DB calls: job + results (no album lookup needed)
+      mockExecute.mockResolvedValueOnce([jobRow]).mockResolvedValueOnce(resultRows);
+
+      const result = await getJobStatus(jobId, userId);
+
+      if (result === null) {
+        throw new Error('Expected non-null result');
+      }
+      expect(result.results[0].matchedAlbum).toBeNull();
     });
   });
 
