@@ -75,7 +75,7 @@ export async function extractFromImages(
   context: ScanContext
 ): Promise<ScanExtraction> {
   const client = getGeminiClient();
-  const model = client.getGenerativeModel({ model: 'gemini-3.1-pro-preview' });
+  const model = client.getGenerativeModel({ model: 'gemini-3-flash-preview' });
 
   console.log(`[Scanner] Extracting metadata from ${images.length} image(s)`);
 
