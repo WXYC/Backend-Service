@@ -6,7 +6,7 @@
  * Gemini extraction pipeline.
  */
 
-import { eq, asc, sql, inArray } from 'drizzle-orm';
+import { eq, asc, desc, sql, count, inArray } from 'drizzle-orm';
 import { db, scan_jobs, scan_results, library_artist_view } from '@wxyc/database';
 import { processImages } from './processor.js';
 import { ScanContext } from './types.js';
@@ -68,6 +68,72 @@ export interface BatchJobStatus {
   results: BatchResultStatus[];
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * Summary of a batch job (without individual results).
+ */
+export interface BatchJobSummary {
+  jobId: string;
+  status: string;
+  totalItems: number;
+  completedItems: number;
+  failedItems: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * Paginated list of batch job summaries.
+ */
+export interface PaginatedJobList {
+  jobs: BatchJobSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * List batch jobs for a user with pagination.
+ *
+ * Returns job summaries (without individual results) ordered by most recent first.
+ *
+ * @param userId - Authenticated user ID
+ * @param limit - Maximum number of jobs to return
+ * @param offset - Number of jobs to skip
+ * @returns Paginated list of job summaries
+ */
+export async function listJobs(userId: string, limit: number, offset: number): Promise<PaginatedJobList> {
+  const [jobs, totalResult] = await Promise.all([
+    db
+      .select()
+      .from(scan_jobs)
+      .where(eq(scan_jobs.user_id, userId))
+      .orderBy(desc(scan_jobs.created_at))
+      .limit(limit)
+      .offset(offset)
+      .execute(),
+    db
+      .select({ count: count() })
+      .from(scan_jobs)
+      .where(eq(scan_jobs.user_id, userId))
+      .execute(),
+  ]);
+
+  return {
+    jobs: jobs.map((job) => ({
+      jobId: job.id,
+      status: job.status,
+      totalItems: job.total_items,
+      completedItems: job.completed_items,
+      failedItems: job.failed_items,
+      createdAt: job.created_at,
+      updatedAt: job.updated_at,
+    })),
+    total: totalResult[0]?.count ?? 0,
+    limit,
+    offset,
+  };
 }
 
 /**

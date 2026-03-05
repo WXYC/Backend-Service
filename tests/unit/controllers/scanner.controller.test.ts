@@ -18,10 +18,12 @@ const mockCreateBatchJob = jest.fn<
   }>
 >();
 const mockGetJobStatus = jest.fn<(jobId: string, userId: string) => Promise<unknown>>();
+const mockListJobs = jest.fn<(userId: string, limit: number, offset: number) => Promise<unknown>>();
 
 jest.mock('../../../apps/backend/services/scanner/batch', () => ({
   createBatchJob: mockCreateBatchJob,
   getJobStatus: mockGetJobStatus,
+  listJobs: mockListJobs,
 }));
 
 // Mock the processor (for scanImages handler which we're not testing here but need for the import)
@@ -36,7 +38,7 @@ jest.mock('../../../apps/backend/services/discogs/discogs.service', () => ({
   },
 }));
 
-import { createBatchScan, getBatchStatus } from '../../../apps/backend/controllers/scanner.controller';
+import { createBatchScan, getBatchStatus, listBatchJobs } from '../../../apps/backend/controllers/scanner.controller';
 
 // Helper to create mock Express req/res/next
 const createMockRes = () => {
@@ -160,6 +162,58 @@ describe('scanner.controller', () => {
         files[1].buffer,
         files[2].buffer,
       ]);
+    });
+  });
+
+  describe('listBatchJobs', () => {
+    it('returns 200 with paginated job list', async () => {
+      const jobList = {
+        jobs: [{ jobId: 'job-1', status: 'completed', totalItems: 2, completedItems: 2, failedItems: 0 }],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      };
+      const req = {
+        query: {},
+        auth: { id: 'user-123' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      mockListJobs.mockResolvedValue(jobList);
+
+      await listBatchJobs(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(jobList);
+      expect(mockListJobs).toHaveBeenCalledWith('user-123', 20, 0);
+    });
+
+    it('uses default limit and offset when not provided', async () => {
+      const req = {
+        query: {},
+        auth: { id: 'user-456' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      mockListJobs.mockResolvedValue({ jobs: [], total: 0, limit: 20, offset: 0 });
+
+      await listBatchJobs(req, res as Response, mockNext);
+
+      expect(mockListJobs).toHaveBeenCalledWith('user-456', 20, 0);
+    });
+
+    it('clamps limit to max 100', async () => {
+      const req = {
+        query: { limit: '500' },
+        auth: { id: 'user-123' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      mockListJobs.mockResolvedValue({ jobs: [], total: 0, limit: 100, offset: 0 });
+
+      await listBatchJobs(req, res as Response, mockNext);
+
+      expect(mockListJobs).toHaveBeenCalledWith('user-123', 100, 0);
     });
   });
 
