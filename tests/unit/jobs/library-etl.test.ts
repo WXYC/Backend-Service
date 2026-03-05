@@ -165,9 +165,21 @@ describe('library-etl job helpers', () => {
       expect(r.isVarious).toBe(false);
     });
 
-    it('does not match without hyphen after "Various Artists"', () => {
-      const r = normalizeArtistName('Various Artists');
+    it('does match "various"', () => {
+      const r = normalizeArtistName('various');
       expect(r.name).toBe('Various Artists');
+      expect(r.isVarious).toBe(true);
+    });
+
+    it('does match "various artists"', () => {
+      const r = normalizeArtistName('various artists');
+      expect(r.name).toBe('Various Artists');
+      expect(r.isVarious).toBe(true);
+    });
+
+    it('does match "various artists - rock - a"', () => {
+      const r = normalizeArtistName('various artists - rock - a');
+      expect(r.name).toBe('various artists - rock - a');
       expect(r.isVarious).toBe(false);
     });
   });
@@ -191,9 +203,9 @@ describe('library-etl job helpers', () => {
   });
 
   describe('normalizeCodeLetters', () => {
-    it('returns first two chars uppercased', () => {
+    it('return chars uppercased', () => {
       expect(normalizeCodeLetters('ab')).toBe('AB');
-      expect(normalizeCodeLetters('xyz')).toBe('XY');
+      expect(normalizeCodeLetters('xyz')).toBe('XYZ');
     });
 
     it('returns null for empty or null', () => {
