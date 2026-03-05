@@ -60,7 +60,10 @@ const isDbOnlyGenre = (genreRef?: string | null) => {
 
 const normalizeArtistName = (name: string) => {
   const trimmed = name.trim();
-  if (/^various\s+artists\s*-\s*/i.test(trimmed)) {
+  if (/^various\s*artists\s*-rock\s*-[a-z]$/i.test(trimmed)) {
+    return { name: trimmed, isVarious: false };
+  }
+  if (/^various(?:\s+artists(?:\s*-\s*[a-z]+)?)?$/i.test(trimmed)) {
     return { name: VARIOUS_ARTISTS_NAME, isVarious: true };
   }
   return { name: trimmed, isVarious: false };
@@ -82,6 +85,12 @@ const normalizeCodeLetters = (code: string | null) => {
   if (!code) return null;
   const trimmed = code.trim();
   if (trimmed.length === 0) return null;
+  if (/Z-[A-Z]/.test(trimmed)) {
+    return VARIOUS_ARTISTS_CODE_LETTERS;
+  }
+  if (trimmed.length === 3) {
+    return trimmed.toUpperCase();
+  }
   return trimmed.slice(0, 2).toUpperCase();
 };
 
