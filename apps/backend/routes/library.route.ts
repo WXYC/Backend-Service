@@ -22,6 +22,8 @@ library_route.patch('/rotation', requirePermissions({ catalog: ['write'] }), lib
 
 library_route.post('/artists', requirePermissions({ catalog: ['write'] }), libraryController.addArtist);
 
+library_route.get('/artists/peek-code', requirePermissions({ catalog: ['write'] }), libraryController.peekArtistNumber);
+
 library_route.get('/formats', requirePermissions({ catalog: ['read'] }), libraryController.getFormats);
 
 library_route.post('/formats', requirePermissions({ catalog: ['write'] }), libraryController.addFormat);

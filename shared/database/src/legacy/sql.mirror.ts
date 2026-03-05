@@ -3,6 +3,7 @@ import { Config, NodeSSH } from 'node-ssh';
 export class MirrorSQL {
   private static _instance: MirrorSQL | null = null;
   private static _ssh: NodeSSH | null = null;
+  private static _disposeTimer: NodeJS.Timeout | null = null;
 
   static instance() {
     if (!this._instance) this._instance = new MirrorSQL();
@@ -24,17 +25,35 @@ export class MirrorSQL {
       await this._ssh.connect(sshConfig);
     }
 
-    setTimeout(
+    if (this._disposeTimer) {
+      clearTimeout(this._disposeTimer);
+    }
+
+    this._disposeTimer = setTimeout(
       () => {
-        if (this._ssh && this._ssh.isConnected()) {
-          this._ssh.dispose();
-          this._ssh = null;
-        }
+        MirrorSQL.instance().close();
       },
       5 * 60 * 1000
     ); // auto-dispose after 5 minutes of inactivity
+    this._disposeTimer.unref();
 
     return this._ssh;
+  }
+
+  close() {
+    if (MirrorSQL._disposeTimer) {
+      clearTimeout(MirrorSQL._disposeTimer);
+      MirrorSQL._disposeTimer = null;
+    }
+
+    if (MirrorSQL._ssh) {
+      if (MirrorSQL._ssh.isConnected()) {
+        MirrorSQL._ssh.dispose();
+      }
+      MirrorSQL._ssh = null;
+    }
+
+    console.log('[MirrorSQL] Database connection closed.');
   }
 
   private static shSingleQuote = (s: string) => s.replace(/'/g, `'\\''`);
@@ -46,6 +65,7 @@ export class MirrorSQL {
         mysql -u ${process.env.REMOTE_DB_USER ?? ''} \\
               -h ${process.env.REMOTE_DB_HOST ?? ''} \\
               -D ${process.env.REMOTE_DB_NAME ?? ''} \\
+              -P ${process.env.REMOTE_DB_PORT ?? '3306'} \\
               --protocol=TCP \\
               --connect-timeout=10 \\
               --skip-ssl \\

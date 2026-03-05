@@ -1,5 +1,5 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
-import { sql, eq } from 'drizzle-orm';
+import { sql, eq, and } from 'drizzle-orm';
 import {
   pgSchema,
   pgTable,
@@ -194,18 +194,22 @@ export const shift_covers = wxyc_schema.table('shift_covers', {
   covered: boolean('covered').default(false),
 });
 
+export type NewCronjobRun = InferInsertModel<typeof cronjob_runs>;
+export type CronjobRun = InferSelectModel<typeof cronjob_runs>;
+export const cronjob_runs = wxyc_schema.table('cronjob_runs', {
+  job_name: varchar('job_name', { length: 64 }).primaryKey(),
+  last_run: timestamp('last_run', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export type NewArtist = InferInsertModel<typeof artists>;
 export type Artist = InferSelectModel<typeof artists>;
 export const artists = wxyc_schema.table(
   'artists',
   {
     id: serial('id').primaryKey(),
-    genre_id: integer('genre_id')
-      .references(() => genres.id)
-      .notNull(),
     artist_name: varchar('artist_name', { length: 128 }).notNull(),
-    code_letters: varchar('code_letters', { length: 2 }).notNull(),
-    code_artist_number: smallint('code_artist_number').notNull(),
+    alphabetical_name: varchar('alphabetical_name', { length: 128 }).notNull(),
+    code_letters: varchar('code_letters', { length: 4 }).notNull(),
     add_date: date('add_date').defaultNow().notNull(),
     last_modified: timestamp('last_modified').defaultNow().notNull(),
   },
@@ -245,6 +249,7 @@ export const library = wxyc_schema.table(
     album_title: varchar('album_title', { length: 128 }).notNull(),
     label: varchar('label', { length: 128 }),
     code_number: smallint('code_number').notNull(),
+    code_volume_letters: varchar('code_volume_letters', { length: 4 }),
     disc_quantity: smallint('disc_quantity').default(1).notNull(),
     plays: integer('plays').default(0).notNull(),
     add_date: timestamp('add_date').defaultNow().notNull(),
@@ -416,6 +421,7 @@ export type LibraryArtistViewEntry = {
   code_artist_number: number;
   code_number: number;
   artist_name: string;
+  alphabetical_name: string;
   album_title: string;
   format_name: string;
   genre_name: string;
@@ -428,9 +434,10 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
     .select({
       id: library.id,
       code_letters: artists.code_letters,
-      code_artist_number: artists.code_artist_number,
+      code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
       album_title: library.album_title,
       format_name: format.format_name,
       genre_name: genres.genre_name,
@@ -442,9 +449,16 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
     .innerJoin(artists, eq(artists.id, library.artist_id))
     .innerJoin(format, eq(format.id, library.format_id))
     .innerJoin(genres, eq(genres.id, library.genre_id))
+    .innerJoin(
+      genre_artist_crossreference,
+      and(
+        eq(genre_artist_crossreference.artist_id, library.artist_id),
+        eq(genre_artist_crossreference.genre_id, library.genre_id)
+      )
+    )
     .leftJoin(
       rotation,
-      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} < CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
+      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
     );
 });
 
@@ -457,6 +471,7 @@ export const rotation_library_view = wxyc_schema.view('rotation_library_view').a
       rotation_bin: rotation.rotation_bin,
       album_title: library.album_title,
       artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
       kill_date: rotation.kill_date,
     })
     .from(library)

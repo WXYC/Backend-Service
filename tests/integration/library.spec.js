@@ -183,7 +183,15 @@ describe('Library Rotation', () => {
       const res = await auth.get('/library/rotation').expect(200);
 
       if (res.body.length > 0) {
-        expectFields(res.body[0], 'id', 'artist_name', 'album_title', 'rotation_bin', 'rotation_id');
+        expectFields(
+          res.body[0],
+          'id',
+          'artist_name',
+          'alphabetical_name',
+          'album_title',
+          'rotation_bin',
+          'rotation_id'
+        );
       }
     });
   });
@@ -313,32 +321,14 @@ describe('Library Artists', () => {
           artist_name: `Test Artist ${uniqueSuffix}`,
           code_letters: uniqueSuffix,
           genre_id: 1,
+          code_number: 1,
         })
         .expect(200);
 
-      expectFields(res.body, 'id', 'artist_name', 'code_letters', 'code_artist_number');
+      expectFields(res.body, 'id', 'artist_name', 'alphabetical_name', 'code_letters', 'code_number');
       expect(res.body.artist_name).toContain('Test Artist');
+      expect(res.body.alphabetical_name).toBeDefined();
       expect(res.body.code_letters).toBe(uniqueSuffix);
-    });
-
-    test('generates incremented code_artist_number', async () => {
-      const uniqueCode = Date.now().toString(36).toUpperCase().slice(-2);
-
-      const res1 = await auth.post('/library/artists').send({
-        artist_name: `Test Artist A ${uniqueCode}`,
-        code_letters: uniqueCode,
-        genre_id: 1,
-      });
-
-      const res2 = await auth.post('/library/artists').send({
-        artist_name: `Test Artist B ${uniqueCode}`,
-        code_letters: uniqueCode,
-        genre_id: 1,
-      });
-
-      if (res1.body.code_artist_number && res2.body.code_artist_number) {
-        expect(res2.body.code_artist_number).toBeGreaterThan(res1.body.code_artist_number);
-      }
     });
 
     test('returns 400 when artist_name is missing', async () => {
@@ -347,6 +337,7 @@ describe('Library Artists', () => {
         .send({
           code_letters: 'TS',
           genre_id: 1,
+          code_number: 1,
         })
         .expect(400);
 
@@ -359,6 +350,7 @@ describe('Library Artists', () => {
         .send({
           artist_name: 'Test Artist',
           genre_id: 1,
+          code_number: 1,
         })
         .expect(400);
 
@@ -371,11 +363,56 @@ describe('Library Artists', () => {
         .send({
           artist_name: 'Test Artist',
           code_letters: 'TS',
+          code_number: 1,
         })
         .expect(400);
 
       expectErrorContains(res, 'Missing Request Parameters');
     });
+
+    test('returns 400 when code_number is missing', async () => {
+      const res = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: 'Test Artist',
+          code_letters: 'TS',
+          genre_id: 1,
+        })
+        .expect(400);
+
+      expectErrorContains(res, 'Missing Request Parameters');
+    });
+
+    test('accepts optional alphabetical_name and returns it', async () => {
+      const uniqueSuffix = Date.now().toString(36).toUpperCase().slice(-3);
+      const res = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `The Band ${uniqueSuffix}`,
+          alphabetical_name: `Band ${uniqueSuffix}, The`,
+          code_letters: uniqueSuffix,
+          genre_id: 1,
+          code_number: 1,
+        })
+        .expect(200);
+
+      expect(res.body.alphabetical_name).toBe(`Band ${uniqueSuffix}, The`);
+    });
+  });
+});
+
+describe('Library Artists Peek Code', () => {
+  let auth;
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+  });
+
+  test('peeks next code_artist_number', async () => {
+    const res = await auth.get('/library/artists/peek-code').query({ code_letters: 'BU', genre_id: 1 }).expect(200);
+
+    // BU is the code for Built to Spill and has artist_genre_code 60
+    expect(res.body.next_code_number).toBe(61);
   });
 });
 
@@ -499,14 +536,23 @@ describe('Library Album Info', () => {
     test('returns album info for valid album_id', async () => {
       const res = await auth.get('/library/info').query({ album_id: 1 }).expect(200);
 
-      expectFields(res.body, 'id', 'artist_name', 'album_title');
+      expectFields(res.body, 'id', 'artist_name', 'alphabetical_name', 'album_title');
       expect(res.body.id).toBe(1);
     });
 
     test('returns album with all expected fields', async () => {
       const res = await auth.get('/library/info').query({ album_id: 1 }).expect(200);
 
-      expectFields(res.body, 'id', 'artist_name', 'album_title', 'code_letters', 'code_number', 'plays');
+      expectFields(
+        res.body,
+        'id',
+        'artist_name',
+        'alphabetical_name',
+        'album_title',
+        'code_letters',
+        'code_number',
+        'plays'
+      );
     });
 
     test('returns 400 when album_id is missing', async () => {

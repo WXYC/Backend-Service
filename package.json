@@ -9,7 +9,7 @@
     "lint:env": "node scripts/lint-env.js",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "build": "npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
+    "build": "npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/** --workspace=jobs/**",
     "dev": "dotenvx run -f .env -- concurrently \"npm:dev:auth\" \"npm:dev:backend\"",
     "dev:backend": "npm run dev --workspace=@wxyc/backend",
     "dev:auth": "npm run dev --workspace=@wxyc/auth-service",
@@ -44,6 +44,7 @@
   "license": "MIT",
   "workspaces": [
     "apps/*",
+    "jobs/*",
     "shared/*"
   ],
   "devDependencies": {
