@@ -25,6 +25,7 @@ const config: Config = {
     // Remove .js extensions from relative imports (ESM compatibility)
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },
+  modulePathIgnorePatterns: ['<rootDir>/.claude/worktrees/'],
   collectCoverageFrom: ['apps/backend/**/*.ts', '!**/*.d.ts', '!**/dist/**'],
   clearMocks: true,
 };

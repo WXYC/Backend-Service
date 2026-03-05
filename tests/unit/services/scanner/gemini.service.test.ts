@@ -60,7 +60,7 @@ describe('gemini.service', () => {
 
       await extractFromImages(mockImages, mockPhotoTypes, mockContext);
 
-      expect(mockGetGenerativeModel).toHaveBeenCalledWith({ model: 'gemini-2.0-flash' });
+      expect(mockGetGenerativeModel).toHaveBeenCalledWith({ model: 'gemini-3-flash-preview' });
     });
 
     it('sends images as base64 inline data', async () => {

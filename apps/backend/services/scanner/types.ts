@@ -29,6 +29,8 @@ export interface ExtractionField {
  * Structured extraction results from Gemini image analysis.
  */
 export interface ScanExtraction {
+  artistName?: ExtractionField;
+  albumTitle?: ExtractionField;
   labelName?: ExtractionField;
   catalogNumber?: ExtractionField;
   reviewText?: ExtractionField;

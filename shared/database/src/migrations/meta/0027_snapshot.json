@@ -1,6 +1,6 @@
 {
-  "id": "df397568-f27d-4a06-9aba-08264d97ae8e",
-  "prevId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "id": "ede8cebc-40fd-42e4-b483-653cb55cc4d8",
+  "prevId": "df397568-f27d-4a06-9aba-08264d97ae8e",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -854,6 +854,14 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": false
+        },
+        "entry_type": {
+          "name": "entry_type",
+          "type": "flowsheet_entry_type",
+          "typeSchema": "wxyc_schema",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'track'"
         },
         "track_title": {
           "name": "track_title",
@@ -1710,6 +1718,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "rotation_bin": {
+          "name": "rotation_bin",
+          "type": "freq_enum",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
         "add_date": {
           "name": "add_date",
           "type": "date",
@@ -1722,13 +1737,6 @@
           "type": "date",
           "primaryKey": false,
           "notNull": false
-        },
-        "rotation_bin": {
-          "name": "rotation_bin",
-          "type": "freq_enum",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
         }
       },
       "indexes": {
@@ -1756,6 +1764,208 @@
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "album_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "wxyc_schema.scan_jobs": {
+      "name": "scan_jobs",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "scan_job_status",
+          "typeSchema": "wxyc_schema",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "total_items": {
+          "name": "total_items",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "completed_items": {
+          "name": "completed_items",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "failed_items": {
+          "name": "failed_items",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "scan_jobs_user_id_auth_user_id_fk": {
+          "name": "scan_jobs_user_id_auth_user_id_fk",
+          "tableFrom": "scan_jobs",
+          "tableTo": "auth_user",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "wxyc_schema.scan_results": {
+      "name": "scan_results",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "job_id": {
+          "name": "job_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "item_index": {
+          "name": "item_index",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "scan_result_status",
+          "typeSchema": "wxyc_schema",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "context": {
+          "name": "context",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "extraction": {
+          "name": "extraction",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "matched_album_id": {
+          "name": "matched_album_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error_message": {
+          "name": "error_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "scan_results_job_id_idx": {
+          "name": "scan_results_job_id_idx",
+          "columns": [
+            {
+              "expression": "job_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "scan_results_job_id_scan_jobs_id_fk": {
+          "name": "scan_results_job_id_scan_jobs_id_fk",
+          "tableFrom": "scan_results",
+          "tableTo": "scan_jobs",
+          "schemaTo": "wxyc_schema",
+          "columnsFrom": [
+            "job_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "scan_results_matched_album_id_library_id_fk": {
+          "name": "scan_results_matched_album_id_library_id_fk",
+          "tableFrom": "scan_results",
+          "tableTo": "library",
+          "schemaTo": "wxyc_schema",
+          "columnsFrom": [
+            "matched_album_id"
           ],
           "columnsTo": [
             "id"
@@ -2485,6 +2695,20 @@
     }
   },
   "enums": {
+    "wxyc_schema.flowsheet_entry_type": {
+      "name": "flowsheet_entry_type",
+      "schema": "wxyc_schema",
+      "values": [
+        "track",
+        "show_start",
+        "show_end",
+        "dj_join",
+        "dj_leave",
+        "talkset",
+        "breakpoint",
+        "message"
+      ]
+    },
     "public.freq_enum": {
       "name": "freq_enum",
       "schema": "public",
@@ -2493,6 +2717,26 @@
         "L",
         "M",
         "H"
+      ]
+    },
+    "wxyc_schema.scan_job_status": {
+      "name": "scan_job_status",
+      "schema": "wxyc_schema",
+      "values": [
+        "pending",
+        "processing",
+        "completed",
+        "failed"
+      ]
+    },
+    "wxyc_schema.scan_result_status": {
+      "name": "scan_result_status",
+      "schema": "wxyc_schema",
+      "values": [
+        "pending",
+        "processing",
+        "completed",
+        "failed"
       ]
     }
   },
@@ -2553,6 +2797,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "rotation_bin": {
+          "name": "rotation_bin",
+          "type": "freq_enum",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
         "add_date": {
           "name": "add_date",
           "type": "timestamp",
@@ -2565,13 +2816,6 @@
           "type": "varchar(128)",
           "primaryKey": false,
           "notNull": false
-        },
-        "rotation_bin": {
-          "name": "rotation_bin",
-          "type": "freq_enum",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
         }
       },
       "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"artists\".\"code_artist_number\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" < CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL)",
@@ -2594,6 +2838,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "rotation_bin": {
+          "name": "rotation_bin",
+          "type": "freq_enum",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
         "album_title": {
           "name": "album_title",
           "type": "varchar(128)",
@@ -2611,13 +2862,6 @@
           "type": "date",
           "primaryKey": false,
           "notNull": false
-        },
-        "rotation_bin": {
-          "name": "rotation_bin",
-          "type": "freq_enum",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
         }
       },
       "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"rotation\".\"id\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"rotation\".\"kill_date\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"library\".\"id\" = \"wxyc_schema\".\"rotation\".\"album_id\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\"",
