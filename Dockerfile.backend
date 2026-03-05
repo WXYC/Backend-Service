@@ -3,12 +3,12 @@ FROM node:22-alpine AS builder
 
 WORKDIR /builder
 
-COPY ./package.json ./
+COPY ./package.json ./package-lock.json ./
 COPY ./tsconfig.base.json ./
 COPY ./shared ./shared
 COPY ./apps/backend ./apps/backend
 
-RUN npm install && npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=@wxyc/backend
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=@wxyc/backend
 
 #Production stage
 FROM node:22-alpine AS prod
