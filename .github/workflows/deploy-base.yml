@@ -371,9 +371,12 @@ jobs:
             echo "SCHEDULE: $CRON_SCHEDULE"
             echo "CMD: $CRON_CMD"
 
-            (crontab -l 2>/dev/null | grep -v "$CRON_ID"; echo "$CRON_SCHEDULE $CRON_CMD # $CRON_ID") | crontab -
+            (crontab -l 2>/dev/null | grep -v "$CRON_ID"; echo "$CRON_SCHEDULE $CRON_CMD # $CRON_ID") > crontab.txt && crontab crontab.txt
 
-            echo "Cron schedule updated."
+            echo "CRONTAB:"
+            crontab -l
+
+            rm crontab.txt
 
       - name: Confirm server is up
         if: steps.deploy_vars.outputs.target_type == 'app'
