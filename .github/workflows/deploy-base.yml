@@ -311,7 +311,7 @@ jobs:
           TARGET_APP=${{ matrix.target }}
           if [ -f "jobs/$TARGET_APP/package.json" ]; then
             TARGET_TYPE="job"
-            CRON_SCHEDULE=$(yq '.["cron-schedule"]' jobs/$TARGET_APP/package.json)
+            CRON_SCHEDULE=$(yq -r '.["cron-schedule"]' jobs/$TARGET_APP/package.json)
             if [ -z "$CRON_SCHEDULE" ] || [ "$CRON_SCHEDULE" = "null" ]; then
               echo "Missing cron-schedule in jobs/$TARGET_APP/package.json" >&2
               exit 1
