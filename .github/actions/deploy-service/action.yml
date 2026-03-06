@@ -73,5 +73,9 @@ runs:
           echo "Starting new Docker container..."
           docker run -d --name $TARGET_APP -p $PUBLISH_PORT:8080 --restart unless-stopped --env-file .env ${{ inputs.aws_ecr_uri }}/$TARGET_APP:$DEPLOY_TAG
 
-          echo "Pruning unused Docker objects..."
-          docker system prune -f
+          echo "Cleaning up old Docker images..."
+          docker images --format '{{.Repository}} {{.Tag}}' | \
+            grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
+            sort -k1,1 -k2,2Vr | \
+            awk '{ if ($1 in seen) print $1 ":" $2; else seen[$1]=1 }' | \
+            xargs -r -n1 docker rmi 2>/dev/null || true
