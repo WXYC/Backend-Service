@@ -8,7 +8,7 @@ COPY ./tsconfig.base.json ./
 COPY ./shared/database ./shared/database
 COPY ./jobs/library-etl ./jobs/library-etl
 
-RUN npm install && npm run build --workspace=@wxyc/database --workspace=@wxyc/library-etl
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/library-etl
 
 #Production stage
 FROM node:22-alpine AS prod

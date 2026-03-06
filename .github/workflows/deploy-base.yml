@@ -367,6 +367,10 @@ jobs:
 
             CRON_CMD="docker rm -f ${TARGET_APP}-cron >/dev/null 2>&1 || true; docker run --rm --name ${TARGET_APP}-cron --env-file .env $AWS_ECR_URI/$TARGET_APP:$DEPLOY_TAG"
 
+            echo "CRON DETAILS: $CRON_ID"
+            echo "SCHEDULE: $CRON_SCHEDULE"
+            echo "CMD: $CRON_CMD"
+
             (crontab -l 2>/dev/null | grep -v "$CRON_ID"; echo "$CRON_SCHEDULE $CRON_CMD # $CRON_ID") | crontab -
 
             echo "Cron schedule updated."
