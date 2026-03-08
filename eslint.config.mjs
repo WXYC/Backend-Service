@@ -8,6 +8,8 @@ export default tseslint.config(
   {
     ignores: [
       '**/dist/',
+      '**/.cache/',
+      '.claude/',
       '**/node_modules/',
       'coverage/',
       '**/*.js',

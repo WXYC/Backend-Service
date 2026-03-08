@@ -4,11 +4,11 @@
   "description": "All necessary app services for the WXYC flowsheet backend",
   "scripts": {
     "typecheck": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication && npm run typecheck --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
+    "lint": "eslint --cache --cache-strategy content --cache-location .cache/eslint/ .",
+    "lint:fix": "eslint --cache --cache-strategy content --cache-location .cache/eslint/ . --fix",
     "lint:env": "node scripts/lint-env.js",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format": "prettier --cache --cache-location .cache/prettier/ --write .",
+    "format:check": "prettier --cache --cache-location .cache/prettier/ --check .",
     "build": "npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/** --workspace=jobs/**",
     "dev": "dotenvx run -f .env -- concurrently \"npm:dev:auth\" \"npm:dev:backend\"",
     "dev:backend": "npm run dev --workspace=@wxyc/backend",
@@ -38,7 +38,8 @@
     "drizzle:generate": "read -p \"Enter migration name (optional): \" MIGRATION_NAME && dotenvx run -f .env -- drizzle-kit generate --config 'drizzle.config.ts' --name \"$MIGRATION_NAME\"",
     "drizzle:migrate": "dotenvx run -f .env -- drizzle-kit migrate --config 'drizzle.config.ts'",
     "drizzle:drop": "dotenvx run -f .env -- drizzle-kit drop --out ./shared/database/src/migrations",
-    "setup:e2e-users": "dotenvx run -f .env -- tsx dev_env/setup-e2e-test-users.ts"
+    "setup:e2e-users": "dotenvx run -f .env -- tsx dev_env/setup-e2e-test-users.ts",
+    "prepare": "husky || true"
   },
   "author": "AyBruno",
   "license": "MIT",
@@ -61,6 +62,7 @@
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-security": "^3.0.1",
+    "husky": "^9.1.7",
     "jest": "^30.0.5",
     "jest-html-reporters": "^3.1.7",
     "nodemon": "^3.1.7",
