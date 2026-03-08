@@ -73,7 +73,7 @@ jobs:
       - name: Set Up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Cache node_modules
         id: cache-node-modules
@@ -138,7 +138,7 @@ jobs:
       - name: Set Up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Cache node_modules
         id: cache-node-modules
@@ -232,7 +232,7 @@ jobs:
         if: env.RUN_TESTS == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Cache node_modules
         if: env.RUN_TESTS == 'true'
