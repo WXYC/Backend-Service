@@ -64,8 +64,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 2
+
+      - name: Fetch base commit for Turbo diff
+        if: inputs.target == ''
+        run: git fetch origin ${{ github.event.before }} --depth=1
 
       - name: Set up Node.js
         if: inputs.target == ''
@@ -94,9 +96,9 @@ jobs:
             echo "HAS_TARGETS=true" >> $GITHUB_OUTPUT
           else
             echo "Detecting affected app targets (Turborepo)..."
-            export TURBO_SCM_BASE=HEAD^
-            export TURBO_SCM_HEAD=HEAD
-            TARGETS=$(npx turbo ls --affected --output=json | jq -c '[.packages.items[] | select(.path | startswith("apps/")) | .path | split("/")[1]] | unique | sort')
+            export TURBO_SCM_BASE=${{ github.event.before }}
+            export TURBO_SCM_HEAD=${{ github.sha }}
+            TARGETS=$(npx turbo ls --affected --output=json | jq -c '[.packages.items[] | select(.path | (startswith("apps/") or startswith("jobs/"))) | .path | split("/")[1]] | unique | sort')
             if [ "$TARGETS" = "[]" ] || [ -z "$TARGETS" ]; then
               echo "No affected app targets found."
               echo "TARGETS=[]" >> $GITHUB_OUTPUT
