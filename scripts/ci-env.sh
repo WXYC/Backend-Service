@@ -51,8 +51,8 @@ fi
 # Start database
 $COMPOSE_CMD up -d ci-db
 
-# Run database initialization
-$COMPOSE_CMD up ci-db-init
+# Run database initialization (--abort-on-container-exit propagates failures)
+$COMPOSE_CMD up --abort-on-container-exit ci-db-init
 
 # Start auth and backend services
 # Environment variables are already exported above, Docker Compose will inherit them

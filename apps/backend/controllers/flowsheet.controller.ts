@@ -1,6 +1,6 @@
 import { Request, RequestHandler } from 'express';
 import { Mutex } from 'async-mutex';
-import { NewFSEntry, FSEntry, Show, ShowDJ, library } from '@wxyc/database';
+import { FSEntry, Show, ShowDJ, library } from '@wxyc/database';
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import { fetchAndCacheMetadata } from '../services/metadata/index.js';
 
@@ -183,7 +183,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
               albumInfo.record_label = body.record_label;
             }
 
-            const fsEntry: NewFSEntry = {
+            const fsEntry = {
               album_id: body.album_id,
               ...albumInfo,
               track_title: body.track_title,
@@ -215,7 +215,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
             console.error('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
             res.status(400).send('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
           } else {
-            const fsEntry: NewFSEntry = {
+            const fsEntry = {
               ...body,
               show_id: latestShow.id,
             };
@@ -244,7 +244,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       }
     } else {
       //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
-      const fsEntry: NewFSEntry = {
+      const fsEntry = {
         artist_name: '',
         album_title: '',
         track_title: '',

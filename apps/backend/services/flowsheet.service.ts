@@ -1,4 +1,4 @@
-import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
+import { sql, desc, eq, and, lte, gte, inArray, max } from 'drizzle-orm';
 import {
   db,
   FSEntry,
@@ -38,6 +38,12 @@ const updateLastModified = () => {
   } else {
     lastModifiedAt = now;
   }
+};
+
+/** Get the next play_order value (global max + 1, or 1 if no entries exist) */
+export const getNextPlayOrder = async (): Promise<number> => {
+  const result = await db.select({ maxOrder: max(flowsheet.play_order) }).from(flowsheet);
+  return (result[0]?.maxOrder ?? 0) + 1;
 };
 
 // SQL query fields (flat structure from database)
@@ -180,7 +186,7 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
   return raw.map(transformToIFSEntry);
 };
 
-export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
+export const addTrack = async (entry: Omit<NewFSEntry, 'play_order'> & { play_order?: number }): Promise<FSEntry> => {
   /*
     TODO: logic for updating album playcount
   */
@@ -208,7 +214,15 @@ export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
   //   }
   // }
 
-  const response = await db.insert(flowsheet).values(entry).returning();
+  // Compute play_order if not already set
+  if (entry.show_id != null && !entry.play_order) {
+    entry = { ...entry, play_order: await getNextPlayOrder() };
+  }
+
+  const response = await db
+    .insert(flowsheet)
+    .values(entry as NewFSEntry)
+    .returning();
   updateLastModified();
   return response[0];
 };
@@ -297,8 +311,10 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
     })
     .returning();
 
+  const startPlayOrder = await getNextPlayOrder();
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
+    play_order: startPlayOrder,
     entry_type: 'show_start',
     message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString(
       'en-US',
@@ -358,10 +374,12 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
 
   const message = `${dj_name} joined the set!`;
 
+  const joinPlayOrder = await getNextPlayOrder();
   const notification = await db
     .insert(flowsheet)
     .values({
       show_id: show_id,
+      play_order: joinPlayOrder,
       entry_type: 'dj_join',
       message: message,
     })
@@ -394,8 +412,10 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   const dj_information = (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0];
   const dj_name = dj_information?.djName || dj_information?.name || 'A DJ';
 
+  const endPlayOrder = await getNextPlayOrder();
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
+    play_order: endPlayOrder,
     entry_type: 'show_end',
     message: `End of Show: ${dj_name} left the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
@@ -437,10 +457,12 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
 
   const message = `${dj_name} left the set!`;
 
+  const leavePlayOrder = await getNextPlayOrder();
   const notification = await db
     .insert(flowsheet)
     .values({
       show_id: show_id,
+      play_order: leavePlayOrder,
       entry_type: 'dj_leave',
       message: message,
     })
