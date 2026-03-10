@@ -2,6 +2,10 @@ import { RequestHandler } from 'express';
 import { getDJsInCurrentShow } from '../services/flowsheet.service.js';
 
 export const showMemberMiddleware: RequestHandler = async (req, res, next) => {
+  if (process.env.AUTH_BYPASS === 'true') {
+    return next();
+  }
+
   try {
     const show_djs = await getDJsInCurrentShow();
     const user_id = req.auth?.id || req.auth?.sub || res.locals.decodedJWT?.id || res.locals.decodedJWT?.userId;
