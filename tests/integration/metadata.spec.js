@@ -34,7 +34,7 @@ describe('Metadata Fields in Flowsheet Response', () => {
         album_id: 4, // Sufjan Stevens - Illinois
         track_title: 'Chicago',
       })
-      .expect(200);
+      .expect(201);
 
     // Get the flowsheet entries
     const getRes = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
@@ -65,7 +65,7 @@ describe('Metadata Fields in Flowsheet Response', () => {
         album_id: 5, // Kendrick Lamar - To Pimp a Butterfly
         track_title: 'Alright',
       })
-      .expect(200);
+      .expect(201);
 
     const res = await request.get('/flowsheet/latest').expect(200);
 
@@ -97,7 +97,7 @@ describe('Fire-and-Forget Metadata Fetch', () => {
         album_id: 4, // Sufjan Stevens - Illinois
         track_title: 'Casimir Pulaski Day',
       })
-      .expect(200);
+      .expect(201);
 
     // Response should return immediately with the entry
     expect(addRes.body.id).toBeDefined();
@@ -124,7 +124,7 @@ describe('Fire-and-Forget Metadata Fetch', () => {
         album_title: 'OK Computer',
         track_title: 'Paranoid Android',
       })
-      .expect(200);
+      .expect(201);
 
     // Response should return immediately
     expect(addRes.body.id).toBeDefined();
@@ -145,7 +145,7 @@ describe('Fire-and-Forget Metadata Fetch', () => {
       .send({
         message: 'PSA: Station ID at the top of the hour',
       })
-      .expect(200);
+      .expect(201);
 
     const entryId = addRes.body.id;
 
@@ -183,7 +183,7 @@ describe('Flowsheet CRUD with Metadata', () => {
         album_id: 5,
         track_title: 'CRUD Test Track',
       })
-      .expect(200);
+      .expect(201);
 
     // Get entries - should include new entry
     const res = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
@@ -201,7 +201,7 @@ describe('Flowsheet CRUD with Metadata', () => {
         album_id: 6,
         track_title: 'Delete Test Track',
       })
-      .expect(200);
+      .expect(201);
 
     const entryId = addRes.body.id;
 
@@ -230,7 +230,7 @@ describe('Flowsheet CRUD with Metadata', () => {
         album_id: 4,
         track_title: 'Update Test Original',
       })
-      .expect(200);
+      .expect(201);
 
     const entryId = addRes.body.id;
 
@@ -279,7 +279,7 @@ describe('Metadata with Rotation Entries', () => {
         track_title: 'Rotation Test Track',
         rotation_id: 2,
       })
-      .expect(200);
+      .expect(201);
 
     // Get the entry
     const getRes = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
@@ -316,7 +316,7 @@ describe('Flowsheet Cache Behavior', () => {
         album_id: 4,
         track_title: 'Cache Consistency Test',
       })
-      .expect(200);
+      .expect(201);
 
     // Query multiple times - should return consistent results
     const res1 = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
@@ -339,7 +339,7 @@ describe('Flowsheet Cache Behavior', () => {
         album_id: 5,
         track_title: 'Cache Invalidation Test Add',
       })
-      .expect(200);
+      .expect(201);
 
     // Query - should include the new entry (proves cache was invalidated)
     const afterRes = await request.get('/flowsheet').query({ limit: 50 }).send().expect(200);
@@ -357,7 +357,7 @@ describe('Flowsheet Cache Behavior', () => {
         album_id: 4,
         track_title: 'Cache Invalidation Test Delete',
       })
-      .expect(200);
+      .expect(201);
 
     const entryId = addRes.body.id;
 
@@ -386,7 +386,7 @@ describe('Flowsheet Cache Behavior', () => {
         album_id: 4,
         track_title: 'Cache Update Original',
       })
-      .expect(200);
+      .expect(201);
 
     const entryId = addRes.body.id;
 
@@ -440,7 +440,7 @@ describe('Conditional GET (304 Not Modified)', () => {
           album_id: 4,
           track_title: 'Last-Modified Header Test',
         })
-        .expect(200);
+        .expect(201);
 
       const res = await request.get('/flowsheet/latest').expect(200);
 
@@ -479,7 +479,7 @@ describe('Conditional GET (304 Not Modified)', () => {
           album_id: 4,
           track_title: 'Modification Test Track',
         })
-        .expect(200);
+        .expect(201);
 
       // Request with old If-Modified-Since should return 200 with new data
       const updatedRes = await request
@@ -504,7 +504,7 @@ describe('Conditional GET (304 Not Modified)', () => {
           album_id: 5,
           track_title: 'Latest 304 Test',
         })
-        .expect(200);
+        .expect(201);
 
       // First request to get timestamp
       const initialRes = await request.get('/flowsheet/latest').expect(200);
@@ -551,7 +551,7 @@ describe('Conditional GET (304 Not Modified)', () => {
           album_id: 4,
           track_title: 'Since Query Param Test',
         })
-        .expect(200);
+        .expect(201);
 
       // Request with old since param should return 200 with new data
       const updatedRes = await request.get('/flowsheet').query({ limit: 10, since: lastModified }).send().expect(200);
@@ -578,7 +578,7 @@ describe('Conditional GET (304 Not Modified)', () => {
           album_id: 4,
           track_title: 'Precedence Test Track',
         })
-        .expect(200);
+        .expect(201);
 
       // Get the new Last-Modified
       const updatedRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
@@ -603,7 +603,7 @@ describe('Conditional GET (304 Not Modified)', () => {
           album_id: 5,
           track_title: 'Latest Since Test',
         })
-        .expect(200);
+        .expect(201);
 
       // First request to get timestamp
       const initialRes = await request.get('/flowsheet/latest').expect(200);

@@ -51,7 +51,7 @@ describe('Schedule', () => {
         show_duration: 8,
       };
 
-      const res = await request.post('/schedule').send(newShift).expect(200);
+      const res = await request.post('/schedule').send(newShift).expect(201);
 
       expectFields(res.body, 'id', 'day', 'start_time', 'show_duration');
       expect(res.body.day).toBe(0);
@@ -71,7 +71,7 @@ describe('Schedule', () => {
         specialty_id: null,
       };
 
-      const res = await request.post('/schedule').send(newShift).expect(200);
+      const res = await request.post('/schedule').send(newShift).expect(201);
 
       expect(res.body.day).toBe(2);
 
@@ -96,7 +96,7 @@ describe('Schedule', () => {
           show_duration: 4,
         };
 
-        const res = await request.post('/schedule').send(newShift).expect(200);
+        const res = await request.post('/schedule').send(newShift).expect(201);
 
         expect(res.body.day).toBe(day);
 
@@ -113,7 +113,7 @@ describe('Schedule', () => {
         show_duration: 2,
       };
 
-      const res = await request.post('/schedule').send(newShift).expect(200);
+      const res = await request.post('/schedule').send(newShift).expect(201);
 
       expect(res.body.start_time).toBe('08:30:00');
 
@@ -132,7 +132,7 @@ describe('Schedule', () => {
         show_duration: 4,
       };
 
-      const postRes = await request.post('/schedule').send(newShift).expect(200);
+      const postRes = await request.post('/schedule').send(newShift).expect(201);
 
       if (postRes.body.id) {
         createdScheduleIds.push(postRes.body.id);

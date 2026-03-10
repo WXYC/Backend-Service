@@ -167,7 +167,7 @@ describe('Add to Flowsheet', () => {
         track_title: 'Carry the Zero',
         // record_label: 'Warner Bros',
       })
-      .expect(200);
+      .expect(201);
 
     expect(res.body).toBeDefined();
     expect(res.body.album_title).toEqual('Keep it Like a Secret');
@@ -182,7 +182,7 @@ describe('Add to Flowsheet', () => {
         track_title: 'Carry the Zero',
         rotation_id: 1,
       })
-      .expect(200);
+      .expect(201);
 
     expect(res.body).toBeDefined();
     expect(res.body.album_title).toEqual('Keep it Like a Secret');
@@ -197,7 +197,7 @@ describe('Add to Flowsheet', () => {
         track_title: 'Carry the Zero',
         record_label: 'Warner Bros',
       })
-      .expect(200);
+      .expect(201);
 
     expect(res.body.album_title).toEqual('Keep it Like a Secret');
     expect(res.body.track_title).toEqual('Carry the Zero');
@@ -213,7 +213,7 @@ describe('Add to Flowsheet', () => {
         track_title: 'Carry the Zero',
         request_flag: true,
       })
-      .expect(200);
+      .expect(201);
 
     expect(res.body).toBeDefined();
     expect(res.body.album_title).toEqual('Keep it Like a Secret');
@@ -229,7 +229,7 @@ describe('Add to Flowsheet', () => {
         album_title: 'Keep it Like a Secret',
         track_title: 'Carry the Zero',
       })
-      .expect(200);
+      .expect(201);
 
     expect(res.body).toBeDefined();
     expect(res.body.album_title).toEqual('Keep it Like a Secret');
@@ -246,7 +246,7 @@ describe('Add to Flowsheet', () => {
         track_title: 'Carry the Zero',
         record_label: 'Warner Bros',
       })
-      .expect(200);
+      .expect(201);
 
     expect(res.body).toBeDefined();
     expect(res.body.album_title).toEqual('Keep it Like a Secret');
@@ -264,7 +264,7 @@ describe('Add to Flowsheet', () => {
         track_title: 'Carry the Zero',
         request_flag: true,
       })
-      .expect(200);
+      .expect(201);
 
     expect(res.body).toBeDefined();
     expect(res.body.album_title).toEqual('Keep it Like a Secret');
@@ -278,7 +278,7 @@ describe('Add to Flowsheet', () => {
       .send({
         message: 'Test Message',
       })
-      .expect(200);
+      .expect(201);
 
     expect(res.body).toBeDefined();
     expect(res.body.message).toEqual('Test Message');
@@ -492,7 +492,7 @@ describe('Retrieve Now Playing', () => {
         album_id: 1, //Built to Spill - Keep it Like a Secret
         track_title: 'Carry the Zero',
       })
-      .expect(200);
+      .expect(201);
   });
 
   afterEach(async () => {
@@ -515,7 +515,7 @@ describe('Retrieve Now Playing', () => {
         album_id: 2, //Ravyn Lenae - Crush
         track_title: 'Venom',
       })
-      .expect(200);
+      .expect(201);
 
     res = await request.get('/flowsheet/latest').expect(200);
     expect(res.body).toBeDefined();
@@ -537,7 +537,7 @@ describe('Shift Flowsheet Entries', () => {
         album_id: 1, //Built to Spill - Keep it Like a Secret
         track_title: 'Carry the Zero',
       })
-      .expect(200);
+      .expect(201);
 
     await request
       .post('/flowsheet')
@@ -546,7 +546,7 @@ describe('Shift Flowsheet Entries', () => {
         album_id: 2, //Ravyn Lenae - Crush
         track_title: 'Venom',
       })
-      .expect(200);
+      .expect(201);
 
     await request
       .post('/flowsheet')
@@ -555,7 +555,7 @@ describe('Shift Flowsheet Entries', () => {
         album_id: 3, //Jockstrap - I Love You Jennifer B
         track_title: 'Debra',
       })
-      .expect(200);
+      .expect(201);
   });
 
   afterEach(async () => {
@@ -700,7 +700,7 @@ describe('Retrieve Playlist Object', () => {
         album_id: 3, //Jockstrap - I Love You Jennifer B
         track_title: 'Debra',
       })
-      .expect(200);
+      .expect(201);
 
     await fls_util.leave_show(global.primary_dj_id, global.access_token);
   });
@@ -771,7 +771,7 @@ describe('V1 API - entry_type field', () => {
         album_id: 1,
         track_title: 'Carry the Zero',
       })
-      .expect(200);
+      .expect(201);
 
     // POST response includes entry_type
     expect(addRes.body.entry_type).toBe('track');
