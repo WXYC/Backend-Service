@@ -354,11 +354,8 @@ export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = asy
     res.status(404).json({ message: 'Bad Request: No active show session found.' });
   } else {
     try {
-      // Catch case where DJ is not in show, but attempting to hit this endpoint
-      const show_djs = await flowsheet_service.getDJsInCurrentShow();
-      if (!show_djs.map((dj) => dj.id).includes(req.body.dj_id)) {
-        res.status(400).json({ message: 'Bad Request: DJ not in current show' });
-      } else if (req.body.dj_id === currentShow.primary_dj_id) {
+      // Show membership is verified by showMemberMiddleware on the route
+      if (req.body.dj_id === currentShow.primary_dj_id) {
         const finalizedShow: Show = await flowsheet_service.endShow(currentShow);
         res.status(200).json(finalizedShow);
       } else {
