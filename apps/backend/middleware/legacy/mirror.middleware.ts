@@ -1,7 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import { MirrorCommandQueue } from './commandqueue.mirror';
-
-import { PostHog } from 'posthog-node';
+import { getPostHogClient } from '../../utils/posthog.js';
 
 export const createBackendMirrorMiddleware =
   <T>(createCommand: (req: Request, data: T) => Promise<string[]>) =>
@@ -12,9 +11,7 @@ export const createBackendMirrorMiddleware =
     res.once('finish', () => {
       void (async () => {
         try {
-          const postHogClient = new PostHog(process.env.POSTHOG_API_KEY ?? '', {
-            host: 'https://us.i.posthog.com',
-          });
+          const client = getPostHogClient();
 
           console.log('Response finished, checking for mirror work...');
           const ok = res.statusCode >= 200 && res.statusCode < 305;
@@ -23,7 +20,7 @@ export const createBackendMirrorMiddleware =
           console.log('Response status:', res.statusCode, 'ok?', ok);
 
           const distinctId = (req as any).user?.id ?? req.ip ?? 'anonymous';
-          let mirrorOn = await postHogClient.isFeatureEnabled('backend-mirror', distinctId);
+          let mirrorOn = await client.isFeatureEnabled('backend-mirror', distinctId);
           mirrorOn ??= false;
 
           if (!ok || data == null || !mirrorOn) return;
@@ -32,8 +29,6 @@ export const createBackendMirrorMiddleware =
 
           const queue = MirrorCommandQueue.instance();
           queue.enqueue(await createCommand(req, data));
-
-          await postHogClient.shutdown();
         } catch (e) {
           console.error('Error in mirror middleware:', e);
         }
