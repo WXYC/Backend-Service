@@ -97,6 +97,8 @@ jobs:
       - name: Install Dependencies
         if: steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false'
         run: npm ci
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Cache tool artifacts (tsc, ESLint, Prettier)
         uses: actions/cache@v4
@@ -162,6 +164,8 @@ jobs:
       - name: Install Dependencies
         if: steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false'
         run: npm ci
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Run affected unit tests
         run: |
@@ -257,6 +261,8 @@ jobs:
       - name: Install Dependencies
         if: env.RUN_TESTS == 'true' && (steps.cache-node-modules.outputs.cache-hit != 'true' || steps.validate-cache.outputs.valid == 'false')
         run: npm ci
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Lint .env file
         if: env.RUN_TESTS == 'true'
@@ -268,6 +274,8 @@ jobs:
 
       - name: Initialize database
         if: env.RUN_TESTS == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           touch .env
           node dev_env/init-db.mjs

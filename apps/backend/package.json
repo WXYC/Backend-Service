@@ -9,13 +9,14 @@
     "start": "node dist/app.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
-    "docker:build": "docker build -t wxyc_backend_service:ci -f ../../Dockerfile.backend ../../",
+    "docker:build": "docker build --build-arg NPM_TOKEN=$NPM_TOKEN -t wxyc_backend_service:ci -f ../../Dockerfile.backend ../../",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit"
   },
   "author": "AyBruno",
   "license": "MIT",
   "dependencies": {
+    "@sentry/node": "^10.40.0",
     "@wxyc/authentication": "*",
     "@wxyc/database": "*",
     "async-mutex": "^0.5.0",

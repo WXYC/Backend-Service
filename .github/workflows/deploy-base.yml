@@ -64,28 +64,50 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+
+      - name: Fetch base commit for Turbo diff
+        if: inputs.target == ''
+        run: git fetch origin ${{ github.event.before }} --depth=1
+
+      - name: Set up Node.js
+        if: inputs.target == ''
+        uses: actions/setup-node@v4
         with:
-          fetch-depth: 2
+          node-version: '20'
+
+      - name: Cache node_modules
+        if: inputs.target == ''
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: deploy-node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        if: inputs.target == ''
+        run: npm ci
 
       - name: Detect Build Target
         id: detect_targets
         run: |
           if [ -n "${{ inputs.target }}" ]; then
             echo "Using provided target: ${{ inputs.target }}"
-            TARGETS="${{ inputs.target }}"
-          else
-            echo "Detecting targets from git diff..."
-            TARGETS=$(git diff --name-only HEAD~1..HEAD | awk -F/ '/^(apps|jobs)\//{print $2}' | sort -u)
-          fi
-
-          if [ -z "$TARGETS" ] ; then
-            echo "No targets found. Exiting."
-            echo "TARGETS=[]" >> $GITHUB_OUTPUT
-            echo "HAS_TARGETS=false" >> $GITHUB_OUTPUT
-          else
-            echo "TARGETS=$TARGETS"
-            echo "TARGETS=$(echo "$TARGETS" | jq -R -s -c 'split("\n") | map(select(length > 0))')" >> $GITHUB_OUTPUT
+            TARGETS=$(echo "${{ inputs.target }}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            echo "TARGETS=$TARGETS" >> $GITHUB_OUTPUT
             echo "HAS_TARGETS=true" >> $GITHUB_OUTPUT
+          else
+            echo "Detecting affected app targets (Turborepo)..."
+            export TURBO_SCM_BASE=${{ github.event.before }}
+            export TURBO_SCM_HEAD=${{ github.sha }}
+            TARGETS=$(npx turbo ls --affected --output=json | jq -c '[.packages.items[] | select(.path | (startswith("apps/") or startswith("jobs/"))) | .path | split("/")[1]] | unique | sort')
+            if [ "$TARGETS" = "[]" ] || [ -z "$TARGETS" ]; then
+              echo "No affected app targets found."
+              echo "TARGETS=[]" >> $GITHUB_OUTPUT
+              echo "HAS_TARGETS=false" >> $GITHUB_OUTPUT
+            else
+              echo "TARGETS=$TARGETS"
+              echo "TARGETS=$TARGETS" >> $GITHUB_OUTPUT
+              echo "HAS_TARGETS=true" >> $GITHUB_OUTPUT
+            fi
           fi
 
       - name: Generate Unique Build ID

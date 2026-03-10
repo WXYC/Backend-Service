@@ -1,3 +1,5 @@
+import './instrument.js';
+import * as Sentry from '@sentry/node';
 import express from 'express';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
@@ -13,20 +15,27 @@ import { request_line_route } from './routes/requestLine.route.js';
 import { showMemberMiddleware } from './middleware/checkShowMember.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
+import { requestIdMiddleware } from './middleware/requestId.js';
 import { requirePermissions } from '@wxyc/authentication';
 
 const port = process.env.PORT || 8080;
 const app = express();
 
+app.set('trust proxy', true);
+
 //Interpret parse json into js objects
 app.use(express.json());
+
+// Cross-service request correlation
+app.use(requestIdMiddleware);
 
 //CORS
 app.use(
   cors({
     origin: process.env.FRONTEND_SOURCE || '*',
     methods: ['GET', 'POST', 'DELETE', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+    exposedHeaders: ['X-Request-Id'],
     credentials: true,
   })
 );
@@ -67,6 +76,7 @@ app.get('/healthcheck', async (req, res) => {
   res.json({ message: 'Healthy!' });
 });
 
+Sentry.setupExpressErrorHandler(app);
 app.use(errorHandler);
 
 const server = app.listen(port, () => {

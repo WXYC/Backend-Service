@@ -1,0 +1,6 @@
+{
+  "globalDependencies": ["tsconfig.base.json"],
+  "tasks": {
+    "build": { "outputs": ["dist/**"] }
+  }
+}
