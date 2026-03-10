@@ -36,6 +36,7 @@ flowsheet_route.delete(
 flowsheet_route.patch(
   '/play-order',
   requirePermissions({ flowsheet: ['write'] }),
+  showMemberMiddleware,
   /*flowsheetMirror.changeOrder,*/
   flowsheetController.changeOrder
 );
@@ -52,6 +53,7 @@ flowsheet_route.post(
 flowsheet_route.post(
   '/end',
   requirePermissions({ flowsheet: ['write'] }),
+  showMemberMiddleware,
   flowsheetMirror.endShow,
   flowsheetController.leaveShow
 );
