@@ -87,7 +87,7 @@ export const auth: Auth = betterAuth({
   // Subdomain-friendly cookie setting (recommended over cross-site cookies)
   advanced: {
     defaultCookieAttributes: {
-      sameSite: 'none',
+      sameSite: (process.env.COOKIE_SAME_SITE as 'lax' | 'strict' | 'none') || 'lax',
       secure: true,
     },
   },
