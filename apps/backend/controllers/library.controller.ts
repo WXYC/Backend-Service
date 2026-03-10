@@ -46,6 +46,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
         console.error('Error: Failed to get artist_id from name');
         console.error(e);
         next(e);
+        return;
       }
     }
     if (!artist_id) {
