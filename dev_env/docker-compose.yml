@@ -37,6 +37,42 @@ services:
       - ./install_extensions.sql:/init/install_extensions.sql
       - ./seed_db.sql:/init/seed_db.sql
 
+  elasticsearch:
+    image: elasticsearch:8.17.0
+    profiles: [dev]
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - 'ES_JAVA_OPTS=-Xms256m -Xmx256m'
+    ports:
+      - '${ELASTICSEARCH_PORT:-9200}:9200'
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:9200/_cluster/health || exit 1']
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  ci-elasticsearch:
+    image: elasticsearch:8.17.0
+    profiles: [ci]
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - 'ES_JAVA_OPTS=-Xms256m -Xmx256m'
+    ports:
+      - '${CI_ELASTICSEARCH_PORT:-9201}:9200'
+    volumes:
+      - ci-es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:9200/_cluster/health || exit 1']
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
   ci-db:
     image: postgres:18.0-alpine
     profiles: [ci]
@@ -283,3 +319,5 @@ volumes:
   pg-data:
   ci-pg-data:
   e2e-pg-data:
+  es-data:
+  ci-es-data:

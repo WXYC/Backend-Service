@@ -46,6 +46,20 @@ Server timeout is 5 seconds globally; SSE routes have no timeout.
 
 Swagger API docs are served at `/api-docs` from `app.yaml`.
 
+### Search (`apps/backend/services/search/`)
+
+Library catalog search uses a facade pattern that routes to either Elasticsearch or PostgreSQL pg_trgm:
+
+- **`elasticsearch.client.ts`** -- Singleton ES client. Returns `null` when `ELASTICSEARCH_URL` is unset (graceful degradation).
+- **`elasticsearch.indices.ts`** -- Index mapping and lifecycle (`ensureLibraryIndex()` called at startup).
+- **`elasticsearch.search.ts`** -- ES query implementations (`searchLibraryES`, `findSimilarArtistES`, `searchAlbumsByTitleES`, `searchByArtistES`). All return `LibraryArtistViewEntry[]`.
+- **`elasticsearch.sync.ts`** -- Stub for dual-write sync and bulk reindex (PR 2).
+- **`index.ts`** -- Facade: tries ES first, falls back to pg_trgm on error. Exports `searchLibrary`, `findSimilarArtist`, `searchAlbumsByTitle`, `searchByArtist`.
+
+The original pg_trgm implementations in `library.service.ts` are renamed with `pgTrgm` prefix (e.g., `pgTrgmSearchLibrary`) and re-exported via the facade under the original names. No callers need to change imports.
+
+Feature flag: set `ELASTICSEARCH_URL` to enable ES, unset to disable. Instant rollback by unsetting the env var.
+
 ### Auth Server (`apps/auth`)
 
 Express wrapper around better-auth with these plugins: admin, username, anonymous, bearer, jwt, organization.
@@ -249,6 +263,13 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
 - `DISCOGS_API_KEY`, `DISCOGS_API_SECRET`
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`
+
+### Elasticsearch (optional)
+
+- `ELASTICSEARCH_URL` -- e.g. `http://localhost:9200` (omit to disable ES and use pg_trgm only)
+- `ELASTICSEARCH_USERNAME`, `ELASTICSEARCH_PASSWORD` -- optional, for production auth
+- `ELASTICSEARCH_INDEX_PREFIX` -- optional, for test isolation (e.g. `ci_`)
+- `ELASTICSEARCH_PORT` (default 9200), `CI_ELASTICSEARCH_PORT` (default 9201)
 
 ### Slack
 

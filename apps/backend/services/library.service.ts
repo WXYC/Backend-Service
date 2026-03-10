@@ -323,7 +323,7 @@ function viewRowToLibraryResult(row: LibraryArtistViewEntry): LibraryResult {
  * @param limit - Maximum results to return
  * @returns Array of enriched library results
  */
-export async function searchLibrary(
+export async function pgTrgmSearchLibrary(
   query?: string,
   artist?: string,
   title?: string,
@@ -387,7 +387,7 @@ export async function searchLibrary(
  * @param threshold - Minimum similarity score (0.0 to 1.0) to accept
  * @returns Corrected artist name if a good match is found, null otherwise
  */
-export async function findSimilarArtist(artistName: string, threshold = 0.85): Promise<string | null> {
+export async function pgTrgmFindSimilarArtist(artistName: string, threshold = 0.85): Promise<string | null> {
   // Use pg_trgm similarity function to find close matches
   const query = sql`
     SELECT DISTINCT artist_name,
@@ -424,7 +424,7 @@ export async function findSimilarArtist(artistName: string, threshold = 0.85): P
  * @param limit - Maximum results to return
  * @returns Array of enriched library results
  */
-export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promise<EnrichedLibraryResult[]> {
+export async function pgTrgmSearchAlbumsByTitle(albumTitle: string, limit = 5): Promise<EnrichedLibraryResult[]> {
   const query = sql`
     SELECT *,
       similarity(${library_artist_view.album_title}, ${albumTitle}) as sim
@@ -467,7 +467,7 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  * @param limit - Maximum results to return
  * @returns Array of enriched library results
  */
-export async function searchByArtist(artistName: string, limit = 5): Promise<EnrichedLibraryResult[]> {
+export async function pgTrgmSearchByArtist(artistName: string, limit = 5): Promise<EnrichedLibraryResult[]> {
   const query = sql`
     SELECT *,
       similarity(${library_artist_view.artist_name}, ${artistName}) as sim
@@ -516,3 +516,7 @@ export function filterResultsByArtist(
 
   return filtered;
 }
+
+// Re-export the search facade under the original function names.
+// All callers continue to import from this file unchanged.
+export { searchLibrary, findSimilarArtist, searchAlbumsByTitle, searchByArtist } from './search/index.js';

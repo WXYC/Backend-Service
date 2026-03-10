@@ -16,6 +16,7 @@
   "author": "AyBruno",
   "license": "MIT",
   "dependencies": {
+    "@elastic/elasticsearch": "^8.19.1",
     "@sentry/node": "^10.40.0",
     "@wxyc/authentication": "*",
     "@wxyc/database": "*",
