@@ -3,10 +3,10 @@ const mockPostHogInstance = {
   shutdown: jest.fn().mockResolvedValue(undefined),
 };
 
-const PostHogConstructor = jest.fn(() => mockPostHogInstance);
+const mockGetPostHogClient = jest.fn(() => mockPostHogInstance);
 
-jest.mock('posthog-node', () => ({
-  PostHog: PostHogConstructor,
+jest.mock('../../../../apps/backend/utils/posthog', () => ({
+  getPostHogClient: mockGetPostHogClient,
 }));
 
 jest.mock('../../../../apps/backend/middleware/legacy/commandqueue.mirror', () => ({
@@ -34,14 +34,14 @@ function createMockReqRes() {
   return { req, res };
 }
 
-describe('PostHog client instantiation', () => {
+describe('PostHog client usage', () => {
   beforeEach(() => {
-    PostHogConstructor.mockClear();
+    mockGetPostHogClient.mockClear();
     mockPostHogInstance.isFeatureEnabled.mockClear();
     mockPostHogInstance.shutdown.mockClear();
   });
 
-  it('creates PostHog at most once across multiple requests', async () => {
+  it('uses the shared PostHog singleton from utils/posthog', async () => {
     const createCommand = jest.fn().mockResolvedValue(['SQL1']);
     const middleware = createBackendMirrorMiddleware(createCommand);
 
@@ -63,6 +63,8 @@ describe('PostHog client instantiation', () => {
     // Allow async callbacks to settle
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(PostHogConstructor).toHaveBeenCalledTimes(1);
+    // getPostHogClient is called per-request, but it returns the same singleton
+    expect(mockGetPostHogClient).toHaveBeenCalled();
+    expect(mockPostHogInstance.isFeatureEnabled).toHaveBeenCalledTimes(2);
   });
 });

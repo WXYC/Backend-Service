@@ -1,17 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import { MirrorCommandQueue } from './commandqueue.mirror';
-
-import { PostHog } from 'posthog-node';
-
-let postHogClient: PostHog | null = null;
-function getPostHogClient(): PostHog {
-  if (!postHogClient) {
-    postHogClient = new PostHog(process.env.POSTHOG_API_KEY ?? '', {
-      host: 'https://us.i.posthog.com',
-    });
-  }
-  return postHogClient;
-}
+import { getPostHogClient } from '../../utils/posthog.js';
 
 export const createBackendMirrorMiddleware =
   <T>(createCommand: (req: Request, data: T) => Promise<string[]>) =>
