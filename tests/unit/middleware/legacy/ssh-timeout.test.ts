@@ -7,7 +7,7 @@ jest.mock('node-ssh', () => {
   return { NodeSSH: jest.fn(() => mockSSH) };
 });
 
-import { MirrorSQL } from '../../../../apps/backend/middleware/legacy/sql.mirror';
+import { MirrorSQL } from '../../../../shared/database/src/legacy/sql.mirror';
 
 describe('MirrorSQL SSH timeout stacking', () => {
   beforeEach(() => {
@@ -15,7 +15,7 @@ describe('MirrorSQL SSH timeout stacking', () => {
     // Reset the singleton between tests
     (MirrorSQL as any)._instance = null;
     (MirrorSQL as any)._ssh = null;
-    (MirrorSQL as any)._timeoutHandle = null;
+    (MirrorSQL as any)._disposeTimer = null;
   });
 
   afterEach(() => {
@@ -41,9 +41,7 @@ describe('MirrorSQL SSH timeout stacking', () => {
   });
 
   it('should not dispose SSH if timeout was superseded by a newer call', async () => {
-    const { NodeSSH } = jest.requireMock('node-ssh');
-    const mockSSH = new NodeSSH();
-    mockSSH.isConnected.mockReturnValue(true);
+    const closeSpy = jest.spyOn(MirrorSQL.instance(), 'close');
 
     await MirrorSQL.sshInstance();
     // Advance partway — not enough to trigger
@@ -53,10 +51,12 @@ describe('MirrorSQL SSH timeout stacking', () => {
     // Advance past original 5 min mark — old timeout should have been cleared
     jest.advanceTimersByTime(2 * 60 * 1000);
 
-    expect(mockSSH.dispose).not.toHaveBeenCalled();
+    expect(closeSpy).not.toHaveBeenCalled();
 
     // Advance to trigger the second (active) timeout
     jest.advanceTimersByTime(3 * 60 * 1000);
-    expect(mockSSH.dispose).toHaveBeenCalledTimes(1);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+
+    closeSpy.mockRestore();
   });
 });
