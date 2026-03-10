@@ -1,4 +1,5 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
+import WxycError from '../utils/error.js';
 import {
   db,
   FSEntry,
@@ -419,7 +420,7 @@ export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowD
 
   // In case gaurds further up the line of logic fail
   if (update_result === undefined) {
-    throw new Error('DJ not in show');
+    throw new WxycError('Bad Request: DJ not a member of show', 400);
   }
 
   // -- Add DJ Left to Flowsheet --
