@@ -3,6 +3,7 @@ import { Mutex } from 'async-mutex';
 import { NewFSEntry, FSEntry, Show, ShowDJ, library } from '@wxyc/database';
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import { fetchAndCacheMetadata } from '../services/metadata/index.js';
+import WxycError from '../utils/error.js';
 
 export type QueryParams = {
   page?: string;
@@ -165,118 +166,111 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     console.error(e);
   }
   if (latestShow?.end_time !== null) {
-    console.error('Bad Request, There are no active shows');
-    res.status(400).send('Bad Request, There are no active shows');
-  } else {
-    if (body.message === undefined) {
-      // no message passed, so we assume we're adding a track to the flowsheet
-      if (body.track_title === undefined) {
-        console.error('Bad Request, Missing query parameter: track_title');
-        res.status(400).send('Bad Request, Missing query parameter: track_title');
-      } else {
-        try {
-          if (body.album_id !== undefined) {
-            //backfill album info from library before adding to flowsheet
-            const albumInfo = await flowsheet_service.getAlbumFromDB(body.album_id);
+    throw new WxycError('Bad Request, There are no active shows', 400);
+  }
 
-            if (body.record_label !== undefined) {
-              albumInfo.record_label = body.record_label;
-            }
+  if (body.message !== undefined) {
+    //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
+    const fsEntry: NewFSEntry = {
+      artist_name: '',
+      album_title: '',
+      track_title: '',
+      message: body.message,
+      show_id: latestShow.id,
+    };
+    try {
+      const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+      res.status(200).json(completedEntry);
+    } catch (e) {
+      console.error('Error: Failed to add message to flowsheet');
+      console.error(e);
+      next(e);
+    }
+    return;
+  }
 
-            const fsEntry: NewFSEntry = {
-              album_id: body.album_id,
-              ...albumInfo,
-              track_title: body.track_title,
-              rotation_id: body.rotation_id,
-              request_flag: body.request_flag,
-              show_id: latestShow.id,
-            };
+  // no message passed, so we assume we're adding a track to the flowsheet
+  if (body.track_title === undefined) {
+    throw new WxycError('Bad Request, Missing query parameter: track_title', 400);
+  }
 
-            const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+  try {
+    if (body.album_id !== undefined) {
+      //backfill album info from library before adding to flowsheet
+      const albumInfo = await flowsheet_service.getAlbumFromDB(body.album_id);
 
-            // Fire-and-forget: fetch metadata for this entry
-            if (completedEntry.artist_name) {
-              fetchAndCacheMetadata({
-                albumId: completedEntry.album_id ?? undefined,
-                artistId: albumInfo.artist_id ?? undefined,
-                rotationId: completedEntry.rotation_id ?? undefined,
-                artistName: completedEntry.artist_name,
-                albumTitle: completedEntry.album_title ?? undefined,
-                trackTitle: completedEntry.track_title ?? undefined,
-              }).catch((err) => console.error('[Flowsheet] Metadata fetch failed:', err));
-            }
-
-            res.status(200).json(completedEntry);
-          } else if (
-            body.album_title === undefined ||
-            body.artist_name === undefined ||
-            body.track_title === undefined
-          ) {
-            console.error('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
-            res.status(400).send('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title');
-          } else {
-            const fsEntry: NewFSEntry = {
-              ...body,
-              show_id: latestShow.id,
-            };
-
-            const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-
-            // Fire-and-forget: fetch metadata for this entry
-            if (completedEntry.artist_name) {
-              fetchAndCacheMetadata({
-                albumId: completedEntry.album_id ?? undefined,
-                artistId: undefined,
-                rotationId: completedEntry.rotation_id ?? undefined,
-                artistName: completedEntry.artist_name,
-                albumTitle: completedEntry.album_title ?? undefined,
-                trackTitle: completedEntry.track_title ?? undefined,
-              }).catch((err) => console.error('[Flowsheet] Metadata fetch failed:', err));
-            }
-
-            res.status(200).json(completedEntry);
-          }
-        } catch (e) {
-          console.error('Error: Failed to add track to flowsheet');
-          console.error(e);
-          next(e);
-        }
+      if (body.record_label !== undefined) {
+        albumInfo.record_label = body.record_label;
       }
-    } else {
-      //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
+
       const fsEntry: NewFSEntry = {
-        artist_name: '',
-        album_title: '',
-        track_title: '',
-        message: body.message,
+        album_id: body.album_id,
+        ...albumInfo,
+        track_title: body.track_title,
+        rotation_id: body.rotation_id,
+        request_flag: body.request_flag,
         show_id: latestShow.id,
       };
-      try {
-        const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-        res.status(200).json(completedEntry);
-      } catch (e) {
-        console.error('Error: Failed to add message to flowsheet');
-        console.error(e);
-        next(e);
+
+      const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+
+      // Fire-and-forget: fetch metadata for this entry
+      if (completedEntry.artist_name) {
+        fetchAndCacheMetadata({
+          albumId: completedEntry.album_id ?? undefined,
+          artistId: albumInfo.artist_id ?? undefined,
+          rotationId: completedEntry.rotation_id ?? undefined,
+          artistName: completedEntry.artist_name,
+          albumTitle: completedEntry.album_title ?? undefined,
+          trackTitle: completedEntry.track_title ?? undefined,
+        }).catch((err) => console.error('[Flowsheet] Metadata fetch failed:', err));
       }
+
+      res.status(200).json(completedEntry);
+    } else if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
+      throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
+    } else {
+      const fsEntry: NewFSEntry = {
+        ...body,
+        show_id: latestShow.id,
+      };
+
+      const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+
+      // Fire-and-forget: fetch metadata for this entry
+      if (completedEntry.artist_name) {
+        fetchAndCacheMetadata({
+          albumId: completedEntry.album_id ?? undefined,
+          artistId: undefined,
+          rotationId: completedEntry.rotation_id ?? undefined,
+          artistName: completedEntry.artist_name,
+          albumTitle: completedEntry.album_title ?? undefined,
+          trackTitle: completedEntry.track_title ?? undefined,
+        }).catch((err) => console.error('[Flowsheet] Metadata fetch failed:', err));
+      }
+
+      res.status(200).json(completedEntry);
     }
+  } catch (e) {
+    console.error('Error: Failed to add track to flowsheet');
+    console.error(e);
+    next(e);
   }
 };
 
 export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> = async (req, res, next) => {
   const { entry_id } = req.body;
   if (entry_id === undefined) {
-    console.error('Bad Request, Missing entry identifier: entry_id');
-    res.status(400).send('Bad Request, Missing entry identifier: entry_id');
-  } else {
-    try {
-      const removedEntry: FSEntry = await flowsheet_service.removeTrack(entry_id);
-      res.status(200).json(removedEntry);
-    } catch (e) {
-      console.error('Error: Failed to remove entry');
-      console.error(e);
-      next(e);
-    }
+    throw new WxycError('Bad Request, Missing entry identifier: entry_id', 400);
+  }
+
+  try {
+    const removedEntry: FSEntry = await flowsheet_service.removeTrack(entry_id);
+    res.status(200).json(removedEntry);
+  } catch (e) {
+    console.error('Error: Failed to remove entry');
+    console.error(e);
+    next(e);
   }
 };
 
@@ -296,17 +290,16 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
 ) => {
   const { entry_id, data } = req.body;
   if (entry_id === undefined) {
-    console.error('Bad Request, Missing entry identifier: entry_id');
-    res.status(400).send('Bad Request, Missing entry identifier: entry_id');
-  } else {
-    try {
-      const updatedEntry: FSEntry = await flowsheet_service.updateEntry(entry_id, data);
-      res.status(200).json(updatedEntry);
-    } catch (e) {
-      console.error('Error: Failed to update entry');
-      console.error(e);
-      next(e);
-    }
+    throw new WxycError('Bad Request, Missing entry identifier: entry_id', 400);
+  }
+
+  try {
+    const updatedEntry: FSEntry = await flowsheet_service.updateEntry(entry_id, data);
+    res.status(200).json(updatedEntry);
+  } catch (e) {
+    console.error('Error: Failed to update entry');
+    console.error(e);
+    next(e);
   }
 };
 
@@ -320,8 +313,10 @@ export type JoinRequestBody = {
 export const joinShow: RequestHandler = async (req: Request<object, object, JoinRequestBody>, res, next) => {
   const current_show = await flowsheet_service.getLatestShow();
   if (req.body.dj_id === undefined) {
-    res.status(400).send('Bad Request, Must include a dj_id to join show');
-  } else if (current_show?.end_time !== null) {
+    throw new WxycError('Bad Request, Must include a dj_id to join show', 400);
+  }
+
+  if (current_show?.end_time !== null) {
     try {
       const show_session: Show = await flowsheet_service.startShow(
         req.body.dj_id,
