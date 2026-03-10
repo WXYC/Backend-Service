@@ -51,6 +51,14 @@ fi
 # Start database
 $COMPOSE_CMD up -d ci-db
 
+# Start Elasticsearch if ELASTICSEARCH_URL is configured
+if [ -n "$ELASTICSEARCH_URL" ]; then
+  echo "  - Elasticsearch: ENABLED"
+  $COMPOSE_CMD up -d ci-elasticsearch
+else
+  echo "  - Elasticsearch: DISABLED (ELASTICSEARCH_URL not set)"
+fi
+
 # Run database initialization
 $COMPOSE_CMD up ci-db-init
 

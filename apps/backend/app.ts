@@ -17,6 +17,8 @@ import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { requirePermissions } from '@wxyc/authentication';
+import { isElasticsearchEnabled, getElasticsearchClient } from './services/search/elasticsearch.client.js';
+import { ensureLibraryIndex } from './services/search/elasticsearch.indices.js';
 
 const port = process.env.PORT || 8080;
 const app = express();
@@ -73,11 +75,28 @@ app.get('/testAuth', requirePermissions({ flowsheet: ['read'] }), async (req, re
 
 //endpoint for healthchecks
 app.get('/healthcheck', async (req, res) => {
-  res.json({ message: 'Healthy!' });
+  let elasticsearch: 'disabled' | 'connected' | 'unavailable' = 'disabled';
+
+  if (isElasticsearchEnabled()) {
+    try {
+      const client = getElasticsearchClient();
+      await client!.ping();
+      elasticsearch = 'connected';
+    } catch {
+      elasticsearch = 'unavailable';
+    }
+  }
+
+  res.json({ message: 'Healthy!', elasticsearch });
 });
 
 Sentry.setupExpressErrorHandler(app);
 app.use(errorHandler);
+
+// Ensure ES index exists at startup (non-blocking — failure doesn't prevent server start)
+ensureLibraryIndex().catch((err) => {
+  console.error('[Elasticsearch] Failed to ensure library index at startup:', err);
+});
 
 const server = app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
