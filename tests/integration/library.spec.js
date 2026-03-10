@@ -87,7 +87,7 @@ describe('Library Catalog', () => {
           genre_id: 1,
           format_id: 1,
         })
-        .expect(200);
+        .expect(201);
 
       expectFields(res.body, 'id', 'album_title');
       expect(res.body.album_title).toContain('Test Album');
@@ -204,7 +204,7 @@ describe('Library Rotation', () => {
           album_id: 2,
           rotation_bin: 'M',
         })
-        .expect(200);
+        .expect(201);
 
       expectFields(res.body, 'id', 'album_id', 'rotation_bin');
       expect(res.body.album_id).toBe(2);
@@ -323,7 +323,7 @@ describe('Library Artists', () => {
           genre_id: 1,
           code_number: 1,
         })
-        .expect(200);
+        .expect(201);
 
       expectFields(res.body, 'id', 'artist_name', 'alphabetical_name', 'code_letters', 'code_number');
       expect(res.body.artist_name).toContain('Test Artist');
@@ -394,7 +394,7 @@ describe('Library Artists', () => {
           genre_id: 1,
           code_number: 1,
         })
-        .expect(200);
+        .expect(201);
 
       expect(res.body.alphabetical_name).toBe(`Band ${uniqueSuffix}, The`);
     });
@@ -448,7 +448,7 @@ describe('Library Formats', () => {
         .send({
           name: `Test Format ${uniqueSuffix}`,
         })
-        .expect(200);
+        .expect(201);
 
       expectFields(res.body, 'id', 'format_name');
       expect(res.body.format_name).toContain('Test Format');
@@ -495,7 +495,7 @@ describe('Library Genres', () => {
           name: `Test Genre ${uniqueSuffix}`,
           description: 'A test genre for integration testing',
         })
-        .expect(200);
+        .expect(201);
 
       expectFields(res.body, 'id', 'genre_name');
       expect(res.body.genre_name).toContain('Test Genre');
