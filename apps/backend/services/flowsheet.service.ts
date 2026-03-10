@@ -21,7 +21,6 @@ import {
 } from '@wxyc/database';
 import { IFSEntry, ShowInfo, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
-import WxycError from '../utils/error.js';
 
 // Track when the flowsheet was last modified for conditional responses (304 Not Modified)
 let lastModifiedAt: Date = new Date();
