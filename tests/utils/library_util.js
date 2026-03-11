@@ -164,7 +164,7 @@ exports.getAlbumInfo = async (album_id, access_token) => {
  *
  * @param {object} searchParams - Search parameters
  * @param {string} [searchParams.artist_name] - Artist name
- * @param {string} [searchParams.album_title] - Album title
+ * @param {string} [searchParams.album_name] - Album name
  * @param {number} [searchParams.n] - Number of results
  * @param {string} access_token - Authorization token
  * @returns {Promise<object>} Search results
@@ -172,7 +172,7 @@ exports.getAlbumInfo = async (album_id, access_token) => {
 exports.searchLibrary = async (searchParams, access_token) => {
   const params = new URLSearchParams();
   if (searchParams.artist_name) params.append('artist_name', searchParams.artist_name);
-  if (searchParams.album_title) params.append('album_title', searchParams.album_title);
+  if (searchParams.album_name) params.append('album_name', searchParams.album_name);
   if (searchParams.n) params.append('n', searchParams.n.toString());
 
   const res = await fetch(`${url}/library?${params.toString()}`, {
