@@ -18,19 +18,14 @@ jest.mock('../../../../apps/backend/services/search/elasticsearch.indices', () =
   getLibraryIndexName: mockGetLibraryIndexName,
 }));
 
-// Mock @wxyc/database for the view query
-const mockSelect = jest.fn();
-const mockFrom = jest.fn();
-const mockWhere = jest.fn();
-const mockLimit = jest.fn();
+// Mock @wxyc/database — sync uses db.execute() with raw SQL
+const mockExecute = jest.fn();
 
 jest.mock('@wxyc/database', () => ({
-  db: { select: mockSelect },
-  library_artist_view: { id: 'id' },
+  db: { execute: mockExecute },
 }));
 
 jest.mock('drizzle-orm', () => ({
-  eq: jest.fn((a, b) => ({ eq: [a, b] })),
   sql: Object.assign(
     jest.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ sql: strings, values })),
     { raw: jest.fn((s: string) => ({ raw: s })) }
@@ -69,15 +64,11 @@ function setUpNullClient() {
 }
 
 function setUpViewQuery(result: unknown[]) {
-  mockLimit.mockResolvedValue(result);
-  mockWhere.mockReturnValue({ limit: mockLimit });
-  mockFrom.mockReturnValue({ where: mockWhere });
-  mockSelect.mockReturnValue({ from: mockFrom });
+  mockExecute.mockResolvedValue(result);
 }
 
 function setUpViewQueryAll(result: unknown[]) {
-  mockFrom.mockResolvedValue(result);
-  mockSelect.mockReturnValue({ from: mockFrom });
+  mockExecute.mockResolvedValue(result);
 }
 
 describe('elasticsearch.sync', () => {
@@ -93,7 +84,7 @@ describe('elasticsearch.sync', () => {
 
       await indexLibraryDocumentById(42);
 
-      expect(mockSelect).toHaveBeenCalled();
+      expect(mockExecute).toHaveBeenCalled();
       expect(mockIndex).toHaveBeenCalledWith({
         index: 'wxyc_library',
         id: '42',
@@ -158,7 +149,7 @@ describe('elasticsearch.sync', () => {
 
       await indexLibraryDocumentById(42);
 
-      expect(mockSelect).not.toHaveBeenCalled();
+      expect(mockExecute).not.toHaveBeenCalled();
       expect(mockIndex).not.toHaveBeenCalled();
     });
 

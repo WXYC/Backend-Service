@@ -1,6 +1,6 @@
 import type { LibraryArtistViewEntry } from '@wxyc/database';
-import { db, library_artist_view } from '@wxyc/database';
-import { eq } from 'drizzle-orm';
+import { db } from '@wxyc/database';
+import { sql } from 'drizzle-orm';
 import { getElasticsearchClient } from './elasticsearch.client.js';
 import { ensureLibraryIndex, getLibraryIndexName } from './elasticsearch.indices.js';
 
@@ -22,20 +22,24 @@ function toEsDocument(doc: LibraryArtistViewEntry): Record<string, unknown> {
     code_letters: doc.code_letters,
     code_artist_number: doc.code_artist_number,
     code_number: doc.code_number,
-    add_date: doc.add_date instanceof Date ? doc.add_date.toISOString() : String(doc.add_date),
+    add_date: doc.add_date instanceof Date
+      ? doc.add_date.toISOString()
+      : new Date(String(doc.add_date)).toISOString(),
   };
 }
+
+// Use raw SQL for view queries to avoid Drizzle's column name confusion:
+// Drizzle references underlying table columns (e.g. artist_genre_code) instead
+// of view column aliases (e.g. code_artist_number) when using db.select().from(view).
 
 /**
  * Query `library_artist_view` by album ID to get the full denormalized row.
  */
 async function getLibraryViewEntryById(albumId: number): Promise<LibraryArtistViewEntry | null> {
-  const rows = await db
-    .select()
-    .from(library_artist_view)
-    .where(eq(library_artist_view.id, albumId))
-    .limit(1);
-  return rows[0] ?? null;
+  const rows = await db.execute(
+    sql`SELECT * FROM wxyc_schema.library_artist_view WHERE id = ${albumId} LIMIT 1`
+  );
+  return (rows[0] as LibraryArtistViewEntry | undefined) ?? null;
 }
 
 /**
@@ -105,7 +109,9 @@ export async function bulkIndexLibrary(): Promise<{ indexed: number; errors: num
 
   await ensureLibraryIndex();
 
-  const rows: LibraryArtistViewEntry[] = await db.select().from(library_artist_view);
+  const rows = (await db.execute(
+    sql`SELECT * FROM wxyc_schema.library_artist_view`
+  )) as unknown as LibraryArtistViewEntry[];
 
   if (rows.length === 0) {
     return { indexed: 0, errors: 0 };
@@ -129,6 +135,9 @@ export async function bulkIndexLibrary(): Promise<{ indexed: number; errors: num
       );
       totalErrors += errorItems.length;
       console.error(`[Elasticsearch] Bulk batch had ${errorItems.length} errors`);
+      errorItems.forEach((item) =>
+        console.error('[Elasticsearch] Bulk item error:', JSON.stringify(item.index?.error))
+      );
     }
   }
 
