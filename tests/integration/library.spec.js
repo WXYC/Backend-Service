@@ -34,7 +34,7 @@ describe('Library Catalog', () => {
     });
 
     test('searches by album title', async () => {
-      const res = await auth.get('/library').query({ album_title: 'Keep it Like a Secret' }).expect(200);
+      const res = await auth.get('/library').query({ album_name: 'Keep it Like a Secret' }).expect(200);
 
       expectArray(res);
       expect(res.body.length).toBeGreaterThan(0);
@@ -43,7 +43,7 @@ describe('Library Catalog', () => {
     test('searches by both artist and album', async () => {
       const res = await auth
         .get('/library')
-        .query({ artist_name: 'Built to Spill', album_title: 'Keep it' })
+        .query({ artist_name: 'Built to Spill', album_name: 'Keep it' })
         .expect(200);
 
       expectArray(res);
