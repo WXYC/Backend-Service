@@ -33,6 +33,9 @@ export function createMockQueryChain(resolvedValue: unknown = []): MockQueryChai
     'update',
     'set',
     'delete',
+    'onConflictDoNothing',
+    'onConflictDoUpdate',
+    'offset',
   ];
 
   chainMethods.forEach((method) => {
@@ -65,6 +68,7 @@ export const anonymous_devices = {};
 export const user_activity = {};
 export const album_metadata = {};
 export const artist_metadata = {};
+export const labels = {};
 export const library = {};
 export const artists = {};
 export const genres = {};
@@ -80,6 +84,7 @@ export const flowsheet = {
   album_title: 'album_title',
   artist_name: 'artist_name',
   record_label: 'record_label',
+  label_id: 'label_id',
   rotation_id: 'rotation_id',
   play_order: 'play_order',
   request_flag: 'request_flag',
@@ -111,6 +116,14 @@ export type ArtistMetadata = Record<string, unknown>;
 export type NewAlbumMetadata = Record<string, unknown>;
 export type NewArtistMetadata = Record<string, unknown>;
 
+export type Label = {
+  id: number;
+  label_name: string;
+  parent_label_id: number | null;
+};
+
+export type NewLabel = Partial<Label>;
+
 export type FSEntry = {
   id: number;
   show_id: number | null;
@@ -121,6 +134,7 @@ export type FSEntry = {
   album_title: string | null;
   artist_name: string | null;
   record_label: string | null;
+  label_id: number | null;
   play_order: number;
   request_flag: boolean;
   message: string | null;

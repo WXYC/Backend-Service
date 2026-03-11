@@ -27,6 +27,7 @@ const createBaseEntry = (overrides: Partial<IFSEntry & { metadata?: Partial<IFSE
     album_title: null,
     artist_name: null,
     record_label: null,
+    label_id: null,
     play_order: 1,
     request_flag: false,
     message: null,
@@ -95,6 +96,19 @@ describe('flowsheet.service', () => {
         const result = transformToV2(entry);
 
         expect(result.rotation_bin).toBeNull();
+      });
+
+      it('includes label_id in track entries', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          artist_name: 'Merge Records Artist',
+          label_id: 42,
+          record_label: 'Merge Records',
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.label_id).toBe(42);
       });
 
       it('excludes message field from track entries', () => {

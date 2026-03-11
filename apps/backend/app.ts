@@ -7,6 +7,7 @@ import { parse as parse_yaml } from 'yaml';
 import swaggerContent from './app.yaml';
 import { dj_route } from './routes/djs.route.js';
 import { flowsheet_route } from './routes/flowsheet.route.js';
+import { labels_route } from './routes/labels.route.js';
 
 import { library_route } from './routes/library.route.js';
 import { schedule_route } from './routes/schedule.route.js';
@@ -45,6 +46,8 @@ const swaggerDoc = parse_yaml(swaggerContent);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc));
 
 // Business logic routes
+app.use('/labels', labels_route);
+
 app.use('/library', library_route);
 
 app.use('/flowsheet', flowsheet_route);
