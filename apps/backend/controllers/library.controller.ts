@@ -79,7 +79,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 
 type AlbumQueryParams = {
   artist_name?: string;
-  album_title?: string;
+  album_name?: string;
   code_letters?: string;
   code_artist_number?: string;
   code_number?: number;
@@ -95,12 +95,12 @@ export const searchForAlbum: RequestHandler = async (
   const { query } = req;
   if (
     query.artist_name === undefined &&
-    query.album_title === undefined &&
+    query.album_name === undefined &&
     (query.code_letters === undefined || query.code_artist_number === undefined)
   ) {
     res.status(400);
     res.send(
-      'Missing query parameter. Query must include: artist_name, album_title, or code_letters, code_artist_number, and code_number'
+      'Missing query parameter. Query must include: artist_name, album_name, or code_letters, code_artist_number, and code_number'
     );
   } else if (query.code_letters !== undefined && query.code_artist_number !== undefined) {
     //quickly look up albums by that artist
@@ -108,7 +108,7 @@ export const searchForAlbum: RequestHandler = async (
     res.send('TODO: Library Code Lookup');
   } else {
     try {
-      const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n);
+      const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_name, query.n);
       res.status(200).json(response);
     } catch (e) {
       console.error("Error: Couldn't get album");
