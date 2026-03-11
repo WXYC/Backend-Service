@@ -53,10 +53,14 @@ Library catalog search uses a facade pattern that routes to either Elasticsearch
 - **`elasticsearch.client.ts`** -- Singleton ES client. Returns `null` when `ELASTICSEARCH_URL` is unset (graceful degradation).
 - **`elasticsearch.indices.ts`** -- Index mapping and lifecycle (`ensureLibraryIndex()` called at startup).
 - **`elasticsearch.search.ts`** -- ES query implementations (`searchLibraryES`, `findSimilarArtistES`, `searchAlbumsByTitleES`, `searchByArtistES`). All return `LibraryArtistViewEntry[]`.
-- **`elasticsearch.sync.ts`** -- Stub for dual-write sync and bulk reindex (PR 2).
+- **`elasticsearch.sync.ts`** -- Dual-write sync and bulk reindex. `indexLibraryDocumentById` is called fire-and-forget from `library.service.ts` on album insert, rotation add, and rotation kill. `bulkIndexLibrary` reads all rows from `library_artist_view` and bulk-indexes into ES in batches of 500. `removeLibraryDocument` deletes a single document by ID (ignores 404).
 - **`index.ts`** -- Facade: tries ES first, falls back to pg_trgm on error. Exports `searchLibrary`, `findSimilarArtist`, `searchAlbumsByTitle`, `searchByArtist`.
 
 The original pg_trgm implementations in `library.service.ts` are renamed with `pgTrgm` prefix (e.g., `pgTrgmSearchLibrary`) and re-exported via the facade under the original names. No callers need to change imports.
+
+Dual-write sync errors are logged but never propagated -- library operations (insert, rotation add/kill) succeed even if ES is temporarily unavailable. The sync module has a safe circular dependency with `library.service.ts` (both imports are function-scoped, not evaluated at module load time).
+
+`POST /library/reindex` triggers a full bulk reindex. Requires `catalog: ['write']` permission (musicDirector or stationManager). Should be called after ETL jobs that modify library data outside the normal API flow.
 
 Feature flag: set `ELASTICSEARCH_URL` to enable ES, unset to disable. Instant rollback by unsetting the env var.
 
