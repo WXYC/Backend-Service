@@ -1,6 +1,7 @@
 import { requirePermissions } from '@wxyc/authentication';
 import { Router } from 'express';
 import * as libraryController from '../controllers/library.controller.js';
+import * as reviewController from '../controllers/review.controller.js';
 import * as requestLineController from '../controllers/requestLine.controller.js';
 import { requireAnonymousAuth } from '../middleware/anonymousAuth.js';
 
@@ -33,3 +34,9 @@ library_route.get('/genres', requirePermissions({ catalog: ['read'] }), libraryC
 library_route.post('/genres', requirePermissions({ catalog: ['write'] }), libraryController.addGenre);
 
 library_route.get('/info', requirePermissions({ catalog: ['read'] }), libraryController.getAlbum);
+
+library_route.get('/reviews', requirePermissions({ catalog: ['read'] }), reviewController.getReview);
+
+library_route.put('/reviews', requirePermissions({ catalog: ['write'] }), reviewController.upsertReview);
+
+library_route.patch('/', requirePermissions({ catalog: ['write'] }), libraryController.updateAlbum);

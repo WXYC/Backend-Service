@@ -71,6 +71,9 @@ export const genres = {};
 export const format = {};
 export const rotation = {};
 export const library_artist_view = {};
+export const reviews = {
+  album_id: 'album_id',
+};
 export const flowsheet = {
   id: 'id',
   show_id: 'show_id',
