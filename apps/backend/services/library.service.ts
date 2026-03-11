@@ -18,6 +18,9 @@ import {
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
 import { extractSignificantWords } from './requestLine/matching/index.js';
+// Circular dependency with elasticsearch.sync is safe — both imports are used
+// only inside function bodies, not at module evaluation time.
+import { indexLibraryDocumentById } from './search/elasticsearch.sync.js';
 
 export const getFormatsFromDB = async () => {
   const formats = await db
@@ -90,7 +93,9 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
 
 export const addToRotation = async (newRotation: RotationAddRequest) => {
   const insertedRotation: RotationRelease[] = await db.insert(rotation).values(newRotation).returning();
-  return insertedRotation[0];
+  const result = insertedRotation[0];
+  indexLibraryDocumentById(result.album_id).catch(() => {});
+  return result;
 };
 
 export const killRotationInDB = async (rotationId: number, updatedKillDate?: string) => {
@@ -99,12 +104,18 @@ export const killRotationInDB = async (rotationId: number, updatedKillDate?: str
     .set({ kill_date: updatedKillDate || sql`CURRENT_DATE` })
     .where(eq(rotation.id, rotationId))
     .returning();
-  return updatedRotation[0];
+  const result = updatedRotation[0];
+  if (result) {
+    indexLibraryDocumentById(result.album_id).catch(() => {});
+  }
+  return result;
 };
 
 export const insertAlbum = async (newAlbum: NewAlbum) => {
   const response = await db.insert(library).values(newAlbum).returning();
-  return response[0];
+  const inserted = response[0];
+  indexLibraryDocumentById(inserted.id).catch(() => {});
+  return inserted;
 };
 
 //based on artist name and album title, retrieve n best matches from db

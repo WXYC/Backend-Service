@@ -10,6 +10,7 @@ import {
   RotationRelease,
 } from '@wxyc/database';
 import * as libraryService from '../services/library.service.js';
+import { bulkIndexLibrary } from '../services/search/elasticsearch.sync.js';
 
 type NewAlbumRequest = {
   album_title: string;
@@ -315,6 +316,17 @@ export const addGenre: RequestHandler = async (req, res, next) => {
       console.error(e);
       next(e);
     }
+  }
+};
+
+export const reindexLibrary: RequestHandler = async (req, res, next) => {
+  try {
+    const { indexed, errors } = await bulkIndexLibrary();
+    res.status(200).json({ message: 'Reindex complete', indexed, errors });
+  } catch (e) {
+    console.error('Error: Failed to reindex library');
+    console.error(e);
+    next(e);
   }
 };
 
