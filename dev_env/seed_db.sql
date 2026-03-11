@@ -46,6 +46,8 @@ VALUES
 ON CONFLICT (id) DO UPDATE SET
   dj_name = EXCLUDED.dj_name,
   real_name = EXCLUDED.real_name,
+  email_verified = EXCLUDED.email_verified,
+  role = EXCLUDED.role,
   updated_at = NOW();
 
 -- Create credential accounts for all test users
