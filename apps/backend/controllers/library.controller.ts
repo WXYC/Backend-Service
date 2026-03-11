@@ -11,6 +11,7 @@ import {
 } from '@wxyc/database';
 import * as libraryService from '../services/library.service.js';
 import * as labelsService from '../services/labels.service.js';
+import { bulkIndexLibrary } from '../services/search/elasticsearch.sync.js';
 import WxycError from '../utils/error.js';
 
 type NewAlbumRequest = {
@@ -317,6 +318,17 @@ export const addGenre: RequestHandler = async (req, res, next) => {
     res.status(201).json(insertion);
   } catch (e) {
     console.error('Failed to add new genre');
+    console.error(e);
+    next(e);
+  }
+};
+
+export const reindexLibrary: RequestHandler = async (req, res, next) => {
+  try {
+    const { indexed, errors } = await bulkIndexLibrary();
+    res.status(200).json({ message: 'Reindex complete', indexed, errors });
+  } catch (e) {
+    console.error('Error: Failed to reindex library');
     console.error(e);
     next(e);
   }

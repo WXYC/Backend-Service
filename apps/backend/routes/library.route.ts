@@ -33,3 +33,5 @@ library_route.get('/genres', requirePermissions({ catalog: ['read'] }), libraryC
 library_route.post('/genres', requirePermissions({ catalog: ['write'] }), libraryController.addGenre);
 
 library_route.get('/info', requirePermissions({ catalog: ['read'] }), libraryController.getAlbum);
+
+library_route.post('/reindex', requirePermissions({ catalog: ['write'] }), libraryController.reindexLibrary);
