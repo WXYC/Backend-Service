@@ -88,7 +88,26 @@ export const flowsheet = {
 };
 export const shows = {};
 export const show_djs = {};
-export const user = {};
+export const user = {
+  id: 'id',
+  name: 'name',
+  email: 'email',
+  emailVerified: 'email_verified',
+  image: 'image',
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+  role: 'role',
+  banned: 'banned',
+  banReason: 'ban_reason',
+  banExpires: 'ban_expires',
+  username: 'username',
+  displayUsername: 'display_username',
+  realName: 'real_name',
+  djName: 'dj_name',
+  appSkin: 'app_skin',
+  isAnonymous: 'is_anonymous',
+  capabilities: 'capabilities',
+};
 export const specialty_shows = {};
 
 // Mock enum
