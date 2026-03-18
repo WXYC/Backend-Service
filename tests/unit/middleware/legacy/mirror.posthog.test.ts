@@ -35,10 +35,21 @@ function createMockReqRes() {
 }
 
 describe('PostHog client usage', () => {
+  const origApiKey = process.env.POSTHOG_API_KEY;
+
   beforeEach(() => {
+    process.env.POSTHOG_API_KEY = 'test-key';
     mockGetPostHogClient.mockClear();
     mockPostHogInstance.isFeatureEnabled.mockClear();
     mockPostHogInstance.shutdown.mockClear();
+  });
+
+  afterEach(() => {
+    if (origApiKey === undefined) {
+      delete process.env.POSTHOG_API_KEY;
+    } else {
+      process.env.POSTHOG_API_KEY = origApiKey;
+    }
   });
 
   it('uses the shared PostHog singleton from utils/posthog', async () => {
