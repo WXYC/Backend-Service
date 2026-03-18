@@ -57,10 +57,7 @@ export async function mirrorCreateEntry(body: Record<string, unknown>): Promise<
  * PATCH an existing entry on tubafrenzy by its tubafrenzy ID.
  * Never throws — errors are logged and swallowed (fire-and-forget).
  */
-export async function mirrorUpdateEntry(
-  tubafrenzyId: number,
-  body: Record<string, unknown>
-): Promise<void> {
+export async function mirrorUpdateEntry(tubafrenzyId: number, body: Record<string, unknown>): Promise<void> {
   try {
     const response = await fetch(`${TUBAFRENZY_URL}/playlists/api/flowsheetEntry`, {
       method: 'PATCH',
@@ -127,16 +124,10 @@ export function mapEntryToTubafrenzy(entry: MirrorEntry): Record<string, unknown
       if (message.toLowerCase().includes('breakpoint')) {
         flowsheetEntryType = 8;
         message = message.toUpperCase();
-      } else if (
-        message.toLowerCase().includes('start of show') ||
-        message.toLowerCase().includes('signed on')
-      ) {
+      } else if (message.toLowerCase().includes('start of show') || message.toLowerCase().includes('signed on')) {
         flowsheetEntryType = 9;
         startTime = startMs;
-      } else if (
-        message.toLowerCase().includes('end of show') ||
-        message.toLowerCase().includes('signed off')
-      ) {
+      } else if (message.toLowerCase().includes('end of show') || message.toLowerCase().includes('signed off')) {
         flowsheetEntryType = 10;
         startTime = startMs;
       } else {
