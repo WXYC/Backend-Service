@@ -43,6 +43,44 @@ export const createBackendMirrorMiddleware =
     next();
   };
 
+/**
+ * HTTP mirror middleware factory. Same response-tapping and PostHog feature flag
+ * check as createBackendMirrorMiddleware, but calls an async callback that makes
+ * HTTP calls instead of returning SQL strings for the command queue.
+ */
+export const createHttpMirrorMiddleware =
+  <T>(execute: (req: Request, data: T) => Promise<void>) =>
+  async (req: Request, res: Response, next: NextFunction) => {
+    tapJsonResponse(res);
+
+    res.once('finish', () => {
+      void (async () => {
+        try {
+          const postHogClient = new PostHog(process.env.POSTHOG_API_KEY ?? '', {
+            host: 'https://us.i.posthog.com',
+          });
+
+          const ok = res.statusCode >= 200 && res.statusCode < 305;
+          const data = (res.locals as any).mirrorData as T | undefined;
+
+          const distinctId = (req as any).user?.id ?? req.ip ?? 'anonymous';
+          let mirrorOn = await postHogClient.isFeatureEnabled('backend-mirror', distinctId);
+          mirrorOn ??= false;
+
+          if (!ok || data == null || !mirrorOn) return;
+
+          await execute(req, data);
+
+          await postHogClient.shutdown();
+        } catch (e) {
+          console.error('Error in HTTP mirror middleware:', e);
+        }
+      })();
+    });
+
+    next();
+  };
+
 function tapJsonResponse(res: Response) {
   const origSend = res.send.bind(res);
 
