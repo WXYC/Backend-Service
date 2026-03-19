@@ -147,7 +147,7 @@ export const getLatest: RequestHandler = async (req, res, next) => {
  * Infer the entry_type from the message content, matching the
  * discriminated union in wxyc-shared's FlowsheetEntryType.
  */
-function inferMessageEntryType(message: string | undefined): 'talkset' | 'breakpoint' | 'message' {
+function inferMessageEntryType(message: string | undefined): NewFSEntry['entry_type'] {
   if (message?.includes('Talkset')) return 'talkset';
   if (message?.includes('Breakpoint')) return 'breakpoint';
   return 'message';
@@ -162,7 +162,7 @@ export type FSEntryRequestBody = {
   record_label: string;
   request_flag?: boolean;
   message?: string;
-  entry_type?: 'talkset' | 'breakpoint' | 'message';
+  entry_type?: NewFSEntry['entry_type'];
 };
 
 // either an id is provided (meaning it came from the user's bin or was fuzzy found)
