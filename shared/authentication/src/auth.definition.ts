@@ -2,7 +2,15 @@ import { account, db, invitation, jwks, member, organization, session, user, ver
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { createAuthMiddleware } from 'better-auth/api';
-import { admin, anonymous, bearer, emailOTP, jwt, organization as organizationPlugin, username } from 'better-auth/plugins';
+import {
+  admin,
+  anonymous,
+  bearer,
+  emailOTP,
+  jwt,
+  organization as organizationPlugin,
+  username,
+} from 'better-auth/plugins';
 import { eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';

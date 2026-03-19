@@ -98,26 +98,31 @@ describe('Email OTP', () => {
         expectedSubject: 'Your WXYC password reset code',
         expectedIntro: 'Use this code to reset your password.',
       },
-    ])('should send $type OTP email with correct subject and content', async ({ type, expectedSubject, expectedIntro }) => {
-      await sendOTPEmail({ to: 'dj@wxyc.org', otp: '123456', type });
+    ])(
+      'should send $type OTP email with correct subject and content',
+      async ({ type, expectedSubject, expectedIntro }) => {
+        await sendOTPEmail({ to: 'dj@wxyc.org', otp: '123456', type });
 
-      expect(mockSend).toHaveBeenCalledTimes(1);
+        expect(mockSend).toHaveBeenCalledTimes(1);
 
-      const command = mockSend.mock.calls[0][0] as any;
-      expect(command.Source).toBe('noreply@wxyc.org');
-      expect(command.Destination.ToAddresses).toEqual(['dj@wxyc.org']);
-      expect(command.Message.Subject.Data).toBe(expectedSubject);
-      expect(command.Message.Body.Text.Data).toContain('123456');
-      expect(command.Message.Body.Text.Data).toContain('expires in 5 minutes');
-      expect(command.Message.Body.Html.Data).toContain('123456');
-      expect(command.Message.Body.Html.Data).toContain(expectedIntro);
-    });
+        const command = mockSend.mock.calls[0][0] as any;
+        expect(command.Source).toBe('noreply@wxyc.org');
+        expect(command.Destination.ToAddresses).toEqual(['dj@wxyc.org']);
+        expect(command.Message.Subject.Data).toBe(expectedSubject);
+        expect(command.Message.Body.Text.Data).toContain('123456');
+        expect(command.Message.Body.Text.Data).toContain('expires in 5 minutes');
+        expect(command.Message.Body.Html.Data).toContain('123456');
+        expect(command.Message.Body.Html.Data).toContain(expectedIntro);
+      }
+    );
 
     it('should throw if SES_FROM_EMAIL is not set', async () => {
       const originalFrom = process.env.SES_FROM_EMAIL;
       delete process.env.SES_FROM_EMAIL;
 
-      await expect(sendOTPEmail({ to: 'dj@wxyc.org', otp: '123456', type: 'sign-in' })).rejects.toThrow('SES_FROM_EMAIL');
+      await expect(sendOTPEmail({ to: 'dj@wxyc.org', otp: '123456', type: 'sign-in' })).rejects.toThrow(
+        'SES_FROM_EMAIL'
+      );
 
       process.env.SES_FROM_EMAIL = originalFrom;
     });
