@@ -152,3 +152,95 @@ export const sendVerificationEmailMessage = async ({ to, verificationUrl }: { to
 
 export const sendAccountSetupEmail = async ({ to, setupUrl }: { to: string; setupUrl: string }) =>
   sendEmail({ type: 'accountSetup', to, url: setupUrl });
+
+type OTPEmailInput = {
+  to: string;
+  otp: string;
+  type: 'sign-in' | 'email-verification' | 'forget-password';
+};
+
+type OTPEmailTemplateInput = {
+  title: string;
+  intro: string;
+  otp: string;
+  footer?: string;
+};
+
+export const buildOTPEmailHtml = ({ title, intro, otp, footer }: OTPEmailTemplateInput) =>
+  `
+  <div style="background-color:#0b0a10;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;color:#fce7f3;">
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:600px;margin:0 auto;background:#14101a;border-radius:12px;overflow:hidden;">
+      <tr>
+        <td style="padding:24px 28px;border-bottom:1px solid #2a2033;">
+          <div style="min-height:48px;display:flex;align-items:center;justify-content:center;">
+            <img
+              src="https://wxyc.org/_next/static/media/logo.cecf836c.png"
+              alt="WXYC"
+              width="180"
+              style="display:block;border:0;outline:none;text-decoration:none;height:auto;"
+            />
+          </div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:28px;">
+          <h1 style="margin:0 0 12px;font-size:22px;line-height:1.3;color:#fdf2f8;">${title}</h1>
+          <p style="margin:0 0 18px;font-size:15px;line-height:1.6;color:#f9a8d4;">
+            ${intro}
+          </p>
+          <div style="text-align:center;margin:24px 0;">
+            <span style="font-size:32px;font-family:monospace;letter-spacing:8px;background:#1a0b14;padding:12px 24px;border-radius:8px;color:#ec4899;display:inline-block;">${otp}</span>
+          </div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:20px 28px;background:#0d0a12;color:#f9a8d4;font-size:12px;line-height:1.5;">
+          ${footer || 'If you did not request this email, you can safely ignore it.'}
+        </td>
+      </tr>
+    </table>
+  </div>
+`.trim();
+
+export const sendOTPEmail = async ({ to, otp, type }: OTPEmailInput) => {
+  const from = process.env.SES_FROM_EMAIL;
+  if (!from) {
+    throw new Error('Missing AWS SES configuration: SES_FROM_EMAIL');
+  }
+
+  const subjectMap: Record<OTPEmailInput['type'], string> = {
+    'sign-in': 'Your WXYC login code',
+    'email-verification': 'Your WXYC verification code',
+    'forget-password': 'Your WXYC password reset code',
+  };
+
+  const introMap: Record<OTPEmailInput['type'], string> = {
+    'sign-in': 'Use this code to sign in to your account.',
+    'email-verification': 'Use this code to verify your email address.',
+    'forget-password': 'Use this code to reset your password.',
+  };
+
+  const subject = subjectMap[type];
+  const textBody = `Your code is: ${otp}. It expires in 5 minutes.`;
+  const htmlBody = buildOTPEmailHtml({
+    title: subject,
+    intro: introMap[type],
+    otp,
+    footer: 'This code expires in 5 minutes. If you didn\'t request this, you can safely ignore it.',
+  });
+
+  const command = new SendEmailCommand({
+    Source: from,
+    Destination: { ToAddresses: [to] },
+    Message: {
+      Subject: { Data: subject },
+      Body: {
+        Text: { Data: textBody },
+        Html: { Data: htmlBody },
+      },
+    },
+  });
+
+  const client = getSesClient();
+  await client.send(command);
+};
