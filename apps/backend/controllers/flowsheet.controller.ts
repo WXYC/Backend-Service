@@ -143,6 +143,16 @@ export const getLatest: RequestHandler = async (req, res, next) => {
   }
 };
 
+/**
+ * Infer the entry_type from the message content, matching the
+ * discriminated union in wxyc-shared's FlowsheetEntryType.
+ */
+function inferMessageEntryType(message: string | undefined): 'talkset' | 'breakpoint' | 'message' {
+  if (message?.includes('Talkset')) return 'talkset';
+  if (message?.includes('Breakpoint')) return 'breakpoint';
+  return 'message';
+}
+
 export type FSEntryRequestBody = {
   artist_name: string;
   album_title: string;
@@ -152,6 +162,7 @@ export type FSEntryRequestBody = {
   record_label: string;
   request_flag?: boolean;
   message?: string;
+  entry_type?: 'talkset' | 'breakpoint' | 'message';
 };
 
 // either an id is provided (meaning it came from the user's bin or was fuzzy found)
@@ -175,6 +186,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       artist_name: '',
       album_title: '',
       track_title: '',
+      entry_type: body.entry_type ?? inferMessageEntryType(body.message),
       message: body.message,
       show_id: latestShow.id,
     };
