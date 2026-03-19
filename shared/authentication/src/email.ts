@@ -226,7 +226,7 @@ export const sendOTPEmail = async ({ to, otp, type }: OTPEmailInput) => {
     title: subject,
     intro: introMap[type],
     otp,
-    footer: 'This code expires in 5 minutes. If you didn\'t request this, you can safely ignore it.',
+    footer: "This code expires in 5 minutes. If you didn't request this, you can safely ignore it.",
   });
 
   const command = new SendEmailCommand({
