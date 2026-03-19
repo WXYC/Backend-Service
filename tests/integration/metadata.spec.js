@@ -152,16 +152,16 @@ describe('Fire-and-Forget Metadata Fetch', () => {
     // Get the entry immediately
     const getRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
 
-    // Messages posted via POST /flowsheet get entry_type 'track' (database default),
-    // so the V2 transform returns them as track entries with null metadata fields
+    // Messages get entry_type 'message' (inferred from content), so the V2
+    // transform returns them without any metadata fields
     const messageEntry = getRes.body.entries.find((e) => e.id === entryId);
     expect(messageEntry).toBeDefined();
+    expect(messageEntry.entry_type).toBe('message');
 
-    // Since there's no artist_name, metadata fetch should not have been triggered,
-    // so all metadata fields should be null
-    expect(messageEntry.artwork_url).toBeNull();
-    expect(messageEntry.spotify_url).toBeNull();
-    expect(messageEntry.youtube_music_url).toBeNull();
+    // Message entries should not include metadata fields at all
+    expect(messageEntry.artwork_url).toBeUndefined();
+    expect(messageEntry.spotify_url).toBeUndefined();
+    expect(messageEntry.youtube_music_url).toBeUndefined();
   });
 });
 
