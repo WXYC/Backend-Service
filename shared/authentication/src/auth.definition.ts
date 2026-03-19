@@ -2,10 +2,10 @@ import { account, db, invitation, jwks, member, organization, session, user, ver
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { createAuthMiddleware } from 'better-auth/api';
-import { admin, anonymous, bearer, jwt, organization as organizationPlugin, username } from 'better-auth/plugins';
+import { admin, anonymous, bearer, emailOTP, jwt, organization as organizationPlugin, username } from 'better-auth/plugins';
 import { eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
-import { sendEmail, sendVerificationEmailMessage } from './email';
+import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 import { rewriteUrlForFrontend } from './url-rewrite';
 
 const buildResetUrl = (url: string, redirectTo?: string) => {
@@ -259,6 +259,18 @@ export const auth = betterAuth({
           }
         },
       },
+    }),
+    emailOTP({
+      async sendVerificationOTP({ email, otp, type }) {
+        void sendOTPEmail({ to: email, otp, type }).catch((error) => {
+          console.error('Error sending OTP email:', error);
+        });
+      },
+      otpLength: 6,
+      expiresIn: 300,
+      disableSignUp: true,
+      allowedAttempts: 5,
+      storeOTP: process.env.NODE_ENV === 'production' ? 'hashed' : 'plain',
     }),
   ],
 
