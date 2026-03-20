@@ -1,6 +1,6 @@
 {
-  "id": "9037a6e9-1b95-4392-bc08-37aa5ca0d9ff",
-  "prevId": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+  "id": "6d3ff626-5f45-4e4b-9e92-2e0310ba3103",
+  "prevId": "07863e5f-57cb-4b4e-9c35-d33a78a8b5f0",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -218,14 +218,14 @@
         },
         "last_accessed": {
           "name": "last_accessed",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
         },
         "created_at": {
           "name": "created_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -522,14 +522,14 @@
         },
         "last_accessed": {
           "name": "last_accessed",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
         },
         "created_at": {
           "name": "created_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -635,6 +635,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "alphabetical_name": {
+          "name": "alphabetical_name",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
         "code_letters": {
           "name": "code_letters",
           "type": "varchar(4)",
@@ -650,7 +656,7 @@
         },
         "last_modified": {
           "name": "last_modified",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -886,6 +892,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "label_id": {
+          "name": "label_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "play_order": {
           "name": "play_order",
           "type": "serial",
@@ -907,7 +919,7 @@
         },
         "add_time": {
           "name": "add_time",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -950,6 +962,20 @@
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "rotation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "flowsheet_label_id_labels_id_fk": {
+          "name": "flowsheet_label_id_labels_id_fk",
+          "tableFrom": "flowsheet",
+          "tableTo": "labels",
+          "schemaTo": "wxyc_schema",
+          "columnsFrom": [
+            "label_id"
           ],
           "columnsTo": [
             "id"
@@ -1116,7 +1142,7 @@
         },
         "last_modified": {
           "name": "last_modified",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -1274,6 +1300,45 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "wxyc_schema.labels": {
+      "name": "labels",
+      "schema": "wxyc_schema",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "label_name": {
+          "name": "label_name",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "parent_label_id": {
+          "name": "parent_label_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "labels_label_name_unique": {
+          "name": "labels_label_name_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "label_name"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "wxyc_schema.library": {
       "name": "library",
       "schema": "wxyc_schema",
@@ -1320,6 +1385,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "label_id": {
+          "name": "label_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "code_number": {
           "name": "code_number",
           "type": "smallint",
@@ -1348,14 +1419,14 @@
         },
         "add_date": {
           "name": "add_date",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
         },
         "last_modified": {
           "name": "last_modified",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -1459,6 +1530,20 @@
           "schemaTo": "wxyc_schema",
           "columnsFrom": [
             "format_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "library_label_id_labels_id_fk": {
+          "name": "library_label_id_labels_id_fk",
+          "tableFrom": "library",
+          "tableTo": "labels",
+          "schemaTo": "wxyc_schema",
+          "columnsFrom": [
+            "label_id"
           ],
           "columnsTo": [
             "id"
@@ -1664,7 +1749,7 @@
         },
         "last_modified": {
           "name": "last_modified",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -1996,13 +2081,13 @@
         },
         "schedule_id": {
           "name": "schedule_id",
-          "type": "serial",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true
         },
         "shift_timestamp": {
           "name": "shift_timestamp",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
         },
@@ -2080,7 +2165,29 @@
           "default": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "show_djs_show_id_dj_id_unique": {
+          "name": "show_djs_show_id_dj_id_unique",
+          "columns": [
+            {
+              "expression": "show_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "dj_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "show_djs_show_id_shows_id_fk": {
           "name": "show_djs_show_id_shows_id_fk",
@@ -2146,14 +2253,14 @@
         },
         "start_time": {
           "name": "start_time",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
         },
         "end_time": {
           "name": "end_time",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         }
@@ -2225,7 +2332,7 @@
         },
         "last_modified": {
           "name": "last_modified",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -2562,6 +2669,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "alphabetical_name": {
+          "name": "alphabetical_name",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
         "album_title": {
           "name": "album_title",
           "type": "varchar(128)",
@@ -2589,7 +2702,7 @@
         },
         "add_date": {
           "name": "add_date",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -2599,9 +2712,15 @@
           "type": "varchar(128)",
           "primaryKey": false,
           "notNull": false
+        },
+        "label_id": {
+          "name": "label_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
         }
       },
-      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL)",
+      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL)",
       "name": "library_artist_view",
       "schema": "wxyc_schema",
       "isExisting": false,
@@ -2618,6 +2737,12 @@
         "label": {
           "name": "label",
           "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "label_id": {
+          "name": "label_id",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false
         },
@@ -2640,6 +2765,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "alphabetical_name": {
+          "name": "alphabetical_name",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
         "kill_date": {
           "name": "kill_date",
           "type": "date",
@@ -2647,7 +2778,7 @@
           "notNull": false
         }
       },
-      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"rotation\".\"id\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"rotation\".\"kill_date\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"library\".\"id\" = \"wxyc_schema\".\"rotation\".\"album_id\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\"",
+      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"rotation\".\"id\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"rotation\".\"kill_date\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"library\".\"id\" = \"wxyc_schema\".\"rotation\".\"album_id\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\"",
       "name": "rotation_library_view",
       "schema": "wxyc_schema",
       "isExisting": false,
