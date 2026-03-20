@@ -50,8 +50,14 @@ jest.mock('../../../../apps/backend/middleware/legacy/mirror.logging', () => ({
   hashSha256Hex: (input: string) => `hash_${input.length}`,
   truncateForMirrorPayload: (input: unknown, maxLen = 1024) => {
     if (input === undefined || input === null) return undefined;
-    const s = String(input);
-    return s.length <= maxLen ? s : s.slice(0, maxLen);
+    if (typeof input === 'string') {
+      return input.length <= maxLen ? input : input.slice(0, maxLen);
+    }
+    if (typeof input === 'number' || typeof input === 'boolean' || typeof input === 'bigint') {
+      const s = String(input);
+      return s.length <= maxLen ? s : s.slice(0, maxLen);
+    }
+    return undefined;
   },
   buildMirrorCommandSummary: (cmd: any) => ({
     id: cmd.id,

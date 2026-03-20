@@ -182,9 +182,11 @@ describe('mirror.logging', () => {
       expect(summary).toHaveProperty('sqlLength', 1234);
       expect(summary).toHaveProperty('sqlHash', 'hash-1');
       expect(summary).toHaveProperty('statementsCount', 3);
-      expect((summary as any).sql).toBeUndefined();
+      expect(summary).not.toHaveProperty('sql');
       expect(summary.lastError).toBeDefined();
-      expect(summary.lastError!.length).toBeLessThanOrEqual(1024);
+      if (summary.lastError !== undefined) {
+        expect(summary.lastError.length).toBeLessThanOrEqual(1024);
+      }
     });
   });
 });
