@@ -17,7 +17,16 @@ import {
 const FLOWSHEET_ENTRY_TABLE = 'FLOWSHEET_ENTRY_PROD';
 const RADIO_SHOW_TABLE = 'FLOWSHEET_RADIO_SHOW_PROD';
 
-const getEntries = createBackendMirrorMiddleware<any>('flowsheet.getEntries', async (req, data) => {
+const MirrorOps = {
+  getEntries: 'flowsheet.getEntries',
+  startShow: 'flowsheet.startShow',
+  endShow: 'flowsheet.endShow',
+  addEntry: 'flowsheet.addEntry',
+  updateEntry: 'flowsheet.updateEntry',
+  deleteEntry: 'flowsheet.deleteEntry',
+} as const;
+
+const getEntries = createBackendMirrorMiddleware<any>(MirrorOps.getEntries, async (req, data) => {
   const query = req.query as QueryParams;
 
   const page = parseInt(query.page ?? '0');
@@ -27,7 +36,7 @@ const getEntries = createBackendMirrorMiddleware<any>('flowsheet.getEntries', as
   return [`SELECT * FROM ${FLOWSHEET_ENTRY_TABLE} LIMIT ${limit} OFFSET ${offset};`];
 });
 
-const startShow = createBackendMirrorMiddleware<Show>('flowsheet.startShow', async (req, show) => {
+const startShow = createBackendMirrorMiddleware<Show>(MirrorOps.startShow, async (req, show) => {
   const nowMs = Date.now();
   const statements: string[] = [];
 
@@ -93,7 +102,7 @@ const startShow = createBackendMirrorMiddleware<Show>('flowsheet.startShow', asy
   return statements;
 });
 
-export const endShow = createBackendMirrorMiddleware<Show>('flowsheet.endShow', async (req, show) => {
+export const endShow = createBackendMirrorMiddleware<Show>(MirrorOps.endShow, async (req, show) => {
   const endMs = toMs(show.end_time ?? Date.now());
   const statements: string[] = [];
 
@@ -283,7 +292,7 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
   return statements;
 };
 
-export const addEntry = createHttpMirrorMiddleware<FSEntry>('flowsheet.addEntry', async (_req, entry) => {
+export const addEntry = createHttpMirrorMiddleware<FSEntry>(MirrorOps.addEntry, async (_req, entry) => {
   const body = mapEntryToTubafrenzy(entry);
   const tubafrenzyId = await mirrorCreateEntry(body);
   if (tubafrenzyId != null) {
@@ -291,7 +300,7 @@ export const addEntry = createHttpMirrorMiddleware<FSEntry>('flowsheet.addEntry'
   }
 });
 
-export const updateEntry = createHttpMirrorMiddleware<FSEntry>('flowsheet.updateEntry', async (_req, entry) => {
+export const updateEntry = createHttpMirrorMiddleware<FSEntry>(MirrorOps.updateEntry, async (_req, entry) => {
   // Message-only rows aren't updateable
   if (entry?.message && entry.message.trim() !== '') return;
 
@@ -305,7 +314,7 @@ export const updateEntry = createHttpMirrorMiddleware<FSEntry>('flowsheet.update
   await mirrorUpdateEntry(tubafrenzyId, body);
 });
 
-export const deleteEntry = createBackendMirrorMiddleware<FSEntry>('flowsheet.deleteEntry', async (req, removed) => {
+export const deleteEntry = createBackendMirrorMiddleware<FSEntry>(MirrorOps.deleteEntry, async (req, removed) => {
   const statements: string[] = [];
 
   // Resolve the RADIO_SHOW_ID first
