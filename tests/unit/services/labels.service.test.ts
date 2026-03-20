@@ -1,4 +1,4 @@
-import { db, createMockQueryChain, labels } from '../../mocks/database.mock';
+import { db, createMockQueryChain } from '../../mocks/database.mock';
 
 // Reset mocks before each test
 beforeEach(() => {
@@ -97,7 +97,7 @@ describe('labels.service', () => {
       const mockLabels = [
         { id: 1, label_name: 'Merge Records', parent_label_id: null },
       ];
-      (db.execute as jest.Mock).mockResolvedValue({ rows: mockLabels });
+      (db.execute as jest.Mock).mockResolvedValue(mockLabels);
 
       const result = await searchLabels('Merge');
 
@@ -106,7 +106,7 @@ describe('labels.service', () => {
     });
 
     it('returns empty array when no matches', async () => {
-      (db.execute as jest.Mock).mockResolvedValue({ rows: [] });
+      (db.execute as jest.Mock).mockResolvedValue([]);
 
       const result = await searchLabels('Nonexistent');
 

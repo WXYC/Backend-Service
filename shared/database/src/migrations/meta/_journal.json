@@ -190,6 +190,13 @@
       "when": 1772298699139,
       "tag": "0029_add_artists_alphabetical_name",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1773965212606,
+      "tag": "0030_labels_table",
+      "breakpoints": true
     }
   ]
 }
