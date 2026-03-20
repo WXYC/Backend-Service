@@ -9,6 +9,16 @@ jest.mock('../../../../apps/backend/utils/posthog', () => ({
   getPostHogClient: mockGetPostHogClient,
 }));
 
+jest.mock('@sentry/node', () => ({
+  addBreadcrumb: jest.fn(),
+  captureException: jest.fn(),
+  withScope: (fn: (scope: { setTags: jest.Mock; setExtra: jest.Mock }) => void) =>
+    fn({
+      setTags: jest.fn(),
+      setExtra: jest.fn(),
+    }),
+}));
+
 jest.mock('../../../../apps/backend/middleware/legacy/commandqueue.mirror', () => ({
   MirrorCommandQueue: {
     instance: jest.fn(() => ({
@@ -54,7 +64,7 @@ describe('PostHog client usage', () => {
 
   it('uses the shared PostHog singleton from utils/posthog', async () => {
     const createCommand = jest.fn().mockResolvedValue(['SQL1']);
-    const middleware = createBackendMirrorMiddleware(createCommand);
+    const middleware = createBackendMirrorMiddleware('flowsheet.test', createCommand);
 
     const { req: req1, res: res1 } = createMockReqRes();
     const { req: req2, res: res2 } = createMockReqRes();

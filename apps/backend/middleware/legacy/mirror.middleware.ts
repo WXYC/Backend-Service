@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { MirrorCommandQueue } from './commandqueue.mirror';
 import { getPostHogClient } from '../../utils/posthog.js';
+import { addMirrorBreadcrumb, captureMirrorException, hashSha256Hex, type MirrorLogContext } from './mirror.logging';
 
 /**
  * Check the PostHog `backend-mirror` feature flag. If PostHog is not
@@ -17,7 +18,7 @@ async function isMirrorEnabled(req: Request): Promise<boolean> {
 }
 
 export const createBackendMirrorMiddleware =
-  <T>(createCommand: (req: Request, data: T) => Promise<string[]>) =>
+  <T>(operation: string, createCommand: (req: Request, data: T) => Promise<string[]>) =>
   async (req: Request, res: Response, next: NextFunction) => {
     tapJsonResponse(res);
 
@@ -25,23 +26,58 @@ export const createBackendMirrorMiddleware =
     res.once('finish', () => {
       void (async () => {
         try {
-          console.log('Response finished, checking for mirror work...');
           const ok = res.statusCode >= 200 && res.statusCode < 305;
           const data = (res.locals as any).mirrorData as T | undefined;
 
-          console.log('Response status:', res.statusCode, 'ok?', ok);
+          const requestId = (res.getHeader('X-Request-Id') ?? req.get('X-Request-Id'))?.toString();
+          const ctx = buildMirrorContext({ operation, req, res, data, requestId });
 
-          if (!ok || data == null) return;
+          if (!ok) {
+            addMirrorBreadcrumb('Mirror skipped: non-success http status', { http_status: res.statusCode }, ctx, 'debug');
+            return;
+          }
+
+          if (data == null) {
+            addMirrorBreadcrumb('Mirror skipped: missing mirrorData', { http_status: res.statusCode }, ctx, 'debug');
+            return;
+          }
 
           const mirrorOn = await isMirrorEnabled(req);
-          if (!mirrorOn) return;
+          ctx.mirrorFeatureEnabled = mirrorOn;
+          const distinctId = (req as any).user?.id ?? req.ip ?? 'anonymous';
+          const distinctIdHash = distinctId ? hashSha256Hex(String(distinctId)) : undefined;
 
-          console.log('Enqueuing mirror work...');
+          if (!mirrorOn) {
+            addMirrorBreadcrumb(
+              'Mirror skipped: backend-mirror flag disabled',
+              { mirror_feature_enabled: mirrorOn, posthog_distinct_id_hash: distinctIdHash },
+              ctx,
+              'info'
+            );
+            return;
+          }
 
+          addMirrorBreadcrumb('Mirror enqueue: generating SQL', { http_status: res.statusCode }, ctx, 'info');
           const queue = MirrorCommandQueue.instance();
-          queue.enqueue(await createCommand(req, data));
+          const sqls = await createCommand(req, data);
+          const cmd = queue.enqueue(sqls, ctx);
+          if (cmd) {
+            ctx.mirrorCmdId = cmd.id;
+            addMirrorBreadcrumb(
+              'Mirror enqueue: queued command',
+              { mirror_cmd_id: cmd.id, statementsCount: cmd.statementsCount },
+              cmd.context ?? ctx,
+              'info'
+            );
+          } else {
+            addMirrorBreadcrumb('Mirror enqueue: queue is dead; command not enqueued', { mirror_cmd_id: 'unknown' }, ctx, 'warning');
+          }
         } catch (e) {
-          console.error('Error in mirror middleware:', e);
+          captureMirrorException(e, {
+            operation,
+            requestId: (res.getHeader('X-Request-Id') ?? req.get('X-Request-Id'))?.toString(),
+            httpStatus: res.statusCode,
+          });
         }
       })();
     });
@@ -55,7 +91,7 @@ export const createBackendMirrorMiddleware =
  * HTTP calls instead of returning SQL strings for the command queue.
  */
 export const createHttpMirrorMiddleware =
-  <T>(execute: (req: Request, data: T) => Promise<void>) =>
+  <T>(operation: string, execute: (req: Request, data: T) => Promise<void>) =>
   async (req: Request, res: Response, next: NextFunction) => {
     tapJsonResponse(res);
 
@@ -65,14 +101,35 @@ export const createHttpMirrorMiddleware =
           const ok = res.statusCode >= 200 && res.statusCode < 305;
           const data = (res.locals as any).mirrorData as T | undefined;
 
-          if (!ok || data == null) return;
+          const requestId = (res.getHeader('X-Request-Id') ?? req.get('X-Request-Id'))?.toString();
+          const ctx = buildMirrorContext({ operation, req, res, data, requestId });
+
+          if (!ok) {
+            addMirrorBreadcrumb('HTTP mirror skipped: non-success http status', { http_status: res.statusCode }, ctx, 'debug');
+            return;
+          }
+
+          if (data == null) {
+            addMirrorBreadcrumb('HTTP mirror skipped: missing mirrorData', { http_status: res.statusCode }, ctx, 'debug');
+            return;
+          }
 
           const mirrorOn = await isMirrorEnabled(req);
-          if (!mirrorOn) return;
+          ctx.mirrorFeatureEnabled = mirrorOn;
 
+          if (!mirrorOn) {
+            addMirrorBreadcrumb('HTTP mirror skipped: backend-mirror flag disabled', { mirror_feature_enabled: mirrorOn }, ctx, 'info');
+            return;
+          }
+
+          addMirrorBreadcrumb('HTTP mirror: executing callback', {}, ctx, 'info');
           await execute(req, data);
         } catch (e) {
-          console.error('Error in HTTP mirror middleware:', e);
+          captureMirrorException(e, {
+            operation,
+            requestId: (res.getHeader('X-Request-Id') ?? req.get('X-Request-Id'))?.toString(),
+            httpStatus: res.statusCode,
+          });
         }
       })();
     });
@@ -105,4 +162,44 @@ function tapJsonResponse(res: Response) {
     (res.locals as any).mirrorData = captured;
     return origSend(body);
   }) as any;
+}
+
+function buildMirrorContext<T>(params: {
+  operation: string;
+  req: Request;
+  res: Response;
+  data: T | undefined;
+  requestId?: string;
+}): MirrorLogContext {
+  const { operation, req, res, data, requestId } = params;
+
+  const route = (req.route?.path ?? req.path ?? req.originalUrl)?.toString();
+  const method = req.method;
+
+  let showId: string | number | undefined;
+  let djId: string | undefined;
+
+  if (data && typeof data === 'object') {
+    const anyData = data as any;
+
+    // Show-like objects
+    if (anyData?.primary_dj_id && anyData?.id !== undefined) {
+      showId = anyData.id;
+      djId = String(anyData.primary_dj_id);
+    }
+
+    // FSEntry-like objects
+    if (anyData?.show_id != null) showId = anyData.show_id;
+    if (anyData?.dj_id) djId = String(anyData.dj_id);
+  }
+
+  return {
+    operation,
+    requestId,
+    showId,
+    djId,
+    route,
+    method,
+    httpStatus: res.statusCode,
+  };
 }
