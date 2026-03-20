@@ -6,12 +6,7 @@ beforeEach(() => {
 });
 
 // Import after mocks are set up (module resolution uses moduleNameMapper)
-import {
-  getAllLabels,
-  getLabelById,
-  createLabel,
-  searchLabels,
-} from '../../../apps/backend/services/labels.service';
+import { getAllLabels, getLabelById, createLabel, searchLabels } from '../../../apps/backend/services/labels.service';
 
 describe('labels.service', () => {
   describe('getAllLabels', () => {
@@ -94,9 +89,7 @@ describe('labels.service', () => {
 
   describe('searchLabels', () => {
     it('filters labels by name prefix', async () => {
-      const mockLabels = [
-        { id: 1, label_name: 'Merge Records', parent_label_id: null },
-      ];
+      const mockLabels = [{ id: 1, label_name: 'Merge Records', parent_label_id: null }];
       (db.execute as jest.Mock).mockResolvedValue(mockLabels);
 
       const result = await searchLabels('Merge');

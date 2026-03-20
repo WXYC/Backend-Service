@@ -37,11 +37,7 @@ export const getLabel: RequestHandler<object, unknown, unknown, { id: string }> 
   }
 };
 
-export const createLabel: RequestHandler = async (
-  req: Request<object, object, CreateLabelRequest>,
-  res,
-  next
-) => {
+export const createLabel: RequestHandler = async (req: Request<object, object, CreateLabelRequest>, res, next) => {
   const { body } = req;
   if (!body.label_name) {
     res.status(400).json({ message: 'Missing required parameter: label_name' });
