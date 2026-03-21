@@ -35,7 +35,12 @@ describe('parseMessage', () => {
     const parsed = { isRequest: true, artist: 'Autechre', album: 'Confield' };
     mockParseOnly.mockResolvedValue(parsed);
 
-    const req = { body: { message: 'play Autechre' }, method: 'POST', originalUrl: '/request/parse', ip: '127.0.0.1' } as unknown as Request;
+    const req = {
+      body: { message: 'play Autechre' },
+      method: 'POST',
+      originalUrl: '/request/parse',
+      ip: '127.0.0.1',
+    } as unknown as Request;
     const res = createMockRes();
 
     await parseMessage(req, res as Response, mockNext as unknown as NextFunction);
@@ -49,7 +54,12 @@ describe('parseMessage', () => {
     const error = new Error('AI service unavailable');
     mockParseOnly.mockRejectedValue(error);
 
-    const req = { body: { message: 'play something' }, method: 'POST', originalUrl: '/request/parse', ip: '127.0.0.1' } as unknown as Request;
+    const req = {
+      body: { message: 'play something' },
+      method: 'POST',
+      originalUrl: '/request/parse',
+      ip: '127.0.0.1',
+    } as unknown as Request;
     const res = createMockRes();
 
     await parseMessage(req, res as Response, mockNext as unknown as NextFunction);
