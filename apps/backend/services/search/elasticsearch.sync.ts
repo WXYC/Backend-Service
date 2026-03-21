@@ -22,6 +22,7 @@ function toEsDocument(doc: LibraryArtistViewEntry): Record<string, unknown> {
     code_letters: doc.code_letters,
     code_artist_number: doc.code_artist_number,
     code_number: doc.code_number,
+    label_id: doc.label_id,
     add_date: doc.add_date instanceof Date
       ? doc.add_date.toISOString()
       : new Date(String(doc.add_date)).toISOString(),

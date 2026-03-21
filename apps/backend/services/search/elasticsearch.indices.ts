@@ -17,6 +17,7 @@ export const LIBRARY_INDEX_MAPPING = {
       code_letters: { type: 'keyword' },
       code_artist_number: { type: 'integer' },
       code_number: { type: 'integer' },
+      label_id: { type: 'integer' },
       add_date: { type: 'date' },
     },
   },

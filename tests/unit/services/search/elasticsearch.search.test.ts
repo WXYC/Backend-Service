@@ -103,6 +103,7 @@ describe('elasticsearch.search', () => {
         code_letters: 'RO',
         code_artist_number: 5,
         code_number: 2,
+        label_id: null,
         add_date: '2024-01-15',
       });
     });

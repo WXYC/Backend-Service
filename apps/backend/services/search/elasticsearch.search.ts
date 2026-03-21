@@ -20,6 +20,7 @@ function hitToViewEntry(source: Record<string, unknown>): LibraryArtistViewEntry
     code_artist_number: source.code_artist_number as number,
     code_number: source.code_number as number,
     add_date: source.add_date as unknown as Date,
+    label_id: (source.label_id as number) ?? null,
   };
 }
 
