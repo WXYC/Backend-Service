@@ -4,7 +4,7 @@
  */
 export const auth = {
   api: {
-    getSession: async () => null,
+    getSession: () => Promise.resolve(null),
   },
 };
 
