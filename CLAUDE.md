@@ -210,7 +210,7 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
 - Hosted on EC2
 - CI/CD via GitHub Actions (manual trigger: Actions tab -> CI/CD Pipeline -> Run Workflow)
-- Docker images built with multi-stage Dockerfile (`node:22-alpine`), stored in Amazon ECR
+- Docker images built with multi-stage Dockerfile (`node:25-alpine`), stored in Amazon ECR
 
 ## Environment Variables
 
