@@ -247,6 +247,11 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 - `AUTH_USERNAME`, `AUTH_PASSWORD` -- Test account credentials (when `AUTH_BYPASS=false`)
 - `TEST_HOST` -- Test server host
 
+### Sentry
+
+- `SENTRY_DSN` -- Sentry project DSN (required for error reporting). Without this, Sentry silently disables itself.
+- `SENTRY_RELEASE` -- Set automatically by the deploy action to `<app>@<tag>`
+
 ### Metadata Services
 
 - `LIBRARY_METADATA_URL` -- library-metadata-lookup base URL (e.g. `http://localhost:8001`). Required for proxy endpoints. Do not include the `/api/v1` path prefix; the LML client adds it automatically.
