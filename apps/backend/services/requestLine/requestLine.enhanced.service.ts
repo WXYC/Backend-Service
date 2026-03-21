@@ -8,6 +8,7 @@
  * 4. Posts to Slack with rich formatting
  */
 
+import * as Sentry from '@sentry/node';
 import {
   ParsedRequest,
   EnrichedLibraryResult,
@@ -249,6 +250,11 @@ export async function processRequest(body: RequestLineRequestBody): Promise<Unif
       slackResult = await postResultsToSlack(message, parsed, itemsWithArtwork, context);
     } catch (error) {
       console.error('[RequestLine] Slack posting failed:', error);
+      Sentry.captureException(error, {
+        level: 'warning',
+        tags: { subsystem: 'slack' },
+        extra: { messagePreview: message.slice(0, 100) },
+      });
       slackResult = {
         success: false,
         message: `Slack posting failed: ${error instanceof Error ? error.message : String(error)}`,

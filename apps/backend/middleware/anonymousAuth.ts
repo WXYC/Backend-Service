@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction, RequestHandler } from 'express';
+import * as Sentry from '@sentry/node';
 import { auth } from '@wxyc/authentication';
 import { fromNodeHeaders } from 'better-auth/node';
 import { recordActivity } from '../services/activityTracking.service.js';
@@ -59,6 +60,10 @@ export const requireAnonymousAuth: RequestHandler = async (
     // Record activity (fire and forget)
     recordActivity(session.user.id).catch((error) => {
       console.error('Failed to record activity:', error);
+      Sentry.captureException(error, {
+        tags: { subsystem: 'activity-tracking' },
+        extra: { userId: session.user.id },
+      });
     });
 
     next();

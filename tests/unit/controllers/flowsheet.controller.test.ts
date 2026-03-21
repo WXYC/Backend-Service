@@ -1,6 +1,10 @@
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
 
+// Mock Sentry
+const mockCaptureException = jest.fn();
+jest.mock('@sentry/node', () => ({ captureException: mockCaptureException }));
+
 // Mock the service module
 const mockGetEntriesByPage = jest.fn<() => Promise<unknown[]>>();
 const mockGetEntryCount = jest.fn<() => Promise<number>>();
@@ -399,6 +403,81 @@ describe('flowsheet.controller', () => {
         })
       );
       expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('reports metadata fetch failure to Sentry when album_id is provided', async () => {
+      const albumInfo = { artist_name: 'Autechre', album_title: 'Confield', record_label: 'Warp', artist_id: 5 };
+      mockGetAlbumFromDB.mockResolvedValue(albumInfo);
+      const completedEntry = {
+        id: 1,
+        show_id: activeShow.id,
+        artist_name: 'Autechre',
+        album_title: 'Confield',
+        track_title: 'VI Scose Poise',
+        album_id: 10,
+        rotation_id: null,
+        play_order: 1,
+        add_time: new Date(),
+      };
+      mockAddTrack.mockResolvedValue(completedEntry);
+      const metadataError = new Error('Discogs timeout');
+      mockFetchAndCacheMetadata.mockRejectedValue(metadataError);
+
+      const req = createMockBodyReq({
+        artist_name: 'Autechre',
+        album_title: 'Confield',
+        track_title: 'VI Scose Poise',
+        record_label: 'Warp',
+        album_id: 10,
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      // Wait for fire-and-forget .catch() to execute
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(res.status).toHaveBeenCalledWith(201);
+      expect(mockCaptureException).toHaveBeenCalledWith(
+        metadataError,
+        expect.objectContaining({ tags: { subsystem: 'metadata' } })
+      );
+    });
+
+    it('reports metadata fetch failure to Sentry when no album_id', async () => {
+      const completedEntry = {
+        id: 2,
+        show_id: activeShow.id,
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+        record_label: 'Sonamos',
+        album_id: null,
+        rotation_id: null,
+        play_order: 2,
+        add_time: new Date(),
+      };
+      mockAddTrack.mockResolvedValue(completedEntry);
+      const metadataError = new Error('Spotify rate limit');
+      mockFetchAndCacheMetadata.mockRejectedValue(metadataError);
+
+      const req = createMockBodyReq({
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+        record_label: 'Sonamos',
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(res.status).toHaveBeenCalledWith(201);
+      expect(mockCaptureException).toHaveBeenCalledWith(
+        metadataError,
+        expect.objectContaining({ tags: { subsystem: 'metadata' } })
+      );
     });
 
     it('does not set entry_type to message for track entries', async () => {

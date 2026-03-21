@@ -296,6 +296,7 @@ const syncAdminRoles = async () => {
     }
   } catch (error) {
     console.error('[ADMIN PERMISSIONS] Error fixing admin roles:', error);
+    Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'admin-sync' } });
   }
 };
 
