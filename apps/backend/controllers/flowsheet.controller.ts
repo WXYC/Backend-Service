@@ -135,7 +135,7 @@ export const getLatest: RequestHandler = async (req, res, next) => {
     if (entries.length) {
       res.status(200).json(flowsheet_service.transformToV2(entries[0]));
     } else {
-      res.status(404).json({ message: 'No entries found' });
+      res.status(200).json(null);
     }
   } catch (e) {
     console.error('Error: Failed to retrieve track');

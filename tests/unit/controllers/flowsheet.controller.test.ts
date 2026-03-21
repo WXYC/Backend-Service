@@ -228,7 +228,7 @@ describe('flowsheet.controller', () => {
       expect(res.json).toHaveBeenCalledWith({ ...entry, v2: true });
     });
 
-    it('returns 404 when no entries exist', async () => {
+    it('returns 200 with null when no entries exist', async () => {
       mockGetEntriesByPage.mockResolvedValue([]);
 
       const req = createMockReq();
@@ -236,8 +236,8 @@ describe('flowsheet.controller', () => {
 
       await getLatest(req as Request, res as Response, mockNext);
 
-      expect(res.status).toHaveBeenCalledWith(404);
-      expect(res.json).toHaveBeenCalledWith({ message: 'No entries found' });
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(null);
       expect(mockTransformToV2).not.toHaveBeenCalled();
     });
 
