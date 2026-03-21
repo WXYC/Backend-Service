@@ -35,7 +35,11 @@ jest.mock('drizzle-orm', () => ({
   ),
 }));
 
-import { isValidDeviceId, tokenNeedsRefresh, validateTokenAndDevice } from '../../../apps/backend/services/anonymousDevice.service';
+import {
+  isValidDeviceId,
+  tokenNeedsRefresh,
+  validateTokenAndDevice,
+} from '../../../apps/backend/services/anonymousDevice.service';
 import * as jose from 'jose';
 import { db } from '@wxyc/database';
 import { daysFromNow } from '../../utils/time';
