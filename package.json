@@ -2,7 +2,7 @@
   "name": "@wxyc/backend-services",
   "version": "1.0.0",
   "description": "All necessary app services for the WXYC flowsheet backend",
-  "packageManager": "npm@10.9.4",
+  "packageManager": "npm@11.11.0",
   "scripts": {
     "typecheck": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication && npm run typecheck --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
     "lint": "eslint --cache --cache-strategy content --cache-location .cache/eslint/ .",
@@ -50,37 +50,37 @@
     "shared/*"
   ],
   "devDependencies": {
-    "@dotenvx/dotenvx": "^1.51.0",
+    "@dotenvx/dotenvx": "^1.57.0",
     "@eslint/js": "^9.39.2",
     "@types/jest": "^29.5.14",
-    "@types/node": "^24.1.0",
-    "@types/pg": "^8.11.10",
+    "@types/node": "^24.12.0",
+    "@types/pg": "^8.20.0",
     "@types/ssh2": "^1.15.5",
     "@types/swagger-ui-express": "^4.1.8",
-    "concurrently": "^9.1.2",
-    "drizzle-kit": "^0.31.5",
+    "concurrently": "^9.2.1",
+    "drizzle-kit": "^0.31.10",
     "drizzle-orm": "^0.41.0",
-    "eslint": "^9.39.2",
+    "eslint": "^9.39.4",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-security": "^3.0.1",
     "husky": "^9.1.7",
-    "jest": "^30.0.5",
+    "jest": "^30.3.0",
     "jest-html-reporters": "^3.1.7",
-    "nodemon": "^3.1.7",
-    "postgres": "^3.4.7",
-    "prettier": "^3.3.3",
-    "supertest": "^7.0.0",
+    "nodemon": "^3.1.14",
+    "postgres": "^3.4.8",
+    "prettier": "^3.8.1",
+    "supertest": "^7.2.2",
     "ts-jest": "^29.4.6",
     "ts-node": "^10.9.2",
-    "tsup": "^8.4.0",
+    "tsup": "^8.5.1",
     "tsx": "^4.21.0",
-    "turbo": "^2.3.0",
-    "typescript": "^5.6.2",
-    "typescript-eslint": "^8.55.0",
-    "wait-on": "^8.0.1"
+    "turbo": "^2.8.20",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.57.1",
+    "wait-on": "^8.0.5"
   },
   "dependencies": {
     "@sentry/node": "^10.45.0",
-    "jose": "^6.1.2"
+    "jose": "^6.2.2"
   }
 }
