@@ -101,12 +101,18 @@ VALUES
   ('test-membership-adminres01', 'test-org-id-0000000000000000001', 'test-adminreset1-id-00000000001', 'dj', NOW())
 ON CONFLICT (id) DO NOTHING;
 
--- Genres, media formats, artists, and albums used in test automation
-INSERT INTO wxyc_schema.genres(genre_name) VALUES ('Rock');
-INSERT INTO wxyc_schema.genres(genre_name) VALUES ('Hiphop');
+-- Genres and media formats matching the legacy tubafrenzy database.
+-- The library ETL job looks up genres/formats by name and skips releases
+-- where the genre or format is missing, so all legacy values must be seeded.
+INSERT INTO wxyc_schema.genres(genre_name) VALUES
+  ('Rock'), ('Hiphop'), ('Electronic'), ('Jazz'), ('Reggae'),
+  ('Classical'), ('Latin'), ('Blues'), ('Soundtracks'), ('Spoken'),
+  ('Comedy'), ('Africa'), ('Asia'), ('OCS'), ('Xmas')
+ON CONFLICT DO NOTHING;
 
-INSERT INTO wxyc_schema.format(format_name) VALUES ('cd');
-INSERT INTO wxyc_schema.format(format_name) VALUES ('vinyl');
+INSERT INTO wxyc_schema.format(format_name) VALUES
+  ('cd'), ('vinyl'), ('vinyl 12"'), ('vinyl 7"'), ('vinyl 10"'), ('cdr')
+ON CONFLICT DO NOTHING;
 
 INSERT INTO wxyc_schema.artists(artist_name, alphabetical_name, code_letters)
 	VALUES ('Built to Spill', 'Built to Spill', 'BU');
