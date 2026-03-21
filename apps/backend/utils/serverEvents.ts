@@ -48,16 +48,34 @@ export type EventData<T = unknown> = {
   timestamp?: Date;
 };
 
-class ServerEventsManager {
+export class ServerEventsManager {
   constructor(...topicNames: string[]) {
     this.topics = new Set(topicNames);
   }
+
+  private static readonly INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
 
   private topics: Set<string> = new Set();
   // each map key is a topic e.g. primary_dj, show_dj, live_fs,
   private clients: Map<string, EventClient> = new Map();
   private clientTopics: Map<string, Set<string>> = new Map(); // clientId -> topicIds
   private topicClients: Map<string, Set<string>> = new Map(); // topicId -> clientIds
+  private clientTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
+
+  private resetTimeout = (clientId: string) => {
+    const existing = this.clientTimeouts.get(clientId);
+    if (existing) {
+      clearTimeout(existing);
+    }
+
+    const timeoutId = setTimeout(() => {
+      if (this.clients.has(clientId)) {
+        this.disconnect(clientId, 'Connection terminated due to inactivity');
+      }
+    }, ServerEventsManager.INACTIVITY_TIMEOUT_MS);
+
+    this.clientTimeouts.set(clientId, timeoutId);
+  };
 
   registerClient = (res: Response): EventClient => {
     const client: EventClient = {
@@ -65,18 +83,14 @@ class ServerEventsManager {
       res: res,
     };
 
-    // Add timeout for stale connections
-    const timeout = setTimeout(
-      () => {
-        if (this.clients.has(client.id)) {
-          this.disconnect(client.id, 'Connection terminated due to inactivity');
-        }
-      },
-      5 * 60 * 1000 // 5 minutes
-    );
+    this.resetTimeout(client.id);
 
     client.res.on('close', () => {
-      clearTimeout(timeout);
+      const timeoutId = this.clientTimeouts.get(client.id);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        this.clientTimeouts.delete(client.id);
+      }
       this.unsubAll(client.id);
     });
 
@@ -183,6 +197,12 @@ class ServerEventsManager {
 
     this.clientTopics.delete(clientId);
     this.clients.delete(clientId);
+
+    const timeoutId = this.clientTimeouts.get(clientId);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      this.clientTimeouts.delete(clientId);
+    }
   };
 
   broadcast = (topicId: string, data: EventData) => {
@@ -199,6 +219,7 @@ class ServerEventsManager {
       if (client) {
         try {
           client.res.write(message);
+          this.resetTimeout(clientId);
         } catch (error) {
           this.unsubAll(client.id);
         }
@@ -222,6 +243,7 @@ class ServerEventsManager {
     if (client) {
       try {
         client.res.write(message);
+        this.resetTimeout(clientId);
       } catch (error) {
         this.unsubAll(client.id);
       }

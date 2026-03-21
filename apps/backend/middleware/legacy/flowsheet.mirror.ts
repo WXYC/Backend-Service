@@ -3,8 +3,16 @@ import { db } from '@wxyc/database';
 import { user, flowsheet, FSEntry, Show } from '@wxyc/database';
 import { asc, desc, eq } from 'drizzle-orm';
 import { Request } from 'express';
-import { createBackendMirrorMiddleware } from './mirror.middleware.js';
+import { createBackendMirrorMiddleware, createHttpMirrorMiddleware } from './mirror.middleware.js';
 import { safeSql, safeSqlNum, toMs } from './utilities.mirror.js';
+import {
+  mirrorCreateEntry,
+  mirrorUpdateEntry,
+  cacheEntryId,
+  getCachedEntryId,
+  mapEntryToTubafrenzy,
+  mapUpdateToTubafrenzy,
+} from './http.mirror.js';
 
 const FLOWSHEET_ENTRY_TABLE = 'FLOWSHEET_ENTRY_PROD';
 const RADIO_SHOW_TABLE = 'FLOWSHEET_RADIO_SHOW_PROD';
@@ -275,48 +283,26 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
   return statements;
 };
 
-export const addEntry = createBackendMirrorMiddleware<FSEntry>(getAddEntrySQL);
+export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) => {
+  const body = mapEntryToTubafrenzy(entry);
+  const tubafrenzyId = await mirrorCreateEntry(body);
+  if (tubafrenzyId != null) {
+    cacheEntryId(entry.play_order, tubafrenzyId);
+  }
+});
 
-export const updateEntry = createBackendMirrorMiddleware<FSEntry>(async (req, entry) => {
+export const updateEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) => {
   // Message-only rows aren't updateable
-  if (entry?.message && entry.message.trim() !== '') return [];
+  if (entry?.message && entry.message.trim() !== '') return;
 
-  const nowMs = Date.now();
-  const statements: string[] = [];
-
-  // Resolve the RADIO_SHOW_ID first
-  statements.push(`SET @RS_ID := (SELECT IFNULL(MAX(ID), 0) FROM ${RADIO_SHOW_TABLE});`);
-
-  // Determine entry type code based on rotation and library IDs
-  // Type codes: 1-4 for different rotation types, 6 for library, 0 for manual/unknown
-  let entryTypeCode = 0;
-  if (entry.rotation_id && entry.rotation_id > 0) {
-    // Rotation entries - default to type 2 (general rotation)
-    // Would need rotation type lookup for accurate 1-4 classification
-    entryTypeCode = 2;
-  } else if (entry.album_id && entry.album_id > 0) {
-    entryTypeCode = 6; // Library entry
+  const tubafrenzyId = getCachedEntryId(entry.play_order);
+  if (tubafrenzyId == null) {
+    console.warn('[mirror] No cached tubafrenzy ID for play_order', entry.play_order);
+    return;
   }
 
-  // Update by RADIO_SHOW_ID and SEQUENCE_WITHIN_SHOW
-  // GLOBAL_ORDER_ID is calculated as RADIO_SHOW_ID * 1000 + SEQUENCE_WITHIN_SHOW
-  statements.push(
-    `UPDATE ${FLOWSHEET_ENTRY_TABLE}
-        SET ARTIST_NAME = ${safeSql(entry.artist_name)},
-            SONG_TITLE = ${safeSql(entry.track_title)},
-            RELEASE_TITLE = ${safeSql(entry.album_title)},
-            LABEL_NAME = ${safeSql(entry.record_label)},
-            LIBRARY_RELEASE_ID = ${safeSqlNum(entry.album_id)},
-            ROTATION_RELEASE_ID = ${safeSqlNum(entry.rotation_id)},
-            REQUEST_FLAG = ${safeSqlNum(entry.request_flag ? 1 : 0)},
-            FLOWSHEET_ENTRY_TYPE_CODE_ID = ${entryTypeCode},
-            TIME_LAST_MODIFIED = ${safeSqlNum(nowMs)}
-      WHERE RADIO_SHOW_ID = @RS_ID
-        AND SEQUENCE_WITHIN_SHOW = ${safeSqlNum(entry.play_order)}
-      LIMIT 1;`
-  );
-
-  return statements;
+  const body = mapUpdateToTubafrenzy(entry);
+  await mirrorUpdateEntry(tubafrenzyId, body);
 });
 
 export const deleteEntry = createBackendMirrorMiddleware<FSEntry>(async (req, removed) => {

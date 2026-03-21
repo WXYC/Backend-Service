@@ -124,6 +124,8 @@ services:
     build:
       context: '../'
       dockerfile: Dockerfile.auth
+      args:
+        NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [ci]
     environment:
       - DB_HOST=ci-db
@@ -162,6 +164,8 @@ services:
     build:
       context: '../'
       dockerfile: Dockerfile.backend
+      args:
+        NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [ci]
     environment:
       - DB_HOST=ci-db
@@ -257,6 +261,8 @@ services:
     build:
       context: '../'
       dockerfile: Dockerfile.auth
+      args:
+        NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [e2e]
     environment:
       - DB_HOST=e2e-db
@@ -293,6 +299,8 @@ services:
     build:
       context: '../'
       dockerfile: Dockerfile.backend
+      args:
+        NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [e2e]
     environment:
       - DB_HOST=e2e-db

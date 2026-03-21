@@ -17,7 +17,7 @@ export const addToSchedule: RequestHandler = async (req: Request<object, object,
   const { body } = req;
   try {
     const response = await ScheduleService.addToSchedule(body);
-    res.status(200).json(response);
+    res.status(201).json(response);
   } catch (e) {
     console.error('Error adding to schedule');
     console.error(e);

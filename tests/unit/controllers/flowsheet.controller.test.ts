@@ -7,6 +7,9 @@ const mockGetEntryCount = jest.fn<() => Promise<number>>();
 const mockGetEntriesByShow = jest.fn<() => Promise<unknown[]>>();
 const mockGetShowMetadata = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...(entry as Record<string, unknown>), v2: true }));
+const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
+const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByPage: mockGetEntriesByPage,
@@ -14,9 +17,17 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByShow: mockGetEntriesByShow,
   getShowMetadata: mockGetShowMetadata,
   transformToV2: mockTransformToV2,
+  addTrack: mockAddTrack,
+  getLatestShow: mockGetLatestShow,
+  getAlbumFromDB: mockGetAlbumFromDB,
 }));
 
-import { getEntries, getLatest, getShowInfo } from '../../../apps/backend/controllers/flowsheet.controller';
+const mockFetchAndCacheMetadata = jest.fn<() => Promise<void>>();
+jest.mock('../../../apps/backend/services/metadata/index', () => ({
+  fetchAndCacheMetadata: mockFetchAndCacheMetadata,
+}));
+
+import { getEntries, getLatest, getShowInfo, addEntry } from '../../../apps/backend/controllers/flowsheet.controller';
 
 // Helper to create mock Express req/res/next
 const createMockReq = (query: Record<string, string> = {}): Partial<Request> => ({
@@ -27,6 +38,7 @@ const createMockRes = () => {
   const res: Partial<Response> = {};
   res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
   res.json = jest.fn().mockReturnValue(res) as unknown as Response['json'];
+  res.send = jest.fn().mockReturnValue(res) as unknown as Response['send'];
   return res;
 };
 
@@ -312,6 +324,112 @@ describe('flowsheet.controller', () => {
       await getShowInfo(req as Request, res as Response, mockNext);
 
       expect(mockNext).toHaveBeenCalledWith(error);
+    });
+  });
+
+  describe('addEntry', () => {
+    const activeShow = { id: 42, end_time: null };
+
+    const createMockBodyReq = (body: Record<string, unknown>): Partial<Request> => ({
+      body,
+    });
+
+    beforeEach(() => {
+      mockGetLatestShow.mockResolvedValue(activeShow);
+    });
+
+    it.each([
+      ['Talkset', undefined, 'talkset'],
+      ['Talkset - DJ Speaking', undefined, 'talkset'],
+      ['Breakpoint', undefined, 'breakpoint'],
+      ['Breakpoint: Station ID', undefined, 'breakpoint'],
+      ['PSA announcement', undefined, 'message'],
+      ['Talkset', 'talkset', 'talkset'],
+    ])('sets entry_type for message="%s", explicit=%s -> %s', async (message, entryType, expectedType) => {
+      const completedEntry = {
+        id: 1,
+        show_id: activeShow.id,
+        entry_type: expectedType,
+        message,
+        play_order: 1,
+        add_time: new Date(),
+      };
+      mockAddTrack.mockResolvedValue(completedEntry);
+
+      const body: Record<string, unknown> = { message };
+      if (entryType !== undefined) body.entry_type = entryType;
+      const req = createMockBodyReq(body);
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockAddTrack).toHaveBeenCalledWith(
+        expect.objectContaining({
+          entry_type: expectedType,
+          message,
+          show_id: activeShow.id,
+        })
+      );
+      expect(res.status).toHaveBeenCalledWith(201);
+      expect(res.json).toHaveBeenCalledWith(completedEntry);
+    });
+
+    it('explicit entry_type takes precedence over message content inference', async () => {
+      const message = 'Breakpoint: Station ID';
+      const completedEntry = {
+        id: 1,
+        show_id: activeShow.id,
+        entry_type: 'talkset',
+        message,
+        play_order: 1,
+        add_time: new Date(),
+      };
+      mockAddTrack.mockResolvedValue(completedEntry);
+
+      const req = createMockBodyReq({ message, entry_type: 'talkset' });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockAddTrack).toHaveBeenCalledWith(
+        expect.objectContaining({
+          entry_type: 'talkset',
+          message,
+          show_id: activeShow.id,
+        })
+      );
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('does not set entry_type to message for track entries', async () => {
+      const trackBody = {
+        artist_name: 'Autechre',
+        album_title: 'Confield',
+        track_title: 'VI Scose Poise',
+        record_label: 'Warp',
+      };
+      const completedEntry = {
+        id: 2,
+        show_id: activeShow.id,
+        entry_type: 'track',
+        ...trackBody,
+        play_order: 2,
+        add_time: new Date(),
+      };
+      mockAddTrack.mockResolvedValue(completedEntry);
+      mockFetchAndCacheMetadata.mockResolvedValue(undefined);
+
+      const req = createMockBodyReq(trackBody);
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockAddTrack).toHaveBeenCalledWith(
+        expect.not.objectContaining({
+          entry_type: 'message',
+        })
+      );
+      expect(res.status).toHaveBeenCalledWith(201);
     });
   });
 });

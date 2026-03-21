@@ -85,6 +85,8 @@ jobs:
       - name: Install dependencies
         if: inputs.target == ''
         run: npm ci
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Detect Build Target
         id: detect_targets
@@ -270,7 +272,7 @@ jobs:
         run: |
           TARGET_APP=${{ matrix.target }}
 
-          docker build --platform linux/amd64 -f Dockerfile.${TARGET_APP} -t ${TARGET_APP}:ci .
+          docker build --platform linux/amd64 --build-arg NPM_TOKEN=${{ secrets.NPM_TOKEN }} -f Dockerfile.${TARGET_APP} -t ${TARGET_APP}:ci .
 
       - name: Tag and Push Image
         if: steps.check_image.outputs.image_exists == 'false'
