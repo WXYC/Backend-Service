@@ -15,8 +15,9 @@ const config: Config = {
   },
   transformIgnorePatterns: ['node_modules/(?!(jose|drizzle-orm|@wxyc/shared)/)'],
   moduleNameMapper: {
-    // Mock workspace database package
+    // Mock workspace packages
     '^@wxyc/database$': '<rootDir>/tests/mocks/database.mock.ts',
+    '^@wxyc/authentication$': '<rootDir>/tests/mocks/authentication.mock.ts',
     // Mock database client for any path resolving to shared/database/src/client
     '^.*/shared/database/src/client(\\.js)?$': '<rootDir>/tests/mocks/database.mock.ts',
     // Mock better-auth access control modules (ESM-only, can't be transformed by ts-jest)
