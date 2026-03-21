@@ -1,4 +1,5 @@
 import * as jose from 'jose';
+import * as Sentry from '@sentry/node';
 import { db, anonymous_devices, AnonymousDevice } from '@wxyc/database';
 import { eq, sql } from 'drizzle-orm';
 
@@ -168,6 +169,10 @@ export const validateTokenAndDevice = async (token: string): Promise<DeviceValid
   // Record activity (fire and forget)
   recordDeviceActivity(payload.deviceId).catch((err) => {
     console.error('[AnonymousDevice] Failed to record device activity:', err);
+    Sentry.captureException(err, {
+      tags: { subsystem: 'activity-tracking' },
+      extra: { deviceId: payload.deviceId },
+    });
   });
 
   return { valid: true, device, needsRefresh, newToken };

@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express';
+import * as Sentry from '@sentry/node';
 import { MirrorCommandQueue } from './commandqueue.mirror';
 import { getPostHogClient } from '../../utils/posthog.js';
 
@@ -42,6 +43,7 @@ export const createBackendMirrorMiddleware =
           queue.enqueue(await createCommand(req, data));
         } catch (e) {
           console.error('Error in mirror middleware:', e);
+          Sentry.captureException(e, { tags: { subsystem: 'legacy-mirror', variant: 'sql' } });
         }
       })();
     });
@@ -73,6 +75,7 @@ export const createHttpMirrorMiddleware =
           await execute(req, data);
         } catch (e) {
           console.error('Error in HTTP mirror middleware:', e);
+          Sentry.captureException(e, { tags: { subsystem: 'legacy-mirror', variant: 'http' } });
         }
       })();
     });

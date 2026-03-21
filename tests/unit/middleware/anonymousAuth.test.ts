@@ -1,6 +1,9 @@
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
 
+const mockCaptureException = jest.fn();
+jest.mock('@sentry/node', () => ({ captureException: mockCaptureException }));
+
 const mockGetSession = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockRecordActivity = jest.fn<() => Promise<void>>();
 
@@ -111,5 +114,26 @@ describe('requireAnonymousAuth', () => {
     await requireAnonymousAuth(req, res as Response, mockNext as unknown as NextFunction);
 
     expect(mockNext).toHaveBeenCalledWith();
+  });
+
+  it('reports recordActivity failure to Sentry', async () => {
+    const activityError = new Error('DB write failed');
+    mockGetSession.mockResolvedValue({
+      user: { id: 'user-1', email: 'dj@wxyc.org', name: 'DJ Test' },
+    });
+    mockRecordActivity.mockRejectedValue(activityError);
+
+    const req = createMockReq();
+    const res = createMockRes();
+
+    await requireAnonymousAuth(req, res as Response, mockNext as unknown as NextFunction);
+
+    // Wait for fire-and-forget .catch() to execute
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(mockCaptureException).toHaveBeenCalledWith(
+      activityError,
+      expect.objectContaining({ tags: { subsystem: 'activity-tracking' } })
+    );
   });
 });
