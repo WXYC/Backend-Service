@@ -64,6 +64,6 @@ export const requireAnonymousAuth: RequestHandler = async (
     next();
   } catch (error) {
     console.error('Auth validation error:', error);
-    res.status(401).json({ message: 'Invalid or expired token' });
+    next(error);
   }
 };

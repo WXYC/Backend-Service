@@ -16,7 +16,7 @@ export const showMemberMiddleware: RequestHandler = async (req, res, next) => {
     } else {
       res.status(400).json({ message: 'Bad Request: DJ not a member of show' });
     }
-  } catch {
-    res.status(500).json({ message: 'Internal server error checking show membership' });
+  } catch (e) {
+    next(e);
   }
 };
