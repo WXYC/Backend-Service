@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/flowsheet-etl",
+  "cron-schedule": "*/30 * * * *",
+  "version": "1.0.0",
+  "description": "WXYC Flowsheet ETL: import and sync flowsheet data from tubafrenzy",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node --max-old-space-size=4096 dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_flowsheet_etl:ci -f ../../Dockerfile.flowsheet-etl ../../",
+    "dev": "tsup --watch"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.41.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.2"
+  }
+}
