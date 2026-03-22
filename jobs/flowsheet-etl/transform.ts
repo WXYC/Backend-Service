@@ -85,7 +85,7 @@ export function transformShow(raw: RawShow): TransformedShow {
     legacy_show_id: raw.id,
     start_time: new Date(raw.signon_time),
     end_time: raw.signoff_time > 0 ? new Date(raw.signoff_time) : null,
-    show_name: showName && showName.length > 0 ? showName : null,
+    show_name: showName && showName.length > 0 ? truncate(showName, 128) : null,
     primary_dj_id: null,
     specialty_id: null,
   };

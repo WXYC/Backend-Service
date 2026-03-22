@@ -111,6 +111,10 @@ async function bulkLoad(dumpFilePath: string, force: boolean) {
   console.log('[flowsheet-etl] Pass 2: Streaming entries from dump...');
   let entriesInserted = 0;
   let unmatchedLibraryIds = 0;
+  let unmatchedShowIds = 0;
+
+  // Build set of valid show IDs for FK validation
+  const validShowIds = new Set(rawShows.map((s) => s.id));
 
   for await (const batch of parseDumpEntries(dumpFilePath)) {
     const insertValues = batch.map((raw) => {
@@ -118,8 +122,16 @@ async function bulkLoad(dumpFilePath: string, force: boolean) {
       if (raw.library_release_id > 0 && entry.album_id == null) {
         unmatchedLibraryIds++;
       }
+      let showId: number | null = null;
+      if (raw.radio_show_id > 0) {
+        if (validShowIds.has(raw.radio_show_id)) {
+          showId = raw.radio_show_id;
+        } else {
+          unmatchedShowIds++;
+        }
+      }
       return {
-        show_id: raw.radio_show_id > 0 ? raw.radio_show_id : null,
+        show_id: showId,
         album_id: entry.album_id,
         rotation_id: entry.rotation_id,
         legacy_entry_id: entry.legacy_entry_id,
@@ -173,6 +185,7 @@ async function bulkLoad(dumpFilePath: string, force: boolean) {
   console.log(`  Shows inserted:       ${showsInserted}`);
   console.log(`  Entries inserted:     ${entriesInserted}`);
   console.log(`  Unmatched library IDs: ${unmatchedLibraryIds}`);
+  console.log(`  Unmatched show IDs:   ${unmatchedShowIds}`);
 }
 
 // ── Incremental sync mode ───────────────────────────────────────────────────
