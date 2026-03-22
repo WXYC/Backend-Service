@@ -1,7 +1,7 @@
 import { QueryParams } from '../../controllers/flowsheet.controller';
-import { db } from '@wxyc/database';
-import { user, flowsheet, FSEntry, Show } from '@wxyc/database';
-import { asc, desc, eq } from 'drizzle-orm';
+import { db, MirrorSQL } from '@wxyc/database';
+import { user, flowsheet, shows, FSEntry, Show } from '@wxyc/database';
+import { desc, eq } from 'drizzle-orm';
 import { Request } from 'express';
 import { createBackendMirrorMiddleware, createHttpMirrorMiddleware } from './mirror.middleware.js';
 import { safeSql, safeSqlNum, toMs } from './utilities.mirror.js';
@@ -90,8 +90,35 @@ const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
     statements.push(...(await getAddEntrySQL(req, announcementEntry[0])));
   }
 
+  // After the command queue processes the INSERT, query for the new show's legacy ID
+  persistLegacyShowId(show.id);
+
   return statements;
 });
+
+/**
+ * Query tubafrenzy for the most recently created show ID and persist it as legacy_show_id.
+ * Runs after a delay to ensure the command queue has processed the INSERT.
+ * Fire-and-forget — if this fails, the flowsheet-etl incremental sync will fill it in.
+ */
+function persistLegacyShowId(backendShowId: number) {
+  setTimeout(async () => {
+    try {
+      const result = await MirrorSQL.instance().send(
+        `SELECT MAX(ID) FROM ${RADIO_SHOW_TABLE};`
+      );
+      const legacyShowId = parseInt(result.trim());
+      if (Number.isFinite(legacyShowId) && legacyShowId > 0) {
+        await db
+          .update(shows)
+          .set({ legacy_show_id: legacyShowId })
+          .where(eq(shows.id, backendShowId));
+      }
+    } catch (e) {
+      console.error('[mirror] Failed to persist legacy_show_id:', e);
+    }
+  }, 5000);
+}
 
 export const endShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
   const endMs = toMs(show.end_time ?? Date.now());
@@ -288,6 +315,10 @@ export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) 
   const tubafrenzyId = await mirrorCreateEntry(body);
   if (tubafrenzyId != null) {
     cacheEntryId(entry.play_order, tubafrenzyId);
+    db.update(flowsheet)
+      .set({ legacy_entry_id: tubafrenzyId })
+      .where(eq(flowsheet.play_order, entry.play_order))
+      .catch((err) => console.error('[mirror] Failed to persist legacy_entry_id:', err));
   }
 });
 

@@ -85,6 +85,7 @@ const FSEntryFieldsRaw = {
   record_label: flowsheet.record_label,
   label_id: flowsheet.label_id,
   rotation_id: flowsheet.rotation_id,
+  legacy_entry_id: flowsheet.legacy_entry_id,
   rotation_bin: rotation.rotation_bin,
   request_flag: flowsheet.request_flag,
   message: flowsheet.message,
@@ -116,6 +117,7 @@ type FSEntryRaw = {
   record_label: string | null;
   label_id: number | null;
   rotation_id: number | null;
+  legacy_entry_id: number | null;
   rotation_bin: string | null;
   request_flag: boolean | null;
   message: string | null;
@@ -145,6 +147,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   record_label: raw.record_label,
   label_id: raw.label_id,
   rotation_id: raw.rotation_id,
+  legacy_entry_id: raw.legacy_entry_id ?? null,
   rotation_bin: raw.rotation_bin,
   request_flag: raw.request_flag ?? false,
   message: raw.message,

@@ -306,7 +306,7 @@ const ensureGenreArtistCrossref = async (
   });
 };
 
-const albumExists = async (
+const findExistingAlbum = async (
   dbClient: DbClient,
   artistId: number,
   genreId: number,
@@ -315,7 +315,7 @@ const albumExists = async (
   codeVolumeLetters: string | null
 ) => {
   const response = await dbClient
-    .select({ id: library.id })
+    .select({ id: library.id, legacy_release_id: library.legacy_release_id })
     .from(library)
     .where(
       and(
@@ -328,7 +328,7 @@ const albumExists = async (
     )
     .limit(1);
 
-  return response.length > 0;
+  return response[0] ?? null;
 };
 
 const run = async () => {
@@ -345,6 +345,7 @@ const run = async () => {
 
     let insertedCount = 0;
     let skippedCount = 0;
+    let backfilledCount = 0;
 
     await db.transaction(async (tx) => {
       const genreRows = await tx.select().from(genres);
@@ -420,7 +421,7 @@ const run = async () => {
           release.release_call_letters != null && release.release_call_letters.trim().length > 0
             ? release.release_call_letters.trim()
             : null;
-        const alreadyExists = await albumExists(
+        const existing = await findExistingAlbum(
           tx,
           artistId,
           genreId,
@@ -428,7 +429,14 @@ const run = async () => {
           release.release_call_numbers,
           codeVolumeLetters
         );
-        if (alreadyExists) {
+        if (existing) {
+          if (existing.legacy_release_id == null) {
+            await tx
+              .update(library)
+              .set({ legacy_release_id: release.release_id })
+              .where(eq(library.id, existing.id));
+            backfilledCount += 1;
+          }
           skippedCount += 1;
           continue;
         }
@@ -439,6 +447,7 @@ const run = async () => {
           format_id: formatId,
           alternate_artist_name: release.release_alternate_artist_name,
           album_title: albumTitle,
+          legacy_release_id: release.release_id,
           code_number: release.release_call_numbers ?? 0,
           code_volume_letters: codeVolumeLetters,
           disc_quantity: formatParsed.discQuantity,
@@ -452,7 +461,7 @@ const run = async () => {
       await updateLastRun(tx, JOB_NAME, runStartedAt);
     });
 
-    console.log(`[library-etl] Completed. Inserted ${insertedCount}, skipped ${skippedCount}.`);
+    console.log(`[library-etl] Completed. Inserted ${insertedCount}, backfilled ${backfilledCount}, skipped ${skippedCount}.`);
   } finally {
     await closeDatabaseConnection();
     legacyDB.close();
