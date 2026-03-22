@@ -78,6 +78,7 @@ import {
   parseFormatAndDiscs,
   toDateOrUndefined,
   toDateOnlyString,
+  findExistingAlbum,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -304,6 +305,53 @@ describe('library-etl job helpers', () => {
 
     it('returns undefined for invalid timestamp', () => {
       expect(toDateOnlyString(Number.NaN)).toBeUndefined();
+    });
+  });
+
+  describe('findExistingAlbum', () => {
+    it('returns id and legacy_release_id when album exists', async () => {
+      const mockDbClient = {
+        select: jest.fn().mockReturnValue({
+          from: jest.fn().mockReturnValue({
+            where: jest.fn().mockReturnValue({
+              limit: jest.fn().mockResolvedValue([{ id: 42, legacy_release_id: 5001 }]),
+            }),
+          }),
+        }),
+      };
+
+      const result = await findExistingAlbum(mockDbClient as any, 1, 2, 'Confield', 10, null);
+      expect(result).toEqual({ id: 42, legacy_release_id: 5001 });
+    });
+
+    it('returns null when album does not exist', async () => {
+      const mockDbClient = {
+        select: jest.fn().mockReturnValue({
+          from: jest.fn().mockReturnValue({
+            where: jest.fn().mockReturnValue({
+              limit: jest.fn().mockResolvedValue([]),
+            }),
+          }),
+        }),
+      };
+
+      const result = await findExistingAlbum(mockDbClient as any, 1, 2, 'Nonexistent', 10, null);
+      expect(result).toBeNull();
+    });
+
+    it('returns id with legacy_release_id null when album exists but has no legacy ID', async () => {
+      const mockDbClient = {
+        select: jest.fn().mockReturnValue({
+          from: jest.fn().mockReturnValue({
+            where: jest.fn().mockReturnValue({
+              limit: jest.fn().mockResolvedValue([{ id: 42, legacy_release_id: null }]),
+            }),
+          }),
+        }),
+      };
+
+      const result = await findExistingAlbum(mockDbClient as any, 1, 2, 'Moon Pix', 5, null);
+      expect(result).toEqual({ id: 42, legacy_release_id: null });
     });
   });
 });

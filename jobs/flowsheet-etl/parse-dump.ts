@@ -177,10 +177,7 @@ export async function parseDumpShows(filePath: string): Promise<RawShow[]> {
  *
  * Entries are yielded in insertion order (dump is ordered by entry ID ≈ chronological).
  */
-export async function* parseDumpEntries(
-  filePath: string,
-  batchSize: number = 5000
-): AsyncGenerator<RawEntry[]> {
+export async function* parseDumpEntries(filePath: string, batchSize: number = 5000): AsyncGenerator<RawEntry[]> {
   const insertPrefix = `INSERT INTO \`${ENTRY_TABLE}\` VALUES`;
   let batch: RawEntry[] = [];
 

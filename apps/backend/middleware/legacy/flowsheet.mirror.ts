@@ -105,15 +105,10 @@ function persistLegacyShowId(backendShowId: number) {
   setTimeout(() => {
     void (async () => {
       try {
-        const result = await MirrorSQL.instance().send(
-          `SELECT MAX(ID) FROM ${RADIO_SHOW_TABLE};`
-        );
+        const result = await MirrorSQL.instance().send(`SELECT MAX(ID) FROM ${RADIO_SHOW_TABLE};`);
         const legacyShowId = parseInt(result.trim());
         if (Number.isFinite(legacyShowId) && legacyShowId > 0) {
-          await db
-            .update(shows)
-            .set({ legacy_show_id: legacyShowId })
-            .where(eq(shows.id, backendShowId));
+          await db.update(shows).set({ legacy_show_id: legacyShowId }).where(eq(shows.id, backendShowId));
         }
       } catch (e) {
         console.error('[mirror] Failed to persist legacy_show_id:', e);

@@ -101,9 +101,7 @@ export function transformEntry(raw: RawEntry, legacyReleaseMap: Map<number, numb
   const entryType = mapEntryType(raw.entry_type_code);
   const isNonTrack = NON_TRACK_CODES.has(raw.entry_type_code);
 
-  const albumId = raw.library_release_id > 0
-    ? (legacyReleaseMap.get(raw.library_release_id) ?? null)
-    : null;
+  const albumId = raw.library_release_id > 0 ? (legacyReleaseMap.get(raw.library_release_id) ?? null) : null;
 
   if (isNonTrack) {
     return {

@@ -431,10 +431,7 @@ const run = async () => {
         );
         if (existing) {
           if (existing.legacy_release_id == null) {
-            await tx
-              .update(library)
-              .set({ legacy_release_id: release.release_id })
-              .where(eq(library.id, existing.id));
+            await tx.update(library).set({ legacy_release_id: release.release_id }).where(eq(library.id, existing.id));
             backfilledCount += 1;
           }
           skippedCount += 1;
@@ -461,7 +458,9 @@ const run = async () => {
       await updateLastRun(tx, JOB_NAME, runStartedAt);
     });
 
-    console.log(`[library-etl] Completed. Inserted ${insertedCount}, backfilled ${backfilledCount}, skipped ${skippedCount}.`);
+    console.log(
+      `[library-etl] Completed. Inserted ${insertedCount}, backfilled ${backfilledCount}, skipped ${skippedCount}.`
+    );
   } finally {
     await closeDatabaseConnection();
     legacyDB.close();
@@ -480,6 +479,7 @@ export {
   parseFormatAndDiscs,
   toDateOrUndefined,
   toDateOnlyString,
+  findExistingAlbum,
 };
 
 run().catch((error) => {

@@ -7,15 +7,7 @@
  */
 
 import { eq, sql } from 'drizzle-orm';
-import {
-  db,
-  flowsheet,
-  shows,
-  library,
-  cronjob_runs,
-  closeDatabaseConnection,
-  NewFSEntry,
-} from '@wxyc/database';
+import { db, flowsheet, shows, library, cronjob_runs, closeDatabaseConnection, NewFSEntry } from '@wxyc/database';
 import { parseDumpShows, parseDumpEntries } from './parse-dump.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
 import { transformShow, transformEntry } from './transform.js';
@@ -158,9 +150,21 @@ async function bulkLoad(dumpFilePath: string, force: boolean) {
   // Reset PostgreSQL sequences
   console.log('[flowsheet-etl] Resetting sequences...');
   const schemaName = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
-  await db.execute(sql.raw(`SELECT setval(pg_get_serial_sequence('${schemaName}.shows', 'id'), COALESCE((SELECT MAX(id) FROM ${schemaName}.shows), 1))`));
-  await db.execute(sql.raw(`SELECT setval(pg_get_serial_sequence('${schemaName}.flowsheet', 'id'), COALESCE((SELECT MAX(id) FROM ${schemaName}.flowsheet), 1))`));
-  await db.execute(sql.raw(`SELECT setval(pg_get_serial_sequence('${schemaName}.flowsheet', 'play_order'), COALESCE((SELECT MAX(play_order) FROM ${schemaName}.flowsheet), 1))`));
+  await db.execute(
+    sql.raw(
+      `SELECT setval(pg_get_serial_sequence('${schemaName}.shows', 'id'), COALESCE((SELECT MAX(id) FROM ${schemaName}.shows), 1))`
+    )
+  );
+  await db.execute(
+    sql.raw(
+      `SELECT setval(pg_get_serial_sequence('${schemaName}.flowsheet', 'id'), COALESCE((SELECT MAX(id) FROM ${schemaName}.flowsheet), 1))`
+    )
+  );
+  await db.execute(
+    sql.raw(
+      `SELECT setval(pg_get_serial_sequence('${schemaName}.flowsheet', 'play_order'), COALESCE((SELECT MAX(play_order) FROM ${schemaName}.flowsheet), 1))`
+    )
+  );
 
   // Update cronjob tracking
   await updateLastRun(new Date());
@@ -253,9 +257,7 @@ async function incrementalSync() {
     }
 
     const transformed = transformEntry(rawEntry, legacyReleaseMap);
-    const backendShowId = rawEntry.radio_show_id > 0
-      ? (showIdMap.get(rawEntry.radio_show_id) ?? null)
-      : null;
+    const backendShowId = rawEntry.radio_show_id > 0 ? (showIdMap.get(rawEntry.radio_show_id) ?? null) : null;
 
     batch.push({
       show_id: backendShowId,
