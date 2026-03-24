@@ -25,33 +25,33 @@ The job requires two sets of credentials: one for the SSH tunnel to the legacy s
 
 ### SSH Tunnel (legacy server access)
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SSH_HOST` | Yes | — | Hostname of the legacy server |
-| `SSH_PORT` | No | `22` | SSH port |
-| `SSH_USERNAME` | Yes | — | SSH login username |
-| `SSH_PASSWORD` | Yes | — | SSH login password |
+| Variable       | Required | Default | Description                   |
+| -------------- | -------- | ------- | ----------------------------- |
+| `SSH_HOST`     | Yes      | —       | Hostname of the legacy server |
+| `SSH_PORT`     | No       | `22`    | SSH port                      |
+| `SSH_USERNAME` | Yes      | —       | SSH login username            |
+| `SSH_PASSWORD` | Yes      | —       | SSH login password            |
 
 ### Remote MySQL (queried over SSH)
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `REMOTE_DB_HOST` | Yes | — | MySQL host (as seen from the SSH server) |
-| `REMOTE_DB_PORT` | No | `3306` | MySQL port |
-| `REMOTE_DB_USER` | Yes | — | MySQL username |
-| `REMOTE_DB_PASSWORD` | Yes | — | MySQL password |
-| `REMOTE_DB_NAME` | Yes | — | MySQL database name |
+| Variable             | Required | Default | Description                              |
+| -------------------- | -------- | ------- | ---------------------------------------- |
+| `REMOTE_DB_HOST`     | Yes      | —       | MySQL host (as seen from the SSH server) |
+| `REMOTE_DB_PORT`     | No       | `3306`  | MySQL port                               |
+| `REMOTE_DB_USER`     | Yes      | —       | MySQL username                           |
+| `REMOTE_DB_PASSWORD` | Yes      | —       | MySQL password                           |
+| `REMOTE_DB_NAME`     | Yes      | —       | MySQL database name                      |
 
 ### Target PostgreSQL (Drizzle ORM)
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `DB_HOST` | Yes | — | PostgreSQL host |
-| `DB_PORT` | No | `5432` | PostgreSQL port |
-| `DB_NAME` | Yes | — | PostgreSQL database name |
-| `DB_USERNAME` | Yes | — | PostgreSQL username |
-| `DB_PASSWORD` | Yes | — | PostgreSQL password |
-| `WXYC_SCHEMA_NAME` | No | `wxyc_schema` | PostgreSQL schema name |
+| Variable           | Required | Default       | Description              |
+| ------------------ | -------- | ------------- | ------------------------ |
+| `DB_HOST`          | Yes      | —             | PostgreSQL host          |
+| `DB_PORT`          | No       | `5432`        | PostgreSQL port          |
+| `DB_NAME`          | Yes      | —             | PostgreSQL database name |
+| `DB_USERNAME`      | Yes      | —             | PostgreSQL username      |
+| `DB_PASSWORD`      | Yes      | —             | PostgreSQL password      |
+| `WXYC_SCHEMA_NAME` | No       | `wxyc_schema` | PostgreSQL schema name   |
 
 ## Prerequisites
 
@@ -128,10 +128,10 @@ npm run test:unit -- --testPathPatterns=library-etl
 
 ## Troubleshooting
 
-| Symptom | Likely Cause |
-|---------|-------------|
-| `Error executing remote SQL command over SSH` | SSH credentials are wrong, the legacy server is unreachable, or MySQL credentials are invalid. Check `SSH_HOST`, `SSH_USERNAME`, `SSH_PASSWORD`, and the `REMOTE_DB_*` variables. |
-| `Missing genre "X" for release Y` | The legacy database has a referential integrity issue — a release references a genre that doesn't exist in the legacy `GENRE` table. This is a data quality issue in tubafrenzy, not a configuration problem. |
-| `Missing format "X" for release Y` | The legacy format string could not be parsed into a canonical format name (e.g., unsupported media type like cassette). |
-| `No new legacy releases found` | Normal when nothing has changed since the last run. |
-| Job runs but inserts nothing | Check the `cronjob_runs` table — the `last_run` timestamp may already be ahead of all legacy data. To force a full re-sync, delete the row: `DELETE FROM cronjob_runs WHERE job_name = 'library-etl';` |
+| Symptom                                       | Likely Cause                                                                                                                                                                                                  |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Error executing remote SQL command over SSH` | SSH credentials are wrong, the legacy server is unreachable, or MySQL credentials are invalid. Check `SSH_HOST`, `SSH_USERNAME`, `SSH_PASSWORD`, and the `REMOTE_DB_*` variables.                             |
+| `Missing genre "X" for release Y`             | The legacy database has a referential integrity issue — a release references a genre that doesn't exist in the legacy `GENRE` table. This is a data quality issue in tubafrenzy, not a configuration problem. |
+| `Missing format "X" for release Y`            | The legacy format string could not be parsed into a canonical format name (e.g., unsupported media type like cassette).                                                                                       |
+| `No new legacy releases found`                | Normal when nothing has changed since the last run.                                                                                                                                                           |
+| Job runs but inserts nothing                  | Check the `cronjob_runs` table — the `last_run` timestamp may already be ahead of all legacy data. To force a full re-sync, delete the row: `DELETE FROM cronjob_runs WHERE job_name = 'library-etl';`        |
