@@ -140,6 +140,50 @@ const toDateOnlyString = (value: number | null) => {
   return date.toISOString().slice(0, 10);
 };
 
+/**
+ * Parse tab-delimited output from `SELECT ID, REFERENCE_NAME FROM GENRE`.
+ * Filters out `db_only` and rows with empty names.
+ */
+const parseLegacyGenreRows = (raw: string): string[] => {
+  if (raw.trim().length === 0) return [];
+  const results: string[] = [];
+  for (const line of raw.trim().split('\n')) {
+    const columns = parseTabRow(line, 2);
+    if (!columns) {
+      console.warn('[library-etl] Skipping malformed legacy genre row:', line);
+      continue;
+    }
+    const name = columns[1].trim();
+    if (name.length === 0) continue;
+    if (isDbOnlyGenre(name)) continue;
+    results.push(name);
+  }
+  return results;
+};
+
+/**
+ * Parse tab-delimited output from `SELECT ID, REFERENCE_NAME FROM FORMAT`.
+ * Normalizes each to a canonical format name via `parseFormatAndDiscs` and deduplicates.
+ */
+const parseLegacyFormatRows = (raw: string): string[] => {
+  if (raw.trim().length === 0) return [];
+  const seen = new Set<string>();
+  const results: string[] = [];
+  for (const line of raw.trim().split('\n')) {
+    const columns = parseTabRow(line, 2);
+    if (!columns) {
+      console.warn('[library-etl] Skipping malformed legacy format row:', line);
+      continue;
+    }
+    const parsed = parseFormatAndDiscs(columns[1]);
+    if (!parsed) continue;
+    if (seen.has(parsed.formatName)) continue;
+    seen.add(parsed.formatName);
+    results.push(parsed.formatName);
+  }
+  return results;
+};
+
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbClient = typeof db | DbTransaction;
 
@@ -152,6 +196,50 @@ const getLastRunTimestamp = async (jobName: string): Promise<number | null> => {
 
   const lastRun = response[0]?.lastRun ?? null;
   return lastRun ? lastRun.getTime() : null;
+};
+
+const fetchLegacyGenres = async () => {
+  const raw = await legacyDB.send('SELECT ID, REFERENCE_NAME FROM GENRE;');
+  return parseLegacyGenreRows(raw);
+};
+
+const fetchLegacyFormats = async () => {
+  const raw = await legacyDB.send('SELECT ID, REFERENCE_NAME FROM FORMAT;');
+  return parseLegacyFormatRows(raw);
+};
+
+/**
+ * Insert genres that don't already exist in PostgreSQL.
+ * Existing records are unchanged (insert-only, no updates).
+ */
+const syncGenres = async (tx: DbTransaction, legacyGenreNames: string[]) => {
+  const existingRows = await tx.select().from(genres);
+  const existingNames = new Set(existingRows.map((r) => r.genre_name.toLowerCase()));
+  let inserted = 0;
+  for (const name of legacyGenreNames) {
+    if (existingNames.has(name.toLowerCase())) continue;
+    await tx.insert(genres).values({ genre_name: name });
+    existingNames.add(name.toLowerCase());
+    inserted++;
+  }
+  return inserted;
+};
+
+/**
+ * Insert formats that don't already exist in PostgreSQL.
+ * Existing records are unchanged (insert-only, no updates).
+ */
+const syncFormats = async (tx: DbTransaction, canonicalFormatNames: string[]) => {
+  const existingRows = await tx.select().from(format);
+  const existingNames = new Set(existingRows.map((r) => r.format_name.toLowerCase()));
+  let inserted = 0;
+  for (const name of canonicalFormatNames) {
+    if (existingNames.has(name.toLowerCase())) continue;
+    await tx.insert(format).values({ format_name: name });
+    existingNames.add(name.toLowerCase());
+    inserted++;
+  }
+  return inserted;
 };
 
 const updateLastRun = async (dbClient: DbClient, jobName: string, lastRun: Date) => {
@@ -347,6 +435,15 @@ const run = async () => {
     let skippedCount = 0;
 
     await db.transaction(async (tx) => {
+      // Sync genres and formats from legacy database before processing releases
+      const legacyGenreNames = await fetchLegacyGenres();
+      const canonicalFormatNames = await fetchLegacyFormats();
+      const genresInserted = await syncGenres(tx, legacyGenreNames);
+      const formatsInserted = await syncFormats(tx, canonicalFormatNames);
+      if (genresInserted > 0 || formatsInserted > 0) {
+        console.log(`[library-etl] Synced ${genresInserted} new genre(s), ${formatsInserted} new format(s) from legacy database.`);
+      }
+
       const genreRows = await tx.select().from(genres);
       const genreMap = new Map(genreRows.map((genre) => [genre.genre_name.toLowerCase(), genre.id]));
 
@@ -471,6 +568,8 @@ export {
   parseFormatAndDiscs,
   toDateOrUndefined,
   toDateOnlyString,
+  parseLegacyGenreRows,
+  parseLegacyFormatRows,
 };
 
 run().catch((error) => {
