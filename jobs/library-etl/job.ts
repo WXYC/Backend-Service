@@ -441,7 +441,9 @@ const run = async () => {
       const genresInserted = await syncGenres(tx, legacyGenreNames);
       const formatsInserted = await syncFormats(tx, canonicalFormatNames);
       if (genresInserted > 0 || formatsInserted > 0) {
-        console.log(`[library-etl] Synced ${genresInserted} new genre(s), ${formatsInserted} new format(s) from legacy database.`);
+        console.log(
+          `[library-etl] Synced ${genresInserted} new genre(s), ${formatsInserted} new format(s) from legacy database.`
+        );
       }
 
       const genreRows = await tx.select().from(genres);
