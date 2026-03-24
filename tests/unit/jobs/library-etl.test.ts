@@ -78,6 +78,8 @@ import {
   parseFormatAndDiscs,
   toDateOrUndefined,
   toDateOnlyString,
+  parseLegacyGenreRows,
+  parseLegacyFormatRows,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -304,6 +306,64 @@ describe('library-etl job helpers', () => {
 
     it('returns undefined for invalid timestamp', () => {
       expect(toDateOnlyString(Number.NaN)).toBeUndefined();
+    });
+  });
+
+  describe('parseLegacyGenreRows', () => {
+    it('parses tab-delimited genre rows into names', () => {
+      const raw = '1\tRock\n2\tJazz\n3\tElectronic';
+      expect(parseLegacyGenreRows(raw)).toEqual(['Rock', 'Jazz', 'Electronic']);
+    });
+
+    it('filters out db_only (case insensitive)', () => {
+      const raw = '1\tRock\n2\tdb_only\n3\tDB_ONLY\n4\tJazz';
+      expect(parseLegacyGenreRows(raw)).toEqual(['Rock', 'Jazz']);
+    });
+
+    it('skips malformed rows', () => {
+      const raw = '1\tRock\nmalformed\n3\tJazz';
+      expect(parseLegacyGenreRows(raw)).toEqual(['Rock', 'Jazz']);
+    });
+
+    it('returns empty array for empty input', () => {
+      expect(parseLegacyGenreRows('')).toEqual([]);
+    });
+
+    it('trims whitespace from genre names', () => {
+      const raw = '1\t  Rock  \n2\t Jazz ';
+      expect(parseLegacyGenreRows(raw)).toEqual(['Rock', 'Jazz']);
+    });
+
+    it('skips rows with empty genre name', () => {
+      const raw = '1\tRock\n2\t\n3\t   \n4\tJazz';
+      expect(parseLegacyGenreRows(raw)).toEqual(['Rock', 'Jazz']);
+    });
+  });
+
+  describe('parseLegacyFormatRows', () => {
+    it('normalizes raw format names to canonical set', () => {
+      const raw = '1\tCD\n2\tVinyl 12"\n3\tCDR';
+      expect(parseLegacyFormatRows(raw)).toEqual(expect.arrayContaining(['cd', 'vinyl 12"', 'cdr']));
+    });
+
+    it('deduplicates canonical names', () => {
+      const raw = '1\tCD\n2\tCD x 2\n3\tCD box';
+      const result = parseLegacyFormatRows(raw);
+      expect(result.filter((f) => f === 'cd')).toHaveLength(1);
+    });
+
+    it('skips unsupported formats', () => {
+      const raw = '1\tCD\n2\tcassette\n3\tdigital';
+      expect(parseLegacyFormatRows(raw)).toEqual(['cd']);
+    });
+
+    it('returns empty array for empty input', () => {
+      expect(parseLegacyFormatRows('')).toEqual([]);
+    });
+
+    it('skips malformed rows', () => {
+      const raw = '1\tCD\nmalformed\n3\tVinyl';
+      expect(parseLegacyFormatRows(raw)).toEqual(expect.arrayContaining(['cd', 'vinyl']));
     });
   });
 });

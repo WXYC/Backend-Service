@@ -28,6 +28,7 @@ const config: Config = {
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },
   collectCoverageFrom: ['apps/backend/**/*.ts', 'jobs/**/*.ts', '!**/*.d.ts', '!**/dist/**'],
+  modulePathIgnorePatterns: ['<rootDir>/.claude/worktrees'],
   clearMocks: true,
 };
 
