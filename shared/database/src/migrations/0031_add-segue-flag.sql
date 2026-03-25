@@ -1,0 +1,1 @@
+ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "segue" boolean DEFAULT false NOT NULL;

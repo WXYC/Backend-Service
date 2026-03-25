@@ -55,6 +55,7 @@ const createMockEntry = (overrides: Record<string, unknown> = {}) => ({
   record_label: null,
   play_order: 1,
   request_flag: false,
+  segue: false,
   message: null,
   add_time: new Date('2024-02-01T12:00:00Z'),
   ...overrides,
@@ -209,6 +210,7 @@ describe('flowsheet.mirror SQL generation', () => {
           'TIME_LAST_MODIFIED',
           'TIME_CREATED',
           'REQUEST_FLAG',
+          'SEGUE_FLAG',
           'GLOBAL_ORDER_ID',
           'BMI_COMPOSER',
         ];

@@ -152,6 +152,7 @@ describe('http.mirror', () => {
       record_label: 'Warp',
       play_order: 1,
       request_flag: false,
+      segue: false,
       message: null as string | null,
       add_time: new Date('2024-02-01T12:34:56Z'),
     };
@@ -205,6 +206,17 @@ describe('http.mirror', () => {
       const entry = { ...baseTrack, request_flag: true };
       const result = mapEntryToTubafrenzy(entry);
       expect(result.request).toBe(true);
+    });
+
+    it('maps segue false by default', () => {
+      const result = mapEntryToTubafrenzy(baseTrack);
+      expect(result.segue).toBe(false);
+    });
+
+    it('maps segue true', () => {
+      const entry = { ...baseTrack, segue: true };
+      const result = mapEntryToTubafrenzy(entry);
+      expect(result.segue).toBe(true);
     });
 
     it('maps show_start to flowsheetEntryType 9', () => {
@@ -358,6 +370,7 @@ describe('http.mirror', () => {
         album_title: null,
         record_label: null,
         request_flag: undefined as any,
+        segue: undefined as any,
       };
       const result = mapEntryToTubafrenzy(entry as any);
       expect(result.artistName).toBe('');
@@ -365,6 +378,7 @@ describe('http.mirror', () => {
       expect(result.releaseTitle).toBe('');
       expect(result.labelName).toBe('');
       expect(result.request).toBe(false);
+      expect(result.segue).toBe(false);
     });
 
     it('uses Date.now() when add_time is null', () => {
@@ -402,6 +416,7 @@ describe('http.mirror', () => {
       record_label: 'Updated Label',
       play_order: 5,
       request_flag: true,
+      segue: false,
       message: null as string | null,
       add_time: new Date(),
     };
@@ -414,6 +429,13 @@ describe('http.mirror', () => {
       expect(result.releaseTitle).toBe('Updated Album');
       expect(result.labelName).toBe('Updated Label');
       expect(result.request).toBe(true);
+      expect(result.segue).toBe(false);
+    });
+
+    it('maps segue true in update', () => {
+      const entry = { ...baseTrack, segue: true };
+      const result = mapUpdateToTubafrenzy(entry);
+      expect(result.segue).toBe(true);
     });
 
     it('maps library ID to flowsheetEntryType 6', () => {
@@ -444,6 +466,7 @@ describe('http.mirror', () => {
         album_title: null,
         record_label: null,
         request_flag: undefined as any,
+        segue: undefined as any,
         album_id: null,
         rotation_id: null,
       };
@@ -453,6 +476,7 @@ describe('http.mirror', () => {
       expect(result.releaseTitle).toBe('');
       expect(result.labelName).toBe('');
       expect(result.request).toBe(false);
+      expect(result.segue).toBe(false);
       expect(result.libraryReleaseID).toBe(0);
       expect(result.rotationReleaseID).toBe(0);
       expect(result.flowsheetEntryType).toBe(0);

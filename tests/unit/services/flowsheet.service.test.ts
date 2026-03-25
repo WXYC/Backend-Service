@@ -35,6 +35,7 @@ const createBaseEntry = (overrides: Partial<IFSEntry & { metadata?: Partial<IFSE
     label_id: null,
     play_order: 1,
     request_flag: false,
+    segue: false,
     message: null,
     add_time: new Date('2024-01-15T12:00:00Z'),
     rotation_bin: null,
@@ -79,6 +80,27 @@ describe('flowsheet.service', () => {
         expect(result.rotation_bin).toBe('H');
         expect(result.artwork_url).toBe('https://example.com/art.jpg');
         expect(result.spotify_url).toBe('https://open.spotify.com/track/123');
+      });
+
+      it('includes segue field for track entry_type', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          segue: true,
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.segue).toBe(true);
+      });
+
+      it('defaults segue to false when not set', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.segue).toBe(false);
       });
 
       it('includes rotation_bin field', () => {
