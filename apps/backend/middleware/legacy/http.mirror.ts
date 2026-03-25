@@ -21,6 +21,7 @@ interface MirrorEntry {
   album_id?: number | null;
   rotation_id?: number | null;
   request_flag?: boolean;
+  segue?: boolean;
   message?: string | null;
   add_time?: Date | string | number | null;
   play_order: number;
@@ -159,6 +160,7 @@ export function mapEntryToTubafrenzy(entry: MirrorEntry): Record<string, unknown
     releaseTitle: entry.album_title ?? '',
     labelName: entry.record_label ?? '',
     request: entry.request_flag ?? false,
+    segue: entry.segue ?? false,
     nowPlayingFlag: 0,
     libraryReleaseID: entry.album_id ?? 0,
     rotationReleaseID: entry.rotation_id ?? 0,
@@ -183,6 +185,7 @@ export function mapUpdateToTubafrenzy(entry: MirrorEntry): Record<string, unknow
     releaseTitle: entry.album_title ?? '',
     labelName: entry.record_label ?? '',
     request: entry.request_flag ?? false,
+    segue: entry.segue ?? false,
     libraryReleaseID: entry.album_id ?? 0,
     rotationReleaseID: entry.rotation_id ?? 0,
     flowsheetEntryType,

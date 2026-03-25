@@ -164,6 +164,7 @@ export type FSEntryRequestBody = {
   record_label: string;
   label_id?: number;
   request_flag?: boolean;
+  segue?: boolean;
   message?: string;
   entry_type?: NewFSEntry['entry_type'];
 };
@@ -310,6 +311,7 @@ export type UpdateRequestBody = {
   record_label?: string;
   label_id?: number;
   request_flag?: boolean;
+  segue?: boolean;
   message?: string;
 };
 

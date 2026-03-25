@@ -315,6 +315,7 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   label_id: integer('label_id').references(() => labels.id),
   play_order: serial('play_order').notNull(),
   request_flag: boolean('request_flag').default(false).notNull(),
+  segue: boolean('segue').default(false).notNull(),
   message: varchar('message', { length: 250 }),
   add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
 });

@@ -212,7 +212,7 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
       (ID, ARTIST_NAME, ARTIST_ID, SONG_TITLE, RELEASE_TITLE, RELEASE_FORMAT_ID,
        LIBRARY_RELEASE_ID, ROTATION_RELEASE_ID, LABEL_NAME, RADIO_HOUR, START_TIME, STOP_TIME,
        RADIO_SHOW_ID, SEQUENCE_WITHIN_SHOW, NOW_PLAYING_FLAG, FLOWSHEET_ENTRY_TYPE_CODE_ID,
-       TIME_LAST_MODIFIED, TIME_CREATED, REQUEST_FLAG, GLOBAL_ORDER_ID, BMI_COMPOSER)
+       TIME_LAST_MODIFIED, TIME_CREATED, REQUEST_FLAG, SEGUE_FLAG, GLOBAL_ORDER_ID, BMI_COMPOSER)
      VALUES
       (@NEW_FE_ID,
        ${safeSql(message)},                   -- ARTIST_NAME
@@ -233,6 +233,7 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
        ${safeSqlNum(startMs)},                -- TIME_LAST_MODIFIED
        ${safeSqlNum(startMs)},                -- TIME_CREATED
        0,                                     -- REQUEST_FLAG
+       0,                                     -- SEGUE_FLAG
        (@RS_ID * 1000 + @SEQ_NUM),            -- GLOBAL_ORDER_ID (RADIO_SHOW_ID * 1000 + SEQUENCE)
        '');` // BMI_COMPOSER
     );
@@ -254,7 +255,7 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
       (ID, ARTIST_NAME, ARTIST_ID, SONG_TITLE, RELEASE_TITLE, RELEASE_FORMAT_ID,
        LIBRARY_RELEASE_ID, ROTATION_RELEASE_ID, LABEL_NAME, RADIO_HOUR, START_TIME, STOP_TIME,
        RADIO_SHOW_ID, SEQUENCE_WITHIN_SHOW, NOW_PLAYING_FLAG, FLOWSHEET_ENTRY_TYPE_CODE_ID,
-       TIME_LAST_MODIFIED, TIME_CREATED, REQUEST_FLAG, GLOBAL_ORDER_ID, BMI_COMPOSER)
+       TIME_LAST_MODIFIED, TIME_CREATED, REQUEST_FLAG, SEGUE_FLAG, GLOBAL_ORDER_ID, BMI_COMPOSER)
      VALUES
       (@NEW_FE_ID,
        ${safeSql(entry.artist_name)},             -- ARTIST_NAME
@@ -275,6 +276,7 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
        ${safeSqlNum(startMs)},                    -- TIME_LAST_MODIFIED
        ${safeSqlNum(startMs)},                    -- TIME_CREATED
        ${safeSqlNum(entry.request_flag ? 1 : 0)}, -- REQUEST_FLAG (bool --> int)
+       ${safeSqlNum(entry.segue ? 1 : 0)},        -- SEGUE_FLAG (bool --> int)
        (@RS_ID * 1000 + @SEQ_NUM),                -- GLOBAL_ORDER_ID (RADIO_SHOW_ID * 1000 + SEQUENCE)
        '');` // BMI_COMPOSER
     );
