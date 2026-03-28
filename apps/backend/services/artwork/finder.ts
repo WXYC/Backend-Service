@@ -4,7 +4,7 @@
  * Ported from request-parser artwork/finder.py
  */
 
-import { ArtworkProvider, discogsProvider } from './providers/index.js';
+import { ArtworkProvider, discogsProvider, lastFmProvider, itunesProvider } from './providers/index.js';
 import { ArtworkRequest, ArtworkResponse, ArtworkSearchResult, EnrichedLibraryResult } from '../requestLine/types.js';
 import { isCompilationArtist } from '../requestLine/matching/index.js';
 import { getConfig } from '../requestLine/config.js';
@@ -16,8 +16,8 @@ export class ArtworkFinder {
   private providers: ArtworkProvider[];
 
   constructor(providers?: ArtworkProvider[]) {
-    // Default to Discogs provider
-    this.providers = providers || [discogsProvider];
+    // Default fallback chain: Discogs → Last.fm → iTunes (same order as iOS app)
+    this.providers = providers || [discogsProvider, lastFmProvider, itunesProvider];
   }
 
   /**
