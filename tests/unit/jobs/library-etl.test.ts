@@ -52,6 +52,8 @@ jest.mock('@wxyc/database', () => {
       instance: () => ({ send: mockSend, close: mockClose }),
     },
     artists: {},
+    artist_crossreference: {},
+    artist_library_crossreference: {},
     genres: {},
     format: {},
     library: {},
@@ -65,6 +67,7 @@ jest.mock('drizzle-orm', () => ({
   eq: jest.fn((a: unknown, b: unknown) => ({ eq: [a, b] })),
   and: jest.fn((...args: unknown[]) => ({ and: args })),
   isNull: jest.fn((col: unknown) => ({ isNull: col })),
+  sql: jest.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ sql: strings, values })),
 }));
 
 import {
@@ -78,6 +81,8 @@ import {
   parseFormatAndDiscs,
   toDateOrUndefined,
   toDateOnlyString,
+  buildAlbumCacheKey,
+  buildArtistCacheKey,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -304,6 +309,34 @@ describe('library-etl job helpers', () => {
 
     it('returns undefined for invalid timestamp', () => {
       expect(toDateOnlyString(Number.NaN)).toBeUndefined();
+    });
+  });
+
+  describe('buildAlbumCacheKey', () => {
+    it('produces a deterministic key from all components', () => {
+      expect(buildAlbumCacheKey(1, 2, 'Moon Pix', 42, 'A')).toBe('1|2|Moon Pix|42|A');
+    });
+
+    it('defaults null codeNumber to 0 and null codeVolumeLetters to empty string', () => {
+      expect(buildAlbumCacheKey(1, 2, 'Moon Pix', null, null)).toBe('1|2|Moon Pix|0|');
+    });
+
+    it('preserves exact album title including case and spacing', () => {
+      expect(buildAlbumCacheKey(5, 3, '  Edits  ', 1, null)).toBe('5|3|  Edits  |1|');
+    });
+  });
+
+  describe('buildArtistCacheKey', () => {
+    it('produces a key with genre and code for regular artists', () => {
+      expect(buildArtistCacheKey('Cat Power', false, 'CP', 3, 42)).toBe('cat power|CP|3|42');
+    });
+
+    it('produces a shorter key for Various Artists (no genre/code)', () => {
+      expect(buildArtistCacheKey('Various Artists', true, 'V/A', 3, 0)).toBe('various artists|V/A');
+    });
+
+    it('defaults null code letters to ??', () => {
+      expect(buildArtistCacheKey('Stereolab', false, null, 1, 10)).toBe('stereolab|??|1|10');
     });
   });
 });

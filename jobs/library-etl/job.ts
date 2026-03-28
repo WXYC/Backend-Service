@@ -1,9 +1,11 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { isNull } from 'drizzle-orm';
 import {
   MirrorSQL,
   db,
   artists,
+  artist_crossreference,
+  artist_library_crossreference,
   format,
   genre_artist_crossreference,
   genres,
@@ -29,6 +31,33 @@ type LegacyReleaseRow = {
   artist_call_numbers: number | null;
   genre_ref_name: string | null;
   format_ref_name: string | null;
+};
+
+type LegacyArtistCrossRefRow = {
+  source_artist_name: string;
+  source_code_letters: string | null;
+  source_code_numbers: number | null;
+  source_genre_ref: string | null;
+  target_artist_name: string;
+  target_code_letters: string | null;
+  target_code_numbers: number | null;
+  target_genre_ref: string | null;
+  comment: string | null;
+};
+
+type LegacyReleaseCrossRefRow = {
+  source_artist_name: string;
+  source_code_letters: string | null;
+  source_code_numbers: number | null;
+  source_genre_ref: string | null;
+  release_title: string;
+  release_call_numbers: number | null;
+  release_call_letters: string | null;
+  target_artist_name: string;
+  target_code_letters: string | null;
+  target_code_numbers: number | null;
+  target_genre_ref: string | null;
+  comment: string | null;
 };
 
 const VARIOUS_ARTISTS_NAME = 'Various Artists';
@@ -140,6 +169,29 @@ const toDateOnlyString = (value: number | null) => {
   return date.toISOString().slice(0, 10);
 };
 
+const buildArtistCacheKey = (
+  artistName: string,
+  isVarious: boolean,
+  codeLetters: string | null,
+  genreId: number,
+  artistGenreCode: number
+): string => {
+  const normalizedLetters = codeLetters ?? '??';
+  return isVarious
+    ? `${artistName.toLowerCase()}|${normalizedLetters}`
+    : `${artistName.toLowerCase()}|${normalizedLetters}|${genreId}|${artistGenreCode}`;
+};
+
+const buildAlbumCacheKey = (
+  artistId: number,
+  genreId: number,
+  albumTitle: string,
+  codeNumber: number | null,
+  codeVolumeLetters: string | null
+): string => {
+  return `${artistId}|${genreId}|${albumTitle}|${codeNumber ?? 0}|${codeVolumeLetters ?? ''}`;
+};
+
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbClient = typeof db | DbTransaction;
 
@@ -221,6 +273,113 @@ const fetchLegacyReleases = async (lastRunMs: number | null) => {
   return parsed;
 };
 
+const fetchLegacyArtistCrossRefs = async (lastRunMs: number | null) => {
+  const lastRunFilter = lastRunMs == null ? '' : `WHERE lccr.TIME_LAST_MODIFIED > ${lastRunMs}`;
+  const sqlQuery = `
+    SELECT
+      REPLACE(REPLACE(IFNULL(src.PRESENTATION_NAME, ''), '\\t', ' '), '\\n', ' '),
+      src.CALL_LETTERS,
+      src.CALL_NUMBERS,
+      src_g.REFERENCE_NAME,
+      REPLACE(REPLACE(IFNULL(tgt.PRESENTATION_NAME, ''), '\\t', ' '), '\\n', ' '),
+      tgt.CALL_LETTERS,
+      tgt.CALL_NUMBERS,
+      tgt_g.REFERENCE_NAME,
+      REPLACE(REPLACE(IFNULL(lccr.COMMENT, ''), '\\t', ' '), '\\n', ' ')
+    FROM LIBRARY_CODE_CROSS_REFERENCE lccr
+    JOIN LIBRARY_CODE src ON lccr.CROSS_REFERENCING_ARTIST_ID = src.ID
+    JOIN GENRE src_g ON src.GENRE_ID = src_g.ID
+    JOIN LIBRARY_CODE tgt ON lccr.CROSS_REFERENCED_LIBRARY_CODE_ID = tgt.ID
+    JOIN GENRE tgt_g ON tgt.GENRE_ID = tgt_g.ID
+    ${lastRunFilter}
+    ORDER BY lccr.TIME_LAST_MODIFIED ASC;
+  `;
+
+  const raw = await legacyDB.send(sqlQuery);
+  const rows = raw.trim().length === 0 ? [] : raw.trim().split('\n');
+  const columnCount = 9;
+  const parsed: LegacyArtistCrossRefRow[] = [];
+
+  for (const line of rows) {
+    const columns = parseTabRow(line, columnCount);
+    if (!columns) {
+      console.warn('[library-etl] Skipping malformed artist crossref row:', line);
+      continue;
+    }
+
+    parsed.push({
+      source_artist_name: columns[0],
+      source_code_letters: toNullableString(columns[1]),
+      source_code_numbers: toNullableNumber(columns[2]),
+      source_genre_ref: toNullableString(columns[3]),
+      target_artist_name: columns[4],
+      target_code_letters: toNullableString(columns[5]),
+      target_code_numbers: toNullableNumber(columns[6]),
+      target_genre_ref: toNullableString(columns[7]),
+      comment: toNullableString(columns[8]),
+    });
+  }
+
+  return parsed;
+};
+
+const fetchLegacyReleaseCrossRefs = async (lastRunMs: number | null) => {
+  const lastRunFilter = lastRunMs == null ? '' : `WHERE rcr.TIME_LAST_MODIFIED > ${lastRunMs}`;
+  const sqlQuery = `
+    SELECT
+      REPLACE(REPLACE(IFNULL(src.PRESENTATION_NAME, ''), '\\t', ' '), '\\n', ' '),
+      src.CALL_LETTERS,
+      src.CALL_NUMBERS,
+      src_g.REFERENCE_NAME,
+      REPLACE(REPLACE(IFNULL(lr.TITLE, ''), '\\t', ' '), '\\n', ' '),
+      lr.CALL_NUMBERS,
+      lr.CALL_LETTERS,
+      REPLACE(REPLACE(IFNULL(tgt.PRESENTATION_NAME, ''), '\\t', ' '), '\\n', ' '),
+      tgt.CALL_LETTERS,
+      tgt.CALL_NUMBERS,
+      tgt_g.REFERENCE_NAME,
+      REPLACE(REPLACE(IFNULL(rcr.COMMENT, ''), '\\t', ' '), '\\n', ' ')
+    FROM RELEASE_CROSS_REFERENCE rcr
+    JOIN LIBRARY_CODE src ON rcr.CROSS_REFERENCING_ARTIST_ID = src.ID
+    JOIN GENRE src_g ON src.GENRE_ID = src_g.ID
+    JOIN LIBRARY_RELEASE lr ON rcr.CROSS_REFERENCED_RELEASE_ID = lr.ID
+    JOIN LIBRARY_CODE tgt ON lr.LIBRARY_CODE_ID = tgt.ID
+    JOIN GENRE tgt_g ON tgt.GENRE_ID = tgt_g.ID
+    ${lastRunFilter}
+    ORDER BY rcr.TIME_LAST_MODIFIED ASC;
+  `;
+
+  const raw = await legacyDB.send(sqlQuery);
+  const rows = raw.trim().length === 0 ? [] : raw.trim().split('\n');
+  const columnCount = 12;
+  const parsed: LegacyReleaseCrossRefRow[] = [];
+
+  for (const line of rows) {
+    const columns = parseTabRow(line, columnCount);
+    if (!columns) {
+      console.warn('[library-etl] Skipping malformed release crossref row:', line);
+      continue;
+    }
+
+    parsed.push({
+      source_artist_name: columns[0],
+      source_code_letters: toNullableString(columns[1]),
+      source_code_numbers: toNullableNumber(columns[2]),
+      source_genre_ref: toNullableString(columns[3]),
+      release_title: columns[4],
+      release_call_numbers: toNullableNumber(columns[5]),
+      release_call_letters: toNullableString(columns[6]),
+      target_artist_name: columns[7],
+      target_code_letters: toNullableString(columns[8]),
+      target_code_numbers: toNullableNumber(columns[9]),
+      target_genre_ref: toNullableString(columns[10]),
+      comment: toNullableString(columns[11]),
+    });
+  }
+
+  return parsed;
+};
+
 const ensureArtist = async (
   dbClient: DbClient,
   artistName: string,
@@ -233,12 +392,11 @@ const ensureArtist = async (
   addDate?: string,
   lastModified?: Date
 ) => {
-  const normalizedLetters = codeLetters ?? '??';
-  const artistKey = isVarious
-    ? `${artistName.toLowerCase()}|${normalizedLetters}`
-    : `${artistName.toLowerCase()}|${normalizedLetters}|${genreId}|${artistGenreCode}`;
+  const artistKey = buildArtistCacheKey(artistName, isVarious, codeLetters, genreId, artistGenreCode);
   const cached = artistCache.get(artistKey);
   if (cached) return cached;
+
+  const normalizedLetters = codeLetters ?? '??';
 
   const query = isVarious
     ? dbClient
@@ -285,6 +443,55 @@ const ensureArtist = async (
   return id;
 };
 
+/**
+ * Find an artist ID by the same composite key used by ensureArtist, without inserting.
+ * Checks the in-memory cache first, then falls back to a DB query.
+ * Populates the cache on DB hit to avoid repeated queries.
+ */
+const findArtistId = async (
+  dbClient: DbClient,
+  artistName: string,
+  isVarious: boolean,
+  genreId: number,
+  codeLetters: string | null,
+  artistGenreCode: number,
+  artistCache: Map<string, number>
+): Promise<number | null> => {
+  const artistKey = buildArtistCacheKey(artistName, isVarious, codeLetters, genreId, artistGenreCode);
+  const cached = artistCache.get(artistKey);
+  if (cached) return cached;
+
+  const normalizedLetters = codeLetters ?? '??';
+
+  const query = isVarious
+    ? dbClient
+        .select({ id: artists.id })
+        .from(artists)
+        .where(and(eq(artists.artist_name, artistName), eq(artists.code_letters, normalizedLetters)))
+        .limit(1)
+    : dbClient
+        .select({ id: artists.id })
+        .from(artists)
+        .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+        .where(
+          and(
+            eq(artists.artist_name, artistName),
+            eq(artists.code_letters, normalizedLetters),
+            eq(genre_artist_crossreference.genre_id, genreId),
+            eq(genre_artist_crossreference.artist_genre_code, artistGenreCode)
+          )
+        )
+        .limit(1);
+
+  const existing = await query;
+  if (existing.length) {
+    artistCache.set(artistKey, existing[0].id);
+    return existing[0].id;
+  }
+
+  return null;
+};
+
 const ensureGenreArtistCrossref = async (
   dbClient: DbClient,
   artistId: number,
@@ -306,14 +513,14 @@ const ensureGenreArtistCrossref = async (
   });
 };
 
-const albumExists = async (
+const findAlbumId = async (
   dbClient: DbClient,
   artistId: number,
   genreId: number,
   albumTitle: string,
   codeNumber: number | null,
   codeVolumeLetters: string | null
-) => {
+): Promise<number | null> => {
   const response = await dbClient
     .select({ id: library.id })
     .from(library)
@@ -328,7 +535,48 @@ const albumExists = async (
     )
     .limit(1);
 
-  return response.length > 0;
+  return response.length > 0 ? response[0].id : null;
+};
+
+/**
+ * Resolve artist fields from a cross-reference row into a Backend-Service artist ID.
+ * Applies the same normalization as the release import loop.
+ */
+const resolveArtistId = async (
+  dbClient: DbClient,
+  artistName: string,
+  codeLettersRaw: string | null,
+  codeNumbers: number | null,
+  genreRef: string | null,
+  genreMap: Map<string, number>,
+  artistCache: Map<string, number>
+): Promise<number | null> => {
+  const artistInfo = normalizeArtistName(artistName);
+  if (artistInfo.name.length === 0) return null;
+
+  if (isDbOnlyGenre(genreRef)) return null;
+
+  const genreName = genreRef ?? '';
+  const genreId = genreMap.get(genreName.toLowerCase());
+  if (!genreId) return null;
+
+  const codeLetters = artistInfo.isVarious
+    ? VARIOUS_ARTISTS_CODE_LETTERS
+    : normalizeCodeLetters(codeLettersRaw);
+  const artistGenreCode = artistInfo.isVarious ? VARIOUS_ARTISTS_CODE_NUMBER : (codeNumbers ?? 0);
+
+  return findArtistId(dbClient, artistInfo.name, artistInfo.isVarious, genreId, codeLetters, artistGenreCode, artistCache);
+};
+
+/**
+ * Check if a cross-reference table is empty (for one-time backfill detection).
+ */
+const isTableEmpty = async (dbClient: DbClient, table: typeof artist_crossreference | typeof artist_library_crossreference): Promise<boolean> => {
+  const result = await dbClient
+    .select({ count: sql<number>`count(*)` })
+    .from(table)
+    .limit(1);
+  return (result[0]?.count ?? 0) === 0;
 };
 
 const run = async () => {
@@ -339,12 +587,14 @@ const run = async () => {
 
     if (legacyReleases.length === 0) {
       console.log('[library-etl] No new legacy releases found.');
-      await updateLastRun(db, JOB_NAME, runStartedAt);
-      return;
     }
 
     let insertedCount = 0;
     let skippedCount = 0;
+    let artistXrefInserted = 0;
+    let artistXrefSkipped = 0;
+    let releaseXrefInserted = 0;
+    let releaseXrefSkipped = 0;
 
     await db.transaction(async (tx) => {
       const genreRows = await tx.select().from(genres);
@@ -354,7 +604,9 @@ const run = async () => {
       const formatMap = new Map(formatRows.map((row) => [row.format_name.toLowerCase(), row.id]));
 
       const artistCache = new Map<string, number>();
+      const albumIdCache = new Map<string, number>();
 
+      // Phase 1: Import releases
       for (const release of legacyReleases) {
         if (isDbOnlyGenre(release.genre_ref_name)) {
           skippedCount += 1;
@@ -420,7 +672,7 @@ const run = async () => {
           release.release_call_letters != null && release.release_call_letters.trim().length > 0
             ? release.release_call_letters.trim()
             : null;
-        const alreadyExists = await albumExists(
+        const existingAlbumId = await findAlbumId(
           tx,
           artistId,
           genreId,
@@ -428,12 +680,13 @@ const run = async () => {
           release.release_call_numbers,
           codeVolumeLetters
         );
-        if (alreadyExists) {
+        if (existingAlbumId != null) {
+          albumIdCache.set(buildAlbumCacheKey(artistId, genreId, albumTitle, release.release_call_numbers, codeVolumeLetters), existingAlbumId);
           skippedCount += 1;
           continue;
         }
 
-        await tx.insert(library).values({
+        const inserted = await tx.insert(library).values({
           artist_id: artistId,
           genre_id: genreId,
           format_id: formatId,
@@ -444,15 +697,124 @@ const run = async () => {
           disc_quantity: formatParsed.discQuantity,
           add_date: toDateOrUndefined(release.release_time_created),
           last_modified: toDateOrUndefined(release.release_last_modified),
-        });
+        }).returning({ id: library.id });
+
+        if (inserted[0]?.id) {
+          albumIdCache.set(buildAlbumCacheKey(artistId, genreId, albumTitle, release.release_call_numbers, codeVolumeLetters), inserted[0].id);
+        }
 
         insertedCount += 1;
+      }
+
+      // Phase 2: Import artist cross-references (artist ↔ artist)
+      // On first run, do a full fetch (backfill); subsequent runs are incremental
+      const artistXrefEmpty = await isTableEmpty(tx, artist_crossreference);
+      const artistXrefLastRun = artistXrefEmpty ? null : lastRunMs;
+      const artistCrossRefs = await fetchLegacyArtistCrossRefs(artistXrefLastRun);
+
+      for (const xref of artistCrossRefs) {
+        const sourceId = await resolveArtistId(
+          tx, xref.source_artist_name, xref.source_code_letters,
+          xref.source_code_numbers, xref.source_genre_ref, genreMap, artistCache
+        );
+        const targetId = await resolveArtistId(
+          tx, xref.target_artist_name, xref.target_code_letters,
+          xref.target_code_numbers, xref.target_genre_ref, genreMap, artistCache
+        );
+
+        if (sourceId == null || targetId == null) {
+          artistXrefSkipped++;
+          continue;
+        }
+
+        await tx
+          .insert(artist_crossreference)
+          .values({
+            source_artist_id: sourceId,
+            target_artist_id: targetId,
+            comment: xref.comment,
+          })
+          .onConflictDoNothing();
+
+        artistXrefInserted++;
+      }
+
+      // Phase 3: Import release cross-references (artist → album)
+      const releaseXrefEmpty = await isTableEmpty(tx, artist_library_crossreference);
+      const releaseXrefLastRun = releaseXrefEmpty ? null : lastRunMs;
+      const releaseCrossRefs = await fetchLegacyReleaseCrossRefs(releaseXrefLastRun);
+
+      for (const xref of releaseCrossRefs) {
+        const sourceId = await resolveArtistId(
+          tx, xref.source_artist_name, xref.source_code_letters,
+          xref.source_code_numbers, xref.source_genre_ref, genreMap, artistCache
+        );
+        if (sourceId == null) {
+          releaseXrefSkipped++;
+          continue;
+        }
+
+        // Resolve target album: find the owning artist, then find the album
+        const targetArtistId = await resolveArtistId(
+          tx, xref.target_artist_name, xref.target_code_letters,
+          xref.target_code_numbers, xref.target_genre_ref, genreMap, artistCache
+        );
+        if (targetArtistId == null) {
+          releaseXrefSkipped++;
+          continue;
+        }
+
+        const targetGenreName = xref.target_genre_ref ?? '';
+        const targetGenreId = genreMap.get(targetGenreName.toLowerCase());
+        if (!targetGenreId) {
+          releaseXrefSkipped++;
+          continue;
+        }
+
+        const releaseTitle = xref.release_title.trim();
+        const releaseCvl = xref.release_call_letters != null && xref.release_call_letters.trim().length > 0
+          ? xref.release_call_letters.trim()
+          : null;
+
+        // Check album cache first
+        const albumCacheKey = buildAlbumCacheKey(targetArtistId, targetGenreId, releaseTitle, xref.release_call_numbers, releaseCvl);
+        let targetAlbumId = albumIdCache.get(albumCacheKey) ?? null;
+
+        if (targetAlbumId == null) {
+          targetAlbumId = await findAlbumId(tx, targetArtistId, targetGenreId, releaseTitle, xref.release_call_numbers, releaseCvl);
+          if (targetAlbumId != null) {
+            albumIdCache.set(albumCacheKey, targetAlbumId);
+          }
+        }
+
+        if (targetAlbumId == null) {
+          releaseXrefSkipped++;
+          continue;
+        }
+
+        await tx
+          .insert(artist_library_crossreference)
+          .values({
+            artist_id: sourceId,
+            library_id: targetAlbumId,
+            comment: xref.comment,
+          })
+          .onConflictDoNothing();
+
+        releaseXrefInserted++;
       }
 
       await updateLastRun(tx, JOB_NAME, runStartedAt);
     });
 
-    console.log(`[library-etl] Completed. Inserted ${insertedCount}, skipped ${skippedCount}.`);
+    const parts = [`Inserted ${insertedCount} releases, skipped ${skippedCount}`];
+    if (artistXrefInserted > 0 || artistXrefSkipped > 0) {
+      parts.push(`Artist xrefs: ${artistXrefInserted} inserted, ${artistXrefSkipped} skipped`);
+    }
+    if (releaseXrefInserted > 0 || releaseXrefSkipped > 0) {
+      parts.push(`Release xrefs: ${releaseXrefInserted} inserted, ${releaseXrefSkipped} skipped`);
+    }
+    console.log(`[library-etl] Completed. ${parts.join('. ')}.`);
   } finally {
     await closeDatabaseConnection();
     legacyDB.close();
@@ -471,6 +833,8 @@ export {
   parseFormatAndDiscs,
   toDateOrUndefined,
   toDateOnlyString,
+  buildAlbumCacheKey,
+  buildArtistCacheKey,
 };
 
 run().catch((error) => {
