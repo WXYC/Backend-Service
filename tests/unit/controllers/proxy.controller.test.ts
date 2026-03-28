@@ -76,7 +76,13 @@ jest.mock('../../../apps/backend/services/discogs/discogs.service', () => ({
   },
 }));
 
-// Mock global fetch for Spotify track endpoint
+const mockClassifyNSFW = jest.fn<() => Promise<'sfw' | 'nsfw'>>();
+
+jest.mock('../../../apps/backend/services/artwork/nsfw', () => ({
+  classify: mockClassifyNSFW,
+}));
+
+// Mock global fetch for image downloads and Spotify track endpoint
 const mockFetch = jest.fn<typeof global.fetch>();
 global.fetch = mockFetch;
 
@@ -94,6 +100,7 @@ const createMockRes = () => {
   const res: Partial<Response> = {};
   res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
   res.json = jest.fn().mockReturnValue(res) as unknown as Response['json'];
+  res.send = jest.fn().mockReturnValue(res) as unknown as Response['send'];
   res.set = jest.fn().mockReturnValue(res) as unknown as Response['set'];
   return res;
 };
@@ -119,28 +126,81 @@ describe('proxy.controller', () => {
       expect(res.json).toHaveBeenCalledWith({ message: 'artistName query parameter is required' });
     });
 
-    it('returns artwork result with cache header', async () => {
+    it('returns SFW image bytes with content type and cache header', async () => {
+      const imageBytes = Buffer.from('fake-image-data');
+
       mockFind.mockResolvedValue({
         artworkUrl: 'https://i.discogs.com/img.jpg',
         releaseUrl: 'https://discogs.com/release/123',
-        album: 'OK Computer',
-        artist: 'Radiohead',
+        album: 'Confield',
+        artist: 'Autechre',
         source: 'discogs',
         confidence: 0.95,
       });
 
-      const req = { query: { artistName: 'Radiohead', releaseTitle: 'OK Computer' } } as unknown as Request;
+      mockFetch.mockResolvedValue({
+        ok: true,
+        arrayBuffer: () => Promise.resolve(imageBytes.buffer),
+        headers: new Headers({ 'content-type': 'image/jpeg' }),
+      } as unknown as globalThis.Response);
+
+      mockClassifyNSFW.mockResolvedValue('sfw');
+
+      const req = { query: { artistName: 'Autechre', releaseTitle: 'Confield' } } as unknown as Request;
       const res = createMockRes();
 
       await searchArtwork(req, res as Response, mockNext);
 
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({
-        artworkUrl: 'https://i.discogs.com/img.jpg',
-        source: 'discogs',
-        confidence: 0.95,
-      });
+      expect(res.send).toHaveBeenCalled();
+      expect(res.set).toHaveBeenCalledWith('Content-Type', 'image/jpeg');
       expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');
+    });
+
+    it('returns 404 when artwork is NSFW', async () => {
+      const imageBytes = Buffer.from('nsfw-image-data');
+
+      mockFind.mockResolvedValue({
+        artworkUrl: 'https://i.discogs.com/nsfw.jpg',
+        releaseUrl: null,
+        album: 'NSFW Album',
+        artist: 'Some Artist',
+        source: 'discogs',
+        confidence: 0.9,
+      });
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        arrayBuffer: () => Promise.resolve(imageBytes.buffer),
+        headers: new Headers({ 'content-type': 'image/jpeg' }),
+      } as unknown as globalThis.Response);
+
+      mockClassifyNSFW.mockResolvedValue('nsfw');
+
+      const req = { query: { artistName: 'Some Artist', releaseTitle: 'NSFW Album' } } as unknown as Request;
+      const res = createMockRes();
+
+      await searchArtwork(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(404);
+    });
+
+    it('returns 404 when no artwork URL is found', async () => {
+      mockFind.mockResolvedValue({
+        artworkUrl: null,
+        releaseUrl: null,
+        album: null,
+        artist: null,
+        source: null,
+        confidence: 0,
+      });
+
+      const req = { query: { artistName: 'Unknown Artist' } } as unknown as Request;
+      const res = createMockRes();
+
+      await searchArtwork(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(404);
     });
 
     it('calls next on error', async () => {
