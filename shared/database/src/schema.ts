@@ -410,9 +410,7 @@ export const artist_crossreference = wxyc_schema.table(
       .references(() => artists.id),
     comment: varchar('comment', { length: 255 }),
   },
-  (table) => [
-    uniqueIndex('artist_crossref_source_target').on(table.source_artist_id, table.target_artist_id),
-  ]
+  (table) => [uniqueIndex('artist_crossref_source_target').on(table.source_artist_id, table.target_artist_id)]
 );
 
 export type NewShow = InferInsertModel<typeof shows>;

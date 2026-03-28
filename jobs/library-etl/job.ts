@@ -560,18 +560,27 @@ const resolveArtistId = async (
   const genreId = genreMap.get(genreName.toLowerCase());
   if (!genreId) return null;
 
-  const codeLetters = artistInfo.isVarious
-    ? VARIOUS_ARTISTS_CODE_LETTERS
-    : normalizeCodeLetters(codeLettersRaw);
+  const codeLetters = artistInfo.isVarious ? VARIOUS_ARTISTS_CODE_LETTERS : normalizeCodeLetters(codeLettersRaw);
   const artistGenreCode = artistInfo.isVarious ? VARIOUS_ARTISTS_CODE_NUMBER : (codeNumbers ?? 0);
 
-  return findArtistId(dbClient, artistInfo.name, artistInfo.isVarious, genreId, codeLetters, artistGenreCode, artistCache);
+  return findArtistId(
+    dbClient,
+    artistInfo.name,
+    artistInfo.isVarious,
+    genreId,
+    codeLetters,
+    artistGenreCode,
+    artistCache
+  );
 };
 
 /**
  * Check if a cross-reference table is empty (for one-time backfill detection).
  */
-const isTableEmpty = async (dbClient: DbClient, table: typeof artist_crossreference | typeof artist_library_crossreference): Promise<boolean> => {
+const isTableEmpty = async (
+  dbClient: DbClient,
+  table: typeof artist_crossreference | typeof artist_library_crossreference
+): Promise<boolean> => {
   const result = await dbClient
     .select({ count: sql<number>`count(*)` })
     .from(table)
@@ -681,26 +690,35 @@ const run = async () => {
           codeVolumeLetters
         );
         if (existingAlbumId != null) {
-          albumIdCache.set(buildAlbumCacheKey(artistId, genreId, albumTitle, release.release_call_numbers, codeVolumeLetters), existingAlbumId);
+          albumIdCache.set(
+            buildAlbumCacheKey(artistId, genreId, albumTitle, release.release_call_numbers, codeVolumeLetters),
+            existingAlbumId
+          );
           skippedCount += 1;
           continue;
         }
 
-        const inserted = await tx.insert(library).values({
-          artist_id: artistId,
-          genre_id: genreId,
-          format_id: formatId,
-          alternate_artist_name: release.release_alternate_artist_name,
-          album_title: albumTitle,
-          code_number: release.release_call_numbers ?? 0,
-          code_volume_letters: codeVolumeLetters,
-          disc_quantity: formatParsed.discQuantity,
-          add_date: toDateOrUndefined(release.release_time_created),
-          last_modified: toDateOrUndefined(release.release_last_modified),
-        }).returning({ id: library.id });
+        const inserted = await tx
+          .insert(library)
+          .values({
+            artist_id: artistId,
+            genre_id: genreId,
+            format_id: formatId,
+            alternate_artist_name: release.release_alternate_artist_name,
+            album_title: albumTitle,
+            code_number: release.release_call_numbers ?? 0,
+            code_volume_letters: codeVolumeLetters,
+            disc_quantity: formatParsed.discQuantity,
+            add_date: toDateOrUndefined(release.release_time_created),
+            last_modified: toDateOrUndefined(release.release_last_modified),
+          })
+          .returning({ id: library.id });
 
         if (inserted[0]?.id) {
-          albumIdCache.set(buildAlbumCacheKey(artistId, genreId, albumTitle, release.release_call_numbers, codeVolumeLetters), inserted[0].id);
+          albumIdCache.set(
+            buildAlbumCacheKey(artistId, genreId, albumTitle, release.release_call_numbers, codeVolumeLetters),
+            inserted[0].id
+          );
         }
 
         insertedCount += 1;
@@ -714,12 +732,22 @@ const run = async () => {
 
       for (const xref of artistCrossRefs) {
         const sourceId = await resolveArtistId(
-          tx, xref.source_artist_name, xref.source_code_letters,
-          xref.source_code_numbers, xref.source_genre_ref, genreMap, artistCache
+          tx,
+          xref.source_artist_name,
+          xref.source_code_letters,
+          xref.source_code_numbers,
+          xref.source_genre_ref,
+          genreMap,
+          artistCache
         );
         const targetId = await resolveArtistId(
-          tx, xref.target_artist_name, xref.target_code_letters,
-          xref.target_code_numbers, xref.target_genre_ref, genreMap, artistCache
+          tx,
+          xref.target_artist_name,
+          xref.target_code_letters,
+          xref.target_code_numbers,
+          xref.target_genre_ref,
+          genreMap,
+          artistCache
         );
 
         if (sourceId == null || targetId == null) {
@@ -746,8 +774,13 @@ const run = async () => {
 
       for (const xref of releaseCrossRefs) {
         const sourceId = await resolveArtistId(
-          tx, xref.source_artist_name, xref.source_code_letters,
-          xref.source_code_numbers, xref.source_genre_ref, genreMap, artistCache
+          tx,
+          xref.source_artist_name,
+          xref.source_code_letters,
+          xref.source_code_numbers,
+          xref.source_genre_ref,
+          genreMap,
+          artistCache
         );
         if (sourceId == null) {
           releaseXrefSkipped++;
@@ -756,8 +789,13 @@ const run = async () => {
 
         // Resolve target album: find the owning artist, then find the album
         const targetArtistId = await resolveArtistId(
-          tx, xref.target_artist_name, xref.target_code_letters,
-          xref.target_code_numbers, xref.target_genre_ref, genreMap, artistCache
+          tx,
+          xref.target_artist_name,
+          xref.target_code_letters,
+          xref.target_code_numbers,
+          xref.target_genre_ref,
+          genreMap,
+          artistCache
         );
         if (targetArtistId == null) {
           releaseXrefSkipped++;
@@ -772,16 +810,30 @@ const run = async () => {
         }
 
         const releaseTitle = xref.release_title.trim();
-        const releaseCvl = xref.release_call_letters != null && xref.release_call_letters.trim().length > 0
-          ? xref.release_call_letters.trim()
-          : null;
+        const releaseCvl =
+          xref.release_call_letters != null && xref.release_call_letters.trim().length > 0
+            ? xref.release_call_letters.trim()
+            : null;
 
         // Check album cache first
-        const albumCacheKey = buildAlbumCacheKey(targetArtistId, targetGenreId, releaseTitle, xref.release_call_numbers, releaseCvl);
+        const albumCacheKey = buildAlbumCacheKey(
+          targetArtistId,
+          targetGenreId,
+          releaseTitle,
+          xref.release_call_numbers,
+          releaseCvl
+        );
         let targetAlbumId = albumIdCache.get(albumCacheKey) ?? null;
 
         if (targetAlbumId == null) {
-          targetAlbumId = await findAlbumId(tx, targetArtistId, targetGenreId, releaseTitle, xref.release_call_numbers, releaseCvl);
+          targetAlbumId = await findAlbumId(
+            tx,
+            targetArtistId,
+            targetGenreId,
+            releaseTitle,
+            xref.release_call_numbers,
+            releaseCvl
+          );
           if (targetAlbumId != null) {
             albumIdCache.set(albumCacheKey, targetAlbumId);
           }
