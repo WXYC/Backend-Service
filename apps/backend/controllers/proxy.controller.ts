@@ -10,8 +10,10 @@ import { SpotifyProvider } from '../services/metadata/providers/spotify.provider
 import { AppleMusicProvider } from '../services/metadata/providers/apple.provider.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 import { getArtworkFinder } from '../services/artwork/finder.js';
+import { classify as classifyNSFW } from '../services/artwork/nsfw.js';
 import { DiscogsService } from '../services/discogs/discogs.service.js';
 import { AlbumMetadataResult, ArtistMetadataResult, SpotifyTokenResponse } from '../services/metadata/metadata.types.js';
+import { LRUCache } from 'lru-cache';
 
 interface SpotifyTrackApiResponse {
   name: string;
@@ -54,18 +56,62 @@ type SpotifyTrackParams = {
   id: string;
 };
 
+// --- Image proxy cache ---
+
+/** Cached artwork result: image bytes for SFW results. */
+interface CachedArtwork {
+  contentType: string;
+  data: Buffer;
+}
+
+const artworkCache = new LRUCache<string, CachedArtwork>({
+  max: 500,
+  ttl: 1000 * 60 * 60, // 1 hour for positive results
+});
+
+/** Separate cache for negative results (NSFW or not found) with longer TTL. */
+const negativeCache = new LRUCache<string, boolean>({
+  max: 1000,
+  ttl: 1000 * 60 * 60 * 24, // 24 hours
+});
+
+function artworkCacheKey(artistName: string, releaseTitle?: string): string {
+  return `${artistName.toLowerCase().trim()}|${(releaseTitle || '').toLowerCase().trim()}`;
+}
+
 // --- Handlers ---
 
 /**
  * GET /proxy/artwork/search
  *
- * Searches for album artwork via the Discogs-backed ArtworkFinder.
+ * Searches for album artwork across Discogs, Last.fm, and iTunes. Downloads the
+ * image, runs NSFW classification, and returns the image bytes directly.
+ *
+ * Returns 200 with image bytes and Content-Type if SFW artwork is found.
+ * Returns 404 if no artwork found or if artwork is NSFW.
  */
 export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSearchQuery> = async (req, res, next) => {
   const { artistName, releaseTitle } = req.query;
 
   if (!artistName) {
     res.status(400).json({ message: 'artistName query parameter is required' });
+    return;
+  }
+
+  const cacheKey = artworkCacheKey(artistName, releaseTitle);
+
+  // Check negative cache first (NSFW or not found)
+  if (negativeCache.has(cacheKey)) {
+    res.status(404).json({ message: 'No artwork available' });
+    return;
+  }
+
+  // Check positive cache
+  const cached = artworkCache.get(cacheKey);
+  if (cached) {
+    res.set('Content-Type', cached.contentType);
+    res.set('Cache-Control', 'private, max-age=600');
+    res.status(200).send(cached.data);
     return;
   }
 
@@ -76,12 +122,39 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
       album: releaseTitle || undefined,
     });
 
+    if (!result.artworkUrl) {
+      negativeCache.set(cacheKey, true);
+      res.status(404).json({ message: 'No artwork found' });
+      return;
+    }
+
+    // Download the image
+    const imageResponse = await fetch(result.artworkUrl);
+    if (!imageResponse.ok) {
+      console.warn(`[ProxyController] Failed to download artwork from ${result.artworkUrl}: ${imageResponse.status}`);
+      negativeCache.set(cacheKey, true);
+      res.status(404).json({ message: 'Failed to fetch artwork image' });
+      return;
+    }
+
+    const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+    const contentType = imageResponse.headers.get('content-type') || 'image/jpeg';
+
+    // Run NSFW classification
+    const nsfwResult = await classifyNSFW(imageBuffer);
+    if (nsfwResult === 'nsfw') {
+      console.log(`[ProxyController] NSFW artwork blocked for ${artistName} - ${releaseTitle || '(no album)'}`);
+      negativeCache.set(cacheKey, true);
+      res.status(404).json({ message: 'No artwork available' });
+      return;
+    }
+
+    // Cache and return the SFW image
+    artworkCache.set(cacheKey, { contentType, data: imageBuffer });
+
+    res.set('Content-Type', contentType);
     res.set('Cache-Control', 'private, max-age=600');
-    res.status(200).json({
-      artworkUrl: result.artworkUrl,
-      source: result.source,
-      confidence: result.confidence,
-    });
+    res.status(200).send(imageBuffer);
   } catch (e) {
     console.error('[ProxyController] searchArtwork error:', e);
     next(e);
