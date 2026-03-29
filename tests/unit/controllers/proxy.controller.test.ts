@@ -6,30 +6,36 @@ import type { Request, Response, NextFunction } from 'express';
 
 // --- Mocks ---
 
-const mockFind = jest.fn<() => Promise<{
-  artworkUrl: string | null;
-  releaseUrl: string | null;
-  album: string | null;
-  artist: string | null;
-  source: string | null;
-  confidence: number;
-}>>();
+const mockFind = jest.fn<
+  () => Promise<{
+    artworkUrl: string | null;
+    releaseUrl: string | null;
+    album: string | null;
+    artist: string | null;
+    source: string | null;
+    confidence: number;
+  }>
+>();
 
 jest.mock('../../../apps/backend/services/artwork/finder', () => ({
   getArtworkFinder: () => ({ find: mockFind }),
 }));
 
-const mockFetchAlbumMetadata = jest.fn<() => Promise<{
-  discogsReleaseId?: number;
-  discogsUrl?: string;
-  releaseYear?: number;
-  artworkUrl?: string;
-} | null>>();
-const mockFetchArtistMetadataById = jest.fn<() => Promise<{
-  discogsArtistId?: number;
-  bio?: string;
-  wikipediaUrl?: string;
-} | null>>();
+const mockFetchAlbumMetadata = jest.fn<
+  () => Promise<{
+    discogsReleaseId?: number;
+    discogsUrl?: string;
+    releaseYear?: number;
+    artworkUrl?: string;
+  } | null>
+>();
+const mockFetchArtistMetadataById = jest.fn<
+  () => Promise<{
+    discogsArtistId?: number;
+    bio?: string;
+    wikipediaUrl?: string;
+  } | null>
+>();
 
 jest.mock('../../../apps/backend/services/metadata/providers/discogs.provider', () => ({
   DiscogsProvider: jest.fn().mockImplementation(() => ({
