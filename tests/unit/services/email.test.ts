@@ -56,47 +56,44 @@ describe('sendEmail', () => {
     SendEmailCommand = sesModule.SendEmailCommand as unknown as jest.Mock;
   });
 
-  describe.each(emailTestCases)(
-    '$description email',
-    ({ type, expectedSubject, expectedActionText }) => {
-      it(`sends email with subject: "${expectedSubject}"`, async () => {
-        await sendEmail({
-          type,
-          to: 'user@example.com',
-          url: 'https://example.com/action?token=abc',
-        });
-
-        expect(SendEmailCommand).toHaveBeenCalledWith(
-          expect.objectContaining({
-            Message: expect.objectContaining({
-              Subject: { Data: expectedSubject },
-            }),
-          })
-        );
+  describe.each(emailTestCases)('$description email', ({ type, expectedSubject, expectedActionText }) => {
+    it(`sends email with subject: "${expectedSubject}"`, async () => {
+      await sendEmail({
+        type,
+        to: 'user@example.com',
+        url: 'https://example.com/action?token=abc',
       });
 
-      it(`includes "${expectedActionText}" as action text in HTML body`, async () => {
-        await sendEmail({
-          type,
-          to: 'user@example.com',
-          url: 'https://example.com/action?token=abc',
-        });
+      expect(SendEmailCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          Message: expect.objectContaining({
+            Subject: { Data: expectedSubject },
+          }),
+        })
+      );
+    });
 
-        const callArgs = SendEmailCommand.mock.calls[0][0];
-        expect(callArgs.Message.Body.Html.Data).toContain(expectedActionText);
+    it(`includes "${expectedActionText}" as action text in HTML body`, async () => {
+      await sendEmail({
+        type,
+        to: 'user@example.com',
+        url: 'https://example.com/action?token=abc',
       });
 
-      it('includes the action URL in the email body', async () => {
-        const testUrl = 'https://example.com/action?token=unique123';
+      const callArgs = SendEmailCommand.mock.calls[0][0];
+      expect(callArgs.Message.Body.Html.Data).toContain(expectedActionText);
+    });
 
-        await sendEmail({ type, to: 'user@example.com', url: testUrl });
+    it('includes the action URL in the email body', async () => {
+      const testUrl = 'https://example.com/action?token=unique123';
 
-        const callArgs = SendEmailCommand.mock.calls[0][0];
-        expect(callArgs.Message.Body.Html.Data).toContain(testUrl);
-        expect(callArgs.Message.Body.Text.Data).toContain(testUrl);
-      });
-    }
-  );
+      await sendEmail({ type, to: 'user@example.com', url: testUrl });
+
+      const callArgs = SendEmailCommand.mock.calls[0][0];
+      expect(callArgs.Message.Body.Html.Data).toContain(testUrl);
+      expect(callArgs.Message.Body.Text.Data).toContain(testUrl);
+    });
+  });
 
   it('throws error when SES_FROM_EMAIL is not configured', async () => {
     delete process.env.SES_FROM_EMAIL;
@@ -155,18 +152,13 @@ const userDetectionCases = [
 ];
 
 describe('isNewUserSetup detection logic', () => {
-  describe.each(userDetectionCases)(
-    'when realName is $description',
-    ({ realName, expectedType }) => {
-      it(`should return ${expectedType} email type`, () => {
-        // This tests the logic that will be used in auth.definition.ts
-        const isNewUserSetup =
-          !realName ||
-          (typeof realName === 'string' && realName.trim() === '');
-        const emailType = isNewUserSetup ? 'accountSetup' : 'passwordReset';
+  describe.each(userDetectionCases)('when realName is $description', ({ realName, expectedType }) => {
+    it(`should return ${expectedType} email type`, () => {
+      // This tests the logic that will be used in auth.definition.ts
+      const isNewUserSetup = !realName || (typeof realName === 'string' && realName.trim() === '');
+      const emailType = isNewUserSetup ? 'accountSetup' : 'passwordReset';
 
-        expect(emailType).toBe(expectedType);
-      });
-    }
-  );
+      expect(emailType).toBe(expectedType);
+    });
+  });
 });

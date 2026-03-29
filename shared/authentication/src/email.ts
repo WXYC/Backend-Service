@@ -41,18 +41,13 @@ export type WXYCEmail =
 /**
  * Content factory for each email type
  */
-function getEmailContent(
-  type: WXYCEmail['type'],
-  url: string,
-  orgName: string
-): EmailTemplateInput {
+function getEmailContent(type: WXYCEmail['type'], url: string, orgName: string): EmailTemplateInput {
   switch (type) {
     case 'passwordReset':
       return {
         subject: 'Reset your password',
         title: 'Reset your password',
-        intro:
-          'We received a request to reset your password. Use the button below to continue.',
+        intro: 'We received a request to reset your password. Use the button below to continue.',
         actionText: 'Reset password',
         actionUrl: url,
       };
@@ -78,13 +73,8 @@ function getEmailContent(
   }
 }
 
-const buildEmailHtml = ({
-  title,
-  intro,
-  actionText,
-  actionUrl,
-  footer,
-}: Omit<EmailTemplateInput, 'subject'>) => `
+const buildEmailHtml = ({ title, intro, actionText, actionUrl, footer }: Omit<EmailTemplateInput, 'subject'>) =>
+  `
   <div style="background-color:#0b0a10;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;color:#fce7f3;">
     <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:600px;margin:0 auto;background:#14101a;border-radius:12px;overflow:hidden;">
       <tr>
@@ -154,26 +144,11 @@ export async function sendEmail(email: WXYCEmail): Promise<void> {
 }
 
 // Backward-compatible wrappers
-export const sendResetPasswordEmail = async ({
-  to,
-  resetUrl,
-}: {
-  to: string;
-  resetUrl: string;
-}) => sendEmail({ type: 'passwordReset', to, url: resetUrl });
+export const sendResetPasswordEmail = async ({ to, resetUrl }: { to: string; resetUrl: string }) =>
+  sendEmail({ type: 'passwordReset', to, url: resetUrl });
 
-export const sendVerificationEmailMessage = async ({
-  to,
-  verificationUrl,
-}: {
-  to: string;
-  verificationUrl: string;
-}) => sendEmail({ type: 'emailVerification', to, url: verificationUrl });
+export const sendVerificationEmailMessage = async ({ to, verificationUrl }: { to: string; verificationUrl: string }) =>
+  sendEmail({ type: 'emailVerification', to, url: verificationUrl });
 
-export const sendAccountSetupEmail = async ({
-  to,
-  setupUrl,
-}: {
-  to: string;
-  setupUrl: string;
-}) => sendEmail({ type: 'accountSetup', to, url: setupUrl });
+export const sendAccountSetupEmail = async ({ to, setupUrl }: { to: string; setupUrl: string }) =>
+  sendEmail({ type: 'accountSetup', to, url: setupUrl });
