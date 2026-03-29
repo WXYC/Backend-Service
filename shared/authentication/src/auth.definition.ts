@@ -65,8 +65,7 @@ export const auth: Auth = betterAuth({
       };
       const isNewUserSetup =
         !userWithCustomFields.realName ||
-        (typeof userWithCustomFields.realName === 'string' &&
-          userWithCustomFields.realName.trim() === '');
+        (typeof userWithCustomFields.realName === 'string' && userWithCustomFields.realName.trim() === '');
 
       const emailType = isNewUserSetup ? 'accountSetup' : 'passwordReset';
 

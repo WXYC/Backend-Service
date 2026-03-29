@@ -16,10 +16,7 @@ type Capability = (typeof CAPABILITIES)[number];
 /**
  * Check if a user has a specific capability.
  */
-function hasCapability(
-  capabilities: Capability[] | null | undefined,
-  capability: Capability
-): boolean {
+function hasCapability(capabilities: Capability[] | null | undefined, capability: Capability): boolean {
   return capabilities?.includes(capability) ?? false;
 }
 
