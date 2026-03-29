@@ -452,20 +452,21 @@ describe('proxy.controller', () => {
       // Mock token response
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ access_token: 'mock-token', expires_in: 3600 }),
+        json: () => Promise.resolve({ access_token: 'mock-token', expires_in: 3600 }),
       } as globalThis.Response);
 
       // Mock track response
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({
-          name: 'Everything In Its Right Place',
-          artists: [{ name: 'Radiohead' }],
-          album: {
-            name: 'Kid A',
-            images: [{ url: 'https://i.scdn.co/image/abc' }],
-          },
-        }),
+        json: () =>
+          Promise.resolve({
+            name: 'Everything In Its Right Place',
+            artists: [{ name: 'Radiohead' }],
+            album: {
+              name: 'Kid A',
+              images: [{ url: 'https://i.scdn.co/image/abc' }],
+            },
+          }),
       } as globalThis.Response);
 
       const req = { params: { id: '6LgJvl0Xdtc73RJ1mN1a7A' } } as unknown as Request;
@@ -486,7 +487,7 @@ describe('proxy.controller', () => {
     it('returns 404 when Spotify track not found', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ access_token: 'mock-token', expires_in: 3600 }),
+        json: () => Promise.resolve({ access_token: 'mock-token', expires_in: 3600 }),
       } as globalThis.Response);
 
       mockFetch.mockResolvedValueOnce({
