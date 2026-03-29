@@ -12,7 +12,11 @@ import { SearchUrlProvider } from '../services/metadata/providers/search-urls.pr
 import { getArtworkFinder } from '../services/artwork/finder.js';
 import { classify as classifyNSFW } from '../services/artwork/nsfw.js';
 import { DiscogsService } from '../services/discogs/discogs.service.js';
-import { AlbumMetadataResult, ArtistMetadataResult, SpotifyTokenResponse } from '../services/metadata/metadata.types.js';
+import {
+  AlbumMetadataResult,
+  ArtistMetadataResult,
+  SpotifyTokenResponse,
+} from '../services/metadata/metadata.types.js';
 import { LRUCache } from 'lru-cache';
 
 interface SpotifyTrackApiResponse {
@@ -345,7 +349,7 @@ export const getSpotifyTrack: RequestHandler<SpotifyTrackParams> = async (req, r
       return;
     }
 
-    const tokenData: SpotifyTokenResponse = await tokenResponse.json() as SpotifyTokenResponse;
+    const tokenData: SpotifyTokenResponse = (await tokenResponse.json()) as SpotifyTokenResponse;
 
     const trackResponse = await fetch(`https://api.spotify.com/v1/tracks/${encodeURIComponent(id)}`, {
       headers: {
@@ -363,7 +367,7 @@ export const getSpotifyTrack: RequestHandler<SpotifyTrackParams> = async (req, r
       return;
     }
 
-    const track: SpotifyTrackApiResponse = await trackResponse.json() as SpotifyTrackApiResponse;
+    const track: SpotifyTrackApiResponse = (await trackResponse.json()) as SpotifyTrackApiResponse;
 
     res.set('Cache-Control', 'private, max-age=600');
     res.status(200).json({
