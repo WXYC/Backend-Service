@@ -8,9 +8,11 @@ const __dirname = dirname(__filename);
 
 export default defineConfig((options) => ({
   entry: ['app.ts'],
-  format: ['cjs'],
+  format: ['esm'],
   outDir: 'dist',
   clean: true,
+  sourcemap: true,
+  external: ['@sentry/node'],
   onSuccess: options.watch ? 'node ./dist/app.js' : undefined,
   minify: !options.watch,
 

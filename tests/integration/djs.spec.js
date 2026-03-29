@@ -52,7 +52,7 @@ describe('DJ Bin', () => {
           dj_id: global.primary_dj_id,
           album_id: 1,
         })
-        .expect(200);
+        .expect(201);
 
       expectFields(res.body, 'album_id', 'dj_id');
       expect(res.body.album_id).toBe(1);
@@ -67,7 +67,7 @@ describe('DJ Bin', () => {
           album_id: 1,
           track_title: 'Carry the Zero',
         })
-        .expect(200);
+        .expect(201);
 
       expectFields(res.body, 'album_id', 'track_title');
       expect(res.body.album_id).toBe(1);

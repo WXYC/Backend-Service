@@ -9,15 +9,16 @@
     "start": "node dist/app.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
-    "docker:build": "docker build -t wxyc_auth_service:ci -f ../../Dockerfile.auth ../../",
+    "docker:build": "docker build --build-arg NPM_TOKEN=$NPM_TOKEN -t wxyc_auth_service:ci -f ../../Dockerfile.auth ../../",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit"
   },
   "author": "Jackson Meade",
   "license": "MIT",
   "dependencies": {
-    "@wxyc/database": "^1.0.0",
+    "@sentry/node": "^10.40.0",
     "@wxyc/authentication": "^1.0.0",
+    "@wxyc/database": "^1.0.0",
     "better-auth": "^1.3.23",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",

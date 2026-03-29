@@ -1,5 +1,7 @@
 dist
 coverage
 node_modules
+.cache
+.claude
 shared/database/src/migrations
 *.sql

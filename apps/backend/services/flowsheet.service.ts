@@ -1,4 +1,5 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
+import WxycError from '../utils/error.js';
 import {
   db,
   FSEntry,
@@ -50,6 +51,7 @@ const FSEntryFieldsRaw = {
   album_title: flowsheet.album_title,
   track_title: flowsheet.track_title,
   record_label: flowsheet.record_label,
+  label_id: flowsheet.label_id,
   rotation_id: flowsheet.rotation_id,
   rotation_bin: rotation.rotation_bin,
   request_flag: flowsheet.request_flag,
@@ -80,6 +82,7 @@ type FSEntryRaw = {
   album_title: string | null;
   track_title: string | null;
   record_label: string | null;
+  label_id: number | null;
   rotation_id: number | null;
   rotation_bin: string | null;
   request_flag: boolean | null;
@@ -108,6 +111,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   album_title: raw.album_title,
   track_title: raw.track_title,
   record_label: raw.record_label,
+  label_id: raw.label_id,
   rotation_id: raw.rotation_id,
   rotation_bin: raw.rotation_bin,
   request_flag: raw.request_flag ?? false,
@@ -280,6 +284,10 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
 export const startShow = async (dj_id: string, show_name?: string, specialty_id?: number): Promise<Show> => {
   const dj_info = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
+  if (!dj_info) {
+    throw new WxycError(`DJ with id '${dj_id}' not found`, 404);
+  }
+
   const new_show = await db
     .insert(shows)
     .values({
@@ -419,7 +427,7 @@ export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowD
 
   // In case gaurds further up the line of logic fail
   if (update_result === undefined) {
-    throw new Error('DJ not in show');
+    throw new WxycError('Bad Request: DJ not a member of show', 400);
   }
 
   // -- Add DJ Left to Flowsheet --
@@ -512,6 +520,7 @@ export const getAlbumFromDB = async (album_id: number) => {
       artist_name: artists.artist_name,
       album_title: library.album_title,
       record_label: library.label,
+      label_id: library.label_id,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -617,6 +626,7 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         album_title: entry.album_title,
         track_title: entry.track_title,
         record_label: entry.record_label,
+        label_id: entry.label_id,
         request_flag: entry.request_flag,
         rotation_bin: entry.rotation_bin,
         artwork_url: entry.metadata?.artwork_url ?? null,

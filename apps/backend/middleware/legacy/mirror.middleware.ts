@@ -1,7 +1,20 @@
 import { NextFunction, Request, Response } from 'express';
 import { MirrorCommandQueue } from './commandqueue.mirror';
+import { getPostHogClient } from '../../utils/posthog.js';
 
-import { PostHog } from 'posthog-node';
+/**
+ * Check the PostHog `backend-mirror` feature flag. If PostHog is not
+ * configured (no API key), the mirror is enabled by default so that
+ * local development and E2E tests work without external dependencies.
+ */
+async function isMirrorEnabled(req: Request): Promise<boolean> {
+  if (!process.env.POSTHOG_API_KEY) return true;
+
+  const client = getPostHogClient();
+  const distinctId = (req as any).user?.id ?? req.ip ?? 'anonymous';
+  const enabled = await client.isFeatureEnabled('backend-mirror', distinctId);
+  return enabled ?? false;
+}
 
 export const createBackendMirrorMiddleware =
   <T>(createCommand: (req: Request, data: T) => Promise<string[]>) =>
@@ -12,30 +25,54 @@ export const createBackendMirrorMiddleware =
     res.once('finish', () => {
       void (async () => {
         try {
-          const postHogClient = new PostHog(process.env.POSTHOG_API_KEY ?? '', {
-            host: 'https://us.i.posthog.com',
-          });
-
           console.log('Response finished, checking for mirror work...');
           const ok = res.statusCode >= 200 && res.statusCode < 305;
           const data = (res.locals as any).mirrorData as T | undefined;
 
           console.log('Response status:', res.statusCode, 'ok?', ok);
 
-          const distinctId = (req as any).user?.id ?? req.ip ?? 'anonymous';
-          let mirrorOn = await postHogClient.isFeatureEnabled('backend-mirror', distinctId);
-          mirrorOn ??= false;
+          if (!ok || data == null) return;
 
-          if (!ok || data == null || !mirrorOn) return;
+          const mirrorOn = await isMirrorEnabled(req);
+          if (!mirrorOn) return;
 
           console.log('Enqueuing mirror work...');
 
           const queue = MirrorCommandQueue.instance();
           queue.enqueue(await createCommand(req, data));
-
-          await postHogClient.shutdown();
         } catch (e) {
           console.error('Error in mirror middleware:', e);
+        }
+      })();
+    });
+
+    next();
+  };
+
+/**
+ * HTTP mirror middleware factory. Same response-tapping and PostHog feature flag
+ * check as createBackendMirrorMiddleware, but calls an async callback that makes
+ * HTTP calls instead of returning SQL strings for the command queue.
+ */
+export const createHttpMirrorMiddleware =
+  <T>(execute: (req: Request, data: T) => Promise<void>) =>
+  async (req: Request, res: Response, next: NextFunction) => {
+    tapJsonResponse(res);
+
+    res.once('finish', () => {
+      void (async () => {
+        try {
+          const ok = res.statusCode >= 200 && res.statusCode < 305;
+          const data = (res.locals as any).mirrorData as T | undefined;
+
+          if (!ok || data == null) return;
+
+          const mirrorOn = await isMirrorEnabled(req);
+          if (!mirrorOn) return;
+
+          await execute(req, data);
+        } catch (e) {
+          console.error('Error in HTTP mirror middleware:', e);
         }
       })();
     });

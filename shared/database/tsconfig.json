@@ -7,6 +7,7 @@
     "baseUrl": ".",
     "rootDir": ".",
     "outDir": "./dist",
+    "tsBuildInfoFile": "./.cache/tsconfig.tsbuildinfo",
     "module": "esnext",
     "moduleResolution": "bundler",
     "strict": true

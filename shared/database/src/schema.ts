@@ -1,5 +1,5 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
-import { sql, eq } from 'drizzle-orm';
+import { sql, eq, and } from 'drizzle-orm';
 import {
   pgSchema,
   pgTable,
@@ -188,12 +188,19 @@ export type NewShiftCover = InferInsertModel<typeof shift_covers>;
 export type ShiftCover = InferSelectModel<typeof shift_covers>;
 export const shift_covers = wxyc_schema.table('shift_covers', {
   id: serial('id').primaryKey(),
-  schedule_id: serial('schedule_id')
+  schedule_id: integer('schedule_id')
     .references(() => schedule.id)
     .notNull(),
-  shift_timestamp: timestamp('shift_timestamp').notNull(), //Timestamp to expire cover requests
+  shift_timestamp: timestamp('shift_timestamp', { withTimezone: true }).notNull(), //Timestamp to expire cover requests
   cover_dj_id: varchar('cover_dj_id', { length: 255 }).references(() => user.id),
   covered: boolean('covered').default(false),
+});
+
+export type NewCronjobRun = InferInsertModel<typeof cronjob_runs>;
+export type CronjobRun = InferSelectModel<typeof cronjob_runs>;
+export const cronjob_runs = wxyc_schema.table('cronjob_runs', {
+  job_name: varchar('job_name', { length: 64 }).primaryKey(),
+  last_run: timestamp('last_run', { withTimezone: true }).notNull().defaultNow(),
 });
 
 export type NewArtist = InferInsertModel<typeof artists>;
@@ -202,14 +209,11 @@ export const artists = wxyc_schema.table(
   'artists',
   {
     id: serial('id').primaryKey(),
-    genre_id: integer('genre_id')
-      .references(() => genres.id)
-      .notNull(),
     artist_name: varchar('artist_name', { length: 128 }).notNull(),
-    code_letters: varchar('code_letters', { length: 2 }).notNull(),
-    code_artist_number: smallint('code_artist_number').notNull(),
+    alphabetical_name: varchar('alphabetical_name', { length: 128 }).notNull(),
+    code_letters: varchar('code_letters', { length: 4 }).notNull(),
     add_date: date('add_date').defaultNow().notNull(),
-    last_modified: timestamp('last_modified').defaultNow().notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => {
     return {
@@ -246,11 +250,13 @@ export const library = wxyc_schema.table(
     alternate_artist_name: varchar('alternate_artist_name', { length: 128 }),
     album_title: varchar('album_title', { length: 128 }).notNull(),
     label: varchar('label', { length: 128 }),
+    label_id: integer('label_id').references(() => labels.id),
     code_number: smallint('code_number').notNull(),
+    code_volume_letters: varchar('code_volume_letters', { length: 4 }),
     disc_quantity: smallint('disc_quantity').default(1).notNull(),
     plays: integer('plays').default(0).notNull(),
-    add_date: timestamp('add_date').defaultNow().notNull(),
-    last_modified: timestamp('last_modified').defaultNow().notNull(),
+    add_date: timestamp('add_date', { withTimezone: true }).defaultNow().notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => {
     return {
@@ -306,10 +312,11 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   album_title: varchar('album_title', { length: 128 }),
   artist_name: varchar('artist_name', { length: 128 }),
   record_label: varchar('record_label', { length: 128 }),
+  label_id: integer('label_id').references(() => labels.id),
   play_order: serial('play_order').notNull(),
   request_flag: boolean('request_flag').default(false).notNull(),
   message: varchar('message', { length: 250 }),
-  add_time: timestamp('add_time').defaultNow().notNull(),
+  add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
 });
 
 export type NewGenre = InferInsertModel<typeof genres>;
@@ -320,7 +327,15 @@ export const genres = wxyc_schema.table('genres', {
   description: text('description'),
   plays: integer('plays').default(0).notNull(),
   add_date: date('add_date').defaultNow().notNull(),
-  last_modified: timestamp('last_modified').defaultNow().notNull(),
+  last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type NewLabel = InferInsertModel<typeof labels>;
+export type Label = InferSelectModel<typeof labels>;
+export const labels = wxyc_schema.table('labels', {
+  id: serial('id').primaryKey(),
+  label_name: varchar('label_name', { length: 128 }).notNull().unique(),
+  parent_label_id: integer('parent_label_id'),
 });
 
 export type NewReview = InferInsertModel<typeof reviews>;
@@ -333,7 +348,7 @@ export const reviews = wxyc_schema.table('reviews', {
     .unique(),
   review: text('review'),
   add_date: date('add_date').defaultNow().notNull(),
-  last_modified: timestamp('last_modified').defaultNow().notNull(),
+  last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   author: varchar('author', { length: 32 }),
 });
 
@@ -385,21 +400,25 @@ export const shows = wxyc_schema.table('shows', {
   specialty_id: integer('specialty_id') //Null for regular shows
     .references(() => specialty_shows.id),
   show_name: varchar('show_name', { length: 128 }), //Null if not provided or specialty show
-  start_time: timestamp('start_time').defaultNow().notNull(),
-  end_time: timestamp('end_time'),
+  start_time: timestamp('start_time', { withTimezone: true }).defaultNow().notNull(),
+  end_time: timestamp('end_time', { withTimezone: true }),
 });
 
 export type NewShowDJ = InferInsertModel<typeof show_djs>;
 export type ShowDJ = InferSelectModel<typeof show_djs>;
-export const show_djs = wxyc_schema.table('show_djs', {
-  show_id: integer('show_id')
-    .references(() => shows.id)
-    .notNull(),
-  dj_id: varchar('dj_id', { length: 255 })
-    .references(() => user.id, { onDelete: 'cascade' })
-    .notNull(),
-  active: boolean('active').default(true),
-});
+export const show_djs = wxyc_schema.table(
+  'show_djs',
+  {
+    show_id: integer('show_id')
+      .references(() => shows.id)
+      .notNull(),
+    dj_id: varchar('dj_id', { length: 255 })
+      .references(() => user.id, { onDelete: 'cascade' })
+      .notNull(),
+    active: boolean('active').default(true),
+  },
+  (table) => [uniqueIndex('show_djs_show_id_dj_id_unique').on(table.show_id, table.dj_id)]
+);
 
 //create entry w/ ID 0 for regular shows
 export type NewSpecialtyShow = InferInsertModel<typeof specialty_shows>;
@@ -409,7 +428,7 @@ export const specialty_shows = wxyc_schema.table('specialty_shows', {
   specialty_name: varchar('specialty_name', { length: 64 }).notNull(),
   description: text('description'),
   add_date: date('add_date').defaultNow().notNull(),
-  last_modified: timestamp('last_modified').defaultNow().notNull(),
+  last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
 });
 
 export type LibraryArtistViewEntry = {
@@ -418,35 +437,46 @@ export type LibraryArtistViewEntry = {
   code_artist_number: number;
   code_number: number;
   artist_name: string;
+  alphabetical_name: string;
   album_title: string;
   format_name: string;
   genre_name: string;
   rotation_bin: string | null;
   add_date: Date;
   label: string | null;
+  label_id: number | null;
 };
 export const library_artist_view = wxyc_schema.view('library_artist_view').as((qb) => {
   return qb
     .select({
       id: library.id,
       code_letters: artists.code_letters,
-      code_artist_number: artists.code_artist_number,
+      code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
       album_title: library.album_title,
       format_name: format.format_name,
       genre_name: genres.genre_name,
       rotation_bin: rotation.rotation_bin,
       add_date: library.add_date,
       label: library.label,
+      label_id: library.label_id,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
     .innerJoin(format, eq(format.id, library.format_id))
     .innerJoin(genres, eq(genres.id, library.genre_id))
+    .innerJoin(
+      genre_artist_crossreference,
+      and(
+        eq(genre_artist_crossreference.artist_id, library.artist_id),
+        eq(genre_artist_crossreference.genre_id, library.genre_id)
+      )
+    )
     .leftJoin(
       rotation,
-      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} < CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
+      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
     );
 });
 
@@ -456,9 +486,11 @@ export const rotation_library_view = wxyc_schema.view('rotation_library_view').a
       library_id: library.id,
       rotation_id: rotation.id,
       label: library.label,
+      label_id: library.label_id,
       rotation_bin: rotation.rotation_bin,
       album_title: library.album_title,
       artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
       kill_date: rotation.kill_date,
     })
     .from(library)
@@ -493,8 +525,8 @@ export const album_metadata = wxyc_schema.table(
 
     // LRU cache management
     is_rotation: boolean('is_rotation').default(false).notNull(),
-    last_accessed: timestamp('last_accessed').defaultNow().notNull(),
-    created_at: timestamp('created_at').defaultNow().notNull(),
+    last_accessed: timestamp('last_accessed', { withTimezone: true }).defaultNow().notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => {
     return {
@@ -522,8 +554,8 @@ export const artist_metadata = wxyc_schema.table(
     wikipedia_url: varchar('wikipedia_url', { length: 512 }),
 
     // LRU cache management
-    last_accessed: timestamp('last_accessed').defaultNow().notNull(),
-    created_at: timestamp('created_at').defaultNow().notNull(),
+    last_accessed: timestamp('last_accessed', { withTimezone: true }).defaultNow().notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => {
     return {

@@ -8,7 +8,7 @@ export default defineConfig((options) => ({
   target: 'node20',
   clean: true,
   sourcemap: true,
-  external: ['@wxyc/database', 'better-auth', 'drizzle-orm', 'express', 'cors', 'postgres'],
+  external: ['@wxyc/database', 'better-auth', 'drizzle-orm', 'express', 'cors', 'postgres', '@sentry/node'],
   env: {
     NODE_ENV: process.env.NODE_ENV || 'development',
   },

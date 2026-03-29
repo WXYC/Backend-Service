@@ -3,18 +3,21 @@
   "publishPort": "8080",
   "version": "1.0.0",
   "description": "An API service for the flowsheet database of WXYC",
+  "type": "module",
   "main": "./dist/app.js",
   "scripts": {
     "start": "node dist/app.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
-    "docker:build": "docker build -t wxyc_backend_service:ci -f ../../Dockerfile.backend ../../",
+    "docker:build": "docker build --build-arg NPM_TOKEN=$NPM_TOKEN -t wxyc_backend_service:ci -f ../../Dockerfile.backend ../../",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit"
   },
   "author": "AyBruno",
   "license": "MIT",
   "dependencies": {
+    "@sentry/node": "^10.40.0",
+    "@tensorflow/tfjs-node": "^4.22.0",
     "@wxyc/authentication": "*",
     "@wxyc/database": "*",
     "async-mutex": "^0.5.0",
@@ -28,8 +31,10 @@
     "lru-cache": "^10.2.0",
     "node-fetch": "^3.3.2",
     "node-ssh": "^13.2.1",
+    "nsfwjs": "^4.3.0",
     "postgres": "^3.4.4",
     "posthog-node": "^5.8.6",
+    "sharp": "^0.34.5",
     "ssh2": "^1.17.0",
     "swagger-ui-express": "^5.0.1",
     "yaml": "^2.7.1"

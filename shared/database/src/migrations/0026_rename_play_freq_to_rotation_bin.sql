@@ -8,7 +8,15 @@ DROP VIEW IF EXISTS "wxyc_schema"."rotation_library_view";
 --> statement-breakpoint
 
 -- Rename the column
-ALTER TABLE "wxyc_schema"."rotation" RENAME COLUMN "play_freq" TO "rotation_bin";
+DO $$
+BEGIN
+  IF EXISTS(SELECT *
+    FROM information_schema.columns
+    WHERE table_name='rotation' and column_name='play_freq')
+  THEN
+    ALTER TABLE "wxyc_schema"."rotation" RENAME COLUMN "play_freq" TO "rotation_bin";
+  END IF;
+END $$;
 --> statement-breakpoint
 
 -- Recreate library_artist_view with the new column name

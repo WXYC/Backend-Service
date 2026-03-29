@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "drizzle-orm": "^0.41.0",
-    "postgres": "^3.4.4"
+    "postgres": "^3.4.4",
+    "node-ssh": "^13.2.1"
   },
   "devDependencies": {
     "tsup": "^8.5.0",

@@ -6,14 +6,14 @@ const config: Config = {
   testMatch: ['<rootDir>/tests/unit/**/*.test.ts'],
   setupFilesAfterEnv: ['<rootDir>/tests/setup/unit.setup.ts'],
   transform: {
-    '^.+\\.tsx?$': [
+    '^.+\\.[jt]sx?$': [
       'ts-jest',
       {
         tsconfig: '<rootDir>/tests/tsconfig.json',
       },
     ],
   },
-  transformIgnorePatterns: ['node_modules/(?!(jose|drizzle-orm)/)'],
+  transformIgnorePatterns: ['node_modules/(?!(jose|drizzle-orm|@wxyc/shared)/)'],
   moduleNameMapper: {
     // Mock workspace database package
     '^@wxyc/database$': '<rootDir>/tests/mocks/database.mock.ts',
@@ -25,7 +25,7 @@ const config: Config = {
     // Remove .js extensions from relative imports (ESM compatibility)
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },
-  collectCoverageFrom: ['apps/backend/**/*.ts', '!**/*.d.ts', '!**/dist/**'],
+  collectCoverageFrom: ['apps/backend/**/*.ts', 'jobs/**/*.ts', '!**/*.d.ts', '!**/dist/**'],
   clearMocks: true,
 };
 

@@ -1,3 +1,5 @@
+import './instrument.js';
+import * as Sentry from '@sentry/node';
 import express from 'express';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
@@ -5,28 +7,37 @@ import { parse as parse_yaml } from 'yaml';
 import swaggerContent from './app.yaml';
 import { dj_route } from './routes/djs.route.js';
 import { flowsheet_route } from './routes/flowsheet.route.js';
+import { labels_route } from './routes/labels.route.js';
 
 import { library_route } from './routes/library.route.js';
 import { schedule_route } from './routes/schedule.route.js';
 import { events_route } from './routes/events.route.js';
 import { request_line_route } from './routes/requestLine.route.js';
-import { showMemberMiddleware } from './middleware/checkShowMember.js';
+import { config_route } from './routes/config.route.js';
+import { proxy_route } from './routes/proxy.route.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
+import { requestIdMiddleware } from './middleware/requestId.js';
 import { requirePermissions } from '@wxyc/authentication';
 
 const port = process.env.PORT || 8080;
 const app = express();
 
+app.set('trust proxy', true);
+
 //Interpret parse json into js objects
 app.use(express.json());
+
+// Cross-service request correlation
+app.use(requestIdMiddleware);
 
 //CORS
 app.use(
   cors({
     origin: process.env.FRONTEND_SOURCE || '*',
     methods: ['GET', 'POST', 'DELETE', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+    exposedHeaders: ['X-Request-Id'],
     credentials: true,
   })
 );
@@ -35,7 +46,15 @@ app.use(
 const swaggerDoc = parse_yaml(swaggerContent);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc));
 
+// Public configuration endpoint (unauthenticated)
+app.use('/config', config_route);
+
+// Proxy endpoints for iOS app (anonymous auth + rate limiting)
+app.use('/proxy', proxy_route);
+
 // Business logic routes
+app.use('/labels', labels_route);
+
 app.use('/library', library_route);
 
 app.use('/flowsheet', flowsheet_route);
@@ -67,6 +86,7 @@ app.get('/healthcheck', async (req, res) => {
   res.json({ message: 'Healthy!' });
 });
 
+Sentry.setupExpressErrorHandler(app);
 app.use(errorHandler);
 
 const server = app.listen(port, () => {

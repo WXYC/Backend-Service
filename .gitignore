@@ -5,4 +5,5 @@ dist
 mirror-logs
 .env
 .DS_STORE
+.cache
 *.tsbuildinfo
