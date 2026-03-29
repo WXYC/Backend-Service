@@ -1,11 +1,36 @@
 /**
  * Unit tests for the proxy controller.
+ *
+ * Handlers that are rerouted through library-metadata-lookup (LML) mock the
+ * LML client. The Spotify handler still mocks global fetch directly.
  */
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
 
 // --- Mocks ---
 
+// LML client mocks (used by searchArtwork, getAlbumMetadata, getArtistMetadata, resolveEntity)
+const mockSearchDiscogs = jest.fn<() => Promise<unknown>>();
+const mockGetRelease = jest.fn<() => Promise<unknown>>();
+const mockGetArtistDetails = jest.fn<() => Promise<unknown>>();
+const mockResolveEntity = jest.fn<() => Promise<unknown>>();
+
+jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+  searchDiscogs: mockSearchDiscogs,
+  getRelease: mockGetRelease,
+  getArtistDetails: mockGetArtistDetails,
+  resolveEntity: mockResolveEntity,
+  LmlClientError: class LmlClientError extends Error {
+    statusCode: number;
+    constructor(message: string, statusCode: number) {
+      super(message);
+      this.name = 'LmlClientError';
+      this.statusCode = statusCode;
+    }
+  },
+}));
+
+// Artwork finder mock (still used for Last.fm/iTunes fallback in searchArtwork)
 const mockFind = jest.fn<
   () => Promise<{
     artworkUrl: string | null;
@@ -21,29 +46,7 @@ jest.mock('../../../apps/backend/services/artwork/finder', () => ({
   getArtworkFinder: () => ({ find: mockFind }),
 }));
 
-const mockFetchAlbumMetadata = jest.fn<
-  () => Promise<{
-    discogsReleaseId?: number;
-    discogsUrl?: string;
-    releaseYear?: number;
-    artworkUrl?: string;
-  } | null>
->();
-const mockFetchArtistMetadataById = jest.fn<
-  () => Promise<{
-    discogsArtistId?: number;
-    bio?: string;
-    wikipediaUrl?: string;
-  } | null>
->();
-
-jest.mock('../../../apps/backend/services/metadata/providers/discogs.provider', () => ({
-  DiscogsProvider: jest.fn().mockImplementation(() => ({
-    fetchAlbumMetadata: mockFetchAlbumMetadata,
-    fetchArtistMetadataById: mockFetchArtistMetadataById,
-  })),
-}));
-
+// Spotify and Apple Music providers (still used by getAlbumMetadata)
 const mockGetSpotifyUrl = jest.fn<() => Promise<string | null>>();
 
 jest.mock('../../../apps/backend/services/metadata/providers/spotify.provider', () => ({
@@ -62,24 +65,12 @@ jest.mock('../../../apps/backend/services/metadata/providers/apple.provider', ()
 
 jest.mock('../../../apps/backend/services/metadata/providers/search-urls.provider', () => ({
   SearchUrlProvider: jest.fn().mockImplementation(() => ({
-    getAllSearchUrls: (artist: string, album?: string, track?: string) => ({
+    getAllSearchUrls: (artist: string, _album?: string, _track?: string) => ({
       youtubeMusicUrl: `https://music.youtube.com/search?q=${encodeURIComponent(artist)}`,
       bandcampUrl: `https://bandcamp.com/search?q=${encodeURIComponent(artist)}`,
       soundcloudUrl: `https://soundcloud.com/search?q=${encodeURIComponent(artist)}`,
     }),
   })),
-}));
-
-const mockGetArtist = jest.fn<() => Promise<{ id: number; name: string } | null>>();
-const mockGetRelease = jest.fn<() => Promise<{ title: string } | null>>();
-const mockGetMaster = jest.fn<() => Promise<{ title: string } | null>>();
-
-jest.mock('../../../apps/backend/services/discogs/discogs.service', () => ({
-  DiscogsService: {
-    getArtist: mockGetArtist,
-    getRelease: mockGetRelease,
-    getMaster: mockGetMaster,
-  },
 }));
 
 const mockClassifyNSFW = jest.fn<() => Promise<'sfw' | 'nsfw'>>();
@@ -234,18 +225,47 @@ describe('proxy.controller', () => {
       expect(res.status).toHaveBeenCalledWith(400);
     });
 
-    it('returns merged metadata from all providers', async () => {
-      mockFetchAlbumMetadata.mockResolvedValue({
-        discogsReleaseId: 12345,
-        discogsUrl: 'https://www.discogs.com/release/12345',
-        releaseYear: 1997,
-        artworkUrl: 'https://i.discogs.com/art.jpg',
+    it('returns merged metadata from LML search + release + other providers', async () => {
+      mockSearchDiscogs.mockResolvedValue({
+        results: [
+          {
+            release_id: 12345,
+            release_url: 'https://www.discogs.com/release/12345',
+            artwork_url: 'https://i.discogs.com/art.jpg',
+            album: 'Confield',
+            artist: 'Autechre',
+            confidence: 0.95,
+          },
+        ],
+        total: 1,
+        cached: false,
       });
-      mockGetSpotifyUrl.mockResolvedValue('https://open.spotify.com/track/abc');
+
+      mockGetRelease.mockResolvedValue({
+        release_id: 12345,
+        title: 'Confield',
+        artist: 'Autechre',
+        year: 2001,
+        label: 'Warp',
+        artist_id: 3840,
+        genres: ['Electronic'],
+        styles: ['IDM', 'Abstract'],
+        tracklist: [
+          { position: '1', title: 'VI Scose Poise', duration: '6:45', artists: [] },
+          { position: '2', title: 'Cfern', duration: '7:01', artists: [] },
+        ],
+        artwork_url: 'https://i.discogs.com/art.jpg',
+        release_url: 'https://www.discogs.com/release/12345',
+        released: '2001-04-30',
+        cached: false,
+        artists: [{ artist_id: 3840, name: 'Autechre', join: '', role: null }],
+      });
+
+      mockGetSpotifyUrl.mockResolvedValue('https://open.spotify.com/album/abc');
       mockGetAppleMusicUrl.mockResolvedValue('https://music.apple.com/album/xyz');
 
       const req = {
-        query: { artistName: 'Radiohead', releaseTitle: 'OK Computer', trackTitle: 'Paranoid Android' },
+        query: { artistName: 'Autechre', releaseTitle: 'Confield' },
       } as unknown as Request;
       const res = createMockRes();
 
@@ -254,7 +274,19 @@ describe('proxy.controller', () => {
       expect(res.status).toHaveBeenCalledWith(200);
       const result = (res.json as jest.Mock).mock.calls[0][0];
       expect(result.discogsReleaseId).toBe(12345);
-      expect(result.spotifyUrl).toBe('https://open.spotify.com/track/abc');
+      expect(result.discogsUrl).toBe('https://www.discogs.com/release/12345');
+      expect(result.releaseYear).toBe(2001);
+      expect(result.artworkUrl).toBe('https://i.discogs.com/art.jpg');
+      expect(result.genres).toEqual(['Electronic']);
+      expect(result.styles).toEqual(['IDM', 'Abstract']);
+      expect(result.label).toBe('Warp');
+      expect(result.discogsArtistId).toBe(3840);
+      expect(result.fullReleaseDate).toBe('2001-04-30');
+      expect(result.tracklist).toEqual([
+        { position: '1', title: 'VI Scose Poise', duration: '6:45' },
+        { position: '2', title: 'Cfern', duration: '7:01' },
+      ]);
+      expect(result.spotifyUrl).toBe('https://open.spotify.com/album/abc');
       expect(result.appleMusicUrl).toBe('https://music.apple.com/album/xyz');
       expect(result.youtubeMusicUrl).toContain('music.youtube.com');
       expect(result.bandcampUrl).toContain('bandcamp.com');
@@ -262,8 +294,8 @@ describe('proxy.controller', () => {
       expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');
     });
 
-    it('returns partial metadata when some providers fail', async () => {
-      mockFetchAlbumMetadata.mockRejectedValue(new Error('Discogs down'));
+    it('returns partial metadata when LML search fails but other providers succeed', async () => {
+      mockSearchDiscogs.mockRejectedValue(new Error('LML down'));
       mockGetSpotifyUrl.mockResolvedValue('https://open.spotify.com/track/abc');
       mockGetAppleMusicUrl.mockResolvedValue(null);
 
@@ -276,6 +308,64 @@ describe('proxy.controller', () => {
       const result = (res.json as jest.Mock).mock.calls[0][0];
       expect(result.spotifyUrl).toBe('https://open.spotify.com/track/abc');
       expect(result.discogsReleaseId).toBeUndefined();
+    });
+
+    it('returns search-only metadata when release fetch fails', async () => {
+      mockSearchDiscogs.mockResolvedValue({
+        results: [
+          {
+            release_id: 99999,
+            release_url: 'https://www.discogs.com/release/99999',
+            artwork_url: 'https://i.discogs.com/art.jpg',
+            album: 'Moon Pix',
+            artist: 'Cat Power',
+            confidence: 0.9,
+          },
+        ],
+        total: 1,
+        cached: false,
+      });
+
+      mockGetRelease.mockRejectedValue(new Error('Release fetch failed'));
+      mockGetSpotifyUrl.mockResolvedValue(null);
+      mockGetAppleMusicUrl.mockResolvedValue(null);
+
+      const req = {
+        query: { artistName: 'Cat Power', releaseTitle: 'Moon Pix' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await getAlbumMetadata(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const result = (res.json as jest.Mock).mock.calls[0][0];
+      expect(result.discogsReleaseId).toBe(99999);
+      expect(result.artworkUrl).toBe('https://i.discogs.com/art.jpg');
+      // No enriched fields since release fetch failed
+      expect(result.genres).toBeUndefined();
+      expect(result.tracklist).toBeUndefined();
+    });
+
+    it('returns metadata when LML search returns empty results', async () => {
+      mockSearchDiscogs.mockResolvedValue({
+        results: [],
+        total: 0,
+        cached: false,
+      });
+
+      mockGetSpotifyUrl.mockResolvedValue('https://open.spotify.com/track/xyz');
+      mockGetAppleMusicUrl.mockResolvedValue(null);
+
+      const req = { query: { artistName: 'Obscure Artist', releaseTitle: 'Unknown Album' } } as unknown as Request;
+      const res = createMockRes();
+
+      await getAlbumMetadata(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const result = (res.json as jest.Mock).mock.calls[0][0];
+      expect(result.discogsReleaseId).toBeUndefined();
+      expect(result.spotifyUrl).toBe('https://open.spotify.com/track/xyz');
+      expect(mockGetRelease).not.toHaveBeenCalled();
     });
   });
 
@@ -302,8 +392,65 @@ describe('proxy.controller', () => {
       expect(res.json).toHaveBeenCalledWith({ message: 'artistId must be an integer' });
     });
 
-    it('returns 404 when artist not found', async () => {
-      mockFetchArtistMetadataById.mockResolvedValue(null);
+    it('returns artist metadata with raw bio, imageUrl, and cache header', async () => {
+      mockGetArtistDetails.mockResolvedValue({
+        artist_id: 3840,
+        name: 'Autechre',
+        profile: 'Autechre is a British electronic music duo consisting of [a=Rob Brown] and [a=Sean Booth].',
+        image_url: 'https://i.discogs.com/autechre.jpg',
+        name_variations: [],
+        aliases: [],
+        members: [
+          { id: 100, name: 'Rob Brown', active: true },
+          { id: 101, name: 'Sean Booth', active: true },
+        ],
+        urls: ['https://en.wikipedia.org/wiki/Autechre', 'https://autechre.ws'],
+        cached: false,
+      });
+
+      const req = { query: { artistId: '3840' } } as unknown as Request;
+      const res = createMockRes();
+
+      await getArtistMetadata(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const result = (res.json as jest.Mock).mock.calls[0][0];
+      expect(result.discogsArtistId).toBe(3840);
+      expect(result.bio).toBe(
+        'Autechre is a British electronic music duo consisting of [a=Rob Brown] and [a=Sean Booth].'
+      );
+      expect(result.wikipediaUrl).toBe('https://en.wikipedia.org/wiki/Autechre');
+      expect(result.imageUrl).toBe('https://i.discogs.com/autechre.jpg');
+      expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=3600');
+    });
+
+    it('returns null wikipediaUrl when no Wikipedia link in urls', async () => {
+      mockGetArtistDetails.mockResolvedValue({
+        artist_id: 456,
+        name: 'Some Artist',
+        profile: 'Bio text',
+        image_url: null,
+        name_variations: [],
+        aliases: [],
+        members: [],
+        urls: ['https://someartist.bandcamp.com'],
+        cached: false,
+      });
+
+      const req = { query: { artistId: '456' } } as unknown as Request;
+      const res = createMockRes();
+
+      await getArtistMetadata(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const result = (res.json as jest.Mock).mock.calls[0][0];
+      expect(result.wikipediaUrl).toBeNull();
+      expect(result.imageUrl).toBeNull();
+    });
+
+    it('returns 404 when LML returns 404', async () => {
+      const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
+      mockGetArtistDetails.mockRejectedValue(new LmlClientError('Not found', 404));
 
       const req = { query: { artistId: '99999' } } as unknown as Request;
       const res = createMockRes();
@@ -313,25 +460,16 @@ describe('proxy.controller', () => {
       expect(res.status).toHaveBeenCalledWith(404);
     });
 
-    it('returns artist metadata with cache header', async () => {
-      mockFetchArtistMetadataById.mockResolvedValue({
-        discogsArtistId: 456,
-        bio: 'A great band',
-        wikipediaUrl: 'https://en.wikipedia.org/wiki/Test',
-      });
+    it('returns 502 when LML is unreachable', async () => {
+      const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
+      mockGetArtistDetails.mockRejectedValue(new LmlClientError('Connection refused', 502));
 
-      const req = { query: { artistId: '456' } } as unknown as Request;
+      const req = { query: { artistId: '3840' } } as unknown as Request;
       const res = createMockRes();
 
       await getArtistMetadata(req, res as Response, mockNext);
 
-      expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({
-        discogsArtistId: 456,
-        bio: 'A great band',
-        wikipediaUrl: 'https://en.wikipedia.org/wiki/Test',
-      });
-      expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=3600');
+      expect(res.status).toHaveBeenCalledWith(502);
     });
   });
 
@@ -369,21 +507,22 @@ describe('proxy.controller', () => {
       expect(res.json).toHaveBeenCalledWith({ message: 'id must be an integer' });
     });
 
-    it('resolves an artist by ID', async () => {
-      mockGetArtist.mockResolvedValue({ id: 3840, name: 'Radiohead' });
+    it('resolves an artist by ID via LML', async () => {
+      mockResolveEntity.mockResolvedValue({ name: 'Autechre', type: 'artist', id: 3840 });
 
       const req = { query: { type: 'artist', id: '3840' } } as unknown as Request;
       const res = createMockRes();
 
       await resolveEntity(req, res as Response, mockNext);
 
+      expect(mockResolveEntity).toHaveBeenCalledWith('artist', 3840);
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({ name: 'Radiohead', type: 'artist', id: 3840 });
+      expect(res.json).toHaveBeenCalledWith({ name: 'Autechre', type: 'artist', id: 3840 });
       expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=86400');
     });
 
-    it('resolves a release by ID', async () => {
-      mockGetRelease.mockResolvedValue({ title: 'OK Computer' });
+    it('resolves a release by ID via LML', async () => {
+      mockResolveEntity.mockResolvedValue({ name: 'Confield', type: 'release', id: 55555 });
 
       const req = { query: { type: 'release', id: '55555' } } as unknown as Request;
       const res = createMockRes();
@@ -391,11 +530,11 @@ describe('proxy.controller', () => {
       await resolveEntity(req, res as Response, mockNext);
 
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({ name: 'OK Computer', type: 'release', id: 55555 });
+      expect(res.json).toHaveBeenCalledWith({ name: 'Confield', type: 'release', id: 55555 });
     });
 
-    it('resolves a master by ID', async () => {
-      mockGetMaster.mockResolvedValue({ title: 'Kid A' });
+    it('resolves a master by ID via LML', async () => {
+      mockResolveEntity.mockResolvedValue({ name: 'Confield', type: 'master', id: 44444 });
 
       const req = { query: { type: 'master', id: '44444' } } as unknown as Request;
       const res = createMockRes();
@@ -403,11 +542,12 @@ describe('proxy.controller', () => {
       await resolveEntity(req, res as Response, mockNext);
 
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({ name: 'Kid A', type: 'master', id: 44444 });
+      expect(res.json).toHaveBeenCalledWith({ name: 'Confield', type: 'master', id: 44444 });
     });
 
-    it('returns 404 when entity not found', async () => {
-      mockGetArtist.mockResolvedValue(null);
+    it('returns 404 when LML returns not found', async () => {
+      const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
+      mockResolveEntity.mockRejectedValue(new LmlClientError('Not found', 404));
 
       const req = { query: { type: 'artist', id: '99999' } } as unknown as Request;
       const res = createMockRes();
@@ -415,6 +555,18 @@ describe('proxy.controller', () => {
       await resolveEntity(req, res as Response, mockNext);
 
       expect(res.status).toHaveBeenCalledWith(404);
+    });
+
+    it('returns 504 when LML times out', async () => {
+      const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
+      mockResolveEntity.mockRejectedValue(new LmlClientError('LML request timed out', 504));
+
+      const req = { query: { type: 'artist', id: '3840' } } as unknown as Request;
+      const res = createMockRes();
+
+      await resolveEntity(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(504);
     });
   });
 
@@ -466,10 +618,10 @@ describe('proxy.controller', () => {
         ok: true,
         json: () =>
           Promise.resolve({
-            name: 'Everything In Its Right Place',
-            artists: [{ name: 'Radiohead' }],
+            name: 'VI Scose Poise',
+            artists: [{ name: 'Autechre' }],
             album: {
-              name: 'Kid A',
+              name: 'Confield',
               images: [{ url: 'https://i.scdn.co/image/abc' }],
             },
           }),
@@ -482,9 +634,9 @@ describe('proxy.controller', () => {
 
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({
-        title: 'Everything In Its Right Place',
-        artist: 'Radiohead',
-        album: 'Kid A',
+        title: 'VI Scose Poise',
+        artist: 'Autechre',
+        album: 'Confield',
         artworkUrl: 'https://i.scdn.co/image/abc',
       });
       expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');

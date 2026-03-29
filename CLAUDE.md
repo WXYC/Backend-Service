@@ -249,6 +249,7 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
 ### Metadata Services
 
+- `LIBRARY_METADATA_URL` -- library-metadata-lookup base URL (e.g. `http://localhost:8001/api/v1`). Required for proxy endpoints.
 - `DISCOGS_API_KEY`, `DISCOGS_API_SECRET`
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`
 
@@ -262,4 +263,5 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
 - **[dj-site](https://github.com/WXYC/dj-site)** -- React frontend that consumes this API
 - **[@wxyc/shared](https://github.com/WXYC/wxyc-shared)** -- Shared DTOs, auth client, validation. V2 flowsheet endpoints use `@wxyc/shared` types.
+- **[library-metadata-lookup](https://github.com/WXYC/library-metadata-lookup)** -- Discogs metadata service with 3-tier caching. Proxy endpoints route Discogs requests through LML via `LIBRARY_METADATA_URL`.
 - **[tubafrenzy](https://github.com/WXYC/tubafrenzy)** -- Legacy Java system this service is replacing. Both read/write the same underlying data.
