@@ -82,7 +82,7 @@ describe('sendEmail', () => {
           url: 'https://example.com/action?token=abc',
         });
 
-        const callArgs = (SendEmailCommand as jest.Mock).mock.calls[0][0];
+        const callArgs = SendEmailCommand.mock.calls[0][0];
         expect(callArgs.Message.Body.Html.Data).toContain(expectedActionText);
       });
 
@@ -91,7 +91,7 @@ describe('sendEmail', () => {
 
         await sendEmail({ type, to: 'user@example.com', url: testUrl });
 
-        const callArgs = (SendEmailCommand as jest.Mock).mock.calls[0][0];
+        const callArgs = SendEmailCommand.mock.calls[0][0];
         expect(callArgs.Message.Body.Html.Data).toContain(testUrl);
         expect(callArgs.Message.Body.Text.Data).toContain(testUrl);
       });
