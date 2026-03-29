@@ -1,22 +1,27 @@
 /**
  * Proxy controller - thin HTTP layer over existing services.
  *
+ * Four of the five handlers route through library-metadata-lookup (LML) for
+ * Discogs data: searchArtwork, getAlbumMetadata, getArtistMetadata, and
+ * resolveEntity. The Spotify track handler calls the Spotify API directly.
+ *
  * All handlers require `requireAnonymousAuth` + `proxyRateLimit` middleware
  * applied at the route level.
  */
 import { RequestHandler } from 'express';
-import { DiscogsProvider } from '../services/metadata/providers/discogs.provider.js';
 import { SpotifyProvider } from '../services/metadata/providers/spotify.provider.js';
 import { AppleMusicProvider } from '../services/metadata/providers/apple.provider.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 import { getArtworkFinder } from '../services/artwork/finder.js';
 import { classify as classifyNSFW } from '../services/artwork/nsfw.js';
-import { DiscogsService } from '../services/discogs/discogs.service.js';
 import {
-  AlbumMetadataResult,
-  ArtistMetadataResult,
-  SpotifyTokenResponse,
-} from '../services/metadata/metadata.types.js';
+  searchDiscogs,
+  getRelease,
+  getArtistDetails,
+  resolveEntity as lmlResolveEntity,
+  LmlClientError,
+} from '../services/lml/lml.client.js';
+import { SpotifyTokenResponse } from '../services/metadata/metadata.types.js';
 import { LRUCache } from 'lru-cache';
 
 interface SpotifyTrackApiResponse {
@@ -28,8 +33,7 @@ interface SpotifyTrackApiResponse {
   };
 }
 
-// Reuse the existing singleton provider instances
-const discogs = new DiscogsProvider();
+// Reuse the existing singleton provider instances (non-Discogs)
 const spotify = new SpotifyProvider();
 const appleMusic = new AppleMusicProvider();
 const searchUrls = new SearchUrlProvider();
@@ -88,8 +92,9 @@ function artworkCacheKey(artistName: string, releaseTitle?: string): string {
 /**
  * GET /proxy/artwork/search
  *
- * Searches for album artwork across Discogs, Last.fm, and iTunes. Downloads the
- * image, runs NSFW classification, and returns the image bytes directly.
+ * Searches for album artwork across Discogs (via LML), Last.fm, and iTunes.
+ * Downloads the image, runs NSFW classification, and returns the image bytes
+ * directly.
  *
  * Returns 200 with image bytes and Content-Type if SFW artwork is found.
  * Returns 404 if no artwork found or if artwork is NSFW.
@@ -168,9 +173,8 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
 /**
  * GET /proxy/metadata/album
  *
- * Fetches album metadata from Discogs, Spotify, Apple Music, and search URL
- * providers in parallel. Mirrors the existing MetadataService.fetchAlbumMetadata
- * logic.
+ * Fetches album metadata from LML (Discogs search + release details), Spotify,
+ * Apple Music, and search URL providers in parallel.
  */
 export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMetadataQuery> = async (
   req,
@@ -185,16 +189,46 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   }
 
   try {
-    const [discogsResult, spotifyUrl, appleMusicUrl] = await Promise.allSettled([
-      discogs.fetchAlbumMetadata(artistName, releaseTitle || trackTitle || ''),
+    const searchTerm = releaseTitle || trackTitle || '';
+
+    const [lmlSearchResult, spotifyUrl, appleMusicUrl] = await Promise.allSettled([
+      searchDiscogs(artistName, searchTerm || undefined),
       spotify.getSpotifyUrl(artistName, releaseTitle, trackTitle),
       appleMusic.getAppleMusicUrl(artistName, releaseTitle, trackTitle),
     ]);
 
-    const metadata: AlbumMetadataResult = {};
+    const metadata: Record<string, unknown> = {};
 
-    if (discogsResult.status === 'fulfilled' && discogsResult.value) {
-      Object.assign(metadata, discogsResult.value);
+    // Extract Discogs data from LML search + release
+    if (lmlSearchResult.status === 'fulfilled' && lmlSearchResult.value.results.length > 0) {
+      const topResult = lmlSearchResult.value.results[0];
+      metadata.discogsReleaseId = topResult.release_id;
+      metadata.discogsUrl = topResult.release_url;
+      metadata.artworkUrl = topResult.artwork_url || undefined;
+
+      // Fetch enriched release details
+      try {
+        const release = await getRelease(topResult.release_id);
+        metadata.releaseYear = release.year ?? undefined;
+        metadata.genres = release.genres.length > 0 ? release.genres : undefined;
+        metadata.styles = release.styles.length > 0 ? release.styles : undefined;
+        metadata.label = release.label ?? undefined;
+        metadata.discogsArtistId = release.artist_id ?? undefined;
+        metadata.fullReleaseDate = release.released ?? undefined;
+        if (release.tracklist.length > 0) {
+          metadata.tracklist = release.tracklist.map((t) => ({
+            position: t.position,
+            title: t.title,
+            duration: t.duration ?? undefined,
+          }));
+        }
+        // Prefer release artwork over search artwork
+        if (release.artwork_url) {
+          metadata.artworkUrl = release.artwork_url;
+        }
+      } catch (releaseError) {
+        console.warn('[ProxyController] Failed to fetch release details from LML:', releaseError);
+      }
     }
 
     if (spotifyUrl.status === 'fulfilled' && spotifyUrl.value) {
@@ -221,7 +255,8 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
 /**
  * GET /proxy/metadata/artist
  *
- * Fetches artist metadata (bio, Wikipedia URL) from Discogs by artist ID.
+ * Fetches artist metadata (bio, Wikipedia URL, image) from LML by artist ID.
+ * Bio is sent as raw Discogs markup — the client handles rendering.
  */
 export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistMetadataQuery> = async (
   req,
@@ -242,16 +277,22 @@ export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistM
   }
 
   try {
-    const result: ArtistMetadataResult | null = await discogs.fetchArtistMetadataById(id);
+    const artist = await getArtistDetails(id);
 
-    if (!result) {
-      res.status(404).json({ message: 'Artist not found' });
-      return;
-    }
+    const wikipediaUrl = artist.urls.find((url) => url.includes('wikipedia.org')) ?? null;
 
     res.set('Cache-Control', 'private, max-age=3600');
-    res.status(200).json(result);
+    res.status(200).json({
+      discogsArtistId: artist.artist_id,
+      bio: artist.profile ?? null,
+      wikipediaUrl,
+      imageUrl: artist.image_url ?? null,
+    });
   } catch (e) {
+    if (e instanceof LmlClientError) {
+      res.status(e.statusCode).json({ message: e.message });
+      return;
+    }
     console.error('[ProxyController] getArtistMetadata error:', e);
     next(e);
   }
@@ -260,7 +301,7 @@ export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistM
 /**
  * GET /proxy/entity/resolve
  *
- * Resolves a Discogs entity (artist, release, master) by type and ID.
+ * Resolves a Discogs entity (artist, release, master) by type and ID via LML.
  * Returns the entity's name and basic info.
  */
 export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResolveQuery> = async (req, res, next) => {
@@ -271,8 +312,8 @@ export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResol
     return;
   }
 
-  const validTypes = ['artist', 'release', 'master'];
-  if (!validTypes.includes(type)) {
+  const validTypes = ['artist', 'release', 'master'] as const;
+  if (!validTypes.includes(type as (typeof validTypes)[number])) {
     res.status(400).json({ message: `type must be one of: ${validTypes.join(', ')}` });
     return;
   }
@@ -284,27 +325,15 @@ export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResol
   }
 
   try {
-    let name: string | null = null;
-
-    if (type === 'artist') {
-      const artist = await DiscogsService.getArtist(entityId);
-      name = artist?.name || null;
-    } else if (type === 'release') {
-      const release = await DiscogsService.getRelease(entityId);
-      name = release?.title || null;
-    } else if (type === 'master') {
-      const master = await DiscogsService.getMaster(entityId);
-      name = master?.title || null;
-    }
-
-    if (!name) {
-      res.status(404).json({ message: `${type} not found` });
-      return;
-    }
+    const result = await lmlResolveEntity(type as 'artist' | 'release' | 'master', entityId);
 
     res.set('Cache-Control', 'private, max-age=86400');
-    res.status(200).json({ name, type, id: entityId });
+    res.status(200).json({ name: result.name, type: result.type, id: result.id });
   } catch (e) {
+    if (e instanceof LmlClientError) {
+      res.status(e.statusCode).json({ message: e.message });
+      return;
+    }
     console.error('[ProxyController] resolveEntity error:', e);
     next(e);
   }
