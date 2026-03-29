@@ -301,8 +301,77 @@ jobs:
           docker push $IMAGE_URI:latest
           fi
 
+  migrate:
+    needs: [handle-git-tags, setup]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.has_targets == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Amazon ECR
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_URI }}
+
+      - name: Ensure ECR repository exists
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws ecr describe-repositories --repository-names db-migrate --region $AWS_REGION 2>/dev/null || \
+            aws ecr create-repository --repository-name db-migrate --region $AWS_REGION
+
+      - name: Build Migration Image
+        run: |
+          docker build --platform linux/amd64 -f Dockerfile.migrate -t db-migrate:ci .
+
+      - name: Tag and Push Migration Image
+        run: |
+          SHA_TAG="sha-${{ github.sha }}"
+          IMAGE_URI="${{ secrets.AWS_ECR_URI }}/db-migrate"
+
+          docker tag db-migrate:ci $IMAGE_URI:$SHA_TAG
+          docker push $IMAGE_URI:$SHA_TAG
+
+      - name: Run Migrations on EC2
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            SHA_TAG="sha-${{ github.sha }}"
+            AWS_ECR_URI=${{ secrets.AWS_ECR_URI }}
+            AWS_REGION=${{ secrets.AWS_REGION }}
+            IMAGE_URI="$AWS_ECR_URI/db-migrate:$SHA_TAG"
+
+            echo "Logging into AWS ECR..."
+            aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ECR_URI
+
+            echo "Pulling migration image..."
+            docker pull $IMAGE_URI
+
+            echo "Running database migrations..."
+            docker run --rm --env-file .env -e SKIP_SEED=true $IMAGE_URI
+
+            echo "Cleaning up migration image..."
+            docker rmi $IMAGE_URI || true
+
   deploy:
-    needs: [setup, handle-git-tags, build]
+    needs: [setup, handle-git-tags, build, migrate]
     runs-on: ubuntu-latest
     if: needs.setup.outputs.has_targets == 'true'
     strategy:

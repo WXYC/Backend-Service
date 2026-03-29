@@ -1,0 +1,28 @@
+FROM node:25-alpine
+
+WORKDIR /init
+
+# Copy slim package file with only required dependencies
+COPY dev_env/package.init.json ./package.json
+
+# Install minimal dependencies (postgres, drizzle-kit, drizzle-orm)
+RUN npm install --omit=dev
+
+# Set drizzle env vars for migration paths (matches baked-in file layout)
+ENV SCHEMA_LOC='/init/database'
+ENV MIGRATION_LOC='/init/database/migrations'
+
+# Always skip seeding in production
+ENV SKIP_SEED='true'
+
+# Bake in all files needed for migrations (no volume mounts required)
+COPY drizzle.config.ts ./drizzle.config.ts
+COPY shared/database/src/schema.ts ./database/schema.ts
+COPY shared/database/src/migrations ./database/migrations
+COPY dev_env/install_extensions.sql ./install_extensions.sql
+COPY dev_env/init-db.mjs ./
+
+# Dummy .env file for compatibility
+RUN touch .env
+
+CMD ["node", "init-db.mjs"]

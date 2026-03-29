@@ -163,13 +163,19 @@ async function main() {
     // Step 3: Run migrations
     await runMigrations();
 
-    // Step 4: Check if seeding is needed
-    const alreadySeeded = await isDatabaseSeeded();
+    // Step 4: Check if seeding should be skipped (production) or if already seeded
+    const skipSeed = process.env.SKIP_SEED === 'true';
 
-    if (alreadySeeded) {
-      console.log('Database already contains data, skipping seed.\n');
+    if (skipSeed) {
+      console.log('SKIP_SEED is set, skipping database seeding.\n');
     } else {
-      await seedDatabase();
+      const alreadySeeded = await isDatabaseSeeded();
+
+      if (alreadySeeded) {
+        console.log('Database already contains data, skipping seed.\n');
+      } else {
+        await seedDatabase();
+      }
     }
 
     console.log(styleText(['bold'], '💾 Database initialization complete!'));
