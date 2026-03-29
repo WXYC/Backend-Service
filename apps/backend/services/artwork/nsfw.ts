@@ -2,12 +2,14 @@
  * NSFW artwork classifier using nsfwjs (TensorFlow.js).
  *
  * Loads the Yahoo OpenNSFW model once at startup and classifies images
- * by their probability of containing NSFW content. Uses the same model
- * and threshold as the iOS app's CoreML-based classifier for parity.
+ * by their probability of containing NSFW content. Uses sharp for image
+ * decoding (instead of tf.node.decodeImage which has Node.js 25 compat issues)
+ * and TensorFlow.js for inference.
  */
 
+import * as tf from '@tensorflow/tfjs';
 import * as nsfwjs from 'nsfwjs';
-import * as tf from '@tensorflow/tfjs-node';
+import sharp from 'sharp';
 
 /** Classification result: safe for work or not. */
 export type NSFWResult = 'sfw' | 'nsfw';
@@ -38,14 +40,23 @@ async function getModel(): Promise<nsfwjs.NSFWJS> {
 /**
  * Classifies an image buffer as SFW or NSFW.
  *
+ * Uses sharp to decode the image to raw RGB pixels, then creates a
+ * TensorFlow tensor for nsfwjs classification.
+ *
  * @param imageBuffer - Raw image bytes (JPEG, PNG, WebP, etc.)
  * @returns 'sfw' or 'nsfw'
  */
 export async function classify(imageBuffer: Buffer): Promise<NSFWResult> {
   const nsfwModel = await getModel();
 
-  // Decode image to a 3-channel tensor
-  const tensor = tf.node.decodeImage(imageBuffer, 3) as tf.Tensor3D;
+  // Decode image to raw RGB pixels using sharp (avoids tf.node.decodeImage compat issues)
+  const { data, info } = await sharp(imageBuffer)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  // Create a 3D tensor [height, width, 3] from raw pixels
+  const tensor = tf.tensor3d(new Uint8Array(data), [info.height, info.width, 3]);
 
   try {
     const predictions = await nsfwModel.classify(tensor);
