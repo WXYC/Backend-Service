@@ -50,10 +50,7 @@ export async function classify(imageBuffer: Buffer): Promise<NSFWResult> {
   const nsfwModel = await getModel();
 
   // Decode image to raw RGB pixels using sharp (avoids tf.node.decodeImage compat issues)
-  const { data, info } = await sharp(imageBuffer)
-    .removeAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+  const { data, info } = await sharp(imageBuffer).removeAlpha().raw().toBuffer({ resolveWithObject: true });
 
   // Create a 3D tensor [height, width, 3] from raw pixels
   const tensor = tf.tensor3d(new Uint8Array(data), [info.height, info.width, 3]);
