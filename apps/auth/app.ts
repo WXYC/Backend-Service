@@ -2,7 +2,7 @@
 import './instrument.js';
 import * as Sentry from '@sentry/node';
 import { config } from 'dotenv';
-const dotenvResult = config();
+config();
 
 import { auth } from '@wxyc/authentication';
 import { toNodeHandler } from 'better-auth/node';
@@ -38,8 +38,9 @@ if (process.env.NODE_ENV !== 'production') {
   // This endpoint accepts an email, looks up the user, then finds their reset token
   app.get('/auth/test/verification-token', async (req, res) => {
     try {
-      const { identifier, type = 'reset-password' } = req.query;
-      if (!identifier || typeof identifier !== 'string') {
+      const identifier = String(req.query.identifier ?? '');
+      const type = String(req.query.type ?? 'reset-password');
+      if (!identifier) {
         return res.status(400).json({ error: 'identifier query parameter is required (email address)' });
       }
 
@@ -84,7 +85,7 @@ if (process.env.NODE_ENV !== 'production') {
   // Expire a user's session for testing session timeout
   app.post('/auth/test/expire-session', async (req, res) => {
     try {
-      const { userId } = req.body;
+      const { userId } = req.body as { userId?: string };
       if (!userId || typeof userId !== 'string') {
         return res.status(400).json({ error: 'userId is required in request body' });
       }
@@ -122,7 +123,7 @@ app.get('/healthcheck', async (req, res) => {
     const response = await fetch(`${authServiceUrl}/auth/ok`);
 
     // Forward the status and body from the /auth/ok response
-    const data = await response.json(); // Assuming /auth/ok returns JSON
+    const data = (await response.json()) as Record<string, unknown>;
     res.status(response.status).json(data);
   } catch (error) {
     console.error('Error proxying /healthcheck to /auth/ok:', error);
@@ -134,7 +135,7 @@ app.get('/healthcheck', async (req, res) => {
 Sentry.setupExpressErrorHandler(app);
 
 // Fallback error handler
-app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const message = err instanceof Error ? err.message : String(err);
   res.status(500).json({ error: message });
 });
@@ -275,12 +276,12 @@ const syncAdminRoles = async () => {
         memberRole: member.role,
       })
       .from(user)
-      .innerJoin(member, sql`${member.userId} = ${user.id}` as any)
-      .innerJoin(organization, sql`${member.organizationId} = ${organization.id}` as any)
+      .innerJoin(member, sql`${member.userId} = ${user.id}`)
+      .innerJoin(organization, sql`${member.organizationId} = ${organization.id}`)
       .where(
         sql`${organization.slug} = ${defaultOrgSlug}
         AND ${member.role} IN ('admin', 'owner', 'stationManager')
-        AND (${user.role} IS NULL OR ${user.role} != 'admin')` as any
+        AND (${user.role} IS NULL OR ${user.role} != 'admin')`
       );
 
     if (usersNeedingFix.length > 0) {
