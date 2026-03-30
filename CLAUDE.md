@@ -249,7 +249,7 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
 ### Metadata Services
 
-- `LIBRARY_METADATA_URL` -- library-metadata-lookup base URL (e.g. `http://localhost:8001/api/v1`). Required for proxy endpoints.
+- `LIBRARY_METADATA_URL` -- library-metadata-lookup base URL (e.g. `http://localhost:8001`). Required for proxy endpoints. Do not include the `/api/v1` path prefix; the LML client adds it automatically.
 - `DISCOGS_API_KEY`, `DISCOGS_API_SECRET`
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`
 

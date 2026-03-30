@@ -163,5 +163,20 @@ describe('lml.client', () => {
 
       expect(mockFetch).toHaveBeenCalledWith('http://lml.test:8000/api/v1/discogs/search', expect.anything());
     });
+
+    it('does not double the /api/v1 prefix when LIBRARY_METADATA_URL already includes it', async () => {
+      process.env.LIBRARY_METADATA_URL = 'http://lml.test:8000/api/v1';
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [], total: 0, cached: false }),
+      } as unknown as globalThis.Response);
+
+      await searchDiscogs('Autechre');
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string;
+      expect(calledUrl).not.toContain('/api/v1/api/v1');
+      expect(calledUrl).toBe('http://lml.test:8000/api/v1/discogs/search');
+    });
   });
 });
