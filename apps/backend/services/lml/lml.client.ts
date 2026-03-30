@@ -103,7 +103,7 @@ function getBaseUrl(): string {
   if (!url) {
     throw new LmlClientError('LIBRARY_METADATA_URL is not configured', 503);
   }
-  return url.replace(/\/$/, '');
+  return url.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
 }
 
 async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
