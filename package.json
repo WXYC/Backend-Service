@@ -21,6 +21,7 @@
     "test:unit:watch": "jest --config jest.unit.config.ts --watch",
     "test:integration": "dotenvx run -f .env -- jest --config jest.config.json --runInBand",
     "test:integration:parallel": "dotenvx run -f .env -- jest --config jest.parallel.config.json",
+    "test:e2e": "jest --config jest.e2e.config.json",
     "test:all": "npm run test:unit && npm run test:integration",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d; docker attach wxyc-db-init",
     "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down db -v --remove-orphans",
