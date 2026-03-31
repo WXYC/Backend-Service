@@ -20,7 +20,6 @@ import {
   artist_metadata,
 } from '@wxyc/database';
 import { IFSEntry, ShowInfo, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
-import WxycError from '../utils/error.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 // Track when the flowsheet was last modified for conditional responses (304 Not Modified)
