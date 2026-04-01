@@ -313,7 +313,7 @@ export const flowsheet = wxyc_schema.table('flowsheet', {
   artist_name: varchar('artist_name', { length: 128 }),
   record_label: varchar('record_label', { length: 128 }),
   label_id: integer('label_id').references(() => labels.id),
-  play_order: serial('play_order').notNull(),
+  play_order: integer('play_order').notNull(),
   request_flag: boolean('request_flag').default(false).notNull(),
   segue: boolean('segue').default(false).notNull(),
   message: varchar('message', { length: 250 }),
@@ -387,8 +387,12 @@ export type ArtistLibraryCrossreference = InferSelectModel<typeof artist_library
 export const artist_library_crossreference = wxyc_schema.table(
   'artist_library_crossreference',
   {
-    artist_id: integer('artist_id').references(() => artists.id, { onDelete: 'cascade' }),
-    library_id: integer('library_id').references(() => library.id, { onDelete: 'cascade' }),
+    artist_id: integer('artist_id')
+      .notNull()
+      .references(() => artists.id, { onDelete: 'cascade' }),
+    library_id: integer('library_id')
+      .notNull()
+      .references(() => library.id, { onDelete: 'cascade' }),
     comment: varchar('comment', { length: 255 }),
   },
   (table) => [uniqueIndex('library_id_artist_id').on(table.artist_id, table.library_id)]
