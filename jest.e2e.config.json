@@ -1,0 +1,15 @@
+{
+  "preset": "ts-jest",
+  "testEnvironment": "node",
+  "testMatch": ["<rootDir>/tests/e2e/**/*.test.ts", "<rootDir>/tests/e2e/**/*.spec.js"],
+  "transform": {
+    "^.+\\.[jt]sx?$": ["ts-jest", { "tsconfig": "<rootDir>/tests/tsconfig.json" }]
+  },
+  "transformIgnorePatterns": ["node_modules/(?!(jose|drizzle-orm|@wxyc/shared)/)"],
+  "moduleNameMapper": {
+    "^(\\.{1,2}/.*)\\.(js)$": "$1"
+  },
+  "testTimeout": 30000,
+  "verbose": true,
+  "forceExit": true
+}

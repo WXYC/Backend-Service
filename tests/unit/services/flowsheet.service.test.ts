@@ -1,4 +1,9 @@
-import { transformToV2 } from '../../../apps/backend/services/flowsheet.service';
+import {
+  transformToV2,
+  getDJsInCurrentShow,
+  getOnAirStatusForDJ,
+  getLatestShow,
+} from '../../../apps/backend/services/flowsheet.service';
 import { IFSEntry, IFSEntryMetadata } from '../../../apps/backend/controllers/flowsheet.controller';
 
 const nullMetadata: IFSEntryMetadata = {
@@ -446,6 +451,25 @@ describe('flowsheet.service', () => {
 
         expect(result.dj_name).toBe("DJ O'Brien & The Crew");
       });
+    });
+  });
+
+  describe('no-show edge cases', () => {
+    // The mock DB returns [] by default, so getLatestShow() returns undefined
+
+    it('getLatestShow returns undefined when no shows exist', async () => {
+      const result = await getLatestShow();
+      expect(result).toBeUndefined();
+    });
+
+    it('getDJsInCurrentShow returns empty array when no shows exist', async () => {
+      const result = await getDJsInCurrentShow();
+      expect(result).toEqual([]);
+    });
+
+    it('getOnAirStatusForDJ returns false when no shows exist', async () => {
+      const result = await getOnAirStatusForDJ('some-dj-id');
+      expect(result).toBe(false);
     });
   });
 });

@@ -413,7 +413,8 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
 
   await db.update(shows).set({ end_time: new Date() }).where(eq(shows.id, currentShow.id));
 
-  return await getLatestShow();
+  // We just ended this show, so a latest show always exists here
+  return (await getLatestShow())!;
 };
 
 export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowDJ> => {
@@ -467,28 +468,23 @@ export const getNShows = async (numberOfShows: number = 1, page: number = 0): Pr
     .limit(numberOfShows);
 };
 
-export const getLatestShow = async (): Promise<Show> => {
+export const getLatestShow = async (): Promise<Show | undefined> => {
   return (await getNShows(1))[0];
 };
 
 export const getOnAirStatusForDJ = async (dj_id: string): Promise<boolean> => {
   const latest_show = await getLatestShow();
-
-  //Avoid a round trip to db with this check
-  if (latest_show.end_time !== null) {
+  if (!latest_show || latest_show.end_time !== null) {
     return false;
   }
 
   const show_djs = await getDJsInShow(latest_show.id, true);
-
   return show_djs.some((dj) => dj.id == dj_id);
 };
 
 export const getDJsInCurrentShow = async (): Promise<User[]> => {
   const current_show = await getLatestShow();
-
-  //Avoid a round trip to db with this check
-  if (current_show.end_time !== null) {
+  if (!current_show || current_show.end_time !== null) {
     return [];
   }
 
@@ -535,15 +531,19 @@ export const getAlbumFromDB = async (album_id: number) => {
 export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry> => {
   await db.transaction(
     async (trx) => {
-      const position_old = (
-        await trx
-          .select({
-            play_order: flowsheet.play_order,
-          })
-          .from(flowsheet)
-          .where(eq(flowsheet.id, entry_id))
-          .limit(1)
-      )[0].play_order;
+      const result = await trx
+        .select({
+          play_order: flowsheet.play_order,
+        })
+        .from(flowsheet)
+        .where(eq(flowsheet.id, entry_id))
+        .limit(1);
+
+      if (result.length === 0) {
+        throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
+      }
+
+      const position_old = result[0].play_order;
 
       if (position_new < position_old) {
         await trx

@@ -135,7 +135,7 @@ export const getLatest: RequestHandler = async (req, res, next) => {
     if (entries.length) {
       res.status(200).json(flowsheet_service.transformToV2(entries[0]));
     } else {
-      res.status(404).json({ message: 'No entries found' });
+      res.status(200).json(null);
     }
   } catch (e) {
     console.error('Error: Failed to retrieve track');
@@ -361,7 +361,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = async (req, res, next) => {
   const currentShow = await flowsheet_service.getLatestShow();
   if (currentShow?.end_time !== null) {
-    res.status(404).json({ message: 'Bad Request: No active show session found.' });
+    res.status(400).json({ message: 'Bad Request: No active show session found.' });
   } else {
     try {
       // Show membership is verified by showMemberMiddleware on the route
