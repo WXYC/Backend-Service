@@ -178,9 +178,7 @@ function connectSSE(): void {
   es.addEventListener('init', (event: MessageEvent) => {
     reconnectDelay = 1000; // reset backoff on successful connection
     resetHeartbeatTimer(es);
-    processInitEvent(event.data).catch((err) =>
-      console.error('[playlist-proxy] Error processing init event:', err)
-    );
+    processInitEvent(event.data).catch((err) => console.error('[playlist-proxy] Error processing init event:', err));
   });
 
   es.addEventListener('created', (event: MessageEvent) => {
