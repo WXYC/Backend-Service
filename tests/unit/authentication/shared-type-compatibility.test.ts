@@ -17,16 +17,15 @@ describe('shared type compatibility', () => {
       expect(Authorization.DJ).toBe(1);
       expect(Authorization.MD).toBe(2);
       expect(Authorization.SM).toBe(3);
-      expect(Authorization.ADMIN).toBe(4);
     });
   });
 
   describe('normalizeRole consistency with roleToAuthorization', () => {
-    it('admin normalizes to stationManager, consistent with shared ADMIN >= SM', () => {
+    it('admin normalizes to stationManager, consistent with shared SM mapping', () => {
       expect(normalizeRole('admin')).toBe('stationManager');
-      // Shared maps "admin" to ADMIN (4), which is >= SM (3).
+      // Shared maps "admin" to SM (3) — the highest station role.
       // Both grant full access; the normalization is a backend-specific concern.
-      expect(roleToAuthorization('admin')).toBe(Authorization.ADMIN);
+      expect(roleToAuthorization('admin')).toBe(Authorization.SM);
     });
 
     it.each(['member', 'dj', 'musicDirector', 'stationManager'] as const)(
