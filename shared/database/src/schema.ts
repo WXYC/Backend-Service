@@ -389,8 +389,25 @@ export const artist_library_crossreference = wxyc_schema.table(
   {
     artist_id: integer('artist_id').references(() => artists.id, { onDelete: 'cascade' }),
     library_id: integer('library_id').references(() => library.id, { onDelete: 'cascade' }),
+    comment: varchar('comment', { length: 255 }),
   },
   (table) => [uniqueIndex('library_id_artist_id').on(table.artist_id, table.library_id)]
+);
+
+export type NewArtistCrossreference = InferInsertModel<typeof artist_crossreference>;
+export type ArtistCrossreference = InferSelectModel<typeof artist_crossreference>;
+export const artist_crossreference = wxyc_schema.table(
+  'artist_crossreference',
+  {
+    source_artist_id: integer('source_artist_id')
+      .notNull()
+      .references(() => artists.id, { onDelete: 'cascade' }),
+    target_artist_id: integer('target_artist_id')
+      .notNull()
+      .references(() => artists.id, { onDelete: 'cascade' }),
+    comment: varchar('comment', { length: 255 }),
+  },
+  (table) => [uniqueIndex('artist_crossref_source_target').on(table.source_artist_id, table.target_artist_id)]
 );
 
 export type NewShow = InferInsertModel<typeof shows>;
