@@ -3,7 +3,7 @@
  */
 import type { Request, Response } from 'express';
 
-import { getConfig } from '../../../apps/backend/controllers/config.controller';
+import { getConfig, getSecrets } from '../../../apps/backend/controllers/config.controller';
 
 const createMockRes = () => {
   const res: Partial<Response> = {};
@@ -30,8 +30,6 @@ describe('config.controller', () => {
       process.env.POSTHOG_HOST = 'https://custom.posthog.com';
       process.env.REQUEST_O_MATIC_URL = 'https://rom.example.com/request';
       process.env.API_BASE_URL = 'https://api.example.com';
-      process.env.DISCOGS_API_KEY = 'discogs_key_123';
-      process.env.DISCOGS_API_SECRET = 'discogs_secret_456';
 
       const req = {} as Request;
       const res = createMockRes();
@@ -44,8 +42,6 @@ describe('config.controller', () => {
         posthogHost: 'https://custom.posthog.com',
         requestOMaticUrl: 'https://rom.example.com/request',
         apiBaseUrl: 'https://api.example.com',
-        discogsApiKey: 'discogs_key_123',
-        discogsApiSecret: 'discogs_secret_456',
       });
     });
 
@@ -54,8 +50,6 @@ describe('config.controller', () => {
       delete process.env.POSTHOG_HOST;
       delete process.env.REQUEST_O_MATIC_URL;
       delete process.env.API_BASE_URL;
-      delete process.env.DISCOGS_API_KEY;
-      delete process.env.DISCOGS_API_SECRET;
 
       const req = {} as Request;
       const res = createMockRes();
@@ -68,8 +62,6 @@ describe('config.controller', () => {
         posthogHost: 'https://us.i.posthog.com',
         requestOMaticUrl: '',
         apiBaseUrl: 'https://api.wxyc.org',
-        discogsApiKey: '',
-        discogsApiSecret: '',
       });
     });
 
@@ -80,6 +72,63 @@ describe('config.controller', () => {
       getConfig(req, res as Response, jest.fn());
 
       expect(res.set).toHaveBeenCalledWith('Cache-Control', 'public, max-age=3600');
+    });
+
+    it('does not include Discogs credentials', () => {
+      process.env.DISCOGS_API_KEY = 'should_not_appear';
+      process.env.DISCOGS_API_SECRET = 'should_not_appear';
+
+      const req = {} as Request;
+      const res = createMockRes();
+
+      getConfig(req, res as Response, jest.fn());
+
+      const responseBody = (res.json as jest.Mock).mock.calls[0][0];
+      expect(responseBody).not.toHaveProperty('discogsApiKey');
+      expect(responseBody).not.toHaveProperty('discogsApiSecret');
+    });
+  });
+
+  describe('getSecrets', () => {
+    it('returns Discogs credentials from environment variables', () => {
+      process.env.DISCOGS_API_KEY = 'discogs_key_123';
+      process.env.DISCOGS_API_SECRET = 'discogs_secret_456';
+
+      const req = {} as Request;
+      const res = createMockRes();
+
+      getSecrets(req, res as Response, jest.fn());
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({
+        discogsApiKey: 'discogs_key_123',
+        discogsApiSecret: 'discogs_secret_456',
+      });
+    });
+
+    it('returns empty strings when environment variables are not set', () => {
+      delete process.env.DISCOGS_API_KEY;
+      delete process.env.DISCOGS_API_SECRET;
+
+      const req = {} as Request;
+      const res = createMockRes();
+
+      getSecrets(req, res as Response, jest.fn());
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({
+        discogsApiKey: '',
+        discogsApiSecret: '',
+      });
+    });
+
+    it('sets Cache-Control header to private, max-age=3600', () => {
+      const req = {} as Request;
+      const res = createMockRes();
+
+      getSecrets(req, res as Response, jest.fn());
+
+      expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=3600');
     });
   });
 });
