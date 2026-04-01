@@ -156,7 +156,7 @@ export const sendAccountSetupEmail = async ({ to, setupUrl }: { to: string; setu
 type OTPEmailInput = {
   to: string;
   otp: string;
-  type: 'sign-in' | 'email-verification' | 'forget-password';
+  type: 'sign-in' | 'email-verification' | 'forget-password' | 'change-email';
 };
 
 type OTPEmailTemplateInput = {
@@ -212,12 +212,14 @@ export const sendOTPEmail = async ({ to, otp, type }: OTPEmailInput) => {
     'sign-in': 'Your WXYC login code',
     'email-verification': 'Your WXYC verification code',
     'forget-password': 'Your WXYC password reset code',
+    'change-email': 'Your WXYC email change code',
   };
 
   const introMap: Record<OTPEmailInput['type'], string> = {
     'sign-in': 'Use this code to sign in to your account.',
     'email-verification': 'Use this code to verify your email address.',
     'forget-password': 'Use this code to reset your password.',
+    'change-email': 'Use this code to confirm your email change.',
   };
 
   const subject = subjectMap[type];
