@@ -116,6 +116,8 @@ export const user = {
 };
 export const specialty_shows = {};
 export const schedule = {};
+export const artist_crossreference = {};
+export const artist_library_crossreference = {};
 
 // Mock enum
 export const flowsheetEntryTypeEnum = () => ({});
