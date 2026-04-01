@@ -167,7 +167,6 @@ export type Show = Record<string, unknown>;
 export type ShowDJ = Record<string, unknown>;
 export type User = Record<string, unknown>;
 
-
 export type BinEntry = {
   id: number;
   dj_id: string;
