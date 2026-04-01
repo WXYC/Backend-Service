@@ -209,9 +209,7 @@ describe('playlist-proxy.service', () => {
     });
 
     it('omits showDelimiter entries', async () => {
-      await processInitEvent(
-        JSON.stringify([ninaSimoneEntry, showDelimiterEntry, talksetEntry, breakpointEntry])
-      );
+      await processInitEvent(JSON.stringify([ninaSimoneEntry, showDelimiterEntry, talksetEntry, breakpointEntry]));
 
       const result = getRecentEntries(50);
       expect(result.playcuts).toHaveLength(1);
@@ -263,9 +261,7 @@ describe('playlist-proxy.service', () => {
     it('enriches newly created playcuts with artwork', async () => {
       await processInitEvent(JSON.stringify([talksetEntry]));
 
-      mockWhere.mockResolvedValue([
-        { cache_key: 'juana molina-doga', artwork_url: 'https://i.discogs.com/juana.jpg' },
-      ]);
+      mockWhere.mockResolvedValue([{ cache_key: 'juana molina-doga', artwork_url: 'https://i.discogs.com/juana.jpg' }]);
 
       await processCreatedEvent(JSON.stringify(juanaMolinaEntry));
 
