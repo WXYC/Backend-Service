@@ -236,6 +236,22 @@ describe('playlist-proxy.service', () => {
       const result = getRecentEntries(50);
       expect(result.playcuts[0].artworkURL).toBeUndefined();
     });
+
+    it('preserves existing artwork when DB fails on re-init', async () => {
+      // First init succeeds with artwork
+      mockWhere.mockResolvedValue([
+        { cache_key: 'nina simone-best of', artwork_url: 'https://i.discogs.com/nina.jpg' },
+      ]);
+      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
+      expect(getRecentEntries(50).playcuts[0].artworkURL).toBe('https://i.discogs.com/nina.jpg');
+
+      // Second init: DB fails — existing artwork should be preserved
+      mockWhere.mockRejectedValue(new Error('DB connection lost'));
+      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
+
+      const result = getRecentEntries(50);
+      expect(result.playcuts[0].artworkURL).toBe('https://i.discogs.com/nina.jpg');
+    });
   });
 
   describe('processCreatedEvent', () => {
@@ -256,6 +272,28 @@ describe('playlist-proxy.service', () => {
       const result = getRecentEntries(50);
       expect(result.talksets).toHaveLength(1);
       expect(result.talksets[0].id).toBe(9999);
+    });
+
+    it('caps entries at MAX_ENTRIES (200) and trims oldest', async () => {
+      // Init with 200 entries (at capacity)
+      const initEntries = Array.from({ length: 200 }, (_, i) => ({
+        ...ninaSimoneEntry,
+        id: 1000 + i,
+        chronOrderID: 100000 + i,
+        timeCreated: 1775082908948 + i,
+      }));
+      await processInitEvent(JSON.stringify(initEntries));
+
+      // Add one more — should trim the oldest
+      const newEntry = { ...juanaMolinaEntry, id: 9999, chronOrderID: 999999 };
+      await processCreatedEvent(JSON.stringify(newEntry));
+
+      const result = getRecentEntries(200);
+      expect(result.playcuts).toHaveLength(200);
+      // Newest should be first
+      expect(result.playcuts[0].artistName).toBe('Juana Molina');
+      // Last entry from init array (id: 1199) should have been trimmed
+      expect(result.playcuts.some((p) => p.id === 1199)).toBe(false);
     });
 
     it('enriches newly created playcuts with artwork', async () => {

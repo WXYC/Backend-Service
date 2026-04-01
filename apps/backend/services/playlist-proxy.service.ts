@@ -24,6 +24,7 @@ import { inArray } from 'drizzle-orm';
 import { generateAlbumCacheKey } from './metadata/metadata.cache.js';
 
 const TUBAFRENZY_URL = process.env.TUBAFRENZY_URL ?? 'https://www.wxyc.info';
+const MAX_ENTRIES = 200;
 
 // --- Types ---
 
@@ -244,6 +245,13 @@ export async function processInitEvent(data: string): Promise<void> {
 export async function processCreatedEvent(data: string): Promise<void> {
   const entry: TubafrenzyEntry = JSON.parse(data);
   entries.unshift(entry);
+
+  // Trim oldest entries to prevent unbounded growth
+  if (entries.length > MAX_ENTRIES) {
+    const removed = entries.splice(MAX_ENTRIES);
+    for (const r of removed) artworkMap.delete(r.id);
+  }
+
   console.log(`[playlist-proxy] Created: ${entry.entryType} #${entry.id}`);
   if (entry.entryType === 'playcut' && entry.playcut) {
     await enrichSinglePlaycut(entry);
@@ -305,22 +313,23 @@ async function enrichPlaycuts(): Promise<void> {
       .from(album_metadata)
       .where(inArray(album_metadata.cache_key, cacheKeys));
 
-    artworkMap = new Map();
+    // Build new map and only swap on success — preserves existing artwork on DB failure
+    const newMap = new Map<number, string>();
     for (const row of rows) {
       if (row.cache_key && row.artwork_url) {
         const entryIds = cacheKeyToIds.get(row.cache_key);
         if (entryIds) {
           for (const id of entryIds) {
-            artworkMap.set(id, row.artwork_url);
+            newMap.set(id, row.artwork_url);
           }
         }
       }
     }
+    artworkMap = newMap;
 
     console.log(`[playlist-proxy] Enriched ${artworkMap.size} playcuts with artwork`);
   } catch (err) {
-    console.error('[playlist-proxy] DB enrichment failed, serving un-enriched entries:', err);
-    // Graceful degradation: artworkMap stays empty/stale
+    console.error('[playlist-proxy] DB enrichment failed, preserving existing artwork data:', err);
   }
 }
 
