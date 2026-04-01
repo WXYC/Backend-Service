@@ -9,7 +9,7 @@ import { addToBin } from '../../../apps/backend/controllers/djs.controller';
 import { addToSchedule } from '../../../apps/backend/controllers/schedule.controller';
 
 function mockReqResNext(body: Record<string, unknown> = {}) {
-  const req = { body } as unknown as Request;
+  const req = { body, auth: { id: 'test-user-id' } } as unknown as Request;
   const statusMock = jest.fn().mockReturnThis();
   const jsonMock = jest.fn().mockReturnThis();
   const sendMock = jest.fn().mockReturnThis();
@@ -25,11 +25,10 @@ function mockReqResNext(body: Record<string, unknown> = {}) {
 describe('create endpoints return 201', () => {
   describe('addToBin', () => {
     it('should return 201 when a bin entry is created', async () => {
-      const created = { id: 1, dj_id: 'dj-1', album_id: 10, track_title: null };
+      const created = { id: 1, dj_id: 'test-user-id', album_id: 10, track_title: null };
       (DJService.addToBin as jest.Mock).mockResolvedValue(created);
 
       const { req, res, next, statusMock, jsonMock } = mockReqResNext({
-        dj_id: 'dj-1',
         album_id: 10,
       });
 
