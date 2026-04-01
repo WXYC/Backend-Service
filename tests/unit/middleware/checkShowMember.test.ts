@@ -28,6 +28,18 @@ function createMockReqResNext(userId: string) {
 }
 
 describe('showMemberMiddleware', () => {
+  const originalAuthBypass = process.env.AUTH_BYPASS;
+
+  beforeEach(() => {
+    delete process.env.AUTH_BYPASS;
+  });
+
+  afterAll(() => {
+    if (originalAuthBypass !== undefined) {
+      process.env.AUTH_BYPASS = originalAuthBypass;
+    }
+  });
+
   it('rejects a DJ who is not in the current show', async () => {
     mockGetDJsInCurrentShow.mockResolvedValue([{ id: 'dj-alice' }, { id: 'dj-bob' }]);
 
