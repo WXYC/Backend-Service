@@ -8,6 +8,15 @@ export default defineConfig((options) => ({
   target: 'node20',
   clean: true,
   sourcemap: true,
-  external: ['@wxyc/database', 'better-auth', 'drizzle-orm', 'express', 'express-rate-limit', 'cors', 'postgres', '@sentry/node'],
+  external: [
+    '@wxyc/database',
+    'better-auth',
+    'drizzle-orm',
+    'express',
+    'express-rate-limit',
+    'cors',
+    'postgres',
+    '@sentry/node',
+  ],
   onSuccess: options.watch ? 'node ./dist/app.js' : undefined,
 }));
