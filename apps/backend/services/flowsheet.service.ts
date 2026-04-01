@@ -25,6 +25,18 @@ import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 // Track when the flowsheet was last modified for conditional responses (304 Not Modified)
 let lastModifiedAt: Date = new Date();
 
+/**
+ * Compute the next play_order value for a new flowsheet entry.
+ * play_order is manually managed (not a serial/sequence), so we derive it
+ * from the current max value.
+ */
+const nextPlayOrder = async (): Promise<number> => {
+  const result = await db
+    .select({ max: sql<number>`coalesce(max(${flowsheet.play_order}), 0)` })
+    .from(flowsheet);
+  return result[0].max + 1;
+};
+
 /** Get the timestamp of the last flowsheet modification */
 export const getLastModifiedAt = (): Date => lastModifiedAt;
 
@@ -219,7 +231,7 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
   return raw.map(transformToIFSEntry);
 };
 
-export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
+export const addTrack = async (entry: Omit<NewFSEntry, 'play_order'>): Promise<FSEntry> => {
   /*
     TODO: logic for updating album playcount
   */
@@ -247,7 +259,8 @@ export const addTrack = async (entry: NewFSEntry): Promise<FSEntry> => {
   //   }
   // }
 
-  const response = await db.insert(flowsheet).values(entry).returning();
+  const play_order = await nextPlayOrder();
+  const response = await db.insert(flowsheet).values({ ...entry, play_order }).returning();
   updateLastModified();
   return response[0];
 };
@@ -343,6 +356,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
     entry_type: 'show_start',
+    play_order: await nextPlayOrder(),
     message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString(
       'en-US',
       {
@@ -406,6 +420,7 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
     .values({
       show_id: show_id,
       entry_type: 'dj_join',
+      play_order: await nextPlayOrder(),
       message: message,
     })
     .returning();
@@ -440,6 +455,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
     entry_type: 'show_end',
+    play_order: await nextPlayOrder(),
     message: `End of Show: ${dj_name} left the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
@@ -486,6 +502,7 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
     .values({
       show_id: show_id,
       entry_type: 'dj_leave',
+      play_order: await nextPlayOrder(),
       message: message,
     })
     .returning();
