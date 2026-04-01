@@ -19,7 +19,7 @@ jest.mock('../../../apps/backend/utils/serverEvents', () => {
   };
 });
 
-import { registerEventClient } from '../../../apps/backend/controllers/events.conroller';
+import { registerEventClient } from '../../../apps/backend/controllers/events.controller';
 import { serverEventsMgr, Topics } from '../../../apps/backend/utils/serverEvents';
 
 describe('events controller', () => {

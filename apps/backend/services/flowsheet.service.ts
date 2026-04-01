@@ -1,4 +1,4 @@
-import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
+import { sql, desc, eq, and, or, lte, gte, inArray } from 'drizzle-orm';
 import WxycError from '../utils/error.js';
 import {
   db,
@@ -40,6 +40,38 @@ const updateLastModified = () => {
     lastModifiedAt = now;
   }
 };
+
+/**
+ * SQL expression that computes an album cache key from flowsheet artist_name and album_title.
+ * Must mirror generateAlbumCacheKey() in metadata.cache.ts:
+ *   `${artistName.toLowerCase().trim()}-${(albumTitle || '').toLowerCase().trim()}`
+ */
+const computedAlbumCacheKey = sql<string>`substring(lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, ''))), 1, 512)`;
+
+/**
+ * SQL expression that computes an artist cache key from flowsheet artist_name.
+ * Must mirror generateArtistCacheKey() in metadata.cache.ts:
+ *   `artistName.toLowerCase().trim()`
+ */
+const computedArtistCacheKey = sql<string>`substring(lower(trim(${flowsheet.artist_name})), 1, 256)`;
+
+/**
+ * Join condition for album_metadata: match on album_id when present,
+ * fall back to cache_key for non-library entries (where album_id is NULL).
+ */
+const albumMetadataJoinCondition = or(
+  eq(album_metadata.album_id, flowsheet.album_id),
+  and(sql`${flowsheet.album_id} is null`, eq(album_metadata.cache_key, computedAlbumCacheKey))
+);
+
+/**
+ * Join condition for artist_metadata: match on artist_id via the library table
+ * when album_id is present, fall back to cache_key for non-library entries.
+ */
+const artistMetadataJoinCondition = or(
+  eq(artist_metadata.artist_id, library.artist_id),
+  and(sql`${flowsheet.album_id} is null`, eq(artist_metadata.cache_key, computedArtistCacheKey))
+);
 
 // SQL query fields (flat structure from database)
 const FSEntryFieldsRaw = {
@@ -144,9 +176,9 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    .leftJoin(album_metadata, albumMetadataJoinCondition)
     .leftJoin(library, eq(library.id, flowsheet.album_id))
-    .leftJoin(artist_metadata, eq(artist_metadata.artist_id, library.artist_id))
+    .leftJoin(artist_metadata, artistMetadataJoinCondition)
     .orderBy(desc(flowsheet.play_order))
     .offset(offset)
     .limit(limit);
@@ -158,9 +190,9 @@ export const getEntriesByRange = async (startId: number, endId: number): Promise
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    .leftJoin(album_metadata, albumMetadataJoinCondition)
     .leftJoin(library, eq(library.id, flowsheet.album_id))
-    .leftJoin(artist_metadata, eq(artist_metadata.artist_id, library.artist_id))
+    .leftJoin(artist_metadata, artistMetadataJoinCondition)
     .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
     .orderBy(desc(flowsheet.play_order));
 
@@ -175,9 +207,9 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    .leftJoin(album_metadata, albumMetadataJoinCondition)
     .leftJoin(library, eq(library.id, flowsheet.album_id))
-    .leftJoin(artist_metadata, eq(artist_metadata.artist_id, library.artist_id))
+    .leftJoin(artist_metadata, artistMetadataJoinCondition)
     .where(inArray(flowsheet.show_id, show_ids))
     .orderBy(desc(flowsheet.play_order));
 
