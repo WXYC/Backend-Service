@@ -13,3 +13,4 @@ export const sql = Object.assign(
 );
 export const desc = jest.fn((col) => ({ desc: col }));
 export const asc = jest.fn((col) => ({ asc: col }));
+export const inArray = jest.fn((col, values) => ({ inArray: [col, values] }));
