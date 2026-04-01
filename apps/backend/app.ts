@@ -15,6 +15,8 @@ import { events_route } from './routes/events.route.js';
 import { request_line_route } from './routes/requestLine.route.js';
 import { config_route } from './routes/config.route.js';
 import { proxy_route } from './routes/proxy.route.js';
+import { playlist_route } from './routes/playlist.route.js';
+import { startPlaylistProxy } from './services/playlist-proxy.service.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
@@ -51,6 +53,9 @@ app.use('/config', config_route);
 
 // Proxy endpoints for iOS app (anonymous auth + rate limiting)
 app.use('/proxy', proxy_route);
+
+// Enriched playlist proxy (unauthenticated, matches tubafrenzy path)
+app.use('/playlists', playlist_route);
 
 // Business logic routes
 app.use('/labels', labels_route);
@@ -91,6 +96,7 @@ app.use(errorHandler);
 
 const server = app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
+  startPlaylistProxy();
 });
 
 server.setTimeout(30000);
