@@ -91,6 +91,7 @@ export const flowsheet = {
   message: 'message',
   add_time: 'add_time',
 };
+export const bins = {};
 export const shows = {};
 export const show_djs = {};
 export const user = {
@@ -164,3 +165,11 @@ export type NewFSEntry = Partial<FSEntry>;
 export type Show = Record<string, unknown>;
 export type ShowDJ = Record<string, unknown>;
 export type User = Record<string, unknown>;
+
+export type BinEntry = {
+  id: number;
+  dj_id: string;
+  album_id: number;
+  track_title: string | null;
+};
+export type NewBinEntry = Omit<BinEntry, 'id'>;

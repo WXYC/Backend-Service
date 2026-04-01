@@ -15,13 +15,15 @@ const config: Config = {
   },
   transformIgnorePatterns: ['node_modules/(?!(jose|drizzle-orm|@wxyc/shared)/)'],
   moduleNameMapper: {
-    // Mock workspace database package
+    // Mock workspace packages
     '^@wxyc/database$': '<rootDir>/tests/mocks/database.mock.ts',
+    '^@wxyc/authentication$': '<rootDir>/tests/mocks/authentication.mock.ts',
     // Mock database client for any path resolving to shared/database/src/client
     '^.*/shared/database/src/client(\\.js)?$': '<rootDir>/tests/mocks/database.mock.ts',
-    // Mock better-auth access control modules (ESM-only, can't be transformed by ts-jest)
+    // Mock better-auth modules (ESM-only, can't be transformed by ts-jest)
     '^better-auth/plugins/access$': '<rootDir>/tests/mocks/better-auth-access.mock.ts',
     '^better-auth/plugins/organization/access$': '<rootDir>/tests/mocks/better-auth-org-access.mock.ts',
+    '^better-auth/node$': '<rootDir>/tests/mocks/better-auth-node.mock.ts',
     // Remove .js extensions from relative imports (ESM compatibility)
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },

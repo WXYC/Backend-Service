@@ -1,5 +1,6 @@
 import { Request, RequestHandler } from 'express';
 import { Mutex } from 'async-mutex';
+import * as Sentry from '@sentry/node';
 import { NewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/database';
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import { fetchAndCacheMetadata } from '../services/metadata/index.js';
@@ -237,7 +238,13 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
           artistName: completedEntry.artist_name,
           albumTitle: completedEntry.album_title ?? undefined,
           trackTitle: completedEntry.track_title ?? undefined,
-        }).catch((err) => console.error('[Flowsheet] Metadata fetch failed:', err));
+        }).catch((err) => {
+          console.error('[Flowsheet] Metadata fetch failed:', err);
+          Sentry.captureException(err, {
+            tags: { subsystem: 'metadata' },
+            extra: { artistName: completedEntry.artist_name, albumTitle: completedEntry.album_title },
+          });
+        });
       }
 
       res.status(201).json(completedEntry);
@@ -260,7 +267,13 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
           artistName: completedEntry.artist_name,
           albumTitle: completedEntry.album_title ?? undefined,
           trackTitle: completedEntry.track_title ?? undefined,
-        }).catch((err) => console.error('[Flowsheet] Metadata fetch failed:', err));
+        }).catch((err) => {
+          console.error('[Flowsheet] Metadata fetch failed:', err);
+          Sentry.captureException(err, {
+            tags: { subsystem: 'metadata' },
+            extra: { artistName: completedEntry.artist_name, albumTitle: completedEntry.album_title },
+          });
+        });
       }
 
       res.status(201).json(completedEntry);

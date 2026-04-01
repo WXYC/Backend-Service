@@ -49,10 +49,5 @@ async function getUserIdsFromDatabase() {
 // Note: Service readiness is checked in globalSetup.js (runs once for all tests)
 beforeAll(async () => {
   await getUserIdsFromDatabase();
-
-  if (process.env.AUTH_BYPASS === 'true') {
-    global.access_token = 'Auth Bypass Enabled';
-  } else {
-    global.access_token = await get_access_token();
-  }
+  global.access_token = await get_access_token();
 });

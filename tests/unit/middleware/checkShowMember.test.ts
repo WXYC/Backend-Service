@@ -28,6 +28,18 @@ function createMockReqResNext(userId: string) {
 }
 
 describe('showMemberMiddleware', () => {
+  const originalAuthBypass = process.env.AUTH_BYPASS;
+
+  beforeEach(() => {
+    delete process.env.AUTH_BYPASS;
+  });
+
+  afterAll(() => {
+    if (originalAuthBypass !== undefined) {
+      process.env.AUTH_BYPASS = originalAuthBypass;
+    }
+  });
+
   it('rejects a DJ who is not in the current show', async () => {
     mockGetDJsInCurrentShow.mockResolvedValue([{ id: 'dj-alice' }, { id: 'dj-bob' }]);
 
@@ -64,17 +76,15 @@ describe('showMemberMiddleware', () => {
     expect(next).not.toHaveBeenCalled();
   });
 
-  it('returns 500 when getDJsInCurrentShow throws', async () => {
-    mockGetDJsInCurrentShow.mockRejectedValue(new Error('DB connection lost'));
+  it('calls next(error) when getDJsInCurrentShow throws', async () => {
+    const dbError = new Error('DB connection lost');
+    mockGetDJsInCurrentShow.mockRejectedValue(dbError);
 
-    const { req, res, next, statusMock, jsonMock } = createMockReqResNext('dj-alice');
+    const { req, res, next, statusMock } = createMockReqResNext('dj-alice');
 
     await showMemberMiddleware(req, res, next);
 
-    expect(statusMock).toHaveBeenCalledWith(500);
-    expect(jsonMock).toHaveBeenCalledWith({
-      message: 'Internal server error checking show membership',
-    });
-    expect(next).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledWith(dbError);
+    expect(statusMock).not.toHaveBeenCalled();
   });
 });
