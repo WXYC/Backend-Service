@@ -30,6 +30,8 @@ describe('config.controller', () => {
       process.env.POSTHOG_HOST = 'https://custom.posthog.com';
       process.env.REQUEST_O_MATIC_URL = 'https://rom.example.com/request';
       process.env.API_BASE_URL = 'https://api.example.com';
+      process.env.DISCOGS_API_KEY = 'discogs_key_123';
+      process.env.DISCOGS_API_SECRET = 'discogs_secret_456';
 
       const req = {} as Request;
       const res = createMockRes();
@@ -42,6 +44,8 @@ describe('config.controller', () => {
         posthogHost: 'https://custom.posthog.com',
         requestOMaticUrl: 'https://rom.example.com/request',
         apiBaseUrl: 'https://api.example.com',
+        discogsApiKey: 'discogs_key_123',
+        discogsApiSecret: 'discogs_secret_456',
       });
     });
 
@@ -50,6 +54,8 @@ describe('config.controller', () => {
       delete process.env.POSTHOG_HOST;
       delete process.env.REQUEST_O_MATIC_URL;
       delete process.env.API_BASE_URL;
+      delete process.env.DISCOGS_API_KEY;
+      delete process.env.DISCOGS_API_SECRET;
 
       const req = {} as Request;
       const res = createMockRes();
@@ -62,6 +68,8 @@ describe('config.controller', () => {
         posthogHost: 'https://us.i.posthog.com',
         requestOMaticUrl: '',
         apiBaseUrl: 'https://api.wxyc.org',
+        discogsApiKey: '',
+        discogsApiSecret: '',
       });
     });
 

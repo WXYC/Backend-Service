@@ -11,6 +11,8 @@ export interface AppConfig {
   posthogHost: string;
   requestOMaticUrl: string;
   apiBaseUrl: string;
+  discogsApiKey: string;
+  discogsApiSecret: string;
 }
 
 /**
@@ -25,6 +27,8 @@ export const getConfig: RequestHandler = (_req, res) => {
     posthogHost: process.env.POSTHOG_HOST || 'https://us.i.posthog.com',
     requestOMaticUrl: process.env.REQUEST_O_MATIC_URL || '',
     apiBaseUrl: process.env.API_BASE_URL || 'https://api.wxyc.org',
+    discogsApiKey: process.env.DISCOGS_API_KEY || '',
+    discogsApiSecret: process.env.DISCOGS_API_SECRET || '',
   };
 
   res.set('Cache-Control', 'public, max-age=3600');
