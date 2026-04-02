@@ -1,4 +1,10 @@
-import { mapEntryType, parseMySQLDatetime, truncate, transformShow, transformEntry } from '../../../../jobs/flowsheet-etl/transform';
+import {
+  mapEntryType,
+  parseMySQLDatetime,
+  truncate,
+  transformShow,
+  transformEntry,
+} from '../../../../jobs/flowsheet-etl/transform';
 
 describe('flowsheet-etl transform', () => {
   describe('mapEntryType', () => {
@@ -97,17 +103,17 @@ describe('flowsheet-etl transform', () => {
   describe('transformEntry', () => {
     const makeRow = (overrides: Partial<Record<number, string | number | null>> = {}) => {
       const base: (string | number | null)[] = [
-        100,                         // 0: id
-        42,                          // 1: show_id
-        0,                           // 2: entry_type (track)
-        'Autechre',                  // 3: artist_name
-        'Confield',                  // 4: album_title
-        'VI Scose Poise',            // 5: track_title
-        'Warp',                      // 6: label
-        null,                        // 7: message
-        0,                           // 8: request_flag
-        1,                           // 9: play_order
-        '2023-10-15 20:05:00',       // 10: time_played
+        100, // 0: id
+        42, // 1: show_id
+        0, // 2: entry_type (track)
+        'Autechre', // 3: artist_name
+        'Confield', // 4: album_title
+        'VI Scose Poise', // 5: track_title
+        'Warp', // 6: label
+        null, // 7: message
+        0, // 8: request_flag
+        1, // 9: play_order
+        '2023-10-15 20:05:00', // 10: time_played
       ];
       for (const [idx, val] of Object.entries(overrides)) {
         base[Number(idx)] = val;
