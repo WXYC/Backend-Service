@@ -1,7 +1,6 @@
 import { RequestHandler } from 'express';
-import * as RequestLineService from '../services/requestLine.service.js';
-import * as AnonymousDeviceService from '../services/anonymousDevice.service.js';
 import { processRequest, parseOnly, getConfig, isParsingEnabled } from '../services/requestLine/index.js';
+import { postTextToSlack } from '../services/slack/index.js';
 import { searchLibrary } from '../services/library.service.js';
 
 export type RequestLineBody = {
@@ -144,7 +143,7 @@ export const submitRequestLine: RequestHandler<object, unknown, RequestLineBody>
       res.status(200).json(result);
     } else {
       // Fall back to simple Slack post (legacy behavior)
-      const result = await RequestLineService.submitRequestLine(trimmedMessage);
+      const result = await postTextToSlack(trimmedMessage);
 
       const responseTime = Date.now() - startTime;
       console.log(`[${logId}] Request completed successfully (legacy):`, {
