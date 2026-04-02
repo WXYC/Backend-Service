@@ -100,6 +100,7 @@ const FSEntryFieldsRaw = {
   segue: flowsheet.segue,
   message: flowsheet.message,
   play_order: flowsheet.play_order,
+  legacy_entry_id: flowsheet.legacy_entry_id,
   add_time: flowsheet.add_time,
   // Album metadata from cache (will be nested in transform)
   artwork_url: album_metadata.artwork_url,
@@ -132,6 +133,7 @@ type FSEntryRaw = {
   segue: boolean | null;
   message: string | null;
   play_order: number | null;
+  legacy_entry_id: number | null;
   add_time: Date | null;
   artwork_url: string | null;
   discogs_url: string | null;
@@ -150,6 +152,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   id: raw.id,
   show_id: raw.show_id,
   album_id: raw.album_id,
+  legacy_entry_id: raw.legacy_entry_id ?? null,
   entry_type: raw.entry_type as FSEntry['entry_type'],
   artist_name: raw.artist_name,
   album_title: raw.album_title,

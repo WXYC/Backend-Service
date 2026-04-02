@@ -225,6 +225,13 @@
       "when": 1775084400000,
       "tag": "0032_audit_f19_f20",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1775095000000,
+      "tag": "0034_legacy_id_columns",
+      "breakpoints": true
     }
   ]
 }
