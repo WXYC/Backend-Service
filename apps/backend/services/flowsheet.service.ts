@@ -31,9 +31,7 @@ let lastModifiedAt: Date = new Date();
  * from the current max value.
  */
 const nextPlayOrder = async (): Promise<number> => {
-  const result = await db
-    .select({ max: sql<number>`coalesce(max(${flowsheet.play_order}), 0)` })
-    .from(flowsheet);
+  const result = await db.select({ max: sql<number>`coalesce(max(${flowsheet.play_order}), 0)` }).from(flowsheet);
   return result[0].max + 1;
 };
 
@@ -260,7 +258,10 @@ export const addTrack = async (entry: Omit<NewFSEntry, 'play_order'>): Promise<F
   // }
 
   const play_order = await nextPlayOrder();
-  const response = await db.insert(flowsheet).values({ ...entry, play_order }).returning();
+  const response = await db
+    .insert(flowsheet)
+    .values({ ...entry, play_order })
+    .returning();
   updateLastModified();
   return response[0];
 };
