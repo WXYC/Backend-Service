@@ -10,8 +10,9 @@ jest.mock('../../../apps/backend/services/requestLine/index', () => ({
   processRequest: jest.fn(),
 }));
 
-jest.mock('../../../apps/backend/services/requestLine.service', () => ({}));
-jest.mock('../../../apps/backend/services/anonymousDevice.service', () => ({}));
+jest.mock('../../../apps/backend/services/slack/index', () => ({
+  postTextToSlack: jest.fn(),
+}));
 jest.mock('../../../apps/backend/services/library.service', () => ({}));
 
 import { parseMessage } from '../../../apps/backend/controllers/requestLine.controller';
