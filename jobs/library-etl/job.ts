@@ -806,14 +806,11 @@ const run = async () => {
       // --- Cross-reference imports ---
       // Detect if this is the first run by checking if both crossref tables are empty.
       // If so, do a full backfill regardless of last_run timestamp.
-      const artistCrossrefCount = await tx
-        .select({ count: sql<number>`count(*)` })
-        .from(artist_crossreference);
+      const artistCrossrefCount = await tx.select({ count: sql<number>`count(*)` }).from(artist_crossreference);
       const releaseCrossrefCount = await tx
         .select({ count: sql<number>`count(*)` })
         .from(artist_library_crossreference);
-      const isFirstCrossrefRun =
-        artistCrossrefCount[0].count === 0 && releaseCrossrefCount[0].count === 0;
+      const isFirstCrossrefRun = artistCrossrefCount[0].count === 0 && releaseCrossrefCount[0].count === 0;
 
       if (isFirstCrossrefRun) {
         console.log('[library-etl] Cross-reference tables are empty — running full backfill.');
