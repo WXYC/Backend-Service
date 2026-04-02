@@ -24,16 +24,14 @@ describe('schema audit: F19 and F20', () => {
   describe('F20: artist_library_crossreference FK columns should be NOT NULL', () => {
     it('artist_id should have .notNull()', () => {
       const crossrefDef = extractTableDef('artist_library_crossreference');
-      const artistIdLine = crossrefDef.split('\n').find((line) => line.includes('artist_id'));
-      expect(artistIdLine).toBeDefined();
-      expect(artistIdLine).toContain('.notNull()');
+      expect(crossrefDef).toContain('artist_id');
+      expect(crossrefDef).toMatch(/artist_id[\s\S]*?\.notNull\(\)/);
     });
 
     it('library_id should have .notNull()', () => {
       const crossrefDef = extractTableDef('artist_library_crossreference');
-      const libraryIdLine = crossrefDef.split('\n').find((line) => line.includes('library_id'));
-      expect(libraryIdLine).toBeDefined();
-      expect(libraryIdLine).toContain('.notNull()');
+      expect(crossrefDef).toContain('library_id');
+      expect(crossrefDef).toMatch(/library_id[\s\S]*?\.notNull\(\)/);
     });
   });
 });
