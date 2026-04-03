@@ -2,16 +2,14 @@
  * Proxy controller - thin HTTP layer over existing services.
  *
  * Four of the five handlers route through library-metadata-lookup (LML) for
- * Discogs data: searchArtwork, getAlbumMetadata, getArtistMetadata, and
- * resolveEntity. The Spotify track handler calls the Spotify API directly.
+ * Discogs data and enriched streaming URLs: searchArtwork, getAlbumMetadata,
+ * getArtistMetadata, and resolveEntity. The Spotify track handler calls the
+ * Spotify API directly (track-by-ID, a different use case from search).
  *
  * All handlers require `requireAnonymousAuth` + `proxyRateLimit` middleware
  * applied at the route level.
  */
 import { RequestHandler } from 'express';
-import { SpotifyProvider } from '../services/metadata/providers/spotify.provider.js';
-import { AppleMusicProvider } from '../services/metadata/providers/apple.provider.js';
-import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 import { getArtworkFinder } from '../services/artwork/finder.js';
 import { classify as classifyNSFW } from '../services/artwork/nsfw.js';
 import {
@@ -21,8 +19,14 @@ import {
   resolveEntity as lmlResolveEntity,
   LmlClientError,
 } from '../services/lml/lml.client.js';
-import { SpotifyTokenResponse } from '../services/metadata/metadata.types.js';
 import { LRUCache } from 'lru-cache';
+
+/** Spotify OAuth2 token response. */
+interface SpotifyTokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+}
 
 interface SpotifyTrackApiResponse {
   name: string;
@@ -32,11 +36,6 @@ interface SpotifyTrackApiResponse {
     images?: Array<{ url: string }>;
   };
 }
-
-// Reuse the existing singleton provider instances (non-Discogs)
-const spotify = new SpotifyProvider();
-const appleMusic = new AppleMusicProvider();
-const searchUrls = new SearchUrlProvider();
 
 // --- Query parameter types ---
 
@@ -173,8 +172,9 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
 /**
  * GET /proxy/metadata/album
  *
- * Fetches album metadata from LML (Discogs search + release details), Spotify,
- * Apple Music, and search URL providers in parallel.
+ * Fetches album metadata from LML. The LML search response already includes
+ * enriched streaming URLs (Spotify, Apple Music, YouTube Music, Bandcamp,
+ * SoundCloud), so no direct calls to those APIs are needed.
  */
 export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMetadataQuery> = async (
   req,
@@ -189,22 +189,28 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   }
 
   try {
+    const metadata: Record<string, unknown> = {};
     const searchTerm = releaseTitle || trackTitle || '';
 
-    const [lmlSearchResult, spotifyUrl, appleMusicUrl] = await Promise.allSettled([
-      searchDiscogs(artistName, searchTerm || undefined),
-      spotify.getSpotifyUrl(artistName, releaseTitle, trackTitle),
-      appleMusic.getAppleMusicUrl(artistName, releaseTitle, trackTitle),
-    ]);
+    let lmlResults;
+    try {
+      lmlResults = await searchDiscogs(artistName, searchTerm || undefined);
+    } catch (searchError) {
+      console.warn('[ProxyController] LML search failed:', searchError);
+    }
 
-    const metadata: Record<string, unknown> = {};
-
-    // Extract Discogs data from LML search + release
-    if (lmlSearchResult.status === 'fulfilled' && lmlSearchResult.value.results.length > 0) {
-      const topResult = lmlSearchResult.value.results[0];
+    if (lmlResults && lmlResults.results.length > 0) {
+      const topResult = lmlResults.results[0];
       metadata.discogsReleaseId = topResult.release_id;
       metadata.discogsUrl = topResult.release_url;
       metadata.artworkUrl = topResult.artwork_url || undefined;
+
+      // Streaming URLs from LML enrichment
+      if (topResult.spotify_url) metadata.spotifyUrl = topResult.spotify_url;
+      if (topResult.apple_music_url) metadata.appleMusicUrl = topResult.apple_music_url;
+      if (topResult.youtube_music_url) metadata.youtubeMusicUrl = topResult.youtube_music_url;
+      if (topResult.bandcamp_url) metadata.bandcampUrl = topResult.bandcamp_url;
+      if (topResult.soundcloud_url) metadata.soundcloudUrl = topResult.soundcloud_url;
 
       // Fetch enriched release details
       try {
@@ -231,18 +237,12 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
       }
     }
 
-    if (spotifyUrl.status === 'fulfilled' && spotifyUrl.value) {
-      metadata.spotifyUrl = spotifyUrl.value;
-    }
-
-    if (appleMusicUrl.status === 'fulfilled' && appleMusicUrl.value) {
-      metadata.appleMusicUrl = appleMusicUrl.value;
-    }
-
-    const urls = searchUrls.getAllSearchUrls(artistName, releaseTitle, trackTitle);
-    metadata.youtubeMusicUrl = urls.youtubeMusicUrl;
-    metadata.bandcampUrl = urls.bandcampUrl;
-    metadata.soundcloudUrl = urls.soundcloudUrl;
+    // Fallback: construct search URLs for services without LML-provided URLs
+    const query = searchTerm ? `${artistName} ${searchTerm}` : artistName;
+    const encodedQuery = encodeURIComponent(query);
+    if (!metadata.youtubeMusicUrl) metadata.youtubeMusicUrl = `https://music.youtube.com/search?q=${encodedQuery}`;
+    if (!metadata.bandcampUrl) metadata.bandcampUrl = `https://bandcamp.com/search?q=${encodedQuery}`;
+    if (!metadata.soundcloudUrl) metadata.soundcloudUrl = `https://soundcloud.com/search?q=${encodedQuery}`;
 
     res.set('Cache-Control', 'private, max-age=600');
     res.status(200).json(metadata);
