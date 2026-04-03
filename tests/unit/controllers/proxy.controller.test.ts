@@ -46,30 +46,12 @@ jest.mock('../../../apps/backend/services/artwork/finder', () => ({
   getArtworkFinder: () => ({ find: mockFind }),
 }));
 
-// Spotify and Apple Music providers (still used by getAlbumMetadata)
-const mockGetSpotifyUrl = jest.fn<() => Promise<string | null>>();
-
-jest.mock('../../../apps/backend/services/metadata/providers/spotify.provider', () => ({
-  SpotifyProvider: jest.fn().mockImplementation(() => ({
-    getSpotifyUrl: mockGetSpotifyUrl,
-  })),
-}));
-
-const mockGetAppleMusicUrl = jest.fn<() => Promise<string | null>>();
-
-jest.mock('../../../apps/backend/services/metadata/providers/apple.provider', () => ({
-  AppleMusicProvider: jest.fn().mockImplementation(() => ({
-    getAppleMusicUrl: mockGetAppleMusicUrl,
-  })),
-}));
-
-jest.mock('../../../apps/backend/services/metadata/providers/search-urls.provider', () => ({
-  SearchUrlProvider: jest.fn().mockImplementation(() => ({
-    getAllSearchUrls: (artist: string, _album?: string, _track?: string) => ({
-      youtubeMusicUrl: `https://music.youtube.com/search?q=${encodeURIComponent(artist)}`,
-      bandcampUrl: `https://bandcamp.com/search?q=${encodeURIComponent(artist)}`,
-      soundcloudUrl: `https://soundcloud.com/search?q=${encodeURIComponent(artist)}`,
-    }),
+// LRU cache mock (proxy controller uses it for artwork caching)
+jest.mock('lru-cache', () => ({
+  LRUCache: jest.fn().mockImplementation(() => ({
+    get: jest.fn(),
+    set: jest.fn(),
+    has: jest.fn().mockReturnValue(false),
   })),
 }));
 
@@ -225,7 +207,7 @@ describe('proxy.controller', () => {
       expect(res.status).toHaveBeenCalledWith(400);
     });
 
-    it('returns merged metadata from LML search + release + other providers', async () => {
+    it('returns merged metadata from LML search + release details', async () => {
       mockSearchDiscogs.mockResolvedValue({
         results: [
           {
@@ -235,6 +217,14 @@ describe('proxy.controller', () => {
             album: 'Confield',
             artist: 'Autechre',
             confidence: 0.95,
+            release_year: null,
+            artist_bio: null,
+            wikipedia_url: null,
+            spotify_url: 'https://open.spotify.com/album/abc',
+            apple_music_url: 'https://music.apple.com/album/xyz',
+            youtube_music_url: 'https://music.youtube.com/search?q=Autechre+Confield',
+            bandcamp_url: 'https://bandcamp.com/search?q=Autechre+Confield',
+            soundcloud_url: 'https://soundcloud.com/search?q=Autechre+Confield',
           },
         ],
         total: 1,
@@ -261,9 +251,6 @@ describe('proxy.controller', () => {
         artists: [{ artist_id: 3840, name: 'Autechre', join: '', role: null }],
       });
 
-      mockGetSpotifyUrl.mockResolvedValue('https://open.spotify.com/album/abc');
-      mockGetAppleMusicUrl.mockResolvedValue('https://music.apple.com/album/xyz');
-
       const req = {
         query: { artistName: 'Autechre', releaseTitle: 'Confield' },
       } as unknown as Request;
@@ -286,28 +273,32 @@ describe('proxy.controller', () => {
         { position: '1', title: 'VI Scose Poise', duration: '6:45' },
         { position: '2', title: 'Cfern', duration: '7:01' },
       ]);
+      // Streaming URLs from LML search results
       expect(result.spotifyUrl).toBe('https://open.spotify.com/album/abc');
       expect(result.appleMusicUrl).toBe('https://music.apple.com/album/xyz');
-      expect(result.youtubeMusicUrl).toContain('music.youtube.com');
-      expect(result.bandcampUrl).toContain('bandcamp.com');
-      expect(result.soundcloudUrl).toContain('soundcloud.com');
+      expect(result.youtubeMusicUrl).toBe('https://music.youtube.com/search?q=Autechre+Confield');
+      expect(result.bandcampUrl).toBe('https://bandcamp.com/search?q=Autechre+Confield');
+      expect(result.soundcloudUrl).toBe('https://soundcloud.com/search?q=Autechre+Confield');
       expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');
     });
 
-    it('returns partial metadata when LML search fails but other providers succeed', async () => {
+    it('returns fallback search URLs when LML search fails', async () => {
       mockSearchDiscogs.mockRejectedValue(new Error('LML down'));
-      mockGetSpotifyUrl.mockResolvedValue('https://open.spotify.com/track/abc');
-      mockGetAppleMusicUrl.mockResolvedValue(null);
 
-      const req = { query: { artistName: 'Test Artist' } } as unknown as Request;
+      const req = { query: { artistName: 'Test Artist', releaseTitle: 'Test Album' } } as unknown as Request;
       const res = createMockRes();
 
       await getAlbumMetadata(req, res as Response, mockNext);
 
       expect(res.status).toHaveBeenCalledWith(200);
       const result = (res.json as jest.Mock).mock.calls[0][0];
-      expect(result.spotifyUrl).toBe('https://open.spotify.com/track/abc');
       expect(result.discogsReleaseId).toBeUndefined();
+      expect(result.spotifyUrl).toBeUndefined();
+      expect(result.appleMusicUrl).toBeUndefined();
+      // Search URLs are always constructed as fallback
+      expect(result.youtubeMusicUrl).toContain('music.youtube.com');
+      expect(result.bandcampUrl).toContain('bandcamp.com');
+      expect(result.soundcloudUrl).toContain('soundcloud.com');
     });
 
     it('returns search-only metadata when release fetch fails', async () => {
@@ -320,6 +311,14 @@ describe('proxy.controller', () => {
             album: 'Moon Pix',
             artist: 'Cat Power',
             confidence: 0.9,
+            release_year: null,
+            artist_bio: null,
+            wikipedia_url: null,
+            spotify_url: 'https://open.spotify.com/album/moonpix',
+            apple_music_url: null,
+            youtube_music_url: null,
+            bandcamp_url: null,
+            soundcloud_url: null,
           },
         ],
         total: 1,
@@ -327,8 +326,6 @@ describe('proxy.controller', () => {
       });
 
       mockGetRelease.mockRejectedValue(new Error('Release fetch failed'));
-      mockGetSpotifyUrl.mockResolvedValue(null);
-      mockGetAppleMusicUrl.mockResolvedValue(null);
 
       const req = {
         query: { artistName: 'Cat Power', releaseTitle: 'Moon Pix' },
@@ -341,20 +338,19 @@ describe('proxy.controller', () => {
       const result = (res.json as jest.Mock).mock.calls[0][0];
       expect(result.discogsReleaseId).toBe(99999);
       expect(result.artworkUrl).toBe('https://i.discogs.com/art.jpg');
+      // Streaming URLs from search result still present
+      expect(result.spotifyUrl).toBe('https://open.spotify.com/album/moonpix');
       // No enriched fields since release fetch failed
       expect(result.genres).toBeUndefined();
       expect(result.tracklist).toBeUndefined();
     });
 
-    it('returns metadata when LML search returns empty results', async () => {
+    it('returns fallback search URLs when LML search returns empty results', async () => {
       mockSearchDiscogs.mockResolvedValue({
         results: [],
         total: 0,
         cached: false,
       });
-
-      mockGetSpotifyUrl.mockResolvedValue('https://open.spotify.com/track/xyz');
-      mockGetAppleMusicUrl.mockResolvedValue(null);
 
       const req = { query: { artistName: 'Obscure Artist', releaseTitle: 'Unknown Album' } } as unknown as Request;
       const res = createMockRes();
@@ -364,7 +360,13 @@ describe('proxy.controller', () => {
       expect(res.status).toHaveBeenCalledWith(200);
       const result = (res.json as jest.Mock).mock.calls[0][0];
       expect(result.discogsReleaseId).toBeUndefined();
-      expect(result.spotifyUrl).toBe('https://open.spotify.com/track/xyz');
+      expect(result.spotifyUrl).toBeUndefined();
+      expect(result.appleMusicUrl).toBeUndefined();
+      // Search URLs are constructed as fallback
+      expect(result.youtubeMusicUrl).toContain('music.youtube.com');
+      expect(result.youtubeMusicUrl).toContain('Obscure%20Artist');
+      expect(result.bandcampUrl).toContain('bandcamp.com');
+      expect(result.soundcloudUrl).toContain('soundcloud.com');
       expect(mockGetRelease).not.toHaveBeenCalled();
     });
   });
