@@ -87,9 +87,7 @@ export async function fetchAndCacheMetadata(request: MetadataRequest): Promise<F
  * Returns the album metadata result, the Discogs artist ID (if found), and
  * the raw LML search result (for fallback artist bio extraction).
  */
-async function fetchAlbumMetadata(
-  request: MetadataRequest
-): Promise<{
+async function fetchAlbumMetadata(request: MetadataRequest): Promise<{
   albumMetadata: AlbumMetadataResult | null;
   artistId: number | null;
   searchResult: LmlSearchResult | null;
