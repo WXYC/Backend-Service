@@ -13,7 +13,4 @@ export {
   artistMetadataExists,
 } from './metadata.cache.js';
 export { fetchAndCacheMetadata } from './metadata.service.js';
-export { DiscogsProvider } from './providers/discogs.provider.js';
-export { SpotifyProvider } from './providers/spotify.provider.js';
-export { AppleMusicProvider } from './providers/apple.provider.js';
 export { SearchUrlProvider } from './providers/search-urls.provider.js';

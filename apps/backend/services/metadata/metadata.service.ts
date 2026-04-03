@@ -1,5 +1,10 @@
 /**
- * Metadata Service - Orchestrates fetching and storing metadata from external APIs
+ * Metadata Service - Fetches and stores metadata via LML (library-metadata-lookup).
+ *
+ * Called fire-and-forget on every flowsheet insert. LML search results include
+ * enriched streaming URLs (Spotify, Apple Music, YouTube Music, Bandcamp,
+ * SoundCloud), Discogs metadata, artist bio, and Wikipedia URL. Fallback search
+ * URLs are constructed for services where LML returns null.
  */
 import { MetadataRequest, AlbumMetadataResult, ArtistMetadataResult, FlowsheetMetadata } from './metadata.types.js';
 import {
@@ -8,30 +13,50 @@ import {
   generateAlbumCacheKey,
   generateArtistCacheKey,
 } from './metadata.cache.js';
-import { DiscogsProvider } from './providers/discogs.provider.js';
-import { SpotifyProvider } from './providers/spotify.provider.js';
-import { AppleMusicProvider } from './providers/apple.provider.js';
+import { searchDiscogs, getRelease, getArtistDetails, LmlSearchResult } from '../lml/lml.client.js';
 import { SearchUrlProvider } from './providers/search-urls.provider.js';
 
-// Provider instances (created once, reused)
-const discogs = new DiscogsProvider();
-const spotify = new SpotifyProvider();
-const appleMusic = new AppleMusicProvider();
 const searchUrls = new SearchUrlProvider();
 
 /**
- * Fetch and store metadata for a single entry (called on insert)
+ * Strip Discogs markup tags from bio text.
+ *
+ * Discogs profiles use custom markup like [a=Artist], [l=Label],
+ * [url=...]...[/url]. This converts them to plain text.
+ */
+function cleanDiscogsBio(bio: string): string {
+  return bio
+    .replace(/\[a=([^\]]+)\]/g, '$1')
+    .replace(/\[l=([^\]]+)\]/g, '$1')
+    .replace(/\[r=([^\]]+)\]/g, '$1')
+    .replace(/\[m=([^\]]+)\]/g, '$1')
+    .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
+}
+
+/**
+ * Check whether the LML service is configured.
+ */
+function isLmlConfigured(): boolean {
+  return !!process.env.LIBRARY_METADATA_URL;
+}
+
+/**
+ * Fetch and store metadata for a single entry (called on insert).
  */
 export async function fetchAndCacheMetadata(request: MetadataRequest): Promise<FlowsheetMetadata | null> {
+  if (!isLmlConfigured()) {
+    console.warn('[MetadataService] LIBRARY_METADATA_URL not configured, skipping metadata fetch');
+    return null;
+  }
+
   const result: FlowsheetMetadata = {};
 
   try {
-    // Fetch album metadata
-    const albumMetadata = await fetchAlbumMetadata(request);
+    // Single LML search fetches Discogs data + enriched streaming URLs
+    const { albumMetadata, artistId, searchResult } = await fetchAlbumMetadata(request);
     if (albumMetadata) {
       result.album = albumMetadata;
 
-      // Store the album metadata
       const cacheKey = request.albumId
         ? null
         : generateAlbumCacheKey(request.artistName, request.albumTitle || request.trackTitle);
@@ -39,12 +64,11 @@ export async function fetchAndCacheMetadata(request: MetadataRequest): Promise<F
       await setAlbumMetadata(request.albumId || null, cacheKey, albumMetadata, request.rotationId != null);
     }
 
-    // Fetch artist metadata
-    const artistMetadata = await fetchArtistMetadata(request);
+    // Fetch artist metadata using the artist ID from the release, or from the search result bio
+    const artistMetadata = await fetchArtistMetadata(request, artistId, searchResult);
     if (artistMetadata) {
       result.artist = artistMetadata;
 
-      // Store the artist metadata
       const cacheKey = request.artistId ? null : generateArtistCacheKey(request.artistName);
 
       await setArtistMetadata(request.artistId || null, cacheKey, artistMetadata);
@@ -58,64 +82,110 @@ export async function fetchAndCacheMetadata(request: MetadataRequest): Promise<F
 }
 
 /**
- * Fetch album metadata from all providers
+ * Fetch album metadata from LML.
+ *
+ * Returns the album metadata result, the Discogs artist ID (if found), and
+ * the raw LML search result (for fallback artist bio extraction).
  */
-async function fetchAlbumMetadata(request: MetadataRequest): Promise<AlbumMetadataResult | null> {
+async function fetchAlbumMetadata(
+  request: MetadataRequest
+): Promise<{
+  albumMetadata: AlbumMetadataResult | null;
+  artistId: number | null;
+  searchResult: LmlSearchResult | null;
+}> {
   const { artistName, albumTitle, trackTitle } = request;
+  const searchTerm = albumTitle || trackTitle || '';
 
-  // Fetch from all providers in parallel
-  const [discogsResult, spotifyUrl, appleMusicUrl] = await Promise.allSettled([
-    discogs.fetchAlbumMetadata(artistName, albumTitle || trackTitle || ''),
-    spotify.getSpotifyUrl(artistName, albumTitle, trackTitle),
-    appleMusic.getAppleMusicUrl(artistName, albumTitle, trackTitle),
-  ]);
-
-  // Merge results
-  const metadata: AlbumMetadataResult = {};
-
-  // Discogs data
-  if (discogsResult.status === 'fulfilled' && discogsResult.value) {
-    Object.assign(metadata, discogsResult.value);
+  let lmlResults;
+  try {
+    lmlResults = await searchDiscogs(artistName, searchTerm || undefined);
+  } catch (error) {
+    console.warn('[MetadataService] LML search failed:', error);
+    // Fall through to construct search URLs
   }
 
-  // Spotify URL
-  if (spotifyUrl.status === 'fulfilled' && spotifyUrl.value) {
-    metadata.spotifyUrl = spotifyUrl.value;
+  if (!lmlResults || lmlResults.results.length === 0) {
+    // No LML results — construct search URLs as bare minimum
+    const urls = searchUrls.getAllSearchUrls(artistName, albumTitle, trackTitle);
+    return {
+      albumMetadata: {
+        youtubeMusicUrl: urls.youtubeMusicUrl,
+        bandcampUrl: urls.bandcampUrl,
+        soundcloudUrl: urls.soundcloudUrl,
+      },
+      artistId: null,
+      searchResult: null,
+    };
   }
 
-  // Apple Music URL
-  if (appleMusicUrl.status === 'fulfilled' && appleMusicUrl.value) {
-    metadata.appleMusicUrl = appleMusicUrl.value;
+  const topResult = lmlResults.results[0];
+  const metadata: AlbumMetadataResult = {
+    discogsReleaseId: topResult.release_id,
+    discogsUrl: topResult.release_url,
+    artworkUrl: topResult.artwork_url ?? undefined,
+    releaseYear: topResult.release_year ?? undefined,
+    spotifyUrl: topResult.spotify_url ?? undefined,
+    appleMusicUrl: topResult.apple_music_url ?? undefined,
+    youtubeMusicUrl: topResult.youtube_music_url ?? undefined,
+    bandcampUrl: topResult.bandcamp_url ?? undefined,
+    soundcloudUrl: topResult.soundcloud_url ?? undefined,
+  };
+
+  // Fetch release details for artist_id (needed for artist metadata)
+  let artistId: number | null = null;
+  try {
+    const release = await getRelease(topResult.release_id);
+    artistId = release.artist_id ?? null;
+    // Enrich with release-level data
+    if (release.year) metadata.releaseYear = release.year;
+    if (release.artwork_url) metadata.artworkUrl = release.artwork_url;
+  } catch (error) {
+    console.warn('[MetadataService] LML release fetch failed:', error);
   }
 
-  // Search URLs (always available - no API calls)
+  // Fill missing search URLs
   const urls = searchUrls.getAllSearchUrls(artistName, albumTitle, trackTitle);
-  metadata.youtubeMusicUrl = urls.youtubeMusicUrl;
-  metadata.bandcampUrl = urls.bandcampUrl;
-  metadata.soundcloudUrl = urls.soundcloudUrl;
+  if (!metadata.youtubeMusicUrl) metadata.youtubeMusicUrl = urls.youtubeMusicUrl;
+  if (!metadata.bandcampUrl) metadata.bandcampUrl = urls.bandcampUrl;
+  if (!metadata.soundcloudUrl) metadata.soundcloudUrl = urls.soundcloudUrl;
 
-  // Return null if we got nothing meaningful
-  if (!metadata.discogsUrl && !metadata.spotifyUrl && !metadata.appleMusicUrl) {
-    // Still return search URLs even if no API results
-    if (metadata.youtubeMusicUrl) {
-      return metadata;
-    }
-    return null;
-  }
-
-  return metadata;
+  return { albumMetadata: metadata, artistId, searchResult: topResult };
 }
 
 /**
- * Fetch artist metadata from Discogs
+ * Fetch artist metadata from LML.
+ *
+ * Prefers getArtistDetails by ID (richer data). Falls back to the bio and
+ * Wikipedia URL from the LML search result if no artist ID is available.
  */
-async function fetchArtistMetadata(request: MetadataRequest): Promise<ArtistMetadataResult | null> {
-  const { artistName } = request;
+async function fetchArtistMetadata(
+  request: MetadataRequest,
+  discogsArtistId: number | null,
+  searchResult: LmlSearchResult | null
+): Promise<ArtistMetadataResult | null> {
+  // Try fetching full artist details by ID
+  if (discogsArtistId) {
+    try {
+      const artist = await getArtistDetails(discogsArtistId);
+      const wikipediaUrl = artist.urls.find((url) => url.includes('wikipedia.org')) ?? undefined;
+      const bio = artist.profile ? cleanDiscogsBio(artist.profile) : undefined;
 
-  try {
-    return await discogs.fetchArtistMetadata(artistName);
-  } catch (error) {
-    console.error('[MetadataService] fetchArtistMetadata error:', error);
-    return null;
+      return { discogsArtistId, bio, wikipediaUrl };
+    } catch (error) {
+      console.warn('[MetadataService] LML artist details failed:', error);
+      // Fall through to search result fallback
+    }
   }
+
+  // Fallback: use bio and Wikipedia URL from the LML search result
+  if (searchResult) {
+    const bio = searchResult.artist_bio ? cleanDiscogsBio(searchResult.artist_bio) : undefined;
+    const wikipediaUrl = searchResult.wikipedia_url ?? undefined;
+    if (bio || wikipediaUrl) {
+      return { discogsArtistId: discogsArtistId ?? undefined, bio, wikipediaUrl };
+    }
+  }
+
+  return null;
 }
