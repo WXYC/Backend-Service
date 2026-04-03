@@ -1,57 +1,63 @@
 /**
  * Discogs artwork provider.
  *
- * Delegates to DiscogsService for API calls to avoid code duplication.
- * Ported from request-parser artwork/providers/discogs.py
+ * The search method routes through LML (library-metadata-lookup) for artwork
+ * discovery. Track-search methods still delegate to DiscogsService directly
+ * until LML gets track-search endpoints (Phase 4).
  */
 
 import { ArtworkProvider } from './base.js';
 import { ArtworkRequest, ArtworkSearchResult } from '../../requestLine/types.js';
 import { DiscogsService, isDiscogsAvailable } from '../../discogs/index.js';
+import { searchDiscogs } from '../../lml/lml.client.js';
 import { calculateConfidence } from '../../requestLine/matching/index.js';
 
 /**
- * Artwork provider using the Discogs API.
+ * Check whether the LML service is configured.
+ */
+function isLmlConfigured(): boolean {
+  return !!process.env.LIBRARY_METADATA_URL;
+}
+
+/**
+ * Artwork provider using LML for search, DiscogsService for track operations.
  */
 export class DiscogsProvider implements ArtworkProvider {
   readonly name = 'discogs';
 
   /**
-   * Search Discogs for album artwork.
+   * Search for album artwork via LML.
    */
   async search(request: ArtworkRequest): Promise<ArtworkSearchResult[]> {
-    if (!isDiscogsAvailable()) {
-      console.warn('[DiscogsProvider] Discogs token not configured');
+    if (!isLmlConfigured()) {
+      console.warn('[DiscogsProvider] LIBRARY_METADATA_URL not configured');
       return [];
     }
 
-    // Check if there's anything to search for
     if (!request.artist && !request.album && !request.song) {
       console.warn('[DiscogsProvider] No searchable fields in request');
       return [];
     }
 
-    // Delegate to service
-    const response = await DiscogsService.search({
-      artist: request.artist,
-      album: request.album,
-      track: request.song,
-    });
+    let lmlResults;
+    try {
+      lmlResults = await searchDiscogs(request.artist || '', request.album || request.song || undefined);
+    } catch (error) {
+      console.warn('[DiscogsProvider] LML search failed:', error);
+      return [];
+    }
 
-    // Convert results to ArtworkSearchResult format
     const results: ArtworkSearchResult[] = [];
-    for (const item of response.results) {
-      // Skip results without artwork
-      if (!item.artworkUrl || item.artworkUrl.includes('spacer.gif')) {
+    for (const item of lmlResults.results) {
+      if (!item.artwork_url || item.artwork_url.includes('spacer.gif')) {
         continue;
       }
 
-      // Calculate confidence score for this result
       const confidence = calculateConfidence(request.artist, request.album, item.artist || '', item.album || '');
 
       results.push({
-        artworkUrl: item.artworkUrl,
-        releaseUrl: item.releaseUrl,
+        artworkUrl: item.artwork_url,
+        releaseUrl: item.release_url,
         album: item.album || '',
         artist: item.artist || '',
         source: this.name,
@@ -59,7 +65,6 @@ export class DiscogsProvider implements ArtworkProvider {
       });
     }
 
-    // Sort by confidence
     results.sort((a, b) => b.confidence - a.confidence);
     return results;
   }
