@@ -7,9 +7,12 @@
 
 import { Router, type Request, type Response } from 'express';
 import { recordRequest, checkErrorRule } from '../state.js';
-import { createRequire } from 'node:module';
-const require = createRequire(import.meta.url);
-const fixtures = require('../fixtures/lml.json');
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const fixtures = JSON.parse(readFileSync(join(__dirname, '../fixtures/lml.json'), 'utf8'));
 
 const router = Router();
 

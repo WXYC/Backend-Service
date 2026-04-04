@@ -96,17 +96,25 @@ async function postToSlack(payload: object): Promise<SlackPostResult> {
  * Post via fetch() — used when SLACK_WEBHOOK_URL override is active.
  */
 async function postViaFetch(url: string, payload: object): Promise<SlackPostResult> {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SLACK_TIMEOUT_MS);
 
-  const text = await response.text();
-  if (response.ok) {
-    return { success: true, message: 'Message sent to Slack successfully' };
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const text = await response.text();
+    if (response.ok) {
+      return { success: true, message: 'Message sent to Slack successfully' };
+    }
+    return { success: false, statusCode: response.status, response: text };
+  } finally {
+    clearTimeout(timeout);
   }
-  return { success: false, statusCode: response.status, response: text };
 }
 
 /**
