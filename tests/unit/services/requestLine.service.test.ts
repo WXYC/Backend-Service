@@ -19,7 +19,6 @@ jest.mock('../../../apps/backend/services/requestLine/config', () => ({
     enableArtworkLookup: false,
   }),
   isParsingEnabled: jest.fn().mockReturnValue(true),
-  isDiscogsEnabled: jest.fn().mockReturnValue(false),
 }));
 
 // Mock search pipeline
@@ -33,10 +32,12 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   findSimilarArtist: jest.fn().mockResolvedValue(null),
 }));
 
-// Mock Discogs
-jest.mock('../../../apps/backend/services/discogs/index', () => ({
-  DiscogsService: {},
-  isDiscogsAvailable: jest.fn().mockReturnValue(false),
+// Mock LML client
+jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+  searchTrackReleases: jest.fn(),
+  searchDiscogs: jest.fn(),
+  validateTrackOnRelease: jest.fn(),
+  isLmlConfigured: jest.fn().mockReturnValue(false),
 }));
 
 // Mock artwork

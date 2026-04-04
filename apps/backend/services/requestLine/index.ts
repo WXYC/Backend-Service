@@ -9,7 +9,7 @@ export { processRequest, parseOnly } from './requestLine.enhanced.service.js';
 export * from './types.js';
 
 // Config
-export { getConfig, loadConfig, validateConfig, isParsingEnabled, isDiscogsEnabled } from './config.js';
+export { getConfig, loadConfig, validateConfig, isParsingEnabled } from './config.js';
 
 // Matching utilities
 export * from './matching/index.js';
