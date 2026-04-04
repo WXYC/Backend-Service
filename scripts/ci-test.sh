@@ -26,6 +26,7 @@ export DB_HOST=localhost
 export DB_PORT=${CI_DB_PORT:-5433}
 export PORT=${CI_PORT:-8081}
 export BETTER_AUTH_URL=${CI_BETTER_AUTH_URL:-http://localhost:8083/auth}
+export MOCK_API_URL=http://localhost:${MOCK_API_PORT:-9090}
 
 if [ "$FULL_MODE" = true ]; then
   echo "Running full test suite..."

@@ -1,0 +1,232 @@
+{
+  "search": {
+    "autechre": {
+      "results": [
+        {
+          "album": "Confield",
+          "artist": "Autechre",
+          "release_id": 4080,
+          "release_url": "https://www.discogs.com/release/4080",
+          "artwork_url": "https://img.discogs.com/autechre-confield.jpg",
+          "confidence": 0.95,
+          "release_year": 2001,
+          "artist_bio": "Autechre are an English electronic music duo consisting of Rob Brown and Sean Booth.",
+          "wikipedia_url": "https://en.wikipedia.org/wiki/Autechre",
+          "spotify_url": "https://open.spotify.com/album/3gSEBMIgsFMbEAsxSfKfoH",
+          "apple_music_url": "https://music.apple.com/album/confield/1440846395",
+          "youtube_music_url": "https://music.youtube.com/search?q=Autechre+Confield",
+          "bandcamp_url": "https://bandcamp.com/search?q=Autechre+Confield",
+          "soundcloud_url": "https://soundcloud.com/search?q=Autechre+Confield"
+        }
+      ],
+      "total": 1,
+      "cached": false
+    },
+    "jessica pratt": {
+      "results": [
+        {
+          "album": "On Your Own Love Again",
+          "artist": "Jessica Pratt",
+          "release_id": 6690542,
+          "release_url": "https://www.discogs.com/release/6690542",
+          "artwork_url": "https://img.discogs.com/jessica-pratt-oyola.jpg",
+          "confidence": 0.92,
+          "release_year": 2015,
+          "artist_bio": null,
+          "wikipedia_url": null,
+          "spotify_url": "https://open.spotify.com/album/5YX2YHbMCkszDPHbLurRMq",
+          "apple_music_url": "https://music.apple.com/album/on-your-own-love-again/952070859",
+          "youtube_music_url": null,
+          "bandcamp_url": null,
+          "soundcloud_url": null
+        }
+      ],
+      "total": 1,
+      "cached": false
+    },
+    "duke ellington": {
+      "results": [
+        {
+          "album": "Duke Ellington & John Coltrane",
+          "artist": "Duke Ellington & John Coltrane",
+          "release_id": 1536211,
+          "release_url": "https://www.discogs.com/release/1536211",
+          "artwork_url": "https://img.discogs.com/duke-ellington-coltrane.jpg",
+          "confidence": 0.88,
+          "release_year": 1963,
+          "artist_bio": "Edward Kennedy \"Duke\" Ellington was an American composer, pianist, and leader of a jazz orchestra.",
+          "wikipedia_url": "https://en.wikipedia.org/wiki/Duke_Ellington",
+          "spotify_url": null,
+          "apple_music_url": null,
+          "youtube_music_url": null,
+          "bandcamp_url": null,
+          "soundcloud_url": null
+        }
+      ],
+      "total": 1,
+      "cached": false
+    },
+    "chuquimamani-condori": {
+      "results": [
+        {
+          "album": "Edits",
+          "artist": "Chuquimamani-Condori",
+          "release_id": 28560123,
+          "release_url": "https://www.discogs.com/release/28560123",
+          "artwork_url": null,
+          "confidence": 0.90,
+          "release_year": 2023,
+          "artist_bio": null,
+          "wikipedia_url": null,
+          "spotify_url": null,
+          "apple_music_url": null,
+          "youtube_music_url": null,
+          "bandcamp_url": null,
+          "soundcloud_url": null
+        }
+      ],
+      "total": 1,
+      "cached": false
+    },
+    "sessa": {
+      "results": [
+        {
+          "album": "Pequena Vertigem de Amor",
+          "artist": "Sessa",
+          "release_id": 31299876,
+          "release_url": "https://www.discogs.com/release/31299876",
+          "artwork_url": "https://img.discogs.com/sessa-pequena.jpg",
+          "confidence": 0.91,
+          "release_year": 2024,
+          "artist_bio": "Sessa is a Brazilian musician from Sao Paulo.",
+          "wikipedia_url": null,
+          "spotify_url": "https://open.spotify.com/album/sessa-pequena",
+          "apple_music_url": null,
+          "youtube_music_url": null,
+          "bandcamp_url": null,
+          "soundcloud_url": null
+        }
+      ],
+      "total": 1,
+      "cached": false
+    }
+  },
+  "releases": {
+    "4080": {
+      "release_id": 4080,
+      "title": "Confield",
+      "artist": "Autechre",
+      "year": 2001,
+      "label": "Warp Records",
+      "artist_id": 3391,
+      "genres": ["Electronic"],
+      "styles": ["IDM", "Abstract", "Experimental"],
+      "tracklist": [
+        { "position": "1", "title": "VI Scose Poise", "duration": "8:09", "artists": [] },
+        { "position": "2", "title": "Cfern", "duration": "6:52", "artists": [] },
+        { "position": "3", "title": "Pen Expers", "duration": "5:33", "artists": [] }
+      ],
+      "artwork_url": "https://img.discogs.com/autechre-confield-hires.jpg",
+      "release_url": "https://www.discogs.com/release/4080",
+      "cached": false,
+      "artists": [{ "artist_id": 3391, "name": "Autechre", "join": "", "role": null }],
+      "released": "2001-04-30"
+    },
+    "6690542": {
+      "release_id": 6690542,
+      "title": "On Your Own Love Again",
+      "artist": "Jessica Pratt",
+      "year": 2015,
+      "label": "Drag City",
+      "artist_id": 2874190,
+      "genres": ["Rock"],
+      "styles": ["Folk"],
+      "tracklist": [
+        { "position": "A1", "title": "Back, Baby", "duration": "3:11", "artists": [] },
+        { "position": "A2", "title": "Greycedes", "duration": "3:27", "artists": [] }
+      ],
+      "artwork_url": "https://img.discogs.com/jessica-pratt-oyola-hires.jpg",
+      "release_url": "https://www.discogs.com/release/6690542",
+      "cached": false,
+      "artists": [{ "artist_id": 2874190, "name": "Jessica Pratt", "join": "", "role": null }],
+      "released": "2015-01-27"
+    },
+    "1536211": {
+      "release_id": 1536211,
+      "title": "Duke Ellington & John Coltrane",
+      "artist": "Duke Ellington & John Coltrane",
+      "year": 1963,
+      "label": "Impulse Records",
+      "artist_id": 253583,
+      "genres": ["Jazz"],
+      "styles": ["Post Bop"],
+      "tracklist": [
+        { "position": "A1", "title": "In a Sentimental Mood", "duration": "4:24", "artists": [] },
+        { "position": "A2", "title": "Take the Coltrane", "duration": "4:41", "artists": [] }
+      ],
+      "artwork_url": "https://img.discogs.com/duke-coltrane-hires.jpg",
+      "release_url": "https://www.discogs.com/release/1536211",
+      "cached": false,
+      "artists": [
+        { "artist_id": 253583, "name": "Duke Ellington", "join": "&", "role": null },
+        { "artist_id": 30649, "name": "John Coltrane", "join": "", "role": null }
+      ],
+      "released": "1963"
+    }
+  },
+  "artists": {
+    "3391": {
+      "artist_id": 3391,
+      "name": "Autechre",
+      "profile": "Autechre are an English electronic music duo consisting of [a=Rob Brown] and [a=Sean Booth], both from Rochdale, Greater Manchester.",
+      "image_url": "https://img.discogs.com/autechre-photo.jpg",
+      "name_variations": ["Ae", "Autecre"],
+      "aliases": [],
+      "members": [
+        { "id": 3392, "name": "Rob Brown", "active": true },
+        { "id": 3393, "name": "Sean Booth", "active": true }
+      ],
+      "urls": ["https://autechre.ws/", "https://en.wikipedia.org/wiki/Autechre"],
+      "cached": false
+    },
+    "2874190": {
+      "artist_id": 2874190,
+      "name": "Jessica Pratt",
+      "profile": "Jessica Pratt is an American singer-songwriter based in Los Angeles.",
+      "image_url": null,
+      "name_variations": [],
+      "aliases": [],
+      "members": [],
+      "urls": ["https://www.jessicaprattmusic.com/"],
+      "cached": false
+    },
+    "253583": {
+      "artist_id": 253583,
+      "name": "Duke Ellington",
+      "profile": "Edward Kennedy \"Duke\" Ellington (April 29, 1899 – May 24, 1974) was an American composer.",
+      "image_url": "https://img.discogs.com/duke-ellington-photo.jpg",
+      "name_variations": ["The Duke"],
+      "aliases": [],
+      "members": [],
+      "urls": ["https://en.wikipedia.org/wiki/Duke_Ellington"],
+      "cached": false
+    }
+  },
+  "entities": {
+    "artist:3391": { "name": "Autechre", "type": "artist", "id": 3391 },
+    "artist:253583": { "name": "Duke Ellington", "type": "artist", "id": 253583 },
+    "release:4080": { "name": "Confield", "type": "release", "id": 4080 },
+    "master:4080": { "name": "Confield", "type": "master", "id": 4080 }
+  },
+  "trackReleases": {
+    "vi scose poise": {
+      "track": "VI Scose Poise",
+      "artist": "Autechre",
+      "releases": [
+        { "album": "Confield", "artist": "Autechre", "release_id": 4080, "release_url": "https://www.discogs.com/release/4080", "is_compilation": false }
+      ],
+      "total": 1,
+      "cached": false
+    }
+  }
+}
