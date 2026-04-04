@@ -77,6 +77,24 @@ export interface LmlArtistDetails {
   cached: boolean;
 }
 
+/** Release info from LML's track-releases endpoint. */
+export interface LmlReleaseInfo {
+  album: string;
+  artist: string;
+  release_id: number;
+  release_url: string;
+  is_compilation: boolean;
+}
+
+/** Response from LML's track-releases endpoint. */
+export interface LmlTrackReleasesResponse {
+  track: string;
+  artist: string | null;
+  releases: LmlReleaseInfo[];
+  total: number;
+  cached: boolean;
+}
+
 /** Entity resolution response from LML. */
 export interface LmlEntityResponse {
   name: string;
@@ -188,4 +206,78 @@ export async function getArtistDetails(artistId: number): Promise<LmlArtistDetai
 export async function resolveEntity(type: 'artist' | 'release' | 'master', id: number): Promise<LmlEntityResponse> {
   const response = await lmlFetch(`/api/v1/discogs/entity/${type}/${id}`);
   return (await response.json()) as LmlEntityResponse;
+}
+
+/**
+ * Search for all releases containing a track via LML.
+ *
+ * @param track - Track/song title to search for
+ * @param artist - Optional artist name for filtering
+ * @param limit - Maximum number of results (default 20)
+ * @returns List of releases containing the track
+ */
+export async function searchTrackReleases(
+  track: string,
+  artist?: string,
+  limit = 20
+): Promise<LmlTrackReleasesResponse> {
+  const params = new URLSearchParams({ track });
+  if (artist) params.set('artist', artist);
+  if (limit !== 20) params.set('limit', String(limit));
+
+  const response = await lmlFetch(`/api/v1/discogs/track-releases?${params}`);
+  return (await response.json()) as LmlTrackReleasesResponse;
+}
+
+/**
+ * Validate that a track by an artist exists on a release.
+ *
+ * Fetches the full release from LML and checks the tracklist client-side.
+ * Uses case-insensitive substring matching on track title and artist name.
+ *
+ * @param releaseId - Discogs release ID
+ * @param track - Track title to find
+ * @param artist - Artist name to find
+ * @returns true if the track by the artist is found on the release
+ */
+export async function validateTrackOnRelease(releaseId: number, track: string, artist: string): Promise<boolean> {
+  const release = await getRelease(releaseId);
+
+  const trackLower = track.toLowerCase();
+  const artistLower = artist.toLowerCase();
+
+  for (const item of release.tracklist) {
+    const itemTitle = item.title.toLowerCase();
+
+    // Check if track title matches (substring in either direction)
+    if (!trackLower.includes(itemTitle) && !itemTitle.includes(trackLower)) {
+      continue;
+    }
+
+    // Check per-track artists first (for compilations)
+    if (item.artists.length > 0) {
+      for (const trackArtist of item.artists) {
+        const normalized = trackArtist.toLowerCase().split('(')[0].trim();
+        if (artistLower.includes(normalized) || normalized.includes(artistLower)) {
+          return true;
+        }
+      }
+      continue;
+    }
+
+    // Fall back to release-level artist (strip Discogs numbering like "(2)")
+    const releaseArtist = release.artist.toLowerCase().split('(')[0].trim();
+    if (artistLower.includes(releaseArtist) || releaseArtist.includes(artistLower)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Check whether the LML service is configured.
+ */
+export function isLmlConfigured(): boolean {
+  return !!process.env.LIBRARY_METADATA_URL;
 }
