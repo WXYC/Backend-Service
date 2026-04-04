@@ -6,12 +6,7 @@
 
 import { ArtworkProvider } from './base.js';
 import { ArtworkRequest, ArtworkSearchResult } from '../../requestLine/types.js';
-import {
-  searchDiscogs,
-  searchTrackReleases,
-  validateTrackOnRelease,
-  isLmlConfigured,
-} from '../../lml/lml.client.js';
+import { searchDiscogs, searchTrackReleases, validateTrackOnRelease, isLmlConfigured } from '../../lml/lml.client.js';
 import { calculateConfidence } from '../../requestLine/matching/index.js';
 
 /**

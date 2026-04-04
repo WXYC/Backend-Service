@@ -167,7 +167,13 @@ describe('artwork DiscogsProvider', () => {
         track: 'VI Scose Poise',
         artist: 'Autechre',
         releases: [
-          { album: 'Confield', artist: 'Autechre', release_id: 123, release_url: 'https://discogs.com/123', is_compilation: false },
+          {
+            album: 'Confield',
+            artist: 'Autechre',
+            release_id: 123,
+            release_url: 'https://discogs.com/123',
+            is_compilation: false,
+          },
         ],
         total: 1,
         cached: false,
@@ -216,8 +222,20 @@ describe('artwork DiscogsProvider', () => {
         track: 'Back, Baby',
         artist: 'Jessica Pratt',
         releases: [
-          { album: 'On Your Own Love Again', artist: 'Jessica Pratt', release_id: 456, release_url: 'https://discogs.com/456', is_compilation: false },
-          { album: 'Quiet Signs', artist: 'Jessica Pratt', release_id: 789, release_url: 'https://discogs.com/789', is_compilation: false },
+          {
+            album: 'On Your Own Love Again',
+            artist: 'Jessica Pratt',
+            release_id: 456,
+            release_url: 'https://discogs.com/456',
+            is_compilation: false,
+          },
+          {
+            album: 'Quiet Signs',
+            artist: 'Jessica Pratt',
+            release_id: 789,
+            release_url: 'https://discogs.com/789',
+            is_compilation: false,
+          },
         ],
         total: 2,
         cached: false,
@@ -236,8 +254,20 @@ describe('artwork DiscogsProvider', () => {
         track: 'Back, Baby',
         artist: 'Jessica Pratt',
         releases: [
-          { album: 'On Your Own Love Again', artist: 'Jessica Pratt', release_id: 456, release_url: 'https://discogs.com/456', is_compilation: false },
-          { album: 'Indie Hits Vol. 3', artist: 'Various Artists', release_id: 999, release_url: 'https://discogs.com/999', is_compilation: true },
+          {
+            album: 'On Your Own Love Again',
+            artist: 'Jessica Pratt',
+            release_id: 456,
+            release_url: 'https://discogs.com/456',
+            is_compilation: false,
+          },
+          {
+            album: 'Indie Hits Vol. 3',
+            artist: 'Various Artists',
+            release_id: 999,
+            release_url: 'https://discogs.com/999',
+            is_compilation: true,
+          },
         ],
         total: 2,
         cached: false,
@@ -247,9 +277,7 @@ describe('artwork DiscogsProvider', () => {
       const results = await provider.searchReleasesByTrack('Back, Baby', 'Jessica Pratt');
 
       expect(mockValidateTrackOnRelease).toHaveBeenCalledWith(999, 'Back, Baby', 'Jessica Pratt');
-      expect(results).toEqual([
-        ['Jessica Pratt', 'On Your Own Love Again'],
-      ]);
+      expect(results).toEqual([['Jessica Pratt', 'On Your Own Love Again']]);
     });
   });
 
