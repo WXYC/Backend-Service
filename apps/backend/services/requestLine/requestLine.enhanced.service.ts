@@ -22,12 +22,7 @@ import { getConfig, isParsingEnabled } from './config.js';
 import { parseRequest, isParserAvailable } from '../ai/index.js';
 import { executeSearchPipeline, getSearchTypeFromState } from './search/index.js';
 import { findSimilarArtist } from '../library.service.js';
-import {
-  searchTrackReleases,
-  searchDiscogs,
-  validateTrackOnRelease,
-  isLmlConfigured,
-} from '../lml/lml.client.js';
+import { searchTrackReleases, searchDiscogs, validateTrackOnRelease, isLmlConfigured } from '../lml/lml.client.js';
 import { fetchArtworkForItems } from '../artwork/index.js';
 import {
   buildSlackBlocks,
