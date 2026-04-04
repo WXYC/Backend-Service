@@ -24,6 +24,10 @@ done
 # Build the Docker images
 npm run ci:build
 
+# Build mock API server
+echo "Building mock API server..."
+(cd "$PROJECT_ROOT/dev_env/mock-api-server" && npm ci && npm run build)
+
 # Set up compose command with environment
 COMPOSE_CMD="docker compose -f $PROJECT_ROOT/dev_env/docker-compose.yml --env-file $PROJECT_ROOT/.env --profile ci"
 
@@ -54,8 +58,8 @@ $COMPOSE_CMD up -d ci-db
 # Run database initialization
 $COMPOSE_CMD up ci-db-init
 
-# Start auth and backend services
+# Start mock API server, auth, and backend services
 # Environment variables are already exported above, Docker Compose will inherit them
-$COMPOSE_CMD up -d auth backend
+$COMPOSE_CMD up -d mock-api auth backend
 
 echo "CI environment is starting. Use 'npm run ci:test' to run tests."

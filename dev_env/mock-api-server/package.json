@@ -1,0 +1,20 @@
+{
+  "name": "wxyc-mock-api-server",
+  "version": "1.0.0",
+  "description": "Mock API server for CI integration tests (LML, Slack, tubafrenzy)",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.9.3"
+  }
+}
