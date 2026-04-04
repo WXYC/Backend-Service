@@ -1,14 +1,25 @@
 /**
- * Enhanced Slack service with block support.
+ * Slack webhook service.
  *
- * Extends the existing requestLine.service.ts functionality
- * to support rich block messages.
+ * Supports text messages and rich block layouts. When SLACK_WEBHOOK_URL is set
+ * (e.g., pointing at a mock server in CI), uses fetch() with that base URL.
+ * Otherwise falls back to https.request against hooks.slack.com.
  */
 
 import https from 'https';
 import { SlackBlock } from './builder.js';
 
 const SLACK_TIMEOUT_MS = 10_000;
+
+/**
+ * Get the SLACK_WEBHOOK_URL override if it's valid (starts with http).
+ * Returns null if unset or malformed, causing fallback to https.request.
+ */
+function getWebhookUrlOverride(): string | null {
+  const url = process.env.SLACK_WEBHOOK_URL;
+  if (url && url.startsWith('http')) return url;
+  return null;
+}
 
 const getSlackConfig = () => ({
   hostname: 'hooks.slack.com',
@@ -72,13 +83,43 @@ async function postToSlack(payload: object): Promise<SlackPostResult> {
     return { success: false, message: 'Slack webhook not configured' };
   }
 
+  // Use fetch() when SLACK_WEBHOOK_URL is set (e.g., mock server in CI)
+  const baseUrl = getWebhookUrlOverride();
+  if (baseUrl) {
+    return postViaFetch(baseUrl + webhookPath, payload);
+  }
+
+  return postViaHttps(payload);
+}
+
+/**
+ * Post via fetch() — used when SLACK_WEBHOOK_URL override is active.
+ */
+async function postViaFetch(url: string, payload: object): Promise<SlackPostResult> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  const text = await response.text();
+  if (response.ok) {
+    return { success: true, message: 'Message sent to Slack successfully' };
+  }
+  return { success: false, statusCode: response.status, response: text };
+}
+
+/**
+ * Post via https.request — production path to hooks.slack.com.
+ */
+function postViaHttps(payload: object): Promise<SlackPostResult> {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify(payload);
 
     const req = https.request(getSlackConfig(), (res) => {
       let data = '';
 
-      res.on('data', (chunk) => {
+      res.on('data', (chunk: string) => {
         data += chunk;
       });
 
@@ -91,7 +132,7 @@ async function postToSlack(payload: object): Promise<SlackPostResult> {
       });
     });
 
-    req.on('error', (e) => {
+    req.on('error', (e: Error) => {
       console.error('[Slack Service] Error sending message to Slack:', e);
       reject(e);
     });
@@ -111,5 +152,6 @@ async function postToSlack(payload: object): Promise<SlackPostResult> {
  * Check if Slack is configured.
  */
 export function isSlackConfigured(): boolean {
-  return !!(process.env.SLACK_WXYC_REQUESTS_WEBHOOK && process.env.USE_MOCK_SERVICES !== 'true');
+  if (process.env.USE_MOCK_SERVICES === 'true') return false;
+  return !!(process.env.SLACK_WXYC_REQUESTS_WEBHOOK || getWebhookUrlOverride());
 }
