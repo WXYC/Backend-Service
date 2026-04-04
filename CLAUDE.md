@@ -262,7 +262,8 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
 - `SLACK_WXYC_REQUESTS_APP_ID`, `SLACK_WXYC_REQUESTS_CLIENT_ID`
 - `SLACK_WXYC_REQUESTS_CLIENT_SECRET`, `SLACK_WXYC_REQUESTS_SIGNING_SECRET`
-- `SLACK_WXYC_REQUESTS_WEBHOOK`
+- `SLACK_WXYC_REQUESTS_WEBHOOK` -- Webhook path (e.g. `/services/T00000/B00000/XXXX`)
+- `SLACK_WEBHOOK_URL` -- Base URL override for Slack webhook (e.g. `http://mock-api:9090`). When set, uses `fetch()` instead of `https.request` to `hooks.slack.com`. Used in CI to route webhooks to the mock API server.
 
 ### ETL Jobs
 

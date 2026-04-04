@@ -25,6 +25,7 @@ env:
   AUTH_BYPASS: true
   AUTH_USERNAME: test_dj1
   AUTH_PASSWORD: testpassword123
+  MOCK_API_URL: http://localhost:9090
 
 jobs:
   # Detect what changed to conditionally run jobs
@@ -61,10 +62,13 @@ jobs:
             docs-only:
               - '**/*.md'
               - 'docs/**'
+            mock-api:
+              - 'dev_env/mock-api-server/**'
             src:
               - 'apps/**'
               - 'shared/**'
               - 'tests/**'
+              - 'dev_env/mock-api-server/**'
               - 'package.json'
               - 'package-lock.json'
               - 'tsconfig.base.json'
@@ -292,6 +296,10 @@ jobs:
         if: env.RUN_TESTS == 'true'
         run: npm run build
 
+      - name: Build mock API server
+        if: env.RUN_TESTS == 'true'
+        run: cd dev_env/mock-api-server && npm ci && npm run build
+
       - name: Initialize database
         if: env.RUN_TESTS == 'true'
         env:
@@ -304,11 +312,19 @@ jobs:
         if: env.RUN_TESTS == 'true'
         env:
           NODE_ENV: test
-          USE_MOCK_SERVICES: 'true'
+          USE_MOCK_SERVICES: 'false'
           ANON_DEVICE_JWT_SECRET: ci-test-secret-key-for-anonymous-devices
+          LIBRARY_METADATA_URL: http://localhost:9090
+          SLACK_WEBHOOK_URL: http://localhost:9090
+          SLACK_WXYC_REQUESTS_WEBHOOK: /services/T00/B00/ci-test-webhook
+          TUBAFRENZY_URL: http://localhost:9090
+          MIRROR_API_KEY: ci-test-mirror-key
+          MOCK_API_PORT: '9090'
         run: |
+          node dev_env/mock-api-server/dist/server.js > /tmp/mock-api.log 2>&1 &
           node apps/auth/dist/app.js > /tmp/auth.log 2>&1 &
           node apps/backend/dist/app.js > /tmp/backend.log 2>&1 &
+          timeout 30 bash -c 'until curl -sf http://localhost:9090/_admin/health > /dev/null 2>&1; do sleep 1; done'
           timeout 30 bash -c 'until curl -sf http://localhost:8083/healthcheck > /dev/null 2>&1; do sleep 1; done'
           timeout 30 bash -c 'until curl -sf http://localhost:8081/healthcheck > /dev/null 2>&1; do sleep 1; done'
 
@@ -322,6 +338,9 @@ jobs:
       - name: Show service logs on failure
         if: env.RUN_TESTS == 'true' && failure()
         run: |
+          echo "=== Mock API Server Log ==="
+          cat /tmp/mock-api.log || true
+          echo ""
           echo "=== Auth Service Log ==="
           cat /tmp/auth.log || true
           echo ""
