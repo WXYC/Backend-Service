@@ -230,6 +230,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
         track_title: body.track_title,
         rotation_id: body.rotation_id,
         request_flag: body.request_flag,
+        segue: body.segue ?? false,
         show_id: latestShow.id,
       };
 
