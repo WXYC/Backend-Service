@@ -93,9 +93,7 @@ describe('MirrorCommandQueue', () => {
     await jest.advanceTimersByTimeAsync(10);
 
     expect(succeededSpy).toHaveBeenCalledTimes(1);
-    expect(succeededSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'completed', attempts: 1 })
-    );
+    expect(succeededSpy).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', attempts: 1 }));
   });
 
   test('failed command retries up to maxAttempts', async () => {
@@ -188,9 +186,7 @@ describe('MirrorCommandQueue', () => {
   });
 
   test('successful retry after transient failure', async () => {
-    mockSend
-      .mockRejectedValueOnce(new Error('transient'))
-      .mockResolvedValueOnce('OK');
+    mockSend.mockRejectedValueOnce(new Error('transient')).mockResolvedValueOnce('OK');
 
     const queue = createQueue({ maxAttempts: 3 });
     const succeededSpy = jest.fn();
