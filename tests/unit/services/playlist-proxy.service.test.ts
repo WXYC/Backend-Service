@@ -2,7 +2,7 @@
  * Unit tests for the playlist proxy service.
  *
  * Tests SSE event parsing, in-memory store management, and artwork
- * enrichment from album_metadata. The EventSource connection is mocked;
+ * enrichment from the flowsheet table. The EventSource connection is mocked;
  * only the pure logic is exercised here.
  */
 import { jest } from '@jest/globals';
@@ -13,31 +13,41 @@ import { jest } from '@jest/globals';
 const mockSelect = jest.fn();
 const mockFrom = jest.fn();
 const mockWhere = jest.fn();
+const mockGroupBy = jest.fn();
+const mockLimit = jest.fn();
 
 const mockDbChain = {
   select: mockSelect,
   from: mockFrom,
   where: mockWhere,
+  groupBy: mockGroupBy,
+  limit: mockLimit,
 };
 mockSelect.mockReturnValue(mockDbChain);
 mockFrom.mockReturnValue(mockDbChain);
-mockWhere.mockResolvedValue([]);
+mockWhere.mockReturnValue(mockDbChain);
+mockGroupBy.mockResolvedValue([]);
+mockLimit.mockResolvedValue([]);
 
 jest.mock('@wxyc/database', () => ({
   db: {
     select: (...args: unknown[]) => mockSelect(...args),
     from: (...args: unknown[]) => mockFrom(...args),
     where: (...args: unknown[]) => mockWhere(...args),
+    groupBy: (...args: unknown[]) => mockGroupBy(...args),
+    limit: (...args: unknown[]) => mockLimit(...args),
   },
-  album_metadata: {
-    cache_key: 'cache_key',
+  flowsheet: {
+    artist_name: 'artist_name',
+    album_title: 'album_title',
     artwork_url: 'artwork_url',
   },
 }));
 
 jest.mock('drizzle-orm', () => ({
-  eq: jest.fn(),
+  sql: Object.assign(jest.fn(), { raw: jest.fn() }),
   inArray: jest.fn(),
+  isNotNull: jest.fn(),
 }));
 
 // Mock EventSource — we do not want to open real SSE connections in tests.
@@ -136,7 +146,9 @@ describe('playlist-proxy.service', () => {
     // Reset the db chain mocks
     mockSelect.mockReturnValue(mockDbChain);
     mockFrom.mockReturnValue(mockDbChain);
-    mockWhere.mockResolvedValue([]);
+    mockWhere.mockReturnValue(mockDbChain);
+    mockGroupBy.mockResolvedValue([]); // batch enrichment default
+    mockLimit.mockResolvedValue([]); // single enrichment default
   });
 
   describe('isConnected', () => {
@@ -218,9 +230,7 @@ describe('playlist-proxy.service', () => {
     });
 
     it('enriches playcuts with artwork from DB', async () => {
-      mockWhere.mockResolvedValue([
-        { cache_key: 'nina simone-best of', artwork_url: 'https://i.discogs.com/nina.jpg' },
-      ]);
+      mockGroupBy.mockResolvedValue([{ key: 'nina simone-best of', artwork_url: 'https://i.discogs.com/nina.jpg' }]);
 
       await processInitEvent(JSON.stringify([ninaSimoneEntry]));
 
@@ -229,7 +239,7 @@ describe('playlist-proxy.service', () => {
     });
 
     it('handles entries with no metadata match (artworkURL omitted)', async () => {
-      mockWhere.mockResolvedValue([]);
+      mockGroupBy.mockResolvedValue([]);
 
       await processInitEvent(JSON.stringify([ninaSimoneEntry]));
 
@@ -239,14 +249,12 @@ describe('playlist-proxy.service', () => {
 
     it('preserves existing artwork when DB fails on re-init', async () => {
       // First init succeeds with artwork
-      mockWhere.mockResolvedValue([
-        { cache_key: 'nina simone-best of', artwork_url: 'https://i.discogs.com/nina.jpg' },
-      ]);
+      mockGroupBy.mockResolvedValue([{ key: 'nina simone-best of', artwork_url: 'https://i.discogs.com/nina.jpg' }]);
       await processInitEvent(JSON.stringify([ninaSimoneEntry]));
       expect(getRecentEntries(50).playcuts[0].artworkURL).toBe('https://i.discogs.com/nina.jpg');
 
       // Second init: DB fails — existing artwork should be preserved
-      mockWhere.mockRejectedValue(new Error('DB connection lost'));
+      mockGroupBy.mockRejectedValue(new Error('DB connection lost'));
       await processInitEvent(JSON.stringify([ninaSimoneEntry]));
 
       const result = getRecentEntries(50);
@@ -299,7 +307,7 @@ describe('playlist-proxy.service', () => {
     it('enriches newly created playcuts with artwork', async () => {
       await processInitEvent(JSON.stringify([talksetEntry]));
 
-      mockWhere.mockResolvedValue([{ cache_key: 'juana molina-doga', artwork_url: 'https://i.discogs.com/juana.jpg' }]);
+      mockLimit.mockResolvedValue([{ artwork_url: 'https://i.discogs.com/juana.jpg' }]);
 
       await processCreatedEvent(JSON.stringify(juanaMolinaEntry));
 
@@ -359,9 +367,7 @@ describe('playlist-proxy.service', () => {
     it('enriches updated playcuts with artwork', async () => {
       await processInitEvent(JSON.stringify([ninaSimoneEntry]));
 
-      mockWhere.mockResolvedValue([
-        { cache_key: 'nina simone-best of', artwork_url: 'https://i.discogs.com/updated.jpg' },
-      ]);
+      mockLimit.mockResolvedValue([{ artwork_url: 'https://i.discogs.com/updated.jpg' }]);
 
       await processUpdatedEvent(JSON.stringify(ninaSimoneEntry));
 
