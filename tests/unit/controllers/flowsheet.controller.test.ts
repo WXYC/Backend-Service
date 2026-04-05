@@ -481,7 +481,12 @@ describe('flowsheet.controller', () => {
     });
 
     it('passes segue field through for library-linked tracks (album_id provided)', async () => {
-      const albumInfo = { artist_name: 'Stereolab', album_title: 'Aluminum Tunes', record_label: 'Duophonic', artist_id: 7 };
+      const albumInfo = {
+        artist_name: 'Stereolab',
+        album_title: 'Aluminum Tunes',
+        record_label: 'Duophonic',
+        artist_id: 7,
+      };
       mockGetAlbumFromDB.mockResolvedValue(albumInfo);
       const completedEntry = {
         id: 3,
@@ -518,7 +523,12 @@ describe('flowsheet.controller', () => {
     });
 
     it('defaults segue to false for library-linked tracks when not provided', async () => {
-      const albumInfo = { artist_name: 'Cat Power', album_title: 'Moon Pix', record_label: 'Matador Records', artist_id: 8 };
+      const albumInfo = {
+        artist_name: 'Cat Power',
+        album_title: 'Moon Pix',
+        record_label: 'Matador Records',
+        artist_id: 8,
+      };
       mockGetAlbumFromDB.mockResolvedValue(albumInfo);
       const completedEntry = {
         id: 4,
