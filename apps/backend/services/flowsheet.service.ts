@@ -131,6 +131,18 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   message: raw.message,
   play_order: raw.play_order ?? 0,
   add_time: raw.add_time ?? new Date(),
+  // Metadata columns (on FSEntry since they're on the flowsheet table)
+  artwork_url: raw.artwork_url,
+  discogs_url: raw.discogs_url,
+  release_year: raw.release_year,
+  spotify_url: raw.spotify_url,
+  apple_music_url: raw.apple_music_url,
+  youtube_music_url: raw.youtube_music_url,
+  bandcamp_url: raw.bandcamp_url,
+  soundcloud_url: raw.soundcloud_url,
+  artist_bio: raw.artist_bio,
+  artist_wikipedia_url: raw.artist_wikipedia_url,
+  // Nested metadata view (used by transformToV2)
   metadata: {
     artwork_url: raw.artwork_url,
     discogs_url: raw.discogs_url,
