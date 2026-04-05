@@ -1,8 +1,8 @@
 /**
  * Unit tests for the metadata service.
  *
- * Verifies that fetchAndCacheMetadata routes through LML instead of calling
- * Discogs, Spotify, and Apple Music APIs directly.
+ * Verifies that fetchMetadata routes through LML and returns metadata
+ * for the caller to persist.
  */
 import { jest } from '@jest/globals';
 
@@ -26,17 +26,6 @@ jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
   },
 }));
 
-const mockSetAlbumMetadata = jest.fn<() => Promise<void>>();
-const mockSetArtistMetadata = jest.fn<() => Promise<void>>();
-
-jest.mock('../../../apps/backend/services/metadata/metadata.cache', () => ({
-  setAlbumMetadata: mockSetAlbumMetadata,
-  setArtistMetadata: mockSetArtistMetadata,
-  generateAlbumCacheKey: (artist: string, album?: string) =>
-    `${artist.toLowerCase().trim()}-${(album || '').toLowerCase().trim()}`.substring(0, 512),
-  generateArtistCacheKey: (artist: string) => artist.toLowerCase().trim().substring(0, 256),
-}));
-
 jest.mock('../../../apps/backend/services/metadata/providers/search-urls.provider', () => ({
   SearchUrlProvider: jest.fn().mockImplementation(() => ({
     getAllSearchUrls: (artist: string, album?: string, track?: string) => {
@@ -50,7 +39,7 @@ jest.mock('../../../apps/backend/services/metadata/providers/search-urls.provide
   })),
 }));
 
-import { fetchAndCacheMetadata } from '../../../apps/backend/services/metadata/metadata.service';
+import { fetchMetadata } from '../../../apps/backend/services/metadata/metadata.service';
 
 // --- Fixtures ---
 
@@ -117,18 +106,18 @@ describe('metadata.service', () => {
   it('returns null when LIBRARY_METADATA_URL is not configured', async () => {
     delete process.env.LIBRARY_METADATA_URL;
 
-    const result = await fetchAndCacheMetadata({ artistName: 'Autechre' });
+    const result = await fetchMetadata({ artistName: 'Autechre' });
 
     expect(result).toBeNull();
     expect(mockSearchDiscogs).not.toHaveBeenCalled();
   });
 
-  it('fetches album and artist metadata via LML and stores it', async () => {
+  it('fetches album and artist metadata via LML and returns it', async () => {
     mockSearchDiscogs.mockResolvedValue({ results: [lmlSearchResult], total: 1, cached: false });
     mockGetRelease.mockResolvedValue(lmlReleaseResponse);
     mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
 
-    const result = await fetchAndCacheMetadata({
+    const result = await fetchMetadata({
       artistName: 'Autechre',
       albumTitle: 'Confield',
       albumId: 42,
@@ -151,13 +140,8 @@ describe('metadata.service', () => {
     expect(result?.album?.soundcloudUrl).toContain('soundcloud.com');
 
     // Verify artist metadata — bio should be cleaned of Discogs markup
-    expect(result?.artist?.discogsArtistId).toBe(3840);
     expect(result?.artist?.bio).toBe('Rob Brown and Sean Booth formed Autechre in Warp Records.');
     expect(result?.artist?.wikipediaUrl).toBe('https://en.wikipedia.org/wiki/Autechre');
-
-    // Verify storage calls
-    expect(mockSetAlbumMetadata).toHaveBeenCalledWith(42, null, expect.any(Object), false);
-    expect(mockSetArtistMetadata).toHaveBeenCalledWith(99, null, expect.any(Object));
   });
 
   it('extracts streaming URLs from LML search results', async () => {
@@ -165,7 +149,7 @@ describe('metadata.service', () => {
     mockGetRelease.mockResolvedValue(lmlReleaseResponse);
     mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
 
-    const result = await fetchAndCacheMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
+    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
     expect(result?.album?.spotifyUrl).toBe('https://open.spotify.com/album/abc');
     expect(result?.album?.appleMusicUrl).toBe('https://music.apple.com/album/xyz');
@@ -185,7 +169,7 @@ describe('metadata.service', () => {
     mockGetRelease.mockResolvedValue(lmlReleaseResponse);
     mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
 
-    const result = await fetchAndCacheMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
+    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
     // Search URLs constructed as fallback
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
@@ -199,7 +183,7 @@ describe('metadata.service', () => {
   it('returns search URLs when LML search fails', async () => {
     mockSearchDiscogs.mockRejectedValue(new Error('LML down'));
 
-    const result = await fetchAndCacheMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
+    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
     expect(result?.album?.bandcampUrl).toContain('bandcamp.com');
@@ -210,7 +194,7 @@ describe('metadata.service', () => {
   it('returns search URLs when LML search returns empty results', async () => {
     mockSearchDiscogs.mockResolvedValue({ results: [], total: 0, cached: false });
 
-    const result = await fetchAndCacheMetadata({ artistName: 'Unknown Artist' });
+    const result = await fetchMetadata({ artistName: 'Unknown Artist' });
 
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
     expect(result?.album?.discogsReleaseId).toBeUndefined();
@@ -221,23 +205,11 @@ describe('metadata.service', () => {
     mockGetRelease.mockResolvedValue(lmlReleaseResponse);
     mockGetArtistDetails.mockRejectedValue(new Error('Artist fetch failed'));
 
-    const result = await fetchAndCacheMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
+    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
     // Falls back to search result bio (cleaned of markup)
     expect(result?.artist?.bio).toBe('Rob Brown and Sean Booth are Autechre.');
     expect(result?.artist?.wikipediaUrl).toBe('https://en.wikipedia.org/wiki/Autechre');
-  });
-
-  it('uses cache_key for non-library entries', async () => {
-    mockSearchDiscogs.mockResolvedValue({ results: [lmlSearchResult], total: 1, cached: false });
-    mockGetRelease.mockResolvedValue(lmlReleaseResponse);
-    mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
-
-    await fetchAndCacheMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
-
-    // No albumId/artistId → cache_key used
-    expect(mockSetAlbumMetadata).toHaveBeenCalledWith(null, 'autechre-confield', expect.any(Object), false);
-    expect(mockSetArtistMetadata).toHaveBeenCalledWith(null, 'autechre', expect.any(Object));
   });
 
   it('handles release fetch failure gracefully', async () => {
@@ -246,21 +218,11 @@ describe('metadata.service', () => {
     // No artist ID available → falls back to search result
     mockGetArtistDetails.mockRejectedValue(new Error('No ID'));
 
-    const result = await fetchAndCacheMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
+    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
     expect(result?.album?.discogsReleaseId).toBe(12345);
     expect(result?.album?.spotifyUrl).toBe('https://open.spotify.com/album/abc');
     // Year from search result, not release
     expect(result?.album?.releaseYear).toBe(2001);
-  });
-
-  it('marks rotation entries', async () => {
-    mockSearchDiscogs.mockResolvedValue({ results: [lmlSearchResult], total: 1, cached: false });
-    mockGetRelease.mockResolvedValue(lmlReleaseResponse);
-    mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
-
-    await fetchAndCacheMetadata({ artistName: 'Autechre', albumTitle: 'Confield', albumId: 42, rotationId: 7 });
-
-    expect(mockSetAlbumMetadata).toHaveBeenCalledWith(42, null, expect.any(Object), true);
   });
 });

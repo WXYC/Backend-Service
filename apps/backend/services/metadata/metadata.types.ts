@@ -6,12 +6,11 @@
  * Request for fetching metadata for a flowsheet entry
  */
 export interface MetadataRequest {
-  // For library-linked entries (preferred - uses FK lookups)
-  albumId?: number; // FK to library.id
-  artistId?: number; // FK to artists.id (from library.artist_id)
-  rotationId?: number; // FK to rotation.id
+  // For library-linked entries (used to pass artist_id for LML artist lookup)
+  albumId?: number;
+  artistId?: number;
 
-  // For non-library entries (fallback to string matching)
+  // Entry fields for LML search
   artistName: string;
   albumTitle?: string;
   trackTitle?: string;
@@ -36,7 +35,6 @@ export interface AlbumMetadataResult {
  * Artist-level metadata from external APIs
  */
 export interface ArtistMetadataResult {
-  discogsArtistId?: number;
   bio?: string;
   wikipediaUrl?: string;
 }

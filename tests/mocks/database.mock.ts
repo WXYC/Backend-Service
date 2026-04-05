@@ -66,8 +66,6 @@ export const db = createMockDb();
 // Mock table schemas (empty objects that can be used in queries)
 export const anonymous_devices = {};
 export const user_activity = {};
-export const album_metadata = {};
-export const artist_metadata = {};
 export const labels = {};
 export const library = {};
 export const artists = {};
@@ -90,6 +88,16 @@ export const flowsheet = {
   request_flag: 'request_flag',
   message: 'message',
   add_time: 'add_time',
+  artwork_url: 'artwork_url',
+  discogs_url: 'discogs_url',
+  release_year: 'release_year',
+  spotify_url: 'spotify_url',
+  apple_music_url: 'apple_music_url',
+  youtube_music_url: 'youtube_music_url',
+  bandcamp_url: 'bandcamp_url',
+  soundcloud_url: 'soundcloud_url',
+  artist_bio: 'artist_bio',
+  artist_wikipedia_url: 'artist_wikipedia_url',
 };
 export const bins = {};
 export const shows = {};
@@ -134,11 +142,6 @@ export type AnonymousDevice = {
   requestCount: number;
 };
 
-export type AlbumMetadata = Record<string, unknown>;
-export type ArtistMetadata = Record<string, unknown>;
-export type NewAlbumMetadata = Record<string, unknown>;
-export type NewArtistMetadata = Record<string, unknown>;
-
 export type Label = {
   id: number;
   label_name: string;
@@ -162,6 +165,16 @@ export type FSEntry = {
   request_flag: boolean;
   message: string | null;
   add_time: Date;
+  artwork_url: string | null;
+  discogs_url: string | null;
+  release_year: number | null;
+  spotify_url: string | null;
+  apple_music_url: string | null;
+  youtube_music_url: string | null;
+  bandcamp_url: string | null;
+  soundcloud_url: string | null;
+  artist_bio: string | null;
+  artist_wikipedia_url: string | null;
 };
 
 export type NewFSEntry = Partial<FSEntry>;

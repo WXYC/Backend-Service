@@ -232,6 +232,13 @@
       "when": 1775095000000,
       "tag": "0034_legacy_id_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1775523600000,
+      "tag": "0035_inline_flowsheet_metadata",
+      "breakpoints": true
     }
   ]
 }

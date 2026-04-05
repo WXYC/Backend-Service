@@ -5,7 +5,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
 }));
 
 jest.mock('../../../apps/backend/services/metadata/index', () => ({
-  fetchAndCacheMetadata: jest.fn(),
+  fetchMetadata: jest.fn(),
 }));
 
 import { addEntry } from '../../../apps/backend/controllers/flowsheet.controller';

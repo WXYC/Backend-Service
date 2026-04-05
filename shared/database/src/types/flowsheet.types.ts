@@ -42,7 +42,7 @@ export interface TrackEntryV2 extends BaseEntry {
   label_id: number | null;
   request_flag: boolean;
   rotation_bin: string | null;
-  // Album metadata from cache
+  // Metadata (fetched from LML on insert, stored inline)
   artwork_url: string | null;
   discogs_url: string | null;
   release_year: number | null;
@@ -51,7 +51,6 @@ export interface TrackEntryV2 extends BaseEntry {
   youtube_music_url: string | null;
   bandcamp_url: string | null;
   soundcloud_url: string | null;
-  // Artist metadata from cache
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
 }
