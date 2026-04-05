@@ -43,14 +43,45 @@ export const mapEntryType = (legacyType: number): BackendEntryType => {
 };
 
 /**
+ * Resolve the UTC offset for America/New_York at a given instant.
+ * Returns a string like "-05:00" (EST) or "-04:00" (EDT).
+ */
+const easternOffsetAt = (probeUtc: Date): string => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'shortOffset',
+  }).formatToParts(probeUtc);
+  const tz = parts.find((p) => p.type === 'timeZoneName')?.value ?? 'GMT-5';
+  // tz is "GMT-5" or "GMT-4"; normalize to "-05:00" / "-04:00"
+  const hours = parseInt(tz.replace('GMT', ''), 10);
+  const sign = hours <= 0 ? '-' : '+';
+  return `${sign}${String(Math.abs(hours)).padStart(2, '0')}:00`;
+};
+
+/**
  * Convert a MySQL DATETIME string (e.g. '2023-10-15 14:30:00') to a JS Date.
- * tubafrenzy stores times in America/New_York.
+ * tubafrenzy stores times as America/New_York wall-clock values with no
+ * offset, so we determine whether EST or EDT applies for the given date and
+ * append the correct offset before parsing.
  * Returns null if the input is null, empty, or unparseable.
  */
 export const parseMySQLDatetime = (datetime: string | null): Date | null => {
   if (!datetime || datetime.trim().length === 0 || datetime === 'NULL') return null;
-  const date = new Date(datetime.trim().replace(' ', 'T') + '-04:00');
-  return Number.isNaN(date.getTime()) ? null : date;
+  const isoString = datetime.trim().replace(' ', 'T');
+  // First pass: treat the wall-clock time as UTC to probe the Eastern offset
+  const probeUtc = new Date(isoString + 'Z');
+  if (Number.isNaN(probeUtc.getTime())) return null;
+  const offset1 = easternOffsetAt(probeUtc);
+  const date1 = new Date(isoString + offset1);
+  // Second pass: the first result is the true UTC instant (within 1 hour);
+  // re-probe to handle the edge case near DST transitions where the UTC
+  // probe date falls on the wrong side of the boundary.
+  const offset2 = easternOffsetAt(date1);
+  if (offset2 !== offset1) {
+    const date2 = new Date(isoString + offset2);
+    return Number.isNaN(date2.getTime()) ? null : date2;
+  }
+  return Number.isNaN(date1.getTime()) ? null : date1;
 };
 
 /**
