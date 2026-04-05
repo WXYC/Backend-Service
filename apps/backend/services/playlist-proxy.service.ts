@@ -3,7 +3,7 @@
  *
  * Subscribes to tubafrenzy's SSE stream at /playlists/recentStream, maintains
  * an in-memory copy of the current playlist, and enriches playcuts with
- * artwork URLs from the album_metadata table. Client requests are served
+ * artwork URLs from the flowsheet table. Client requests are served
  * instantly from memory via getRecentEntries().
  *
  * Exported API:
@@ -19,12 +19,19 @@
  *   resetState()              — clear in-memory store (tests only)
  */
 import { EventSource } from 'eventsource';
-import { db, album_metadata } from '@wxyc/database';
-import { inArray } from 'drizzle-orm';
-import { generateAlbumCacheKey } from './metadata/metadata.cache.js';
+import { db, flowsheet } from '@wxyc/database';
+import { sql, inArray, isNotNull } from 'drizzle-orm';
 
 const TUBAFRENZY_URL = process.env.TUBAFRENZY_URL ?? 'https://www.wxyc.info';
 const MAX_ENTRIES = 200;
+
+/** Compute a normalized lookup key from artist and album for matching against flowsheet rows. */
+function lookupKey(artist: string, album: string): string {
+  return `${artist.toLowerCase().trim()}-${album.toLowerCase().trim()}`;
+}
+
+/** SQL expression that computes the same lookup key from flowsheet columns. */
+const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
 
 // --- Types ---
 
@@ -288,36 +295,37 @@ export function processDeletedEvent(data: string): void {
 // --- Enrichment ---
 
 /**
- * Batch-enrich all playcut entries with artwork URLs from album_metadata.
+ * Batch-enrich all playcut entries with artwork URLs from the flowsheet table.
  */
 async function enrichPlaycuts(): Promise<void> {
   const playcutEntries = entries.filter((e) => e.entryType === 'playcut' && e.playcut);
   if (playcutEntries.length === 0) return;
 
-  const cacheKeyToIds = new Map<string, number[]>();
+  const keyToIds = new Map<string, number[]>();
   for (const entry of playcutEntries) {
-    const key = generateAlbumCacheKey(entry.playcut!.artistName, entry.playcut!.releaseTitle);
-    const ids = cacheKeyToIds.get(key) ?? [];
+    const key = lookupKey(entry.playcut!.artistName, entry.playcut!.releaseTitle);
+    const ids = keyToIds.get(key) ?? [];
     ids.push(entry.id);
-    cacheKeyToIds.set(key, ids);
+    keyToIds.set(key, ids);
   }
 
-  const cacheKeys = [...cacheKeyToIds.keys()];
+  const keys = [...keyToIds.keys()];
 
   try {
     const rows = await db
       .select({
-        cache_key: album_metadata.cache_key,
-        artwork_url: album_metadata.artwork_url,
+        key: flowsheetLookupKey,
+        artwork_url: flowsheet.artwork_url,
       })
-      .from(album_metadata)
-      .where(inArray(album_metadata.cache_key, cacheKeys));
+      .from(flowsheet)
+      .where(inArray(flowsheetLookupKey, keys))
+      .groupBy(flowsheetLookupKey, flowsheet.artwork_url);
 
     // Build new map and only swap on success — preserves existing artwork on DB failure
     const newMap = new Map<number, string>();
     for (const row of rows) {
-      if (row.cache_key && row.artwork_url) {
-        const entryIds = cacheKeyToIds.get(row.cache_key);
+      if (row.key && row.artwork_url) {
+        const entryIds = keyToIds.get(row.key);
         if (entryIds) {
           for (const id of entryIds) {
             newMap.set(id, row.artwork_url);
@@ -334,21 +342,19 @@ async function enrichPlaycuts(): Promise<void> {
 }
 
 /**
- * Enrich a single playcut entry with artwork from album_metadata.
+ * Enrich a single playcut entry with artwork from the flowsheet table.
  */
 async function enrichSinglePlaycut(entry: TubafrenzyEntry): Promise<void> {
   if (!entry.playcut) return;
 
-  const cacheKey = generateAlbumCacheKey(entry.playcut.artistName, entry.playcut.releaseTitle);
+  const key = lookupKey(entry.playcut.artistName, entry.playcut.releaseTitle);
 
   try {
     const rows = await db
-      .select({
-        cache_key: album_metadata.cache_key,
-        artwork_url: album_metadata.artwork_url,
-      })
-      .from(album_metadata)
-      .where(inArray(album_metadata.cache_key, [cacheKey]));
+      .select({ artwork_url: flowsheet.artwork_url })
+      .from(flowsheet)
+      .where(inArray(flowsheetLookupKey, [key]))
+      .limit(1);
 
     if (rows.length > 0 && rows[0].artwork_url) {
       artworkMap.set(entry.id, rows[0].artwork_url);
