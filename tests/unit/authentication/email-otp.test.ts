@@ -98,6 +98,11 @@ describe('Email OTP', () => {
         expectedSubject: 'Your WXYC password reset code',
         expectedIntro: 'Use this code to reset your password.',
       },
+      {
+        type: 'change-email' as const,
+        expectedSubject: 'Your WXYC email change code',
+        expectedIntro: 'Use this code to confirm your email change.',
+      },
     ])(
       'should send $type OTP email with correct subject and content',
       async ({ type, expectedSubject, expectedIntro }) => {
