@@ -68,7 +68,7 @@ const runBulkLoad = async (dumpPath: string) => {
   let entryCount = 0;
   const pendingEntries: Array<{
     legacy_entry_id: number;
-    show_id: number;
+    show_id: number | null;
     entry_type: string;
     artist_name: string | null;
     album_title: string | null;
@@ -126,7 +126,7 @@ const runBulkLoad = async (dumpPath: string) => {
 
       pendingEntries.push({
         legacy_entry_id: entry.legacy_entry_id,
-        show_id: backendShowId ?? 0,
+        show_id: backendShowId ?? null,
         entry_type: entry.entry_type,
         artist_name: entry.artist_name,
         album_title: entry.album_title,
