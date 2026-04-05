@@ -9,14 +9,6 @@ export interface RequestLineConfig {
   groqApiKey: string | undefined;
   groqModel: string;
 
-  // Discogs (Optional - artwork/compilation search degrades gracefully)
-  discogsApiKey: string | undefined;
-  discogsApiSecret: string | undefined;
-  discogsCacheTtlTrack: number;
-  discogsCacheTtlRelease: number;
-  discogsCacheTtlSearch: number;
-  discogsCacheMaxSize: number;
-
   // Feature Flags
   enableArtworkLookup: boolean;
   enableLibrarySearch: boolean;
@@ -34,14 +26,6 @@ export function loadConfig(): RequestLineConfig {
     // AI Parsing
     groqApiKey: process.env.GROQ_API_KEY,
     groqModel: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
-
-    // Discogs
-    discogsApiKey: process.env.DISCOGS_API_KEY,
-    discogsApiSecret: process.env.DISCOGS_API_SECRET,
-    discogsCacheTtlTrack: parseInt(process.env.DISCOGS_CACHE_TTL_TRACK || '3600', 10), // 1 hour
-    discogsCacheTtlRelease: parseInt(process.env.DISCOGS_CACHE_TTL_RELEASE || '14400', 10), // 4 hours
-    discogsCacheTtlSearch: parseInt(process.env.DISCOGS_CACHE_TTL_SEARCH || '3600', 10), // 1 hour
-    discogsCacheMaxSize: parseInt(process.env.DISCOGS_CACHE_MAX_SIZE || '1000', 10),
 
     // Feature Flags
     enableArtworkLookup: process.env.ENABLE_ARTWORK_LOOKUP !== 'false',
@@ -65,13 +49,6 @@ export function validateConfig(config: RequestLineConfig): string[] {
     errors.push('GROQ_API_KEY is required for AI parsing');
   }
 
-  // Discogs is optional but warn if not configured
-  if (!config.discogsApiKey || !config.discogsApiSecret) {
-    console.warn(
-      '[RequestLine Config] DISCOGS_API_KEY or DISCOGS_API_SECRET not set - artwork lookup and compilation search will be disabled'
-    );
-  }
-
   return errors;
 }
 
@@ -80,13 +57,6 @@ export function validateConfig(config: RequestLineConfig): string[] {
  */
 export function isParsingEnabled(config: RequestLineConfig): boolean {
   return !!config.groqApiKey;
-}
-
-/**
- * Check if Discogs integration is available.
- */
-export function isDiscogsEnabled(config: RequestLineConfig): boolean {
-  return !!(config.discogsApiKey && config.discogsApiSecret);
 }
 
 /**

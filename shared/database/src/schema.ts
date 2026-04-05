@@ -255,6 +255,7 @@ export const library = wxyc_schema.table(
     code_volume_letters: varchar('code_volume_letters', { length: 4 }),
     disc_quantity: smallint('disc_quantity').default(1).notNull(),
     plays: integer('plays').default(0).notNull(),
+    legacy_release_id: integer('legacy_release_id'),
     add_date: timestamp('add_date', { withTimezone: true }).defaultNow().notNull(),
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
@@ -264,6 +265,7 @@ export const library = wxyc_schema.table(
       genreIdIdx: index('genre_id_idx').on(table.genre_id),
       formatIdIdx: index('format_id_idx').on(table.format_id),
       artistIdIdx: index('artist_id_idx').on(table.artist_id),
+      legacyReleaseIdIdx: uniqueIndex('library_legacy_release_id_idx').on(table.legacy_release_id),
     };
   }
 );
@@ -302,23 +304,28 @@ export const rotation = wxyc_schema.table(
 
 export type NewFSEntry = InferInsertModel<typeof flowsheet>;
 export type FSEntry = InferSelectModel<typeof flowsheet>;
-export const flowsheet = wxyc_schema.table('flowsheet', {
-  id: serial('id').primaryKey(),
-  show_id: integer('show_id').references(() => shows.id, { onDelete: 'set null' }),
-  album_id: integer('album_id').references(() => library.id, { onDelete: 'set null' }),
-  rotation_id: integer('rotation_id').references(() => rotation.id, { onDelete: 'set null' }),
-  entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
-  track_title: varchar('track_title', { length: 128 }),
-  album_title: varchar('album_title', { length: 128 }),
-  artist_name: varchar('artist_name', { length: 128 }),
-  record_label: varchar('record_label', { length: 128 }),
-  label_id: integer('label_id').references(() => labels.id),
-  play_order: serial('play_order').notNull(),
-  request_flag: boolean('request_flag').default(false).notNull(),
-  segue: boolean('segue').default(false).notNull(),
-  message: varchar('message', { length: 250 }),
-  add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
-});
+export const flowsheet = wxyc_schema.table(
+  'flowsheet',
+  {
+    id: serial('id').primaryKey(),
+    show_id: integer('show_id').references(() => shows.id, { onDelete: 'set null' }),
+    album_id: integer('album_id').references(() => library.id, { onDelete: 'set null' }),
+    rotation_id: integer('rotation_id').references(() => rotation.id, { onDelete: 'set null' }),
+    legacy_entry_id: integer('legacy_entry_id'),
+    entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
+    track_title: varchar('track_title', { length: 128 }),
+    album_title: varchar('album_title', { length: 128 }),
+    artist_name: varchar('artist_name', { length: 128 }),
+    record_label: varchar('record_label', { length: 128 }),
+    label_id: integer('label_id').references(() => labels.id),
+    play_order: integer('play_order').notNull(),
+    request_flag: boolean('request_flag').default(false).notNull(),
+    segue: boolean('segue').default(false).notNull(),
+    message: varchar('message', { length: 250 }),
+    add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex('flowsheet_legacy_entry_id_idx').on(table.legacy_entry_id)]
+);
 
 export type NewGenre = InferInsertModel<typeof genres>;
 export type Genre = InferSelectModel<typeof genres>;
@@ -387,23 +394,48 @@ export type ArtistLibraryCrossreference = InferSelectModel<typeof artist_library
 export const artist_library_crossreference = wxyc_schema.table(
   'artist_library_crossreference',
   {
-    artist_id: integer('artist_id').references(() => artists.id, { onDelete: 'cascade' }),
-    library_id: integer('library_id').references(() => library.id, { onDelete: 'cascade' }),
+    artist_id: integer('artist_id')
+      .notNull()
+      .references(() => artists.id, { onDelete: 'cascade' }),
+    library_id: integer('library_id')
+      .notNull()
+      .references(() => library.id, { onDelete: 'cascade' }),
+    comment: varchar('comment', { length: 255 }),
   },
   (table) => [uniqueIndex('library_id_artist_id').on(table.artist_id, table.library_id)]
 );
 
+export type NewArtistCrossreference = InferInsertModel<typeof artist_crossreference>;
+export type ArtistCrossreference = InferSelectModel<typeof artist_crossreference>;
+export const artist_crossreference = wxyc_schema.table(
+  'artist_crossreference',
+  {
+    source_artist_id: integer('source_artist_id')
+      .notNull()
+      .references(() => artists.id, { onDelete: 'cascade' }),
+    target_artist_id: integer('target_artist_id')
+      .notNull()
+      .references(() => artists.id, { onDelete: 'cascade' }),
+    comment: varchar('comment', { length: 255 }),
+  },
+  (table) => [uniqueIndex('artist_crossref_source_target').on(table.source_artist_id, table.target_artist_id)]
+);
+
 export type NewShow = InferInsertModel<typeof shows>;
 export type Show = InferSelectModel<typeof shows>;
-export const shows = wxyc_schema.table('shows', {
-  id: serial('id').primaryKey(),
-  primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
-  specialty_id: integer('specialty_id') //Null for regular shows
-    .references(() => specialty_shows.id),
-  show_name: varchar('show_name', { length: 128 }), //Null if not provided or specialty show
-  start_time: timestamp('start_time', { withTimezone: true }).defaultNow().notNull(),
-  end_time: timestamp('end_time', { withTimezone: true }),
-});
+export const shows = wxyc_schema.table(
+  'shows',
+  {
+    id: serial('id').primaryKey(),
+    primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    specialty_id: integer('specialty_id').references(() => specialty_shows.id),
+    legacy_show_id: integer('legacy_show_id'),
+    show_name: varchar('show_name', { length: 128 }),
+    start_time: timestamp('start_time', { withTimezone: true }).defaultNow().notNull(),
+    end_time: timestamp('end_time', { withTimezone: true }),
+  },
+  (table) => [uniqueIndex('shows_legacy_show_id_idx').on(table.legacy_show_id)]
+);
 
 export type NewShowDJ = InferInsertModel<typeof show_djs>;
 export type ShowDJ = InferSelectModel<typeof show_djs>;

@@ -1,57 +1,53 @@
 /**
  * Discogs artwork provider.
  *
- * Delegates to DiscogsService for API calls to avoid code duplication.
- * Ported from request-parser artwork/providers/discogs.py
+ * All Discogs operations route through LML (library-metadata-lookup).
  */
 
 import { ArtworkProvider } from './base.js';
 import { ArtworkRequest, ArtworkSearchResult } from '../../requestLine/types.js';
-import { DiscogsService, isDiscogsAvailable } from '../../discogs/index.js';
+import { searchDiscogs, searchTrackReleases, validateTrackOnRelease, isLmlConfigured } from '../../lml/lml.client.js';
 import { calculateConfidence } from '../../requestLine/matching/index.js';
 
 /**
- * Artwork provider using the Discogs API.
+ * Artwork provider backed by LML's Discogs endpoints.
  */
 export class DiscogsProvider implements ArtworkProvider {
   readonly name = 'discogs';
 
   /**
-   * Search Discogs for album artwork.
+   * Search for album artwork via LML.
    */
   async search(request: ArtworkRequest): Promise<ArtworkSearchResult[]> {
-    if (!isDiscogsAvailable()) {
-      console.warn('[DiscogsProvider] Discogs token not configured');
+    if (!isLmlConfigured()) {
+      console.warn('[DiscogsProvider] LIBRARY_METADATA_URL not configured');
       return [];
     }
 
-    // Check if there's anything to search for
     if (!request.artist && !request.album && !request.song) {
       console.warn('[DiscogsProvider] No searchable fields in request');
       return [];
     }
 
-    // Delegate to service
-    const response = await DiscogsService.search({
-      artist: request.artist,
-      album: request.album,
-      track: request.song,
-    });
+    let lmlResults;
+    try {
+      lmlResults = await searchDiscogs(request.artist || '', request.album || request.song || undefined);
+    } catch (error) {
+      console.warn('[DiscogsProvider] LML search failed:', error);
+      return [];
+    }
 
-    // Convert results to ArtworkSearchResult format
     const results: ArtworkSearchResult[] = [];
-    for (const item of response.results) {
-      // Skip results without artwork
-      if (!item.artworkUrl || item.artworkUrl.includes('spacer.gif')) {
+    for (const item of lmlResults.results) {
+      if (!item.artwork_url || item.artwork_url.includes('spacer.gif')) {
         continue;
       }
 
-      // Calculate confidence score for this result
       const confidence = calculateConfidence(request.artist, request.album, item.artist || '', item.album || '');
 
       results.push({
-        artworkUrl: item.artworkUrl,
-        releaseUrl: item.releaseUrl,
+        artworkUrl: item.artwork_url,
+        releaseUrl: item.release_url,
         album: item.album || '',
         artist: item.artist || '',
         source: this.name,
@@ -59,25 +55,32 @@ export class DiscogsProvider implements ArtworkProvider {
       });
     }
 
-    // Sort by confidence
     results.sort((a, b) => b.confidence - a.confidence);
     return results;
   }
 
   /**
-   * Search Discogs for a track and return the album name.
+   * Search for a track and return the album name.
    */
   async searchTrack(track: string, artist?: string): Promise<string | null> {
-    if (!isDiscogsAvailable()) {
+    if (!isLmlConfigured()) {
       return null;
     }
 
-    const result = await DiscogsService.searchTrack(track, artist);
-    return result.album;
+    try {
+      const response = await searchTrackReleases(track, artist);
+      if (response.releases.length > 0) {
+        return response.releases[0].album;
+      }
+      return null;
+    } catch (error) {
+      console.warn('[DiscogsProvider] LML track search failed:', error);
+      return null;
+    }
   }
 
   /**
-   * Search Discogs for ALL releases containing a track.
+   * Search for ALL releases containing a track.
    *
    * For Various Artists / compilation releases, validates the tracklist
    * to ensure the track by the artist actually exists on the release.
@@ -85,20 +88,30 @@ export class DiscogsProvider implements ArtworkProvider {
    * @returns List of [artist, album] tuples for releases containing the track.
    */
   async searchReleasesByTrack(track: string, artist?: string, limit = 20): Promise<Array<[string, string]>> {
-    if (!isDiscogsAvailable()) {
+    if (!isLmlConfigured()) {
       return [];
     }
 
-    const response = await DiscogsService.searchReleasesByTrack(track, artist, limit);
+    let response;
+    try {
+      response = await searchTrackReleases(track, artist, limit);
+    } catch (error) {
+      console.warn('[DiscogsProvider] LML track-releases search failed:', error);
+      return [];
+    }
 
-    // If searching with artist, validate compilation releases
     const releases: Array<[string, string]> = [];
     for (const releaseInfo of response.releases) {
       // For Various Artists / compilations, validate the tracklist
-      if (artist && releaseInfo.isCompilation) {
-        const isValid = await DiscogsService.validateTrackOnRelease(releaseInfo.releaseId, track, artist);
-        if (!isValid) {
-          console.log(`[DiscogsProvider] Skipping '${releaseInfo.album}' - track/artist not validated on release`);
+      if (artist && releaseInfo.is_compilation) {
+        try {
+          const isValid = await validateTrackOnRelease(releaseInfo.release_id, track, artist);
+          if (!isValid) {
+            console.log(`[DiscogsProvider] Skipping '${releaseInfo.album}' - track/artist not validated on release`);
+            continue;
+          }
+        } catch (error) {
+          console.warn(`[DiscogsProvider] Validation failed for release ${releaseInfo.release_id}:`, error);
           continue;
         }
       }
@@ -113,11 +126,16 @@ export class DiscogsProvider implements ArtworkProvider {
    * Validate that a track by an artist exists on a release.
    */
   async validateTrackOnRelease(releaseId: number, track: string, artist: string): Promise<boolean> {
-    if (!isDiscogsAvailable()) {
+    if (!isLmlConfigured()) {
       return false;
     }
 
-    return DiscogsService.validateTrackOnRelease(releaseId, track, artist);
+    try {
+      return await validateTrackOnRelease(releaseId, track, artist);
+    } catch (error) {
+      console.warn(`[DiscogsProvider] Validation failed for release ${releaseId}:`, error);
+      return false;
+    }
   }
 }
 

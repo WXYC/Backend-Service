@@ -18,11 +18,11 @@ import {
   MESSAGE_TYPE_LABELS,
   MessageType,
 } from './types.js';
-import { getConfig, isParsingEnabled, isDiscogsEnabled } from './config.js';
+import { getConfig, isParsingEnabled } from './config.js';
 import { parseRequest, isParserAvailable } from '../ai/index.js';
-import { executeSearchPipeline, getSearchTypeFromState, type PipelineOptions } from './search/index.js';
+import { executeSearchPipeline, getSearchTypeFromState } from './search/index.js';
 import { findSimilarArtist } from '../library.service.js';
-import { DiscogsService, isDiscogsAvailable } from '../discogs/index.js';
+import { searchTrackReleases, searchDiscogs, validateTrackOnRelease, isLmlConfigured } from '../lml/lml.client.js';
 import { fetchArtworkForItems } from '../artwork/index.js';
 import {
   buildSlackBlocks,
@@ -51,8 +51,8 @@ async function resolveAlbumsForTrack(parsed: ParsedRequest): Promise<{ albums: s
       console.log(`[RequestLine] Album '${parsed.album}' appears to be artist name, looking up albums`);
     }
 
-    if (!isDiscogsAvailable()) {
-      console.log('[RequestLine] Discogs not available for album lookup');
+    if (!isLmlConfigured()) {
+      console.log('[RequestLine] LIBRARY_METADATA_URL not configured for album lookup');
       return { albums: [], songNotFound: true };
     }
 
@@ -215,8 +215,26 @@ export async function processRequest(body: RequestLineRequestBody): Promise<Unif
   // Step 3: Execute search strategy pipeline
   if (config.enableLibrarySearch) {
     const searchState = await executeSearchPipeline(parsed, message, {
-      discogsService: isDiscogsAvailable()
-        ? (DiscogsService as unknown as PipelineOptions['discogsService'])
+      discogsService: isLmlConfigured()
+        ? {
+            searchReleasesByTrack: async (track: string, artist?: string, limit?: number) => {
+              const response = await searchTrackReleases(track, artist, limit);
+              return response.releases.map((r) => ({
+                artist: r.artist,
+                album: r.album,
+                releaseId: r.release_id,
+                isCompilation: r.is_compilation,
+              }));
+            },
+            searchReleasesByArtist: async (artist: string, limit = 10) => {
+              const response = await searchDiscogs(artist);
+              return response.results
+                .filter((r) => r.album)
+                .slice(0, limit)
+                .map((r) => ({ artist: r.artist ?? '', album: r.album! }));
+            },
+            validateTrackOnRelease,
+          }
         : undefined,
       albumsForSearch,
     });

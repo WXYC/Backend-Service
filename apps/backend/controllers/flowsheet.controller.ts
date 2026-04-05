@@ -1,7 +1,10 @@
 import { Request, RequestHandler } from 'express';
 import { Mutex } from 'async-mutex';
 import * as Sentry from '@sentry/node';
-import { NewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/database';
+import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/database';
+
+// play_order is computed by the service layer, not provided by controllers
+type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import { fetchAndCacheMetadata } from '../services/metadata/index.js';
 import WxycError from '../utils/error.js';
@@ -227,6 +230,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
         track_title: body.track_title,
         rotation_id: body.rotation_id,
         request_flag: body.request_flag,
+        segue: body.segue ?? false,
         show_id: latestShow.id,
       };
 

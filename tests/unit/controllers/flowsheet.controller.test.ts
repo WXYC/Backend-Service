@@ -480,6 +480,89 @@ describe('flowsheet.controller', () => {
       );
     });
 
+    it('passes segue field through for library-linked tracks (album_id provided)', async () => {
+      const albumInfo = {
+        artist_name: 'Stereolab',
+        album_title: 'Aluminum Tunes',
+        record_label: 'Duophonic',
+        artist_id: 7,
+      };
+      mockGetAlbumFromDB.mockResolvedValue(albumInfo);
+      const completedEntry = {
+        id: 3,
+        show_id: activeShow.id,
+        artist_name: 'Stereolab',
+        album_title: 'Aluminum Tunes',
+        track_title: 'Crispy Duck',
+        album_id: 20,
+        segue: true,
+        rotation_id: null,
+        play_order: 3,
+        add_time: new Date(),
+      };
+      mockAddTrack.mockResolvedValue(completedEntry);
+      mockFetchAndCacheMetadata.mockResolvedValue(undefined);
+
+      const req = createMockBodyReq({
+        track_title: 'Crispy Duck',
+        album_id: 20,
+        segue: true,
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockAddTrack).toHaveBeenCalledWith(
+        expect.objectContaining({
+          segue: true,
+          show_id: activeShow.id,
+          album_id: 20,
+        })
+      );
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('defaults segue to false for library-linked tracks when not provided', async () => {
+      const albumInfo = {
+        artist_name: 'Cat Power',
+        album_title: 'Moon Pix',
+        record_label: 'Matador Records',
+        artist_id: 8,
+      };
+      mockGetAlbumFromDB.mockResolvedValue(albumInfo);
+      const completedEntry = {
+        id: 4,
+        show_id: activeShow.id,
+        artist_name: 'Cat Power',
+        album_title: 'Moon Pix',
+        track_title: 'Metal Heart',
+        album_id: 25,
+        segue: false,
+        rotation_id: null,
+        play_order: 4,
+        add_time: new Date(),
+      };
+      mockAddTrack.mockResolvedValue(completedEntry);
+      mockFetchAndCacheMetadata.mockResolvedValue(undefined);
+
+      const req = createMockBodyReq({
+        track_title: 'Metal Heart',
+        album_id: 25,
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockAddTrack).toHaveBeenCalledWith(
+        expect.objectContaining({
+          segue: false,
+          show_id: activeShow.id,
+          album_id: 25,
+        })
+      );
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
     it('does not set entry_type to message for track entries', async () => {
       const trackBody = {
         artist_name: 'Autechre',

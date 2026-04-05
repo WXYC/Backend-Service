@@ -57,6 +57,8 @@ jest.mock('@wxyc/database', () => {
     library: {},
     cronjob_runs: {},
     genre_artist_crossreference: {},
+    artist_crossreference: {},
+    artist_library_crossreference: {},
     closeDatabaseConnection: jest.fn().mockResolvedValue(undefined),
   };
 });
@@ -65,6 +67,7 @@ jest.mock('drizzle-orm', () => ({
   eq: jest.fn((a: unknown, b: unknown) => ({ eq: [a, b] })),
   and: jest.fn((...args: unknown[]) => ({ and: args })),
   isNull: jest.fn((col: unknown) => ({ isNull: col })),
+  sql: jest.fn(),
 }));
 
 import {
@@ -80,6 +83,8 @@ import {
   toDateOnlyString,
   parseLegacyGenreRows,
   parseLegacyFormatRows,
+  buildArtistCacheKey,
+  buildAlbumCacheKey,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -364,6 +369,41 @@ describe('library-etl job helpers', () => {
     it('skips malformed rows', () => {
       const raw = '1\tCD\nmalformed\n3\tVinyl';
       expect(parseLegacyFormatRows(raw)).toEqual(expect.arrayContaining(['cd', 'vinyl']));
+    });
+  });
+
+  describe('buildArtistCacheKey', () => {
+    it('normalizes to lowercase and trims', () => {
+      expect(buildArtistCacheKey('  Autechre  ', ' AE ')).toBe('autechre|ae');
+    });
+
+    it('produces consistent keys for identical input', () => {
+      const a = buildArtistCacheKey('Cat Power', 'CP');
+      const b = buildArtistCacheKey('Cat Power', 'CP');
+      expect(a).toBe(b);
+    });
+
+    it('produces different keys for different artists', () => {
+      const a = buildArtistCacheKey('Stereolab', 'ST');
+      const b = buildArtistCacheKey('Sessa', 'SE');
+      expect(a).not.toBe(b);
+    });
+  });
+
+  describe('buildAlbumCacheKey', () => {
+    it('includes all components', () => {
+      const key = buildAlbumCacheKey(42, 3, 'Moon Pix', 1);
+      expect(key).toBe('42|3|moon pix|1');
+    });
+
+    it('normalizes title to lowercase and trims', () => {
+      expect(buildAlbumCacheKey(1, 1, '  Confield  ', 5)).toBe('1|1|confield|5');
+    });
+
+    it('produces different keys for different code numbers', () => {
+      const a = buildAlbumCacheKey(1, 1, 'Album', 1);
+      const b = buildAlbumCacheKey(1, 1, 'Album', 2);
+      expect(a).not.toBe(b);
     });
   });
 });
