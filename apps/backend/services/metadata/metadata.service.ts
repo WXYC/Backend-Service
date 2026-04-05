@@ -1,18 +1,13 @@
 /**
- * Metadata Service - Fetches and stores metadata via LML (library-metadata-lookup).
+ * Metadata Service - Fetches metadata from LML (library-metadata-lookup).
  *
- * Called fire-and-forget on every flowsheet insert. LML search results include
+ * Called fire-and-forget on every flowsheet insert. The caller persists the
+ * returned metadata directly on the flowsheet row. LML search results include
  * enriched streaming URLs (Spotify, Apple Music, YouTube Music, Bandcamp,
  * SoundCloud), Discogs metadata, artist bio, and Wikipedia URL. Fallback search
  * URLs are constructed for services where LML returns null.
  */
 import { MetadataRequest, AlbumMetadataResult, ArtistMetadataResult, FlowsheetMetadata } from './metadata.types.js';
-import {
-  setAlbumMetadata,
-  setArtistMetadata,
-  generateAlbumCacheKey,
-  generateArtistCacheKey,
-} from './metadata.cache.js';
 import { searchDiscogs, getRelease, getArtistDetails, LmlSearchResult } from '../lml/lml.client.js';
 import { SearchUrlProvider } from './providers/search-urls.provider.js';
 
@@ -41,9 +36,13 @@ function isLmlConfigured(): boolean {
 }
 
 /**
- * Fetch and store metadata for a single entry (called on insert).
+ * Fetch metadata for a single flowsheet entry from LML.
+ *
+ * Returns album and artist metadata, or null if LML is not configured or
+ * an unrecoverable error occurs. The caller is responsible for persisting
+ * the result (e.g., updating the flowsheet row).
  */
-export async function fetchAndCacheMetadata(request: MetadataRequest): Promise<FlowsheetMetadata | null> {
+export async function fetchMetadata(request: MetadataRequest): Promise<FlowsheetMetadata | null> {
   if (!isLmlConfigured()) {
     console.warn('[MetadataService] LIBRARY_METADATA_URL not configured, skipping metadata fetch');
     return null;
@@ -52,31 +51,19 @@ export async function fetchAndCacheMetadata(request: MetadataRequest): Promise<F
   const result: FlowsheetMetadata = {};
 
   try {
-    // Single LML search fetches Discogs data + enriched streaming URLs
     const { albumMetadata, artistId, searchResult } = await fetchAlbumMetadata(request);
     if (albumMetadata) {
       result.album = albumMetadata;
-
-      const cacheKey = request.albumId
-        ? null
-        : generateAlbumCacheKey(request.artistName, request.albumTitle || request.trackTitle);
-
-      await setAlbumMetadata(request.albumId || null, cacheKey, albumMetadata, request.rotationId != null);
     }
 
-    // Fetch artist metadata using the artist ID from the release, or from the search result bio
     const artistMetadata = await fetchArtistMetadata(request, artistId, searchResult);
     if (artistMetadata) {
       result.artist = artistMetadata;
-
-      const cacheKey = request.artistId ? null : generateArtistCacheKey(request.artistName);
-
-      await setArtistMetadata(request.artistId || null, cacheKey, artistMetadata);
     }
 
     return result;
   } catch (error) {
-    console.error('[MetadataService] fetchAndCacheMetadata error:', error);
+    console.error('[MetadataService] fetchMetadata error:', error);
     return null;
   }
 }
@@ -158,7 +145,7 @@ async function fetchAlbumMetadata(request: MetadataRequest): Promise<{
  * Wikipedia URL from the LML search result if no artist ID is available.
  */
 async function fetchArtistMetadata(
-  request: MetadataRequest,
+  _request: MetadataRequest,
   discogsArtistId: number | null,
   searchResult: LmlSearchResult | null
 ): Promise<ArtistMetadataResult | null> {
@@ -169,7 +156,7 @@ async function fetchArtistMetadata(
       const wikipediaUrl = artist.urls.find((url) => url.includes('wikipedia.org')) ?? undefined;
       const bio = artist.profile ? cleanDiscogsBio(artist.profile) : undefined;
 
-      return { discogsArtistId, bio, wikipediaUrl };
+      return { bio, wikipediaUrl };
     } catch (error) {
       console.warn('[MetadataService] LML artist details failed:', error);
       // Fall through to search result fallback
@@ -181,7 +168,7 @@ async function fetchArtistMetadata(
     const bio = searchResult.artist_bio ? cleanDiscogsBio(searchResult.artist_bio) : undefined;
     const wikipediaUrl = searchResult.wikipedia_url ?? undefined;
     if (bio || wikipediaUrl) {
-      return { discogsArtistId: discogsArtistId ?? undefined, bio, wikipediaUrl };
+      return { bio, wikipediaUrl };
     }
   }
 

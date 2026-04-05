@@ -1,12 +1,13 @@
 import { Request, RequestHandler } from 'express';
 import { Mutex } from 'async-mutex';
 import * as Sentry from '@sentry/node';
-import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/database';
+import { eq } from 'drizzle-orm';
+import { db, NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ, flowsheet } from '@wxyc/database';
 
 // play_order is computed by the service layer, not provided by controllers
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
-import { fetchAndCacheMetadata } from '../services/metadata/index.js';
+import { fetchMetadata } from '../services/metadata/index.js';
 import WxycError from '../utils/error.js';
 
 export type QueryParams = {
@@ -18,7 +19,6 @@ export type QueryParams = {
 };
 
 export interface IFSEntryMetadata {
-  // Album metadata from cache
   artwork_url: string | null;
   discogs_url: string | null;
   release_year: number | null;
@@ -27,7 +27,6 @@ export interface IFSEntryMetadata {
   youtube_music_url: string | null;
   bandcamp_url: string | null;
   soundcloud_url: string | null;
-  // Artist metadata from cache
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
 }
@@ -36,6 +35,48 @@ export interface IFSEntry extends FSEntry {
   label_id: number | null;
   rotation_bin: string | null;
   metadata: IFSEntryMetadata;
+}
+
+/**
+ * Fire-and-forget: fetch metadata from LML and update the flowsheet row.
+ *
+ * Called after a track is inserted. Does not block the HTTP response.
+ */
+function fireAndForgetMetadata(completedEntry: FSEntry, artistId?: number): void {
+  if (!completedEntry.artist_name) return;
+
+  fetchMetadata({
+    albumId: completedEntry.album_id ?? undefined,
+    artistId,
+    artistName: completedEntry.artist_name,
+    albumTitle: completedEntry.album_title ?? undefined,
+    trackTitle: completedEntry.track_title ?? undefined,
+  })
+    .then(async (metadata) => {
+      if (!metadata) return;
+      await db
+        .update(flowsheet)
+        .set({
+          artwork_url: metadata.album?.artworkUrl ?? null,
+          discogs_url: metadata.album?.discogsUrl ?? null,
+          release_year: metadata.album?.releaseYear ?? null,
+          spotify_url: metadata.album?.spotifyUrl ?? null,
+          apple_music_url: metadata.album?.appleMusicUrl ?? null,
+          youtube_music_url: metadata.album?.youtubeMusicUrl ?? null,
+          bandcamp_url: metadata.album?.bandcampUrl ?? null,
+          soundcloud_url: metadata.album?.soundcloudUrl ?? null,
+          artist_bio: metadata.artist?.bio ?? null,
+          artist_wikipedia_url: metadata.artist?.wikipediaUrl ?? null,
+        })
+        .where(eq(flowsheet.id, completedEntry.id));
+    })
+    .catch((err) => {
+      console.error('[Flowsheet] Metadata fetch failed:', err);
+      Sentry.captureException(err, {
+        tags: { subsystem: 'metadata' },
+        extra: { artistName: completedEntry.artist_name, albumTitle: completedEntry.album_title },
+      });
+    });
 }
 
 const MAX_ITEMS = 200;
@@ -235,25 +276,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       };
 
       const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-
-      // Fire-and-forget: fetch metadata for this entry
-      if (completedEntry.artist_name) {
-        fetchAndCacheMetadata({
-          albumId: completedEntry.album_id ?? undefined,
-          artistId: albumInfo.artist_id ?? undefined,
-          rotationId: completedEntry.rotation_id ?? undefined,
-          artistName: completedEntry.artist_name,
-          albumTitle: completedEntry.album_title ?? undefined,
-          trackTitle: completedEntry.track_title ?? undefined,
-        }).catch((err) => {
-          console.error('[Flowsheet] Metadata fetch failed:', err);
-          Sentry.captureException(err, {
-            tags: { subsystem: 'metadata' },
-            extra: { artistName: completedEntry.artist_name, albumTitle: completedEntry.album_title },
-          });
-        });
-      }
-
+      fireAndForgetMetadata(completedEntry, albumInfo.artist_id ?? undefined);
       res.status(201).json(completedEntry);
     } else if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
       throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
@@ -264,25 +287,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       };
 
       const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-
-      // Fire-and-forget: fetch metadata for this entry
-      if (completedEntry.artist_name) {
-        fetchAndCacheMetadata({
-          albumId: completedEntry.album_id ?? undefined,
-          artistId: undefined,
-          rotationId: completedEntry.rotation_id ?? undefined,
-          artistName: completedEntry.artist_name,
-          albumTitle: completedEntry.album_title ?? undefined,
-          trackTitle: completedEntry.track_title ?? undefined,
-        }).catch((err) => {
-          console.error('[Flowsheet] Metadata fetch failed:', err);
-          Sentry.captureException(err, {
-            tags: { subsystem: 'metadata' },
-            extra: { artistName: completedEntry.artist_name, albumTitle: completedEntry.album_title },
-          });
-        });
-      }
-
+      fireAndForgetMetadata(completedEntry);
       res.status(201).json(completedEntry);
     }
   } catch (e) {

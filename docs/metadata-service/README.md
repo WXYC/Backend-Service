@@ -1,85 +1,57 @@
-# Metadata Service Backend Integration
+# Metadata Service
 
-This document describes the metadata service integration that moves metadata fetching from the iOS client to the backend service. Clients now receive album art URLs, streaming links, and artist metadata as part of flowsheet responses.
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Last-Modified Tracking](#last-modified-tracking)
-- [Conditional GET (304 Not Modified)](#conditional-get-304-not-modified)
-- [Fire-and-Forget Metadata Fetch](#fire-and-forget-metadata-fetch)
-- [Migration Structure](#migration-structure)
-- [Network Sequence Diagram](#network-sequence-diagram)
-- [Implementation Summary](#implementation-summary)
-- [Files Changed](#files-changed)
-
----
+This document describes how the backend service fetches and serves album/artist metadata (artwork URLs, streaming links, artist bios) as part of flowsheet responses.
 
 ## Overview
 
-### Problem
-
-The iOS client was responsible for fetching metadata (album art, streaming links, artist bios) from multiple external APIs (Discogs, Spotify, Apple Music). This created:
-
-- Redundant API calls across multiple clients
-- Inconsistent caching strategies
-- Poor offline experience
-- API rate limiting issues
-
-### Solution
-
-Move metadata fetching to the backend with:
-
-- **Database-backed storage** for persistent metadata
-- **Fire-and-forget fetching** for non-blocking metadata retrieval
-- **LEFT JOINs** to include metadata in flowsheet responses automatically
-- **Conditional GET** support (304 responses) for efficient client polling
-
----
+When a track is added to the flowsheet, the backend fetches metadata from [library-metadata-lookup](https://github.com/WXYC/library-metadata-lookup) (LML) asynchronously and stores it directly on the flowsheet row. Subsequent GET requests return the metadata inline with the entry. LML handles its own caching of Discogs API data, so no additional cache layer is needed on the backend.
 
 ## Architecture
 
-The overall system architecture showing how components interact:
+| Component | Responsibility |
+|---|---|
+| **Flowsheet Controller** | Handles HTTP requests, triggers async metadata fetch, updates the flowsheet row |
+| **Flowsheet Service** | Database queries returning entries with inline metadata |
+| **Metadata Service** | Calls LML for Discogs data and enriched streaming URLs |
+| **LML** | External service: Discogs search, release details, artist details, streaming URL enrichment (with its own cache) |
 
-![Architecture Diagram](./architecture.svg)
+### Metadata Fields on Flowsheet
 
-> **Note:** Diagram source files are in `diagrams/*.mmd` (Mermaid format). Regenerate SVGs with:
->
-> ```bash
-> npx @mermaid-js/mermaid-cli -i diagrams/architecture.mmd -o architecture.svg -b transparent
-> ```
+| Column | Type | Source |
+|---|---|---|
+| `artwork_url` | varchar(512) | LML (Discogs) |
+| `discogs_url` | varchar(512) | LML (Discogs) |
+| `release_year` | smallint | LML (Discogs) |
+| `spotify_url` | varchar(512) | LML enrichment |
+| `apple_music_url` | varchar(512) | LML enrichment |
+| `youtube_music_url` | varchar(512) | LML enrichment or search URL fallback |
+| `bandcamp_url` | varchar(512) | LML enrichment or search URL fallback |
+| `soundcloud_url` | varchar(512) | LML enrichment or search URL fallback |
+| `artist_bio` | text | LML (Discogs artist profile, markup stripped) |
+| `artist_wikipedia_url` | varchar(512) | LML (Discogs artist URLs) |
 
-### Key Components
+## Fire-and-Forget Metadata Fetch
 
-| Component                | Responsibility                                               |
-| ------------------------ | ------------------------------------------------------------ |
-| **Flowsheet Controller** | Handles HTTP requests, triggers async metadata fetch         |
-| **Flowsheet Service**    | Database queries with metadata JOINs, last-modified tracking |
-| **Metadata Service**     | Coordinates external API calls, stores results               |
-| **PostgreSQL**           | Persistent storage for flowsheet and metadata tables         |
-| **External APIs**        | Discogs, Spotify, Apple Music for metadata                   |
+When a track is added, metadata is fetched asynchronously without blocking the response:
 
----
+1. `POST /flowsheet` inserts the entry to the database
+2. If the entry has an `artist_name`, `fetchMetadata()` is called asynchronously
+3. The HTTP response returns immediately (metadata columns are null)
+4. `fetchMetadata()` calls LML's Discogs search, release details, and artist details endpoints
+5. On success, the flowsheet row is updated with the metadata via `db.update(flowsheet).set(...)`
+6. On the next GET request, the metadata is included in the response
 
-## Last-Modified Tracking
+### LML Endpoints Used
 
-The flowsheet service tracks when the flowsheet was last modified to support conditional GET requests (304 responses).
+| Endpoint | Data Retrieved |
+|---|---|
+| `POST /api/v1/discogs/search` | artwork_url, release_url, release_year, streaming URLs, artist_bio, wikipedia_url |
+| `GET /api/v1/discogs/release/{id}` | Enriched artwork_url, year, artist_id |
+| `GET /api/v1/discogs/artist/{id}` | Artist profile (bio), Wikipedia URL |
 
-### Modification Triggers
+### Fallback Behavior
 
-The `lastModifiedAt` timestamp is updated when:
-
-- Track is added (`addTrack`)
-- Track is deleted (`removeTrack`)
-- Track is updated (`updateEntry`)
-- Track order changes (`changeOrder`)
-- Show starts/ends (flowsheet messages added)
-- DJ joins/leaves (flowsheet notifications added)
-
-This allows clients to poll efficiently using conditional GET requests (see below).
-
----
+When LML returns no results or is unavailable, the metadata service constructs search URLs for YouTube Music, Bandcamp, and SoundCloud as a bare minimum. These are generic search links, not direct album/track URLs.
 
 ## Conditional GET (304 Not Modified)
 
@@ -88,208 +60,24 @@ The flowsheet endpoints support conditional requests via the `Last-Modified` hea
 ### How It Works
 
 1. **Server response**: Every successful GET response includes a `Last-Modified` header
-2. **Client request**: Client stores this timestamp and sends it back via:
-   - `If-Modified-Since` header (standard HTTP), or
-   - `since` query parameter (convenience for clients that can't set headers easily)
+2. **Client request**: Client stores this timestamp and sends it back via `If-Modified-Since` header or `since` query parameter
 3. **304 Not Modified**: If the flowsheet hasn't changed, server returns 304 (no body)
 4. **200 OK**: If the flowsheet has changed, server returns full response with updated `Last-Modified`
 
 ### Supported Endpoints
 
-| Endpoint                | Support |
-| ----------------------- | ------- |
-| `GET /flowsheet`        | Yes     |
-| `GET /flowsheet/latest` | Yes     |
+| Endpoint | Support |
+|---|---|
+| `GET /flowsheet` | Yes |
+| `GET /flowsheet/latest` | Yes |
 
-### Example Flow
+## Configuration
 
-```
-# First request
-GET /flowsheet
-→ 200 OK
-→ Last-Modified: Sun, 18 Jan 2026 10:30:00 GMT
-→ [entries...]
+The `LIBRARY_METADATA_URL` environment variable must be set to the LML service base URL (e.g., `http://localhost:8001`). Without this, metadata fetching is silently skipped and all metadata columns remain null.
 
-# Subsequent request using header (no changes)
-GET /flowsheet
-If-Modified-Since: Sun, 18 Jan 2026 10:30:00 GMT
-→ 304 Not Modified
-→ (no body)
+## Migration History
 
-# Or using query parameter (equivalent)
-GET /flowsheet?since=Sun,%2018%20Jan%202026%2010:30:00%20GMT
-→ 304 Not Modified
-→ (no body)
-
-# After a track is added
-GET /flowsheet
-If-Modified-Since: Sun, 18 Jan 2026 10:30:00 GMT
-→ 200 OK
-→ Last-Modified: Sun, 18 Jan 2026 10:35:00 GMT
-→ [entries...]
-```
-
-### Benefits
-
-- **Reduced bandwidth**: 304 responses have no body
-- **Native iOS support**: `URLSession` handles 304 responses automatically
-- **Proxy-friendly**: Standard HTTP caching semantics work with CDNs/proxies
-- **Flexible client support**: Query parameter alternative for clients that can't easily set headers
-
----
-
-## Fire-and-Forget Metadata Fetch
-
-When a track is added, metadata is fetched asynchronously without blocking the response:
-
-![Metadata Fetch Diagram](./metadata-fetch.svg)
-
-### Flow
-
-1. **Entry added** - `addTrack()` inserts to database
-2. **Check artist_name** - Only fetch metadata for tracks (not talksets/messages)
-3. **Fire-and-forget** - Call `fetchAndCacheMetadata()` with `.catch()`
-4. **Return immediately** - Client gets response, metadata may be null
-5. **Async completion** - Metadata stored in DB, available on next request
-
-### Provider Pipeline
-
-| Provider        | Data Retrieved                                                       |
-| --------------- | -------------------------------------------------------------------- |
-| **Discogs**     | `artwork_url`, `release_year`, `discogs_url`, `bio`, `wikipedia_url` |
-| **Spotify**     | `spotify_url`                                                        |
-| **Apple Music** | `apple_music_url`                                                    |
-| **Search URLs** | `youtube_music_url`, `bandcamp_url`, `soundcloud_url`                |
-
----
-
-## Migration Structure
-
-The database migration adds two new tables for metadata storage:
-
-![Migration Structure Diagram](./migration-structure.svg)
-
-### Migration History
-
-| Migration                          | Purpose                                    |
-| ---------------------------------- | ------------------------------------------ |
-| `0021_user-table-migration.sql`    | DJ refactor (already applied)              |
-| `0022_library_cross_reference.sql` | Artist/library crossreference tables       |
-| `0023_metadata_tables.sql`         | **NEW** - album_metadata + artist_metadata |
-
-### New Tables
-
-#### `wxyc_schema.album_metadata`
-
-| Column              | Type                 | Purpose                          |
-| ------------------- | -------------------- | -------------------------------- |
-| `id`                | serial               | Primary key                      |
-| `album_id`          | integer (FK, unique) | Link to library for known albums |
-| `cache_key`         | varchar (unique)     | Key for non-library entries      |
-| `artwork_url`       | varchar              | Album cover image URL            |
-| `spotify_url`       | varchar              | Spotify album link               |
-| `apple_music_url`   | varchar              | Apple Music album link           |
-| `discogs_url`       | varchar              | Discogs release link             |
-| `youtube_music_url` | varchar              | YouTube Music search URL         |
-| `bandcamp_url`      | varchar              | Bandcamp search URL              |
-| `soundcloud_url`    | varchar              | SoundCloud search URL            |
-| `release_year`      | smallint             | Album release year               |
-| `is_rotation`       | boolean              | Whether album is in rotation     |
-| `last_accessed`     | timestamp            | For tracking usage               |
-
-#### `wxyc_schema.artist_metadata`
-
-| Column              | Type                 | Purpose                           |
-| ------------------- | -------------------- | --------------------------------- |
-| `id`                | serial               | Primary key                       |
-| `artist_id`         | integer (FK, unique) | Link to artists for known artists |
-| `cache_key`         | varchar (unique)     | Key for non-library artists       |
-| `discogs_artist_id` | integer              | Discogs artist ID                 |
-| `bio`               | text                 | Artist biography                  |
-| `wikipedia_url`     | varchar              | Wikipedia article link            |
-| `last_accessed`     | timestamp            | For tracking usage                |
-
----
-
-## Network Sequence Diagram
-
-This diagram shows the complete request/response flow between all systems:
-
-![Sequence Diagram](./sequence-diagram.svg)
-
-### Scenarios
-
-#### 1. Add Track
-
-- Client POSTs new track
-- Backend inserts to DB
-- Fire-and-forget metadata fetch starts
-- Client receives response immediately (metadata may be null)
-- Metadata service fetches from external APIs asynchronously
-- Metadata saved to DB for future requests
-
-#### 2. Get Entries
-
-- Client GETs flowsheet entries
-- Query database with LEFT JOINs to include metadata
-- Return entries with metadata
-
----
-
-## Implementation Summary
-
-### Changes Made
-
-| Area                     | Change                                            |
-| ------------------------ | ------------------------------------------------- |
-| **Migration**            | Created 0023_metadata_tables.sql                  |
-| **Flowsheet Service**    | Added LEFT JOINs, last-modified tracking          |
-| **Flowsheet Controller** | Fire-and-forget metadata fetch on new entries     |
-| **Database**             | New `album_metadata` and `artist_metadata` tables |
-
-### Data Flow Summary
-
-![Data Flow Diagram](./data-flow.svg)
-
----
-
-## Files Changed
-
-### Core Implementation
-
-| File                                               | Change                                   |
-| -------------------------------------------------- | ---------------------------------------- |
-| `apps/backend/services/flowsheet.service.ts`       | Added LEFT JOINs, last-modified tracking |
-| `apps/backend/controllers/flowsheet.controller.ts` | Fire-and-forget metadata fetch           |
-| `apps/backend/services/metadata/*`                 | Metadata service implementation          |
-
-### Database
-
-| File                                                      | Change                                              |
-| --------------------------------------------------------- | --------------------------------------------------- |
-| `shared/database/src/schema.ts`                           | Added `album_metadata` and `artist_metadata` tables |
-| `shared/database/src/migrations/0023_metadata_tables.sql` | Migration for metadata tables                       |
-| `shared/database/src/migrations/meta/_journal.json`       | Added 0023 entry                                    |
-
----
-
-## Running the Migration
-
-To apply the migration locally:
-
-```bash
-# Start local database (requires Docker)
-npm run db:start
-
-# Apply migrations
-npm run drizzle:migrate
-```
-
-## Verification
-
-After migration, verify:
-
-1. **Tables exist**: `album_metadata` and `artist_metadata` in `wxyc_schema`
-2. **Backend starts**: Healthcheck passes at `/healthcheck`
-3. **Add track**: Verify metadata appears in subsequent GET requests
-4. **Cache works**: Repeated GET requests return consistent results
+| Migration | Purpose |
+|---|---|
+| `0023_metadata_tables.sql` | Created separate album_metadata and artist_metadata cache tables (original design) |
+| `0035_inline_flowsheet_metadata.sql` | Added metadata columns to flowsheet table, dropped the cache tables |

@@ -26,9 +26,9 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
 }));
 
-const mockFetchAndCacheMetadata = jest.fn<() => Promise<void>>();
+const mockFetchMetadata = jest.fn<() => Promise<void>>();
 jest.mock('../../../apps/backend/services/metadata/index', () => ({
-  fetchAndCacheMetadata: mockFetchAndCacheMetadata,
+  fetchMetadata: mockFetchMetadata,
 }));
 
 import { getEntries, getLatest, getShowInfo, addEntry } from '../../../apps/backend/controllers/flowsheet.controller';
@@ -421,7 +421,7 @@ describe('flowsheet.controller', () => {
       };
       mockAddTrack.mockResolvedValue(completedEntry);
       const metadataError = new Error('Discogs timeout');
-      mockFetchAndCacheMetadata.mockRejectedValue(metadataError);
+      mockFetchMetadata.mockRejectedValue(metadataError);
 
       const req = createMockBodyReq({
         artist_name: 'Autechre',
@@ -459,7 +459,7 @@ describe('flowsheet.controller', () => {
       };
       mockAddTrack.mockResolvedValue(completedEntry);
       const metadataError = new Error('Spotify rate limit');
-      mockFetchAndCacheMetadata.mockRejectedValue(metadataError);
+      mockFetchMetadata.mockRejectedValue(metadataError);
 
       const req = createMockBodyReq({
         artist_name: 'Juana Molina',
@@ -501,7 +501,7 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      mockFetchAndCacheMetadata.mockResolvedValue(undefined);
+      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = createMockBodyReq({
         track_title: 'Crispy Duck',
@@ -543,7 +543,7 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      mockFetchAndCacheMetadata.mockResolvedValue(undefined);
+      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = createMockBodyReq({
         track_title: 'Metal Heart',
@@ -579,7 +579,7 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      mockFetchAndCacheMetadata.mockResolvedValue(undefined);
+      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = createMockBodyReq(trackBody);
       const res = createMockRes();

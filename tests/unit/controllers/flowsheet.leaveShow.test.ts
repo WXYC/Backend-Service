@@ -7,7 +7,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
 }));
 
 jest.mock('../../../apps/backend/services/metadata/index', () => ({
-  fetchAndCacheMetadata: jest.fn(),
+  fetchMetadata: jest.fn(),
 }));
 
 jest.mock('async-mutex', () => ({
