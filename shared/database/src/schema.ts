@@ -542,7 +542,6 @@ export const rotation_library_view = wxyc_schema.view('rotation_library_view').a
     .innerJoin(artists, eq(artists.id, library.artist_id));
 });
 
-
 // User activity tracking (for anonymous users)
 export const user_activity = pgTable('user_activity', {
   userId: varchar('user_id', { length: 255 })

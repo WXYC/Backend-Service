@@ -8,27 +8,27 @@ When a track is added to the flowsheet, the backend fetches metadata from [libra
 
 ## Architecture
 
-| Component | Responsibility |
-|---|---|
-| **Flowsheet Controller** | Handles HTTP requests, triggers async metadata fetch, updates the flowsheet row |
-| **Flowsheet Service** | Database queries returning entries with inline metadata |
-| **Metadata Service** | Calls LML for Discogs data and enriched streaming URLs |
-| **LML** | External service: Discogs search, release details, artist details, streaming URL enrichment (with its own cache) |
+| Component                | Responsibility                                                                                                   |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| **Flowsheet Controller** | Handles HTTP requests, triggers async metadata fetch, updates the flowsheet row                                  |
+| **Flowsheet Service**    | Database queries returning entries with inline metadata                                                          |
+| **Metadata Service**     | Calls LML for Discogs data and enriched streaming URLs                                                           |
+| **LML**                  | External service: Discogs search, release details, artist details, streaming URL enrichment (with its own cache) |
 
 ### Metadata Fields on Flowsheet
 
-| Column | Type | Source |
-|---|---|---|
-| `artwork_url` | varchar(512) | LML (Discogs) |
-| `discogs_url` | varchar(512) | LML (Discogs) |
-| `release_year` | smallint | LML (Discogs) |
-| `spotify_url` | varchar(512) | LML enrichment |
-| `apple_music_url` | varchar(512) | LML enrichment |
-| `youtube_music_url` | varchar(512) | LML enrichment or search URL fallback |
-| `bandcamp_url` | varchar(512) | LML enrichment or search URL fallback |
-| `soundcloud_url` | varchar(512) | LML enrichment or search URL fallback |
-| `artist_bio` | text | LML (Discogs artist profile, markup stripped) |
-| `artist_wikipedia_url` | varchar(512) | LML (Discogs artist URLs) |
+| Column                 | Type         | Source                                        |
+| ---------------------- | ------------ | --------------------------------------------- |
+| `artwork_url`          | varchar(512) | LML (Discogs)                                 |
+| `discogs_url`          | varchar(512) | LML (Discogs)                                 |
+| `release_year`         | smallint     | LML (Discogs)                                 |
+| `spotify_url`          | varchar(512) | LML enrichment                                |
+| `apple_music_url`      | varchar(512) | LML enrichment                                |
+| `youtube_music_url`    | varchar(512) | LML enrichment or search URL fallback         |
+| `bandcamp_url`         | varchar(512) | LML enrichment or search URL fallback         |
+| `soundcloud_url`       | varchar(512) | LML enrichment or search URL fallback         |
+| `artist_bio`           | text         | LML (Discogs artist profile, markup stripped) |
+| `artist_wikipedia_url` | varchar(512) | LML (Discogs artist URLs)                     |
 
 ## Fire-and-Forget Metadata Fetch
 
@@ -43,11 +43,11 @@ When a track is added, metadata is fetched asynchronously without blocking the r
 
 ### LML Endpoints Used
 
-| Endpoint | Data Retrieved |
-|---|---|
-| `POST /api/v1/discogs/search` | artwork_url, release_url, release_year, streaming URLs, artist_bio, wikipedia_url |
-| `GET /api/v1/discogs/release/{id}` | Enriched artwork_url, year, artist_id |
-| `GET /api/v1/discogs/artist/{id}` | Artist profile (bio), Wikipedia URL |
+| Endpoint                           | Data Retrieved                                                                    |
+| ---------------------------------- | --------------------------------------------------------------------------------- |
+| `POST /api/v1/discogs/search`      | artwork_url, release_url, release_year, streaming URLs, artist_bio, wikipedia_url |
+| `GET /api/v1/discogs/release/{id}` | Enriched artwork_url, year, artist_id                                             |
+| `GET /api/v1/discogs/artist/{id}`  | Artist profile (bio), Wikipedia URL                                               |
 
 ### Fallback Behavior
 
@@ -66,10 +66,10 @@ The flowsheet endpoints support conditional requests via the `Last-Modified` hea
 
 ### Supported Endpoints
 
-| Endpoint | Support |
-|---|---|
-| `GET /flowsheet` | Yes |
-| `GET /flowsheet/latest` | Yes |
+| Endpoint                | Support |
+| ----------------------- | ------- |
+| `GET /flowsheet`        | Yes     |
+| `GET /flowsheet/latest` | Yes     |
 
 ## Configuration
 
@@ -77,7 +77,7 @@ The `LIBRARY_METADATA_URL` environment variable must be set to the LML service b
 
 ## Migration History
 
-| Migration | Purpose |
-|---|---|
-| `0023_metadata_tables.sql` | Created separate album_metadata and artist_metadata cache tables (original design) |
-| `0035_inline_flowsheet_metadata.sql` | Added metadata columns to flowsheet table, dropped the cache tables |
+| Migration                            | Purpose                                                                            |
+| ------------------------------------ | ---------------------------------------------------------------------------------- |
+| `0023_metadata_tables.sql`           | Created separate album_metadata and artist_metadata cache tables (original design) |
+| `0035_inline_flowsheet_metadata.sql` | Added metadata columns to flowsheet table, dropped the cache tables                |
