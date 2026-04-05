@@ -74,7 +74,7 @@
           "release_id": 28560123,
           "release_url": "https://www.discogs.com/release/28560123",
           "artwork_url": null,
-          "confidence": 0.90,
+          "confidence": 0.9,
           "release_year": 2023,
           "artist_bio": null,
           "wikipedia_url": null,
@@ -223,7 +223,13 @@
       "track": "VI Scose Poise",
       "artist": "Autechre",
       "releases": [
-        { "album": "Confield", "artist": "Autechre", "release_id": 4080, "release_url": "https://www.discogs.com/release/4080", "is_compilation": false }
+        {
+          "album": "Confield",
+          "artist": "Autechre",
+          "release_id": 4080,
+          "release_url": "https://www.discogs.com/release/4080",
+          "is_compilation": false
+        }
       ],
       "total": 1,
       "cached": false
