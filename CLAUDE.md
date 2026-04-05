@@ -264,6 +264,18 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 - `SLACK_WXYC_REQUESTS_CLIENT_SECRET`, `SLACK_WXYC_REQUESTS_SIGNING_SECRET`
 - `SLACK_WXYC_REQUESTS_WEBHOOK`
 
+### ETL Jobs
+
+The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the legacy MySQL database into PostgreSQL. It requires the standard database variables above plus these for SSH tunneling to the legacy server:
+
+- `SSH_HOST` -- Hostname of the legacy server
+- `SSH_USERNAME` -- SSH login username
+- `SSH_PASSWORD` -- SSH login password
+- `REMOTE_DB_HOST` -- MySQL host on the legacy server (typically `localhost` from inside the tunnel)
+- `REMOTE_DB_USER` -- MySQL username
+- `REMOTE_DB_PASSWORD` -- MySQL password
+- `REMOTE_DB_NAME` -- MySQL database name
+
 ## Relationship to Other Repos
 
 - **[dj-site](https://github.com/WXYC/dj-site)** -- React frontend that consumes this API
