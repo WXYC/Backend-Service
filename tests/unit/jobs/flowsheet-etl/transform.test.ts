@@ -33,6 +33,39 @@ describe('flowsheet-etl transform', () => {
       expect(result?.toISOString()).toContain('2023-10-15');
     });
 
+    it('applies EDT offset (-04:00) for summer dates', () => {
+      // July 4 is always EDT (UTC-4)
+      const result = parseMySQLDatetime('2023-07-04 12:00:00');
+      expect(result).toBeInstanceOf(Date);
+      // 12:00 EDT = 16:00 UTC
+      expect(result?.toISOString()).toBe('2023-07-04T16:00:00.000Z');
+    });
+
+    it('applies EST offset (-05:00) for winter dates', () => {
+      // January 15 is always EST (UTC-5)
+      const result = parseMySQLDatetime('2023-01-15 12:00:00');
+      expect(result).toBeInstanceOf(Date);
+      // 12:00 EST = 17:00 UTC
+      expect(result?.toISOString()).toBe('2023-01-15T17:00:00.000Z');
+    });
+
+    it('handles the spring-forward DST transition date', () => {
+      // March 12, 2023: clocks spring forward at 2:00 AM ET
+      // 1:00 AM is still EST (UTC-5)
+      const beforeSpring = parseMySQLDatetime('2023-03-12 01:00:00');
+      expect(beforeSpring?.toISOString()).toBe('2023-03-12T06:00:00.000Z');
+      // 3:00 AM is EDT (UTC-4)
+      const afterSpring = parseMySQLDatetime('2023-03-12 03:00:00');
+      expect(afterSpring?.toISOString()).toBe('2023-03-12T07:00:00.000Z');
+    });
+
+    it('handles the fall-back DST transition date', () => {
+      // November 5, 2023: clocks fall back at 2:00 AM ET
+      // 12:00 PM is EST (UTC-5) after the transition
+      const result = parseMySQLDatetime('2023-11-05 12:00:00');
+      expect(result?.toISOString()).toBe('2023-11-05T17:00:00.000Z');
+    });
+
     it('returns null for null input', () => {
       expect(parseMySQLDatetime(null)).toBeNull();
     });
