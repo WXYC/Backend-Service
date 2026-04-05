@@ -73,12 +73,12 @@ describe('MirrorCommandQueue', () => {
     const cmd = queue.enqueue(['SELECT 1', 'SELECT 2']);
 
     expect(cmd).not.toBeNull();
-    expect(cmd!.sql).toContain('START TRANSACTION;');
-    expect(cmd!.sql).toContain('SELECT 1;');
-    expect(cmd!.sql).toContain('SELECT 2;');
-    expect(cmd!.sql).toContain('COMMIT;');
+    expect(cmd?.sql).toContain('START TRANSACTION;');
+    expect(cmd?.sql).toContain('SELECT 1;');
+    expect(cmd?.sql).toContain('SELECT 2;');
+    expect(cmd?.sql).toContain('COMMIT;');
     // Status may already be 'in_progress' since enqueue() kicks the work loop
-    expect(['pending', 'in_progress']).toContain(cmd!.status);
+    expect(['pending', 'in_progress']).toContain(cmd?.status);
   });
 
   test('successful command emits succeeded event', async () => {
@@ -171,9 +171,9 @@ describe('MirrorCommandQueue', () => {
 
   test('commands drain in FIFO order', async () => {
     const sendOrder: string[] = [];
-    mockSend.mockImplementation(async (sql: string) => {
+    mockSend.mockImplementation((sql: string) => {
       sendOrder.push(sql);
-      return 'OK';
+      return Promise.resolve('OK');
     });
 
     const queue = createQueue();
