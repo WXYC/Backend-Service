@@ -108,7 +108,7 @@ export const auth = betterAuth({
   advanced: {
     defaultCookieAttributes: {
       sameSite: (process.env.COOKIE_SAME_SITE as 'lax' | 'strict' | 'none') || 'lax',
-      secure: true,
+      secure: process.env.NODE_ENV === 'production',
     },
   },
 
@@ -125,31 +125,30 @@ export const auth = betterAuth({
       // Custom payload to include organization member role and capabilities
       jwt: {
         definePayload: async ({ user }) => {
-          // Query organization membership to get member role
-          if (user?.id) {
-            const memberRecord = await db
-              .select({ role: member.role })
-              .from(member)
-              .where(sql`${member.userId} = ${user.id}` as any)
-              .limit(1);
-
-            if (memberRecord.length > 0) {
-              // Cast user to access capabilities field
-              const userWithCapabilities = user as typeof user & {
-                capabilities?: string[] | null;
-              };
-              return {
-                ...user,
-                role: memberRecord[0].role, // Use organization member role instead of default user role
-                capabilities: userWithCapabilities.capabilities ?? [], // Include capabilities in JWT
-              };
-            }
-          }
-          // Fallback to default user data if no organization membership found
-          // Still include capabilities even without organization membership
           const userWithCapabilities = user as typeof user & {
             capabilities?: string[] | null;
           };
+          // Query organization membership to get member role
+          if (user?.id) {
+            try {
+              const memberRecord = await db
+                .select({ role: member.role })
+                .from(member)
+                .where(eq(member.userId, user.id))
+                .limit(1);
+
+              if (memberRecord.length > 0) {
+                return {
+                  ...user,
+                  role: memberRecord[0].role,
+                  capabilities: userWithCapabilities.capabilities ?? [],
+                };
+              }
+            } catch (error) {
+              console.error('[JWT] Failed to fetch member role:', error);
+            }
+          }
+          // Fallback: no organization membership or query failed
           return {
             ...user,
             capabilities: userWithCapabilities?.capabilities ?? [],
