@@ -16,7 +16,7 @@ import { readFileSync } from 'fs';
 import { eq, sql } from 'drizzle-orm';
 import { db, shows, flowsheet, cronjob_runs, closeDatabaseConnection } from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
-import { mapProdEntryType, epochMsToDate, parseShowEntryDJName, truncate } from './transform.js';
+import { mapProdEntryType, epochMsToDate, resolveEntryTimestamp, parseShowEntryDJName, truncate } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
 
 const JOB_NAME = 'flowsheet-etl';
@@ -67,7 +67,7 @@ const resetSequences = async () => {
 const resolveArtistName = (rawArtistName: string | null, entryType: string): string | null => {
   if (!rawArtistName) return null;
   if (entryType === 'show_start' || entryType === 'show_end') {
-    return parseShowEntryDJName(rawArtistName) ?? truncate(rawArtistName, 128);
+    return truncate(parseShowEntryDJName(rawArtistName), 128) ?? truncate(rawArtistName, 128);
   }
   return truncate(rawArtistName, 128);
 };
@@ -152,7 +152,11 @@ const runBulkLoad = async (dumpPath: string) => {
     if (!parsed || parsed.table !== 'FLOWSHEET_ENTRY_PROD') continue;
 
     for (const tuple of parsed.tuples) {
-      const addTime = epochMsToDate(Number(tuple[10]) || 0);
+      const addTime = resolveEntryTimestamp(
+        Number(tuple[10]) || 0,   // START_TIME
+        Number(tuple[17]) || 0,   // TIME_CREATED
+        Number(tuple[16]) || 0,   // TIME_LAST_MODIFIED
+      );
       if (!addTime) continue;
       const entryId = Number(tuple[0]);
       const showId = Number(tuple[12]);

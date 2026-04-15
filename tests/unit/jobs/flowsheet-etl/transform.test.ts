@@ -2,6 +2,7 @@ import {
   mapEntryType,
   mapProdEntryType,
   epochMsToDate,
+  resolveEntryTimestamp,
   parseShowEntryDJName,
   parseMySQLDatetime,
   truncate,
@@ -69,6 +70,40 @@ describe('flowsheet-etl transform', () => {
 
     it('returns null for NaN', () => {
       expect(epochMsToDate(NaN)).toBeNull();
+    });
+  });
+
+  describe('resolveEntryTimestamp', () => {
+    const VALID_MS = 1099537681134; // 2004-11-04T02:08:01.134Z
+    const CREATED_MS = 1099537727355;
+    const MODIFIED_MS = 1099537978522;
+
+    it('prefers START_TIME when available', () => {
+      const result = resolveEntryTimestamp(VALID_MS, CREATED_MS, MODIFIED_MS);
+      expect(result?.getTime()).toBe(VALID_MS);
+    });
+
+    it('falls back to TIME_CREATED when START_TIME is 0', () => {
+      const result = resolveEntryTimestamp(0, CREATED_MS, MODIFIED_MS);
+      expect(result?.getTime()).toBe(CREATED_MS);
+    });
+
+    it('falls back to TIME_CREATED when START_TIME is null', () => {
+      const result = resolveEntryTimestamp(null, CREATED_MS, MODIFIED_MS);
+      expect(result?.getTime()).toBe(CREATED_MS);
+    });
+
+    it('falls back to TIME_LAST_MODIFIED when both are 0', () => {
+      const result = resolveEntryTimestamp(0, 0, MODIFIED_MS);
+      expect(result?.getTime()).toBe(MODIFIED_MS);
+    });
+
+    it('returns null when all timestamps are 0', () => {
+      expect(resolveEntryTimestamp(0, 0, 0)).toBeNull();
+    });
+
+    it('returns null when all timestamps are null', () => {
+      expect(resolveEntryTimestamp(null, null, null)).toBeNull();
     });
   });
 
