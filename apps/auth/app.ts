@@ -120,7 +120,9 @@ const isTestEnv =
 if (isTestEnv) {
   app.use('/auth', toNodeHandler(auth));
 } else {
-  const authRateLimit = rateLimit({
+  // Strict limit for auth mutations vulnerable to brute-force attacks.
+  // These are the only endpoints that need tight rate limiting.
+  const authMutationRateLimit = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 10,
     standardHeaders: 'draft-7',
@@ -128,7 +130,18 @@ if (isTestEnv) {
     message: { error: 'Too many requests, please try again later.' },
   });
 
-  app.use('/auth', authRateLimit, toNodeHandler(auth));
+  const rateLimitedPaths = [
+    '/auth/sign-in',
+    '/auth/sign-up',
+    '/auth/email-otp/send-verification-otp',
+    '/auth/forget-password',
+  ];
+
+  for (const path of rateLimitedPaths) {
+    app.use(path, authMutationRateLimit);
+  }
+
+  app.use('/auth', toNodeHandler(auth));
 }
 
 //endpoint for healthchecks
