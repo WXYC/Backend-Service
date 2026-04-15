@@ -91,7 +91,8 @@ describe('Library ETL', () => {
   });
 
   it('imports date_lost for missing releases', async () => {
-    const rows = await pg`SELECT album_title, date_lost, date_found FROM ${pg(SCHEMA)}.library WHERE date_lost IS NOT NULL`;
+    const rows =
+      await pg`SELECT album_title, date_lost, date_found FROM ${pg(SCHEMA)}.library WHERE date_lost IS NOT NULL`;
     expect(rows.length).toBeGreaterThanOrEqual(1);
     const compilation = rows.find((r: any) => r.album_title === 'Dada Damage: A Night People Compilation');
     expect(compilation).toBeDefined();
@@ -171,16 +172,17 @@ describe('Flowsheet ETL', () => {
 
     const byId = (id: number) => entries.find((e: any) => e.legacy_entry_id === id);
     expect(byId(2001).entry_type).toBe('show_start');
-    expect(byId(2002).entry_type).toBe('track');      // LIBRARY (6)
-    expect(byId(2004).entry_type).toBe('talkset');     // TALKSET (7)
-    expect(byId(2006).entry_type).toBe('breakpoint');  // HOURLY_BREAK (8)
-    expect(byId(2007).entry_type).toBe('track');       // HEAVY (1) -> track
-    expect(byId(2008).entry_type).toBe('show_end');    // END_OF_SHOW (10)
-    expect(byId(2010).entry_type).toBe('track');       // OTHER (0) -> track
+    expect(byId(2002).entry_type).toBe('track'); // LIBRARY (6)
+    expect(byId(2004).entry_type).toBe('talkset'); // TALKSET (7)
+    expect(byId(2006).entry_type).toBe('breakpoint'); // HOURLY_BREAK (8)
+    expect(byId(2007).entry_type).toBe('track'); // HEAVY (1) -> track
+    expect(byId(2008).entry_type).toBe('show_end'); // END_OF_SHOW (10)
+    expect(byId(2010).entry_type).toBe('track'); // OTHER (0) -> track
   });
 
   it('parses DJ name from show_start/show_end entries', async () => {
-    const entries = await pg`SELECT legacy_entry_id, artist_name FROM ${pg(SCHEMA)}.flowsheet WHERE entry_type IN ('show_start', 'show_end')`;
+    const entries =
+      await pg`SELECT legacy_entry_id, artist_name FROM ${pg(SCHEMA)}.flowsheet WHERE entry_type IN ('show_start', 'show_end')`;
 
     const byId = (id: number) => entries.find((e: any) => e.legacy_entry_id === id);
     expect(byId(2001).artist_name).toBe('DJ Bluejay');
@@ -189,14 +191,16 @@ describe('Flowsheet ETL', () => {
   });
 
   it('imports segue flag', async () => {
-    const entries = await pg`SELECT legacy_entry_id, segue FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id IN (2002, 2003)`;
+    const entries =
+      await pg`SELECT legacy_entry_id, segue FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id IN (2002, 2003)`;
     const byId = (id: number) => entries.find((e: any) => e.legacy_entry_id === id);
     expect(byId(2003).segue).toBe(true);
     expect(byId(2002).segue).toBe(false);
   });
 
   it('imports request flag', async () => {
-    const entries = await pg`SELECT legacy_entry_id, request_flag FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id IN (2002, 2005)`;
+    const entries =
+      await pg`SELECT legacy_entry_id, request_flag FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id IN (2002, 2005)`;
     const byId = (id: number) => entries.find((e: any) => e.legacy_entry_id === id);
     expect(byId(2005).request_flag).toBe(true);
     expect(byId(2002).request_flag).toBe(false);
@@ -204,7 +208,8 @@ describe('Flowsheet ETL', () => {
 
   it('maps show_id via legacy_show_id', async () => {
     const showRows = await pg`SELECT id, legacy_show_id FROM ${pg(SCHEMA)}.shows`;
-    const entries = await pg`SELECT legacy_entry_id, show_id FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id IN (2002, 2010)`;
+    const entries =
+      await pg`SELECT legacy_entry_id, show_id FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id IN (2002, 2010)`;
 
     const bluejayShow = showRows.find((s: any) => s.legacy_show_id === 1001);
     const wildeShow = showRows.find((s: any) => s.legacy_show_id === 1002);
@@ -215,7 +220,8 @@ describe('Flowsheet ETL', () => {
   });
 
   it('imports track metadata', async () => {
-    const rows = await pg`SELECT artist_name, album_title, track_title, record_label FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id = 2002`;
+    const rows =
+      await pg`SELECT artist_name, album_title, track_title, record_label FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id = 2002`;
     expect(rows[0].artist_name).toBe('Autechre');
     expect(rows[0].album_title).toBe('Confield');
     expect(rows[0].track_title).toBe('VI Scose Poise');

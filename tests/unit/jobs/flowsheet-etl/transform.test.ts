@@ -86,7 +86,9 @@ describe('flowsheet-etl transform', () => {
     });
 
     it('handles multi-word DJ names', () => {
-      expect(parseShowEntryDJName('START OF SHOW: Xx_CoolSocc3r101_xX SIGNED ON at 9:02 PM (4/1/26)')).toBe('Xx_CoolSocc3r101_xX');
+      expect(parseShowEntryDJName('START OF SHOW: Xx_CoolSocc3r101_xX SIGNED ON at 9:02 PM (4/1/26)')).toBe(
+        'Xx_CoolSocc3r101_xX'
+      );
     });
 
     it('returns null for non-show entries', () => {

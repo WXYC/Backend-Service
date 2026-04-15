@@ -91,7 +91,7 @@ const parseEntryRows = (raw: string, columnCount: number): LegacyEntryRow[] => {
       requestFlag: Number(cols[7]) || 0,
       playOrder: Number(cols[8]) || 0,
       startTime: Number(cols[9]),
-      segueFlag: columnCount >= 11 ? (Number(cols[10]) || 0) : 0,
+      segueFlag: columnCount >= 11 ? Number(cols[10]) || 0 : 0,
     });
   }
   return rows;
