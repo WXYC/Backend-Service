@@ -16,11 +16,12 @@ import { request_line_route } from './routes/requestLine.route.js';
 import { config_route } from './routes/config.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
-import { startPlaylistProxy } from './services/playlist-proxy.service.js';
+import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { requirePermissions } from '@wxyc/authentication';
+import { closeDatabaseConnection } from '@wxyc/database';
 
 const port = process.env.PORT || 8080;
 const app = express();
@@ -100,3 +101,35 @@ const server = app.listen(port, () => {
 });
 
 server.setTimeout(30000);
+
+// --- Memory monitoring ---
+
+const MEMORY_LOG_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const memoryLogTimer = setInterval(() => {
+  const usage = process.memoryUsage();
+  console.log(
+    `[memory] rss=${(usage.rss / 1024 / 1024).toFixed(1)}MB heap=${(usage.heapUsed / 1024 / 1024).toFixed(1)}/${(usage.heapTotal / 1024 / 1024).toFixed(1)}MB`
+  );
+}, MEMORY_LOG_INTERVAL);
+memoryLogTimer.unref();
+
+// --- Graceful shutdown ---
+
+function shutdown(signal: string): void {
+  console.log(`[shutdown] Received ${signal}, shutting down...`);
+  stopPlaylistProxy();
+  server.close(() => {
+    closeDatabaseConnection()
+      .then(() => process.exit(0))
+      .catch(() => process.exit(1));
+  });
+  // Force-close lingering connections (SSE clients, slow requests)
+  setTimeout(() => {
+    console.warn('[shutdown] Force closing remaining connections');
+    server.closeAllConnections();
+  }, 5_000).unref();
+  setTimeout(() => process.exit(1), 10_000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

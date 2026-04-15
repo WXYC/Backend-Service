@@ -8,6 +8,7 @@
  *
  * Exported API:
  *   startPlaylistProxy() — open the SSE connection (call once at startup)
+ *   stopPlaylistProxy()  — close the SSE connection and cancel pending reconnects
  *   getRecentEntries(n)  — current enriched playlist, sliced to n entries
  *   isConnected()        — true once the init event has been processed
  *
@@ -170,18 +171,43 @@ export function resetState(): void {
   connected = false;
 }
 
+/**
+ * Close the SSE connection, cancel pending reconnects, and stop heartbeat monitoring.
+ */
+export function stopPlaylistProxy(): void {
+  console.log('[playlist-proxy] Stopping proxy...');
+  connected = false;
+  if (currentEventSource) {
+    currentEventSource.close();
+    currentEventSource = null;
+  }
+  clearHeartbeatTimer();
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
 // --- SSE connection ---
 
 let reconnectDelay = 1000;
 const MAX_RECONNECT_DELAY = 30000;
 let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 const HEARTBEAT_TIMEOUT = 60000;
+let currentEventSource: EventSource | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 function connectSSE(): void {
   const url = `${TUBAFRENZY_URL}/playlists/recentStream`;
   console.log(`[playlist-proxy] Connecting to SSE: ${url}`);
 
+  if (currentEventSource) {
+    currentEventSource.close();
+    currentEventSource = null;
+  }
+
   const es = new EventSource(url);
+  currentEventSource = es;
 
   es.addEventListener('init', (event: MessageEvent) => {
     reconnectDelay = 1000; // reset backoff on successful connection
@@ -212,7 +238,10 @@ function connectSSE(): void {
     console.error(`[playlist-proxy] SSE error, reconnecting in ${reconnectDelay}ms`);
     clearHeartbeatTimer();
     es.close();
-    setTimeout(() => connectSSE(), reconnectDelay);
+    currentEventSource = null;
+    reconnectTimer = setTimeout(() => {
+      if (connected) connectSSE();
+    }, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
   });
 }
@@ -222,7 +251,8 @@ function resetHeartbeatTimer(es: EventSource): void {
   heartbeatTimer = setTimeout(() => {
     console.warn('[playlist-proxy] Heartbeat timeout, reconnecting');
     es.close();
-    connectSSE();
+    currentEventSource = null;
+    if (connected) connectSSE();
   }, HEARTBEAT_TIMEOUT);
 }
 
