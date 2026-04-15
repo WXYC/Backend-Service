@@ -43,6 +43,35 @@ export const mapEntryType = (legacyType: number): BackendEntryType => {
 };
 
 /**
+ * FLOWSHEET_ENTRY_TYPE_CODE_ID codes (production FLOWSHEET_ENTRY_PROD table):
+ *   0 = OTHER (non-rotation track)
+ *   1-4 = HEAVY/MEDIUM/LIGHT/SINGLES (rotation tracks)
+ *   5 = NEW (new vinyl, not yet in rotation)
+ *   6 = LIBRARY (existing library release)
+ *   7 = TALKSET
+ *   8 = HOURLY_BREAK
+ *   9 = START_OF_SHOW
+ *   10 = END_OF_SHOW
+ */
+const PROD_ENTRY_TYPE_MAP: Record<number, BackendEntryType> = {
+  0: 'track',
+  1: 'track',
+  2: 'track',
+  3: 'track',
+  4: 'track',
+  5: 'track',
+  6: 'track',
+  7: 'talkset',
+  8: 'breakpoint',
+  9: 'show_start',
+  10: 'show_end',
+};
+
+export const mapProdEntryType = (typeCode: number): BackendEntryType => {
+  return PROD_ENTRY_TYPE_MAP[typeCode] ?? 'message';
+};
+
+/**
  * Resolve the UTC offset for America/New_York at a given instant.
  * Returns a string like "-05:00" (EST) or "-04:00" (EDT).
  */
@@ -85,6 +114,28 @@ export const parseMySQLDatetime = (datetime: string | null): Date | null => {
 };
 
 /**
+ * Convert an epoch milliseconds value to a JS Date.
+ * Returns null for null, 0 (tubafrenzy uses 0 for "not set"), and NaN.
+ */
+export const epochMsToDate = (epochMs: number | null): Date | null => {
+  if (epochMs == null || epochMs === 0 || !Number.isFinite(epochMs)) return null;
+  const date = new Date(epochMs);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+/**
+ * Extract the DJ name from a START/END OF SHOW message in FLOWSHEET_ENTRY_PROD.
+ * These entries store structured text in the ARTIST_NAME column:
+ *   "START OF SHOW: DJ Bluejay SIGNED ON at 12:03 PM (4/4/26)"
+ *   "END OF SHOW: dj wilde SIGNED OFF at 12:03 PM (4/4/26)"
+ * Returns the DJ name or null if the text doesn't match the pattern.
+ */
+export const parseShowEntryDJName = (artistName: string): string | null => {
+  const match = artistName.match(/^(?:START|END) OF SHOW: (.+?) SIGNED (?:ON|OFF)/);
+  return match ? match[1] : null;
+};
+
+/**
  * Truncate a string to a max length, returning null if empty.
  * Matches the VARCHAR(128) / VARCHAR(250) limits in the schema.
  */
@@ -98,6 +149,7 @@ export type TransformedShow = {
   legacy_show_id: number;
   start_time: Date;
   end_time: Date | null;
+  show_name: string | null;
 };
 
 export type TransformedEntry = {
@@ -110,6 +162,7 @@ export type TransformedEntry = {
   record_label: string | null;
   message: string | null;
   request_flag: boolean;
+  segue: boolean;
   play_order: number;
   add_time: Date;
 };
@@ -125,6 +178,7 @@ export const transformShow = (row: [number, string, string | null]): Transformed
     legacy_show_id: row[0],
     start_time: startTime,
     end_time: parseMySQLDatetime(row[2]),
+    show_name: null,
   };
 };
 
@@ -149,7 +203,8 @@ export const transformEntry = (row: (string | number | null)[]): TransformedEntr
     track_title: truncate(row[5] as string | null, 128),
     record_label: truncate(row[6] as string | null, 128),
     message: truncate(row[7] as string | null, 250),
-    request_flag: row[8] === 1 || row[8] === '1' || row[8] === true,
+    request_flag: row[8] === 1 || row[8] === '1',
+    segue: false,
     play_order: Number(row[9]) || 0,
     add_time: addTime,
   };

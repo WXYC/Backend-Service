@@ -12,6 +12,7 @@ import {
   cronjob_runs,
   artist_crossreference,
   artist_library_crossreference,
+  compilation_track_artist,
   closeDatabaseConnection,
 } from '@wxyc/database';
 
@@ -32,6 +33,8 @@ type LegacyReleaseRow = {
   artist_call_numbers: number | null;
   genre_ref_name: string | null;
   format_ref_name: string | null;
+  date_lost: number | null;
+  date_found: number | null;
 };
 
 const VARIOUS_ARTISTS_NAME = 'Various Artists';
@@ -255,9 +258,10 @@ const updateLastRun = async (dbClient: DbClient, jobName: string, lastRun: Date)
     });
 };
 
-const fetchLegacyReleases = async (lastRunMs: number | null) => {
+const buildReleaseQuery = (lastRunMs: number | null, includeDateLostFound: boolean) => {
   const lastRunFilter = lastRunMs == null ? '' : `WHERE lr.TIME_LAST_MODIFIED > ${lastRunMs}`;
-  const sqlQuery = `
+  const dateLostFoundColumns = includeDateLostFound ? `,\n      lr.DATE_LOST,\n      lr.DATE_FOUND` : '';
+  return `
     SELECT
       lr.ID,
       REPLACE(REPLACE(IFNULL(lr.TITLE, ''), '\\t', ' '), '\\n', ' '),
@@ -271,7 +275,7 @@ const fetchLegacyReleases = async (lastRunMs: number | null) => {
       lc.CALL_LETTERS AS artist_call_letters,
       lc.CALL_NUMBERS AS artist_call_numbers,
       g.REFERENCE_NAME,
-      f.REFERENCE_NAME
+      f.REFERENCE_NAME${dateLostFoundColumns}
     FROM LIBRARY_RELEASE lr
     JOIN LIBRARY_CODE lc ON lr.LIBRARY_CODE_ID = lc.ID
     JOIN GENRE g ON lc.GENRE_ID = g.ID
@@ -279,10 +283,10 @@ const fetchLegacyReleases = async (lastRunMs: number | null) => {
     ${lastRunFilter}
     ORDER BY lr.TIME_LAST_MODIFIED ASC;
   `;
+};
 
-  const raw = await legacyDB.send(sqlQuery);
+const parseReleaseRows = (raw: string, columnCount: number): LegacyReleaseRow[] => {
   const rows = raw.trim().length === 0 ? [] : raw.trim().split('\n');
-  const columnCount = 13;
   const parsed: LegacyReleaseRow[] = [];
 
   for (const line of rows) {
@@ -306,10 +310,24 @@ const fetchLegacyReleases = async (lastRunMs: number | null) => {
       artist_call_numbers: toNullableNumber(columns[10]),
       genre_ref_name: toNullableString(columns[11]),
       format_ref_name: toNullableString(columns[12]),
+      date_lost: columnCount >= 15 ? toNullableNumber(columns[13]) : null,
+      date_found: columnCount >= 15 ? toNullableNumber(columns[14]) : null,
     });
   }
 
   return parsed;
+};
+
+const fetchLegacyReleases = async (lastRunMs: number | null) => {
+  // Try with DATE_LOST/DATE_FOUND columns first; fall back if they don't exist
+  try {
+    const raw = await legacyDB.send(buildReleaseQuery(lastRunMs, true));
+    return parseReleaseRows(raw, 15);
+  } catch {
+    console.warn('[library-etl] DATE_LOST/DATE_FOUND columns not available, falling back to 13-column query.');
+    const raw = await legacyDB.send(buildReleaseQuery(lastRunMs, false));
+    return parseReleaseRows(raw, 13);
+  }
 };
 
 const ensureArtist = async (
@@ -601,6 +619,94 @@ const importArtistCrossRefs = async (
   return { imported, skipped };
 };
 
+type LegacyCompilationTrackRow = {
+  libraryReleaseId: number;
+  artistName: string;
+  trackTitle: string | null;
+  trackPosition: string | null;
+};
+
+/**
+ * Parse tab-delimited output from COMPILATION_TRACK_ARTIST query.
+ */
+const parseLegacyCompilationTrackRows = (raw: string): LegacyCompilationTrackRow[] => {
+  if (raw.trim().length === 0) return [];
+  const results: LegacyCompilationTrackRow[] = [];
+  for (const line of raw.trim().split('\n')) {
+    const columns = parseTabRow(line, 4);
+    if (!columns) {
+      console.warn('[library-etl] Skipping malformed compilation track row:', line);
+      continue;
+    }
+    const artistName = columns[1].trim();
+    if (artistName.length === 0) continue;
+    results.push({
+      libraryReleaseId: Number(columns[0]),
+      artistName,
+      trackTitle: toNullableString(columns[2]),
+      trackPosition: toNullableString(columns[3]),
+    });
+  }
+  return results;
+};
+
+const fetchLegacyCompilationTracks = async (): Promise<LegacyCompilationTrackRow[]> => {
+  try {
+    const raw = await legacyDB.send(`
+      SELECT
+        LIBRARY_RELEASE_ID,
+        REPLACE(REPLACE(ARTIST_NAME, '\\t', ' '), '\\n', ' '),
+        REPLACE(REPLACE(IFNULL(TRACK_TITLE, ''), '\\t', ' '), '\\n', ' '),
+        REPLACE(REPLACE(IFNULL(TRACK_POSITION, ''), '\\t', ' '), '\\n', ' ')
+      FROM COMPILATION_TRACK_ARTIST;
+    `);
+    return parseLegacyCompilationTrackRows(raw);
+  } catch {
+    console.warn('[library-etl] COMPILATION_TRACK_ARTIST table not available, skipping.');
+    return [];
+  }
+};
+
+const importCompilationTracks = async (
+  tx: DbTransaction,
+  rows: LegacyCompilationTrackRow[]
+): Promise<{ imported: number; skipped: number }> => {
+  // Build map of legacy_release_id -> library.id
+  const releaseRows = await tx
+    .select({ id: library.id, legacyReleaseId: library.legacy_release_id })
+    .from(library)
+    .where(sql`${library.legacy_release_id} IS NOT NULL`);
+  const releaseMap = new Map<number, number>();
+  for (const row of releaseRows) {
+    if (row.legacyReleaseId != null) {
+      releaseMap.set(row.legacyReleaseId, row.id);
+    }
+  }
+
+  let imported = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    const libraryId = releaseMap.get(row.libraryReleaseId);
+    if (!libraryId) {
+      skipped++;
+      continue;
+    }
+
+    await tx
+      .insert(compilation_track_artist)
+      .values({
+        library_id: libraryId,
+        artist_name: row.artistName,
+        track_title: row.trackTitle,
+        track_position: row.trackPosition,
+      })
+      .onConflictDoNothing();
+    imported++;
+  }
+
+  return { imported, skipped };
+};
+
 /**
  * Import release cross-references (artist→album links) into the artist_library_crossreference table.
  * Uses ON CONFLICT DO NOTHING for idempotent upserts.
@@ -649,16 +755,28 @@ const importReleaseCrossRefs = async (
   return { imported, skipped };
 };
 
-const albumExists = async (
+type ExistingRelease = {
+  id: number;
+  legacyReleaseId: number | null;
+  dateLost: Date | null;
+  dateFound: Date | null;
+};
+
+const findExistingRelease = async (
   dbClient: DbClient,
   artistId: number,
   genreId: number,
   albumTitle: string,
   codeNumber: number | null,
   codeVolumeLetters: string | null
-) => {
+): Promise<ExistingRelease | null> => {
   const response = await dbClient
-    .select({ id: library.id })
+    .select({
+      id: library.id,
+      legacyReleaseId: library.legacy_release_id,
+      dateLost: library.date_lost,
+      dateFound: library.date_found,
+    })
     .from(library)
     .where(
       and(
@@ -671,7 +789,7 @@ const albumExists = async (
     )
     .limit(1);
 
-  return response.length > 0;
+  return response.length > 0 ? response[0] : null;
 };
 
 const run = async () => {
@@ -774,7 +892,7 @@ const run = async () => {
           release.release_call_letters != null && release.release_call_letters.trim().length > 0
             ? release.release_call_letters.trim()
             : null;
-        const alreadyExists = await albumExists(
+        const existing = await findExistingRelease(
           tx,
           artistId,
           genreId,
@@ -782,7 +900,23 @@ const run = async () => {
           release.release_call_numbers,
           codeVolumeLetters
         );
-        if (alreadyExists) {
+        if (existing) {
+          // Backfill legacy_release_id and update date_lost/date_found if changed
+          const updates: Record<string, unknown> = {};
+          if (existing.legacyReleaseId == null) {
+            updates.legacy_release_id = release.release_id;
+          }
+          const newDateLost = toDateOrUndefined(release.date_lost) ?? null;
+          const newDateFound = toDateOrUndefined(release.date_found) ?? null;
+          if (existing.dateLost?.getTime() !== newDateLost?.getTime()) {
+            updates.date_lost = newDateLost;
+          }
+          if (existing.dateFound?.getTime() !== newDateFound?.getTime()) {
+            updates.date_found = newDateFound;
+          }
+          if (Object.keys(updates).length > 0) {
+            await tx.update(library).set(updates).where(eq(library.id, existing.id));
+          }
           skippedCount += 1;
           continue;
         }
@@ -796,8 +930,11 @@ const run = async () => {
           code_number: release.release_call_numbers ?? 0,
           code_volume_letters: codeVolumeLetters,
           disc_quantity: formatParsed.discQuantity,
+          legacy_release_id: release.release_id,
           add_date: toDateOrUndefined(release.release_time_created),
           last_modified: toDateOrUndefined(release.release_last_modified),
+          date_lost: toDateOrUndefined(release.date_lost),
+          date_found: toDateOrUndefined(release.date_found),
         });
 
         insertedCount += 1;
@@ -806,9 +943,9 @@ const run = async () => {
       // --- Cross-reference imports ---
       // Detect if this is the first run by checking if both crossref tables are empty.
       // If so, do a full backfill regardless of last_run timestamp.
-      const artistCrossrefCount = await tx.select({ count: sql<number>`count(*)` }).from(artist_crossreference);
+      const artistCrossrefCount = await tx.select({ count: sql<number>`count(*)::int` }).from(artist_crossreference);
       const releaseCrossrefCount = await tx
-        .select({ count: sql<number>`count(*)` })
+        .select({ count: sql<number>`count(*)::int` })
         .from(artist_library_crossreference);
       const isFirstCrossrefRun = artistCrossrefCount[0].count === 0 && releaseCrossrefCount[0].count === 0;
 
@@ -844,6 +981,18 @@ const run = async () => {
         );
       }
 
+      // Import compilation track artists (V/A releases)
+      const ctaCount = await tx.select({ count: sql<number>`count(*)::int` }).from(compilation_track_artist);
+      if (ctaCount[0].count === 0) {
+        const legacyCTA = await fetchLegacyCompilationTracks();
+        if (legacyCTA.length > 0) {
+          const ctaResult = await importCompilationTracks(tx, legacyCTA);
+          console.log(
+            `[library-etl] Compilation track artists: imported ${ctaResult.imported}, skipped ${ctaResult.skipped}.`
+          );
+        }
+      }
+
       await updateLastRun(tx, JOB_NAME, runStartedAt);
     });
 
@@ -868,6 +1017,7 @@ export {
   toDateOnlyString,
   parseLegacyGenreRows,
   parseLegacyFormatRows,
+  parseLegacyCompilationTrackRows,
   buildArtistCacheKey,
   buildAlbumCacheKey,
 };
