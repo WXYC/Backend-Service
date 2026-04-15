@@ -153,9 +153,9 @@ const runBulkLoad = async (dumpPath: string) => {
 
     for (const tuple of parsed.tuples) {
       const addTime = resolveEntryTimestamp(
-        Number(tuple[10]) || 0,   // START_TIME
-        Number(tuple[17]) || 0,   // TIME_CREATED
-        Number(tuple[16]) || 0,   // TIME_LAST_MODIFIED
+        Number(tuple[10]) || 0, // START_TIME
+        Number(tuple[17]) || 0, // TIME_CREATED
+        Number(tuple[16]) || 0 // TIME_LAST_MODIFIED
       );
       if (!addTime) continue;
       const entryId = Number(tuple[0]);
