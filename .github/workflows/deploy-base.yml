@@ -479,7 +479,7 @@ jobs:
             echo "CRONTAB:"
             crontab -l
 
-            rm crontab.txt
+            rm -f crontab.txt
 
       - name: Confirm server is up
         if: steps.deploy_vars.outputs.target_type == 'app'
