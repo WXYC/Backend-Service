@@ -248,6 +248,16 @@ jobs:
         run: |
           aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_URI }}
 
+      - name: Ensure ECR repository exists
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          TARGET_APP=${{ matrix.target }}
+          aws ecr describe-repositories --repository-names $TARGET_APP --region $AWS_REGION 2>/dev/null || \
+            aws ecr create-repository --repository-name $TARGET_APP --region $AWS_REGION
+
       - name: Check if image exists in ECR
         id: check_image
         env:
