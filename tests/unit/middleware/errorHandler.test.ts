@@ -12,7 +12,7 @@ function mockResponse() {
   return { res, statusMock, jsonMock };
 }
 
-const mockReq = {} as Request;
+const mockReq = { method: 'GET', url: '/flowsheet/latest' } as Request;
 const mockNext = jest.fn() as NextFunction;
 
 describe('errorHandler middleware', () => {
@@ -52,7 +52,7 @@ describe('errorHandler middleware', () => {
 
     errorHandler(error, mockReq, res, mockNext);
 
-    expect(consoleSpy).toHaveBeenCalledWith('Unhandled error:', error);
+    expect(consoleSpy).toHaveBeenCalledWith('[GET /flowsheet/latest] Unhandled error:', error);
     consoleSpy.mockRestore();
   });
 });
