@@ -424,8 +424,18 @@ describe('library-etl job helpers', () => {
       const raw = '200\tAutechre\t\t\n200\tStereolab\tMetronomic Underground\tA1';
       const result = parseLegacyCompilationTrackRows(raw);
       expect(result).toHaveLength(2);
-      expect(result[0]).toEqual({ libraryReleaseId: 200, artistName: 'Autechre', trackTitle: null, trackPosition: null });
-      expect(result[1]).toEqual({ libraryReleaseId: 200, artistName: 'Stereolab', trackTitle: 'Metronomic Underground', trackPosition: 'A1' });
+      expect(result[0]).toEqual({
+        libraryReleaseId: 200,
+        artistName: 'Autechre',
+        trackTitle: null,
+        trackPosition: null,
+      });
+      expect(result[1]).toEqual({
+        libraryReleaseId: 200,
+        artistName: 'Stereolab',
+        trackTitle: 'Metronomic Underground',
+        trackPosition: 'A1',
+      });
     });
 
     it('skips rows with empty artist name', () => {
