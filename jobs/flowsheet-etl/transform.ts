@@ -131,7 +131,7 @@ export const epochMsToDate = (epochMs: number | null): Date | null => {
 export const resolveEntryTimestamp = (
   startTime: number | null,
   timeCreated: number | null,
-  timeLastModified: number | null,
+  timeLastModified: number | null
 ): Date | null => {
   return epochMsToDate(startTime) ?? epochMsToDate(timeCreated) ?? epochMsToDate(timeLastModified);
 };
