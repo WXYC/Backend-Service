@@ -258,6 +258,8 @@ export const library = wxyc_schema.table(
     legacy_release_id: integer('legacy_release_id'),
     add_date: timestamp('add_date', { withTimezone: true }).defaultNow().notNull(),
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+    date_lost: timestamp('date_lost', { withTimezone: true }),
+    date_found: timestamp('date_found', { withTimezone: true }),
   },
   (table) => {
     return {
@@ -268,6 +270,26 @@ export const library = wxyc_schema.table(
       legacyReleaseIdIdx: uniqueIndex('library_legacy_release_id_idx').on(table.legacy_release_id),
     };
   }
+);
+
+export type NewCompilationTrackArtist = InferInsertModel<typeof compilation_track_artist>;
+export type CompilationTrackArtist = InferSelectModel<typeof compilation_track_artist>;
+export const compilation_track_artist = wxyc_schema.table(
+  'compilation_track_artist',
+  {
+    id: serial('id').primaryKey(),
+    library_id: integer('library_id')
+      .notNull()
+      .references(() => library.id, { onDelete: 'cascade' }),
+    artist_name: varchar('artist_name', { length: 255 }).notNull(),
+    track_title: varchar('track_title', { length: 255 }),
+    track_position: varchar('track_position', { length: 20 }),
+  },
+  (table) => [
+    index('cta_library_id_idx').on(table.library_id),
+    index('cta_artist_name_idx').on(table.artist_name),
+    uniqueIndex('cta_unique_idx').on(table.library_id, table.artist_name, table.track_title),
+  ]
 );
 
 export type NewRotationRelease = InferInsertModel<typeof rotation>;

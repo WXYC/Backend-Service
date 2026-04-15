@@ -305,7 +305,72 @@ services:
       retries: 10
       start_period: 30s
 
+  # ETL E2E Test Profile Services
+  # MySQL source database for testing ETL jobs against real tubafrenzy schema
+  etl-mysql:
+    image: mysql:8.0
+    profiles: [etl]
+    environment:
+      MYSQL_ROOT_PASSWORD: etltest
+      MYSQL_DATABASE: wxycmusic
+      MYSQL_USER: etluser
+      MYSQL_PASSWORD: etltest
+    ports:
+      - '${ETL_MYSQL_PORT:-3307}:3306'
+    volumes:
+      - ./etl-seed.sql:/docker-entrypoint-initdb.d/01-seed.sql
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-u', 'etluser', '-petltest']
+      interval: 3s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  etl-pg:
+    image: postgres:18.0-alpine
+    profiles: [etl]
+    environment:
+      POSTGRES_PASSWORD: etltest
+      POSTGRES_USER: etluser
+      PGUSER: etluser
+      POSTGRES_DB: etldb
+    ports:
+      - '${ETL_PG_PORT:-5435}:5432'
+    volumes:
+      - etl-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U etluser -d etldb || pg_isready']
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  etl-db-init:
+    image: wxyc-db-init-image
+    profiles: [etl]
+    build:
+      context: ..
+      dockerfile: dev_env/Dockerfile.init
+    container_name: wxyc-etl-db-init
+    depends_on:
+      etl-pg:
+        condition: service_healthy
+    environment:
+      - DB_HOST=etl-pg
+      - DB_PORT=5432
+      - DB_USERNAME=etluser
+      - DB_PASSWORD=etltest
+      - DB_NAME=etldb
+    restart: 'no'
+    volumes:
+      - ../drizzle.config.ts:/init/drizzle.config.ts
+      - ../shared/database/src/schema.ts:/init/database/schema.ts
+      - ../shared/database/src/migrations:/init/database/migrations
+      - ./install_extensions.sql:/init/install_extensions.sql
+      - ./etl-seed-pg.sql:/init/seed_db.sql
+
 volumes:
   pg-data:
   ci-pg-data:
   e2e-pg-data:
+  etl-pg-data:

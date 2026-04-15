@@ -1,5 +1,8 @@
 import {
   mapEntryType,
+  mapProdEntryType,
+  epochMsToDate,
+  parseShowEntryDJName,
   parseMySQLDatetime,
   truncate,
   transformShow,
@@ -23,6 +26,73 @@ describe('flowsheet-etl transform', () => {
 
     it.each([8, 9, 10, 99, -1])('maps unknown code %d to "message"', (code) => {
       expect(mapEntryType(code)).toBe('message');
+    });
+  });
+
+  describe('mapProdEntryType', () => {
+    it.each([
+      [0, 'track'],
+      [1, 'track'],
+      [2, 'track'],
+      [3, 'track'],
+      [4, 'track'],
+      [5, 'track'],
+      [6, 'track'],
+      [7, 'talkset'],
+      [8, 'breakpoint'],
+      [9, 'show_start'],
+      [10, 'show_end'],
+    ] as const)('maps FLOWSHEET_ENTRY_TYPE_CODE_ID %d to "%s"', (code, expected) => {
+      expect(mapProdEntryType(code)).toBe(expected);
+    });
+
+    it.each([11, 99, -1])('maps unknown code %d to "message"', (code) => {
+      expect(mapProdEntryType(code)).toBe('message');
+    });
+  });
+
+  describe('epochMsToDate', () => {
+    it('converts valid epoch ms to a Date', () => {
+      // 1775322000000 = 2026-04-04T17:00:00.000Z
+      const result = epochMsToDate(1775322000000);
+      expect(result).toBeInstanceOf(Date);
+      expect(result?.toISOString()).toBe('2026-04-04T17:00:00.000Z');
+    });
+
+    it('returns null for 0', () => {
+      expect(epochMsToDate(0)).toBeNull();
+    });
+
+    it('returns null for null', () => {
+      expect(epochMsToDate(null)).toBeNull();
+    });
+
+    it('returns null for NaN', () => {
+      expect(epochMsToDate(NaN)).toBeNull();
+    });
+  });
+
+  describe('parseShowEntryDJName', () => {
+    it('extracts DJ name from START OF SHOW message', () => {
+      expect(parseShowEntryDJName('START OF SHOW: DJ Bluejay SIGNED ON at 12:03 PM (4/4/26)')).toBe('DJ Bluejay');
+    });
+
+    it('extracts DJ name from END OF SHOW message', () => {
+      expect(parseShowEntryDJName('END OF SHOW: dj wilde SIGNED OFF at 12:03 PM (4/4/26)')).toBe('dj wilde');
+    });
+
+    it('handles anonymous DJ (just "DJ")', () => {
+      expect(parseShowEntryDJName('END OF SHOW: DJ SIGNED OFF at 11:54 PM (4/3/26)')).toBe('DJ');
+    });
+
+    it('handles multi-word DJ names', () => {
+      expect(parseShowEntryDJName('START OF SHOW: Xx_CoolSocc3r101_xX SIGNED ON at 9:02 PM (4/1/26)')).toBe('Xx_CoolSocc3r101_xX');
+    });
+
+    it('returns null for non-show entries', () => {
+      expect(parseShowEntryDJName('TALKSET')).toBeNull();
+      expect(parseShowEntryDJName('--- 1:00 PM BREAKPOINT ---')).toBeNull();
+      expect(parseShowEntryDJName('Autechre')).toBeNull();
     });
   });
 

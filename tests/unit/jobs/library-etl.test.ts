@@ -59,6 +59,7 @@ jest.mock('@wxyc/database', () => {
     genre_artist_crossreference: {},
     artist_crossreference: {},
     artist_library_crossreference: {},
+    compilation_track_artist: {},
     closeDatabaseConnection: jest.fn().mockResolvedValue(undefined),
   };
 });
@@ -83,6 +84,7 @@ import {
   toDateOnlyString,
   parseLegacyGenreRows,
   parseLegacyFormatRows,
+  parseLegacyCompilationTrackRows,
   buildArtistCacheKey,
   buildAlbumCacheKey,
 } from '../../../jobs/library-etl/job';
@@ -404,6 +406,43 @@ describe('library-etl job helpers', () => {
       const a = buildAlbumCacheKey(1, 1, 'Album', 1);
       const b = buildAlbumCacheKey(1, 1, 'Album', 2);
       expect(a).not.toBe(b);
+    });
+  });
+
+  describe('parseLegacyCompilationTrackRows', () => {
+    it('parses 4-column tab-delimited rows', () => {
+      const raw = '100\tKoo Nimo\tAsonkoa\tA1\n100\tObo Addy\tWawshishijay\tA2';
+      const result = parseLegacyCompilationTrackRows(raw);
+      expect(result).toEqual([
+        { libraryReleaseId: 100, artistName: 'Koo Nimo', trackTitle: 'Asonkoa', trackPosition: 'A1' },
+        { libraryReleaseId: 100, artistName: 'Obo Addy', trackTitle: 'Wawshishijay', trackPosition: 'A2' },
+      ]);
+    });
+
+    it('handles empty track title and position (multi-row)', () => {
+      // When empty columns are at end of a non-final line, they're preserved by split('\n')
+      const raw = '200\tAutechre\t\t\n200\tStereolab\tMetronomic Underground\tA1';
+      const result = parseLegacyCompilationTrackRows(raw);
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual({ libraryReleaseId: 200, artistName: 'Autechre', trackTitle: null, trackPosition: null });
+      expect(result[1]).toEqual({ libraryReleaseId: 200, artistName: 'Stereolab', trackTitle: 'Metronomic Underground', trackPosition: 'A1' });
+    });
+
+    it('skips rows with empty artist name', () => {
+      const raw = '100\t\tTrack\tA1\n100\tArtist\tTrack\tA2';
+      const result = parseLegacyCompilationTrackRows(raw);
+      expect(result).toHaveLength(1);
+      expect(result[0].artistName).toBe('Artist');
+    });
+
+    it('skips malformed rows', () => {
+      const raw = '100\tArtist\tTrack\tA1\nmalformed\n200\tArtist2\tTrack2\tB1';
+      const result = parseLegacyCompilationTrackRows(raw);
+      expect(result).toHaveLength(2);
+    });
+
+    it('returns empty array for empty input', () => {
+      expect(parseLegacyCompilationTrackRows('')).toEqual([]);
     });
   });
 });
