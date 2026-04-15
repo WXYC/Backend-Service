@@ -12,10 +12,13 @@ describe('Auth service rate limiting', () => {
     expect(authAppSource).toMatch(/rateLimit\s*\(/);
   });
 
-  it('applies rate limiting to the auth handler in production', () => {
-    // The rate limiter is applied conditionally: skipped in test env, active otherwise.
-    // Verify the production branch wires authRateLimit before toNodeHandler(auth).
-    expect(authAppSource).toMatch(/authRateLimit,\s*toNodeHandler\s*\(\s*auth\s*\)/);
+  it('applies rate limiting to sensitive auth endpoints in production', () => {
+    // The rate limiter targets specific mutation paths, not all /auth routes.
+    expect(authAppSource).toMatch(/authMutationRateLimit/);
+    expect(authAppSource).toMatch(/\/auth\/sign-in/);
+    expect(authAppSource).toMatch(/\/auth\/sign-up/);
+    expect(authAppSource).toMatch(/\/auth\/email-otp\/send-verification-otp/);
+    expect(authAppSource).toMatch(/\/auth\/forget-password/);
   });
 
   it('disables rate limiting in test environments', () => {
