@@ -14,7 +14,7 @@
  */
 
 import { readFileSync } from 'fs';
-import { eq, isNotNull, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { db, shows, flowsheet, cronjob_runs, closeDatabaseConnection } from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
 import { mapProdEntryType, epochMsToDate, resolveEntryTimestamp, parseShowEntryDJName, truncate } from './transform.js';
@@ -227,7 +227,13 @@ const runIncremental = async (): Promise<SyncResult> => {
         end_time: endTime,
         show_name: truncate(show.showName, 128),
       })
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: shows.legacy_show_id,
+        set: {
+          end_time: sql`excluded.end_time`,
+          show_name: sql`excluded.show_name`,
+        },
+      });
     showsImported++;
   }
 
@@ -240,15 +246,21 @@ const runIncremental = async (): Promise<SyncResult> => {
     }
   }
 
-  // Collect existing legacy IDs to distinguish inserts from updates
-  const existingIds = new Set(
-    (
-      await db.select({ lid: flowsheet.legacy_entry_id }).from(flowsheet).where(isNotNull(flowsheet.legacy_entry_id))
-    ).map((r) => r.lid)
-  );
-
   // Sync entries (upsert: insert new, update display fields on conflict)
   const legacyEntries = await fetchLegacyEntries(lastRunMs);
+
+  // Collect existing legacy IDs (scoped to this batch) to distinguish inserts from updates
+  const batchIds = legacyEntries.map((e) => e.id).filter((id) => Number.isFinite(id));
+  const existingIds = new Set(
+    batchIds.length > 0
+      ? (
+          await db
+            .select({ lid: flowsheet.legacy_entry_id })
+            .from(flowsheet)
+            .where(inArray(flowsheet.legacy_entry_id, batchIds))
+        ).map((r) => r.lid)
+      : []
+  );
   let entriesImported = 0;
   let entriesUpdated = 0;
   for (const entry of legacyEntries) {
@@ -308,10 +320,13 @@ const notifyBackendService = async () => {
   const url = process.env.BACKEND_SERVICE_URL ?? 'http://localhost:8080';
   const key = process.env.ETL_NOTIFY_KEY ?? '';
   try {
-    await fetch(`${url}/internal/flowsheet-sync-notify`, {
+    const response = await fetch(`${url}/internal/flowsheet-sync-notify`, {
       method: 'POST',
       headers: { 'X-Internal-Key': key },
     });
+    if (!response.ok) {
+      console.warn(`[flowsheet-etl] Backend notify returned ${response.status}`);
+    }
   } catch (e) {
     console.warn('[flowsheet-etl] Failed to notify backend:', e);
   }
