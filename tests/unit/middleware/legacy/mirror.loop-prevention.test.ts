@@ -106,7 +106,7 @@ function createMockReq() {
 async function runMiddleware(
   middleware: (req: any, res: any, next: any) => Promise<void> | void,
   entry: Record<string, unknown>,
-  statusCode = 201,
+  statusCode = 201
 ) {
   const req = createMockReq();
   const res = createMockRes(statusCode, entry);
