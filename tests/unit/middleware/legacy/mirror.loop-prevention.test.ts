@@ -72,9 +72,10 @@ import { EventEmitter } from 'events';
 // Helper: create mock Express response that simulates the middleware lifecycle
 function createMockRes(statusCode: number, body: Record<string, unknown>) {
   const emitter = new EventEmitter();
+  const locals: Record<string, unknown> = {};
   const res = {
     statusCode,
-    locals: {} as Record<string, unknown>,
+    locals,
     getHeader: jest.fn().mockReturnValue('application/json'),
     send: jest.fn(),
     once: emitter.once.bind(emitter),
@@ -85,7 +86,7 @@ function createMockRes(statusCode: number, body: Record<string, unknown>) {
 
   // After send is called, emit 'finish' to trigger mirror logic
   res.send.mockImplementation((data: unknown) => {
-    (res.locals as Record<string, unknown>).mirrorData = typeof data === 'string' ? JSON.parse(data) : data;
+    locals.mirrorData = typeof data === 'string' ? JSON.parse(data) : data;
     // Simulate Express: emit finish after send
     setTimeout(() => emitter.emit('finish'), 0);
     return res;
@@ -103,7 +104,7 @@ function createMockReq() {
 
 // Helper: call middleware and wait for the async finish handler
 async function runMiddleware(
-  middleware: (req: any, res: any, next: any) => void,
+  middleware: (req: any, res: any, next: any) => Promise<void> | void,
   entry: Record<string, unknown>,
   statusCode = 201,
 ) {
@@ -111,7 +112,8 @@ async function runMiddleware(
   const res = createMockRes(statusCode, entry);
   const next = jest.fn();
 
-  await middleware(req, res, next);
+  // Middleware may or may not return a promise
+  void middleware(req, res, next);
   expect(next).toHaveBeenCalled();
 
   // Trigger send (which populates mirrorData and emits finish)
@@ -135,7 +137,7 @@ describe('mirror loop prevention', () => {
     show_id: 100,
     album_id: null,
     rotation_id: null,
-    legacy_entry_id: null,
+    legacy_entry_id: null as number | null,
     entry_type: 'track',
     track_title: 'VI Scose Poise',
     album_title: 'Confield',
@@ -144,87 +146,92 @@ describe('mirror loop prevention', () => {
     play_order: 1,
     request_flag: false,
     segue: false,
-    message: null,
+    message: null as string | null,
     add_time: new Date('2024-02-01T12:00:00Z').toISOString(),
   };
 
   describe('addEntry', () => {
-    it('mirrors normally when legacy_entry_id is null', async () => {
+    it('mirrors normally when legacy_entry_id is null', (done) => {
       mockMirrorCreateEntry.mockResolvedValue(99);
 
-      await runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null });
-
-      expect(mockMapEntryToTubafrenzy).toHaveBeenCalled();
-      expect(mockMirrorCreateEntry).toHaveBeenCalled();
+      void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalled();
+        expect(mockMirrorCreateEntry).toHaveBeenCalled();
+        done();
+      });
     });
 
-    it('skips mirroring when legacy_entry_id is non-null (ETL-imported)', async () => {
-      await runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: 12345 });
-
-      expect(mockMirrorCreateEntry).not.toHaveBeenCalled();
+    it('skips mirroring when legacy_entry_id is non-null (ETL-imported)', (done) => {
+      void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: 12345 }).then(() => {
+        expect(mockMirrorCreateEntry).not.toHaveBeenCalled();
+        done();
+      });
     });
 
-    it('persists tubafrenzy ID to legacy_entry_id after successful POST', async () => {
+    it('persists tubafrenzy ID to legacy_entry_id after successful POST', (done) => {
       mockMirrorCreateEntry.mockResolvedValue(99);
 
-      await runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null });
-
-      expect(mockCacheEntryId).toHaveBeenCalledWith(1, 99);
-      expect(mockDbUpdate).toHaveBeenCalled();
+      void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockCacheEntryId).toHaveBeenCalledWith(1, 99);
+        expect(mockDbUpdate).toHaveBeenCalled();
+        done();
+      });
     });
 
-    it('does not persist legacy_entry_id when POST fails', async () => {
+    it('does not persist legacy_entry_id when POST fails', (done) => {
       mockMirrorCreateEntry.mockResolvedValue(null);
 
-      await runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null });
-
-      expect(mockCacheEntryId).not.toHaveBeenCalled();
-      expect(mockDbUpdate).not.toHaveBeenCalled();
+      void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockCacheEntryId).not.toHaveBeenCalled();
+        expect(mockDbUpdate).not.toHaveBeenCalled();
+        done();
+      });
     });
   });
 
   describe('updateEntry', () => {
-    it('skips mirroring when legacy_entry_id is set but not in cache (ETL-imported)', async () => {
+    it('skips mirroring when legacy_entry_id is set but not in cache (ETL-imported)', (done) => {
       mockGetCachedEntryId.mockReturnValue(undefined);
 
-      await runMiddleware(flowsheetMirror.updateEntry, { ...baseEntry, legacy_entry_id: 12345 });
-
-      expect(mockMirrorUpdateEntry).not.toHaveBeenCalled();
+      void runMiddleware(flowsheetMirror.updateEntry, { ...baseEntry, legacy_entry_id: 12345 }).then(() => {
+        expect(mockMirrorUpdateEntry).not.toHaveBeenCalled();
+        done();
+      });
     });
 
-    it('mirrors when cached ID exists (we created it this lifecycle)', async () => {
+    it('mirrors when cached ID exists (we created it this lifecycle)', (done) => {
       mockGetCachedEntryId.mockReturnValue(99);
 
-      await runMiddleware(flowsheetMirror.updateEntry, { ...baseEntry, legacy_entry_id: null });
-
-      expect(mockMapUpdateToTubafrenzy).toHaveBeenCalled();
-      expect(mockMirrorUpdateEntry).toHaveBeenCalledWith(99, expect.any(Object));
+      void runMiddleware(flowsheetMirror.updateEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockMapUpdateToTubafrenzy).toHaveBeenCalled();
+        expect(mockMirrorUpdateEntry).toHaveBeenCalledWith(99, expect.any(Object));
+        done();
+      });
     });
 
-    it('skips message-only entries', async () => {
+    it('skips message-only entries', (done) => {
       mockGetCachedEntryId.mockReturnValue(99);
 
-      await runMiddleware(flowsheetMirror.updateEntry, {
+      void runMiddleware(flowsheetMirror.updateEntry, {
         ...baseEntry,
         message: 'This is a message',
         legacy_entry_id: null,
+      }).then(() => {
+        expect(mockMirrorUpdateEntry).not.toHaveBeenCalled();
+        done();
       });
-
-      expect(mockMirrorUpdateEntry).not.toHaveBeenCalled();
     });
 
-    it('logs warning when no tubafrenzy ID available at all', async () => {
+    it('logs warning when no tubafrenzy ID available at all', (done) => {
       const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
       mockGetCachedEntryId.mockReturnValue(undefined);
 
-      await runMiddleware(flowsheetMirror.updateEntry, { ...baseEntry, legacy_entry_id: null });
-
-      expect(mockMirrorUpdateEntry).not.toHaveBeenCalled();
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[mirror]'),
-        expect.anything(),
-      );
-      consoleSpy.mockRestore();
+      void runMiddleware(flowsheetMirror.updateEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockMirrorUpdateEntry).not.toHaveBeenCalled();
+        expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('[mirror]'), expect.anything());
+        consoleSpy.mockRestore();
+        done();
+      });
     });
   });
 });
