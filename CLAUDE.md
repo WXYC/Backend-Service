@@ -31,7 +31,7 @@ Express 5 application with these route groups:
 | `/schedule`     | Schedule management                               |
 | `/events`       | SSE for real-time updates                         |
 | `/healthcheck`  | Health check                                      |
-| `/internal`     | Internal endpoints (ETL sync notifications)       |
+| `/internal`     | Internal endpoints (ETL notifications, tubafrenzy webhook) |
 
 Code is organized as controllers (HTTP handling) -> services (business logic) -> database (Drizzle queries).
 
@@ -282,7 +282,7 @@ The flowsheet ETL supports two run modes: one-shot (`npm start`) for cron invoca
 
 - `ETL_POLL_INTERVAL_MS` -- Poll interval in milliseconds (default `30000`)
 - `BACKEND_SERVICE_URL` -- Backend-Service URL for SSE notifications (default `http://localhost:8080`)
-- `ETL_NOTIFY_KEY` -- Shared secret for the internal notification endpoint (required in production)
+- `ETL_NOTIFY_KEY` -- Shared secret for internal endpoints: ETL sync notification and tubafrenzy webhook (required in production)
 
 ## Relationship to Other Repos
 
