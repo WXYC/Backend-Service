@@ -37,7 +37,7 @@ const nextPlayOrder = async (): Promise<number> => {
 export const getLastModifiedAt = (): Date => lastModifiedAt;
 
 /** Update the last modified timestamp (call after any write operation) */
-const updateLastModified = () => {
+export const updateLastModified = () => {
   // Truncate to seconds for HTTP Date header compatibility (avoids millisecond precision issues)
   const now = new Date();
   now.setMilliseconds(0);
