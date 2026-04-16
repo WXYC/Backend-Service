@@ -7,6 +7,7 @@
   "main": "./dist/job.js",
   "scripts": {
     "start": "node dist/job.js",
+    "start:poll": "node dist/job.js --poll",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
     "docker:build": "docker build -t wxyc_flowsheet_etl:ci -f ../../Dockerfile.flowsheet-etl ../../",

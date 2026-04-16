@@ -9,11 +9,12 @@
  *
  * Usage:
  *   node dist/job.js /path/to/dump.sql [--force]   # bulk load
- *   node dist/job.js                                # incremental sync
+ *   node dist/job.js                                # one-shot incremental sync
+ *   node dist/job.js --poll                         # continuous polling loop
  */
 
 import { readFileSync } from 'fs';
-import { eq, sql } from 'drizzle-orm';
+import { eq, isNotNull, sql } from 'drizzle-orm';
 import { db, shows, flowsheet, cronjob_runs, closeDatabaseConnection } from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
 import { mapProdEntryType, epochMsToDate, resolveEntryTimestamp, parseShowEntryDJName, truncate } from './transform.js';
@@ -204,7 +205,9 @@ const runBulkLoad = async (dumpPath: string) => {
 
 // ---- Incremental Sync Mode ----
 
-const runIncremental = async () => {
+type SyncResult = { showsImported: number; entriesImported: number; entriesUpdated: number };
+
+const runIncremental = async (): Promise<SyncResult> => {
   const runStartedAt = new Date();
   const lastRunMs = await getLastRunTimestamp();
 
@@ -237,9 +240,17 @@ const runIncremental = async () => {
     }
   }
 
-  // Sync entries
+  // Collect existing legacy IDs to distinguish inserts from updates
+  const existingIds = new Set(
+    (
+      await db.select({ lid: flowsheet.legacy_entry_id }).from(flowsheet).where(isNotNull(flowsheet.legacy_entry_id))
+    ).map((r) => r.lid)
+  );
+
+  // Sync entries (upsert: insert new, update display fields on conflict)
   const legacyEntries = await fetchLegacyEntries(lastRunMs);
   let entriesImported = 0;
+  let entriesUpdated = 0;
   for (const entry of legacyEntries) {
     const addTime = epochMsToDate(entry.startTime);
     if (!addTime) continue;
@@ -263,21 +274,94 @@ const runIncremental = async () => {
         play_order: entry.playOrder,
         add_time: addTime,
       })
-      .onConflictDoNothing();
-    entriesImported++;
+      .onConflictDoUpdate({
+        target: flowsheet.legacy_entry_id,
+        set: {
+          artist_name: sql`excluded.artist_name`,
+          album_title: sql`excluded.album_title`,
+          track_title: sql`excluded.track_title`,
+          record_label: sql`excluded.record_label`,
+          request_flag: sql`excluded.request_flag`,
+          segue: sql`excluded.segue`,
+          entry_type: sql`excluded.entry_type`,
+        },
+      });
+
+    if (existingIds.has(entry.id)) {
+      entriesUpdated++;
+    } else {
+      entriesImported++;
+    }
   }
 
   await updateLastRun(runStartedAt);
-  console.log(`[flowsheet-etl] Incremental sync: ${showsImported} shows, ${entriesImported} entries.`);
+  const parts = [`${showsImported} shows`, `${entriesImported} new entries`];
+  if (entriesUpdated > 0) parts.push(`${entriesUpdated} updated entries`);
+  console.log(`[flowsheet-etl] Incremental sync: ${parts.join(', ')}.`);
+
+  return { showsImported, entriesImported, entriesUpdated };
+};
+
+// ---- SSE Notification ----
+
+const notifyBackendService = async () => {
+  const url = process.env.BACKEND_SERVICE_URL ?? 'http://localhost:8080';
+  const key = process.env.ETL_NOTIFY_KEY ?? '';
+  try {
+    await fetch(`${url}/internal/flowsheet-sync-notify`, {
+      method: 'POST',
+      headers: { 'X-Internal-Key': key },
+    });
+  } catch (e) {
+    console.warn('[flowsheet-etl] Failed to notify backend:', e);
+  }
+};
+
+// ---- Continuous Polling Mode ----
+
+const runPollingLoop = async () => {
+  const intervalMs = Number(process.env.ETL_POLL_INTERVAL_MS) || 30_000;
+  let running = true;
+  let sleepResolve: (() => void) | null = null;
+
+  const shutdown = () => {
+    running = false;
+    sleepResolve?.();
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+
+  console.log(`[flowsheet-etl] Polling every ${intervalMs}ms. PID ${process.pid}`);
+
+  while (running) {
+    try {
+      const result = await runIncremental();
+      if (result.entriesImported > 0 || result.entriesUpdated > 0) {
+        await notifyBackendService();
+      }
+    } catch (e) {
+      console.error('[flowsheet-etl] Poll error:', e);
+    }
+    if (!running) break;
+    await new Promise<void>((resolve) => {
+      sleepResolve = resolve;
+      setTimeout(resolve, intervalMs);
+    });
+  }
+
+  console.log('[flowsheet-etl] Shutting down.');
 };
 
 // ---- Main ----
 
 const run = async () => {
   try {
-    const dumpPath = process.argv[2];
-    if (dumpPath && !dumpPath.startsWith('--')) {
+    const args = process.argv.slice(2);
+    const dumpPath = args.find((a) => !a.startsWith('--'));
+    if (dumpPath) {
       await runBulkLoad(dumpPath);
+    } else if (args.includes('--poll')) {
+      await runPollingLoop();
     } else {
       await runIncremental();
     }
