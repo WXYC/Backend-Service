@@ -36,12 +36,14 @@ const etlEnv = {
   REMOTE_DB_NAME: 'wxycmusic',
 };
 
-const runETL = (jobPath: string, jobName: string) => {
-  // Clear last_run to force a full import
-  execSync(
-    `psql "postgres://etluser:etltest@localhost:${PG_PORT}/etldb" -c "DELETE FROM ${SCHEMA}.cronjob_runs WHERE job_name = '${jobName}'"`,
-    { stdio: 'pipe' }
-  );
+const runETL = (jobPath: string, jobName: string, { resetLastRun = true } = {}) => {
+  if (resetLastRun) {
+    // Clear last_run to force a full import
+    execSync(
+      `psql "postgres://etluser:etltest@localhost:${PG_PORT}/etldb" -c "DELETE FROM ${SCHEMA}.cronjob_runs WHERE job_name = '${jobName}'"`,
+      { stdio: 'pipe' }
+    );
+  }
   execSync(`npx tsx ${jobPath}`, {
     env: etlEnv,
     cwd: process.cwd(),
@@ -232,5 +234,70 @@ describe('Flowsheet ETL', () => {
     const rows = await pg`SELECT last_run FROM ${pg(SCHEMA)}.cronjob_runs WHERE job_name = 'flowsheet-etl'`;
     expect(rows.length).toBe(1);
     expect(rows[0].last_run).toBeInstanceOf(Date);
+  });
+});
+
+// ---- Flowsheet ETL: Incremental Sync (bidirectional) ----
+
+describe('Flowsheet ETL incremental sync', () => {
+  const MYSQL_CONTAINER = 'dev_env-etl-mysql-1';
+  const MYSQL_CMD = `docker exec -i ${MYSQL_CONTAINER} mysql -uetluser -petltest wxycmusic --batch --raw --silent`;
+
+  const runMySQL = (sql: string) => {
+    execSync(MYSQL_CMD, { encoding: 'utf8', input: sql, stdio: 'pipe' });
+  };
+
+  it('imports a new entry added to tubafrenzy after the initial sync', async () => {
+    const newStartTime = Date.now();
+    runMySQL(`
+      INSERT INTO FLOWSHEET_ENTRY_PROD
+        (ID, ARTIST_NAME, ARTIST_ID, SONG_TITLE, RELEASE_TITLE, RELEASE_FORMAT_ID,
+         LIBRARY_RELEASE_ID, ROTATION_RELEASE_ID, LABEL_NAME, RADIO_HOUR,
+         START_TIME, STOP_TIME, RADIO_SHOW_ID, SEQUENCE_WITHIN_SHOW,
+         NOW_PLAYING_FLAG, FLOWSHEET_ENTRY_TYPE_CODE_ID,
+         TIME_LAST_MODIFIED, TIME_CREATED, REQUEST_FLAG, GLOBAL_ORDER_ID,
+         BMI_COMPOSER, SEGUE_FLAG)
+      VALUES
+        (3001, 'Sessa', 0, 'Pequena Vertigem', 'Pequena Vertigem de Amor', 0,
+         0, 0, 'Mexican Summer', ${Math.floor(newStartTime / 3600000) * 3600000},
+         ${newStartTime}, 0, 1002, 3, 0, 0,
+         ${newStartTime}, ${newStartTime}, 0, 1002003,
+         '', 0);
+    `);
+
+    runETL('jobs/flowsheet-etl/job.ts', 'flowsheet-etl', { resetLastRun: false });
+
+    const rows =
+      await pg`SELECT artist_name, track_title, album_title, record_label, legacy_entry_id FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id = 3001`;
+    expect(rows.length).toBe(1);
+    expect(rows[0].artist_name).toBe('Sessa');
+    expect(rows[0].track_title).toBe('Pequena Vertigem');
+    expect(rows[0].album_title).toBe('Pequena Vertigem de Amor');
+    expect(rows[0].record_label).toBe('Mexican Summer');
+  });
+
+  it('propagates edits from tubafrenzy to Backend-Service on re-sync', async () => {
+    const now = Date.now();
+    runMySQL(`
+      UPDATE FLOWSHEET_ENTRY_PROD
+      SET ARTIST_NAME = 'Sessa (updated)',
+          SONG_TITLE = 'Pequena Vertigem (live)',
+          TIME_LAST_MODIFIED = ${now}
+      WHERE ID = 3001;
+    `);
+
+    runETL('jobs/flowsheet-etl/job.ts', 'flowsheet-etl', { resetLastRun: false });
+
+    const rows = await pg`SELECT artist_name, track_title FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id = 3001`;
+    expect(rows.length).toBe(1);
+    expect(rows[0].artist_name).toBe('Sessa (updated)');
+    expect(rows[0].track_title).toBe('Pequena Vertigem (live)');
+  });
+
+  it('does not duplicate entries on repeated syncs', async () => {
+    runETL('jobs/flowsheet-etl/job.ts', 'flowsheet-etl', { resetLastRun: false });
+
+    const rows = await pg`SELECT COUNT(*)::int AS count FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id = 3001`;
+    expect(rows[0].count).toBe(1);
   });
 });
