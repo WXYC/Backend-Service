@@ -39,18 +39,14 @@ describe('POST /internal/flowsheet-sync-notify', () => {
   });
 
   it('returns 401 with wrong key', async () => {
-    const res = await request(app)
-      .post('/internal/flowsheet-sync-notify')
-      .set('X-Internal-Key', 'wrong-key');
+    const res = await request(app).post('/internal/flowsheet-sync-notify').set('X-Internal-Key', 'wrong-key');
 
     expect(res.status).toBe(401);
     expect(mockBroadcast).not.toHaveBeenCalled();
   });
 
   it('returns 200 with correct key and broadcasts refetch', async () => {
-    const res = await request(app)
-      .post('/internal/flowsheet-sync-notify')
-      .set('X-Internal-Key', 'test-secret-key');
+    const res = await request(app).post('/internal/flowsheet-sync-notify').set('X-Internal-Key', 'test-secret-key');
 
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
