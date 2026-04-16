@@ -1,0 +1,29 @@
+name: EC2 One-Time Setup
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add SSH key and ETL_NOTIFY_KEY
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Add jake's SSH public key
+            mkdir -p ~/.ssh && chmod 700 ~/.ssh
+            PUB="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFNGZslYyDHMMN/gKowI104NI0wtjFvH3ou6qxP0q9vp jake@wxyc-ec2"
+            grep -qF "$PUB" ~/.ssh/authorized_keys 2>/dev/null || echo "$PUB" >> ~/.ssh/authorized_keys
+            chmod 600 ~/.ssh/authorized_keys
+            echo "SSH key added"
+
+            # Add ETL_NOTIFY_KEY to .env if not present
+            grep -q "^ETL_NOTIFY_KEY=" ~/.env 2>/dev/null || echo 'ETL_NOTIFY_KEY=${{ secrets.ETL_NOTIFY_KEY }}' >> ~/.env
+            echo "ETL_NOTIFY_KEY configured"
+
+            # Restart backend container to pick up new env
+            docker restart backend 2>/dev/null && echo "Backend restarted" || echo "No backend container found"
