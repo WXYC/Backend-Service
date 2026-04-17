@@ -225,6 +225,8 @@ const runBulkLoad = async (dumpPath: string) => {
   console.log(`[flowsheet-etl] Imported ${entryCount} entries.`);
   await resetSequences();
   await resolveAlbumIds();
+  await updateLastRun(new Date());
+  console.log('[flowsheet-etl] Recorded last_run for future incremental syncs.');
 };
 
 // ---- Incremental Sync Mode ----
