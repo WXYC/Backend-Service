@@ -36,12 +36,14 @@ const etlEnv = {
   REMOTE_DB_NAME: 'wxycmusic',
 };
 
-const runETL = (jobPath: string, jobName: string) => {
-  // Clear last_run to force a full import
-  execSync(
-    `psql "postgres://etluser:etltest@localhost:${PG_PORT}/etldb" -c "DELETE FROM ${SCHEMA}.cronjob_runs WHERE job_name = '${jobName}'"`,
-    { stdio: 'pipe' }
-  );
+const runETL = (jobPath: string, jobName: string, { resetLastRun = true } = {}) => {
+  if (resetLastRun) {
+    // Clear last_run to force a full import
+    execSync(
+      `psql "postgres://etluser:etltest@localhost:${PG_PORT}/etldb" -c "DELETE FROM ${SCHEMA}.cronjob_runs WHERE job_name = '${jobName}'"`,
+      { stdio: 'pipe' }
+    );
+  }
   execSync(`npx tsx ${jobPath}`, {
     env: etlEnv,
     cwd: process.cwd(),
@@ -121,9 +123,40 @@ describe('Library ETL', () => {
     expect(sharpPins.track_position).toBe('A1');
   });
 
-  it('imports artist cross-references', async () => {
+  it('does not create duplicate artists from case-variant LIBRARY_CODE entries', async () => {
+    const rows = await pg`SELECT id, artist_name FROM ${pg(SCHEMA)}.artists WHERE lower(artist_name) = 'autechre'`;
+    expect(rows.length).toBe(1); // Only one "Autechre", not a duplicate "AUTECHRE"
+  });
+
+  it('imports cross-references from case-variant source entries', async () => {
     const rows = await pg`SELECT COUNT(*)::int AS count FROM ${pg(SCHEMA)}.artist_crossreference`;
-    expect(rows[0].count).toBeGreaterThanOrEqual(1);
+    expect(rows[0].count).toBe(2); // original (Autechre->Chuquimamani) + case-variant (AUTECHRE->Cat Power)
+  });
+
+  it('imports artist cross-references with correct source and target', async () => {
+    const rows = await pg`
+      SELECT a1.artist_name AS source, a2.artist_name AS target, ac.comment
+      FROM ${pg(SCHEMA)}.artist_crossreference ac
+      JOIN ${pg(SCHEMA)}.artists a1 ON ac.source_artist_id = a1.id
+      JOIN ${pg(SCHEMA)}.artists a2 ON ac.target_artist_id = a2.id
+    `;
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    const seeAlso = rows.find((r: any) => r.comment === 'see also');
+    expect(seeAlso).toBeDefined();
+    expect(seeAlso.source).toBe('Autechre');
+    expect(seeAlso.target).toBe('Chuquimamani-Condori');
+  });
+
+  it('imports artist-library cross-references', async () => {
+    const rows = await pg`
+      SELECT a.artist_name, l.album_title, alc.comment
+      FROM ${pg(SCHEMA)}.artist_library_crossreference alc
+      JOIN ${pg(SCHEMA)}.artists a ON alc.artist_id = a.id
+      JOIN ${pg(SCHEMA)}.library l ON alc.library_id = l.id
+    `;
+    expect(rows.length).toBe(1);
+    expect(rows[0].artist_name).toBe('Duke Ellington & John Coltrane');
+    expect(rows[0].comment).toBe('featured artist');
   });
 
   it('imports genre-artist cross-references', async () => {
@@ -228,9 +261,136 @@ describe('Flowsheet ETL', () => {
     expect(rows[0].record_label).toBe('Warp');
   });
 
+  it('captures legacy_release_id from LIBRARY_RELEASE_ID', async () => {
+    const entries =
+      await pg`SELECT legacy_entry_id, legacy_release_id FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id IN (2002, 2004, 2010)`;
+    const byId = (id: number) => entries.find((e: any) => e.legacy_entry_id === id);
+    expect(byId(2002).legacy_release_id).toBe(101); // Confield
+    expect(byId(2004).legacy_release_id).toBeNull(); // talkset (LIBRARY_RELEASE_ID=0)
+    expect(byId(2010).legacy_release_id).toBe(105); // Duke Ellington
+  });
+
+  it('resolves album_id via legacy_release_id join to library', async () => {
+    const entries = await pg`
+      SELECT f.legacy_entry_id, f.album_id, l.album_title
+      FROM ${pg(SCHEMA)}.flowsheet f
+      LEFT JOIN ${pg(SCHEMA)}.library l ON f.album_id = l.id
+      WHERE f.legacy_entry_id IN (2002, 2003, 2004)
+    `;
+    const byId = (id: number) => entries.find((e: any) => e.legacy_entry_id === id);
+    expect(byId(2002).album_title).toBe('Confield');
+    expect(byId(2003).album_title).toBe('Moon Pix');
+    expect(byId(2004).album_id).toBeNull(); // talkset has no album
+  });
+
+  it('captures legacy DJ name and ID from shows', async () => {
+    const rows = await pg`SELECT legacy_show_id, legacy_dj_name, legacy_dj_id FROM ${pg(SCHEMA)}.shows`;
+    const show1001 = rows.find((r: any) => r.legacy_show_id === 1001);
+    const show1002 = rows.find((r: any) => r.legacy_show_id === 1002);
+    expect(show1001.legacy_dj_name).toBe('DJ Bluejay');
+    expect(show1001.legacy_dj_id).toBe(42);
+    expect(show1002.legacy_dj_name).toBe('dj wilde');
+    expect(show1002.legacy_dj_id).toBeNull();
+  });
+
   it('records the last run timestamp', async () => {
     const rows = await pg`SELECT last_run FROM ${pg(SCHEMA)}.cronjob_runs WHERE job_name = 'flowsheet-etl'`;
     expect(rows.length).toBe(1);
     expect(rows[0].last_run).toBeInstanceOf(Date);
+  });
+});
+
+// ---- Flowsheet ETL: Incremental Sync (bidirectional) ----
+
+describe('Flowsheet ETL incremental sync', () => {
+  const MYSQL_CONTAINER = 'dev_env-etl-mysql-1';
+  const MYSQL_CMD = `docker exec -i ${MYSQL_CONTAINER} mysql -uetluser -petltest wxycmusic --batch --raw --silent`;
+
+  const runMySQL = (sql: string) => {
+    execSync(MYSQL_CMD, { encoding: 'utf8', input: sql, stdio: 'pipe' });
+  };
+
+  it('imports a new entry added to tubafrenzy after the initial sync', async () => {
+    const newStartTime = Date.now();
+    runMySQL(`
+      INSERT INTO FLOWSHEET_ENTRY_PROD
+        (ID, ARTIST_NAME, ARTIST_ID, SONG_TITLE, RELEASE_TITLE, RELEASE_FORMAT_ID,
+         LIBRARY_RELEASE_ID, ROTATION_RELEASE_ID, LABEL_NAME, RADIO_HOUR,
+         START_TIME, STOP_TIME, RADIO_SHOW_ID, SEQUENCE_WITHIN_SHOW,
+         NOW_PLAYING_FLAG, FLOWSHEET_ENTRY_TYPE_CODE_ID,
+         TIME_LAST_MODIFIED, TIME_CREATED, REQUEST_FLAG, GLOBAL_ORDER_ID,
+         BMI_COMPOSER, SEGUE_FLAG)
+      VALUES
+        (3001, 'Sessa', 0, 'Pequena Vertigem', 'Pequena Vertigem de Amor', 0,
+         0, 0, 'Mexican Summer', ${Math.floor(newStartTime / 3600000) * 3600000},
+         ${newStartTime}, 0, 1002, 3, 0, 0,
+         ${newStartTime}, ${newStartTime}, 0, 1002003,
+         '', 0);
+    `);
+
+    runETL('jobs/flowsheet-etl/job.ts', 'flowsheet-etl', { resetLastRun: false });
+
+    const rows =
+      await pg`SELECT artist_name, track_title, album_title, record_label, legacy_entry_id FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id = 3001`;
+    expect(rows.length).toBe(1);
+    expect(rows[0].artist_name).toBe('Sessa');
+    expect(rows[0].track_title).toBe('Pequena Vertigem');
+    expect(rows[0].album_title).toBe('Pequena Vertigem de Amor');
+    expect(rows[0].record_label).toBe('Mexican Summer');
+  });
+
+  it('propagates edits from tubafrenzy to Backend-Service on re-sync', async () => {
+    const now = Date.now();
+    runMySQL(`
+      UPDATE FLOWSHEET_ENTRY_PROD
+      SET ARTIST_NAME = 'Sessa (updated)',
+          SONG_TITLE = 'Pequena Vertigem (live)',
+          TIME_LAST_MODIFIED = ${now}
+      WHERE ID = 3001;
+    `);
+
+    runETL('jobs/flowsheet-etl/job.ts', 'flowsheet-etl', { resetLastRun: false });
+
+    const rows = await pg`SELECT artist_name, track_title FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id = 3001`;
+    expect(rows.length).toBe(1);
+    expect(rows[0].artist_name).toBe('Sessa (updated)');
+    expect(rows[0].track_title).toBe('Pequena Vertigem (live)');
+  });
+
+  it('does not duplicate entries on repeated syncs', async () => {
+    runETL('jobs/flowsheet-etl/job.ts', 'flowsheet-etl', { resetLastRun: false });
+
+    const rows = await pg`SELECT COUNT(*)::int AS count FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id = 3001`;
+    expect(rows[0].count).toBe(1);
+  });
+
+  it('resolves album_id for newly synced entries with valid LIBRARY_RELEASE_ID', async () => {
+    const now = Date.now();
+    runMySQL(`
+      INSERT INTO FLOWSHEET_ENTRY_PROD
+        (ID, ARTIST_NAME, ARTIST_ID, SONG_TITLE, RELEASE_TITLE, RELEASE_FORMAT_ID,
+         LIBRARY_RELEASE_ID, ROTATION_RELEASE_ID, LABEL_NAME, RADIO_HOUR,
+         START_TIME, STOP_TIME, RADIO_SHOW_ID, SEQUENCE_WITHIN_SHOW,
+         NOW_PLAYING_FLAG, FLOWSHEET_ENTRY_TYPE_CODE_ID,
+         TIME_LAST_MODIFIED, TIME_CREATED, REQUEST_FLAG, GLOBAL_ORDER_ID,
+         BMI_COMPOSER, SEGUE_FLAG)
+      VALUES
+        (3002, 'Autechre', 0, 'Pen Expers', 'Confield', 0,
+         101, 0, 'Warp', ${Math.floor(now / 3600000) * 3600000},
+         ${now}, 0, 1002, 4, 0, 6,
+         ${now}, ${now}, 0, 1002004,
+         '', 0);
+    `);
+
+    runETL('jobs/flowsheet-etl/job.ts', 'flowsheet-etl', { resetLastRun: false });
+
+    const rows = await pg`
+      SELECT f.album_id, l.album_title
+      FROM ${pg(SCHEMA)}.flowsheet f
+      LEFT JOIN ${pg(SCHEMA)}.library l ON f.album_id = l.id
+      WHERE f.legacy_entry_id = 3002
+    `;
+    expect(rows.length).toBe(1);
+    expect(rows[0].album_title).toBe('Confield');
   });
 });

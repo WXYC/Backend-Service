@@ -124,6 +124,19 @@ export const epochMsToDate = (epochMs: number | null): Date | null => {
 };
 
 /**
+ * Resolve the best available timestamp for a FLOWSHEET_ENTRY_PROD row.
+ * Prefers START_TIME (epoch ms), falls back to TIME_CREATED, then TIME_LAST_MODIFIED.
+ * Most track entries have START_TIME = 0, so the fallback is essential.
+ */
+export const resolveEntryTimestamp = (
+  startTime: number | null,
+  timeCreated: number | null,
+  timeLastModified: number | null
+): Date | null => {
+  return epochMsToDate(startTime) ?? epochMsToDate(timeCreated) ?? epochMsToDate(timeLastModified);
+};
+
+/**
  * Extract the DJ name from a START/END OF SHOW message in FLOWSHEET_ENTRY_PROD.
  * These entries store structured text in the ARTIST_NAME column:
  *   "START OF SHOW: DJ Bluejay SIGNED ON at 12:03 PM (4/4/26)"

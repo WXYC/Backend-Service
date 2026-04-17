@@ -9,14 +9,15 @@
  *
  * Usage:
  *   node dist/job.js /path/to/dump.sql [--force]   # bulk load
- *   node dist/job.js                                # incremental sync
+ *   node dist/job.js                                # one-shot incremental sync
+ *   node dist/job.js --poll                         # continuous polling loop
  */
 
 import { readFileSync } from 'fs';
-import { eq, sql } from 'drizzle-orm';
-import { db, shows, flowsheet, cronjob_runs, closeDatabaseConnection } from '@wxyc/database';
+import { eq, inArray, sql } from 'drizzle-orm';
+import { db, shows, flowsheet, library, cronjob_runs, closeDatabaseConnection } from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
-import { mapProdEntryType, epochMsToDate, parseShowEntryDJName, truncate } from './transform.js';
+import { mapProdEntryType, epochMsToDate, resolveEntryTimestamp, parseShowEntryDJName, truncate } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
 
 const JOB_NAME = 'flowsheet-etl';
@@ -60,6 +61,23 @@ const resetSequences = async () => {
 };
 
 /**
+ * Resolve flowsheet.album_id by joining legacy_release_id to library.legacy_release_id.
+ * Only updates entries where album_id is NULL and legacy_release_id is set.
+ * Requires the library ETL to have run first (populates library.legacy_release_id).
+ */
+const resolveAlbumIds = async () => {
+  await db.execute(sql`
+    UPDATE ${flowsheet} f
+    SET album_id = l.id
+    FROM ${library} l
+    WHERE f.legacy_release_id = l.legacy_release_id
+      AND f.legacy_release_id IS NOT NULL
+      AND f.album_id IS NULL
+  `);
+  console.log(`[flowsheet-etl] Resolved album_id for flowsheet entries.`);
+};
+
+/**
  * Resolve the artist_name for a flowsheet entry. For show_start/show_end entries,
  * parse the DJ name from the structured ARTIST_NAME text. For all other entries,
  * truncate to 128 chars.
@@ -67,7 +85,7 @@ const resetSequences = async () => {
 const resolveArtistName = (rawArtistName: string | null, entryType: string): string | null => {
   if (!rawArtistName) return null;
   if (entryType === 'show_start' || entryType === 'show_end') {
-    return parseShowEntryDJName(rawArtistName) ?? truncate(rawArtistName, 128);
+    return truncate(parseShowEntryDJName(rawArtistName), 128) ?? truncate(rawArtistName, 128);
   }
   return truncate(rawArtistName, 128);
 };
@@ -99,6 +117,7 @@ const runBulkLoad = async (dumpPath: string) => {
   let entryCount = 0;
   const pendingEntries: Array<{
     legacy_entry_id: number;
+    legacy_release_id: number | null;
     show_id: number | null;
     entry_type: 'track' | 'show_start' | 'show_end' | 'breakpoint' | 'talkset' | 'dj_join' | 'dj_leave' | 'message';
     artist_name: string | null;
@@ -122,10 +141,13 @@ const runBulkLoad = async (dumpPath: string) => {
       const startTime = epochMsToDate(Number(tuple[8]) || 0);
       if (!startTime) continue;
 
+      const rawDjId = Number(tuple[3]);
       await db
         .insert(shows)
         .values({
           legacy_show_id: Number(tuple[0]),
+          legacy_dj_name: truncate(tuple[2] != null ? String(tuple[2]) : null, 128),
+          legacy_dj_id: Number.isFinite(rawDjId) && rawDjId !== 0 ? rawDjId : null,
           start_time: startTime,
           end_time: epochMsToDate(Number(tuple[9]) || 0),
           show_name: truncate(String(tuple[5] ?? ''), 128),
@@ -152,7 +174,11 @@ const runBulkLoad = async (dumpPath: string) => {
     if (!parsed || parsed.table !== 'FLOWSHEET_ENTRY_PROD') continue;
 
     for (const tuple of parsed.tuples) {
-      const addTime = epochMsToDate(Number(tuple[10]) || 0);
+      const addTime = resolveEntryTimestamp(
+        Number(tuple[10]) || 0, // START_TIME
+        Number(tuple[17]) || 0, // TIME_CREATED
+        Number(tuple[16]) || 0 // TIME_LAST_MODIFIED
+      );
       if (!addTime) continue;
       const entryId = Number(tuple[0]);
       const showId = Number(tuple[12]);
@@ -161,9 +187,11 @@ const runBulkLoad = async (dumpPath: string) => {
       const entryType = mapProdEntryType(Number(tuple[15]) || 0);
       const backendShowId = showIdMap.get(showId);
       const rawArtistName = tuple[1] != null ? String(tuple[1]) : null;
+      const rawReleaseId = Number(tuple[6]) || 0;
 
       pendingEntries.push({
         legacy_entry_id: entryId,
+        legacy_release_id: rawReleaseId === 0 ? null : rawReleaseId,
         show_id: backendShowId ?? null,
         entry_type: entryType,
         artist_name: resolveArtistName(rawArtistName, entryType),
@@ -196,11 +224,14 @@ const runBulkLoad = async (dumpPath: string) => {
 
   console.log(`[flowsheet-etl] Imported ${entryCount} entries.`);
   await resetSequences();
+  await resolveAlbumIds();
 };
 
 // ---- Incremental Sync Mode ----
 
-const runIncremental = async () => {
+type SyncResult = { showsImported: number; entriesImported: number; entriesUpdated: number };
+
+const runIncremental = async (): Promise<SyncResult> => {
   const runStartedAt = new Date();
   const lastRunMs = await getLastRunTimestamp();
 
@@ -216,11 +247,21 @@ const runIncremental = async () => {
       .insert(shows)
       .values({
         legacy_show_id: show.id,
+        legacy_dj_name: truncate(show.djName, 128),
+        legacy_dj_id: show.djId,
         start_time: startTime,
         end_time: endTime,
         show_name: truncate(show.showName, 128),
       })
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: shows.legacy_show_id,
+        set: {
+          end_time: sql`excluded.end_time`,
+          show_name: sql`excluded.show_name`,
+          legacy_dj_name: sql`excluded.legacy_dj_name`,
+          legacy_dj_id: sql`excluded.legacy_dj_id`,
+        },
+      });
     showsImported++;
   }
 
@@ -233,9 +274,23 @@ const runIncremental = async () => {
     }
   }
 
-  // Sync entries
+  // Sync entries (upsert: insert new, update display fields on conflict)
   const legacyEntries = await fetchLegacyEntries(lastRunMs);
+
+  // Collect existing legacy IDs (scoped to this batch) to distinguish inserts from updates
+  const batchIds = legacyEntries.map((e) => e.id).filter((id) => Number.isFinite(id));
+  const existingIds = new Set(
+    batchIds.length > 0
+      ? (
+          await db
+            .select({ lid: flowsheet.legacy_entry_id })
+            .from(flowsheet)
+            .where(inArray(flowsheet.legacy_entry_id, batchIds))
+        ).map((r) => r.lid)
+      : []
+  );
   let entriesImported = 0;
+  let entriesUpdated = 0;
   for (const entry of legacyEntries) {
     const addTime = epochMsToDate(entry.startTime);
     if (!addTime) continue;
@@ -247,6 +302,7 @@ const runIncremental = async () => {
       .insert(flowsheet)
       .values({
         legacy_entry_id: entry.id,
+        legacy_release_id: entry.legacyReleaseId,
         show_id: backendShowId ?? null,
         entry_type: entryType,
         artist_name: resolveArtistName(entry.artistName, entryType),
@@ -259,21 +315,101 @@ const runIncremental = async () => {
         play_order: entry.playOrder,
         add_time: addTime,
       })
-      .onConflictDoNothing();
-    entriesImported++;
+      .onConflictDoUpdate({
+        target: flowsheet.legacy_entry_id,
+        set: {
+          artist_name: sql`excluded.artist_name`,
+          album_title: sql`excluded.album_title`,
+          track_title: sql`excluded.track_title`,
+          record_label: sql`excluded.record_label`,
+          request_flag: sql`excluded.request_flag`,
+          segue: sql`excluded.segue`,
+          entry_type: sql`excluded.entry_type`,
+        },
+      });
+
+    if (existingIds.has(entry.id)) {
+      entriesUpdated++;
+    } else {
+      entriesImported++;
+    }
+  }
+
+  if (entriesImported > 0) {
+    await resolveAlbumIds();
   }
 
   await updateLastRun(runStartedAt);
-  console.log(`[flowsheet-etl] Incremental sync: ${showsImported} shows, ${entriesImported} entries.`);
+  const parts = [`${showsImported} shows`, `${entriesImported} new entries`];
+  if (entriesUpdated > 0) parts.push(`${entriesUpdated} updated entries`);
+  console.log(`[flowsheet-etl] Incremental sync: ${parts.join(', ')}.`);
+
+  return { showsImported, entriesImported, entriesUpdated };
+};
+
+// ---- SSE Notification ----
+
+const notifyBackendService = async () => {
+  const url = process.env.BACKEND_SERVICE_URL ?? 'http://localhost:8080';
+  const key = process.env.ETL_NOTIFY_KEY ?? '';
+  try {
+    const response = await fetch(`${url}/internal/flowsheet-sync-notify`, {
+      method: 'POST',
+      headers: { 'X-Internal-Key': key },
+    });
+    if (!response.ok) {
+      console.warn(`[flowsheet-etl] Backend notify returned ${response.status}`);
+    }
+  } catch (e) {
+    console.warn('[flowsheet-etl] Failed to notify backend:', e);
+  }
+};
+
+// ---- Continuous Polling Mode ----
+
+const runPollingLoop = async () => {
+  const intervalMs = Number(process.env.ETL_POLL_INTERVAL_MS) || 30_000;
+  let running = true;
+  let sleepResolve: (() => void) | null = null;
+
+  const shutdown = () => {
+    running = false;
+    sleepResolve?.();
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+
+  console.log(`[flowsheet-etl] Polling every ${intervalMs}ms. PID ${process.pid}`);
+
+  while (running) {
+    try {
+      const result = await runIncremental();
+      if (result.entriesImported > 0 || result.entriesUpdated > 0) {
+        await notifyBackendService();
+      }
+    } catch (e) {
+      console.error('[flowsheet-etl] Poll error:', e);
+    }
+    if (!running) break;
+    await new Promise<void>((resolve) => {
+      sleepResolve = resolve;
+      setTimeout(resolve, intervalMs);
+    });
+  }
+
+  console.log('[flowsheet-etl] Shutting down.');
 };
 
 // ---- Main ----
 
 const run = async () => {
   try {
-    const dumpPath = process.argv[2];
-    if (dumpPath && !dumpPath.startsWith('--')) {
+    const args = process.argv.slice(2);
+    const dumpPath = args.find((a) => !a.startsWith('--'));
+    if (dumpPath) {
       await runBulkLoad(dumpPath);
+    } else if (args.includes('--poll')) {
+      await runPollingLoop();
     } else {
       await runIncremental();
     }

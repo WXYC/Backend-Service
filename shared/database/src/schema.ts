@@ -334,6 +334,7 @@ export const flowsheet = wxyc_schema.table(
     album_id: integer('album_id').references(() => library.id, { onDelete: 'set null' }),
     rotation_id: integer('rotation_id').references(() => rotation.id, { onDelete: 'set null' }),
     legacy_entry_id: integer('legacy_entry_id'),
+    legacy_release_id: integer('legacy_release_id'),
     entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
     track_title: varchar('track_title', { length: 128 }),
     album_title: varchar('album_title', { length: 128 }),
@@ -357,7 +358,10 @@ export const flowsheet = wxyc_schema.table(
     artist_bio: text('artist_bio'),
     artist_wikipedia_url: varchar('artist_wikipedia_url', { length: 512 }),
   },
-  (table) => [uniqueIndex('flowsheet_legacy_entry_id_idx').on(table.legacy_entry_id)]
+  (table) => [
+    uniqueIndex('flowsheet_legacy_entry_id_idx').on(table.legacy_entry_id),
+    index('flowsheet_legacy_release_id_idx').on(table.legacy_release_id),
+  ]
 );
 
 export type NewGenre = InferInsertModel<typeof genres>;
@@ -463,6 +467,8 @@ export const shows = wxyc_schema.table(
     primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
     specialty_id: integer('specialty_id').references(() => specialty_shows.id),
     legacy_show_id: integer('legacy_show_id'),
+    legacy_dj_name: varchar('legacy_dj_name', { length: 128 }),
+    legacy_dj_id: integer('legacy_dj_id'),
     show_name: varchar('show_name', { length: 128 }),
     start_time: timestamp('start_time', { withTimezone: true }).defaultNow().notNull(),
     end_time: timestamp('end_time', { withTimezone: true }),

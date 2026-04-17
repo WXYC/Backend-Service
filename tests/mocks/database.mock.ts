@@ -77,6 +77,7 @@ export const flowsheet = {
   id: 'id',
   show_id: 'show_id',
   album_id: 'album_id',
+  legacy_entry_id: 'legacy_entry_id',
   entry_type: 'entry_type',
   track_title: 'track_title',
   album_title: 'album_title',
@@ -86,6 +87,7 @@ export const flowsheet = {
   rotation_id: 'rotation_id',
   play_order: 'play_order',
   request_flag: 'request_flag',
+  segue: 'segue',
   message: 'message',
   add_time: 'add_time',
   artwork_url: 'artwork_url',
@@ -155,6 +157,7 @@ export type FSEntry = {
   show_id: number | null;
   album_id: number | null;
   rotation_id: number | null;
+  legacy_entry_id: number | null;
   entry_type: string;
   track_title: string | null;
   album_title: string | null;
@@ -163,6 +166,7 @@ export type FSEntry = {
   label_id: number | null;
   play_order: number;
   request_flag: boolean;
+  segue: boolean;
   message: string | null;
   add_time: Date;
   artwork_url: string | null;

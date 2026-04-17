@@ -166,9 +166,17 @@ INSERT INTO COMPILATION_TRACK_ARTIST (LIBRARY_RELEASE_ID, ARTIST_NAME, TRACK_TIT
   (106, 'Scott and Charlene''s Wedding', 'Footscray Station', 'A2'),
   (106, 'Naked on the Vague', 'Left Behind', 'B1');
 
+-- Case-variant artist (same artist as ID=1 but uppercase name)
+INSERT INTO LIBRARY_CODE (ID, PRESENTATION_NAME, ALPHABETICAL_NAME, CALL_LETTERS, CALL_NUMBERS, GENRE_ID) VALUES
+  (10, 'AUTECHRE', 'Autechre', 'AU', 5, 2);
+
 -- ---- Artist Cross-References ----
+-- ID=1 uses the case-variant source (AUTECHRE) so it is processed FIRST by MySQL
+-- (InnoDB returns rows in PK order). This ensures the case-insensitive cache
+-- doesn't mask a DB-level exact-match bug in findArtistId.
 INSERT INTO LIBRARY_CODE_CROSS_REFERENCE (ID, SOURCE_LIBRARY_CODE_ID, TARGET_LIBRARY_CODE_ID, NOTE) VALUES
-  (1, 1, 4, 'see also');
+  (1, 10, 2, 'case test'),
+  (2, 1, 4, 'see also');
 
 -- ---- Release Cross-References ----
 INSERT INTO RELEASE_CROSS_REFERENCE (ID, LIBRARY_RELEASE_ID, LIBRARY_CODE_ID, NOTE) VALUES
@@ -176,7 +184,7 @@ INSERT INTO RELEASE_CROSS_REFERENCE (ID, LIBRARY_RELEASE_ID, LIBRARY_CODE_ID, NO
 
 -- ---- Shows ----
 INSERT INTO FLOWSHEET_RADIO_SHOW_PROD (ID, STARTING_RADIO_HOUR, DJ_NAME, DJ_ID, SHOW_NAME, SIGNON_TIME, SIGNOFF_TIME, TIME_LAST_MODIFIED, TIME_CREATED) VALUES
-  (1001, 1775300400000, 'DJ Bluejay', NULL, 'The Nest', 1775300460000, 1775311200000, 1775311200000, 1775300460000),
+  (1001, 1775300400000, 'DJ Bluejay', 42, 'The Nest', 1775300460000, 1775311200000, 1775311200000, 1775300460000),
   (1002, 1775311200000, 'dj wilde', NULL, NULL, 1775311260000, NULL, 1775311260000, 1775311260000);
 
 -- ---- Flowsheet Entries ----

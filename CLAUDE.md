@@ -19,18 +19,19 @@ npm workspaces with four packages:
 
 Express 5 application with these route groups:
 
-| Route           | Purpose                                           |
-| --------------- | ------------------------------------------------- |
-| `/config`       | Public app bootstrap configuration                |
-| `/proxy`        | iOS proxy endpoints (anonymous auth + rate limit) |
-| `/library`      | Music library catalog                             |
-| `/flowsheet`    | V1 flowsheet (legacy)                             |
-| `/v2/flowsheet` | V2 flowsheet (uses `@wxyc/shared` DTOs)           |
-| `/djs`          | DJ profiles and management                        |
-| `/request`      | Song request line                                 |
-| `/schedule`     | Schedule management                               |
-| `/events`       | SSE for real-time updates                         |
-| `/healthcheck`  | Health check                                      |
+| Route           | Purpose                                                    |
+| --------------- | ---------------------------------------------------------- |
+| `/config`       | Public app bootstrap configuration                         |
+| `/proxy`        | iOS proxy endpoints (anonymous auth + rate limit)          |
+| `/library`      | Music library catalog                                      |
+| `/flowsheet`    | V1 flowsheet (legacy)                                      |
+| `/v2/flowsheet` | V2 flowsheet (uses `@wxyc/shared` DTOs)                    |
+| `/djs`          | DJ profiles and management                                 |
+| `/request`      | Song request line                                          |
+| `/schedule`     | Schedule management                                        |
+| `/events`       | SSE for real-time updates                                  |
+| `/healthcheck`  | Health check                                               |
+| `/internal`     | Internal endpoints (ETL notifications, tubafrenzy webhook) |
 
 Code is organized as controllers (HTTP handling) -> services (business logic) -> database (Drizzle queries).
 
@@ -267,7 +268,7 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
 ### ETL Jobs
 
-The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the legacy MySQL database into PostgreSQL. It requires the standard database variables above plus these for SSH tunneling to the legacy server:
+The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the legacy MySQL database into PostgreSQL. The flowsheet ETL (`jobs/flowsheet-etl/`) syncs flowsheet entries and shows from tubafrenzy. Both require the standard database variables above plus these for SSH tunneling to the legacy server:
 
 - `SSH_HOST` -- Hostname of the legacy server
 - `SSH_USERNAME` -- SSH login username
@@ -276,6 +277,12 @@ The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the 
 - `REMOTE_DB_USER` -- MySQL username
 - `REMOTE_DB_PASSWORD` -- MySQL password
 - `REMOTE_DB_NAME` -- MySQL database name
+
+The flowsheet ETL supports two run modes: one-shot (`npm start`) for cron invocation, and continuous polling (`npm run start:poll` or `node dist/job.js --poll`) for real-time sync. In polling mode, it queries tubafrenzy every `ETL_POLL_INTERVAL_MS` (default 30 seconds) for new or modified entries and upserts them into PostgreSQL. After importing changes, it notifies the Backend-Service via `POST /internal/flowsheet-sync-notify` so connected dj-site clients receive an SSE refetch event.
+
+- `ETL_POLL_INTERVAL_MS` -- Poll interval in milliseconds (default `30000`)
+- `BACKEND_SERVICE_URL` -- Backend-Service URL for SSE notifications (default `http://localhost:8080`)
+- `ETL_NOTIFY_KEY` -- Shared secret for internal endpoints: ETL sync notification and tubafrenzy webhook (required in production)
 
 ## Relationship to Other Repos
 

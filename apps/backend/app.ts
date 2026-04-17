@@ -14,6 +14,7 @@ import { schedule_route } from './routes/schedule.route.js';
 import { events_route } from './routes/events.route.js';
 import { request_line_route } from './routes/requestLine.route.js';
 import { config_route } from './routes/config.route.js';
+import { internal_route } from './routes/internal.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
@@ -39,7 +40,7 @@ app.use(
   cors({
     origin: process.env.FRONTEND_SOURCE || '*',
     methods: ['GET', 'POST', 'DELETE', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'X-Internal-Key'],
     exposedHeaders: ['X-Request-Id'],
     credentials: true,
   })
@@ -91,6 +92,9 @@ app.get('/testAuth', requirePermissions({ flowsheet: ['read'] }), async (req, re
 app.get('/healthcheck', async (req, res) => {
   res.json({ message: 'Healthy!' });
 });
+
+// Internal endpoints (ETL sync notifications, key-authenticated)
+app.use('/internal', internal_route);
 
 Sentry.setupExpressErrorHandler(app);
 app.use(errorHandler);

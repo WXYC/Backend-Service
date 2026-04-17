@@ -286,10 +286,19 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
 };
 
 export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) => {
+  // Loop guard: entry imported from tubafrenzy by ETL — don't mirror back
+  if (entry.legacy_entry_id != null) return;
+
   const body = mapEntryToTubafrenzy(entry);
   const tubafrenzyId = await mirrorCreateEntry(body);
   if (tubafrenzyId != null) {
     cacheEntryId(entry.play_order, tubafrenzyId);
+    // Persist the mapping so the ETL can deduplicate
+    try {
+      await db.update(flowsheet).set({ legacy_entry_id: tubafrenzyId }).where(eq(flowsheet.id, entry.id));
+    } catch (e) {
+      console.error('[mirror] Failed to persist legacy_entry_id:', e);
+    }
   }
 });
 
@@ -297,9 +306,16 @@ export const updateEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entr
   // Message-only rows aren't updateable
   if (entry?.message && entry.message.trim() !== '') return;
 
-  const tubafrenzyId = getCachedEntryId(entry.play_order);
+  const cachedId = getCachedEntryId(entry.play_order);
+
+  // Loop guard: entry has a legacy ID but we didn't cache it this lifecycle —
+  // it was imported by the ETL, not created by our mirror. Don't mirror back.
+  if (cachedId == null && entry.legacy_entry_id != null) return;
+
+  // Use cache (fast path) or fall back to persisted legacy_entry_id (after restart)
+  const tubafrenzyId = cachedId ?? entry.legacy_entry_id;
   if (tubafrenzyId == null) {
-    console.warn('[mirror] No cached tubafrenzy ID for play_order', entry.play_order);
+    console.warn('[mirror] No tubafrenzy ID for play_order', entry.play_order);
     return;
   }
 
