@@ -72,7 +72,9 @@ interface CachedArtwork {
 }
 
 const artworkCache = new LRUCache<string, CachedArtwork>({
-  max: 500,
+  max: 200,
+  maxSize: 20 * 1024 * 1024, // 20 MB total
+  sizeCalculation: (value) => value.data.byteLength,
   ttl: 1000 * 60 * 60, // 1 hour for positive results
 });
 
