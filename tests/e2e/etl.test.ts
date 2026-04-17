@@ -302,6 +302,31 @@ describe('Flowsheet ETL', () => {
 
 // ---- Flowsheet ETL: Incremental Sync (bidirectional) ----
 
+describe('Flowsheet API ordering after ETL import', () => {
+  it('returns newest entries first by id, not by play_order', async () => {
+    // After ETL import, show 1001 has entries with play_order up to 8,
+    // and show 1002 (newer) has entries with play_order 1-2.
+    // ORDER BY id DESC should return show 1002 entries first.
+    const rows = await pg`
+      SELECT id, legacy_entry_id, play_order
+      FROM ${pg(SCHEMA)}.flowsheet
+      WHERE legacy_entry_id IS NOT NULL
+      ORDER BY id DESC
+      LIMIT 3
+    `;
+    expect(rows.length).toBeGreaterThanOrEqual(2);
+    // The newest entry (highest legacy_entry_id) should be first
+    expect(rows[0].legacy_entry_id).toBe(2010);
+    // Even though show 1001's entries have higher play_order (up to 8),
+    // they should NOT appear before show 1002's entries
+    const firstPlayOrder = rows[0].play_order;
+    const secondPlayOrder = rows[1].play_order;
+    // show 1002 entry has play_order 2, show 1001's last entry has play_order 8
+    // If sorted by play_order DESC, show 1001 entries would come first (wrong)
+    expect(firstPlayOrder).toBeLessThanOrEqual(secondPlayOrder);
+  });
+});
+
 describe('Flowsheet ETL incremental sync', () => {
   const MYSQL_CONTAINER = 'dev_env-etl-mysql-1';
   const MYSQL_CMD = `docker exec -i ${MYSQL_CONTAINER} mysql -uetluser -petltest wxycmusic --batch --raw --silent`;
