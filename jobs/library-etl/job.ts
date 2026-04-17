@@ -526,10 +526,10 @@ const fetchLegacyArtistCrossRefs = async (): Promise<LegacyCrossrefRow[]> => {
       src.CALL_LETTERS,
       REPLACE(REPLACE(tgt.PRESENTATION_NAME, '\\t', ' '), '\\n', ' '),
       tgt.CALL_LETTERS,
-      REPLACE(REPLACE(IFNULL(cr.NOTE, ''), '\\t', ' '), '\\n', ' ')
+      REPLACE(REPLACE(IFNULL(cr.COMMENT, ''), '\\t', ' '), '\\n', ' ')
     FROM LIBRARY_CODE_CROSS_REFERENCE cr
-    JOIN LIBRARY_CODE src ON cr.SOURCE_LIBRARY_CODE_ID = src.ID
-    JOIN LIBRARY_CODE tgt ON cr.TARGET_LIBRARY_CODE_ID = tgt.ID;
+    JOIN LIBRARY_CODE src ON cr.CROSS_REFERENCING_ARTIST_ID = src.ID
+    JOIN LIBRARY_CODE tgt ON cr.CROSS_REFERENCED_LIBRARY_CODE_ID = tgt.ID;
   `;
   const raw = await legacyDB.send(sqlQuery);
   if (raw.trim().length === 0) return [];
@@ -564,10 +564,10 @@ const fetchLegacyReleaseCrossRefs = async (): Promise<LegacyReleaseCrossrefRow[]
       REPLACE(REPLACE(lr.TITLE, '\\t', ' '), '\\n', ' '),
       lr.CALL_NUMBERS,
       g.REFERENCE_NAME,
-      REPLACE(REPLACE(IFNULL(cr.NOTE, ''), '\\t', ' '), '\\n', ' ')
+      REPLACE(REPLACE(IFNULL(cr.COMMENT, ''), '\\t', ' '), '\\n', ' ')
     FROM RELEASE_CROSS_REFERENCE cr
-    JOIN LIBRARY_RELEASE lr ON cr.LIBRARY_RELEASE_ID = lr.ID
-    JOIN LIBRARY_CODE lc ON cr.LIBRARY_CODE_ID = lc.ID
+    JOIN LIBRARY_RELEASE lr ON cr.CROSS_REFERENCED_RELEASE_ID = lr.ID
+    JOIN LIBRARY_CODE lc ON cr.CROSS_REFERENCING_ARTIST_ID = lc.ID
     JOIN GENRE g ON lc.GENRE_ID = g.ID;
   `;
   const raw = await legacyDB.send(sqlQuery);
