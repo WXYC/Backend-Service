@@ -246,6 +246,13 @@
       "when": 1776224209937,
       "tag": "0037_etl-schema-sync",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1776394873403,
+      "tag": "0038_etl-legacy-columns",
+      "breakpoints": true
     }
   ]
 }
