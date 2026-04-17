@@ -781,20 +781,10 @@ describe('Paginated ordering with ETL-imported entries', () => {
   });
 
   test('newest entry appears first even when older entry has higher play_order', async () => {
-    // First, create a fresh entry via the API
-    await fls_util.join_show(global.primary_dj_id, global.access_token);
-    const addRes = await request
-      .post('/flowsheet')
-      .set('Authorization', global.access_token)
-      .send({
-        album_id: 1,
-        track_title: 'Carry the Zero',
-      })
-      .expect(201);
-
-    // Now insert a stale ETL-imported entry directly into the DB with a very high
-    // play_order but old timestamp — simulating the October 2025 show 72945 that
-    // blocked production by sorting above all recent entries
+    // Insert a stale ETL-imported entry first — it gets a lower id, simulating
+    // old data imported by the ETL before the current show exists. It has a very
+    // high play_order (from a long old show), which under the old ORDER BY
+    // play_order DESC would sort above all recent entries.
     const schema = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
     const result = await sql.unsafe(`
       INSERT INTO ${schema}.flowsheet
@@ -804,6 +794,18 @@ describe('Paginated ordering with ETL-imported entries', () => {
       RETURNING id
     `);
     staleEntryId = result[0].id;
+
+    // Now create a fresh entry via the API — this gets a higher id but lower
+    // play_order, matching the production scenario
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+    const addRes = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1,
+        track_title: 'Carry the Zero',
+      })
+      .expect(201);
 
     // The paginated endpoint should return the fresh entry first, not the stale one
     const res = await request.get('/flowsheet').query({ limit: 1 }).expect(200);
