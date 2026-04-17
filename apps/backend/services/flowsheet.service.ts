@@ -172,7 +172,7 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .orderBy(desc(flowsheet.play_order))
+    .orderBy(desc(flowsheet.id))
     .offset(offset)
     .limit(limit);
   return raw.map(transformToIFSEntry);
