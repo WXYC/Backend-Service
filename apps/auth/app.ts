@@ -10,6 +10,7 @@ import cors from 'cors';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
+import { closeDatabaseConnection } from '@wxyc/database';
 
 const port = process.env.AUTH_PORT || '8080';
 
@@ -334,9 +335,23 @@ void (async () => {
   await createDefaultUser();
   await syncAdminRoles();
 
-  app.listen(parseInt(port), () => {
+  const server = app.listen(parseInt(port), () => {
     console.log(`listening on port: ${port}! (auth service)`);
   });
+
+  function shutdown(signal: string): void {
+    console.log(`[auth-shutdown] Received ${signal}, shutting down...`);
+    server.close(() => {
+      closeDatabaseConnection()
+        .then(() => process.exit(0))
+        .catch(() => process.exit(1));
+    });
+    setTimeout(() => server.closeAllConnections(), 5_000).unref();
+    setTimeout(() => process.exit(1), 10_000).unref();
+  }
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 })();
 
 export default app;
