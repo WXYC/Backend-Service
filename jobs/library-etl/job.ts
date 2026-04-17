@@ -349,11 +349,15 @@ const ensureArtist = async (
   const cached = artistCache.get(artistKey);
   if (cached) return cached;
 
+  const nameLower = artistName.toLowerCase().trim();
+  const lettersLower = normalizedLetters.toLowerCase().trim();
   const query = isVarious
     ? dbClient
         .select({ id: artists.id })
         .from(artists)
-        .where(and(eq(artists.artist_name, artistName), eq(artists.code_letters, normalizedLetters)))
+        .where(
+          and(sql`lower(${artists.artist_name}) = ${nameLower}`, sql`lower(${artists.code_letters}) = ${lettersLower}`)
+        )
         .limit(1)
     : dbClient
         .select({ id: artists.id })
@@ -361,8 +365,8 @@ const ensureArtist = async (
         .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
         .where(
           and(
-            eq(artists.artist_name, artistName),
-            eq(artists.code_letters, normalizedLetters),
+            sql`lower(${artists.artist_name}) = ${nameLower}`,
+            sql`lower(${artists.code_letters}) = ${lettersLower}`,
             eq(genre_artist_crossreference.genre_id, genreId),
             eq(genre_artist_crossreference.artist_genre_code, artistGenreCode)
           )
@@ -446,7 +450,12 @@ const findArtistId = async (
   const rows = await dbClient
     .select({ id: artists.id })
     .from(artists)
-    .where(and(eq(artists.artist_name, artistName), eq(artists.code_letters, codeLetters)))
+    .where(
+      and(
+        sql`lower(${artists.artist_name}) = ${artistName.toLowerCase().trim()}`,
+        sql`lower(${artists.code_letters}) = ${codeLetters.toLowerCase().trim()}`
+      )
+    )
     .limit(1);
 
   if (rows.length === 0) return null;

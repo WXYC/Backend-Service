@@ -15,7 +15,7 @@
 
 import { readFileSync } from 'fs';
 import { eq, inArray, sql } from 'drizzle-orm';
-import { db, shows, flowsheet, cronjob_runs, closeDatabaseConnection } from '@wxyc/database';
+import { db, shows, flowsheet, library, cronjob_runs, closeDatabaseConnection } from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
 import { mapProdEntryType, epochMsToDate, resolveEntryTimestamp, parseShowEntryDJName, truncate } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
@@ -61,6 +61,23 @@ const resetSequences = async () => {
 };
 
 /**
+ * Resolve flowsheet.album_id by joining legacy_release_id to library.legacy_release_id.
+ * Only updates entries where album_id is NULL and legacy_release_id is set.
+ * Requires the library ETL to have run first (populates library.legacy_release_id).
+ */
+const resolveAlbumIds = async () => {
+  await db.execute(sql`
+    UPDATE ${flowsheet} f
+    SET album_id = l.id
+    FROM ${library} l
+    WHERE f.legacy_release_id = l.legacy_release_id
+      AND f.legacy_release_id IS NOT NULL
+      AND f.album_id IS NULL
+  `);
+  console.log(`[flowsheet-etl] Resolved album_id for flowsheet entries.`);
+};
+
+/**
  * Resolve the artist_name for a flowsheet entry. For show_start/show_end entries,
  * parse the DJ name from the structured ARTIST_NAME text. For all other entries,
  * truncate to 128 chars.
@@ -100,6 +117,7 @@ const runBulkLoad = async (dumpPath: string) => {
   let entryCount = 0;
   const pendingEntries: Array<{
     legacy_entry_id: number;
+    legacy_release_id: number | null;
     show_id: number | null;
     entry_type: 'track' | 'show_start' | 'show_end' | 'breakpoint' | 'talkset' | 'dj_join' | 'dj_leave' | 'message';
     artist_name: string | null;
@@ -123,10 +141,13 @@ const runBulkLoad = async (dumpPath: string) => {
       const startTime = epochMsToDate(Number(tuple[8]) || 0);
       if (!startTime) continue;
 
+      const rawDjId = Number(tuple[3]);
       await db
         .insert(shows)
         .values({
           legacy_show_id: Number(tuple[0]),
+          legacy_dj_name: truncate(tuple[2] != null ? String(tuple[2]) : null, 128),
+          legacy_dj_id: Number.isFinite(rawDjId) && rawDjId !== 0 ? rawDjId : null,
           start_time: startTime,
           end_time: epochMsToDate(Number(tuple[9]) || 0),
           show_name: truncate(String(tuple[5] ?? ''), 128),
@@ -166,9 +187,11 @@ const runBulkLoad = async (dumpPath: string) => {
       const entryType = mapProdEntryType(Number(tuple[15]) || 0);
       const backendShowId = showIdMap.get(showId);
       const rawArtistName = tuple[1] != null ? String(tuple[1]) : null;
+      const rawReleaseId = Number(tuple[6]) || 0;
 
       pendingEntries.push({
         legacy_entry_id: entryId,
+        legacy_release_id: rawReleaseId === 0 ? null : rawReleaseId,
         show_id: backendShowId ?? null,
         entry_type: entryType,
         artist_name: resolveArtistName(rawArtistName, entryType),
@@ -201,6 +224,7 @@ const runBulkLoad = async (dumpPath: string) => {
 
   console.log(`[flowsheet-etl] Imported ${entryCount} entries.`);
   await resetSequences();
+  await resolveAlbumIds();
 };
 
 // ---- Incremental Sync Mode ----
@@ -223,6 +247,8 @@ const runIncremental = async (): Promise<SyncResult> => {
       .insert(shows)
       .values({
         legacy_show_id: show.id,
+        legacy_dj_name: truncate(show.djName, 128),
+        legacy_dj_id: show.djId,
         start_time: startTime,
         end_time: endTime,
         show_name: truncate(show.showName, 128),
@@ -232,6 +258,8 @@ const runIncremental = async (): Promise<SyncResult> => {
         set: {
           end_time: sql`excluded.end_time`,
           show_name: sql`excluded.show_name`,
+          legacy_dj_name: sql`excluded.legacy_dj_name`,
+          legacy_dj_id: sql`excluded.legacy_dj_id`,
         },
       });
     showsImported++;
@@ -274,6 +302,7 @@ const runIncremental = async (): Promise<SyncResult> => {
       .insert(flowsheet)
       .values({
         legacy_entry_id: entry.id,
+        legacy_release_id: entry.legacyReleaseId,
         show_id: backendShowId ?? null,
         entry_type: entryType,
         artist_name: resolveArtistName(entry.artistName, entryType),
@@ -304,6 +333,10 @@ const runIncremental = async (): Promise<SyncResult> => {
     } else {
       entriesImported++;
     }
+  }
+
+  if (entriesImported > 0) {
+    await resolveAlbumIds();
   }
 
   await updateLastRun(runStartedAt);
