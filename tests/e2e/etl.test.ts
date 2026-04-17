@@ -394,3 +394,60 @@ describe('Flowsheet ETL incremental sync', () => {
     expect(rows[0].album_title).toBe('Confield');
   });
 });
+
+// ---- Backfill Script ----
+
+describe('Backfill legacy IDs script', () => {
+  beforeAll(async () => {
+    // NULL out the columns that the backfill script should restore,
+    // simulating entries imported before PR #328
+    await pg`UPDATE ${pg(SCHEMA)}.flowsheet SET legacy_release_id = NULL, album_id = NULL`;
+    await pg`UPDATE ${pg(SCHEMA)}.shows SET legacy_dj_name = NULL, legacy_dj_id = NULL`;
+
+    // Verify they're actually NULL
+    const releaseCheck =
+      await pg`SELECT COUNT(*)::int AS count FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_release_id IS NOT NULL`;
+    expect(releaseCheck[0].count).toBe(0);
+
+    const djCheck = await pg`SELECT COUNT(*)::int AS count FROM ${pg(SCHEMA)}.shows WHERE legacy_dj_name IS NOT NULL`;
+    expect(djCheck[0].count).toBe(0);
+
+    // Run the backfill script
+    execSync('npx tsx jobs/flowsheet-etl/backfill-legacy-ids.ts', {
+      env: etlEnv,
+      cwd: process.cwd(),
+      stdio: 'pipe',
+      timeout: 60000,
+    });
+  });
+
+  it('restores legacy_release_id on flowsheet entries', async () => {
+    const entries =
+      await pg`SELECT legacy_entry_id, legacy_release_id FROM ${pg(SCHEMA)}.flowsheet WHERE legacy_entry_id IN (2002, 2004, 2010)`;
+    const byId = (id: number) => entries.find((e: any) => e.legacy_entry_id === id);
+    expect(byId(2002).legacy_release_id).toBe(101);
+    expect(byId(2004).legacy_release_id).toBeNull(); // talkset
+    expect(byId(2010).legacy_release_id).toBe(105);
+  });
+
+  it('resolves album_id after backfilling legacy_release_id', async () => {
+    const entries = await pg`
+      SELECT f.legacy_entry_id, l.album_title
+      FROM ${pg(SCHEMA)}.flowsheet f
+      LEFT JOIN ${pg(SCHEMA)}.library l ON f.album_id = l.id
+      WHERE f.legacy_entry_id IN (2002, 2003)
+    `;
+    const byId = (id: number) => entries.find((e: any) => e.legacy_entry_id === id);
+    expect(byId(2002).album_title).toBe('Confield');
+    expect(byId(2003).album_title).toBe('Moon Pix');
+  });
+
+  it('restores legacy DJ name and ID on shows', async () => {
+    const rows = await pg`SELECT legacy_show_id, legacy_dj_name, legacy_dj_id FROM ${pg(SCHEMA)}.shows`;
+    const show1001 = rows.find((r: any) => r.legacy_show_id === 1001);
+    const show1002 = rows.find((r: any) => r.legacy_show_id === 1002);
+    expect(show1001.legacy_dj_name).toBe('DJ Bluejay');
+    expect(show1001.legacy_dj_id).toBe(42);
+    expect(show1002.legacy_dj_name).toBe('dj wilde');
+  });
+});
