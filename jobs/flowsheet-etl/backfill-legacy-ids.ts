@@ -74,8 +74,7 @@ const backfillReleaseIds = async (mappings: ReleaseMapping[]): Promise<number> =
     `)
     );
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access -- db.execute returns untyped result
-    const count = Number((result as Record<string, unknown>).count ?? batch.length);
+    const count = Number((result as unknown as Record<string, unknown>).count ?? batch.length);
     totalUpdated += count;
 
     if ((i / BATCH_SIZE + 1) % 20 === 0) {
@@ -164,7 +163,7 @@ const resolveAlbumIds = async (): Promise<void> => {
       JOIN ${library} l ON f.legacy_release_id = l.legacy_release_id
       WHERE f.legacy_release_id IS NOT NULL AND f.album_id IS NULL
     `);
-    const rows = preview as Record<string, unknown>[];
+    const rows = preview as unknown as Record<string, unknown>[];
     const count = rows.length > 0 ? (rows[0].count as number) : '?';
     console.log(`[backfill] [dry-run] Would resolve album_id for ${count} entries.`);
     return;
