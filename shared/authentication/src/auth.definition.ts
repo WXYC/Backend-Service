@@ -32,6 +32,9 @@ const buildResetUrl = (url: string, redirectTo?: string) => {
   }
 };
 
+// Type annotation avoids TS2742: tsup's DTS emitter cannot reference
+// better-auth's internal anonymous plugin types (unexported subpath).
+// The `as` is safe — all Auth instances share the same runtime API surface.
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
     provider: 'pg',
@@ -314,4 +317,4 @@ export const auth = betterAuth({
       capabilities: { type: 'string[]', required: false, defaultValue: [] },
     },
   },
-});
+}) as unknown as ReturnType<typeof betterAuth>;
