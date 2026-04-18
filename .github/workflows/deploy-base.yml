@@ -481,6 +481,14 @@ jobs:
 
             rm -f crontab.txt
 
+            echo "Cleaning up old Docker images..."
+            docker images --format '{{.Repository}} {{.Tag}}' | \
+              grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
+              sort -k1,1 -k2,2Vr | \
+              awk '{ if ($1 in seen) print $1 ":" $2; else seen[$1]=1 }' | \
+              xargs -r -n1 docker rmi 2>/dev/null || true
+            docker image prune -f 2>/dev/null || true
+
       - name: Confirm server is up
         if: steps.deploy_vars.outputs.target_type == 'app'
         uses: appleboy/ssh-action@v1
