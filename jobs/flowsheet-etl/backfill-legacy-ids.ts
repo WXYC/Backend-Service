@@ -12,7 +12,7 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { db, flowsheet, library, shows, closeDatabaseConnection, MirrorSQL } from '@wxyc/database';
+import { db, flowsheet, library, closeDatabaseConnection, MirrorSQL } from '@wxyc/database';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const BATCH_SIZE = 5000;
@@ -131,16 +131,16 @@ const backfillDJInfo = async (mappings: DJMapping[]): Promise<number> => {
       continue;
     }
 
-    // Update one at a time — show count is small (71K) and the query needs
-    // to handle nullable strings which are hard to batch via raw VALUES
     for (const m of batch) {
-      await db
-        .update(shows)
-        .set({
-          legacy_dj_name: m.djName,
-          legacy_dj_id: m.djId,
-        })
-        .where(sql`${shows.legacy_show_id} = ${m.showId} AND ${shows.legacy_dj_name} IS NULL`);
+      const djNameValue = m.djName ? `'${m.djName.replace(/'/g, "''")}'` : 'NULL';
+      const djIdValue = m.djId != null ? String(m.djId) : 'NULL';
+      await db.execute(
+        sql.raw(`
+        UPDATE ${getSchemaPrefix()}shows
+        SET legacy_dj_name = ${djNameValue}, legacy_dj_id = ${djIdValue}
+        WHERE legacy_show_id = ${m.showId} AND legacy_dj_name IS NULL
+      `)
+      );
     }
 
     totalUpdated += batch.length;
