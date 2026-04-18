@@ -8,7 +8,8 @@
  * Source tables: FLOWSHEET_RADIO_SHOW_PROD, FLOWSHEET_ENTRY_PROD
  *
  * Usage:
- *   node dist/job.js /path/to/dump.sql [--force]   # bulk load
+ *   node dist/job.js /path/to/dump.sql              # bulk load (append to existing)
+ *   node dist/job.js /path/to/dump.sql --replace    # truncate + bulk load in one transaction
  *   node dist/job.js                                # one-shot incremental sync
  *   node dist/job.js --poll                         # continuous polling loop
  */
@@ -108,31 +109,26 @@ const resolveArtistName = (rawArtistName: string | null, entryType: string): str
  *   [21: SEGUE_FLAG -- if present]
  */
 
-const runBulkLoad = async (dumpPath: string) => {
-  console.log(`[flowsheet-etl] Bulk load from: ${dumpPath}`);
-  const content = readFileSync(dumpPath, 'utf-8');
-  const lines = content.split('\n');
+type BulkEntryRow = {
+  legacy_entry_id: number;
+  legacy_release_id: number | null;
+  show_id: number | null;
+  entry_type: 'track' | 'show_start' | 'show_end' | 'breakpoint' | 'talkset' | 'dj_join' | 'dj_leave' | 'message';
+  artist_name: string | null;
+  album_title: string | null;
+  track_title: string | null;
+  record_label: string | null;
+  message: string | null;
+  request_flag: boolean;
+  segue: boolean;
+  play_order: number;
+  add_time: Date;
+};
 
+type DbClient = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+const importShows = async (dbClient: DbClient, lines: string[]) => {
   let showCount = 0;
-  let entryCount = 0;
-  const pendingEntries: Array<{
-    legacy_entry_id: number;
-    legacy_release_id: number | null;
-    show_id: number | null;
-    entry_type: 'track' | 'show_start' | 'show_end' | 'breakpoint' | 'talkset' | 'dj_join' | 'dj_leave' | 'message';
-    artist_name: string | null;
-    album_title: string | null;
-    track_title: string | null;
-    record_label: string | null;
-    message: string | null;
-    request_flag: boolean;
-    segue: boolean;
-    play_order: number;
-    add_time: Date;
-  }> = [];
-
-  // Pass 1: Import shows
-  console.log('[flowsheet-etl] Pass 1: Importing shows...');
   for (const line of lines) {
     const parsed = parseInsertLine(line);
     if (!parsed || parsed.table !== 'FLOWSHEET_RADIO_SHOW_PROD') continue;
@@ -142,7 +138,7 @@ const runBulkLoad = async (dumpPath: string) => {
       if (!startTime) continue;
 
       const rawDjId = Number(tuple[3]);
-      await db
+      await dbClient
         .insert(shows)
         .values({
           legacy_show_id: Number(tuple[0]),
@@ -156,28 +152,33 @@ const runBulkLoad = async (dumpPath: string) => {
       showCount++;
     }
   }
-  console.log(`[flowsheet-etl] Imported ${showCount} shows.`);
+  return showCount;
+};
 
-  // Build show mapping: legacy_show_id -> backend show id
-  const showRows = await db.select({ id: shows.id, legacyId: shows.legacy_show_id }).from(shows);
-  const showIdMap = new Map<number, number>();
+const buildShowIdMap = async (dbClient: DbClient) => {
+  const showRows = await dbClient.select({ id: shows.id, legacyId: shows.legacy_show_id }).from(shows);
+  const map = new Map<number, number>();
   for (const row of showRows) {
     if (row.legacyId != null) {
-      showIdMap.set(row.legacyId, row.id);
+      map.set(row.legacyId, row.id);
     }
   }
+  return map;
+};
 
-  // Pass 2: Import entries
-  console.log('[flowsheet-etl] Pass 2: Importing entries...');
+const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map<number, number>) => {
+  let entryCount = 0;
+  const pendingEntries: BulkEntryRow[] = [];
+
   for (const line of lines) {
     const parsed = parseInsertLine(line);
     if (!parsed || parsed.table !== 'FLOWSHEET_ENTRY_PROD') continue;
 
     for (const tuple of parsed.tuples) {
       const addTime = resolveEntryTimestamp(
-        Number(tuple[10]) || 0, // START_TIME
-        Number(tuple[17]) || 0, // TIME_CREATED
-        Number(tuple[16]) || 0 // TIME_LAST_MODIFIED
+        Number(tuple[10]) || 0,
+        Number(tuple[17]) || 0,
+        Number(tuple[16]) || 0,
       );
       if (!addTime) continue;
       const entryId = Number(tuple[0]);
@@ -206,7 +207,7 @@ const runBulkLoad = async (dumpPath: string) => {
       });
 
       if (pendingEntries.length >= BATCH_SIZE) {
-        await db.insert(flowsheet).values(pendingEntries).onConflictDoNothing();
+        await dbClient.insert(flowsheet).values(pendingEntries).onConflictDoNothing();
         entryCount += pendingEntries.length;
         pendingEntries.length = 0;
         if (entryCount % 50000 === 0) {
@@ -216,15 +217,48 @@ const runBulkLoad = async (dumpPath: string) => {
     }
   }
 
-  // Flush remaining entries
   if (pendingEntries.length > 0) {
-    await db.insert(flowsheet).values(pendingEntries).onConflictDoNothing();
+    await dbClient.insert(flowsheet).values(pendingEntries).onConflictDoNothing();
     entryCount += pendingEntries.length;
   }
 
-  console.log(`[flowsheet-etl] Imported ${entryCount} entries.`);
+  return entryCount;
+};
+
+const runBulkLoad = async (dumpPath: string, { replace = false } = {}) => {
+  console.log(`[flowsheet-etl] Bulk load from: ${dumpPath}${replace ? ' (--replace: truncate + reimport)' : ''}`);
+  const content = readFileSync(dumpPath, 'utf-8');
+  const lines = content.split('\n');
+
+  const doBulkLoad = async (dbClient: DbClient) => {
+    if (replace) {
+      console.log('[flowsheet-etl] Truncating flowsheet and shows tables...');
+      await dbClient.execute(sql`TRUNCATE ${flowsheet}, ${shows} CASCADE`);
+    }
+
+    console.log('[flowsheet-etl] Pass 1: Importing shows...');
+    const showCount = await importShows(dbClient, lines);
+    console.log(`[flowsheet-etl] Imported ${showCount} shows.`);
+
+    const showIdMap = await buildShowIdMap(dbClient);
+
+    console.log('[flowsheet-etl] Pass 2: Importing entries...');
+    const entryCount = await importEntries(dbClient, lines, showIdMap);
+    console.log(`[flowsheet-etl] Imported ${entryCount} entries.`);
+  };
+
+  if (replace) {
+    await db.transaction(async (tx) => {
+      await doBulkLoad(tx);
+    });
+  } else {
+    await doBulkLoad(db);
+  }
+
   await resetSequences();
   await resolveAlbumIds();
+  await updateLastRun(new Date());
+  console.log('[flowsheet-etl] Recorded last_run for future incremental syncs.');
 };
 
 // ---- Incremental Sync Mode ----
@@ -407,7 +441,7 @@ const run = async () => {
     const args = process.argv.slice(2);
     const dumpPath = args.find((a) => !a.startsWith('--'));
     if (dumpPath) {
-      await runBulkLoad(dumpPath);
+      await runBulkLoad(dumpPath, { replace: args.includes('--replace') });
     } else if (args.includes('--poll')) {
       await runPollingLoop();
     } else {
