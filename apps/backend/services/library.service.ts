@@ -309,6 +309,7 @@ function viewRowToLibraryResult(row: LibraryArtistViewEntry): LibraryResult {
     codeNumber: row.code_number,
     genre: row.genre_name,
     format: row.format_name,
+    onStreaming: row.on_streaming,
   };
 }
 

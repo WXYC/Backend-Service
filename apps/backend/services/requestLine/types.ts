@@ -63,6 +63,8 @@ export interface LibraryResult {
   genre: string | null;
   /** Format name (CD, Vinyl, etc.) */
   format: string | null;
+  /** Whether this release is available on streaming services */
+  onStreaming?: boolean | null;
 }
 
 /**

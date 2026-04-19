@@ -260,6 +260,7 @@ export const library = wxyc_schema.table(
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
     date_lost: timestamp('date_lost', { withTimezone: true }),
     date_found: timestamp('date_found', { withTimezone: true }),
+    on_streaming: boolean('on_streaming'),
   },
   (table) => {
     return {
@@ -503,21 +504,6 @@ export const specialty_shows = wxyc_schema.table('specialty_shows', {
   last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
 });
 
-export type LibraryArtistViewEntry = {
-  id: number;
-  code_letters: string;
-  code_artist_number: number;
-  code_number: number;
-  artist_name: string;
-  alphabetical_name: string;
-  album_title: string;
-  format_name: string;
-  genre_name: string;
-  rotation_bin: string | null;
-  add_date: Date;
-  label: string | null;
-  label_id: number | null;
-};
 export const library_artist_view = wxyc_schema.view('library_artist_view').as((qb) => {
   return qb
     .select({
@@ -534,6 +520,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       add_date: library.add_date,
       label: library.label,
       label_id: library.label_id,
+      on_streaming: library.on_streaming,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -551,6 +538,22 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
     );
 });
+export type LibraryArtistViewEntry = {
+  id: number;
+  code_letters: string;
+  code_artist_number: number;
+  code_number: number;
+  artist_name: string;
+  alphabetical_name: string;
+  album_title: string;
+  format_name: string;
+  genre_name: string;
+  rotation_bin: string | null;
+  add_date: Date;
+  label: string | null;
+  label_id: number | null;
+  on_streaming: boolean | null;
+};
 
 export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {
   return qb
