@@ -175,11 +175,7 @@ const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map
     if (!parsed || parsed.table !== 'FLOWSHEET_ENTRY_PROD') continue;
 
     for (const tuple of parsed.tuples) {
-      const addTime = resolveEntryTimestamp(
-        Number(tuple[10]) || 0,
-        Number(tuple[17]) || 0,
-        Number(tuple[16]) || 0,
-      );
+      const addTime = resolveEntryTimestamp(Number(tuple[10]) || 0, Number(tuple[17]) || 0, Number(tuple[16]) || 0);
       if (!addTime) continue;
       const entryId = Number(tuple[0]);
       const showId = Number(tuple[12]);
