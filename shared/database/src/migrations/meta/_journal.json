@@ -253,6 +253,13 @@
       "when": 1776394873403,
       "tag": "0038_etl-legacy-columns",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1776565622430,
+      "tag": "0039_add_on_streaming",
+      "breakpoints": true
     }
   ]
 }
