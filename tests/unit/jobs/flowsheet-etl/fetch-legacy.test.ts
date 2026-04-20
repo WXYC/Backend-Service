@@ -2,7 +2,8 @@
  * Unit tests for flowsheet ETL fetch-legacy parsing functions.
  *
  * Tests the tab-separated row parsing for entries and shows, including
- * the TIME_LAST_MODIFIED column used for update detection.
+ * the TIME_CREATED and TIME_LAST_MODIFIED columns used for timestamp
+ * resolution and update detection.
  */
 
 jest.mock('@wxyc/database', () => ({
@@ -51,11 +52,12 @@ describe('fetch-legacy parsing', () => {
   });
 
   describe('parseEntryRows', () => {
-    // Columns: ID, SHOW_ID, TYPE, ARTIST, ALBUM, TRACK, LABEL, REQ, SEQ, START, TLM, LIBRARY_RELEASE_ID [, SEGUE_FLAG]
+    // Columns: ID, SHOW_ID, TYPE, ARTIST, ALBUM, TRACK, LABEL, REQ, SEQ, START, TIME_CREATED, TLM, LIBRARY_RELEASE_ID [, SEGUE_FLAG]
 
-    it('parses 12-column format (without SEGUE_FLAG)', () => {
-      const raw = '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t0\t1\t1706799600000\t1706799700000\t101';
-      const rows = parseEntryRows(raw, 12);
+    it('parses 13-column format (without SEGUE_FLAG)', () => {
+      const raw =
+        '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t0\t1\t1706799600000\t1706799650000\t1706799700000\t101';
+      const rows = parseEntryRows(raw, 13);
 
       expect(rows).toHaveLength(1);
       expect(rows[0]).toEqual({
@@ -69,40 +71,43 @@ describe('fetch-legacy parsing', () => {
         requestFlag: 0,
         playOrder: 1,
         startTime: 1706799600000,
+        timeCreated: 1706799650000,
         timeLastModified: 1706799700000,
         legacyReleaseId: 101,
         segueFlag: 0,
       });
     });
 
-    it('parses 13-column format (with SEGUE_FLAG)', () => {
-      const raw = '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t1\t1\t1706799600000\t1706799700000\t101\t1';
-      const rows = parseEntryRows(raw, 13);
+    it('parses 14-column format (with SEGUE_FLAG)', () => {
+      const raw =
+        '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t1\t1\t1706799600000\t1706799650000\t1706799700000\t101\t1';
+      const rows = parseEntryRows(raw, 14);
 
       expect(rows).toHaveLength(1);
       expect(rows[0].requestFlag).toBe(1);
+      expect(rows[0].timeCreated).toBe(1706799650000);
       expect(rows[0].timeLastModified).toBe(1706799700000);
       expect(rows[0].legacyReleaseId).toBe(101);
       expect(rows[0].segueFlag).toBe(1);
     });
 
-    it('defaults segueFlag to 0 in 12-column format', () => {
-      const raw = '100\t200\t0\tArtist\tAlbum\tTrack\tLabel\t0\t1\t1000\t2000\t42';
-      const rows = parseEntryRows(raw, 12);
+    it('defaults segueFlag to 0 in 13-column format', () => {
+      const raw = '100\t200\t0\tArtist\tAlbum\tTrack\tLabel\t0\t1\t1000\t1500\t2000\t42';
+      const rows = parseEntryRows(raw, 13);
 
       expect(rows[0].segueFlag).toBe(0);
     });
 
     it('sets legacyReleaseId to null when value is 0', () => {
-      const raw = '100\t200\t7\tTALKSET\t\t\t\t0\t5\t1000\t2000\t0';
-      const rows = parseEntryRows(raw, 12);
+      const raw = '100\t200\t7\tTALKSET\t\t\t\t0\t5\t1000\t1500\t2000\t0';
+      const rows = parseEntryRows(raw, 13);
 
       expect(rows[0].legacyReleaseId).toBeNull();
     });
 
     it('handles NULL/empty text fields', () => {
-      const raw = '100\t200\t7\tNULL\t\t\t\t0\t5\t1000\t2000\t0';
-      const rows = parseEntryRows(raw, 12);
+      const raw = '100\t200\t7\tNULL\t\t\t\t0\t5\t1000\t1500\t2000\t0';
+      const rows = parseEntryRows(raw, 13);
 
       expect(rows[0].artistName).toBeNull();
       expect(rows[0].albumTitle).toBeNull();
@@ -114,7 +119,7 @@ describe('fetch-legacy parsing', () => {
       const raw = '100\t200\t0\tArtist';
       const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
 
-      const rows = parseEntryRows(raw, 12);
+      const rows = parseEntryRows(raw, 13);
 
       expect(rows).toHaveLength(0);
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('malformed'), expect.any(String));
@@ -122,23 +127,33 @@ describe('fetch-legacy parsing', () => {
     });
 
     it('returns empty array for empty input', () => {
-      expect(parseEntryRows('', 12)).toEqual([]);
-      expect(parseEntryRows('   ', 12)).toEqual([]);
+      expect(parseEntryRows('', 13)).toEqual([]);
+      expect(parseEntryRows('   ', 13)).toEqual([]);
     });
 
     it('parses multiple rows', () => {
       const raw = [
-        '1\t100\t0\tArtist1\tAlbum1\tTrack1\tLabel1\t0\t1\t1000\t2000\t101',
-        '2\t100\t0\tArtist2\tAlbum2\tTrack2\tLabel2\t1\t2\t3000\t4000\t102',
+        '1\t100\t0\tArtist1\tAlbum1\tTrack1\tLabel1\t0\t1\t1000\t1500\t2000\t101',
+        '2\t100\t0\tArtist2\tAlbum2\tTrack2\tLabel2\t1\t2\t3000\t3500\t4000\t102',
       ].join('\n');
-      const rows = parseEntryRows(raw, 12);
+      const rows = parseEntryRows(raw, 13);
 
       expect(rows).toHaveLength(2);
       expect(rows[0].id).toBe(1);
       expect(rows[0].legacyReleaseId).toBe(101);
       expect(rows[1].id).toBe(2);
       expect(rows[1].legacyReleaseId).toBe(102);
+      expect(rows[1].timeCreated).toBe(3500);
       expect(rows[1].timeLastModified).toBe(4000);
+    });
+
+    it('preserves timeCreated when START_TIME is 0', () => {
+      const raw = '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t0\t1\t0\t1706799650000\t1706799700000\t101';
+      const rows = parseEntryRows(raw, 13);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].startTime).toBe(0);
+      expect(rows[0].timeCreated).toBe(1706799650000);
     });
   });
 
