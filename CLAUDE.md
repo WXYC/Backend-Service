@@ -8,14 +8,14 @@ API and authentication service for WXYC applications. Provides endpoints for the
 
 npm workspaces with four packages:
 
-| Package                | Path                     | Purpose                                  |
-| ---------------------- | ------------------------ | ---------------------------------------- |
-| `@wxyc/backend`        | `apps/backend/`          | Express API server (port 8080)           |
-| `@wxyc/auth-service`   | `apps/auth/`             | better-auth server (port 8082)           |
+| Package                | Path                     | Purpose                                               |
+| ---------------------- | ------------------------ | ----------------------------------------------------- |
+| `@wxyc/backend`        | `apps/backend/`          | Express API server (port 8080)                        |
+| `@wxyc/auth-service`   | `apps/auth/`             | better-auth server (port 8082)                        |
 | `@wxyc/database`       | `shared/database/`       | Drizzle ORM schema, client, migrations, ETL utilities |
-| `@wxyc/authentication` | `shared/authentication/` | Auth middleware, roles, JWT verification |
-| `@wxyc/flowsheet-etl`  | `jobs/flowsheet-etl/`    | Flowsheet ETL: sync from tubafrenzy      |
-| `@wxyc/rotation-etl`   | `jobs/rotation-etl/`     | Rotation ETL: sync from tubafrenzy       |
+| `@wxyc/authentication` | `shared/authentication/` | Auth middleware, roles, JWT verification              |
+| `@wxyc/flowsheet-etl`  | `jobs/flowsheet-etl/`    | Flowsheet ETL: sync from tubafrenzy                   |
+| `@wxyc/rotation-etl`   | `jobs/rotation-etl/`     | Rotation ETL: sync from tubafrenzy                    |
 
 ### API Server (`apps/backend`)
 
