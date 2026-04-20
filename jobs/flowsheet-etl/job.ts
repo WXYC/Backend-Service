@@ -327,7 +327,7 @@ const runIncremental = async (): Promise<SyncResult> => {
   let entriesImported = 0;
   let entriesUpdated = 0;
   for (const entry of legacyEntries) {
-    const addTime = epochMsToDate(entry.startTime);
+    const addTime = resolveEntryTimestamp(entry.startTime, entry.timeCreated, entry.timeLastModified);
     if (!addTime) continue;
 
     const backendShowId = showIdMap.get(entry.showId);

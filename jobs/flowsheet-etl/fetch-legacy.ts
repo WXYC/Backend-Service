@@ -32,6 +32,7 @@ export type LegacyEntryRow = {
   requestFlag: number;
   playOrder: number;
   startTime: number;
+  timeCreated: number;
   timeLastModified: number;
   legacyReleaseId: number | null;
   segueFlag: number;
@@ -83,10 +84,10 @@ export const fetchLegacyShows = async (sinceMs: number | null): Promise<LegacySh
  * Parse tab-separated entry rows. Column positions:
  *   0: ID, 1: RADIO_SHOW_ID, 2: ENTRY_TYPE_CODE, 3: ARTIST_NAME,
  *   4: RELEASE_TITLE, 5: SONG_TITLE, 6: LABEL_NAME, 7: REQUEST_FLAG,
- *   8: SEQUENCE_WITHIN_SHOW, 9: START_TIME, 10: TIME_LAST_MODIFIED,
- *   11: LIBRARY_RELEASE_ID [, 12: SEGUE_FLAG — optional]
+ *   8: SEQUENCE_WITHIN_SHOW, 9: START_TIME, 10: TIME_CREATED,
+ *   11: TIME_LAST_MODIFIED, 12: LIBRARY_RELEASE_ID [, 13: SEGUE_FLAG — optional]
  *
- * columnCount: 12 (without SEGUE_FLAG) or 13 (with)
+ * columnCount: 13 (without SEGUE_FLAG) or 14 (with)
  */
 export const parseEntryRows = (raw: string, columnCount: number): LegacyEntryRow[] => {
   if (raw.trim().length === 0) return [];
@@ -98,7 +99,7 @@ export const parseEntryRows = (raw: string, columnCount: number): LegacyEntryRow
       console.warn('[flowsheet-etl] Skipping malformed entry row:', line);
       continue;
     }
-    const rawReleaseId = Number(cols[11]) || 0;
+    const rawReleaseId = Number(cols[12]) || 0;
     rows.push({
       id: Number(cols[0]),
       showId: Number(cols[1]),
@@ -110,9 +111,10 @@ export const parseEntryRows = (raw: string, columnCount: number): LegacyEntryRow
       requestFlag: Number(cols[7]) || 0,
       playOrder: Number(cols[8]) || 0,
       startTime: Number(cols[9]),
-      timeLastModified: Number(cols[10]) || 0,
+      timeCreated: Number(cols[10]) || 0,
+      timeLastModified: Number(cols[11]) || 0,
       legacyReleaseId: rawReleaseId === 0 ? null : rawReleaseId,
-      segueFlag: columnCount >= 13 ? Number(cols[12]) || 0 : 0,
+      segueFlag: columnCount >= 14 ? Number(cols[13]) || 0 : 0,
     });
   }
   return rows;
@@ -129,22 +131,26 @@ const BASE_ENTRY_COLUMNS = `
       fe.REQUEST_FLAG,
       fe.SEQUENCE_WITHIN_SHOW,
       fe.START_TIME,
+      fe.TIME_CREATED,
       fe.TIME_LAST_MODIFIED,
       fe.LIBRARY_RELEASE_ID`;
 
 export const fetchLegacyEntries = async (sinceMs: number | null): Promise<LegacyEntryRow[]> => {
-  const filter = sinceMs != null ? `WHERE fe.START_TIME > ${sinceMs} OR fe.TIME_LAST_MODIFIED > ${sinceMs}` : '';
+  const filter =
+    sinceMs != null
+      ? `WHERE fe.START_TIME > ${sinceMs} OR fe.TIME_CREATED > ${sinceMs} OR fe.TIME_LAST_MODIFIED > ${sinceMs}`
+      : '';
 
   // Try with SEGUE_FLAG first; fall back without it if the column doesn't exist
   try {
     const queryWithSegue = `SELECT ${BASE_ENTRY_COLUMNS}, fe.SEGUE_FLAG FROM FLOWSHEET_ENTRY_PROD fe ${filter} ORDER BY fe.ID ASC;`;
     const raw = await legacyDB.send(queryWithSegue);
-    return parseEntryRows(raw, 13);
+    return parseEntryRows(raw, 14);
   } catch {
     console.warn('[flowsheet-etl] SEGUE_FLAG not available, defaulting to 0.');
     const queryWithout = `SELECT ${BASE_ENTRY_COLUMNS} FROM FLOWSHEET_ENTRY_PROD fe ${filter} ORDER BY fe.ID ASC;`;
     const raw = await legacyDB.send(queryWithout);
-    return parseEntryRows(raw, 12);
+    return parseEntryRows(raw, 13);
   }
 };
 
