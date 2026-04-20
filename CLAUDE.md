@@ -12,8 +12,10 @@ npm workspaces with four packages:
 | ---------------------- | ------------------------ | ---------------------------------------- |
 | `@wxyc/backend`        | `apps/backend/`          | Express API server (port 8080)           |
 | `@wxyc/auth-service`   | `apps/auth/`             | better-auth server (port 8082)           |
-| `@wxyc/database`       | `shared/database/`       | Drizzle ORM schema, client, migrations   |
+| `@wxyc/database`       | `shared/database/`       | Drizzle ORM schema, client, migrations, ETL utilities |
 | `@wxyc/authentication` | `shared/authentication/` | Auth middleware, roles, JWT verification |
+| `@wxyc/flowsheet-etl`  | `jobs/flowsheet-etl/`    | Flowsheet ETL: sync from tubafrenzy      |
+| `@wxyc/rotation-etl`   | `jobs/rotation-etl/`     | Rotation ETL: sync from tubafrenzy       |
 
 ### API Server (`apps/backend`)
 
@@ -268,7 +270,7 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
 ### ETL Jobs
 
-The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the legacy MySQL database into PostgreSQL. The flowsheet ETL (`jobs/flowsheet-etl/`) syncs flowsheet entries and shows from tubafrenzy. Both require the standard database variables above plus these for SSH tunneling to the legacy server:
+The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the legacy MySQL database into PostgreSQL. The flowsheet ETL (`jobs/flowsheet-etl/`) syncs flowsheet entries and shows from tubafrenzy. The rotation ETL (`jobs/rotation-etl/`) syncs rotation releases from tubafrenzy. All three require the standard database variables above plus these for SSH tunneling to the legacy server:
 
 - `SSH_HOST` -- Hostname of the legacy server
 - `SSH_USERNAME` -- SSH login username
@@ -283,6 +285,8 @@ The flowsheet ETL supports two run modes: one-shot (`npm start`) for cron invoca
 - `ETL_POLL_INTERVAL_MS` -- Poll interval in milliseconds (default `30000`)
 - `BACKEND_SERVICE_URL` -- Backend-Service URL for SSE notifications (default `http://localhost:8080`)
 - `ETL_NOTIFY_KEY` -- Shared secret for internal endpoints: ETL sync notification and tubafrenzy webhook (required in production)
+
+The rotation ETL supports the same two run modes as the flowsheet ETL: one-shot (`npm start`) for cron invocation, and continuous polling (`npm run start:poll` or `node dist/job.js --poll`) for real-time sync. In polling mode, it queries tubafrenzy every `ETL_POLL_INTERVAL_MS` for new or modified rotation releases and upserts them into PostgreSQL. It uses the same SSH tunnel, `ETL_POLL_INTERVAL_MS`, `BACKEND_SERVICE_URL`, and `ETL_NOTIFY_KEY` variables as the flowsheet ETL. After importing changes, it notifies the Backend-Service via `POST /internal/rotation-sync-notify`.
 
 ## Relationship to Other Repos
 

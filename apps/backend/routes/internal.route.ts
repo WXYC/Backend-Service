@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import { eq, sql } from 'drizzle-orm';
-import { db, flowsheet, shows } from '@wxyc/database';
+import { db, flowsheet, shows, rotation, library, truncate } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
 import { updateLastModified } from '../services/flowsheet.service.js';
-import { mapProdEntryType, isMessageEntryType, truncate } from '../utils/flowsheet-transform.js';
+import { mapProdEntryType, isMessageEntryType } from '../utils/flowsheet-transform.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
 
@@ -137,6 +137,143 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error('[webhook] Flowsheet webhook error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---- Rotation Endpoints ----
+
+/**
+ * POST /internal/rotation-sync-notify
+ *
+ * Called by the rotation ETL after importing new or updated rotation releases
+ * from tubafrenzy. Broadcasts a refetch event so dj-site UIs stay in sync.
+ */
+internal_route.post('/rotation-sync-notify', (req, res) => {
+  if (!authenticateInternal(req.get('X-Internal-Key'))) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  serverEventsMgr.broadcast(Topics.liveFs, {
+    type: FsEvents.refetch,
+    payload: { source: 'rotation-etl' },
+  });
+
+  res.json({ ok: true });
+});
+
+const VALID_ROTATION_ACTIONS = new Set(['create', 'update', 'kill', 'unkill']);
+const VALID_ROTATION_BINS = new Set(['S', 'L', 'M', 'H', 'N']);
+
+/**
+ * Resolve a Backend-Service album_id from a tubafrenzy LIBRARY_RELEASE_ID.
+ * Returns null if the library release ID is 0 or not found.
+ */
+async function resolveAlbumId(legacyLibraryReleaseId: number): Promise<number | null> {
+  if (!legacyLibraryReleaseId) return null;
+
+  const [row] = await db
+    .select({ id: library.id })
+    .from(library)
+    .where(eq(library.legacy_release_id, legacyLibraryReleaseId))
+    .limit(1);
+  return row?.id ?? null;
+}
+
+/**
+ * POST /internal/rotation-webhook
+ *
+ * Receives rotation release events from tubafrenzy. Called by tubafrenzy's
+ * WebhookRotationReleaseListener when releases are added, updated, killed, or unkilled.
+ *
+ * Payload:
+ *   { action: "create"|"update", release: { id, artistName, albumTitle, rotationType, labelName, addDate, killDate, libraryReleaseId } }
+ *   { action: "kill", release: { id, killDate } }
+ *   { action: "unkill", releaseId: number }
+ */
+internal_route.post('/rotation-webhook', async (req, res) => {
+  if (!authenticateInternal(req.get('X-Internal-Key'))) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const { action, release, releaseId } = req.body ?? {};
+
+  if (!action || !VALID_ROTATION_ACTIONS.has(action)) {
+    res.status(400).json({ error: 'Missing or invalid action. Expected: create, update, kill, or unkill.' });
+    return;
+  }
+
+  try {
+    if (action === 'unkill') {
+      if (typeof releaseId !== 'number') {
+        res.status(400).json({ error: 'Missing releaseId for unkill action.' });
+        return;
+      }
+      await db.update(rotation).set({ kill_date: null }).where(eq(rotation.legacy_rotation_id, releaseId));
+    } else if (action === 'kill') {
+      if (!release || typeof release.id !== 'number') {
+        res.status(400).json({ error: 'Missing release.id for kill action.' });
+        return;
+      }
+      const killDate =
+        release.killDate && release.killDate !== 0
+          ? new Date(release.killDate).toISOString().split('T')[0]
+          : new Date().toISOString().split('T')[0];
+      await db.update(rotation).set({ kill_date: killDate }).where(eq(rotation.legacy_rotation_id, release.id));
+    } else {
+      // create or update — both use upsert
+      if (!release || typeof release.id !== 'number') {
+        res.status(400).json({ error: 'Missing release.id for create/update action.' });
+        return;
+      }
+
+      const rotationType = VALID_ROTATION_BINS.has(release.rotationType) ? release.rotationType : 'N';
+      const rawLibraryId = release.libraryReleaseId ?? 0;
+      const albumId = await resolveAlbumId(rawLibraryId);
+      const addDate =
+        release.addDate && release.addDate !== 0
+          ? new Date(release.addDate).toISOString().split('T')[0]
+          : new Date().toISOString().split('T')[0];
+      const killDate =
+        release.killDate && release.killDate !== 0 ? new Date(release.killDate).toISOString().split('T')[0] : null;
+
+      await db
+        .insert(rotation)
+        .values({
+          legacy_rotation_id: release.id,
+          legacy_library_release_id: rawLibraryId || null,
+          album_id: albumId,
+          rotation_bin: rotationType,
+          add_date: addDate,
+          kill_date: killDate,
+          artist_name: albumId ? null : truncate(release.artistName, 128),
+          album_title: albumId ? null : truncate(release.albumTitle, 128),
+          record_label: albumId ? null : truncate(release.labelName, 128),
+        })
+        .onConflictDoUpdate({
+          target: rotation.legacy_rotation_id,
+          set: {
+            album_id: sql`excluded.album_id`,
+            legacy_library_release_id: sql`excluded.legacy_library_release_id`,
+            rotation_bin: sql`excluded.rotation_bin`,
+            kill_date: sql`excluded.kill_date`,
+            artist_name: sql`excluded.artist_name`,
+            album_title: sql`excluded.album_title`,
+            record_label: sql`excluded.record_label`,
+          },
+        });
+    }
+
+    serverEventsMgr.broadcast(Topics.liveFs, {
+      type: FsEvents.refetch,
+      payload: { source: 'rotation-webhook' },
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[webhook] Rotation webhook error:', e);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -15,34 +15,25 @@
  */
 
 import { readFileSync } from 'fs';
-import { eq, inArray, sql } from 'drizzle-orm';
-import { db, shows, flowsheet, library, cronjob_runs, closeDatabaseConnection } from '@wxyc/database';
+import { inArray, sql } from 'drizzle-orm';
+import {
+  db,
+  shows,
+  flowsheet,
+  library,
+  closeDatabaseConnection,
+  getLastRunTimestamp,
+  updateLastRun,
+  runPollingLoop,
+  epochMsToDate,
+  truncate,
+} from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
-import { mapProdEntryType, epochMsToDate, resolveEntryTimestamp, parseShowEntryDJName, truncate } from './transform.js';
+import { mapProdEntryType, resolveEntryTimestamp, parseShowEntryDJName } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
 
 const JOB_NAME = 'flowsheet-etl';
 const BATCH_SIZE = 5000;
-
-const getLastRunTimestamp = async (): Promise<number | null> => {
-  const response = await db
-    .select({ lastRun: cronjob_runs.last_run })
-    .from(cronjob_runs)
-    .where(eq(cronjob_runs.job_name, JOB_NAME))
-    .limit(1);
-  const lastRun = response[0]?.lastRun ?? null;
-  return lastRun ? lastRun.getTime() : null;
-};
-
-const updateLastRun = async (timestamp: Date) => {
-  await db
-    .insert(cronjob_runs)
-    .values({ job_name: JOB_NAME, last_run: timestamp })
-    .onConflictDoUpdate({
-      target: cronjob_runs.job_name,
-      set: { last_run: timestamp },
-    });
-};
 
 /**
  * Reset PostgreSQL sequences after a bulk load so that new inserts
@@ -267,7 +258,7 @@ const runBulkLoad = async (dumpPath: string, { replace = false } = {}) => {
 
   await resetSequences();
   await resolveAlbumIds();
-  await updateLastRun(new Date());
+  await updateLastRun(JOB_NAME, new Date());
   console.log('[flowsheet-etl] Recorded last_run for future incremental syncs.');
 };
 
@@ -277,7 +268,7 @@ type SyncResult = { showsImported: number; entriesImported: number; entriesUpdat
 
 const runIncremental = async (): Promise<SyncResult> => {
   const runStartedAt = new Date();
-  const lastRunMs = await getLastRunTimestamp();
+  const lastRunMs = await getLastRunTimestamp(JOB_NAME);
 
   // Sync shows
   const legacyShows = await fetchLegacyShows(lastRunMs);
@@ -384,65 +375,12 @@ const runIncremental = async (): Promise<SyncResult> => {
     await resolveAlbumIds();
   }
 
-  await updateLastRun(runStartedAt);
+  await updateLastRun(JOB_NAME, runStartedAt);
   const parts = [`${showsImported} shows`, `${entriesImported} new entries`];
   if (entriesUpdated > 0) parts.push(`${entriesUpdated} updated entries`);
   console.log(`[flowsheet-etl] Incremental sync: ${parts.join(', ')}.`);
 
   return { showsImported, entriesImported, entriesUpdated };
-};
-
-// ---- SSE Notification ----
-
-const notifyBackendService = async () => {
-  const url = process.env.BACKEND_SERVICE_URL ?? 'http://localhost:8080';
-  const key = process.env.ETL_NOTIFY_KEY ?? '';
-  try {
-    const response = await fetch(`${url}/internal/flowsheet-sync-notify`, {
-      method: 'POST',
-      headers: { 'X-Internal-Key': key },
-    });
-    if (!response.ok) {
-      console.warn(`[flowsheet-etl] Backend notify returned ${response.status}`);
-    }
-  } catch (e) {
-    console.warn('[flowsheet-etl] Failed to notify backend:', e);
-  }
-};
-
-// ---- Continuous Polling Mode ----
-
-const runPollingLoop = async () => {
-  const intervalMs = Number(process.env.ETL_POLL_INTERVAL_MS) || 30_000;
-  let running = true;
-  let sleepResolve: (() => void) | null = null;
-
-  const shutdown = () => {
-    running = false;
-    sleepResolve?.();
-  };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
-
-  console.log(`[flowsheet-etl] Polling every ${intervalMs}ms. PID ${process.pid}`);
-
-  while (running) {
-    try {
-      const result = await runIncremental();
-      if (result.entriesImported > 0 || result.entriesUpdated > 0) {
-        await notifyBackendService();
-      }
-    } catch (e) {
-      console.error('[flowsheet-etl] Poll error:', e);
-    }
-    if (!running) break;
-    await new Promise<void>((resolve) => {
-      sleepResolve = resolve;
-      setTimeout(resolve, intervalMs);
-    });
-  }
-
-  console.log('[flowsheet-etl] Shutting down.');
 };
 
 // ---- Main ----
@@ -454,7 +392,13 @@ const run = async () => {
     if (dumpPath) {
       await runBulkLoad(dumpPath, { replace: args.includes('--replace') });
     } else if (args.includes('--poll')) {
-      await runPollingLoop();
+      await runPollingLoop(
+        async () => {
+          const result = await runIncremental();
+          return { hasChanges: result.entriesImported > 0 || result.entriesUpdated > 0 };
+        },
+        { jobName: JOB_NAME, notifyPath: '/internal/flowsheet-sync-notify' }
+      );
     } else {
       await runIncremental();
     }
