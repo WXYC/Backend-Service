@@ -262,7 +262,9 @@ const updateLastRun = async (dbClient: DbClient, jobName: string, lastRun: Date)
 const buildReleaseQuery = (lastRunMs: number | null, includeDateLostFound: boolean, includeAlbumArtist: boolean) => {
   const lastRunFilter = lastRunMs == null ? '' : `WHERE lr.TIME_LAST_MODIFIED > ${lastRunMs}`;
   const dateLostFoundColumns = includeDateLostFound ? `,\n      lr.DATE_LOST,\n      lr.DATE_FOUND` : '';
-  const albumArtistColumn = includeAlbumArtist ? `,\n      REPLACE(REPLACE(IFNULL(lr.ALBUM_ARTIST, ''), '\\t', ' '), '\\n', ' ')` : '';
+  const albumArtistColumn = includeAlbumArtist
+    ? `,\n      REPLACE(REPLACE(IFNULL(lr.ALBUM_ARTIST, ''), '\\t', ' '), '\\n', ' ')`
+    : '';
   return `
     SELECT
       lr.ID,
