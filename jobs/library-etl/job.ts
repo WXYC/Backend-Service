@@ -35,6 +35,7 @@ type LegacyReleaseRow = {
   format_ref_name: string | null;
   date_lost: number | null;
   date_found: number | null;
+  release_album_artist: string | null;
 };
 
 const VARIOUS_ARTISTS_NAME = 'Various Artists';
@@ -258,9 +259,10 @@ const updateLastRun = async (dbClient: DbClient, jobName: string, lastRun: Date)
     });
 };
 
-const buildReleaseQuery = (lastRunMs: number | null, includeDateLostFound: boolean) => {
+const buildReleaseQuery = (lastRunMs: number | null, includeDateLostFound: boolean, includeAlbumArtist: boolean) => {
   const lastRunFilter = lastRunMs == null ? '' : `WHERE lr.TIME_LAST_MODIFIED > ${lastRunMs}`;
   const dateLostFoundColumns = includeDateLostFound ? `,\n      lr.DATE_LOST,\n      lr.DATE_FOUND` : '';
+  const albumArtistColumn = includeAlbumArtist ? `,\n      REPLACE(REPLACE(IFNULL(lr.ALBUM_ARTIST, ''), '\\t', ' '), '\\n', ' ')` : '';
   return `
     SELECT
       lr.ID,
@@ -275,7 +277,7 @@ const buildReleaseQuery = (lastRunMs: number | null, includeDateLostFound: boole
       lc.CALL_LETTERS AS artist_call_letters,
       lc.CALL_NUMBERS AS artist_call_numbers,
       g.REFERENCE_NAME,
-      f.REFERENCE_NAME${dateLostFoundColumns}
+      f.REFERENCE_NAME${dateLostFoundColumns}${albumArtistColumn}
     FROM LIBRARY_RELEASE lr
     JOIN LIBRARY_CODE lc ON lr.LIBRARY_CODE_ID = lc.ID
     JOIN GENRE g ON lc.GENRE_ID = g.ID
@@ -312,6 +314,7 @@ const parseReleaseRows = (raw: string, columnCount: number): LegacyReleaseRow[] 
       format_ref_name: toNullableString(columns[12]),
       date_lost: columnCount >= 15 ? toNullableNumber(columns[13]) : null,
       date_found: columnCount >= 15 ? toNullableNumber(columns[14]) : null,
+      release_album_artist: columnCount >= 16 ? toNullableString(columns[15]) : null,
     });
   }
 
@@ -319,13 +322,19 @@ const parseReleaseRows = (raw: string, columnCount: number): LegacyReleaseRow[] 
 };
 
 const fetchLegacyReleases = async (lastRunMs: number | null) => {
-  // Try with DATE_LOST/DATE_FOUND columns first; fall back if they don't exist
+  // Try with DATE_LOST/DATE_FOUND + ALBUM_ARTIST columns first; fall back progressively
   try {
-    const raw = await legacyDB.send(buildReleaseQuery(lastRunMs, true));
+    const raw = await legacyDB.send(buildReleaseQuery(lastRunMs, true, true));
+    return parseReleaseRows(raw, 16);
+  } catch {
+    console.warn('[library-etl] ALBUM_ARTIST column not available, falling back to 15-column query.');
+  }
+  try {
+    const raw = await legacyDB.send(buildReleaseQuery(lastRunMs, true, false));
     return parseReleaseRows(raw, 15);
   } catch {
     console.warn('[library-etl] DATE_LOST/DATE_FOUND columns not available, falling back to 13-column query.');
-    const raw = await legacyDB.send(buildReleaseQuery(lastRunMs, false));
+    const raw = await legacyDB.send(buildReleaseQuery(lastRunMs, false, false));
     return parseReleaseRows(raw, 13);
   }
 };
@@ -769,6 +778,7 @@ type ExistingRelease = {
   legacyReleaseId: number | null;
   dateLost: Date | null;
   dateFound: Date | null;
+  albumArtist: string | null;
 };
 
 const findExistingRelease = async (
@@ -785,6 +795,7 @@ const findExistingRelease = async (
       legacyReleaseId: library.legacy_release_id,
       dateLost: library.date_lost,
       dateFound: library.date_found,
+      albumArtist: library.album_artist,
     })
     .from(library)
     .where(
@@ -923,6 +934,10 @@ const run = async () => {
           if (existing.dateFound?.getTime() !== newDateFound?.getTime()) {
             updates.date_found = newDateFound;
           }
+          const newAlbumArtist = release.release_album_artist ?? null;
+          if ((existing.albumArtist ?? null) !== newAlbumArtist) {
+            updates.album_artist = newAlbumArtist;
+          }
           if (Object.keys(updates).length > 0) {
             await tx.update(library).set(updates).where(eq(library.id, existing.id));
           }
@@ -935,6 +950,7 @@ const run = async () => {
           genre_id: genreId,
           format_id: formatId,
           alternate_artist_name: release.release_alternate_artist_name,
+          album_artist: release.release_album_artist,
           album_title: albumTitle,
           code_number: release.release_call_numbers ?? 0,
           code_volume_letters: codeVolumeLetters,
