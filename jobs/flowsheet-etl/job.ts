@@ -264,9 +264,9 @@ const runBulkLoad = async (dumpPath: string, { replace = false } = {}) => {
 
 // ---- Incremental Sync Mode ----
 
-type SyncResult = { showsImported: number; entriesImported: number; entriesUpdated: number };
+export type SyncResult = { showsImported: number; entriesImported: number; entriesUpdated: number };
 
-const runIncremental = async (): Promise<SyncResult> => {
+export const runIncremental = async (): Promise<SyncResult> => {
   const runStartedAt = new Date();
   const lastRunMs = await getLastRunTimestamp(JOB_NAME);
 

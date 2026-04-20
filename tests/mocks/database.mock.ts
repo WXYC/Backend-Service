@@ -166,6 +166,13 @@ export const toNullable = (value: string): string | null => {
   return trimmed.length === 0 || trimmed === 'NULL' ? null : trimmed;
 };
 
+// ETL cronjob tracking and lifecycle (from etl-utils.ts)
+export const getLastRunTimestamp = jest.fn().mockResolvedValue(null);
+export const updateLastRun = jest.fn().mockResolvedValue(undefined);
+export const runPollingLoop = jest.fn().mockResolvedValue(undefined);
+export const closeDatabaseConnection = jest.fn().mockResolvedValue(undefined);
+export const cronjob_runs = {};
+
 // Mock enum
 export const flowsheetEntryTypeEnum = () => ({});
 
