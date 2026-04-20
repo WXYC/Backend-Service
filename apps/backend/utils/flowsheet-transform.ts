@@ -44,6 +44,10 @@ export const mapProdEntryType = (typeCode: number): BackendEntryType => {
   return PROD_ENTRY_TYPE_MAP[typeCode] ?? 'message';
 };
 
+/** Entry types whose legacy ARTIST_NAME text is display content, not a real artist. */
+export const isMessageEntryType = (entryType: string): boolean =>
+  entryType === 'breakpoint' || entryType === 'talkset' || entryType === 'message';
+
 /**
  * Truncate a string to a max length, returning null if empty.
  * Matches the VARCHAR(128) / VARCHAR(250) limits in the schema.
