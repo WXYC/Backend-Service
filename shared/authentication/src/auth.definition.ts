@@ -8,6 +8,7 @@ import {
   bearer,
   emailOTP,
   jwt,
+  oidcProvider,
   organization as organizationPlugin,
   username,
 } from 'better-auth/plugins';
@@ -157,6 +158,39 @@ export const auth = betterAuth({
             capabilities: userWithCapabilities?.capabilities ?? [],
           };
         },
+      },
+    }),
+    oidcProvider({
+      loginPage: '/sign-in',
+      allowDynamicClientRegistration: false,
+      requirePKCE: true,
+      trustedClients: [
+        {
+          clientId: process.env.WIKIJS_OIDC_CLIENT_ID!,
+          clientSecret: process.env.WIKIJS_OIDC_CLIENT_SECRET!,
+          redirectUrls: [`${process.env.WIKIJS_URL}/login/oidc/callback`],
+          name: 'Wiki.js',
+          type: 'web' as const,
+          disabled: false,
+          icon: undefined,
+          metadata: null,
+          skipConsent: true,
+        },
+      ],
+      getAdditionalUserInfoClaim: async (userRecord) => {
+        try {
+          const memberRecord = await db
+            .select({ role: member.role })
+            .from(member)
+            .where(eq(member.userId, userRecord.id))
+            .limit(1);
+          return {
+            role: memberRecord[0]?.role ?? 'member',
+            capabilities: (userRecord as typeof userRecord & { capabilities?: string[] }).capabilities ?? [],
+          };
+        } catch {
+          return { role: 'member', capabilities: [] };
+        }
       },
     }),
     organizationPlugin({
