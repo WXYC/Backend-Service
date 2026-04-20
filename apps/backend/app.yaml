@@ -247,7 +247,7 @@ components:
           format: date
         rotation_bin:
           type: string
-          enum: ['S', 'L', 'M', 'H']
+          enum: ['S', 'L', 'M', 'H', 'N']
         kill_date:
           type: string
           format: date
@@ -263,7 +263,7 @@ components:
           type: integer
         rotation_bin:
           type: string
-          enum: ['S', 'L', 'M', 'H']
+          enum: ['S', 'L', 'M', 'H', 'N']
         kill_date:
           type: string
           format: date

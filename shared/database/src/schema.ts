@@ -297,7 +297,7 @@ export const compilation_track_artist = wxyc_schema.table(
 
 export type NewRotationRelease = InferInsertModel<typeof rotation>;
 export type RotationRelease = InferSelectModel<typeof rotation>;
-export const freqEnum = pgEnum('freq_enum', ['S', 'L', 'M', 'H']);
+export const freqEnum = pgEnum('freq_enum', ['S', 'L', 'M', 'H', 'N']);
 
 export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
   'track',
@@ -312,17 +312,21 @@ export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
 export const rotation = wxyc_schema.table(
   'rotation',
   {
-    id: serial('id').primaryKey(), //need to create an entry w/ id 0 for items not currently on rotation and items from outside the station
-    album_id: integer('album_id')
-      .references(() => library.id, { onDelete: 'cascade' })
-      .notNull(),
+    id: serial('id').primaryKey(),
+    album_id: integer('album_id').references(() => library.id, { onDelete: 'cascade' }),
+    legacy_rotation_id: integer('legacy_rotation_id'),
+    legacy_library_release_id: integer('legacy_library_release_id'),
     rotation_bin: freqEnum('rotation_bin').notNull(),
     add_date: date('add_date').defaultNow().notNull(),
     kill_date: date('kill_date'),
+    artist_name: varchar('artist_name', { length: 128 }),
+    album_title: varchar('album_title', { length: 128 }),
+    record_label: varchar('record_label', { length: 128 }),
   },
   (table) => {
     return {
       albumIdIdx: index('album_id_idx').on(table.album_id),
+      legacyRotationIdIdx: uniqueIndex('rotation_legacy_rotation_id_idx').on(table.legacy_rotation_id),
     };
   }
 );

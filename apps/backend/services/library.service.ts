@@ -47,7 +47,7 @@ export interface Rotation {
   rotation_id: number;
   add_date: Date;
   rotation_add_date: string;
-  rotation_bin: 'S' | 'L' | 'M' | 'H';
+  rotation_bin: 'S' | 'L' | 'M' | 'H' | 'N';
   rotation_kill_date: string | null;
   plays: number;
 }

@@ -4,7 +4,10 @@
  * Fetches new shows and entries from tubafrenzy's production tables
  * (FLOWSHEET_RADIO_SHOW_PROD, FLOWSHEET_ENTRY_PROD) since the last sync.
  */
-import { MirrorSQL } from '@wxyc/database';
+import { MirrorSQL, parseTabRow, toNullable } from '@wxyc/database';
+
+// Re-export so existing imports from this module continue to work
+export { parseTabRow, toNullable } from '@wxyc/database';
 
 const legacyDB = MirrorSQL.instance();
 
@@ -32,16 +35,6 @@ export type LegacyEntryRow = {
   timeLastModified: number;
   legacyReleaseId: number | null;
   segueFlag: number;
-};
-
-export const parseTabRow = (line: string, columnCount: number) => {
-  const columns = line.split('\t');
-  return columns.length === columnCount ? columns : null;
-};
-
-export const toNullable = (value: string): string | null => {
-  const trimmed = value.trim();
-  return trimmed.length === 0 || trimmed === 'NULL' ? null : trimmed;
 };
 
 export const parseShowRows = (raw: string): LegacyShowRow[] => {

@@ -5,6 +5,11 @@
  * All functions are pure (no side effects) for easy testing.
  */
 
+// Import shared utilities for local use and re-export so existing imports continue to work
+import { epochMsToDate as _epochMsToDate, truncate as _truncate } from '@wxyc/database';
+export const epochMsToDate = _epochMsToDate;
+export const truncate = _truncate;
+
 /**
  * tubafrenzy entry_type codes:
  *   0 = track
@@ -113,15 +118,7 @@ export const parseMySQLDatetime = (datetime: string | null): Date | null => {
   return Number.isNaN(date1.getTime()) ? null : date1;
 };
 
-/**
- * Convert an epoch milliseconds value to a JS Date.
- * Returns null for null, 0 (tubafrenzy uses 0 for "not set"), and NaN.
- */
-export const epochMsToDate = (epochMs: number | null): Date | null => {
-  if (epochMs == null || epochMs === 0 || !Number.isFinite(epochMs)) return null;
-  const date = new Date(epochMs);
-  return Number.isNaN(date.getTime()) ? null : date;
-};
+// epochMsToDate is re-exported from @wxyc/database above
 
 /**
  * Resolve the best available timestamp for a FLOWSHEET_ENTRY_PROD row.
@@ -148,15 +145,7 @@ export const parseShowEntryDJName = (artistName: string): string | null => {
   return match ? match[1] : null;
 };
 
-/**
- * Truncate a string to a max length, returning null if empty.
- * Matches the VARCHAR(128) / VARCHAR(250) limits in the schema.
- */
-export const truncate = (value: string | null, maxLength: number): string | null => {
-  if (!value || value.trim().length === 0) return null;
-  const trimmed = value.trim();
-  return trimmed.length <= maxLength ? trimmed : trimmed.slice(0, maxLength);
-};
+// truncate is re-exported from @wxyc/database above
 
 export type TransformedShow = {
   legacy_show_id: number;

@@ -12,6 +12,14 @@ jest.mock('@wxyc/database', () => ({
       close: jest.fn(),
     }),
   },
+  parseTabRow: (line: string, columnCount: number) => {
+    const columns = line.split('\t');
+    return columns.length === columnCount ? columns : null;
+  },
+  toNullable: (value: string) => {
+    const trimmed = value.trim();
+    return trimmed.length === 0 || trimmed === 'NULL' ? null : trimmed;
+  },
 }));
 
 import { parseTabRow, toNullable, parseEntryRows, parseShowRows } from '../../../../jobs/flowsheet-etl/fetch-legacy';

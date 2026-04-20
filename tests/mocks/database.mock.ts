@@ -67,11 +67,25 @@ export const db = createMockDb();
 export const anonymous_devices = {};
 export const user_activity = {};
 export const labels = {};
-export const library = {};
+export const library = {
+  id: 'id',
+  legacy_release_id: 'legacy_release_id',
+};
 export const artists = {};
 export const genres = {};
 export const format = {};
-export const rotation = {};
+export const rotation = {
+  id: 'id',
+  album_id: 'album_id',
+  legacy_rotation_id: 'legacy_rotation_id',
+  legacy_library_release_id: 'legacy_library_release_id',
+  rotation_bin: 'rotation_bin',
+  add_date: 'add_date',
+  kill_date: 'kill_date',
+  artist_name: 'artist_name',
+  album_title: 'album_title',
+  record_label: 'record_label',
+};
 export const library_artist_view = {};
 export const flowsheet = {
   id: 'id',
@@ -128,6 +142,29 @@ export const specialty_shows = {};
 export const schedule = {};
 export const artist_crossreference = {};
 export const artist_library_crossreference = {};
+
+// Pure ETL utility functions (copied from etl-utils.ts to avoid importing the real DB client)
+export const epochMsToDate = (epochMs: number | null): Date | null => {
+  if (epochMs == null || epochMs === 0 || !Number.isFinite(epochMs)) return null;
+  const date = new Date(epochMs);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+export const truncate = (value: string | null | undefined, maxLength: number): string | null => {
+  if (!value || value.trim().length === 0) return null;
+  const trimmed = value.trim();
+  return trimmed.length <= maxLength ? trimmed : trimmed.slice(0, maxLength);
+};
+
+export const parseTabRow = (line: string, columnCount: number): string[] | null => {
+  const columns = line.split('\t');
+  return columns.length === columnCount ? columns : null;
+};
+
+export const toNullable = (value: string): string | null => {
+  const trimmed = value.trim();
+  return trimmed.length === 0 || trimmed === 'NULL' ? null : trimmed;
+};
 
 // Mock enum
 export const flowsheetEntryTypeEnum = () => ({});

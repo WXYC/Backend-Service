@@ -2,6 +2,8 @@
  * Unit tests for internal endpoints:
  * - POST /internal/flowsheet-sync-notify (ETL SSE notification)
  * - POST /internal/flowsheet-webhook (tubafrenzy webhook receiver)
+ * - POST /internal/rotation-sync-notify (rotation ETL SSE notification)
+ * - POST /internal/rotation-webhook (tubafrenzy rotation webhook receiver)
  */
 
 const mockBroadcast = jest.fn();
@@ -193,6 +195,176 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
       type: 'refetch',
       payload: { source: 'webhook' },
+    });
+  });
+});
+
+// ---- rotation-sync-notify ----
+
+describe('POST /internal/rotation-sync-notify', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('returns 401 without X-Internal-Key header', async () => {
+    const res = await request(app).post('/internal/rotation-sync-notify');
+
+    expect(res.status).toBe(401);
+    expect(mockBroadcast).not.toHaveBeenCalled();
+  });
+
+  it('returns 200 with correct key and broadcasts refetch', async () => {
+    const res = await request(app).post('/internal/rotation-sync-notify').set('X-Internal-Key', 'test-secret-key');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+      type: 'refetch',
+      payload: { source: 'rotation-etl' },
+    });
+  });
+});
+
+// ---- rotation-webhook ----
+
+describe('POST /internal/rotation-webhook', () => {
+  const validRelease = {
+    id: 500,
+    artistName: 'Autechre',
+    albumTitle: 'Confield',
+    rotationType: 'H',
+    labelName: 'Warp',
+    addDate: 1706799600000,
+    killDate: 0,
+    libraryReleaseId: 0,
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  // -- Auth --
+
+  it('returns 401 without X-Internal-Key header', async () => {
+    const res = await request(app).post('/internal/rotation-webhook').send({ action: 'create', release: validRelease });
+
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 with wrong key', async () => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'wrong-key')
+      .send({ action: 'create', release: validRelease });
+
+    expect(res.status).toBe(401);
+  });
+
+  // -- Validation --
+
+  it('returns 400 for missing action field', async () => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ release: validRelease });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/action/i);
+  });
+
+  it('returns 400 for invalid action', async () => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'purge', release: validRelease });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for create with missing release.id', async () => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', release: { ...validRelease, id: undefined } });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for unkill with missing releaseId', async () => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'unkill' });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for kill with missing release.id', async () => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'kill', release: {} });
+
+    expect(res.status).toBe(400);
+  });
+
+  // -- Create --
+
+  it('returns 200 for valid create and broadcasts refetch', async () => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', release: validRelease });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+      type: 'refetch',
+      payload: { source: 'rotation-webhook' },
+    });
+  });
+
+  // -- Update --
+
+  it('returns 200 for valid update', async () => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', release: validRelease });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+  });
+
+  // -- Kill --
+
+  it('returns 200 for valid kill', async () => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'kill', release: { id: 500, killDate: 1706799600000 } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+      type: 'refetch',
+      payload: { source: 'rotation-webhook' },
+    });
+  });
+
+  // -- Unkill --
+
+  it('returns 200 for valid unkill', async () => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'unkill', releaseId: 500 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+      type: 'refetch',
+      payload: { source: 'rotation-webhook' },
     });
   });
 });
