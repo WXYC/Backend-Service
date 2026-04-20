@@ -3,7 +3,7 @@ import { eq, sql } from 'drizzle-orm';
 import { db, flowsheet, shows } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
 import { updateLastModified } from '../services/flowsheet.service.js';
-import { mapProdEntryType, truncate } from '../utils/flowsheet-transform.js';
+import { mapProdEntryType, isMessageEntryType, truncate } from '../utils/flowsheet-transform.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
 
@@ -96,6 +96,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
 
       const entryType = mapProdEntryType(entry.flowsheetEntryType ?? 0);
       const showId = await resolveShowId(entry.radioShowId);
+      const isMsgType = isMessageEntryType(entryType);
 
       await db
         .insert(flowsheet)
@@ -103,10 +104,11 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           legacy_entry_id: entry.id,
           show_id: showId,
           entry_type: entryType,
-          artist_name: truncate(entry.artistName, 128),
+          artist_name: isMsgType ? null : truncate(entry.artistName, 128),
           album_title: truncate(entry.releaseTitle, 128),
           track_title: truncate(entry.songTitle, 128),
           record_label: truncate(entry.labelName, 128),
+          message: isMsgType ? truncate(entry.artistName, 250) : null,
           request_flag: !!entry.requestFlag,
           segue: false,
           play_order: entry.sequenceWithinShow ?? 0,
@@ -119,6 +121,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
             album_title: sql`excluded.album_title`,
             track_title: sql`excluded.track_title`,
             record_label: sql`excluded.record_label`,
+            message: sql`excluded.message`,
             request_flag: sql`excluded.request_flag`,
             entry_type: sql`excluded.entry_type`,
           },

@@ -78,17 +78,31 @@ const resolveAlbumIds = async () => {
   console.log(`[flowsheet-etl] Resolved album_id for flowsheet entries.`);
 };
 
+/** Entry types whose legacy ARTIST_NAME text is display content, not a real artist. */
+const isMessageEntryType = (entryType: string): boolean =>
+  entryType === 'breakpoint' || entryType === 'talkset' || entryType === 'message';
+
 /**
  * Resolve the artist_name for a flowsheet entry. For show_start/show_end entries,
- * parse the DJ name from the structured ARTIST_NAME text. For all other entries,
- * truncate to 128 chars.
+ * parse the DJ name from the structured ARTIST_NAME text. For message-bearing types
+ * (breakpoint, talkset, message), the text belongs in the message field instead.
  */
 const resolveArtistName = (rawArtistName: string | null, entryType: string): string | null => {
   if (!rawArtistName) return null;
+  if (isMessageEntryType(entryType)) return null;
   if (entryType === 'show_start' || entryType === 'show_end') {
     return truncate(parseShowEntryDJName(rawArtistName), 128) ?? truncate(rawArtistName, 128);
   }
   return truncate(rawArtistName, 128);
+};
+
+/**
+ * Resolve the message field for a flowsheet entry. For breakpoint, talkset, and
+ * message entries, the legacy ARTIST_NAME column contains the display text.
+ */
+const resolveMessage = (rawArtistName: string | null, entryType: string): string | null => {
+  if (!rawArtistName || !isMessageEntryType(entryType)) return null;
+  return truncate(rawArtistName, 250);
 };
 
 // ---- Bulk Load Mode ----
@@ -195,7 +209,7 @@ const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map
         album_title: truncate(tuple[4] != null ? String(tuple[4]) : null, 128),
         track_title: truncate(tuple[3] != null ? String(tuple[3]) : null, 128),
         record_label: truncate(tuple[8] != null ? String(tuple[8]) : null, 128),
-        message: null,
+        message: resolveMessage(rawArtistName, entryType),
         request_flag: Number(tuple[18]) === 1,
         segue: tuple.length > 21 ? Number(tuple[21]) === 1 : false,
         play_order: Number(tuple[13]) || 0,
@@ -339,7 +353,7 @@ const runIncremental = async (): Promise<SyncResult> => {
         album_title: truncate(entry.albumTitle, 128),
         track_title: truncate(entry.trackTitle, 128),
         record_label: truncate(entry.label, 128),
-        message: null,
+        message: resolveMessage(entry.artistName, entryType),
         request_flag: entry.requestFlag === 1,
         segue: entry.segueFlag === 1,
         play_order: entry.playOrder,
@@ -352,6 +366,7 @@ const runIncremental = async (): Promise<SyncResult> => {
           album_title: sql`excluded.album_title`,
           track_title: sql`excluded.track_title`,
           record_label: sql`excluded.record_label`,
+          message: sql`excluded.message`,
           request_flag: sql`excluded.request_flag`,
           segue: sql`excluded.segue`,
           entry_type: sql`excluded.entry_type`,
