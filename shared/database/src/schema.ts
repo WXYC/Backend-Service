@@ -248,6 +248,7 @@ export const library = wxyc_schema.table(
       .references(() => format.id)
       .notNull(),
     alternate_artist_name: varchar('alternate_artist_name', { length: 128 }),
+    album_artist: varchar('album_artist', { length: 128 }),
     album_title: varchar('album_title', { length: 128 }).notNull(),
     label: varchar('label', { length: 128 }),
     label_id: integer('label_id').references(() => labels.id),
@@ -269,6 +270,7 @@ export const library = wxyc_schema.table(
       formatIdIdx: index('format_id_idx').on(table.format_id),
       artistIdIdx: index('artist_id_idx').on(table.artist_id),
       legacyReleaseIdIdx: uniqueIndex('library_legacy_release_id_idx').on(table.legacy_release_id),
+      albumArtistTrgmIdx: index('album_artist_trgm_idx').using(`gin`, sql`${table.album_artist} gin_trgm_ops`),
     };
   }
 );
@@ -521,6 +523,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       label: library.label,
       label_id: library.label_id,
       on_streaming: library.on_streaming,
+      album_artist: library.album_artist,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -553,6 +556,7 @@ export type LibraryArtistViewEntry = {
   label: string | null;
   label_id: number | null;
   on_streaming: boolean | null;
+  album_artist: string | null;
 };
 
 export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {
