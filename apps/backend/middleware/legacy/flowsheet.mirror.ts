@@ -75,10 +75,7 @@ const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
     if (entryId != null) {
       cacheEntryId(announcementEntry[0].play_order, entryId);
       try {
-        await db
-          .update(flowsheet)
-          .set({ legacy_entry_id: entryId })
-          .where(eq(flowsheet.id, announcementEntry[0].id));
+        await db.update(flowsheet).set({ legacy_entry_id: entryId }).where(eq(flowsheet.id, announcementEntry[0].id));
       } catch (e) {
         console.error('[mirror] Failed to persist legacy_entry_id for announcement:', e);
       }
@@ -110,10 +107,7 @@ export const endShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
     if (entryId != null) {
       cacheEntryId(announcementEntry[0].play_order, entryId);
       try {
-        await db
-          .update(flowsheet)
-          .set({ legacy_entry_id: entryId })
-          .where(eq(flowsheet.id, announcementEntry[0].id));
+        await db.update(flowsheet).set({ legacy_entry_id: entryId }).where(eq(flowsheet.id, announcementEntry[0].id));
       } catch (e) {
         console.error('[mirror] Failed to persist legacy_entry_id for announcement:', e);
       }
