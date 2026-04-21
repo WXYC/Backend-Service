@@ -84,7 +84,7 @@ describe('Library Catalog', () => {
           album_title: `Test Album ${Date.now()}`,
           artist_name: 'Built to Spill',
           label: 'Test Label',
-          genre_id: 1,
+          genre_id: 11,
           format_id: 1,
         })
         .expect(201);
@@ -99,7 +99,7 @@ describe('Library Catalog', () => {
         .send({
           artist_id: 1,
           label: 'Test Label',
-          genre_id: 1,
+          genre_id: 11,
           format_id: 1,
         })
         .expect(400);
@@ -113,7 +113,7 @@ describe('Library Catalog', () => {
         .send({
           album_title: 'Test Album',
           artist_id: 1,
-          genre_id: 1,
+          genre_id: 11,
           format_id: 1,
         })
         .expect(400);
@@ -142,7 +142,7 @@ describe('Library Catalog', () => {
           album_title: 'Test Album',
           artist_id: 1,
           label: 'Test Label',
-          genre_id: 1,
+          genre_id: 11,
         })
         .expect(400);
 
@@ -155,7 +155,7 @@ describe('Library Catalog', () => {
         .send({
           album_title: 'Test Album',
           label: 'Test Label',
-          genre_id: 1,
+          genre_id: 11,
           format_id: 1,
         })
         .expect(400);
@@ -320,7 +320,7 @@ describe('Library Artists', () => {
         .send({
           artist_name: `Test Artist ${uniqueSuffix}`,
           code_letters: uniqueSuffix,
-          genre_id: 1,
+          genre_id: 11,
           code_number: 1,
         })
         .expect(201);
@@ -336,7 +336,7 @@ describe('Library Artists', () => {
         .post('/library/artists')
         .send({
           code_letters: 'TS',
-          genre_id: 1,
+          genre_id: 11,
           code_number: 1,
         })
         .expect(400);
@@ -349,7 +349,7 @@ describe('Library Artists', () => {
         .post('/library/artists')
         .send({
           artist_name: 'Test Artist',
-          genre_id: 1,
+          genre_id: 11,
           code_number: 1,
         })
         .expect(400);
@@ -376,7 +376,7 @@ describe('Library Artists', () => {
         .send({
           artist_name: 'Test Artist',
           code_letters: 'TS',
-          genre_id: 1,
+          genre_id: 11,
         })
         .expect(400);
 
@@ -391,7 +391,7 @@ describe('Library Artists', () => {
           artist_name: `The Band ${uniqueSuffix}`,
           alphabetical_name: `Band ${uniqueSuffix}, The`,
           code_letters: uniqueSuffix,
-          genre_id: 1,
+          genre_id: 11,
           code_number: 1,
         })
         .expect(201);
@@ -409,7 +409,7 @@ describe('Library Artists Peek Code', () => {
   });
 
   test('peeks next code_artist_number', async () => {
-    const res = await auth.get('/library/artists/peek-code').query({ code_letters: 'BU', genre_id: 1 }).expect(200);
+    const res = await auth.get('/library/artists/peek-code').query({ code_letters: 'BU', genre_id: 11 }).expect(200);
 
     // BU is the code for Built to Spill and has artist_genre_code 60
     expect(res.body.next_code_number).toBe(61);

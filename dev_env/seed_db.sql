@@ -104,11 +104,14 @@ ON CONFLICT (id) DO NOTHING;
 -- Genres and media formats matching the legacy tubafrenzy database.
 -- The library ETL job looks up genres/formats by name and skips releases
 -- where the genre or format is missing, so all legacy values must be seeded.
-INSERT INTO wxyc_schema.genres(genre_name) VALUES
-  ('Rock'), ('Hiphop'), ('Electronic'), ('Jazz'), ('Reggae'),
-  ('Classical'), ('Latin'), ('Blues'), ('Soundtracks'), ('Spoken'),
-  ('Comedy'), ('Africa'), ('Asia'), ('OCS'), ('Xmas')
-ON CONFLICT DO NOTHING;
+-- Genre IDs must match production (alphabetical assignment from the initial ETL sync).
+-- Using explicit IDs ensures compatibility with pg_dump snapshots and crossreference data.
+INSERT INTO wxyc_schema.genres(id, genre_name) VALUES
+  (1, 'Africa'), (2, 'Asia'), (3, 'Blues'), (4, 'Classical'), (5, 'Comedy'),
+  (6, 'Hiphop'), (7, 'Jazz'), (8, 'Latin'), (9, 'OCS'), (10, 'Reggae'),
+  (11, 'Rock'), (12, 'Soundtracks'), (13, 'Spoken'), (14, 'Xmas'), (15, 'Electronic')
+ON CONFLICT (id) DO NOTHING;
+SELECT setval('wxyc_schema.genres_id_seq', 15, true);
 
 INSERT INTO wxyc_schema.format(format_name) VALUES
   ('cd'), ('vinyl'), ('vinyl 12"'), ('vinyl 7"'), ('vinyl 10"'), ('cdr')
@@ -124,23 +127,23 @@ INSERT INTO wxyc_schema.artists(artist_name, alphabetical_name, code_letters)
 	VALUES ('Jockstrap', 'Jockstrap', 'JO');
 
 INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
-	VALUES (1, 1, 60);
+	VALUES (1, 11, 60);
 INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
-	VALUES (2, 2, 35);
+	VALUES (2, 6, 35);
 INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
-	VALUES (3, 1, 108);
+	VALUES (3, 11, 108);
 
 INSERT INTO wxyc_schema.library(
-    artist_id, genre_id, format_id, album_title, code_number) 
-    VALUES (1, 1, 1, 'Keep it Like a Secret', 8);
+    artist_id, genre_id, format_id, album_title, code_number)
+    VALUES (1, 11, 1, 'Keep it Like a Secret', 8);
 
 INSERT INTO wxyc_schema.library(
-    artist_id, genre_id, format_id, album_title, code_number) 
-    VALUES (2, 2, 1, 'Crush', 1);
+    artist_id, genre_id, format_id, album_title, code_number)
+    VALUES (2, 6, 1, 'Crush', 1);
 
 INSERT INTO wxyc_schema.library(
-    artist_id, genre_id, format_id, album_title, code_number) 
-    VALUES (3, 1, 2, 'I Love You Jennifer B', 1);
+    artist_id, genre_id, format_id, album_title, code_number)
+    VALUES (3, 11, 2, 'I Love You Jennifer B', 1);
 
 -- Additional artists for parallel test isolation (metadata.spec.js uses albums 4-6)
 INSERT INTO wxyc_schema.artists(artist_name, alphabetical_name, code_letters)
@@ -153,24 +156,24 @@ INSERT INTO wxyc_schema.artists(artist_name, alphabetical_name, code_letters)
 	VALUES ('Bjork', 'Bjork', 'BJ');
 
 INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
-	VALUES (4, 1, 42);
+	VALUES (4, 11, 42);
 INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
-	VALUES (5, 2, 15);
+	VALUES (5, 6, 15);
 INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
-	VALUES (6, 1, 22);
+	VALUES (6, 11, 22);
 
 -- Additional albums for parallel test isolation (IDs 4, 5, 6 for metadata.spec.js)
 INSERT INTO wxyc_schema.library(
     artist_id, genre_id, format_id, album_title, code_number)
-    VALUES (4, 1, 1, 'Illinois', 1);
+    VALUES (4, 11, 1, 'Illinois', 1);
 
 INSERT INTO wxyc_schema.library(
     artist_id, genre_id, format_id, album_title, code_number)
-    VALUES (5, 2, 1, 'To Pimp a Butterfly', 1);
+    VALUES (5, 6, 1, 'To Pimp a Butterfly', 1);
 
 INSERT INTO wxyc_schema.library(
     artist_id, genre_id, format_id, album_title, code_number)
-    VALUES (6, 1, 2, 'Homogenic', 1);
+    VALUES (6, 11, 2, 'Homogenic', 1);
 
 INSERT INTO wxyc_schema.rotation(album_id, rotation_bin) VALUES (1, 'L');
 
