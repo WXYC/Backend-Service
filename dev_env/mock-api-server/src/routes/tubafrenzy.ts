@@ -42,4 +42,15 @@ router.patch('/playlists/api/flowsheetEntry', (req: Request, res: Response) => {
   res.status(200).json(req.body);
 });
 
+/** POST /playlists/api/radioShow — create a mirror radio show */
+router.post('/playlists/api/radioShow', (req: Request, res: Response) => {
+  const id = nextId++;
+  res.status(201).json({ id, ...req.body });
+});
+
+/** POST /playlists/api/radioShow/signoff — sign off a mirror radio show */
+router.post('/playlists/api/radioShow/signoff', (req: Request, res: Response) => {
+  res.status(200).json({ ...req.body, modlock: 1 });
+});
+
 export default router;

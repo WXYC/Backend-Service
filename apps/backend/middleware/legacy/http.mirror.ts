@@ -1,16 +1,22 @@
 /**
  * HTTP client for the tubafrenzy mirror API.
  *
- * Replaces raw SQL for addEntry/updateEntry mirror operations.
- * Calls POST/PATCH on tubafrenzy's /playlists/api/flowsheetEntry endpoint,
- * which goes through FlowsheetEntryService so listeners (cache, SSE, Lucene) fire.
+ * Mirrors flowsheet entries and radio shows to tubafrenzy via REST endpoints:
+ * - POST/PATCH /playlists/api/flowsheetEntry — entry CRUD
+ * - POST /playlists/api/radioShow — show creation
+ * - POST /playlists/api/radioShow/signoff — show sign-off
  */
+
+import * as Sentry from '@sentry/node';
 
 const TUBAFRENZY_URL = process.env.TUBAFRENZY_URL ?? 'https://www.wxyc.info';
 const MIRROR_API_KEY = process.env.MIRROR_API_KEY ?? '';
 
 /** In-memory map: Backend-Service play_order → tubafrenzy entry ID */
 const entryIdMap = new Map<number, number>();
+
+/** In-memory map: Backend-Service show ID → tubafrenzy show ID */
+const showIdMap = new Map<number, number>();
 
 interface MirrorEntry {
   entry_type: string;
@@ -91,10 +97,10 @@ export function clearEntryIdMap(): void {
 
 /**
  * Maps a Backend-Service FSEntry to the tubafrenzy POST JSON body.
- * radioShowID is omitted — tubafrenzy auto-resolves from the current show.
+ * When radioShowID is provided, it's included so tubafrenzy doesn't auto-resolve.
  * nowPlayingFlag is always 0 (dropped — nothing in tubafrenzy reads it).
  */
-export function mapEntryToTubafrenzy(entry: MirrorEntry): Record<string, unknown> {
+export function mapEntryToTubafrenzy(entry: MirrorEntry, radioShowID?: number | null): Record<string, unknown> {
   const startMs = entry.add_time ? new Date(entry.add_time as any).getTime() : Date.now();
   const radioHour = Math.floor(startMs / 3_600_000) * 3_600_000;
 
@@ -137,6 +143,7 @@ export function mapEntryToTubafrenzy(entry: MirrorEntry): Record<string, unknown
     }
 
     return {
+      ...(radioShowID != null ? { radioShowID } : {}),
       radioHour,
       flowsheetEntryType,
       artistName: message,
@@ -153,6 +160,7 @@ export function mapEntryToTubafrenzy(entry: MirrorEntry): Record<string, unknown
   }
 
   return {
+    ...(radioShowID != null ? { radioShowID } : {}),
     radioHour,
     flowsheetEntryType,
     artistName: entry.artist_name ?? '',
@@ -189,6 +197,116 @@ export function mapUpdateToTubafrenzy(entry: MirrorEntry): Record<string, unknow
     libraryReleaseID: entry.album_id ?? 0,
     rotationReleaseID: entry.rotation_id ?? 0,
     flowsheetEntryType,
+  };
+}
+
+// ── Show mirror functions ──────────────────────────────────────────────
+
+/**
+ * POST a new radio show to tubafrenzy. Retries up to 5 times with exponential
+ * backoff (base 500ms, max 8s) because a failed show creation cascades: every
+ * subsequent entry will lack a radioShowID. Returns the tubafrenzy show ID, or
+ * null after all retries fail.
+ */
+export async function mirrorCreateShow(body: Record<string, unknown>): Promise<number | null> {
+  const MAX_ATTEMPTS = 5;
+  const BASE_BACKOFF_MS = 500;
+  const MAX_BACKOFF_MS = 8_000;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(`${TUBAFRENZY_URL}/playlists/api/radioShow`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${MIRROR_API_KEY}`,
+        },
+        body: JSON.stringify(body),
+      });
+      if (response.ok) {
+        const json = await response.json();
+        return json.id ?? null;
+      }
+      const text = await response.text();
+      console.error(`[mirror] POST radioShow failed (attempt ${attempt}/${MAX_ATTEMPTS}): ${response.status} ${text}`);
+    } catch (e) {
+      console.error(`[mirror] POST radioShow error (attempt ${attempt}/${MAX_ATTEMPTS}):`, e);
+    }
+
+    if (attempt < MAX_ATTEMPTS) {
+      const delay = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt - 1), MAX_BACKOFF_MS);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  Sentry.captureMessage('Mirror: show creation failed after all retries', {
+    level: 'error',
+    tags: { subsystem: 'legacy-mirror' },
+    extra: { body },
+  });
+  return null;
+}
+
+/**
+ * POST a show signoff to tubafrenzy. Fire-and-forget (single attempt).
+ * Signoff failure doesn't cascade — the show already exists in tubafrenzy.
+ */
+export async function mirrorSignoffShow(radioShowId: number, signoffTime: number): Promise<void> {
+  try {
+    const response = await fetch(`${TUBAFRENZY_URL}/playlists/api/radioShow/signoff`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${MIRROR_API_KEY}`,
+      },
+      body: JSON.stringify({ radioShowId, signoffTime }),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      console.error(`[mirror] POST radioShow/signoff failed: ${response.status} ${text}`);
+    }
+  } catch (e) {
+    console.error('[mirror] POST radioShow/signoff error:', e);
+  }
+}
+
+export function cacheShowId(backendShowId: number, tubafrenzyShowId: number): void {
+  showIdMap.set(backendShowId, tubafrenzyShowId);
+}
+
+export function getCachedShowId(backendShowId: number): number | undefined {
+  return showIdMap.get(backendShowId);
+}
+
+export function clearShowIdMap(): void {
+  showIdMap.clear();
+}
+
+interface MirrorShow {
+  id: number;
+  show_name?: string | null;
+  specialty_id?: number | null;
+  start_time?: Date | string | number | null;
+}
+
+interface MirrorDJ {
+  realName?: string | null;
+  djName?: string | null;
+  name: string;
+}
+
+/**
+ * Maps a Backend-Service Show + user to the tubafrenzy radioShow POST body.
+ */
+export function mapShowToTubafrenzy(show: MirrorShow, dj: MirrorDJ): Record<string, unknown> {
+  const startMs = show.start_time ? new Date(show.start_time as any).getTime() : Date.now();
+  return {
+    djName: dj.realName || dj.name,
+    djHandle: dj.djName || dj.name,
+    djId: 0,
+    showName: show.show_name ?? '',
+    specialtyShowId: show.specialty_id ?? 0,
+    signonTime: startMs,
   };
 }
 

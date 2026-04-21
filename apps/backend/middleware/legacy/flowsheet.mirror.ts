@@ -1,16 +1,21 @@
 import { QueryParams } from '../../controllers/flowsheet.controller';
 import { db } from '@wxyc/database';
-import { user, flowsheet, FSEntry, Show } from '@wxyc/database';
+import { user, flowsheet, shows, FSEntry, Show } from '@wxyc/database';
 import { asc, desc, eq } from 'drizzle-orm';
 import { Request } from 'express';
 import { createBackendMirrorMiddleware, createHttpMirrorMiddleware } from './mirror.middleware.js';
 import { safeSql, safeSqlNum, toMs } from './utilities.mirror.js';
 import {
   mirrorCreateEntry,
+  mirrorCreateShow,
+  mirrorSignoffShow,
   mirrorUpdateEntry,
   cacheEntryId,
+  cacheShowId,
   getCachedEntryId,
+  getCachedShowId,
   mapEntryToTubafrenzy,
+  mapShowToTubafrenzy,
   mapUpdateToTubafrenzy,
 } from './http.mirror.js';
 
@@ -27,15 +32,9 @@ const getEntries = createBackendMirrorMiddleware<any>(async (req, data) => {
   return [`SELECT * FROM ${FLOWSHEET_ENTRY_TABLE} LIMIT ${limit} OFFSET ${offset};`];
 });
 
-const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
-  const nowMs = Date.now();
-  const statements: string[] = [];
-
-  const startMs = toMs(show.start_time ?? req.body?.start_time ?? nowMs);
-  const djId = show.primary_dj_id ?? req.body?.dj_id;
-
-  if (!djId) return statements; // no DJ, nothing to do
-  if (!show) return statements; // no show, nothing to do
+const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
+  const djId = show.primary_dj_id;
+  if (!djId || !show) return;
 
   const dj = (
     await db
@@ -45,40 +44,24 @@ const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
       .limit(1)
   )?.[0];
 
-  if (!dj) return statements; // DJ not found
+  if (!dj) return;
 
-  const showName = show.show_name ?? req.body?.show_name ?? '';
-  const specialtyId = Number.isFinite(Number(show.specialty_id ?? req.body?.specialty_id))
-    ? Number(show.specialty_id ?? req.body?.specialty_id)
-    : 0;
-  const startingHour = Math.floor(startMs / 3_600_000) * 3_600_000;
-  const workingHour = startingHour; // Initially same as starting hour, updates as show progresses
-  const timeCreated = startMs;
-  const timeModified = startMs;
+  // 1. Create show in tubafrenzy via REST API
+  const body = mapShowToTubafrenzy(show, dj);
+  const tubafrenzyShowId = await mirrorCreateShow(body);
 
-  // NOTE: Legacy table has no AUTO_INCREMENT; we allocate ID as MAX(ID)+1.
-  statements.push(
-    `SET @NEW_RS_ID := (SELECT IFNULL(MAX(ID), 0) + 1 FROM ${RADIO_SHOW_TABLE});`,
-    `INSERT INTO ${RADIO_SHOW_TABLE}
-        (ID, STARTING_RADIO_HOUR, DJ_NAME, DJ_ID, DJ_HANDLE, SHOW_NAME, SPECIALTY_SHOW_ID,
-         WORKING_HOUR, SIGNON_TIME, SIGNOFF_TIME, TIME_LAST_MODIFIED, TIME_CREATED, MODLOCK, SHOW_ID)
-       VALUES
-        (@NEW_RS_ID,
-         ${safeSqlNum(startingHour)},         -- STARTING_RADIO_HOUR (hour bucket)
-         ${safeSql(dj.realName || dj.name)},            -- DJ_NAME (real name)
-         0,                                   -- DJ_ID (always 0 in legacy system)
-         ${safeSql(dj.djName || dj.name)},              -- DJ_HANDLE (DJ name/handle)
-         ${safeSql(showName)},                -- SHOW_NAME
-         ${safeSqlNum(specialtyId)},          -- SPECIALTY_SHOW_ID (0 if not specialty)
-         ${safeSqlNum(workingHour)},          -- WORKING_HOUR (current working hour bucket)
-         ${safeSqlNum(startMs)},              -- SIGNON_TIME (actual sign-on timestamp)
-         0,                                   -- SIGNOFF_TIME (0 for active shows, set to timestamp on end)
-         ${safeSqlNum(timeModified)},         -- TIME_LAST_MODIFIED
-         ${safeSqlNum(timeCreated)},          -- TIME_CREATED
-         0,                                   -- MODLOCK (0 for active, 1 when completed)
-         @NEW_RS_ID);` // SHOW_ID (same as ID)
-  );
+  if (tubafrenzyShowId != null) {
+    // Cache for subsequent addEntry calls in this process lifetime
+    cacheShowId(show.id, tubafrenzyShowId);
+    // Persist for ETL dedup and restart resilience
+    try {
+      await db.update(shows).set({ legacy_show_id: tubafrenzyShowId }).where(eq(shows.id, show.id));
+    } catch (e) {
+      console.error('[mirror] Failed to persist legacy_show_id:', e);
+    }
+  }
 
+  // 2. Mirror the show_start announcement entry
   const announcementEntry = await db
     .select()
     .from(flowsheet)
@@ -86,29 +69,31 @@ const startShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
     .orderBy(desc(flowsheet.play_order))
     .limit(1);
 
-  if (announcementEntry && announcementEntry.length > 0) {
-    statements.push(...(await getAddEntrySQL(req, announcementEntry[0])));
+  if (announcementEntry?.[0]) {
+    const entryBody = mapEntryToTubafrenzy(announcementEntry[0], tubafrenzyShowId);
+    const entryId = await mirrorCreateEntry(entryBody);
+    if (entryId != null) {
+      cacheEntryId(announcementEntry[0].play_order, entryId);
+      try {
+        await db.update(flowsheet).set({ legacy_entry_id: entryId }).where(eq(flowsheet.id, announcementEntry[0].id));
+      } catch (e) {
+        console.error('[mirror] Failed to persist legacy_entry_id for announcement:', e);
+      }
+    }
   }
-
-  return statements;
 });
 
-export const endShow = createBackendMirrorMiddleware<Show>(async (req, show) => {
+export const endShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
   const endMs = toMs(show.end_time ?? Date.now());
-  const statements: string[] = [];
 
-  // Update the most recent active show (SIGNOFF_TIME = 0, MODLOCK = 0)
-  statements.push(
-    `UPDATE ${RADIO_SHOW_TABLE}
-       SET SIGNOFF_TIME = ${safeSqlNum(endMs)},
-           TIME_LAST_MODIFIED = ${safeSqlNum(endMs)},
-           MODLOCK = 1
-     WHERE SIGNOFF_TIME = 0
-       AND MODLOCK = 0
-     ORDER BY STARTING_RADIO_HOUR DESC
-     LIMIT 1;`
-  );
+  // Resolve tubafrenzy show ID: in-memory cache → persisted legacy_show_id
+  const tubafrenzyShowId = getCachedShowId(show.id) ?? show.legacy_show_id;
 
+  if (tubafrenzyShowId != null) {
+    await mirrorSignoffShow(tubafrenzyShowId, endMs);
+  }
+
+  // Mirror the show_end announcement entry
   const announcementEntry = await db
     .select()
     .from(flowsheet)
@@ -116,11 +101,18 @@ export const endShow = createBackendMirrorMiddleware<Show>(async (req, show) => 
     .orderBy(desc(flowsheet.play_order))
     .limit(1);
 
-  if (announcementEntry && announcementEntry.length > 0) {
-    statements.push(...(await getAddEntrySQL(req, announcementEntry[0])));
+  if (announcementEntry?.[0]) {
+    const entryBody = mapEntryToTubafrenzy(announcementEntry[0], tubafrenzyShowId);
+    const entryId = await mirrorCreateEntry(entryBody);
+    if (entryId != null) {
+      cacheEntryId(announcementEntry[0].play_order, entryId);
+      try {
+        await db.update(flowsheet).set({ legacy_entry_id: entryId }).where(eq(flowsheet.id, announcementEntry[0].id));
+      } catch (e) {
+        console.error('[mirror] Failed to persist legacy_entry_id for announcement:', e);
+      }
+    }
   }
-
-  return statements;
 });
 
 const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
@@ -289,7 +281,25 @@ export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) 
   // Loop guard: entry imported from tubafrenzy by ETL — don't mirror back
   if (entry.legacy_entry_id != null) return;
 
-  const body = mapEntryToTubafrenzy(entry);
+  // Resolve tubafrenzy show ID: (1) in-memory cache, (2) DB, (3) null (auto-resolve)
+  let radioShowID: number | null | undefined = entry.show_id != null ? getCachedShowId(entry.show_id) : undefined;
+  if (radioShowID == null && entry.show_id != null) {
+    try {
+      const showRow = await db
+        .select({ legacy_show_id: shows.legacy_show_id })
+        .from(shows)
+        .where(eq(shows.id, entry.show_id as number))
+        .limit(1);
+      radioShowID = showRow?.[0]?.legacy_show_id ?? null;
+      if (radioShowID != null) {
+        cacheShowId(entry.show_id as number, radioShowID);
+      }
+    } catch {
+      // DB lookup failed; fall back to tubafrenzy auto-resolution
+    }
+  }
+
+  const body = mapEntryToTubafrenzy(entry, radioShowID);
   const tubafrenzyId = await mirrorCreateEntry(body);
   if (tubafrenzyId != null) {
     cacheEntryId(entry.play_order, tubafrenzyId);

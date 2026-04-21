@@ -45,7 +45,7 @@ Key middleware:
 - `anonymousAuth` -- Validates better-auth session
 - `rateLimiting` -- Rate limits on registration and song requests
 - `errorHandler` -- Centralized error handling returning standardized responses
-- Legacy mirror middleware -- Compatibility layer for old frontend
+- Legacy mirror middleware -- Syncs flowsheet data to tubafrenzy. Show lifecycle (`startShow`, `endShow`) and entry CRUD (`addEntry`, `updateEntry`) use HTTP REST calls to tubafrenzy's mirror API. `deleteEntry` uses raw SQL via SSH. Show IDs are cached in-memory (`showIdMap`) and persisted to `shows.legacy_show_id` for restart resilience. Every entry mirror call includes `radioShowID` when available (cache → DB fallback → omit for auto-resolution).
 
 Server timeout is 5 seconds globally; SSE routes have no timeout.
 

@@ -12,17 +12,25 @@
 const mockMirrorCreateEntry = jest.fn();
 const mockMirrorUpdateEntry = jest.fn();
 const mockCacheEntryId = jest.fn();
+const mockCacheShowId = jest.fn();
 const mockGetCachedEntryId = jest.fn();
+const mockGetCachedShowId = jest.fn().mockReturnValue(undefined);
 const mockMapEntryToTubafrenzy = jest.fn().mockReturnValue({ artistName: 'test' });
 const mockMapUpdateToTubafrenzy = jest.fn().mockReturnValue({ artistName: 'test' });
 
 jest.mock('../../../../apps/backend/middleware/legacy/http.mirror', () => ({
   mirrorCreateEntry: mockMirrorCreateEntry,
+  mirrorCreateShow: jest.fn(),
+  mirrorSignoffShow: jest.fn(),
   mirrorUpdateEntry: mockMirrorUpdateEntry,
   cacheEntryId: mockCacheEntryId,
+  cacheShowId: mockCacheShowId,
   getCachedEntryId: mockGetCachedEntryId,
+  getCachedShowId: mockGetCachedShowId,
   clearEntryIdMap: jest.fn(),
+  clearShowIdMap: jest.fn(),
   mapEntryToTubafrenzy: mockMapEntryToTubafrenzy,
+  mapShowToTubafrenzy: jest.fn(),
   mapUpdateToTubafrenzy: mockMapUpdateToTubafrenzy,
 }));
 
@@ -32,22 +40,28 @@ const mockDbUpdate = jest.fn().mockReturnValue({
   }),
 });
 
+// Configurable per-test: default resolves to [] (no results)
+let mockSelectLimitResult: unknown[] = [];
+
+const mockDbSelect = jest.fn().mockReturnValue({
+  from: jest.fn().mockReturnValue({
+    where: jest.fn().mockReturnValue({
+      orderBy: jest.fn().mockReturnValue({
+        limit: jest.fn().mockImplementation(() => Promise.resolve(mockSelectLimitResult)),
+      }),
+      limit: jest.fn().mockImplementation(() => Promise.resolve(mockSelectLimitResult)),
+    }),
+  }),
+});
+
 jest.mock('@wxyc/database', () => ({
   db: {
-    select: jest.fn().mockReturnValue({
-      from: jest.fn().mockReturnValue({
-        where: jest.fn().mockReturnValue({
-          orderBy: jest.fn().mockReturnValue({
-            limit: jest.fn().mockResolvedValue([]),
-          }),
-          limit: jest.fn().mockResolvedValue([]),
-        }),
-      }),
-    }),
+    select: mockDbSelect,
     update: mockDbUpdate,
   },
   user: {},
-  flowsheet: { id: 'id', legacy_entry_id: 'legacy_entry_id' },
+  flowsheet: { id: 'id', legacy_entry_id: 'legacy_entry_id', show_id: 'show_id' },
+  shows: { id: 'id', legacy_show_id: 'legacy_show_id' },
 }));
 
 jest.mock('drizzle-orm', () => ({
@@ -130,6 +144,7 @@ describe('mirror loop prevention', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetCachedEntryId.mockReturnValue(undefined);
+    mockSelectLimitResult = [];
   });
 
   const baseEntry = {
@@ -184,6 +199,30 @@ describe('mirror loop prevention', () => {
       void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
         expect(mockCacheEntryId).not.toHaveBeenCalled();
         expect(mockDbUpdate).not.toHaveBeenCalled();
+        done();
+      });
+    });
+
+    it('back-fills show ID cache after DB fallback lookup', (done) => {
+      mockMirrorCreateEntry.mockResolvedValue(99);
+      mockGetCachedShowId.mockReturnValue(undefined);
+      mockSelectLimitResult = [{ legacy_show_id: 171500 }];
+
+      void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockCacheShowId).toHaveBeenCalledWith(100, 171500);
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), 171500);
+        done();
+      });
+    });
+
+    it('does not back-fill show ID cache when DB returns null', (done) => {
+      mockMirrorCreateEntry.mockResolvedValue(99);
+      mockGetCachedShowId.mockReturnValue(undefined);
+      mockSelectLimitResult = [{ legacy_show_id: null }];
+
+      void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockCacheShowId).not.toHaveBeenCalled();
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), null);
         done();
       });
     });

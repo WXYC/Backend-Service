@@ -53,10 +53,10 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
     await new Promise((r) => setTimeout(r, 300));
 
     const tubafrenzyRequests = await getMockRequests('tubafrenzy');
-    const postCalls = tubafrenzyRequests.filter((r) => r.method === 'POST');
-    expect(postCalls.length).toBeGreaterThanOrEqual(1);
+    const entryPosts = tubafrenzyRequests.filter((r) => r.method === 'POST' && r.path.includes('/api/flowsheetEntry'));
+    expect(entryPosts.length).toBeGreaterThanOrEqual(1);
 
-    const body = postCalls[0].body;
+    const body = entryPosts[entryPosts.length - 1].body;
     expect(body.artistName).toBe('Autechre');
     expect(body.songTitle).toBe('VI Scose Poise');
     expect(body.releaseTitle).toBe('Confield');
@@ -78,11 +78,11 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
     await new Promise((r) => setTimeout(r, 300));
 
     const tubafrenzyRequests = await getMockRequests('tubafrenzy');
-    const postCalls = tubafrenzyRequests.filter((r) => r.method === 'POST');
-    expect(postCalls.length).toBeGreaterThanOrEqual(1);
+    const entryPosts = tubafrenzyRequests.filter((r) => r.method === 'POST' && r.path.includes('/api/flowsheetEntry'));
+    expect(entryPosts.length).toBeGreaterThanOrEqual(1);
 
     // Non-library, non-rotation track should be type 0
-    expect(postCalls[0].body.flowsheetEntryType).toBe(0);
+    expect(entryPosts[entryPosts.length - 1].body.flowsheetEntryType).toBe(0);
   });
 
   test('mirror failure does not block primary response', async () => {
