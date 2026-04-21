@@ -368,7 +368,6 @@ export const flowsheet = wxyc_schema.table(
   (table) => [
     uniqueIndex('flowsheet_legacy_entry_id_idx').on(table.legacy_entry_id),
     index('flowsheet_legacy_release_id_idx').on(table.legacy_release_id),
-    index('flowsheet_entry_type_idx').on(table.entry_type),
     index('flowsheet_artist_name_trgm_idx').using('gin', sql`${table.artist_name} gin_trgm_ops`),
     index('flowsheet_track_title_trgm_idx').using('gin', sql`${table.track_title} gin_trgm_ops`),
   ]

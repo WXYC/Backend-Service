@@ -1,5 +1,5 @@
 {
-  "id": "9d5a2122-49e8-4b45-ac0f-ebd1df900888",
+  "id": "f256ba10-c06c-4600-8657-e81f194c5101",
   "prevId": "11cc4171-50d4-4af9-beb1-2b88e8ed23b7",
   "version": "7",
   "dialect": "postgresql",
@@ -900,21 +900,6 @@
           "columns": [
             {
               "expression": "legacy_release_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "flowsheet_entry_type_idx": {
-          "name": "flowsheet_entry_type_idx",
-          "columns": [
-            {
-              "expression": "entry_type",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
