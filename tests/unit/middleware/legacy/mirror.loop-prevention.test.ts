@@ -38,18 +38,23 @@ const mockDbUpdate = jest.fn().mockReturnValue({
   }),
 });
 
+// Configurable per-test: default resolves to [] (no results)
+let mockSelectLimitResult: unknown[] = [];
+
+const mockDbSelect = jest.fn().mockReturnValue({
+  from: jest.fn().mockReturnValue({
+    where: jest.fn().mockReturnValue({
+      orderBy: jest.fn().mockReturnValue({
+        limit: jest.fn().mockImplementation(() => Promise.resolve(mockSelectLimitResult)),
+      }),
+      limit: jest.fn().mockImplementation(() => Promise.resolve(mockSelectLimitResult)),
+    }),
+  }),
+});
+
 jest.mock('@wxyc/database', () => ({
   db: {
-    select: jest.fn().mockReturnValue({
-      from: jest.fn().mockReturnValue({
-        where: jest.fn().mockReturnValue({
-          orderBy: jest.fn().mockReturnValue({
-            limit: jest.fn().mockResolvedValue([]),
-          }),
-          limit: jest.fn().mockResolvedValue([]),
-        }),
-      }),
-    }),
+    select: mockDbSelect,
     update: mockDbUpdate,
   },
   user: {},
@@ -137,6 +142,7 @@ describe('mirror loop prevention', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetCachedEntryId.mockReturnValue(undefined);
+    mockSelectLimitResult = [];
   });
 
   const baseEntry = {
