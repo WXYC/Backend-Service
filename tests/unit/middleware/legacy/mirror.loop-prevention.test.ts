@@ -12,7 +12,9 @@
 const mockMirrorCreateEntry = jest.fn();
 const mockMirrorUpdateEntry = jest.fn();
 const mockCacheEntryId = jest.fn();
+const mockCacheShowId = jest.fn();
 const mockGetCachedEntryId = jest.fn();
+const mockGetCachedShowId = jest.fn().mockReturnValue(undefined);
 const mockMapEntryToTubafrenzy = jest.fn().mockReturnValue({ artistName: 'test' });
 const mockMapUpdateToTubafrenzy = jest.fn().mockReturnValue({ artistName: 'test' });
 
@@ -22,9 +24,9 @@ jest.mock('../../../../apps/backend/middleware/legacy/http.mirror', () => ({
   mirrorSignoffShow: jest.fn(),
   mirrorUpdateEntry: mockMirrorUpdateEntry,
   cacheEntryId: mockCacheEntryId,
-  cacheShowId: jest.fn(),
+  cacheShowId: mockCacheShowId,
   getCachedEntryId: mockGetCachedEntryId,
-  getCachedShowId: jest.fn().mockReturnValue(undefined),
+  getCachedShowId: mockGetCachedShowId,
   clearEntryIdMap: jest.fn(),
   clearShowIdMap: jest.fn(),
   mapEntryToTubafrenzy: mockMapEntryToTubafrenzy,
@@ -197,6 +199,30 @@ describe('mirror loop prevention', () => {
       void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
         expect(mockCacheEntryId).not.toHaveBeenCalled();
         expect(mockDbUpdate).not.toHaveBeenCalled();
+        done();
+      });
+    });
+
+    it('back-fills show ID cache after DB fallback lookup', (done) => {
+      mockMirrorCreateEntry.mockResolvedValue(99);
+      mockGetCachedShowId.mockReturnValue(undefined);
+      mockSelectLimitResult = [{ legacy_show_id: 171500 }];
+
+      void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockCacheShowId).toHaveBeenCalledWith(100, 171500);
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), 171500);
+        done();
+      });
+    });
+
+    it('does not back-fill show ID cache when DB returns null', (done) => {
+      mockMirrorCreateEntry.mockResolvedValue(99);
+      mockGetCachedShowId.mockReturnValue(undefined);
+      mockSelectLimitResult = [{ legacy_show_id: null }];
+
+      void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockCacheShowId).not.toHaveBeenCalled();
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), null);
         done();
       });
     });
