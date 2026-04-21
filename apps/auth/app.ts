@@ -16,16 +16,6 @@ const port = process.env.AUTH_PORT || '8080';
 
 const app = express();
 
-// [DEBUG] Request logging — remove after debugging roster issue
-app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(`[auth-request] ${req.method} ${req.originalUrl} → ${res.statusCode} (${duration}ms) [origin: ${req.headers.origin || 'none'}, cookie: ${req.headers.cookie ? 'present' : 'absent'}]`);
-  });
-  next();
-});
-
 // Parse JSON bodies first (needed for auth endpoints)
 app.use(express.json());
 
