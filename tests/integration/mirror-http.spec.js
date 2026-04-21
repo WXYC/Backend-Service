@@ -53,9 +53,7 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
     await new Promise((r) => setTimeout(r, 300));
 
     const tubafrenzyRequests = await getMockRequests('tubafrenzy');
-    const entryPosts = tubafrenzyRequests.filter(
-      (r) => r.method === 'POST' && r.path.includes('/api/flowsheetEntry')
-    );
+    const entryPosts = tubafrenzyRequests.filter((r) => r.method === 'POST' && r.path.includes('/api/flowsheetEntry'));
     expect(entryPosts.length).toBeGreaterThanOrEqual(1);
 
     const body = entryPosts[entryPosts.length - 1].body;
@@ -80,9 +78,7 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
     await new Promise((r) => setTimeout(r, 300));
 
     const tubafrenzyRequests = await getMockRequests('tubafrenzy');
-    const entryPosts = tubafrenzyRequests.filter(
-      (r) => r.method === 'POST' && r.path.includes('/api/flowsheetEntry')
-    );
+    const entryPosts = tubafrenzyRequests.filter((r) => r.method === 'POST' && r.path.includes('/api/flowsheetEntry'));
     expect(entryPosts.length).toBeGreaterThanOrEqual(1);
 
     // Non-library, non-rotation track should be type 0
