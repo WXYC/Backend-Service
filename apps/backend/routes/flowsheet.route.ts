@@ -1,6 +1,7 @@
 import { requirePermissions } from '@wxyc/authentication';
 import { Router } from 'express';
 import * as flowsheetController from '../controllers/flowsheet.controller';
+import * as suggestController from '../controllers/suggest.controller';
 import { flowsheetMirror } from '../middleware/legacy/flowsheet.mirror';
 import { conditionalGet } from '../middleware/conditionalGet';
 import { showMemberMiddleware } from '../middleware/checkShowMember';
@@ -65,3 +66,8 @@ flowsheet_route.get('/on-air', flowsheetController.getOnAir);
 flowsheet_route.get('/playlist', flowsheetController.getShowInfo);
 
 flowsheet_route.get('/show-info', flowsheetController.getShowInfo);
+
+// Ghost text autocomplete suggestions
+flowsheet_route.get('/suggest/artists', requirePermissions({ flowsheet: ['read'] }), suggestController.suggestArtistsEndpoint);
+flowsheet_route.get('/suggest/tracks', requirePermissions({ flowsheet: ['read'] }), suggestController.suggestTracksEndpoint);
+flowsheet_route.get('/suggest/track-details', requirePermissions({ flowsheet: ['read'] }), suggestController.getTrackDetailsEndpoint);

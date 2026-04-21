@@ -142,6 +142,7 @@ export const specialty_shows = {};
 export const schedule = {};
 export const artist_crossreference = {};
 export const artist_library_crossreference = {};
+export const compilation_track_artist = {};
 
 // Pure ETL utility functions (copied from etl-utils.ts to avoid importing the real DB client)
 export const epochMsToDate = (epochMs: number | null): Date | null => {
