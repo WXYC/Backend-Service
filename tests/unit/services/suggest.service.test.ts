@@ -9,10 +9,7 @@ import { suggestArtists, suggestTracks, getTrackDetails } from '../../../apps/ba
 describe('suggest.service', () => {
   describe('suggestArtists', () => {
     it('returns matching artist names ordered by plays', async () => {
-      const mockRows = [
-        { artist_name: 'Autechre' },
-        { artist_name: 'Autolux' },
-      ];
+      const mockRows = [{ artist_name: 'Autechre' }, { artist_name: 'Autolux' }];
       (db.execute as jest.Mock).mockResolvedValue(mockRows);
 
       const result = await suggestArtists('Aut');
@@ -41,16 +38,12 @@ describe('suggest.service', () => {
 
   describe('suggestTracks', () => {
     it('returns matching tracks from flowsheet with album and label', async () => {
-      const mockFlowsheetRows = [
-        { track_title: 'VI Scose Poise', album_title: 'Confield', record_label: 'Warp' },
-      ];
+      const mockFlowsheetRows = [{ track_title: 'VI Scose Poise', album_title: 'Confield', record_label: 'Warp' }];
       (db.execute as jest.Mock).mockResolvedValue(mockFlowsheetRows);
 
       const result = await suggestTracks('VI', 'Autechre');
 
-      expect(result).toEqual([
-        { track_title: 'VI Scose Poise', album_title: 'Confield', record_label: 'Warp' },
-      ]);
+      expect(result).toEqual([{ track_title: 'VI Scose Poise', album_title: 'Confield', record_label: 'Warp' }]);
     });
 
     it('returns empty array when no matches', async () => {
@@ -62,15 +55,9 @@ describe('suggest.service', () => {
     });
 
     it('merges compilation track results when flowsheet has fewer than limit', async () => {
-      const mockFlowsheetRows = [
-        { track_title: 'VI Scose Poise', album_title: 'Confield', record_label: 'Warp' },
-      ];
-      const mockCtaRows = [
-        { track_title: 'Vose In', album_title: 'We Are Reasonable People', record_label: 'Warp' },
-      ];
-      (db.execute as jest.Mock)
-        .mockResolvedValueOnce(mockFlowsheetRows)
-        .mockResolvedValueOnce(mockCtaRows);
+      const mockFlowsheetRows = [{ track_title: 'VI Scose Poise', album_title: 'Confield', record_label: 'Warp' }];
+      const mockCtaRows = [{ track_title: 'Vose In', album_title: 'We Are Reasonable People', record_label: 'Warp' }];
+      (db.execute as jest.Mock).mockResolvedValueOnce(mockFlowsheetRows).mockResolvedValueOnce(mockCtaRows);
 
       const result = await suggestTracks('V', 'Autechre', 5);
 
@@ -80,15 +67,9 @@ describe('suggest.service', () => {
     });
 
     it('deduplicates compilation results against flowsheet results', async () => {
-      const mockFlowsheetRows = [
-        { track_title: 'VI Scose Poise', album_title: 'Confield', record_label: 'Warp' },
-      ];
-      const mockCtaRows = [
-        { track_title: 'VI Scose Poise', album_title: 'Some Compilation', record_label: 'Warp' },
-      ];
-      (db.execute as jest.Mock)
-        .mockResolvedValueOnce(mockFlowsheetRows)
-        .mockResolvedValueOnce(mockCtaRows);
+      const mockFlowsheetRows = [{ track_title: 'VI Scose Poise', album_title: 'Confield', record_label: 'Warp' }];
+      const mockCtaRows = [{ track_title: 'VI Scose Poise', album_title: 'Some Compilation', record_label: 'Warp' }];
+      (db.execute as jest.Mock).mockResolvedValueOnce(mockFlowsheetRows).mockResolvedValueOnce(mockCtaRows);
 
       const result = await suggestTracks('VI', 'Autechre', 5);
 
@@ -124,9 +105,7 @@ describe('suggest.service', () => {
 
     it('falls back to library when flowsheet has no results', async () => {
       const mockLibraryRows = [{ album_title: 'Confield', record_label: 'Warp' }];
-      (db.execute as jest.Mock)
-        .mockResolvedValueOnce([])
-        .mockResolvedValueOnce(mockLibraryRows);
+      (db.execute as jest.Mock).mockResolvedValueOnce([]).mockResolvedValueOnce(mockLibraryRows);
 
       const result = await getTrackDetails('Autechre', 'VI Scose Poise');
 
@@ -147,9 +126,7 @@ describe('suggest.service', () => {
     });
 
     it('returns null when no match in flowsheet or library', async () => {
-      (db.execute as jest.Mock)
-        .mockResolvedValueOnce([])
-        .mockResolvedValueOnce([]);
+      (db.execute as jest.Mock).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
       const result = await getTrackDetails('Unknown Artist', 'Unknown Track');
 

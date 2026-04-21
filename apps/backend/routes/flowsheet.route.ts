@@ -68,6 +68,18 @@ flowsheet_route.get('/playlist', flowsheetController.getShowInfo);
 flowsheet_route.get('/show-info', flowsheetController.getShowInfo);
 
 // Ghost text autocomplete suggestions
-flowsheet_route.get('/suggest/artists', requirePermissions({ flowsheet: ['read'] }), suggestController.suggestArtistsEndpoint);
-flowsheet_route.get('/suggest/tracks', requirePermissions({ flowsheet: ['read'] }), suggestController.suggestTracksEndpoint);
-flowsheet_route.get('/suggest/track-details', requirePermissions({ flowsheet: ['read'] }), suggestController.getTrackDetailsEndpoint);
+flowsheet_route.get(
+  '/suggest/artists',
+  requirePermissions({ flowsheet: ['read'] }),
+  suggestController.suggestArtistsEndpoint
+);
+flowsheet_route.get(
+  '/suggest/tracks',
+  requirePermissions({ flowsheet: ['read'] }),
+  suggestController.suggestTracksEndpoint
+);
+flowsheet_route.get(
+  '/suggest/track-details',
+  requirePermissions({ flowsheet: ['read'] }),
+  suggestController.getTrackDetailsEndpoint
+);
