@@ -280,8 +280,8 @@ const createDefaultUser = async () => {
 
     console.log('Default user created successfully with admin role.');
   } catch (error) {
-    console.error('Error creating default user!');
-    throw error;
+    console.error('[DEFAULT USER] Error creating default user:', error);
+    Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'default-user' } });
   }
 };
 
