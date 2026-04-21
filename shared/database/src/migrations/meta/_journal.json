@@ -274,6 +274,13 @@
       "when": 1776825600000,
       "tag": "0041_rotation_etl_support",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1776751687724,
+      "tag": "0042_flowsheet-suggest-indexes",
+      "breakpoints": true
     }
   ]
 }
