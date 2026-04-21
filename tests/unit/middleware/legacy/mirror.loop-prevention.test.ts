@@ -18,11 +18,17 @@ const mockMapUpdateToTubafrenzy = jest.fn().mockReturnValue({ artistName: 'test'
 
 jest.mock('../../../../apps/backend/middleware/legacy/http.mirror', () => ({
   mirrorCreateEntry: mockMirrorCreateEntry,
+  mirrorCreateShow: jest.fn(),
+  mirrorSignoffShow: jest.fn(),
   mirrorUpdateEntry: mockMirrorUpdateEntry,
   cacheEntryId: mockCacheEntryId,
+  cacheShowId: jest.fn(),
   getCachedEntryId: mockGetCachedEntryId,
+  getCachedShowId: jest.fn().mockReturnValue(undefined),
   clearEntryIdMap: jest.fn(),
+  clearShowIdMap: jest.fn(),
   mapEntryToTubafrenzy: mockMapEntryToTubafrenzy,
+  mapShowToTubafrenzy: jest.fn(),
   mapUpdateToTubafrenzy: mockMapUpdateToTubafrenzy,
 }));
 
@@ -47,7 +53,8 @@ jest.mock('@wxyc/database', () => ({
     update: mockDbUpdate,
   },
   user: {},
-  flowsheet: { id: 'id', legacy_entry_id: 'legacy_entry_id' },
+  flowsheet: { id: 'id', legacy_entry_id: 'legacy_entry_id', show_id: 'show_id' },
+  shows: { id: 'id', legacy_show_id: 'legacy_show_id' },
 }));
 
 jest.mock('drizzle-orm', () => ({

@@ -17,11 +17,18 @@ import {
   clearEntryIdMap,
   mapEntryToTubafrenzy,
   mapUpdateToTubafrenzy,
+  mirrorCreateShow,
+  mirrorSignoffShow,
+  cacheShowId,
+  getCachedShowId,
+  clearShowIdMap,
+  mapShowToTubafrenzy,
 } from '../../../../apps/backend/middleware/legacy/http.mirror';
 
 beforeEach(() => {
   mockFetch.mockReset();
   clearEntryIdMap();
+  clearShowIdMap();
 });
 
 describe('http.mirror', () => {
@@ -180,8 +187,18 @@ describe('http.mirror', () => {
       expect(result.nowPlayingFlag).toBe(0);
     });
 
-    it('does not include radioShowID (auto-resolved by tubafrenzy)', () => {
+    it('does not include radioShowID when not provided', () => {
       const result = mapEntryToTubafrenzy(baseTrack);
+      expect(result).not.toHaveProperty('radioShowID');
+    });
+
+    it('includes radioShowID when provided', () => {
+      const result = mapEntryToTubafrenzy(baseTrack, 171500);
+      expect(result.radioShowID).toBe(171500);
+    });
+
+    it('does not include radioShowID when null', () => {
+      const result = mapEntryToTubafrenzy(baseTrack, null);
       expect(result).not.toHaveProperty('radioShowID');
     });
 
@@ -480,6 +497,156 @@ describe('http.mirror', () => {
       expect(result.libraryReleaseID).toBe(0);
       expect(result.rotationReleaseID).toBe(0);
       expect(result.flowsheetEntryType).toBe(0);
+    });
+  });
+
+  describe('mirrorCreateShow', () => {
+    it('POSTs to the tubafrenzy radioShow API', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ id: 171500 }),
+      });
+
+      const body = { djName: 'Kate Bailey', djHandle: 'DJ Catalyst', signonTime: 1773792000000 };
+      const result = await mirrorCreateShow(body);
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, options] = mockFetch.mock.calls[0];
+      expect(url).toContain('/playlists/api/radioShow');
+      expect(options.method).toBe('POST');
+      expect(JSON.parse(options.body)).toEqual(body);
+      expect(result).toBe(171500);
+    });
+
+    it('retries on failure up to 5 times', async () => {
+      mockFetch
+        .mockResolvedValueOnce({ ok: false, status: 500, text: () => Promise.resolve('error') })
+        .mockResolvedValueOnce({ ok: false, status: 500, text: () => Promise.resolve('error') })
+        .mockResolvedValue({ ok: true, json: () => Promise.resolve({ id: 171500 }) });
+
+      const result = await mirrorCreateShow({ djName: 'Test' });
+      expect(result).toBe(171500);
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('returns null after all retries fail', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve('error'),
+      });
+
+      const result = await mirrorCreateShow({ djName: 'Test' });
+      expect(result).toBeNull();
+      expect(mockFetch).toHaveBeenCalledTimes(5);
+    });
+
+    it('returns null on network error without throwing', async () => {
+      mockFetch.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      const result = await mirrorCreateShow({ djName: 'Test' });
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('mirrorSignoffShow', () => {
+    it('POSTs to the signoff endpoint', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+
+      await mirrorSignoffShow(171500, 1773799200000);
+
+      const [url, options] = mockFetch.mock.calls[0];
+      expect(url).toContain('/playlists/api/radioShow/signoff');
+      expect(options.method).toBe('POST');
+      const parsed = JSON.parse(options.body);
+      expect(parsed.radioShowId).toBe(171500);
+      expect(parsed.signoffTime).toBe(1773799200000);
+    });
+
+    it('does not throw on HTTP error', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 409,
+        text: () => Promise.resolve('already signed off'),
+      });
+
+      await expect(mirrorSignoffShow(171500, 1773799200000)).resolves.toBeUndefined();
+    });
+
+    it('does not throw on network error', async () => {
+      mockFetch.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      await expect(mirrorSignoffShow(171500, 1773799200000)).resolves.toBeUndefined();
+    });
+  });
+
+  describe('showIdMap', () => {
+    it('stores and retrieves show IDs by backend show ID', () => {
+      cacheShowId(100, 171500);
+      expect(getCachedShowId(100)).toBe(171500);
+    });
+
+    it('returns undefined for unknown backend show ID', () => {
+      expect(getCachedShowId(999)).toBeUndefined();
+    });
+
+    it('overwrites existing entries', () => {
+      cacheShowId(100, 171500);
+      cacheShowId(100, 171501);
+      expect(getCachedShowId(100)).toBe(171501);
+    });
+
+    it('clearShowIdMap removes all entries', () => {
+      cacheShowId(100, 171500);
+      cacheShowId(101, 171501);
+      clearShowIdMap();
+      expect(getCachedShowId(100)).toBeUndefined();
+      expect(getCachedShowId(101)).toBeUndefined();
+    });
+  });
+
+  describe('mapShowToTubafrenzy', () => {
+    it('maps show and DJ to tubafrenzy JSON', () => {
+      const show = {
+        id: 100,
+        show_name: 'Friday Night Jazz',
+        specialty_id: 5,
+        start_time: new Date('2024-02-01T12:00:00Z'),
+      };
+      const dj = {
+        realName: 'Kate Bailey',
+        djName: 'DJ Catalyst',
+        name: 'kate',
+      };
+
+      const result = mapShowToTubafrenzy(show as any, dj as any);
+
+      expect(result.djName).toBe('Kate Bailey');
+      expect(result.djHandle).toBe('DJ Catalyst');
+      expect(result.showName).toBe('Friday Night Jazz');
+      expect(result.specialtyShowId).toBe(5);
+      expect(result.signonTime).toBe(new Date('2024-02-01T12:00:00Z').getTime());
+    });
+
+    it('falls back to name when realName/djName are null', () => {
+      const show = { id: 100, start_time: new Date() };
+      const dj = { realName: null, djName: null, name: 'kate' };
+
+      const result = mapShowToTubafrenzy(show as any, dj as any);
+
+      expect(result.djName).toBe('kate');
+      expect(result.djHandle).toBe('kate');
+    });
+
+    it('defaults optional fields', () => {
+      const show = { id: 100, start_time: new Date() };
+      const dj = { name: 'kate' };
+
+      const result = mapShowToTubafrenzy(show as any, dj as any);
+
+      expect(result.showName).toBe('');
+      expect(result.specialtyShowId).toBe(0);
+      expect(result.djId).toBe(0);
     });
   });
 });
