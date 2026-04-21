@@ -291,6 +291,9 @@ export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) 
         .where(eq(shows.id, entry.show_id as number))
         .limit(1);
       radioShowID = showRow?.[0]?.legacy_show_id ?? null;
+      if (radioShowID != null) {
+        cacheShowId(entry.show_id as number, radioShowID);
+      }
     } catch {
       // DB lookup failed; fall back to tubafrenzy auto-resolution
     }
