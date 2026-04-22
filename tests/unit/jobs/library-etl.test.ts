@@ -460,19 +460,19 @@ describe('library-etl job helpers', () => {
   describe('parseReleaseRows', () => {
     // Base 13 columns shared across all row widths
     const base13 = [
-      '1001',        // ID
-      'Confield',    // TITLE
-      '1700000000',  // TIME_LAST_MODIFIED
-      '1600000000',  // TIME_CREATED
-      '42',          // CALL_NUMBERS
-      'AE',          // CALL_LETTERS
-      '',            // ALTERNATE_ARTIST_NAME
-      'Autechre',    // PRESENTATION_NAME
-      'Autechre',    // ALPHABETICAL_NAME
-      'AE',          // artist CALL_LETTERS
-      '1',           // artist CALL_NUMBERS
-      'Electronic',  // GENRE REFERENCE_NAME
-      'CD',          // FORMAT REFERENCE_NAME
+      '1001', // ID
+      'Confield', // TITLE
+      '1700000000', // TIME_LAST_MODIFIED
+      '1600000000', // TIME_CREATED
+      '42', // CALL_NUMBERS
+      'AE', // CALL_LETTERS
+      '', // ALTERNATE_ARTIST_NAME
+      'Autechre', // PRESENTATION_NAME
+      'Autechre', // ALPHABETICAL_NAME
+      'AE', // artist CALL_LETTERS
+      '1', // artist CALL_NUMBERS
+      'Electronic', // GENRE REFERENCE_NAME
+      'CD', // FORMAT REFERENCE_NAME
     ];
 
     it('parses a 17-column row with on_streaming=true', () => {

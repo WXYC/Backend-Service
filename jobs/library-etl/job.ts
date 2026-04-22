@@ -260,7 +260,12 @@ const updateLastRun = async (dbClient: DbClient, jobName: string, lastRun: Date)
     });
 };
 
-const buildReleaseQuery = (lastRunMs: number | null, includeDateLostFound: boolean, includeAlbumArtist: boolean, includeOnStreaming: boolean = false) => {
+const buildReleaseQuery = (
+  lastRunMs: number | null,
+  includeDateLostFound: boolean,
+  includeAlbumArtist: boolean,
+  includeOnStreaming: boolean = false
+) => {
   const lastRunFilter = lastRunMs == null ? '' : `WHERE lr.TIME_LAST_MODIFIED > ${lastRunMs}`;
   const dateLostFoundColumns = includeDateLostFound ? `,\n      lr.DATE_LOST,\n      lr.DATE_FOUND` : '';
   const albumArtistColumn = includeAlbumArtist
