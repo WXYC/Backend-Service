@@ -1009,15 +1009,12 @@ const run = async () => {
       }
 
       // Import compilation track artists (V/A releases)
-      const ctaCount = await tx.select({ count: sql<number>`count(*)::int` }).from(compilation_track_artist);
-      if (ctaCount[0].count === 0) {
-        const legacyCTA = await fetchLegacyCompilationTracks();
-        if (legacyCTA.length > 0) {
-          const ctaResult = await importCompilationTracks(tx, legacyCTA);
-          console.log(
-            `[library-etl] Compilation track artists: imported ${ctaResult.imported}, skipped ${ctaResult.skipped}.`
-          );
-        }
+      const legacyCTA = await fetchLegacyCompilationTracks();
+      if (legacyCTA.length > 0) {
+        const ctaResult = await importCompilationTracks(tx, legacyCTA);
+        console.log(
+          `[library-etl] Compilation track artists: imported ${ctaResult.imported}, skipped ${ctaResult.skipped}.`
+        );
       }
 
       await updateLastRun(tx, JOB_NAME, runStartedAt);
