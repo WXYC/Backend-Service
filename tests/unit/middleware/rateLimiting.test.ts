@@ -44,23 +44,23 @@ describe('songRequestRateLimit keyGenerator', () => {
     delete process.env.TEST_RATE_LIMITING;
   });
 
-  it('returns user ID when req.user.id is set', () => {
-    const req = { user: { id: 'user-123' }, ip: '10.0.0.1' } as unknown as Request;
+  it('returns user ID when req.auth.id is set', () => {
+    const req = { auth: { id: 'user-123' }, ip: '10.0.0.1' } as unknown as Request;
     expect(keyGenerator(req)).toBe('user-123');
   });
 
-  it('returns req.ip when req.user is undefined', () => {
-    const req = { user: undefined, ip: '192.168.1.42' } as unknown as Request;
+  it('returns req.ip when req.auth is undefined', () => {
+    const req = { auth: undefined, ip: '192.168.1.42' } as unknown as Request;
     expect(keyGenerator(req)).toBe('192.168.1.42');
   });
 
-  it('returns req.ip when req.user.id is missing', () => {
-    const req = { user: {}, ip: '10.0.0.5' } as unknown as Request;
+  it('returns req.ip when req.auth.id is missing', () => {
+    const req = { auth: {}, ip: '10.0.0.5' } as unknown as Request;
     expect(keyGenerator(req)).toBe('10.0.0.5');
   });
 
-  it('returns "unknown" only when both req.user.id and req.ip are unavailable', () => {
-    const req = { user: undefined, ip: undefined } as unknown as Request;
+  it('returns "unknown" only when both req.auth.id and req.ip are unavailable', () => {
+    const req = { auth: undefined, ip: undefined } as unknown as Request;
     expect(keyGenerator(req)).toBe('unknown');
   });
 });

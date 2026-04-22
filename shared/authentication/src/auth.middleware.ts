@@ -10,7 +10,9 @@ export type WXYCAuthJwtPayload = JWTPayload & {
   id?: string; // User ID (may be in 'sub' field, better-auth may map it)
   sub?: string; // Standard JWT subject (user ID)
   email: string;
-  role: WXYCRole; // Organization member role from better-auth organization plugin
+  role?: WXYCRole; // Organization member role (absent for anonymous users)
+  banned?: boolean;
+  banReason?: string | null;
 };
 
 const issuer = process.env.BETTER_AUTH_ISSUER;
@@ -113,36 +115,48 @@ export function requirePermissions(required: RequiredPermissions) {
       id: userId,
     } as WXYCAuthJwtPayload;
 
-    // Normalize and validate role
-    if (!payload.role) {
-      return res.status(403).json({ error: 'Forbidden: Missing role in token.' });
+    // Check if user is banned (field is included in JWT payload via ...user spread)
+    if (payload.banned) {
+      return res.status(403).json({
+        message: 'Access denied',
+        reason: (payload as any).banReason || 'Account suspended',
+      });
     }
 
-    const normalizedRole = normalizeRole(payload.role as string);
-    if (!normalizedRole) {
-      return res.status(403).json({ error: 'Forbidden: Invalid role.' });
-    }
+    // Role and permission checks only apply when specific permissions are required.
+    // requirePermissions({}) means "verify JWT only" — no role needed (e.g. anonymous users).
+    const hasPermissions = Object.keys(required).length > 0;
 
-    // Update req.auth with normalized role so downstream sees a valid WXYCRole
-    req.auth = { ...req.auth!, role: normalizedRole };
+    if (hasPermissions) {
+      if (!payload.role) {
+        return res.status(403).json({ error: 'Forbidden: Missing role in token.' });
+      }
 
-    const roleImpl = WXYCRoles[normalizedRole];
+      const normalizedRole = normalizeRole(payload.role as string);
+      if (!normalizedRole) {
+        return res.status(403).json({ error: 'Forbidden: Invalid role.' });
+      }
 
-    // Check permissions
-    const ok = Object.entries(required).every(([resource, actions]) => {
-      if (!actions || actions.length === 0) return true;
+      // Update req.auth with normalized role so downstream sees a valid WXYCRole
+      req.auth = { ...req.auth!, role: normalizedRole };
 
-      const authorize = roleImpl.authorize as (request: RequiredPermissions) => { success: boolean };
+      const roleImpl = WXYCRoles[normalizedRole];
 
-      const result = authorize({
-        [resource]: actions,
-      } as RequiredPermissions);
+      const ok = Object.entries(required).every(([resource, actions]) => {
+        if (!actions || actions.length === 0) return true;
 
-      return result.success;
-    });
+        const authorize = roleImpl.authorize as (request: RequiredPermissions) => { success: boolean };
 
-    if (!ok) {
-      return res.status(403).json({ error: 'Forbidden: insufficient permissions' });
+        const result = authorize({
+          [resource]: actions,
+        } as RequiredPermissions);
+
+        return result.success;
+      });
+
+      if (!ok) {
+        return res.status(403).json({ error: 'Forbidden: insufficient permissions' });
+      }
     }
 
     return next();

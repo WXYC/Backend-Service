@@ -6,8 +6,8 @@
  * getArtistMetadata, and resolveEntity. The Spotify track handler calls the
  * Spotify API directly (track-by-ID, a different use case from search).
  *
- * All handlers require `requireAnonymousAuth` + `proxyRateLimit` middleware
- * applied at the route level.
+ * All handlers require `requirePermissions({})` + `trackActivity` +
+ * `proxyRateLimit` middleware applied at the route level.
  */
 import { RequestHandler } from 'express';
 import { getArtworkFinder } from '../services/artwork/finder.js';

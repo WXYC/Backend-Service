@@ -81,9 +81,9 @@ export const songRequestRateLimit = shouldEnableRateLimiting
       legacyHeaders: false,
       store: songRequestStore,
       keyGenerator: (req: Request) => {
-        // Use user ID if available (set by anonymousAuth middleware)
-        if (req.user?.id) {
-          return req.user.id;
+        // Use user ID if available (set by requirePermissions middleware)
+        if (req.auth?.id) {
+          return req.auth.id;
         }
         return req.ip || 'unknown';
       },
@@ -100,7 +100,7 @@ export const songRequestRateLimit = shouldEnableRateLimiting
 
 /**
  * Rate limiter for proxy endpoints (artwork, metadata, entity, Spotify).
- * Limits requests per user ID (from anonymous auth session).
+ * Limits requests per user ID (from JWT auth).
  *
  * Configurable via environment:
  * - RATE_LIMIT_PROXY_WINDOW_MS (default: 60000 = 60 seconds)
@@ -116,8 +116,8 @@ export const proxyRateLimit = shouldEnableRateLimiting
       legacyHeaders: false,
       store: proxyStore,
       keyGenerator: (req: Request) => {
-        if (req.user?.id) {
-          return req.user.id;
+        if (req.auth?.id) {
+          return req.auth.id;
         }
         return 'unknown';
       },
