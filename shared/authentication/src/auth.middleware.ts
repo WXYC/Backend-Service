@@ -55,18 +55,17 @@ export type RequiredPermissions = {
 export function requirePermissions(required: RequiredPermissions) {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (process.env.AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production') {
-      // In bypass mode, skip JWKS signature verification but still require
-      // a token to be present. This matches production behavior for
-      // unauthenticated request rejection while allowing tests to pass
-      // tokens without a running auth service.
+      // In bypass mode, skip JWKS signature verification but still enforce
+      // the same request structure as production: require a Bearer token.
       const authHeader = req.headers.authorization;
       if (!authHeader) {
         return res.status(401).json({ error: 'Unauthorized: Missing Authorization header.' });
       }
-      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader.trim();
-      if (!token) {
+      const match = authHeader.match(/^Bearer\s+(.+)$/i);
+      if (!match) {
         return res.status(401).json({ error: 'Unauthorized: Missing token in Authorization header.' });
       }
+      const token = match[1].trim();
       // Try to decode the JWT so req.auth is populated for controllers.
       // If the token is not a valid JWT (e.g. integration tests pass a raw
       // user ID), fall back to using the token value as the user ID directly.
