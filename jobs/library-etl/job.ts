@@ -416,12 +416,20 @@ const ensureGenreArtistCrossref = async (
   artistGenreCode: number
 ) => {
   const existing = await dbClient
-    .select({ artist_id: genre_artist_crossreference.artist_id })
+    .select({ artist_id: genre_artist_crossreference.artist_id, artist_genre_code: genre_artist_crossreference.artist_genre_code })
     .from(genre_artist_crossreference)
     .where(and(eq(genre_artist_crossreference.artist_id, artistId), eq(genre_artist_crossreference.genre_id, genreId)))
     .limit(1);
 
-  if (existing.length) return;
+  if (existing.length) {
+    if (existing[0].artist_genre_code !== artistGenreCode) {
+      await dbClient
+        .update(genre_artist_crossreference)
+        .set({ artist_genre_code: artistGenreCode })
+        .where(and(eq(genre_artist_crossreference.artist_id, artistId), eq(genre_artist_crossreference.genre_id, genreId)));
+    }
+    return;
+  }
 
   await dbClient.insert(genre_artist_crossreference).values({
     artist_id: artistId,
