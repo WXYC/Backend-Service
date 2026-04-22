@@ -71,13 +71,10 @@ export const auth = betterAuth({
       const resetUrl = buildResetUrl(url, redirectTo);
 
       // Detect if this is a new user setup or actual password reset
-      // New users created by admin don't have realName filled in yet
       const userWithCustomFields = user as typeof user & {
-        realName?: string | null;
+        hasCompletedOnboarding?: boolean;
       };
-      const isNewUserSetup =
-        !userWithCustomFields.realName ||
-        (typeof userWithCustomFields.realName === 'string' && userWithCustomFields.realName.trim() === '');
+      const isNewUserSetup = userWithCustomFields.hasCompletedOnboarding === false;
 
       const emailType = isNewUserSetup ? 'accountSetup' : 'passwordReset';
 
@@ -347,6 +344,7 @@ export const auth = betterAuth({
       djName: { type: 'string', required: false },
       appSkin: { type: 'string', required: true, defaultValue: 'modern-light' },
       isAnonymous: { type: 'boolean', required: false, defaultValue: false },
+      hasCompletedOnboarding: { type: 'boolean', required: false, defaultValue: false },
       // Cross-cutting capabilities independent of role hierarchy (e.g., 'editor', 'webmaster')
       capabilities: { type: 'string[]', required: false, defaultValue: [] },
     },

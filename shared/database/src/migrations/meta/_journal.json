@@ -281,6 +281,13 @@
       "when": 1776754643179,
       "tag": "0042_flowsheet-suggest-indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1745366400000,
+      "tag": "0043_add-has-completed-onboarding",
+      "breakpoints": true
     }
   ]
 }
