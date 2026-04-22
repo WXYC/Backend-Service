@@ -44,7 +44,10 @@ describe('Request Line Endpoint', () => {
       expect(response.status).toBe(401);
     });
 
-    it('should return 401 with invalid Bearer token', async () => {
+    // In AUTH_BYPASS mode, any well-formed Bearer token is accepted (bypass
+    // skips JWKS signature verification). This test only validates in production.
+    const describeIfNoBypass = process.env.AUTH_BYPASS === 'true' ? it.skip : it;
+    describeIfNoBypass('should return 401 with invalid Bearer token', async () => {
       const response = await request
         .post('/request')
         .set('Authorization', 'Bearer invalid-token')
