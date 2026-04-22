@@ -49,7 +49,7 @@ export const registerDevice: RequestHandler<object, unknown, RegisterDeviceBody>
 export const submitRequestLine: RequestHandler<object, unknown, RequestLineBody> = async (req, res, next) => {
   const logId = `rl-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   const startTime = Date.now();
-  const userId = req.user?.id || 'unknown';
+  const userId = req.auth?.id || 'unknown';
 
   // Log incoming request
   console.log(`[${logId}] Request line received:`, {

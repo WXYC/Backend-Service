@@ -2,13 +2,13 @@ import { requirePermissions } from '@wxyc/authentication';
 import { Router } from 'express';
 import * as libraryController from '../controllers/library.controller.js';
 import * as requestLineController from '../controllers/requestLine.controller.js';
-import { requireAnonymousAuth } from '../middleware/anonymousAuth.js';
+import { trackActivity } from '../middleware/trackActivity.js';
 
 export const library_route = Router();
 
 // Public library search endpoint (for request line feature)
-// Uses anonymous auth instead of DJ permissions
-library_route.get('/search', requireAnonymousAuth, requestLineController.searchLibraryEndpoint);
+// Requires JWT auth but no specific role/permissions
+library_route.get('/search', requirePermissions({}), trackActivity, requestLineController.searchLibraryEndpoint);
 
 library_route.get('/', requirePermissions({ catalog: ['read'] }), libraryController.searchForAlbum);
 

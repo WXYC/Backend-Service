@@ -1,12 +1,13 @@
+import { requirePermissions } from '@wxyc/authentication';
 import { Router } from 'express';
 import * as proxyController from '../controllers/proxy.controller.js';
-import { requireAnonymousAuth } from '../middleware/anonymousAuth.js';
 import { proxyRateLimit } from '../middleware/rateLimiting.js';
+import { trackActivity } from '../middleware/trackActivity.js';
 
 export const proxy_route = Router();
 
-// All proxy routes require anonymous auth + rate limiting
-proxy_route.use(requireAnonymousAuth, proxyRateLimit);
+// All proxy routes require JWT auth + activity tracking + rate limiting
+proxy_route.use(requirePermissions({}), trackActivity, proxyRateLimit);
 
 proxy_route.get('/artwork/search', proxyController.searchArtwork);
 proxy_route.get('/metadata/album', proxyController.getAlbumMetadata);
