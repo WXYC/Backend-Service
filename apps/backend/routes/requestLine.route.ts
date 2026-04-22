@@ -12,7 +12,13 @@ request_line_route.post('/register', registrationRateLimit, requestLineControlle
 
 // Request Line - song requests from listeners (requires JWT auth)
 // Rate limited by device ID after authentication
-request_line_route.post('/', requirePermissions({}), trackActivity, songRequestRateLimit, requestLineController.submitRequestLine);
+request_line_route.post(
+  '/',
+  requirePermissions({}),
+  trackActivity,
+  songRequestRateLimit,
+  requestLineController.submitRequestLine
+);
 
 // Parse only - for debugging AI parser (requires JWT auth)
 request_line_route.post('/parse', requirePermissions({}), trackActivity, requestLineController.parseMessage);
