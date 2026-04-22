@@ -19,7 +19,7 @@ describe('Request Line Endpoint', () => {
     });
   });
 
-  describe('Anonymous Authentication', () => {
+  describe('JWT Authentication', () => {
     it('should return 401 without Authorization header', async () => {
       const response = await request.post('/request').send({ message: 'Test song request' });
 

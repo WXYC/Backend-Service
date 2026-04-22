@@ -63,6 +63,7 @@ describe('AUTH_BYPASS environment variable', () => {
   it('should allow bypass in non-production when AUTH_BYPASS is true', async () => {
     process.env.AUTH_BYPASS = 'true';
     process.env.NODE_ENV = 'test';
+    mockReq.headers = { authorization: 'Bearer test-user-id' };
 
     const middleware = requirePermissions({ flowsheet: ['read'] });
     await middleware(mockReq as Request, mockRes as Response, mockNext as NextFunction);
@@ -73,11 +74,23 @@ describe('AUTH_BYPASS environment variable', () => {
   it('should allow bypass when NODE_ENV is not set and AUTH_BYPASS is true', async () => {
     process.env.AUTH_BYPASS = 'true';
     delete process.env.NODE_ENV;
+    mockReq.headers = { authorization: 'Bearer test-user-id' };
 
     const middleware = requirePermissions({ flowsheet: ['read'] });
     await middleware(mockReq as Request, mockRes as Response, mockNext as NextFunction);
 
     expect(mockNext).toHaveBeenCalled();
+  });
+
+  it('should reject requests without auth header even in bypass mode', async () => {
+    process.env.AUTH_BYPASS = 'true';
+    process.env.NODE_ENV = 'test';
+
+    const middleware = requirePermissions({ flowsheet: ['read'] });
+    await middleware(mockReq as Request, mockRes as Response, mockNext as NextFunction);
+
+    expect(mockNext).not.toHaveBeenCalled();
+    expect(mockRes.status).toHaveBeenCalledWith(401);
   });
 
   it('should NOT bypass when AUTH_BYPASS is not set', async () => {
