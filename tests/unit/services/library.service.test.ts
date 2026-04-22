@@ -1,21 +1,34 @@
 // Mock dependencies before importing the service
-jest.mock('@wxyc/database', () => ({
-  db: {
-    select: jest.fn().mockReturnThis(),
-    insert: jest.fn().mockReturnThis(),
-    update: jest.fn().mockReturnThis(),
-    delete: jest.fn().mockReturnThis(),
-  },
-  library: {},
-  artists: {},
-  genres: {},
-  format: {},
-  rotation: {},
-  library_artist_view: {},
-}));
+jest.mock('@wxyc/database', () => {
+  const chain: Record<string, jest.Mock> = {};
+  const chainMethods = ['select', 'from', 'where', 'innerJoin', 'leftJoin', 'orderBy', 'limit', 'insert', 'values', 'update', 'set', 'delete', 'offset'];
+  chainMethods.forEach((method) => {
+    chain[method] = jest.fn().mockReturnValue(chain);
+  });
+  chain.returning = jest.fn().mockResolvedValue([]);
+  chain.execute = jest.fn().mockResolvedValue([]);
+
+  return {
+    db: {
+      select: chain.select,
+      insert: chain.insert,
+      update: chain.update,
+      delete: chain.delete,
+      execute: chain.execute,
+      _chain: chain,
+    },
+    library: { on_streaming: 'on_streaming' },
+    artists: {},
+    genres: {},
+    format: {},
+    rotation: {},
+    library_artist_view: { on_streaming: 'on_streaming' },
+  };
+});
 
 jest.mock('drizzle-orm', () => ({
   eq: jest.fn((a, b) => ({ eq: [a, b] })),
+  and: jest.fn((...args: unknown[]) => ({ and: args })),
   sql: Object.assign(
     jest.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ sql: strings, values })),
     { raw: jest.fn((s: string) => ({ raw: s })) }
@@ -23,9 +36,41 @@ jest.mock('drizzle-orm', () => ({
   desc: jest.fn((col) => ({ desc: col })),
 }));
 
-import { isISODate } from '../../../apps/backend/services/library.service';
+import { isISODate, fuzzySearchLibrary } from '../../../apps/backend/services/library.service';
+import { db } from '@wxyc/database';
 
 describe('library.service', () => {
+  describe('fuzzySearchLibrary', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it('passes through results when no on_streaming filter is provided', async () => {
+      const mockResults = [
+        { id: 1, artist_name: 'Autechre', album_title: 'Confield', on_streaming: true },
+        { id: 2, artist_name: 'Autechre', album_title: 'LP5', on_streaming: false },
+      ];
+      (db.execute as jest.Mock).mockResolvedValueOnce(mockResults);
+
+      const results = await fuzzySearchLibrary('Autechre', undefined, 5);
+
+      expect(results).toEqual(mockResults);
+      expect(db.execute).toHaveBeenCalled();
+    });
+
+    it('calls db.execute when on_streaming filter is provided', async () => {
+      const mockResults = [
+        { id: 1, artist_name: 'Autechre', album_title: 'Confield', on_streaming: true },
+      ];
+      (db.execute as jest.Mock).mockResolvedValueOnce(mockResults);
+
+      const results = await fuzzySearchLibrary('Autechre', undefined, 5, true);
+
+      expect(results).toEqual(mockResults);
+      expect(db.execute).toHaveBeenCalled();
+    });
+  });
+
   describe('isISODate', () => {
     it('returns true for valid ISO date format YYYY-MM-DD', () => {
       expect(isISODate('2024-01-15')).toBe(true);

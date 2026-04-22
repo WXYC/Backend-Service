@@ -39,6 +39,7 @@ const createBaseEntry = (overrides: Partial<IFSEntry & { metadata?: Partial<IFSE
     message: null,
     add_time: new Date('2024-01-15T12:00:00Z'),
     rotation_bin: null,
+    on_streaming: null,
     metadata: {
       ...nullMetadata,
       ...metadataOverrides,
@@ -136,6 +137,36 @@ describe('flowsheet.service', () => {
         const result = transformToV2(entry);
 
         expect(result.label_id).toBe(42);
+      });
+
+      it.each([
+        { value: true, description: 'true' },
+        { value: false, description: 'false' },
+        { value: null, description: 'null' },
+      ])('includes on_streaming as $description for track entries', ({ value }) => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+          on_streaming: value,
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.on_streaming).toBe(value);
+      });
+
+      it('defaults on_streaming to null when entry has no album_id', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          album_id: null,
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.on_streaming).toBeNull();
       });
 
       it('excludes message field from track entries', () => {

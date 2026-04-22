@@ -70,6 +70,7 @@ export const labels = {};
 export const library = {
   id: 'id',
   legacy_release_id: 'legacy_release_id',
+  on_streaming: 'on_streaming',
 };
 export const artists = {};
 export const genres = {};
@@ -86,7 +87,9 @@ export const rotation = {
   album_title: 'album_title',
   record_label: 'record_label',
 };
-export const library_artist_view = {};
+export const library_artist_view = {
+  on_streaming: 'on_streaming',
+};
 export const flowsheet = {
   id: 'id',
   show_id: 'show_id',

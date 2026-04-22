@@ -111,13 +111,17 @@ export const insertAlbum = async (newAlbum: NewAlbum) => {
 
 //based on artist name and album title, retrieve n best matches from db
 //let's build the query using drizzle's sql object
-export const fuzzySearchLibrary = async (artist_name?: string, album_title?: string, n = 5) => {
+export const fuzzySearchLibrary = async (artist_name?: string, album_title?: string, n = 5, on_streaming?: boolean) => {
+  const streamingFilter = on_streaming !== undefined
+    ? sql` AND ${library_artist_view.on_streaming} = ${on_streaming}`
+    : sql``;
+
   const query = sql`SELECT *,
                     ${library_artist_view.artist_name} <-> ${artist_name || null} AS artist_dist,
                     ${library_artist_view.album_title} <-> ${album_title || null} AS album_dist
                       FROM ${library_artist_view}
-                      WHERE ${library_artist_view.artist_name} % ${artist_name || null} OR
-                            ${library_artist_view.album_title} % ${album_title || null}
+                      WHERE (${library_artist_view.artist_name} % ${artist_name || null} OR
+                            ${library_artist_view.album_title} % ${album_title || null})${streamingFilter}
                       ORDER BY artist_dist asc, album_dist asc
                       LIMIT ${n}`;
 
@@ -331,7 +335,8 @@ export async function searchLibrary(
   query?: string,
   artist?: string,
   title?: string,
-  limit = 5
+  limit = 5,
+  on_streaming?: boolean
 ): Promise<EnrichedLibraryResult[]> {
   let results: LibraryArtistViewEntry[] = [];
 
@@ -375,7 +380,7 @@ export async function searchLibrary(
     }
   } else if (artist || title) {
     // Filtered search by artist and/or title
-    const response = await fuzzySearchLibrary(artist, title, limit);
+    const response = await fuzzySearchLibrary(artist, title, limit, on_streaming);
     results = response as unknown as LibraryArtistViewEntry[];
   }
 

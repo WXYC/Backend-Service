@@ -53,6 +53,7 @@ export interface TrackEntryV2 extends BaseEntry {
   soundcloud_url: string | null;
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
+  on_streaming?: boolean | null;
 }
 
 /** Show start event - when a show begins */
