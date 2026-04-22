@@ -345,3 +345,49 @@ export const getAlbum: RequestHandler<object, unknown, unknown, { album_id: stri
     next(e);
   }
 };
+
+const parseAlbumId = (rawId: string): number => {
+  const albumId = Number(rawId);
+  if (!Number.isInteger(albumId) || albumId <= 0) {
+    throw new WxycError('Invalid album ID', 400);
+  }
+  return albumId;
+};
+
+export const markMissing: RequestHandler<{ id: string }> = async (req, res, next) => {
+  const albumId = parseAlbumId(req.params.id);
+
+  try {
+    const result = await libraryService.markAlbumMissing(albumId);
+    if (!result) {
+      throw new WxycError('Album not found', 404);
+    }
+
+    const album = await libraryService.getAlbumFromDB(albumId);
+    res.status(200).json(album);
+  } catch (e) {
+    if (e instanceof WxycError) throw e;
+    console.error('Failed to mark album as missing');
+    console.error(e);
+    next(e);
+  }
+};
+
+export const markFound: RequestHandler<{ id: string }> = async (req, res, next) => {
+  const albumId = parseAlbumId(req.params.id);
+
+  try {
+    const result = await libraryService.markAlbumFound(albumId);
+    if (!result) {
+      throw new WxycError('Album not found', 404);
+    }
+
+    const album = await libraryService.getAlbumFromDB(albumId);
+    res.status(200).json(album);
+  } catch (e) {
+    if (e instanceof WxycError) throw e;
+    console.error('Failed to mark album as found');
+    console.error(e);
+    next(e);
+  }
+};

@@ -263,9 +263,16 @@ export const getAlbumFromDB = async (album_id: number) => {
       plays: library.plays,
       add_date: library.add_date,
       last_modified: library.last_modified,
+      format_name: format.format_name,
+      genre_name: genres.genre_name,
+      date_lost: library.date_lost,
+      date_found: library.date_found,
+      on_streaming: library.on_streaming,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
+    .innerJoin(format, eq(format.id, library.format_id))
+    .innerJoin(genres, eq(genres.id, library.genre_id))
     .innerJoin(
       genre_artist_crossreference,
       and(
@@ -277,6 +284,24 @@ export const getAlbumFromDB = async (album_id: number) => {
     .limit(1);
 
   return album[0];
+};
+
+export const markAlbumMissing = async (album_id: number) => {
+  const result = await db
+    .update(library)
+    .set({ date_lost: sql`NOW()`, date_found: null, last_modified: sql`NOW()` })
+    .where(eq(library.id, album_id))
+    .returning({ id: library.id });
+  return result[0];
+};
+
+export const markAlbumFound = async (album_id: number) => {
+  const result = await db
+    .update(library)
+    .set({ date_found: sql`NOW()`, last_modified: sql`NOW()` })
+    .where(eq(library.id, album_id))
+    .returning({ id: library.id });
+  return result[0];
 };
 
 export const getGenresFromDB = async () => {

@@ -1,57 +1,12 @@
-// Mock dependencies before importing the service
-jest.mock('@wxyc/database', () => {
-  const chain: Record<string, jest.Mock> = {};
-  const chainMethods = [
-    'select',
-    'from',
-    'where',
-    'innerJoin',
-    'leftJoin',
-    'orderBy',
-    'limit',
-    'insert',
-    'values',
-    'update',
-    'set',
-    'delete',
-    'offset',
-  ];
-  chainMethods.forEach((method) => {
-    chain[method] = jest.fn().mockReturnValue(chain);
-  });
-  chain.returning = jest.fn().mockResolvedValue([]);
-  chain.execute = jest.fn().mockResolvedValue([]);
+import { db, createMockQueryChain } from '../../mocks/database.mock';
 
-  return {
-    db: {
-      select: chain.select,
-      insert: chain.insert,
-      update: chain.update,
-      delete: chain.delete,
-      execute: chain.execute,
-      _chain: chain,
-    },
-    library: { on_streaming: 'on_streaming' },
-    artists: {},
-    genres: {},
-    format: {},
-    rotation: {},
-    library_artist_view: { on_streaming: 'on_streaming' },
-  };
-});
-
-jest.mock('drizzle-orm', () => ({
-  eq: jest.fn((a, b) => ({ eq: [a, b] })),
-  and: jest.fn((...args: unknown[]) => ({ and: args })),
-  sql: Object.assign(
-    jest.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ sql: strings, values })),
-    { raw: jest.fn((s: string) => ({ raw: s })) }
-  ),
-  desc: jest.fn((col) => ({ desc: col })),
-}));
-
-import { isISODate, fuzzySearchLibrary } from '../../../apps/backend/services/library.service';
-import { db } from '@wxyc/database';
+import {
+  isISODate,
+  fuzzySearchLibrary,
+  getAlbumFromDB,
+  markAlbumMissing,
+  markAlbumFound,
+} from '../../../apps/backend/services/library.service';
 
 describe('library.service', () => {
   describe('fuzzySearchLibrary', () => {
@@ -111,6 +66,99 @@ describe('library.service', () => {
       expect(isISODate('2024-02-29')).toBe(true); // leap year
       expect(isISODate('2024-02-30')).toBe(true); // invalid day but correct format
       expect(isISODate('2024-13-01')).toBe(true); // invalid month but correct format
+    });
+  });
+
+  describe('getAlbumFromDB', () => {
+    it('returns album with format_name, genre_name, date_lost, date_found, and on_streaming', async () => {
+      const mockAlbum = {
+        id: 42,
+        code_letters: 'AU',
+        code_artist_number: 1,
+        code_number: 3,
+        artist_name: 'Autechre',
+        alphabetical_name: 'Autechre',
+        album_title: 'Confield',
+        record_label: 'Warp',
+        label_id: 10,
+        plays: 5,
+        add_date: new Date('2024-01-15'),
+        last_modified: new Date('2024-03-01'),
+        format_name: 'CD',
+        genre_name: 'Electronic',
+        date_lost: null,
+        date_found: null,
+        on_streaming: true,
+      };
+      const chain = createMockQueryChain([mockAlbum]);
+      (db.select as jest.Mock).mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockAlbum]);
+
+      const result = await getAlbumFromDB(42);
+
+      expect(result).toEqual(mockAlbum);
+      expect(result).toHaveProperty('format_name', 'CD');
+      expect(result).toHaveProperty('genre_name', 'Electronic');
+      expect(result).toHaveProperty('date_lost', null);
+      expect(result).toHaveProperty('date_found', null);
+      expect(result).toHaveProperty('on_streaming', true);
+      expect(db.select).toHaveBeenCalled();
+    });
+
+    it('returns undefined when album not found', async () => {
+      const chain = createMockQueryChain([]);
+      (db.select as jest.Mock).mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+
+      const result = await getAlbumFromDB(999);
+
+      expect(result).toBeUndefined();
+    });
+  });
+
+  describe('markAlbumMissing', () => {
+    it('issues UPDATE and returns the updated row ID', async () => {
+      const chain = createMockQueryChain([{ id: 42 }]);
+      (db.update as jest.Mock).mockReturnValue(chain);
+      chain.returning = jest.fn().mockResolvedValue([{ id: 42 }]);
+
+      const result = await markAlbumMissing(42);
+
+      expect(result).toEqual({ id: 42 });
+      expect(db.update).toHaveBeenCalled();
+    });
+
+    it('returns undefined when album does not exist', async () => {
+      const chain = createMockQueryChain([]);
+      (db.update as jest.Mock).mockReturnValue(chain);
+      chain.returning = jest.fn().mockResolvedValue([]);
+
+      const result = await markAlbumMissing(999);
+
+      expect(result).toBeUndefined();
+    });
+  });
+
+  describe('markAlbumFound', () => {
+    it('issues UPDATE and returns the updated row ID', async () => {
+      const chain = createMockQueryChain([{ id: 42 }]);
+      (db.update as jest.Mock).mockReturnValue(chain);
+      chain.returning = jest.fn().mockResolvedValue([{ id: 42 }]);
+
+      const result = await markAlbumFound(42);
+
+      expect(result).toEqual({ id: 42 });
+      expect(db.update).toHaveBeenCalled();
+    });
+
+    it('returns undefined when album does not exist', async () => {
+      const chain = createMockQueryChain([]);
+      (db.update as jest.Mock).mockReturnValue(chain);
+      chain.returning = jest.fn().mockResolvedValue([]);
+
+      const result = await markAlbumFound(999);
+
+      expect(result).toBeUndefined();
     });
   });
 });
