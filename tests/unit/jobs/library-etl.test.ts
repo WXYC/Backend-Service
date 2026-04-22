@@ -85,6 +85,7 @@ import {
   parseLegacyGenreRows,
   parseLegacyFormatRows,
   parseLegacyCompilationTrackRows,
+  parseReleaseRows,
   buildArtistCacheKey,
   buildAlbumCacheKey,
 } from '../../../jobs/library-etl/job';
@@ -453,6 +454,93 @@ describe('library-etl job helpers', () => {
 
     it('returns empty array for empty input', () => {
       expect(parseLegacyCompilationTrackRows('')).toEqual([]);
+    });
+  });
+
+  describe('parseReleaseRows', () => {
+    // Base 13 columns shared across all row widths
+    const base13 = [
+      '1001', // ID
+      'Confield', // TITLE
+      '1700000000', // TIME_LAST_MODIFIED
+      '1600000000', // TIME_CREATED
+      '42', // CALL_NUMBERS
+      'AE', // CALL_LETTERS
+      '', // ALTERNATE_ARTIST_NAME
+      'Autechre', // PRESENTATION_NAME
+      'Autechre', // ALPHABETICAL_NAME
+      'AE', // artist CALL_LETTERS
+      '1', // artist CALL_NUMBERS
+      'Electronic', // GENRE REFERENCE_NAME
+      'CD', // FORMAT REFERENCE_NAME
+    ];
+
+    it('parses a 17-column row with on_streaming=true', () => {
+      const row = [...base13, '0', '0', 'Autechre', '1'].join('\t');
+      const result = parseReleaseRows(row, 17);
+      expect(result).toHaveLength(1);
+      expect(result[0].release_on_streaming).toBe(true);
+      expect(result[0].release_album_artist).toBe('Autechre');
+    });
+
+    it('parses a 17-column row with on_streaming=false', () => {
+      const row = [...base13, '0', '0', '', '0'].join('\t');
+      const result = parseReleaseRows(row, 17);
+      expect(result).toHaveLength(1);
+      expect(result[0].release_on_streaming).toBe(false);
+    });
+
+    it('parses a 17-column row with on_streaming=null for empty value', () => {
+      // Use two rows so raw.trim() does not strip trailing tabs from the first row
+      const row1 = [...base13, '0', '0', '', ''].join('\t');
+      const row2 = [...base13, '0', '0', 'Autechre', '1'].join('\t');
+      const result = parseReleaseRows([row1, row2].join('\n'), 17);
+      expect(result).toHaveLength(2);
+      expect(result[0].release_on_streaming).toBeNull();
+    });
+
+    it('parses a 16-column row with release_on_streaming=null (backward compat)', () => {
+      const row = [...base13, '0', '0', 'Autechre'].join('\t');
+      const result = parseReleaseRows(row, 16);
+      expect(result).toHaveLength(1);
+      expect(result[0].release_on_streaming).toBeNull();
+      expect(result[0].release_album_artist).toBe('Autechre');
+    });
+
+    it('parses a 15-column row with release_on_streaming=null', () => {
+      const row = [...base13, '0', '0'].join('\t');
+      const result = parseReleaseRows(row, 15);
+      expect(result).toHaveLength(1);
+      expect(result[0].release_on_streaming).toBeNull();
+      expect(result[0].release_album_artist).toBeNull();
+    });
+
+    it('parses a 13-column row with release_on_streaming=null', () => {
+      const row = base13.join('\t');
+      const result = parseReleaseRows(row, 13);
+      expect(result).toHaveLength(1);
+      expect(result[0].release_on_streaming).toBeNull();
+      expect(result[0].release_album_artist).toBeNull();
+      expect(result[0].date_lost).toBeNull();
+      expect(result[0].date_found).toBeNull();
+    });
+
+    it('parses multiple 17-column rows with mixed on_streaming values', () => {
+      // Empty-column row is not last to avoid raw.trim() stripping trailing tabs
+      const rows = [
+        [...base13, '0', '0', 'Autechre', '1'].join('\t'),
+        [...base13, '0', '0', '', ''].join('\t'),
+        [...base13, '0', '0', '', '0'].join('\t'),
+      ].join('\n');
+      const result = parseReleaseRows(rows, 17);
+      expect(result).toHaveLength(3);
+      expect(result[0].release_on_streaming).toBe(true);
+      expect(result[1].release_on_streaming).toBeNull();
+      expect(result[2].release_on_streaming).toBe(false);
+    });
+
+    it('returns empty array for empty input', () => {
+      expect(parseReleaseRows('', 17)).toEqual([]);
     });
   });
 });
