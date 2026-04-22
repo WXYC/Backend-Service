@@ -80,6 +80,7 @@ const FSEntryFieldsRaw = {
   soundcloud_url: flowsheet.soundcloud_url,
   artist_bio: flowsheet.artist_bio,
   artist_wikipedia_url: flowsheet.artist_wikipedia_url,
+  on_streaming: library.on_streaming,
 };
 
 // Raw result type from SQL query
@@ -112,6 +113,7 @@ type FSEntryRaw = {
   soundcloud_url: string | null;
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
+  on_streaming: boolean | null;
 };
 
 /** Transform flat SQL result to nested IFSEntry structure */
@@ -145,6 +147,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   soundcloud_url: raw.soundcloud_url,
   artist_bio: raw.artist_bio,
   artist_wikipedia_url: raw.artist_wikipedia_url,
+  on_streaming: raw.on_streaming ?? null,
   // Nested metadata view (used by transformToV2)
   metadata: {
     artwork_url: raw.artwork_url,
@@ -172,6 +175,7 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .leftJoin(library, eq(library.id, flowsheet.album_id))
     .orderBy(desc(flowsheet.id))
     .offset(offset)
     .limit(limit);
@@ -183,6 +187,7 @@ export const getEntriesByRange = async (startId: number, endId: number): Promise
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .leftJoin(library, eq(library.id, flowsheet.album_id))
     .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
     .orderBy(desc(flowsheet.play_order));
 
@@ -196,6 +201,7 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .leftJoin(library, eq(library.id, flowsheet.album_id))
     .where(inArray(flowsheet.show_id, show_ids))
     .orderBy(desc(flowsheet.play_order));
 
@@ -666,6 +672,7 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         soundcloud_url: entry.metadata?.soundcloud_url ?? null,
         artist_bio: entry.metadata?.artist_bio ?? null,
         artist_wikipedia_url: entry.metadata?.artist_wikipedia_url ?? null,
+        on_streaming: entry.on_streaming ?? null,
       };
 
     case 'show_start':

@@ -34,6 +34,7 @@ export interface IFSEntryMetadata {
 export interface IFSEntry extends FSEntry {
   label_id: number | null;
   rotation_bin: string | null;
+  on_streaming: boolean | null;
   metadata: IFSEntryMetadata;
 }
 
