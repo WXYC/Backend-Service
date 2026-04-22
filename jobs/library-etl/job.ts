@@ -415,19 +415,13 @@ const ensureGenreArtistCrossref = async (
   genreId: number,
   artistGenreCode: number
 ) => {
-  const existing = await dbClient
-    .select({ artist_id: genre_artist_crossreference.artist_id })
-    .from(genre_artist_crossreference)
-    .where(and(eq(genre_artist_crossreference.artist_id, artistId), eq(genre_artist_crossreference.genre_id, genreId)))
-    .limit(1);
-
-  if (existing.length) return;
-
-  await dbClient.insert(genre_artist_crossreference).values({
-    artist_id: artistId,
-    genre_id: genreId,
-    artist_genre_code: artistGenreCode,
-  });
+  await dbClient
+    .insert(genre_artist_crossreference)
+    .values({ artist_id: artistId, genre_id: genreId, artist_genre_code: artistGenreCode })
+    .onConflictDoUpdate({
+      target: [genre_artist_crossreference.artist_id, genre_artist_crossreference.genre_id],
+      set: { artist_genre_code: artistGenreCode },
+    });
 };
 
 /**
@@ -631,7 +625,10 @@ const importArtistCrossRefs = async (
         target_artist_id: targetId,
         comment: row.comment,
       })
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: [artist_crossreference.source_artist_id, artist_crossreference.target_artist_id],
+        set: { comment: sql`excluded.comment` },
+      });
 
     imported++;
   }
@@ -767,7 +764,10 @@ const importReleaseCrossRefs = async (
         library_id: albumId,
         comment: row.comment,
       })
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: [artist_library_crossreference.artist_id, artist_library_crossreference.library_id],
+        set: { comment: sql`excluded.comment` },
+      });
 
     imported++;
   }
@@ -1009,15 +1009,12 @@ const run = async () => {
       }
 
       // Import compilation track artists (V/A releases)
-      const ctaCount = await tx.select({ count: sql<number>`count(*)::int` }).from(compilation_track_artist);
-      if (ctaCount[0].count === 0) {
-        const legacyCTA = await fetchLegacyCompilationTracks();
-        if (legacyCTA.length > 0) {
-          const ctaResult = await importCompilationTracks(tx, legacyCTA);
-          console.log(
-            `[library-etl] Compilation track artists: imported ${ctaResult.imported}, skipped ${ctaResult.skipped}.`
-          );
-        }
+      const legacyCTA = await fetchLegacyCompilationTracks();
+      if (legacyCTA.length > 0) {
+        const ctaResult = await importCompilationTracks(tx, legacyCTA);
+        console.log(
+          `[library-etl] Compilation track artists: imported ${ctaResult.imported}, skipped ${ctaResult.skipped}.`
+        );
       }
 
       await updateLastRun(tx, JOB_NAME, runStartedAt);
