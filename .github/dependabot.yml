@@ -1,33 +1,41 @@
 version: 2
 updates:
-  - package-ecosystem: "npm"
-    directory: "/"
+  - package-ecosystem: 'npm'
+    directory: '/'
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: 'weekly'
+      day: 'monday'
     groups:
       better-auth:
         patterns:
-          - "better-auth"
-          - "@better-auth/*"
+          - 'better-auth'
+          - '@better-auth/*'
+      drizzle:
+        patterns:
+          - 'drizzle-orm'
+          - 'drizzle-kit'
       wxyc-shared:
         patterns:
-          - "@wxyc/shared"
+          - '@wxyc/shared'
       dev-dependencies:
-        dependency-type: "development"
+        dependency-type: 'development'
         exclude-patterns:
-          - "better-auth"
-          - "@better-auth/*"
-          - "@wxyc/shared"
+          - 'better-auth'
+          - '@better-auth/*'
+          - 'drizzle-orm'
+          - 'drizzle-kit'
+          - '@wxyc/shared'
       production-dependencies:
-        dependency-type: "production"
+        dependency-type: 'production'
         exclude-patterns:
-          - "better-auth"
-          - "@better-auth/*"
-          - "@wxyc/shared"
+          - 'better-auth'
+          - '@better-auth/*'
+          - 'drizzle-orm'
+          - 'drizzle-kit'
+          - '@wxyc/shared'
 
-  - package-ecosystem: "github-actions"
-    directory: "/"
+  - package-ecosystem: 'github-actions'
+    directory: '/'
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: 'weekly'
+      day: 'monday'
