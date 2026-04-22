@@ -41,6 +41,7 @@ export const user = pgTable(
     djName: varchar('dj_name', { length: 255 }),
     appSkin: varchar('app_skin', { length: 255 }).notNull().default('modern-light'),
     isAnonymous: boolean('is_anonymous').notNull().default(false),
+    hasCompletedOnboarding: boolean('has_completed_onboarding').notNull().default(false),
     // Cross-cutting capabilities independent of role hierarchy (e.g., 'editor', 'webmaster')
     capabilities: text('capabilities').array().notNull().default([]),
   },
