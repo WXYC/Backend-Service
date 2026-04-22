@@ -247,6 +247,7 @@ jobs:
       BETTER_AUTH_JWKS_URL: http://localhost:8083/auth/jwks
       BETTER_AUTH_ISSUER: http://localhost:8083
       BETTER_AUTH_AUDIENCE: http://localhost:8083
+      BETTER_AUTH_SECRET: ci-test-secret-key-for-jwt-signing
     steps:
       - name: Skip notification
         if: env.RUN_TESTS != 'true'
