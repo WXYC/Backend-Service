@@ -55,25 +55,29 @@ export type RequiredPermissions = {
 export function requirePermissions(required: RequiredPermissions) {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (process.env.AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production') {
-      // In bypass mode, try to decode the JWT (without verification) so that
-      // req.auth is populated for controllers that rely on req.auth.id.
+      // In bypass mode, skip JWKS signature verification but still require
+      // a token to be present. This matches production behavior for
+      // unauthenticated request rejection while allowing tests to pass
+      // tokens without a running auth service.
+      const authHeader = req.headers.authorization;
+      if (!authHeader) {
+        return res.status(401).json({ error: 'Unauthorized: Missing Authorization header.' });
+      }
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader.trim();
+      if (!token) {
+        return res.status(401).json({ error: 'Unauthorized: Missing token in Authorization header.' });
+      }
+      // Try to decode the JWT so req.auth is populated for controllers.
       // If the token is not a valid JWT (e.g. integration tests pass a raw
       // user ID), fall back to using the token value as the user ID directly.
-      const authHeader = req.headers.authorization;
-      if (authHeader) {
-        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader.trim();
-        if (token) {
-          try {
-            const payload = decodeJwt(token) as WXYCAuthJwtPayload;
-            const userId = payload.id || payload.sub;
-            if (userId) {
-              req.auth = { ...payload, id: userId } as WXYCAuthJwtPayload;
-            }
-          } catch {
-            // Token is not a valid JWT -- treat it as a raw user ID.
-            req.auth = { id: token } as WXYCAuthJwtPayload;
-          }
+      try {
+        const payload = decodeJwt(token) as WXYCAuthJwtPayload;
+        const userId = payload.id || payload.sub;
+        if (userId) {
+          req.auth = { ...payload, id: userId } as WXYCAuthJwtPayload;
         }
+      } catch {
+        req.auth = { id: token } as WXYCAuthJwtPayload;
       }
       return next();
     }

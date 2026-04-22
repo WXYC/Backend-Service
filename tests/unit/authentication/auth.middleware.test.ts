@@ -68,14 +68,24 @@ describe('requirePermissions middleware', () => {
       process.env.AUTH_BYPASS = 'true';
     });
 
-    it('should skip all validation when AUTH_BYPASS is "true"', async () => {
-      const { req, res, next } = createMocks();
+    it('should skip JWKS validation when AUTH_BYPASS is "true"', async () => {
+      const { req, res, next } = createMocks('Bearer test-user-id');
       const middleware = requirePermissions({ catalog: ['read'] });
 
       await middleware(req, res, next);
 
       expect(next).toHaveBeenCalled();
       expect(res.status).not.toHaveBeenCalled();
+    });
+
+    it('should reject requests without auth header even in bypass mode', async () => {
+      const { req, res, next } = createMocks();
+      const middleware = requirePermissions({ catalog: ['read'] });
+
+      await middleware(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(401);
     });
 
     it('should populate req.auth from decoded JWT when token is a valid JWT', async () => {
