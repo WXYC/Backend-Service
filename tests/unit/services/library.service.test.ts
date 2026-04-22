@@ -1,7 +1,21 @@
 // Mock dependencies before importing the service
 jest.mock('@wxyc/database', () => {
   const chain: Record<string, jest.Mock> = {};
-  const chainMethods = ['select', 'from', 'where', 'innerJoin', 'leftJoin', 'orderBy', 'limit', 'insert', 'values', 'update', 'set', 'delete', 'offset'];
+  const chainMethods = [
+    'select',
+    'from',
+    'where',
+    'innerJoin',
+    'leftJoin',
+    'orderBy',
+    'limit',
+    'insert',
+    'values',
+    'update',
+    'set',
+    'delete',
+    'offset',
+  ];
   chainMethods.forEach((method) => {
     chain[method] = jest.fn().mockReturnValue(chain);
   });
@@ -59,9 +73,7 @@ describe('library.service', () => {
     });
 
     it('calls db.execute when on_streaming filter is provided', async () => {
-      const mockResults = [
-        { id: 1, artist_name: 'Autechre', album_title: 'Confield', on_streaming: true },
-      ];
+      const mockResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', on_streaming: true }];
       (db.execute as jest.Mock).mockResolvedValueOnce(mockResults);
 
       const results = await fuzzySearchLibrary('Autechre', undefined, 5, true);

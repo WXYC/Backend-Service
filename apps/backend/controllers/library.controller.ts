@@ -121,7 +121,12 @@ export const searchForAlbum: RequestHandler = async (
   const onStreaming = query.on_streaming === 'true' ? true : query.on_streaming === 'false' ? false : undefined;
 
   try {
-    const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n, onStreaming);
+    const response = await libraryService.fuzzySearchLibrary(
+      query.artist_name,
+      query.album_title,
+      query.n,
+      onStreaming
+    );
     res.status(200).json(response);
   } catch (e) {
     console.error("Error: Couldn't get album");
