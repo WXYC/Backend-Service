@@ -36,6 +36,7 @@ type LegacyReleaseRow = {
   date_lost: number | null;
   date_found: number | null;
   release_album_artist: string | null;
+  release_on_streaming: boolean | null;
 };
 
 const VARIOUS_ARTISTS_NAME = 'Various Artists';
@@ -259,12 +260,13 @@ const updateLastRun = async (dbClient: DbClient, jobName: string, lastRun: Date)
     });
 };
 
-const buildReleaseQuery = (lastRunMs: number | null, includeDateLostFound: boolean, includeAlbumArtist: boolean) => {
+const buildReleaseQuery = (lastRunMs: number | null, includeDateLostFound: boolean, includeAlbumArtist: boolean, includeOnStreaming: boolean = false) => {
   const lastRunFilter = lastRunMs == null ? '' : `WHERE lr.TIME_LAST_MODIFIED > ${lastRunMs}`;
   const dateLostFoundColumns = includeDateLostFound ? `,\n      lr.DATE_LOST,\n      lr.DATE_FOUND` : '';
   const albumArtistColumn = includeAlbumArtist
     ? `,\n      REPLACE(REPLACE(IFNULL(lr.ALBUM_ARTIST, ''), '\\t', ' '), '\\n', ' ')`
     : '';
+  const onStreamingColumn = includeOnStreaming ? `,\n      lr.ON_STREAMING` : '';
   return `
     SELECT
       lr.ID,
@@ -279,7 +281,7 @@ const buildReleaseQuery = (lastRunMs: number | null, includeDateLostFound: boole
       lc.CALL_LETTERS AS artist_call_letters,
       lc.CALL_NUMBERS AS artist_call_numbers,
       g.REFERENCE_NAME,
-      f.REFERENCE_NAME${dateLostFoundColumns}${albumArtistColumn}
+      f.REFERENCE_NAME${dateLostFoundColumns}${albumArtistColumn}${onStreamingColumn}
     FROM LIBRARY_RELEASE lr
     JOIN LIBRARY_CODE lc ON lr.LIBRARY_CODE_ID = lc.ID
     JOIN GENRE g ON lc.GENRE_ID = g.ID
@@ -287,6 +289,11 @@ const buildReleaseQuery = (lastRunMs: number | null, includeDateLostFound: boole
     ${lastRunFilter}
     ORDER BY lr.TIME_LAST_MODIFIED ASC;
   `;
+};
+
+const parseOnStreaming = (value?: string): boolean | null => {
+  if (value == null || value.trim().length === 0) return null;
+  return value.trim() === '1';
 };
 
 const parseReleaseRows = (raw: string, columnCount: number): LegacyReleaseRow[] => {
@@ -317,6 +324,7 @@ const parseReleaseRows = (raw: string, columnCount: number): LegacyReleaseRow[] 
       date_lost: columnCount >= 15 ? toNullableNumber(columns[13]) : null,
       date_found: columnCount >= 15 ? toNullableNumber(columns[14]) : null,
       release_album_artist: columnCount >= 16 ? toNullableString(columns[15]) : null,
+      release_on_streaming: columnCount >= 17 ? parseOnStreaming(columns[16]) : null,
     });
   }
 
@@ -324,7 +332,13 @@ const parseReleaseRows = (raw: string, columnCount: number): LegacyReleaseRow[] 
 };
 
 const fetchLegacyReleases = async (lastRunMs: number | null) => {
-  // Try with DATE_LOST/DATE_FOUND + ALBUM_ARTIST columns first; fall back progressively
+  // Try with ON_STREAMING + DATE_LOST/DATE_FOUND + ALBUM_ARTIST columns first; fall back progressively
+  try {
+    const raw = await legacyDB.send(buildReleaseQuery(lastRunMs, true, true, true));
+    return parseReleaseRows(raw, 17);
+  } catch {
+    console.warn('[library-etl] ON_STREAMING column not available, falling back to 16-column query.');
+  }
   try {
     const raw = await legacyDB.send(buildReleaseQuery(lastRunMs, true, true));
     return parseReleaseRows(raw, 16);
@@ -781,6 +795,7 @@ type ExistingRelease = {
   dateLost: Date | null;
   dateFound: Date | null;
   albumArtist: string | null;
+  onStreaming: boolean | null;
 };
 
 const findExistingRelease = async (
@@ -798,6 +813,7 @@ const findExistingRelease = async (
       dateLost: library.date_lost,
       dateFound: library.date_found,
       albumArtist: library.album_artist,
+      onStreaming: library.on_streaming,
     })
     .from(library)
     .where(
@@ -940,6 +956,10 @@ const run = async () => {
           if ((existing.albumArtist ?? null) !== newAlbumArtist) {
             updates.album_artist = newAlbumArtist;
           }
+          const newOnStreaming = release.release_on_streaming ?? null;
+          if ((existing.onStreaming ?? null) !== newOnStreaming) {
+            updates.on_streaming = newOnStreaming;
+          }
           if (Object.keys(updates).length > 0) {
             await tx.update(library).set(updates).where(eq(library.id, existing.id));
           }
@@ -962,6 +982,7 @@ const run = async () => {
           last_modified: toDateOrUndefined(release.release_last_modified),
           date_lost: toDateOrUndefined(release.date_lost),
           date_found: toDateOrUndefined(release.date_found),
+          on_streaming: release.release_on_streaming,
         });
 
         insertedCount += 1;
@@ -1042,6 +1063,7 @@ export {
   parseLegacyGenreRows,
   parseLegacyFormatRows,
   parseLegacyCompilationTrackRows,
+  parseReleaseRows,
   buildArtistCacheKey,
   buildAlbumCacheKey,
 };
