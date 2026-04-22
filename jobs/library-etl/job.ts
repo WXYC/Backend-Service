@@ -625,7 +625,10 @@ const importArtistCrossRefs = async (
         target_artist_id: targetId,
         comment: row.comment,
       })
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: [artist_crossreference.source_artist_id, artist_crossreference.target_artist_id],
+        set: { comment: sql`excluded.comment` },
+      });
 
     imported++;
   }
@@ -761,7 +764,10 @@ const importReleaseCrossRefs = async (
         library_id: albumId,
         comment: row.comment,
       })
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: [artist_library_crossreference.artist_id, artist_library_crossreference.library_id],
+        set: { comment: sql`excluded.comment` },
+      });
 
     imported++;
   }
