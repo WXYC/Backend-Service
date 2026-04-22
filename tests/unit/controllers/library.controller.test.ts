@@ -147,9 +147,7 @@ describe('library.controller', () => {
       expect(mockMarkAlbumFound).toHaveBeenCalledWith(42);
       expect(mockGetAlbumFromDB).toHaveBeenCalledWith(42);
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 42, date_found: expect.any(Date) })
-      );
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ id: 42, date_found: expect.any(Date) }));
     });
   });
 });
