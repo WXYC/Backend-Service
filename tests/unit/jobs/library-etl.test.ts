@@ -490,6 +490,13 @@ describe('library-etl job helpers', () => {
       expect(result[0].release_on_streaming).toBe(false);
     });
 
+    it('parses a 17-column row with on_streaming=null for MySQL NULL literal', () => {
+      const row = [...base13, '0', '0', 'Autechre', 'NULL'].join('\t');
+      const result = parseReleaseRows(row, 17);
+      expect(result).toHaveLength(1);
+      expect(result[0].release_on_streaming).toBeNull();
+    });
+
     it('parses a 17-column row with on_streaming=null for empty value', () => {
       // Use two rows so raw.trim() does not strip trailing tabs from the first row
       const row1 = [...base13, '0', '0', '', ''].join('\t');
