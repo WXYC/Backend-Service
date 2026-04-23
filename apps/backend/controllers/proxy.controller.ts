@@ -207,6 +207,10 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
       metadata.discogsUrl = topResult.release_url;
       metadata.artworkUrl = topResult.artwork_url || undefined;
 
+      // Artist bio and Wikipedia from LML search result
+      if (topResult.artist_bio) metadata.artistBio = topResult.artist_bio;
+      if (topResult.wikipedia_url) metadata.artistWikipediaUrl = topResult.wikipedia_url;
+
       // Streaming URLs from LML enrichment
       if (topResult.spotify_url) metadata.spotifyUrl = topResult.spotify_url;
       if (topResult.apple_music_url) metadata.appleMusicUrl = topResult.apple_music_url;
@@ -221,7 +225,7 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
         metadata.genres = release.genres.length > 0 ? release.genres : undefined;
         metadata.styles = release.styles.length > 0 ? release.styles : undefined;
         metadata.label = release.label ?? undefined;
-        metadata.discogsArtistId = release.artist_id ?? undefined;
+        metadata.discogsArtistId = release.artist_id ?? null;
         metadata.fullReleaseDate = release.released ?? undefined;
         if (release.tracklist.length > 0) {
           metadata.tracklist = release.tracklist.map((t) => ({
