@@ -107,6 +107,7 @@ Here is an example environment variable file. Create a file with these contents 
 ### Backend Service Port
 PORT=8080
 CI_PORT=8081
+AUTH_PORT=8082
 
 ### DB Info
 DB_HOST={{placeholder FQDN to RDS instance}}

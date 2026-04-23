@@ -12,7 +12,7 @@ import type { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { closeDatabaseConnection } from '@wxyc/database';
 
-const port = process.env.AUTH_PORT || '8080';
+const port = process.env.AUTH_PORT || '8082';
 
 const app = express();
 
