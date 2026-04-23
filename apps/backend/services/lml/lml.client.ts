@@ -64,11 +64,18 @@ export interface LmlReleaseResponse {
   released: string | null;
 }
 
+/** A single resolved token from LML's Discogs markup parser. */
+export interface LmlResolvedToken {
+  type: string;
+  [key: string]: unknown;
+}
+
 /** Artist details from LML. */
 export interface LmlArtistDetails {
   artist_id: number;
   name: string;
   profile: string | null;
+  profile_tokens: LmlResolvedToken[] | null;
   image_url: string | null;
   name_variations: string[];
   aliases: Array<{ id: number; name: string }>;
