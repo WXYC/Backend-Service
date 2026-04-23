@@ -262,7 +262,8 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
  * GET /proxy/metadata/artist
  *
  * Fetches artist metadata (bio, Wikipedia URL, image) from LML by artist ID.
- * Bio is sent as raw Discogs markup — the client handles rendering.
+ * Bio is available as both raw Discogs markup (`bio`) and pre-parsed structured
+ * tokens (`bioTokens`) for direct rendering by clients.
  */
 export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistMetadataQuery> = async (
   req,
@@ -291,6 +292,7 @@ export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistM
     res.status(200).json({
       discogsArtistId: artist.artist_id,
       bio: artist.profile ?? null,
+      bioTokens: artist.profile_tokens ?? null,
       wikipediaUrl,
       imageUrl: artist.image_url ?? null,
     });

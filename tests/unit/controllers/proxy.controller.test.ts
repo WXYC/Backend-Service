@@ -394,11 +394,30 @@ describe('proxy.controller', () => {
       expect(res.json).toHaveBeenCalledWith({ message: 'artistId must be an integer' });
     });
 
-    it('returns artist metadata with raw bio, imageUrl, and cache header', async () => {
+    it('returns artist metadata with raw bio, bioTokens, imageUrl, and cache header', async () => {
+      const profileTokens = [
+        { type: 'plainText', text: 'Autechre is a British electronic music duo consisting of ' },
+        {
+          type: 'artistLink',
+          name: 'Rob Brown',
+          display_name: 'Rob Brown',
+          url: 'https://www.discogs.com/search/?q=Rob%20Brown&type=artist',
+        },
+        { type: 'plainText', text: ' and ' },
+        {
+          type: 'artistLink',
+          name: 'Sean Booth',
+          display_name: 'Sean Booth',
+          url: 'https://www.discogs.com/search/?q=Sean%20Booth&type=artist',
+        },
+        { type: 'plainText', text: '.' },
+      ];
+
       mockGetArtistDetails.mockResolvedValue({
         artist_id: 3840,
         name: 'Autechre',
         profile: 'Autechre is a British electronic music duo consisting of [a=Rob Brown] and [a=Sean Booth].',
+        profile_tokens: profileTokens,
         image_url: 'https://i.discogs.com/autechre.jpg',
         name_variations: [],
         aliases: [],
@@ -421,9 +440,34 @@ describe('proxy.controller', () => {
       expect(result.bio).toBe(
         'Autechre is a British electronic music duo consisting of [a=Rob Brown] and [a=Sean Booth].'
       );
+      expect(result.bioTokens).toEqual(profileTokens);
       expect(result.wikipediaUrl).toBe('https://en.wikipedia.org/wiki/Autechre');
       expect(result.imageUrl).toBe('https://i.discogs.com/autechre.jpg');
       expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=3600');
+    });
+
+    it('returns null bioTokens when LML does not provide profile_tokens', async () => {
+      mockGetArtistDetails.mockResolvedValue({
+        artist_id: 456,
+        name: 'Some Artist',
+        profile: 'Bio text',
+        profile_tokens: null,
+        image_url: null,
+        name_variations: [],
+        aliases: [],
+        members: [],
+        urls: [],
+        cached: false,
+      });
+
+      const req = { query: { artistId: '456' } } as unknown as Request;
+      const res = createMockRes();
+
+      await getArtistMetadata(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const result = (res.json as jest.Mock).mock.calls[0][0];
+      expect(result.bioTokens).toBeNull();
     });
 
     it('returns null wikipediaUrl when no Wikipedia link in urls', async () => {
