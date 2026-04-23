@@ -18,6 +18,7 @@ import {
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
 import { extractSignificantWords } from './requestLine/matching/index.js';
+import { searchDiscogs, isLmlConfigured } from './lml/lml.client.js';
 
 export const getFormatsFromDB = async () => {
   const formats = await db
@@ -113,6 +114,50 @@ export const updateOnStreaming = async (id: number, on_streaming: boolean | null
   const response = await db.update(library).set({ on_streaming }).where(eq(library.id, id)).returning();
   return response[0];
 };
+
+/** Update the cached artwork URL for a library entry. */
+export const updateArtworkUrl = async (id: number, artwork_url: string | null) => {
+  const response = await db.update(library).set({ artwork_url }).where(eq(library.id, id)).returning();
+  return response[0];
+};
+
+/**
+ * Enrich search results with artwork URLs from LML.
+ *
+ * Results that already have artwork cached return as-is. For uncached results,
+ * fetches artwork from LML in parallel via Promise.allSettled and writes back
+ * to the library table (cache-through). Gracefully degrades if LML is
+ * unavailable or times out.
+ */
+export async function enrichWithArtwork(
+  results: Array<Record<string, unknown>>
+): Promise<Array<Record<string, unknown>>> {
+  if (!isLmlConfigured()) return results;
+
+  const uncached = results.filter((r) => r.artwork_url === null || r.artwork_url === undefined);
+  if (uncached.length === 0) return results;
+
+  const settlements = await Promise.allSettled(
+    uncached.map(async (row) => {
+      const artist = row.artist_name as string;
+      const album = row.album_title as string;
+      const id = row.id as number;
+      const lmlResult = await searchDiscogs(artist, album);
+      const top = lmlResult.results[0];
+      if (!top?.artwork_url || top.artwork_url.includes('spacer.gif')) return;
+      row.artwork_url = top.artwork_url;
+      await updateArtworkUrl(id, top.artwork_url);
+    })
+  );
+
+  for (const s of settlements) {
+    if (s.status === 'rejected') {
+      console.warn('[Library] Artwork enrichment failed:', s.reason);
+    }
+  }
+
+  return results;
+}
 
 //based on artist name and album title, retrieve n best matches from db
 //let's build the query using drizzle's sql object

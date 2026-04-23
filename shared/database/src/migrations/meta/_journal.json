@@ -295,6 +295,13 @@
       "when": 1776927425413,
       "tag": "0044_add_plays_to_library_artist_view",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1776950835732,
+      "tag": "0045_add-library-artwork-url",
+      "breakpoints": true
     }
   ]
 }
