@@ -122,7 +122,9 @@ async function runMigrations() {
 async function verifyMigrations() {
   console.log(styleText(['bold'], '🔍 Verifying migration completeness...\n'));
 
-  const migrationsDir = join(__dirname, 'database/migrations');
+  // MIGRATION_LOC is set in Dockerfile.migrate (/init/database/migrations).
+  // When running outside Docker (CI, local dev), fall back to the repo path.
+  const migrationsDir = process.env.MIGRATION_LOC || join(__dirname, '..', 'shared/database/src/migrations');
   const journalPath = join(migrationsDir, 'meta/_journal.json');
   const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
 
