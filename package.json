@@ -65,6 +65,7 @@
     "@types/ssh2": "^1.15.5",
     "@types/supertest": "^6.0.3",
     "@types/swagger-ui-express": "^4.1.8",
+    "@types/ws": "^8.18.1",
     "concurrently": "^9.2.1",
     "drizzle-kit": "^0.31.10",
     "drizzle-orm": "^0.41.0",
@@ -85,7 +86,8 @@
     "turbo": "^2.8.20",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.1",
-    "wait-on": "^8.0.5"
+    "wait-on": "^8.0.5",
+    "ws": "^8.20.0"
   },
   "dependencies": {
     "@sentry/node": "^10.45.0",
