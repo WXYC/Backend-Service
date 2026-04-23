@@ -14,20 +14,24 @@ const mockSearchDiscogs = jest.fn<() => Promise<unknown>>();
 const mockGetRelease = jest.fn<() => Promise<unknown>>();
 const mockGetArtistDetails = jest.fn<() => Promise<unknown>>();
 const mockResolveEntity = jest.fn<() => Promise<unknown>>();
+const mockSearchLibrary = jest.fn<() => Promise<unknown>>();
+
+class MockLmlClientError extends Error {
+  statusCode: number;
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.name = 'LmlClientError';
+    this.statusCode = statusCode;
+  }
+}
 
 jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
   searchDiscogs: mockSearchDiscogs,
   getRelease: mockGetRelease,
   getArtistDetails: mockGetArtistDetails,
   resolveEntity: mockResolveEntity,
-  LmlClientError: class LmlClientError extends Error {
-    statusCode: number;
-    constructor(message: string, statusCode: number) {
-      super(message);
-      this.name = 'LmlClientError';
-      this.statusCode = statusCode;
-    }
-  },
+  searchLibrary: mockSearchLibrary,
+  LmlClientError: MockLmlClientError,
 }));
 
 // Artwork finder mock (still used for Last.fm/iTunes fallback in searchArtwork)
@@ -71,6 +75,7 @@ import {
   getArtistMetadata,
   resolveEntity,
   getSpotifyTrack,
+  librarySearch,
 } from '../../../apps/backend/controllers/proxy.controller';
 
 // --- Helpers ---
@@ -719,6 +724,74 @@ describe('proxy.controller', () => {
       await getSpotifyTrack(req, res as Response, mockNext);
 
       expect(res.status).toHaveBeenCalledWith(502);
+    });
+  });
+
+  describe('librarySearch', () => {
+    it('returns 400 when no search params provided', async () => {
+      const req = { query: {} } as unknown as Request;
+      const res = createMockRes();
+
+      await librarySearch(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('artist') }));
+    });
+
+    it('forwards artist and title to LML searchLibrary', async () => {
+      const mockResponse = {
+        results: [{ id: 1, title: 'Aluminum Tunes', artist: 'Stereolab' }],
+        total: 1,
+        query: 'Stereolab',
+      };
+      mockSearchLibrary.mockResolvedValue(mockResponse);
+      const req = { query: { artist: 'Stereolab', title: 'Aluminum Tunes', limit: '5' } } as unknown as Request;
+      const res = createMockRes();
+
+      await librarySearch(req, res as Response, mockNext);
+
+      expect(mockSearchLibrary).toHaveBeenCalledWith({
+        artist: 'Stereolab',
+        title: 'Aluminum Tunes',
+        q: undefined,
+        limit: 5,
+      });
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(mockResponse);
+      expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=60');
+    });
+
+    it('forwards q param for free text search', async () => {
+      mockSearchLibrary.mockResolvedValue({ results: [], total: 0, query: null });
+      const req = { query: { q: 'Cat Power' } } as unknown as Request;
+      const res = createMockRes();
+
+      await librarySearch(req, res as Response, mockNext);
+
+      expect(mockSearchLibrary).toHaveBeenCalledWith(expect.objectContaining({ q: 'Cat Power' }));
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('maps LmlClientError to the correct status code', async () => {
+      mockSearchLibrary.mockRejectedValue(new MockLmlClientError('LML not configured', 503));
+      const req = { query: { artist: 'Stereolab' } } as unknown as Request;
+      const res = createMockRes();
+
+      await librarySearch(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ message: 'LML not configured' }));
+    });
+
+    it('passes unexpected errors to next()', async () => {
+      const error = new Error('unexpected');
+      mockSearchLibrary.mockRejectedValue(error);
+      const req = { query: { artist: 'Stereolab' } } as unknown as Request;
+      const res = createMockRes();
+
+      await librarySearch(req, res as Response, mockNext);
+
+      expect(mockNext).toHaveBeenCalledWith(error);
     });
   });
 });

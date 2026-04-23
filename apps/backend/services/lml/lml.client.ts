@@ -1,113 +1,40 @@
 /**
  * HTTP client for the library-metadata-lookup (LML) service.
  *
- * Thin wrapper around LML's Discogs endpoints. Reads LIBRARY_METADATA_URL from
- * env. All methods throw on non-2xx responses so the proxy controller's
- * try/catch blocks can translate to appropriate HTTP error codes.
+ * Thin wrapper around LML's endpoints. Reads LIBRARY_METADATA_URL from env.
+ * All methods throw on non-2xx responses so the proxy controller's try/catch
+ * blocks can translate to appropriate HTTP error codes.
+ *
+ * Response types are generated from wxyc-shared/api.yaml — see @wxyc/shared/dtos.
  */
 
-/** Search result from LML's Discogs search endpoint. */
-export interface LmlSearchResult {
-  album: string | null;
-  artist: string | null;
-  release_id: number;
-  release_url: string;
-  artwork_url: string | null;
-  confidence: number;
-  release_year: number | null;
-  artist_bio: string | null;
-  wikipedia_url: string | null;
-  spotify_url: string | null;
-  apple_music_url: string | null;
-  youtube_music_url: string | null;
-  bandcamp_url: string | null;
-  soundcloud_url: string | null;
-}
+import type {
+  DiscogsSearchResponse,
+  DiscogsReleaseMetadata,
+  DiscogsArtistDetails,
+  DiscogsTrackReleasesResponse,
+  EntityResolveResponse,
+  LibrarySearchResponse,
+  StreamingCheckResponse,
+} from '@wxyc/shared/dtos';
 
-export interface LmlSearchResponse {
-  results: LmlSearchResult[];
-  total: number;
-  cached: boolean;
-}
-
-/** Track item from LML's release endpoint. */
-export interface LmlTrackItem {
-  position: string;
-  title: string;
-  duration: string | null;
-  artists: string[];
-}
-
-/** Artist credit from LML's release endpoint. */
-export interface LmlArtistCredit {
-  artist_id: number | null;
-  name: string;
-  join: string;
-  role: string | null;
-}
-
-/** Release metadata from LML. */
-export interface LmlReleaseResponse {
-  release_id: number;
-  title: string;
-  artist: string;
-  year: number | null;
-  label: string | null;
-  artist_id: number | null;
-  genres: string[];
-  styles: string[];
-  tracklist: LmlTrackItem[];
-  artwork_url: string | null;
-  release_url: string;
-  cached: boolean;
-  artists: LmlArtistCredit[];
-  released: string | null;
-}
-
-/** A single resolved token from LML's Discogs markup parser. */
-export interface LmlResolvedToken {
-  type: string;
-  [key: string]: unknown;
-}
-
-/** Artist details from LML. */
-export interface LmlArtistDetails {
-  artist_id: number;
-  name: string;
-  profile: string | null;
-  profile_tokens: LmlResolvedToken[] | null;
-  image_url: string | null;
-  name_variations: string[];
-  aliases: Array<{ id: number; name: string }>;
-  members: Array<{ id: number; name: string; active: boolean }>;
-  urls: string[];
-  cached: boolean;
-}
-
-/** Release info from LML's track-releases endpoint. */
-export interface LmlReleaseInfo {
-  album: string;
-  artist: string;
-  release_id: number;
-  release_url: string;
-  is_compilation: boolean;
-}
-
-/** Response from LML's track-releases endpoint. */
-export interface LmlTrackReleasesResponse {
-  track: string;
-  artist: string | null;
-  releases: LmlReleaseInfo[];
-  total: number;
-  cached: boolean;
-}
-
-/** Entity resolution response from LML. */
-export interface LmlEntityResponse {
-  name: string;
-  type: 'artist' | 'release' | 'master';
-  id: number;
-}
+export type {
+  DiscogsSearchResponse,
+  DiscogsEnrichedSearchResult,
+  DiscogsReleaseMetadata,
+  DiscogsTrackItem,
+  DiscogsArtistCredit,
+  DiscogsArtistDetails,
+  DiscogsResolvedToken,
+  DiscogsReleaseInfo,
+  DiscogsTrackReleasesResponse,
+  EntityResolveResponse,
+  LibrarySearchItem,
+  LibrarySearchResponse,
+  StreamingCheckResponse,
+  StreamingSourceMatch,
+  StreamingCheckSources,
+} from '@wxyc/shared/dtos';
 
 class LmlClientError extends Error {
   constructor(
@@ -168,7 +95,7 @@ async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
  * @param album - Album/release title
  * @returns Search results with enriched metadata
  */
-export async function searchDiscogs(artist: string, album?: string): Promise<LmlSearchResponse> {
+export async function searchDiscogs(artist: string, album?: string): Promise<DiscogsSearchResponse> {
   const body: Record<string, string> = { artist };
   if (album) body.album = album;
 
@@ -178,7 +105,7 @@ export async function searchDiscogs(artist: string, album?: string): Promise<Lml
     body: JSON.stringify(body),
   });
 
-  return (await response.json()) as LmlSearchResponse;
+  return (await response.json()) as DiscogsSearchResponse;
 }
 
 /**
@@ -187,9 +114,9 @@ export async function searchDiscogs(artist: string, album?: string): Promise<Lml
  * @param releaseId - Discogs release ID
  * @returns Release metadata including tracklist, genres, styles
  */
-export async function getRelease(releaseId: number): Promise<LmlReleaseResponse> {
+export async function getRelease(releaseId: number): Promise<DiscogsReleaseMetadata> {
   const response = await lmlFetch(`/api/v1/discogs/release/${releaseId}`);
-  return (await response.json()) as LmlReleaseResponse;
+  return (await response.json()) as DiscogsReleaseMetadata;
 }
 
 /**
@@ -198,9 +125,9 @@ export async function getRelease(releaseId: number): Promise<LmlReleaseResponse>
  * @param artistId - Discogs artist ID
  * @returns Artist details including bio, image, URLs
  */
-export async function getArtistDetails(artistId: number): Promise<LmlArtistDetails> {
+export async function getArtistDetails(artistId: number): Promise<DiscogsArtistDetails> {
   const response = await lmlFetch(`/api/v1/discogs/artist/${artistId}`);
-  return (await response.json()) as LmlArtistDetails;
+  return (await response.json()) as DiscogsArtistDetails;
 }
 
 /**
@@ -210,9 +137,9 @@ export async function getArtistDetails(artistId: number): Promise<LmlArtistDetai
  * @param id - Discogs entity ID
  * @returns Entity name and basic info
  */
-export async function resolveEntity(type: 'artist' | 'release' | 'master', id: number): Promise<LmlEntityResponse> {
+export async function resolveEntity(type: 'artist' | 'release' | 'master', id: number): Promise<EntityResolveResponse> {
   const response = await lmlFetch(`/api/v1/discogs/entity/${type}/${id}`);
-  return (await response.json()) as LmlEntityResponse;
+  return (await response.json()) as EntityResolveResponse;
 }
 
 /**
@@ -227,13 +154,13 @@ export async function searchTrackReleases(
   track: string,
   artist?: string,
   limit = 20
-): Promise<LmlTrackReleasesResponse> {
+): Promise<DiscogsTrackReleasesResponse> {
   const params = new URLSearchParams({ track });
   if (artist) params.set('artist', artist);
   if (limit !== 20) params.set('limit', String(limit));
 
   const response = await lmlFetch(`/api/v1/discogs/track-releases?${params}`);
-  return (await response.json()) as LmlTrackReleasesResponse;
+  return (await response.json()) as DiscogsTrackReleasesResponse;
 }
 
 /**
@@ -282,17 +209,6 @@ export async function validateTrackOnRelease(releaseId: number, track: string, a
   return false;
 }
 
-/** Response from LML's streaming-check endpoint. */
-export interface LmlStreamingCheckResponse {
-  on_streaming: boolean | null;
-  sources: {
-    spotify?: { url: string; confidence: number } | null;
-    deezer?: { url: string; confidence: number } | null;
-    apple_music?: { url: string; confidence: number } | null;
-    bandcamp?: { url: string; confidence: number } | null;
-  };
-}
-
 /**
  * Check streaming availability for an artist+title pair.
  *
@@ -300,14 +216,36 @@ export interface LmlStreamingCheckResponse {
  * @param title - Album title
  * @returns Streaming availability result with per-source URLs
  */
-export async function checkStreamingAvailability(artist: string, title: string): Promise<LmlStreamingCheckResponse> {
+export async function checkStreamingAvailability(artist: string, title: string): Promise<StreamingCheckResponse> {
   const response = await lmlFetch('/api/v1/streaming-check', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ artist, title }),
   });
 
-  return (await response.json()) as LmlStreamingCheckResponse;
+  return (await response.json()) as StreamingCheckResponse;
+}
+
+/**
+ * Search the library catalog via LML.
+ *
+ * @param params - Search parameters (artist, title, q, limit)
+ * @returns Library search results
+ */
+export async function searchLibrary(params: {
+  artist?: string;
+  title?: string;
+  q?: string;
+  limit?: number;
+}): Promise<LibrarySearchResponse> {
+  const searchParams = new URLSearchParams();
+  if (params.artist) searchParams.set('artist', params.artist);
+  if (params.title) searchParams.set('title', params.title);
+  if (params.q) searchParams.set('q', params.q);
+  if (params.limit) searchParams.set('limit', String(params.limit));
+
+  const response = await lmlFetch(`/api/v1/library/search?${searchParams}`);
+  return (await response.json()) as LibrarySearchResponse;
 }
 
 /**

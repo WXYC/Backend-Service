@@ -14,3 +14,4 @@ proxy_route.get('/metadata/album', proxyController.getAlbumMetadata);
 proxy_route.get('/metadata/artist', proxyController.getArtistMetadata);
 proxy_route.get('/entity/resolve', proxyController.resolveEntity);
 proxy_route.get('/spotify/track/:id', proxyController.getSpotifyTrack);
+proxy_route.get('/library/search', proxyController.librarySearch);

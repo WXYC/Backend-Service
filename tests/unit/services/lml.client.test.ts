@@ -13,6 +13,7 @@ import {
   resolveEntity,
   LmlClientError,
   checkStreamingAvailability,
+  searchLibrary,
 } from '../../../apps/backend/services/lml/lml.client';
 
 describe('lml.client', () => {
@@ -234,6 +235,45 @@ describe('lml.client', () => {
       } as unknown as globalThis.Response);
 
       await expect(checkStreamingAvailability('Stereolab', 'Aluminum Tunes')).rejects.toThrow(LmlClientError);
+    });
+  });
+
+  describe('searchLibrary', () => {
+    it('sends GET to /api/v1/library/search with query params', async () => {
+      const mockResponse = {
+        results: [{ id: 1, title: 'Aluminum Tunes', artist: 'Stereolab' }],
+        total: 1,
+        query: 'Stereolab',
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      } as unknown as globalThis.Response);
+
+      const result = await searchLibrary({ artist: 'Stereolab', limit: 5 });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/v1/library/search?'),
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
+      const calledUrl = mockFetch.mock.calls[0][0] as string;
+      expect(calledUrl).toContain('artist=Stereolab');
+      expect(calledUrl).toContain('limit=5');
+      expect(result.total).toBe(1);
+    });
+
+    it('omits unset params', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [], total: 0, query: null }),
+      } as unknown as globalThis.Response);
+
+      await searchLibrary({ title: 'Moon Pix' });
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string;
+      expect(calledUrl).toContain('title=Moon+Pix');
+      expect(calledUrl).not.toContain('artist=');
+      expect(calledUrl).not.toContain('limit=');
     });
   });
 });
