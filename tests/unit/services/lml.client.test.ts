@@ -233,9 +233,7 @@ describe('lml.client', () => {
         statusText: 'Internal Server Error',
       } as unknown as globalThis.Response);
 
-      await expect(checkStreamingAvailability('Stereolab', 'Aluminum Tunes')).rejects.toThrow(
-        LmlClientError
-      );
+      await expect(checkStreamingAvailability('Stereolab', 'Aluminum Tunes')).rejects.toThrow(LmlClientError);
     });
   });
 });

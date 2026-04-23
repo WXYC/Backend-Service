@@ -300,10 +300,7 @@ export interface LmlStreamingCheckResponse {
  * @param title - Album title
  * @returns Streaming availability result with per-source URLs
  */
-export async function checkStreamingAvailability(
-  artist: string,
-  title: string
-): Promise<LmlStreamingCheckResponse> {
+export async function checkStreamingAvailability(artist: string, title: string): Promise<LmlStreamingCheckResponse> {
   const response = await lmlFetch('/api/v1/streaming-check', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
