@@ -105,6 +105,8 @@ async function runMigrations() {
     console.log('\nMigrations completed successfully!\n');
   } catch (error) {
     console.error('Migration failed:', error.message);
+    if (error.stdout) console.error('stdout:', error.stdout);
+    if (error.stderr) console.error('stderr:', error.stderr);
     throw error;
   }
 }
