@@ -214,6 +214,21 @@ describe('provisionUser()', () => {
     });
   });
 
+  describe('duplicate username', () => {
+    it('should throw 409 when username unique constraint is violated', async () => {
+      mockCreateUser.mockRejectedValue(new Error('unique constraint violated'));
+
+      await expect(provisionUser(validInput)).rejects.toThrow(ProvisionError);
+      await expect(provisionUser(validInput)).rejects.toMatchObject({ statusCode: 409 });
+    });
+
+    it('should rethrow non-uniqueness errors from createUser', async () => {
+      mockCreateUser.mockRejectedValue(new Error('connection timeout'));
+
+      await expect(provisionUser(validInput)).rejects.toThrow('connection timeout');
+    });
+  });
+
   describe('organization not found', () => {
     it('should throw 404 when organization slug does not exist', async () => {
       mockAdapterFindOne.mockResolvedValue(null);
