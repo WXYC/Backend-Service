@@ -4,8 +4,7 @@
  * endpoint and by createDefaultUser() at startup.
  */
 
-import { auth } from '@wxyc/authentication';
-import { WXYCRoles } from '@wxyc/authentication';
+import { auth, WXYCRoles } from '@wxyc/authentication';
 import { db, user } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
 
@@ -74,19 +73,28 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     throw new ProvisionError(404, `Organization not found for slug: "${organizationSlug}"`);
   }
 
-  // 5. Create user
-  const newUser = await internalAdapter.createUser({
-    email,
-    emailVerified: true,
-    name,
-    username,
-    realName: realName || undefined,
-    djName: djName || undefined,
-    appSkin: 'modern-light',
-    hasCompletedOnboarding: false,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  });
+  // 5. Create user (catch unique constraint violations on username)
+  let newUser;
+  try {
+    newUser = await internalAdapter.createUser({
+      email,
+      emailVerified: true,
+      name,
+      username,
+      realName: realName || undefined,
+      djName: djName || undefined,
+      appSkin: 'modern-light',
+      hasCompletedOnboarding: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('unique') || message.includes('duplicate') || message.includes('already exists')) {
+      throw new ProvisionError(409, `Username "${username}" is already taken`);
+    }
+    throw error;
+  }
 
   // 6-9. Remaining steps wrapped for cleanup on failure
   try {
