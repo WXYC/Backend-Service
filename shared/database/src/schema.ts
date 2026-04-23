@@ -531,6 +531,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       label_id: library.label_id,
       on_streaming: library.on_streaming,
       album_artist: library.album_artist,
+      plays: library.plays,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -564,6 +565,7 @@ export type LibraryArtistViewEntry = {
   label_id: number | null;
   on_streaming: boolean | null;
   album_artist: string | null;
+  plays: number;
 };
 
 export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {
