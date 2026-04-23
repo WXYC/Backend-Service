@@ -15,23 +15,32 @@ export type WXYCAuthJwtPayload = JWTPayload & {
   banReason?: string | null;
 };
 
-const issuer = process.env.BETTER_AUTH_ISSUER;
-const audience = process.env.BETTER_AUTH_AUDIENCE;
-const jwksUrl = process.env.BETTER_AUTH_JWKS_URL;
+// Lazily initialized on first use so that importing this module from the auth
+// service (which only needs the `auth` instance, not `requirePermissions`)
+// doesn't throw when BETTER_AUTH_JWKS_URL is absent.
+let _jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 
-if (!jwksUrl) {
-  throw new Error('BETTER_AUTH_JWKS_URL environment variable is not set.');
+function getJWKS() {
+  if (!_jwks) {
+    const jwksUrl = process.env.BETTER_AUTH_JWKS_URL;
+    if (!jwksUrl) {
+      throw new Error('BETTER_AUTH_JWKS_URL environment variable is not set.');
+    }
+    _jwks = createRemoteJWKSet(new URL(jwksUrl));
+  }
+  return _jwks;
 }
 
-const JWKS = createRemoteJWKSet(new URL(jwksUrl));
-
 async function verify(token: string) {
+  const issuer = process.env.BETTER_AUTH_ISSUER;
+  const audience = process.env.BETTER_AUTH_AUDIENCE;
+
   if (!issuer || !audience) {
     throw new Error('JWT verification environment variables are not properly set.');
   }
 
   try {
-    const { payload } = await jwtVerify(token, JWKS, {
+    const { payload } = await jwtVerify(token, getJWKS(), {
       issuer: issuer,
       audience: audience,
     });
