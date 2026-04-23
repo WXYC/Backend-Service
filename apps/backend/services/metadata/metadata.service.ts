@@ -8,7 +8,8 @@
  * URLs are constructed for services where LML returns null.
  */
 import { MetadataRequest, AlbumMetadataResult, ArtistMetadataResult, FlowsheetMetadata } from './metadata.types.js';
-import { searchDiscogs, getRelease, getArtistDetails, LmlSearchResult } from '../lml/lml.client.js';
+import { searchDiscogs, getRelease, getArtistDetails } from '../lml/lml.client.js';
+import type { DiscogsEnrichedSearchResult } from '../lml/lml.client.js';
 import { SearchUrlProvider } from './providers/search-urls.provider.js';
 
 const searchUrls = new SearchUrlProvider();
@@ -77,7 +78,7 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
 async function fetchAlbumMetadata(request: MetadataRequest): Promise<{
   albumMetadata: AlbumMetadataResult | null;
   artistId: number | null;
-  searchResult: LmlSearchResult | null;
+  searchResult: DiscogsEnrichedSearchResult | null;
 }> {
   const { artistName, albumTitle, trackTitle } = request;
   const searchTerm = albumTitle || trackTitle || '';
@@ -147,7 +148,7 @@ async function fetchAlbumMetadata(request: MetadataRequest): Promise<{
 async function fetchArtistMetadata(
   _request: MetadataRequest,
   discogsArtistId: number | null,
-  searchResult: LmlSearchResult | null
+  searchResult: DiscogsEnrichedSearchResult | null
 ): Promise<ArtistMetadataResult | null> {
   // Try fetching full artist details by ID
   if (discogsArtistId) {
