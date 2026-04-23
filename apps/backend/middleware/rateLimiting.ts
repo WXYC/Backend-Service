@@ -93,8 +93,8 @@ export const songRequestRateLimit = shouldEnableRateLimiting
           retryAfter: Math.ceil(REQUEST_WINDOW_MS / 1000),
         });
       },
-      // Skip validation for keyGenerator since we're using device ID, not IP
-      validate: { xForwardedForHeader: false } as Partial<Options['validate']>,
+      // Skip validation for keyGenerator since we primarily use user ID, not IP
+      validate: { xForwardedForHeader: false, keyGeneratorIpFallback: false } as Partial<Options['validate']>,
     })
   : passThrough;
 
