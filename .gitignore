@@ -7,3 +7,4 @@ mirror-logs
 .DS_STORE
 .cache
 *.tsbuildinfo
+.claude/worktrees/
