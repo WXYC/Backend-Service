@@ -33,3 +33,7 @@ library_route.get('/genres', requirePermissions({ catalog: ['read'] }), libraryC
 library_route.post('/genres', requirePermissions({ catalog: ['write'] }), libraryController.addGenre);
 
 library_route.get('/info', requirePermissions({ catalog: ['read'] }), libraryController.getAlbum);
+
+library_route.patch('/:id/missing', requirePermissions({ catalog: ['write'] }), libraryController.markMissing);
+
+library_route.patch('/:id/found', requirePermissions({ catalog: ['write'] }), libraryController.markFound);

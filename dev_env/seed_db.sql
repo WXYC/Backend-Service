@@ -19,35 +19,36 @@ ON CONFLICT (id) DO NOTHING;
 
 -- Create test users for test automation
 -- These users are required for the E2E test suite to function
-INSERT INTO auth_user (id, name, email, email_verified, username, dj_name, real_name, role, created_at, updated_at, app_skin)
+INSERT INTO auth_user (id, name, email, email_verified, username, dj_name, real_name, role, created_at, updated_at, app_skin, has_completed_onboarding)
 VALUES
   -- Member (no org role beyond member)
-  ('test-member-id-000000000000000001', 'test_member', 'test_member@wxyc.org', true, 'test_member', 'Test Member DJ', 'Test Member', NULL, NOW(), NOW(), 'modern-light'),
+  ('test-member-id-000000000000000001', 'test_member', 'test_member@wxyc.org', true, 'test_member', 'Test Member DJ', 'Test Member', NULL, NOW(), NOW(), 'modern-light', true),
   -- DJ users
-  ('test-dj1-id-00000000000000000001', 'test_dj1', 'test_dj1@wxyc.org', true, 'test_dj1', 'Test dj1', 'Test DJ 1', NULL, NOW(), NOW(), 'modern-light'),
-  ('test-dj2-id-00000000000000000002', 'test_dj2', 'test_dj2@wxyc.org', true, 'test_dj2', 'Test dj2', 'Test DJ 2', NULL, NOW(), NOW(), 'modern-light'),
+  ('test-dj1-id-00000000000000000001', 'test_dj1', 'test_dj1@wxyc.org', true, 'test_dj1', 'Test dj1', 'Test DJ 1', NULL, NOW(), NOW(), 'modern-light', true),
+  ('test-dj2-id-00000000000000000002', 'test_dj2', 'test_dj2@wxyc.org', true, 'test_dj2', 'Test dj2', 'Test DJ 2', NULL, NOW(), NOW(), 'modern-light', true),
   -- Music Director
-  ('test-md-id-0000000000000000001', 'test_music_director', 'test_music_director@wxyc.org', true, 'test_music_director', 'Test MD', 'Test Music Director', NULL, NOW(), NOW(), 'modern-light'),
+  ('test-md-id-0000000000000000001', 'test_music_director', 'test_music_director@wxyc.org', true, 'test_music_director', 'Test MD', 'Test Music Director', NULL, NOW(), NOW(), 'modern-light', true),
   -- Station Manager (with admin role for Better Auth Admin plugin)
-  ('test-sm-id-0000000000000000001', 'test_station_manager', 'test_station_manager@wxyc.org', true, 'test_station_manager', 'Test SM', 'Test Station Manager', 'admin', NOW(), NOW(), 'modern-light'),
-  -- Incomplete user (missing realName and djName for onboarding tests)
-  ('test-incomplete-id-0000000000001', 'test_incomplete', 'test_incomplete@wxyc.org', true, 'test_incomplete', '', '', NULL, NOW(), NOW(), 'modern-light'),
+  ('test-sm-id-0000000000000000001', 'test_station_manager', 'test_station_manager@wxyc.org', true, 'test_station_manager', 'Test SM', 'Test Station Manager', 'admin', NOW(), NOW(), 'modern-light', true),
+  -- Incomplete user (has not completed onboarding, missing realName and djName)
+  ('test-incomplete-id-0000000000001', 'test_incomplete', 'test_incomplete@wxyc.org', true, 'test_incomplete', '', '', NULL, NOW(), NOW(), 'modern-light', false),
   -- Deletable user (for admin deletion tests)
-  ('test-deletable-id-00000000000001', 'test_deletable_user', 'test_deletable@wxyc.org', true, 'test_deletable_user', 'Deletable DJ', 'Test Deletable', NULL, NOW(), NOW(), 'modern-light'),
+  ('test-deletable-id-00000000000001', 'test_deletable_user', 'test_deletable@wxyc.org', true, 'test_deletable_user', 'Deletable DJ', 'Test Deletable', NULL, NOW(), NOW(), 'modern-light', true),
   -- Promotable user (for role modification tests)
-  ('test-promotable-id-0000000000001', 'test_promotable_user', 'test_promotable@wxyc.org', true, 'test_promotable_user', 'Promotable DJ', 'Test Promotable', NULL, NOW(), NOW(), 'modern-light'),
+  ('test-promotable-id-0000000000001', 'test_promotable_user', 'test_promotable@wxyc.org', true, 'test_promotable_user', 'Promotable DJ', 'Test Promotable', NULL, NOW(), NOW(), 'modern-light', true),
   -- Demotable Station Manager (for role demotion tests)
-  ('test-demotable-sm-id-000000000001', 'test_demotable_sm', 'test_demotable_sm@wxyc.org', true, 'test_demotable_sm', 'Demotable SM', 'Test Demotable SM', 'admin', NOW(), NOW(), 'modern-light'),
+  ('test-demotable-sm-id-000000000001', 'test_demotable_sm', 'test_demotable_sm@wxyc.org', true, 'test_demotable_sm', 'Demotable SM', 'Test Demotable SM', 'admin', NOW(), NOW(), 'modern-light', true),
   -- Password reset test users (dedicated users for password reset tests to avoid conflicts)
-  ('test-reset1-id-000000000000000001', 'test_reset1', 'test_reset1@wxyc.org', true, 'test_reset1', 'Reset DJ 1', 'Test Reset 1', NULL, NOW(), NOW(), 'modern-light'),
-  ('test-reset2-id-000000000000000002', 'test_reset2', 'test_reset2@wxyc.org', true, 'test_reset2', 'Reset DJ 2', 'Test Reset 2', NULL, NOW(), NOW(), 'modern-light'),
+  ('test-reset1-id-000000000000000001', 'test_reset1', 'test_reset1@wxyc.org', true, 'test_reset1', 'Reset DJ 1', 'Test Reset 1', NULL, NOW(), NOW(), 'modern-light', true),
+  ('test-reset2-id-000000000000000002', 'test_reset2', 'test_reset2@wxyc.org', true, 'test_reset2', 'Reset DJ 2', 'Test Reset 2', NULL, NOW(), NOW(), 'modern-light', true),
   -- Admin password reset test user (dedicated for admin-initiated password reset tests)
-  ('test-adminreset1-id-00000000001', 'test_adminreset1', 'test_adminreset1@wxyc.org', true, 'test_adminreset1', 'AdminReset DJ', 'Test AdminReset 1', NULL, NOW(), NOW(), 'modern-light')
+  ('test-adminreset1-id-00000000001', 'test_adminreset1', 'test_adminreset1@wxyc.org', true, 'test_adminreset1', 'AdminReset DJ', 'Test AdminReset 1', NULL, NOW(), NOW(), 'modern-light', true)
 ON CONFLICT (id) DO UPDATE SET
   dj_name = EXCLUDED.dj_name,
   real_name = EXCLUDED.real_name,
   email_verified = EXCLUDED.email_verified,
   role = EXCLUDED.role,
+  has_completed_onboarding = EXCLUDED.has_completed_onboarding,
   updated_at = NOW();
 
 -- Create credential accounts for all test users
