@@ -152,7 +152,7 @@ app.get('/auth/admin/resolve-organization', async (req, res) => {
       return res.status(400).json({ error: 'Missing required query parameter: slug' });
     }
 
-    const org = await resolveOrganization(slug, session);
+    const org = await resolveOrganization(slug);
     if (!org) {
       return res.status(404).json({ error: `Organization not found for slug: "${slug}"` });
     }
