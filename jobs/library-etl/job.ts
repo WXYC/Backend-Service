@@ -297,7 +297,7 @@ const buildReleaseQuery = (
 };
 
 const parseOnStreaming = (value?: string): boolean | null => {
-  if (value == null || value.trim().length === 0) return null;
+  if (value == null || value.trim().length === 0 || value.trim() === 'NULL') return null;
   return value.trim() === '1';
 };
 
