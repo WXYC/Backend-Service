@@ -17,6 +17,7 @@ import {
   getRelease,
   getArtistDetails,
   resolveEntity as lmlResolveEntity,
+  searchLibrary,
   LmlClientError,
 } from '../services/lml/lml.client.js';
 import { LRUCache } from 'lru-cache';
@@ -415,6 +416,49 @@ export const getSpotifyTrack: RequestHandler<SpotifyTrackParams> = async (req, r
     });
   } catch (e) {
     console.error('[ProxyController] getSpotifyTrack error:', e);
+    next(e);
+  }
+};
+
+/**
+ * GET /proxy/library/search — Search the WXYC library catalog via LML.
+ *
+ * Proxies to LML's GET /api/v1/library/search, providing auth, rate limiting,
+ * and activity tracking. Used by dj-site for flowsheet autocomplete.
+ *
+ * Query params: artist, title, q (free text), limit (default 10)
+ */
+type LibrarySearchQuery = {
+  artist?: string;
+  title?: string;
+  q?: string;
+  limit?: string;
+};
+
+export const librarySearch: RequestHandler<object, unknown, unknown, LibrarySearchQuery> = async (req, res, next) => {
+  const { artist, title, q, limit } = req.query;
+
+  if (!artist && !title && !q) {
+    res.status(400).json({ message: 'At least one of artist, title, or q is required' });
+    return;
+  }
+
+  try {
+    const results = await searchLibrary({
+      artist,
+      title,
+      q,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+
+    res.set('Cache-Control', 'private, max-age=60');
+    res.status(200).json(results);
+  } catch (e) {
+    if (e instanceof LmlClientError) {
+      res.status(e.statusCode).json({ message: e.message });
+      return;
+    }
+    console.error('[ProxyController] librarySearch error:', e);
     next(e);
   }
 };
