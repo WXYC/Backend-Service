@@ -109,6 +109,15 @@ export const insertAlbum = async (newAlbum: NewAlbum) => {
   return response[0];
 };
 
+export const updateOnStreaming = async (id: number, on_streaming: boolean | null) => {
+  const response = await db
+    .update(library)
+    .set({ on_streaming })
+    .where(eq(library.id, id))
+    .returning();
+  return response[0];
+};
+
 //based on artist name and album title, retrieve n best matches from db
 //let's build the query using drizzle's sql object
 export const fuzzySearchLibrary = async (artist_name?: string, album_title?: string, n = 5, on_streaming?: boolean) => {

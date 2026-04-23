@@ -11,6 +11,7 @@ import {
 } from '@wxyc/database';
 import * as libraryService from '../services/library.service.js';
 import * as labelsService from '../services/labels.service.js';
+import { checkStreamingAvailability, isLmlConfigured } from '../services/lml/lml.client.js';
 import WxycError from '../utils/error.js';
 
 type NewAlbumRequest = {
@@ -76,7 +77,21 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
       disc_quantity: body.disc_quantity,
     };
 
-    const inserted_album: Album = await libraryService.insertAlbum(new_album);
+    let inserted_album: Album = await libraryService.insertAlbum(new_album);
+
+    // Check streaming availability asynchronously — don't fail the insert
+    if (isLmlConfigured()) {
+      try {
+        const artistName = body.alternate_artist_name || body.artist_name || '';
+        const result = await checkStreamingAvailability(artistName, body.album_title);
+        if (result.on_streaming !== null) {
+          inserted_album = await libraryService.updateOnStreaming(inserted_album.id, result.on_streaming);
+        }
+      } catch (e) {
+        console.warn('Streaming check failed for new album, leaving on_streaming as null:', (e as Error).message);
+      }
+    }
+
     res.status(201).json(inserted_album);
   } catch (e) {
     console.error('Error: Could not insert new album');
