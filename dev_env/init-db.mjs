@@ -39,8 +39,6 @@ const dbConfig = {
 
 const sql = postgres(dbConfig);
 
-const bold = 'font-weight: strong;';
-
 console.log(styleText(['bold'], `🔧 Database Init Script Starting...`));
 console.log(`   Host: ${dbConfig.host}:${dbConfig.port}`);
 console.log(`   Database: ${dbConfig.database}\n`);
@@ -194,23 +192,58 @@ async function isDatabaseSeeded() {
 }
 
 /**
- * Seed the database
+ * Seed the database inside an explicit transaction.
+ *
+ * The seed file contains many statements. Running them via sql.unsafe() in
+ * the simple query protocol means each statement auto-commits independently.
+ * If an intermediate statement fails, the postgres library may not surface the
+ * error, leaving the database partially seeded while the script reports success.
+ *
+ * Wrapping in sql.begin() ensures atomicity: either every statement commits
+ * or the entire batch rolls back, and any error is properly propagated.
  */
 async function seedDatabase() {
   console.log(styleText(['bold'], '🌱 Seeding database...\n'));
 
-  try {
-    const seedSQL = readFileSync(join(__dirname, './seed_db.sql'), 'utf8');
+  const seedSQL = readFileSync(join(__dirname, './seed_db.sql'), 'utf8');
 
-    // Execute the seed SQL
-    await sql.unsafe(seedSQL);
-    await sql.end();
+  await sql.begin(async (tx) => {
+    await tx.unsafe(seedSQL);
+  });
 
-    console.log('Database seeded successfully!\n');
-  } catch (error) {
-    await sql.end();
-    console.error('Seeding failed:', error.message);
-    throw error;
+  console.log('Database seeded successfully!\n');
+}
+
+/**
+ * Verify that critical seed data was persisted.
+ *
+ * Catches silent failures where the seed appears to succeed but no rows
+ * were actually committed (the original bug reported in #408).
+ */
+async function verifySeedData() {
+  console.log(styleText(['bold'], '🔍 Verifying seed data...\n'));
+
+  const counts = await sql`
+    SELECT
+      (SELECT COUNT(*) FROM auth_user) AS users,
+      (SELECT COUNT(*) FROM auth_account) AS accounts,
+      (SELECT COUNT(*) FROM auth_member) AS members,
+      (SELECT COUNT(*) FROM wxyc_schema.genres) AS genres,
+      (SELECT COUNT(*) FROM wxyc_schema.artists) AS artists
+  `;
+
+  const { users, accounts, members, genres, artists } = counts[0];
+  console.log(`   auth_user:    ${users} rows`);
+  console.log(`   auth_account: ${accounts} rows`);
+  console.log(`   auth_member:  ${members} rows`);
+  console.log(`   genres:       ${genres} rows`);
+  console.log(`   artists:      ${artists} rows\n`);
+
+  if (parseInt(users) === 0 || parseInt(genres) === 0) {
+    throw new Error(
+      'Seed verification failed: critical tables are empty after seeding. ' +
+        'The seed SQL may have been silently rolled back.'
+    );
   }
 }
 
@@ -243,15 +276,16 @@ async function main() {
         console.log('Database already contains data, skipping seed.\n');
       } else {
         await seedDatabase();
+        await verifySeedData();
       }
     }
 
     console.log(styleText(['bold'], '💾 Database initialization complete!'));
-    sql.end();
+    await sql.end();
     process.exit(0);
   } catch (error) {
     console.error('\nDatabase initialization failed:', error);
-    sql.end();
+    await sql.end();
     process.exit(1);
   }
 }
