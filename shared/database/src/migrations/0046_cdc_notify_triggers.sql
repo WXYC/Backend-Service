@@ -69,16 +69,30 @@ CREATE TRIGGER cdc_artist_library_xref AFTER INSERT OR UPDATE OR DELETE ON wxyc_
 --> statement-breakpoint
 CREATE TRIGGER cdc_artist_xref AFTER INSERT OR UPDATE OR DELETE ON wxyc_schema.artist_crossreference FOR EACH ROW EXECUTE FUNCTION cdc_notify();
 --> statement-breakpoint
-CREATE TRIGGER cdc_auth_user AFTER INSERT OR UPDATE OR DELETE ON public.auth_user FOR EACH ROW EXECUTE FUNCTION cdc_notify();
---> statement-breakpoint
-CREATE TRIGGER cdc_auth_account AFTER INSERT OR UPDATE OR DELETE ON public.auth_account FOR EACH ROW EXECUTE FUNCTION cdc_notify();
---> statement-breakpoint
-CREATE TRIGGER cdc_auth_organization AFTER INSERT OR UPDATE OR DELETE ON public.auth_organization FOR EACH ROW EXECUTE FUNCTION cdc_notify();
---> statement-breakpoint
-CREATE TRIGGER cdc_auth_member AFTER INSERT OR UPDATE OR DELETE ON public.auth_member FOR EACH ROW EXECUTE FUNCTION cdc_notify();
---> statement-breakpoint
-CREATE TRIGGER cdc_auth_invitation AFTER INSERT OR UPDATE OR DELETE ON public.auth_invitation FOR EACH ROW EXECUTE FUNCTION cdc_notify();
---> statement-breakpoint
-CREATE TRIGGER cdc_user_activity AFTER INSERT OR UPDATE OR DELETE ON public.user_activity FOR EACH ROW EXECUTE FUNCTION cdc_notify();
---> statement-breakpoint
-CREATE TRIGGER cdc_anonymous_devices AFTER INSERT OR UPDATE OR DELETE ON public.anonymous_devices FOR EACH ROW EXECUTE FUNCTION cdc_notify();
+-- Public schema tables are created by better-auth at runtime, not by Drizzle
+-- migrations. Use conditional creation so the migration doesn't fail in CI
+-- where better-auth hasn't run yet.
+DO $do$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'auth_user') THEN
+    CREATE TRIGGER cdc_auth_user AFTER INSERT OR UPDATE OR DELETE ON public.auth_user FOR EACH ROW EXECUTE FUNCTION cdc_notify();
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'auth_account') THEN
+    CREATE TRIGGER cdc_auth_account AFTER INSERT OR UPDATE OR DELETE ON public.auth_account FOR EACH ROW EXECUTE FUNCTION cdc_notify();
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'auth_organization') THEN
+    CREATE TRIGGER cdc_auth_organization AFTER INSERT OR UPDATE OR DELETE ON public.auth_organization FOR EACH ROW EXECUTE FUNCTION cdc_notify();
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'auth_member') THEN
+    CREATE TRIGGER cdc_auth_member AFTER INSERT OR UPDATE OR DELETE ON public.auth_member FOR EACH ROW EXECUTE FUNCTION cdc_notify();
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'auth_invitation') THEN
+    CREATE TRIGGER cdc_auth_invitation AFTER INSERT OR UPDATE OR DELETE ON public.auth_invitation FOR EACH ROW EXECUTE FUNCTION cdc_notify();
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'user_activity') THEN
+    CREATE TRIGGER cdc_user_activity AFTER INSERT OR UPDATE OR DELETE ON public.user_activity FOR EACH ROW EXECUTE FUNCTION cdc_notify();
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'anonymous_devices') THEN
+    CREATE TRIGGER cdc_anonymous_devices AFTER INSERT OR UPDATE OR DELETE ON public.anonymous_devices FOR EACH ROW EXECUTE FUNCTION cdc_notify();
+  END IF;
+END $do$;
