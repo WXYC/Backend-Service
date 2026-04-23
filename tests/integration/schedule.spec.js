@@ -1,18 +1,21 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
-const { expectFields, expectArray } = require('../utils/test_helpers');
+const { createAuthRequest, expectFields, expectArray } = require('../utils/test_helpers');
 
 /**
  * Schedule Endpoints Integration Tests
  *
  * Tests for:
- * - GET /schedule - Retrieve full schedule
- * - POST /schedule - Add shift to schedule
- *
- * Note: Schedule endpoints don't require authentication
+ * - GET /schedule - Retrieve full schedule (public)
+ * - POST /schedule - Add shift to schedule (requires flowsheet:write)
  */
 
 describe('Schedule', () => {
   const createdScheduleIds = [];
+  let auth;
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+  });
 
   afterAll(async () => {
     // Note: Cleanup would require a DELETE endpoint (currently commented out in route)
@@ -51,7 +54,7 @@ describe('Schedule', () => {
         show_duration: 8,
       };
 
-      const res = await request.post('/schedule').send(newShift).expect(201);
+      const res = await auth.post('/schedule').send(newShift).expect(201);
 
       expectFields(res.body, 'id', 'day', 'start_time', 'show_duration');
       expect(res.body.day).toBe(0);
@@ -71,7 +74,7 @@ describe('Schedule', () => {
         specialty_id: null,
       };
 
-      const res = await request.post('/schedule').send(newShift).expect(201);
+      const res = await auth.post('/schedule').send(newShift).expect(201);
 
       expect(res.body.day).toBe(2);
 
@@ -96,7 +99,7 @@ describe('Schedule', () => {
           show_duration: 4,
         };
 
-        const res = await request.post('/schedule').send(newShift).expect(201);
+        const res = await auth.post('/schedule').send(newShift).expect(201);
 
         expect(res.body.day).toBe(day);
 
@@ -113,7 +116,7 @@ describe('Schedule', () => {
         show_duration: 2,
       };
 
-      const res = await request.post('/schedule').send(newShift).expect(201);
+      const res = await auth.post('/schedule').send(newShift).expect(201);
 
       expect(res.body.start_time).toBe('08:30:00');
 
@@ -132,7 +135,7 @@ describe('Schedule', () => {
         show_duration: 4,
       };
 
-      const postRes = await request.post('/schedule').send(newShift).expect(201);
+      const postRes = await auth.post('/schedule').send(newShift).expect(201);
 
       if (postRes.body.id) {
         createdScheduleIds.push(postRes.body.id);
