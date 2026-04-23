@@ -275,6 +275,37 @@ export async function validateTrackOnRelease(releaseId: number, track: string, a
   return false;
 }
 
+/** Response from LML's streaming-check endpoint. */
+export interface LmlStreamingCheckResponse {
+  on_streaming: boolean | null;
+  sources: {
+    spotify?: { url: string; confidence: number } | null;
+    deezer?: { url: string; confidence: number } | null;
+    apple_music?: { url: string; confidence: number } | null;
+    bandcamp?: { url: string; confidence: number } | null;
+  };
+}
+
+/**
+ * Check streaming availability for an artist+title pair.
+ *
+ * @param artist - Artist name
+ * @param title - Album title
+ * @returns Streaming availability result with per-source URLs
+ */
+export async function checkStreamingAvailability(
+  artist: string,
+  title: string
+): Promise<LmlStreamingCheckResponse> {
+  const response = await lmlFetch('/api/v1/streaming-check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ artist, title }),
+  });
+
+  return (await response.json()) as LmlStreamingCheckResponse;
+}
+
 /**
  * Check whether the LML service is configured.
  */

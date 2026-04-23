@@ -12,6 +12,7 @@ import {
   getArtistDetails,
   resolveEntity,
   LmlClientError,
+  checkStreamingAvailability,
 } from '../../../apps/backend/services/lml/lml.client';
 
 describe('lml.client', () => {
@@ -177,6 +178,64 @@ describe('lml.client', () => {
       const calledUrl = mockFetch.mock.calls[0][0] as string;
       expect(calledUrl).not.toContain('/api/v1/api/v1');
       expect(calledUrl).toBe('http://lml.test:8000/api/v1/discogs/search');
+    });
+  });
+
+  describe('checkStreamingAvailability', () => {
+    it('sends POST to /api/v1/streaming-check with artist and title', async () => {
+      const mockResponse = {
+        on_streaming: true,
+        sources: {
+          spotify: { url: 'https://open.spotify.com/album/abc', confidence: 95.0 },
+          deezer: null,
+          apple_music: null,
+          bandcamp: null,
+        },
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      } as unknown as globalThis.Response);
+
+      const result = await checkStreamingAvailability('Stereolab', 'Aluminum Tunes');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://lml.test:8000/api/v1/streaming-check',
+        expect.objectContaining({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ artist: 'Stereolab', title: 'Aluminum Tunes' }),
+        })
+      );
+      expect(result.on_streaming).toBe(true);
+      expect(result.sources.spotify?.url).toBe('https://open.spotify.com/album/abc');
+    });
+
+    it('returns on_streaming=false when not found', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            on_streaming: false,
+            sources: { spotify: null, deezer: null, apple_music: null, bandcamp: null },
+          }),
+      } as unknown as globalThis.Response);
+
+      const result = await checkStreamingAvailability('Chuquimamani-Condori', 'Edits');
+
+      expect(result.on_streaming).toBe(false);
+    });
+
+    it('throws LmlClientError on non-2xx response', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+      } as unknown as globalThis.Response);
+
+      await expect(checkStreamingAvailability('Stereolab', 'Aluminum Tunes')).rejects.toThrow(
+        LmlClientError
+      );
     });
   });
 });
