@@ -4,18 +4,23 @@ import type { Request, Response, NextFunction } from 'express';
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
 const mockMarkAlbumMissing = jest.fn<() => Promise<{ id: number } | undefined>>();
 const mockMarkAlbumFound = jest.fn<() => Promise<{ id: number } | undefined>>();
+const mockFuzzySearchLibrary = jest.fn<() => Promise<unknown[]>>();
+const mockEnrichWithArtwork = jest.fn<(results: unknown[]) => Promise<unknown[]>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
   markAlbumMissing: mockMarkAlbumMissing,
   markAlbumFound: mockMarkAlbumFound,
+  fuzzySearchLibrary: mockFuzzySearchLibrary,
+  enrichWithArtwork: mockEnrichWithArtwork,
   // Stub out other exports that may be referenced at import time
   getFormatsFromDB: jest.fn(),
   getRotationFromDB: jest.fn(),
   addToRotation: jest.fn(),
   killRotationInDB: jest.fn(),
   insertAlbum: jest.fn(),
-  fuzzySearchLibrary: jest.fn(),
+  updateArtworkUrl: jest.fn(),
+  updateOnStreaming: jest.fn(),
   artistIdFromName: jest.fn(),
   insertArtist: jest.fn(),
   insertArtistGenreCrossreference: jest.fn(),
@@ -32,7 +37,13 @@ jest.mock('../../../apps/backend/services/labels.service', () => ({
   createLabel: jest.fn(),
 }));
 
-import { markMissing, markFound } from '../../../apps/backend/controllers/library.controller';
+jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+  checkStreamingAvailability: jest.fn(),
+  searchDiscogs: jest.fn(),
+  isLmlConfigured: jest.fn().mockReturnValue(false),
+}));
+
+import { markMissing, markFound, searchForAlbum } from '../../../apps/backend/controllers/library.controller';
 
 function mockResponse(): Response {
   const res = {} as Response;
@@ -148,6 +159,41 @@ describe('library.controller', () => {
       expect(mockGetAlbumFromDB).toHaveBeenCalledWith(42);
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ id: 42, date_found: expect.any(Date) }));
+    });
+  });
+
+  describe('searchForAlbum', () => {
+    it('calls enrichWithArtwork after fuzzy search', async () => {
+      const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
+      const enrichedResults = [
+        { id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: 'https://i.discogs.com/confield.jpg' },
+      ];
+      mockFuzzySearchLibrary.mockResolvedValue(searchResults);
+      mockEnrichWithArtwork.mockResolvedValue(enrichedResults);
+
+      const req = { query: { artist_name: 'Autechre' } } as unknown as Request;
+      const res = mockResponse();
+
+      await searchForAlbum(req, res, next);
+
+      expect(mockFuzzySearchLibrary).toHaveBeenCalledWith('Autechre', undefined, undefined, undefined);
+      expect(mockEnrichWithArtwork).toHaveBeenCalledWith(searchResults);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(enrichedResults);
+    });
+
+    it('returns results even if enrichment throws', async () => {
+      const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
+      mockFuzzySearchLibrary.mockResolvedValue(searchResults);
+      mockEnrichWithArtwork.mockRejectedValue(new Error('enrichment failed'));
+
+      const req = { query: { artist_name: 'Autechre' } } as unknown as Request;
+      const res = mockResponse();
+
+      await searchForAlbum(req, res, next);
+
+      // Error should be passed to next()
+      expect(next).toHaveBeenCalled();
     });
   });
 });

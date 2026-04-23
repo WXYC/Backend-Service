@@ -11,7 +11,7 @@ import {
 } from '@wxyc/database';
 import * as libraryService from '../services/library.service.js';
 import * as labelsService from '../services/labels.service.js';
-import { checkStreamingAvailability, isLmlConfigured } from '../services/lml/lml.client.js';
+import { checkStreamingAvailability, searchDiscogs, isLmlConfigured } from '../services/lml/lml.client.js';
 import WxycError from '../utils/error.js';
 
 type NewAlbumRequest = {
@@ -79,16 +79,39 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 
     let inserted_album: Album = await libraryService.insertAlbum(new_album);
 
-    // Check streaming availability asynchronously — don't fail the insert
+    // Enrich with LML metadata (streaming + artwork) — don't fail the insert
     if (isLmlConfigured()) {
-      try {
-        const artistName = body.alternate_artist_name || body.artist_name || '';
-        const result = await checkStreamingAvailability(artistName, body.album_title);
-        if (result.on_streaming !== null) {
-          inserted_album = await libraryService.updateOnStreaming(inserted_album.id, result.on_streaming);
+      const artistName = body.alternate_artist_name || body.artist_name || '';
+      const [streamingResult, artworkResult] = await Promise.allSettled([
+        checkStreamingAvailability(artistName, body.album_title),
+        searchDiscogs(artistName, body.album_title),
+      ]);
+
+      if (streamingResult.status === 'fulfilled' && streamingResult.value.on_streaming !== null) {
+        try {
+          inserted_album = await libraryService.updateOnStreaming(
+            inserted_album.id,
+            streamingResult.value.on_streaming
+          );
+        } catch (e) {
+          console.warn('Failed to persist streaming status:', (e as Error).message);
         }
-      } catch (e) {
-        console.warn('Streaming check failed for new album, leaving on_streaming as null:', (e as Error).message);
+      } else if (streamingResult.status === 'rejected') {
+        console.warn('Streaming check failed for new album:', streamingResult.reason);
+      }
+
+      if (artworkResult.status === 'fulfilled') {
+        const top = artworkResult.value.results[0];
+        if (top?.artwork_url && !top.artwork_url.includes('spacer.gif')) {
+          try {
+            await libraryService.updateArtworkUrl(inserted_album.id, top.artwork_url);
+            (inserted_album as Record<string, unknown>).artwork_url = top.artwork_url;
+          } catch (e) {
+            console.warn('Failed to persist artwork URL:', (e as Error).message);
+          }
+        }
+      } else {
+        console.warn('Artwork fetch failed for new album:', artworkResult.reason);
       }
     }
 
@@ -142,7 +165,8 @@ export const searchForAlbum: RequestHandler = async (
       query.n,
       onStreaming
     );
-    res.status(200).json(response);
+    const enriched = await libraryService.enrichWithArtwork(response as Array<Record<string, unknown>>);
+    res.status(200).json(enriched);
   } catch (e) {
     console.error("Error: Couldn't get album");
     console.error(e);

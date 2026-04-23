@@ -263,6 +263,7 @@ export const library = wxyc_schema.table(
     date_lost: timestamp('date_lost', { withTimezone: true }),
     date_found: timestamp('date_found', { withTimezone: true }),
     on_streaming: boolean('on_streaming'),
+    artwork_url: varchar('artwork_url', { length: 512 }),
   },
   (table) => {
     return {
@@ -532,6 +533,7 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       on_streaming: library.on_streaming,
       album_artist: library.album_artist,
       plays: library.plays,
+      artwork_url: library.artwork_url,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -566,6 +568,7 @@ export type LibraryArtistViewEntry = {
   on_streaming: boolean | null;
   album_artist: string | null;
   plays: number;
+  artwork_url: string | null;
 };
 
 export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {
