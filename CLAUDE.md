@@ -58,7 +58,8 @@ Express wrapper around better-auth with these plugins: admin, username, anonymou
 - Email+password auth only (no social auth)
 - Email verification required
 - Sign-up disabled (admin creates accounts)
-- Default user creation from env vars when `CREATE_DEFAULT_USER=TRUE`
+- `POST /auth/admin/provision-user` -- Atomic user provisioning: creates user, credential account, and org membership in one call. Requires admin session. Accepts `organizationSlug` (resolved server-side) so the client never needs to map slugs to UUIDs. See `apps/auth/provision-user.ts`.
+- Default user creation from env vars when `CREATE_DEFAULT_USER=TRUE` (uses `provisionUser()` internally)
 - Test-only endpoints (non-production): `/auth/test/verification-token`, `/auth/test/expire-session`
 
 ### Database (`shared/database`)

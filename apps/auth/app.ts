@@ -5,12 +5,13 @@ import { config } from 'dotenv';
 config();
 
 import { auth } from '@wxyc/authentication';
-import { toNodeHandler } from 'better-auth/node';
+import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { closeDatabaseConnection } from '@wxyc/database';
+import { provisionUser, ProvisionError } from './provision-user';
 
 const port = process.env.AUTH_PORT || '8082';
 
@@ -107,11 +108,78 @@ if (process.env.NODE_ENV !== 'production') {
     }
   });
 
+  // Confirm a user (mark onboarding as complete) for testing
+  app.post('/auth/test/confirm-user', async (req, res) => {
+    try {
+      const { userId } = req.body as { userId?: string };
+      if (!userId) {
+        return res.status(400).json({ error: 'userId is required' });
+      }
+
+      const { db, user } = await import('@wxyc/database');
+      const { eq } = await import('drizzle-orm');
+
+      await db.update(user).set({ hasCompletedOnboarding: true }).where(eq(user.id, userId));
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('[TEST ENDPOINTS] Failed to confirm user:', error);
+      return res.status(500).json({ error: 'Failed to confirm user' });
+    }
+  });
+
   // Report session
   console.log(
-    '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session)'
+    '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session, /auth/test/confirm-user)'
   );
 }
+
+// Provision a new user atomically: create user + credential + org membership.
+// Registered before the better-auth handler so it intercepts the request.
+app.post('/auth/admin/provision-user', async (req, res) => {
+  try {
+    // Validate admin session
+    const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+    if (!session?.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if ((session.user as { role?: string }).role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: admin role required' });
+    }
+
+    // Validate required fields
+    const { email, username, password, name, organizationSlug, role, realName, djName } = req.body as Record<
+      string,
+      unknown
+    >;
+    const missing = ['email', 'username', 'password', 'name', 'organizationSlug', 'role'].filter(
+      (f) => !req.body?.[f] || typeof req.body[f] !== 'string'
+    );
+    if (missing.length > 0) {
+      return res.status(400).json({ error: `Missing required fields: ${missing.join(', ')}` });
+    }
+
+    const result = await provisionUser({
+      email: email as string,
+      username: username as string,
+      password: password as string,
+      name: name as string,
+      organizationSlug: organizationSlug as string,
+      role: role as string,
+      realName: realName as string | undefined,
+      djName: djName as string | undefined,
+    });
+
+    return res.status(201).json(result);
+  } catch (error) {
+    if (error instanceof ProvisionError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    console.error('[PROVISION USER] Unexpected error:', error);
+    Sentry.captureException(error, { tags: { subsystem: 'provision-user' } });
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // Disable rate limiting in test environments to avoid flaky integration tests.
 // This matches the pattern used by the backend's rateLimiting middleware.
@@ -189,10 +257,7 @@ const createDefaultUser = async () => {
     }
 
     const context = await auth.$context;
-    const adapter = context.adapter;
-
     const internalAdapter = context.internalAdapter;
-    const passwordUtility = context.password;
 
     const existingUser = await internalAdapter.findUserByEmail(email);
 
@@ -201,39 +266,14 @@ const createDefaultUser = async () => {
       return;
     }
 
-    const newUser = await internalAdapter.createUser({
-      // Required
-      email: email,
-      emailVerified: true,
-      name: username,
-      username: username,
-      // Optional fields
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      real_name: realName,
-      dj_name: djName,
-      app_skin: 'modern-light',
-    });
-
-    const hashedPassword = await passwordUtility.hash(password);
-    await internalAdapter.linkAccount({
-      accountId: crypto.randomUUID(),
-      providerId: 'credential',
-      password: hashedPassword,
-      userId: newUser.id,
-    });
-
-    let organizationId;
-
-    const existingOrganization = await adapter.findOne<{ id: string }>({
+    // Ensure the organization exists (bootstrap: create if missing)
+    const existingOrganization = await context.adapter.findOne<{ id: string }>({
       model: 'organization',
       where: [{ field: 'slug', value: organizationSlug }],
     });
 
-    if (existingOrganization) {
-      organizationId = existingOrganization.id;
-    } else {
-      const newOrganization = await adapter.create({
+    if (!existingOrganization) {
+      await context.adapter.create({
         model: 'organization',
         data: {
           name: organizationName,
@@ -242,41 +282,19 @@ const createDefaultUser = async () => {
           updatedAt: new Date(),
         },
       });
-
-      organizationId = newOrganization.id;
     }
 
-    if (!organizationId) {
-      throw new Error('Failed to create or retrieve organization for default user.');
-    }
-
-    const existingMembership = await adapter.findOne<{ id: string }>({
-      model: 'member',
-      where: [
-        { field: 'userId', value: newUser.id },
-        { field: 'organizationId', value: organizationId },
-      ],
+    // Provision user + credential + membership atomically
+    await provisionUser({
+      email,
+      username,
+      password,
+      name: username,
+      realName,
+      djName,
+      organizationSlug,
+      role: 'stationManager',
     });
-
-    if (existingMembership) {
-      throw new Error('Somehow, default user membership already exists for new user.');
-    }
-
-    await adapter.create({
-      model: 'member',
-      data: {
-        userId: newUser.id,
-        organizationId: organizationId,
-        role: 'stationManager',
-        createdAt: new Date(),
-      },
-    });
-
-    // Set admin role for stationManager in default organization
-    // This ensures the user has admin permissions for Better Auth Admin plugin
-    const { db, user } = await import('@wxyc/database');
-    const { eq } = await import('drizzle-orm');
-    await db.update(user).set({ role: 'admin' }).where(eq(user.id, newUser.id));
 
     console.log('Default user created successfully with admin role.');
   } catch (error) {
