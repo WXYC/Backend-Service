@@ -474,12 +474,19 @@ jobs:
             echo "SCHEDULE: $CRON_SCHEDULE"
             echo "CMD: $CRON_CMD"
 
-            (crontab -l 2>/dev/null | grep -v "$CRON_ID" || true; echo "$CRON_SCHEDULE $CRON_CMD # $CRON_ID") > crontab.txt && crontab crontab.txt
+            # Serialize crontab updates across parallel matrix jobs with flock.
+            # Without this, concurrent read-modify-write cycles race and one
+            # job's crontab install can clobber another's entry.
+            LOCKFILE=/tmp/crontab-deploy.lock
+            TMPFILE=$(mktemp /tmp/crontab-${TARGET_APP}.XXXXXX)
+            (
+              flock 9
+              (crontab -l 2>/dev/null | grep -v "$CRON_ID" || true; echo "$CRON_SCHEDULE $CRON_CMD # $CRON_ID") > "$TMPFILE" && crontab "$TMPFILE"
+            ) 9>"$LOCKFILE"
+            rm -f "$TMPFILE"
 
             echo "CRONTAB:"
             crontab -l
-
-            rm -f crontab.txt
 
             echo "Cleaning up old Docker images..."
             docker images --format '{{.Repository}} {{.Tag}}' | \

@@ -137,20 +137,16 @@ echo "Creating subscription on local database..."
 # Build the connection string for the subscription (points to tunnel, not RDS directly)
 CONN_STRING="host=localhost port=$TUNNEL_PORT dbname=$RDS_NAME user=$RDS_USER password=$RDS_PASS"
 
-PGPASSWORD="$LOCAL_DB_PASSWORD" psql -h "$LOCAL_DB_HOST" -p "$LOCAL_DB_PORT" -U "$LOCAL_DB_USER" -d "$LOCAL_DB_NAME" <<SQL
-DO \$\$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_subscription WHERE subname = 'local_sync') THEN
-        EXECUTE format(
-            'CREATE SUBSCRIPTION local_sync CONNECTION %L PUBLICATION wxyc_cdc WITH (copy_data = true)',
-            '$CONN_STRING'
-        );
-        RAISE NOTICE 'Subscription local_sync created. Initial data copy starting...';
-    ELSE
-        RAISE NOTICE 'Subscription local_sync already exists.';
-    END IF;
-END \$\$;
-SQL
+# Check if subscription already exists (CREATE SUBSCRIPTION cannot run inside DO blocks)
+SUB_EXISTS=$(PGPASSWORD="$LOCAL_DB_PASSWORD" psql -h "$LOCAL_DB_HOST" -p "$LOCAL_DB_PORT" -U "$LOCAL_DB_USER" -d "$LOCAL_DB_NAME" -tAc "SELECT 1 FROM pg_subscription WHERE subname = 'local_sync';" 2>/dev/null)
+
+if [ "$SUB_EXISTS" = "1" ]; then
+    echo "Subscription local_sync already exists."
+else
+    PGPASSWORD="$LOCAL_DB_PASSWORD" psql -h "$LOCAL_DB_HOST" -p "$LOCAL_DB_PORT" -U "$LOCAL_DB_USER" -d "$LOCAL_DB_NAME" -c \
+        "CREATE SUBSCRIPTION local_sync CONNECTION '$CONN_STRING' PUBLICATION wxyc_cdc WITH (copy_data = true);"
+    echo "Subscription local_sync created. Initial data copy starting..."
+fi
 
 # --- Step 7: Show replication status ---
 

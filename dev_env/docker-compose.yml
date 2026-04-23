@@ -92,6 +92,7 @@ services:
         NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [ci]
     environment:
+      - AUTH_PORT=8080
       - NODE_ENV=test
       - DB_HOST=ci-db
       - DB_PORT=5432
@@ -247,6 +248,7 @@ services:
         NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [e2e]
     environment:
+      - AUTH_PORT=8080
       - DB_HOST=e2e-db
       - DB_PORT=5432
       - DB_USERNAME=${DB_USERNAME:-e2euser}
