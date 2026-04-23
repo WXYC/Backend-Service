@@ -204,7 +204,7 @@ jobs:
           fi
 
       - name: Upload Coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: unit-test-coverage
@@ -352,7 +352,7 @@ jobs:
           cat /tmp/backend.log || true
 
       - name: Upload Coverage Report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: env.RUN_TESTS == 'true' && always()
         with:
           name: integration-test-coverage
