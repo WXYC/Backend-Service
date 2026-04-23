@@ -65,9 +65,17 @@ async function getMysql(): Promise<mysql.Pool> {
 // --- Entry type mapping (mirrors Backend-Service's mapProdEntryType) ---
 
 const ENTRY_TYPE_MAP: Record<number, string> = {
-  0: 'track', 1: 'track', 2: 'track', 3: 'track',
-  4: 'track', 5: 'track', 6: 'track',
-  7: 'talkset', 8: 'breakpoint', 9: 'show_start', 10: 'show_end',
+  0: 'track',
+  1: 'track',
+  2: 'track',
+  3: 'track',
+  4: 'track',
+  5: 'track',
+  6: 'track',
+  7: 'talkset',
+  8: 'breakpoint',
+  9: 'show_start',
+  10: 'show_end',
 };
 
 function mapEntryType(code: number): string {
@@ -131,7 +139,11 @@ interface FieldDiff {
   actual: unknown;
 }
 
-function compareFields(expected: Record<string, unknown>, actual: Record<string, unknown>, fields: string[]): FieldDiff[] {
+function compareFields(
+  expected: Record<string, unknown>,
+  actual: Record<string, unknown>,
+  fields: string[]
+): FieldDiff[] {
   const diffs: FieldDiff[] = [];
   for (const field of fields) {
     const e = expected[field];
@@ -197,7 +209,7 @@ async function reconcileFlowsheetEntry(event: CdcEvent) {
   if (diffs.length === 0) {
     logMatch('FLOWSHEET_ENTRY_PROD', id, 'flowsheet');
   } else {
-    const details = diffs.map(d => `${d.field}: "${d.expected}" vs "${d.actual}"`).join(', ');
+    const details = diffs.map((d) => `${d.field}: "${d.expected}" vs "${d.actual}"`).join(', ');
     logMismatch('FLOWSHEET_ENTRY_PROD', id, 'flowsheet', details);
   }
 }
@@ -227,7 +239,7 @@ async function reconcileRadioShow(event: CdcEvent) {
   if (diffs.length === 0) {
     logMatch('FLOWSHEET_RADIO_SHOW_PROD', id, 'shows');
   } else {
-    const details = diffs.map(d => `${d.field}: "${d.expected}" vs "${d.actual}"`).join(', ');
+    const details = diffs.map((d) => `${d.field}: "${d.expected}" vs "${d.actual}"`).join(', ');
     logMismatch('FLOWSHEET_RADIO_SHOW_PROD', id, 'shows', details);
   }
 }
@@ -266,7 +278,7 @@ async function reconcileRotation(event: CdcEvent) {
   if (diffs.length === 0) {
     logMatch('ROTATION_RELEASE', id, 'rotation');
   } else {
-    const details = diffs.map(d => `${d.field}: "${d.expected}" vs "${d.actual}"`).join(', ');
+    const details = diffs.map((d) => `${d.field}: "${d.expected}" vs "${d.actual}"`).join(', ');
     logMismatch('ROTATION_RELEASE', id, 'rotation', details);
   }
 }
@@ -313,7 +325,8 @@ async function reconcileLibraryCode(event: CdcEvent) {
     return;
   }
 
-  const rows = await sql`SELECT * FROM ${sql(SCHEMA)}.artists WHERE artist_name = ${name} AND code_letters = ${letters}`;
+  const rows =
+    await sql`SELECT * FROM ${sql(SCHEMA)}.artists WHERE artist_name = ${name} AND code_letters = ${letters}`;
   if (rows.length === 0) {
     logMissing('LIBRARY_CODE', id, `artists (${name} / ${letters})`);
   } else {
@@ -404,7 +417,7 @@ async function reverseReconcileFlowsheet(event: CdcEvent) {
   if (diffs.length === 0) {
     logMatch('flowsheet', legacyId, 'FLOWSHEET_ENTRY_PROD');
   } else {
-    const details = diffs.map(d => `${d.field}: "${d.expected}" vs "${d.actual}"`).join(', ');
+    const details = diffs.map((d) => `${d.field}: "${d.expected}" vs "${d.actual}"`).join(', ');
     logMismatch('flowsheet', legacyId, 'FLOWSHEET_ENTRY_PROD', details);
   }
 }
@@ -489,14 +502,31 @@ const BACKEND_TABLES: Record<string, (event: CdcEvent) => Promise<void>> = {
 };
 
 const UNSYNCED_TABLES = new Set([
-  'COMMENT', 'USER', 'WEEKLY_PLAY', 'APPLICATION_VARIABLE',
-  'LIBRARY_CODE_CROSS_REFERENCE', 'RELEASE_CROSS_REFERENCE',
+  'COMMENT',
+  'USER',
+  'WEEKLY_PLAY',
+  'APPLICATION_VARIABLE',
+  'LIBRARY_CODE_CROSS_REFERENCE',
+  'RELEASE_CROSS_REFERENCE',
   // Backend-Service tables with no tubafrenzy counterpart
-  'auth_user', 'auth_account', 'auth_organization', 'auth_member',
-  'auth_invitation', 'user_activity', 'anonymous_devices',
-  'dj_stats', 'schedule', 'shift_covers', 'cronjob_runs', 'bins',
-  'reviews', 'specialty_shows', 'show_djs', 'compilation_track_artist',
-  'genre_artist_crossreference', 'artist_library_crossreference',
+  'auth_user',
+  'auth_account',
+  'auth_organization',
+  'auth_member',
+  'auth_invitation',
+  'user_activity',
+  'anonymous_devices',
+  'dj_stats',
+  'schedule',
+  'shift_covers',
+  'cronjob_runs',
+  'bins',
+  'reviews',
+  'specialty_shows',
+  'show_djs',
+  'compilation_track_artist',
+  'genre_artist_crossreference',
+  'artist_library_crossreference',
   'artist_crossreference',
 ]);
 
@@ -541,11 +571,7 @@ async function batchReconcile() {
 
 // --- WebSocket CDC client (generic, used for both directions) ---
 
-function connectCdc(
-  label: string,
-  wsUrl: string,
-  tableHandlers: Record<string, (event: CdcEvent) => Promise<void>>,
-) {
+function connectCdc(label: string, wsUrl: string, tableHandlers: Record<string, (event: CdcEvent) => Promise<void>>) {
   const url = `${wsUrl}?key=${CDC_SECRET}`;
   logInfo(`[${label}] Connecting to ${wsUrl}...`);
 
@@ -572,7 +598,7 @@ function connectCdc(
       const handler = tableHandlers[event.table];
 
       if (handler) {
-        await new Promise(resolve => setTimeout(resolve, PROPAGATION_DELAY_MS));
+        await new Promise((resolve) => setTimeout(resolve, PROPAGATION_DELAY_MS));
         await handler(event);
       } else if (!UNSYNCED_TABLES.has(event.table)) {
         logSkipped(event.table, event.id ?? 0, `[${label}] unknown table`);
@@ -600,8 +626,12 @@ async function main() {
   console.log('🔍 WXYC Bidirectional Reconciliation Monitor');
   console.log(`   tubafrenzy CDC: ${TUBAFRENZY_CDC_URL}`);
   console.log(`   Backend-Service CDC: ${BACKEND_CDC_URL}`);
-  console.log(`   PostgreSQL: ${process.env.DB_HOST ?? 'localhost'}:${process.env.DB_PORT ?? '5432'}/${process.env.DB_NAME ?? 'wxyc_db'}`);
-  console.log(`   MySQL: ${process.env.MYSQL_HOST ?? 'localhost'}:${process.env.MYSQL_PORT ?? '3306'}/${process.env.MYSQL_DATABASE ?? 'wxycmusic'}`);
+  console.log(
+    `   PostgreSQL: ${process.env.DB_HOST ?? 'localhost'}:${process.env.DB_PORT ?? '5432'}/${process.env.DB_NAME ?? 'wxyc_db'}`
+  );
+  console.log(
+    `   MySQL: ${process.env.MYSQL_HOST ?? 'localhost'}:${process.env.MYSQL_PORT ?? '3306'}/${process.env.MYSQL_DATABASE ?? 'wxycmusic'}`
+  );
   console.log(`   Propagation delay: ${PROPAGATION_DELAY_MS}ms`);
   console.log('');
 
