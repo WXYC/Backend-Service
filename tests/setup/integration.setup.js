@@ -49,5 +49,6 @@ async function getUserIdsFromDatabase() {
 // Note: Service readiness is checked in globalSetup.js (runs once for all tests)
 beforeAll(async () => {
   await getUserIdsFromDatabase();
-  global.access_token = await get_access_token();
+  const token = await get_access_token();
+  global.access_token = `Bearer ${token}`;
 });
