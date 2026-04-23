@@ -108,9 +108,29 @@ if (process.env.NODE_ENV !== 'production') {
     }
   });
 
+  // Confirm a user (mark onboarding as complete) for testing
+  app.post('/auth/test/confirm-user', async (req, res) => {
+    try {
+      const { userId } = req.body as { userId?: string };
+      if (!userId) {
+        return res.status(400).json({ error: 'userId is required' });
+      }
+
+      const { db, user } = await import('@wxyc/database');
+      const { eq } = await import('drizzle-orm');
+
+      await db.update(user).set({ hasCompletedOnboarding: true }).where(eq(user.id, userId));
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('[TEST ENDPOINTS] Failed to confirm user:', error);
+      return res.status(500).json({ error: 'Failed to confirm user' });
+    }
+  });
+
   // Report session
   console.log(
-    '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session)'
+    '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session, /auth/test/confirm-user)'
   );
 }
 
