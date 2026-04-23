@@ -110,11 +110,7 @@ export const insertAlbum = async (newAlbum: NewAlbum) => {
 };
 
 export const updateOnStreaming = async (id: number, on_streaming: boolean | null) => {
-  const response = await db
-    .update(library)
-    .set({ on_streaming })
-    .where(eq(library.id, id))
-    .returning();
+  const response = await db.update(library).set({ on_streaming }).where(eq(library.id, id)).returning();
   return response[0];
 };
 
