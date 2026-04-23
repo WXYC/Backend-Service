@@ -15,10 +15,7 @@ export interface ResolvedOrganization {
  * Look up an organization by slug using the better-auth adapter.
  * Returns the organization's id, slug, and name, or null if not found.
  */
-export async function resolveOrganization(
-  slug: string,
-  _session: unknown
-): Promise<ResolvedOrganization | null> {
+export async function resolveOrganization(slug: string, _session: unknown): Promise<ResolvedOrganization | null> {
   const context = await auth.$context;
   const { adapter } = context;
 
