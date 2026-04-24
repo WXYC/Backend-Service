@@ -17,6 +17,7 @@ jest.mock('async-mutex', () => ({
 }));
 
 import { leaveShow } from '../../../apps/backend/controllers/flowsheet.controller';
+import WxycError from '../../../apps/backend/utils/error';
 import type { Request, Response, NextFunction } from 'express';
 
 function createMockRes() {
@@ -31,7 +32,7 @@ function createMockRes() {
 }
 
 describe('leaveShow', () => {
-  it('returns 400 when no active show session exists (end_time is set)', async () => {
+  it('throws WxycError 400 when no active show session exists (end_time is set)', async () => {
     mockGetLatestShow.mockResolvedValue({
       id: 1,
       primary_dj_id: 'dj-1',
@@ -40,14 +41,10 @@ describe('leaveShow', () => {
     });
 
     const req = { body: { dj_id: 'dj-1' } } as Request;
-    const { res, statusMock, jsonMock } = createMockRes();
+    const { res } = createMockRes();
     const next = jest.fn() as unknown as NextFunction;
 
-    await leaveShow(req, res, next);
-
-    expect(statusMock).toHaveBeenCalledWith(400);
-    expect(jsonMock).toHaveBeenCalledWith({
-      message: 'Bad Request: No active show session found.',
-    });
+    await expect(leaveShow(req, res, next)).rejects.toThrow(WxycError);
+    await expect(leaveShow(req, res, next)).rejects.toThrow('Bad Request: No active show session found.');
   });
 });

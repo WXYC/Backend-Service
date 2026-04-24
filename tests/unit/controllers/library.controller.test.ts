@@ -182,18 +182,16 @@ describe('library.controller', () => {
       expect(res.json).toHaveBeenCalledWith(enrichedResults);
     });
 
-    it('returns results even if enrichment throws', async () => {
+    it('rejects when enrichment throws', async () => {
       const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
       mockFuzzySearchLibrary.mockResolvedValue(searchResults);
-      mockEnrichWithArtwork.mockRejectedValue(new Error('enrichment failed'));
+      const enrichError = new Error('enrichment failed');
+      mockEnrichWithArtwork.mockRejectedValue(enrichError);
 
       const req = { query: { artist_name: 'Autechre' } } as unknown as Request;
       const res = mockResponse();
 
-      await searchForAlbum(req, res, next);
-
-      // Error should be passed to next()
-      expect(next).toHaveBeenCalled();
+      await expect(searchForAlbum(req, res, next)).rejects.toThrow(enrichError);
     });
   });
 });
