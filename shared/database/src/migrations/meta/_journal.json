@@ -330,6 +330,13 @@
       "when": 1777300800000,
       "tag": "0048_fix-fk-on-delete-set-null",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1777387200000,
+      "tag": "0049_flowsheet-search-indexes",
+      "breakpoints": true
     }
   ]
 }
