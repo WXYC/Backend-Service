@@ -42,13 +42,13 @@ export const searchFlowsheetEndpoint: RequestHandler<object, unknown, unknown, S
     return;
   }
 
-  const sort = (VALID_SORTS.includes(req.query.sort as SearchParams['sort'])
-    ? req.query.sort
-    : 'date') as SearchParams['sort'];
+  const sort = (
+    VALID_SORTS.includes(req.query.sort as SearchParams['sort']) ? req.query.sort : 'date'
+  ) as SearchParams['sort'];
 
-  const order = (VALID_ORDERS.includes(req.query.order as SearchParams['order'])
-    ? req.query.order
-    : 'desc') as SearchParams['order'];
+  const order = (
+    VALID_ORDERS.includes(req.query.order as SearchParams['order']) ? req.query.order : 'desc'
+  ) as SearchParams['order'];
 
   try {
     const { results, total } = await searchService.searchFlowsheet({ q, page, limit, sort, order });
