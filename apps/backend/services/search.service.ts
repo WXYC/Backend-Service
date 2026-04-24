@@ -19,6 +19,7 @@ type SearchResultRow = {
   record_label: string | null;
   show_id: number | null;
   dj_name: string | null;
+  total: number;
 };
 
 export type SearchResult = {
@@ -68,7 +69,7 @@ export async function searchFlowsheet(params: SearchParams): Promise<{ results: 
 
   const fullWhere = whereClause ? sql`${baseFrom} AND ${whereClause}` : baseFrom;
 
-  const dataQuery = sql`
+  const query = sql`
     SELECT
       ${flowsheet.id},
       ${flowsheet.add_time} AS play_date,
@@ -77,21 +78,18 @@ export async function searchFlowsheet(params: SearchParams): Promise<{ results: 
       ${flowsheet.album_title},
       ${flowsheet.record_label},
       ${flowsheet.show_id},
-      ${DJ_NAME_EXPR} AS dj_name
+      ${DJ_NAME_EXPR} AS dj_name,
+      COUNT(*)::int OVER() AS total
     ${fullWhere}
     ORDER BY ${sortExpr} ${orderDirection}
     LIMIT ${limit} OFFSET ${offset}
   `;
 
-  const countQuery = sql`
-    SELECT COUNT(*)::int AS total
-    ${fullWhere}
-  `;
+  const rows = await db.execute(query);
 
-  const [rows, countRows] = await Promise.all([db.execute(dataQuery), db.execute(countQuery)]);
-
-  const results = (rows as unknown as SearchResultRow[]).map(transformRow);
-  const total = (countRows as unknown as Array<{ total: number }>)[0]?.total ?? 0;
+  const typedRows = rows as unknown as SearchResultRow[];
+  const results = typedRows.map(transformRow);
+  const total = typedRows[0]?.total ?? 0;
 
   return { results, total };
 }
