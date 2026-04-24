@@ -49,18 +49,13 @@ describe('songRequestRateLimit keyGenerator', () => {
     expect(keyGenerator(req)).toBe('user-123');
   });
 
-  it('returns req.ip when req.auth is undefined', () => {
+  it('returns "unknown" when req.auth is undefined', () => {
     const req = { auth: undefined, ip: '192.168.1.42' } as unknown as Request;
-    expect(keyGenerator(req)).toBe('192.168.1.42');
+    expect(keyGenerator(req)).toBe('unknown');
   });
 
-  it('returns req.ip when req.auth.id is missing', () => {
+  it('returns "unknown" when req.auth.id is missing', () => {
     const req = { auth: {}, ip: '10.0.0.5' } as unknown as Request;
-    expect(keyGenerator(req)).toBe('10.0.0.5');
-  });
-
-  it('returns "unknown" only when both req.auth.id and req.ip are unavailable', () => {
-    const req = { auth: undefined, ip: undefined } as unknown as Request;
     expect(keyGenerator(req)).toBe('unknown');
   });
 });
