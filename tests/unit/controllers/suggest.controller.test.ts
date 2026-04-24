@@ -99,17 +99,13 @@ describe('suggest.controller', () => {
     it('throws WxycError 400 when artist parameter is missing', async () => {
       const { req, res, next } = mockReqResNext({ track: 'VI Scose Poise' });
 
-      await expect(getTrackDetailsEndpoint(req, res, next)).rejects.toThrow(
-        'Missing required query parameter: artist'
-      );
+      await expect(getTrackDetailsEndpoint(req, res, next)).rejects.toThrow('Missing required query parameter: artist');
     });
 
     it('throws WxycError 400 when track parameter is missing', async () => {
       const { req, res, next } = mockReqResNext({ artist: 'Autechre' });
 
-      await expect(getTrackDetailsEndpoint(req, res, next)).rejects.toThrow(
-        'Missing required query parameter: track'
-      );
+      await expect(getTrackDetailsEndpoint(req, res, next)).rejects.toThrow('Missing required query parameter: track');
     });
 
     it('returns 200 with track details', async () => {

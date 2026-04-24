@@ -82,10 +82,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 
     if (streamingResult.status === 'fulfilled' && streamingResult.value.on_streaming !== null) {
       try {
-        inserted_album = await libraryService.updateOnStreaming(
-          inserted_album.id,
-          streamingResult.value.on_streaming
-        );
+        inserted_album = await libraryService.updateOnStreaming(inserted_album.id, streamingResult.value.on_streaming);
       } catch (e) {
         console.warn('Failed to persist streaming status:', (e as Error).message);
       }
@@ -122,10 +119,7 @@ type AlbumQueryParams = {
   on_streaming?: string;
 };
 
-export const searchForAlbum: RequestHandler = async (
-  req: Request<object, object, object, AlbumQueryParams>,
-  res
-) => {
+export const searchForAlbum: RequestHandler = async (req: Request<object, object, object, AlbumQueryParams>, res) => {
   const { query } = req;
   if (
     query.artist_name === undefined &&
@@ -145,12 +139,7 @@ export const searchForAlbum: RequestHandler = async (
 
   const onStreaming = query.on_streaming === 'true' ? true : query.on_streaming === 'false' ? false : undefined;
 
-  const response = await libraryService.fuzzySearchLibrary(
-    query.artist_name,
-    query.album_title,
-    query.n,
-    onStreaming
-  );
+  const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n, onStreaming);
   const enriched = await libraryService.enrichWithArtwork(response as Array<Record<string, unknown>>);
   res.status(200).json(enriched);
 };
