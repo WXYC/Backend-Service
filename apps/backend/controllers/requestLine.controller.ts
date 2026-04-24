@@ -64,7 +64,7 @@ export const submitRequestLine: RequestHandler<object, unknown, RequestLineBody>
   });
 
   // Validate message
-  if (!req.body?.message) throw new WxycError('Missing request line message', 400);
+  if (!req.body || req.body.message === undefined) throw new WxycError('Missing request line message', 400);
   const trimmedMessage = req.body.message.trim();
   if (trimmedMessage.length < MESSAGE_MIN_LENGTH) throw new WxycError('Message cannot be empty', 400);
   if (trimmedMessage.length > MESSAGE_MAX_LENGTH) {
