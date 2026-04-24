@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
 import {
@@ -159,48 +159,23 @@ export async function enrichWithArtwork(
   return results;
 }
 
-//based on artist name and album title, retrieve n best matches from db
-//let's build the query using drizzle's sql object
 export const fuzzySearchLibrary = async (artist_name?: string, album_title?: string, n = 5, on_streaming?: boolean) => {
-  const streamingFilter =
-    on_streaming !== undefined ? sql` AND ${library_artist_view.on_streaming} = ${on_streaming}` : sql``;
+  const similarityCondition = sql`(${library_artist_view.artist_name} % ${artist_name || null} OR ${library_artist_view.album_title} % ${album_title || null})`;
 
-  const query = sql`SELECT *,
-                    ${library_artist_view.artist_name} <-> ${artist_name || null} AS artist_dist,
-                    ${library_artist_view.album_title} <-> ${album_title || null} AS album_dist
-                      FROM ${library_artist_view}
-                      WHERE (${library_artist_view.artist_name} % ${artist_name || null} OR
-                            ${library_artist_view.album_title} % ${album_title || null})${streamingFilter}
-                      ORDER BY artist_dist asc, album_dist asc
-                      LIMIT ${n}`;
+  const streamingCondition =
+    on_streaming !== undefined ? eq(library_artist_view.on_streaming, on_streaming) : undefined;
 
-  const response = await db.execute(query);
-  return response;
+  const results = await db
+    .select()
+    .from(library_artist_view)
+    .where(streamingCondition ? and(similarityCondition, streamingCondition) : similarityCondition)
+    .orderBy(
+      asc(sql`${library_artist_view.artist_name} <-> ${artist_name || null}`),
+      asc(sql`${library_artist_view.album_title} <-> ${album_title || null}`)
+    )
+    .limit(n);
 
-  // trying to get something like this working, but having type issues using orderBy method with 2 computed columns
-  // maybe at some point for more type safety 🤷
-
-  // const query1 = db
-  //   .select({
-  //     library_id: library_artist_view.library_id,
-  //     album_title: library_artist_view.album_title,
-  //     artist_name: library_artist_view.artist_name,
-  //     artist_similarity: sql`similarity(${library_artist_view.artist_name}, ${artist_name || ''})`,
-  //     album_similarity: sql`similarity(${library_artist_view.album_title}, ${album_title || ''})`,
-  //   })
-  //   .from(library_artist_view)
-  //   .where(
-  //     sql`${library_artist_view.album_title} % ${album_title} OR ${library_artist_view.artist_name} % ${artist_name}`
-  //   )
-  //   .orderBy(
-  //     ({ album_similarity }) =>
-  //       desc(
-  //         album_similarity
-  //       ) /*, ({ artist_similarity, album_similarity }) => {desc(artist_similarity), desc(album_similarity)}*/
-  //   )
-  //   .limit(n)
-  //   .toSQL();
-  // console.log(query1);
+  return results;
 };
 
 export const artistIdFromName = async (artist_name: string, genre_id: number): Promise<number> => {
