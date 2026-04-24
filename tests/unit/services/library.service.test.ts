@@ -21,31 +21,50 @@ import {
 
 describe('library.service', () => {
   describe('fuzzySearchLibrary', () => {
+    const mockViewRow = {
+      id: 1,
+      code_letters: 'AU',
+      code_artist_number: 3,
+      code_number: 2,
+      artist_name: 'Autechre',
+      alphabetical_name: 'Autechre',
+      album_title: 'Confield',
+      format_name: 'cd',
+      genre_name: 'Electronic',
+      rotation_bin: null,
+      add_date: new Date('2024-01-15'),
+      label: 'Warp',
+      label_id: null,
+      on_streaming: true,
+      album_artist: null,
+      plays: 5,
+      artwork_url: null,
+    };
+
     beforeEach(() => {
       jest.clearAllMocks();
     });
 
-    it('passes through results when no on_streaming filter is provided', async () => {
-      const mockResults = [
-        { id: 1, artist_name: 'Autechre', album_title: 'Confield', on_streaming: true },
-        { id: 2, artist_name: 'Autechre', album_title: 'LP5', on_streaming: false },
-      ];
-      db.execute.mockResolvedValueOnce(mockResults);
+    it('returns results with code_artist_number mapped from the view', async () => {
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
 
       const results = await fuzzySearchLibrary('Autechre', undefined, 5);
 
-      expect(results).toEqual(mockResults);
-      expect(db.execute).toHaveBeenCalled();
+      expect(results).toHaveLength(1);
+      expect(results[0]).toHaveProperty('code_artist_number', 3);
     });
 
-    it('calls db.execute when on_streaming filter is provided', async () => {
-      const mockResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', on_streaming: true }];
-      db.execute.mockResolvedValueOnce(mockResults);
+    it('applies on_streaming filter when provided', async () => {
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
 
       const results = await fuzzySearchLibrary('Autechre', undefined, 5, true);
 
-      expect(results).toEqual(mockResults);
-      expect(db.execute).toHaveBeenCalled();
+      expect(results).toHaveLength(1);
+      expect(results[0]).toHaveProperty('on_streaming', true);
     });
   });
 
