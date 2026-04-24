@@ -43,6 +43,7 @@ const createMockRes = () => {
   res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
   res.json = jest.fn().mockReturnValue(res) as unknown as Response['json'];
   res.send = jest.fn().mockReturnValue(res) as unknown as Response['send'];
+  res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
   return res;
 };
 
@@ -232,7 +233,7 @@ describe('flowsheet.controller', () => {
       expect(res.json).toHaveBeenCalledWith({ ...entry, v2: true });
     });
 
-    it('returns 200 with null when no entries exist', async () => {
+    it('returns 204 with no body when no entries exist', async () => {
       mockGetEntriesByPage.mockResolvedValue([]);
 
       const req = createMockReq();
@@ -240,8 +241,9 @@ describe('flowsheet.controller', () => {
 
       await getLatest(req as Request, res as Response, mockNext);
 
-      expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith(null);
+      expect(res.status).toHaveBeenCalledWith(204);
+      expect(res.end).toHaveBeenCalled();
+      expect(res.json).not.toHaveBeenCalled();
       expect(mockTransformToV2).not.toHaveBeenCalled();
     });
 
