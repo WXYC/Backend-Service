@@ -41,6 +41,14 @@ const SORT_MAP: Record<SearchParams['sort'], SQL> = {
   dj: DJ_NAME_EXPR,
 };
 
+/** Column references for WHERE clause building, keyed by SearchField name. */
+const COLUMN_MAP: Record<string, SQL> = {
+  artist_name: sql`${flowsheet.artist_name}`,
+  track_title: sql`${flowsheet.track_title}`,
+  album_title: sql`${flowsheet.album_title}`,
+  record_label: sql`${flowsheet.record_label}`,
+};
+
 /** Search historical flowsheet entries with filtering, sorting, and pagination. */
 export async function searchFlowsheet(params: SearchParams): Promise<{ results: SearchResult[]; total: number }> {
   const { q, page, limit, sort, order } = params;
@@ -52,23 +60,23 @@ export async function searchFlowsheet(params: SearchParams): Promise<{ results: 
   const sortExpr = SORT_MAP[sort];
 
   const baseFrom = sql`
-    FROM ${flowsheet} f
-    LEFT JOIN ${shows} s ON s.id = f.show_id
-    LEFT JOIN ${user} u ON u.id = s.primary_dj_id
-    WHERE f.entry_type = 'track'
+    FROM ${flowsheet}
+    LEFT JOIN ${shows} ON ${shows.id} = ${flowsheet.show_id}
+    LEFT JOIN ${user} ON ${user.id} = ${shows.primary_dj_id}
+    WHERE ${flowsheet.entry_type} = 'track'
   `;
 
   const fullWhere = whereClause ? sql`${baseFrom} AND ${whereClause}` : baseFrom;
 
   const dataQuery = sql`
     SELECT
-      f.id,
-      f.add_time AS play_date,
-      f.artist_name,
-      f.track_title,
-      f.album_title,
-      f.record_label,
-      f.show_id,
+      ${flowsheet.id},
+      ${flowsheet.add_time} AS play_date,
+      ${flowsheet.artist_name},
+      ${flowsheet.track_title},
+      ${flowsheet.album_title},
+      ${flowsheet.record_label},
+      ${flowsheet.show_id},
       ${DJ_NAME_EXPR} AS dj_name
     ${fullWhere}
     ORDER BY ${sortExpr} ${orderDirection}
@@ -155,7 +163,8 @@ function buildConditionFragment(condition: SearchCondition): SQL | null {
 }
 
 function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
-  const col = sql.raw(`f.${column}`);
+  const col = COLUMN_MAP[column];
+  if (!col) return sql`FALSE`;
   if (exact) {
     return sql`${col} = ${value}`;
   }
@@ -164,10 +173,10 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
 
 function buildAllFieldMatch(value: string, exact: boolean): SQL {
   if (exact) {
-    return sql`(f.artist_name = ${value} OR f.track_title = ${value} OR f.album_title = ${value} OR f.record_label = ${value})`;
+    return sql`(${flowsheet.artist_name} = ${value} OR ${flowsheet.track_title} = ${value} OR ${flowsheet.album_title} = ${value} OR ${flowsheet.record_label} = ${value})`;
   }
   const pattern = '%' + value + '%';
-  return sql`(f.artist_name ILIKE ${pattern} OR f.track_title ILIKE ${pattern} OR f.album_title ILIKE ${pattern} OR f.record_label ILIKE ${pattern})`;
+  return sql`(${flowsheet.artist_name} ILIKE ${pattern} OR ${flowsheet.track_title} ILIKE ${pattern} OR ${flowsheet.album_title} ILIKE ${pattern} OR ${flowsheet.record_label} ILIKE ${pattern})`;
 }
 
 function buildDjNameMatch(value: string, exact: boolean): SQL {
@@ -178,7 +187,7 @@ function buildDjNameMatch(value: string, exact: boolean): SQL {
 }
 
 function buildDateMatch(value: string): SQL {
-  return sql`f.add_time >= ${value}::date AND f.add_time < (${value}::date + interval '1 day')`;
+  return sql`${flowsheet.add_time} >= ${value}::date AND ${flowsheet.add_time} < (${value}::date + interval '1 day')`;
 }
 
 function buildDateRangeMatch(value: string): SQL {
@@ -186,5 +195,5 @@ function buildDateRangeMatch(value: string): SQL {
   if (!start || !end) {
     return buildDateMatch(value);
   }
-  return sql`f.add_time >= ${start}::date AND f.add_time < (${end}::date + interval '1 day')`;
+  return sql`${flowsheet.add_time} >= ${start}::date AND ${flowsheet.add_time} < (${end}::date + interval '1 day')`;
 }
