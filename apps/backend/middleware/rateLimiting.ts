@@ -81,11 +81,11 @@ export const songRequestRateLimit = shouldEnableRateLimiting
       legacyHeaders: false,
       store: songRequestStore,
       keyGenerator: (req: Request) => {
-        // Use user ID if available (set by requirePermissions middleware)
+        // Use user ID (set by requirePermissions middleware, which runs before this)
         if (req.auth?.id) {
           return req.auth.id;
         }
-        return req.ip || 'unknown';
+        return 'unknown';
       },
       handler: (_req: Request, res: Response) => {
         res.status(429).json({
@@ -93,7 +93,6 @@ export const songRequestRateLimit = shouldEnableRateLimiting
           retryAfter: Math.ceil(REQUEST_WINDOW_MS / 1000),
         });
       },
-      // Skip validation for keyGenerator since we primarily use user ID, not IP
       validate: { xForwardedForHeader: false, keyGeneratorIpFallback: false } as Partial<Options['validate']>,
     })
   : passThrough;
