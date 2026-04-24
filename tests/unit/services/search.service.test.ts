@@ -33,9 +33,7 @@ describe('searchFlowsheet', () => {
   });
 
   it('returns empty results when no matches', async () => {
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ total: 0 }]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([]).mockResolvedValueOnce([{ total: 0 }]);
 
     const result = await searchFlowsheet({ q: 'nonexistent', page: 0, limit: 50, sort: 'date', order: 'desc' });
 
@@ -44,9 +42,7 @@ describe('searchFlowsheet', () => {
   });
 
   it('calculates correct offset from page and limit', async () => {
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce([makeRow()])
-      .mockResolvedValueOnce([{ total: 100 }]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow()]).mockResolvedValueOnce([{ total: 100 }]);
 
     const result = await searchFlowsheet({ q: 'autechre', page: 2, limit: 10, sort: 'date', order: 'desc' });
 
@@ -57,9 +53,7 @@ describe('searchFlowsheet', () => {
   });
 
   it('handles field-prefixed queries', async () => {
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce([makeRow()])
-      .mockResolvedValueOnce([{ total: 1 }]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow()]).mockResolvedValueOnce([{ total: 1 }]);
 
     const result = await searchFlowsheet({
       q: 'artist:autechre',
@@ -85,9 +79,7 @@ describe('searchFlowsheet', () => {
   });
 
   it('coerces null dj_name to empty string', async () => {
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce([makeRow({ dj_name: null })])
-      .mockResolvedValueOnce([{ total: 1 }]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow({ dj_name: null })]).mockResolvedValueOnce([{ total: 1 }]);
 
     const result = await searchFlowsheet({ q: 'autechre', page: 0, limit: 50, sort: 'date', order: 'desc' });
 

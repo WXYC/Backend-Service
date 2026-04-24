@@ -5,9 +5,7 @@ describe('parseSearchQuery', () => {
     it('parses a bare term as all-field search', () => {
       const result = parseSearchQuery('autechre');
 
-      expect(result).toEqual([
-        { operator: 'AND', field: 'all', value: 'autechre', exact: false, negated: false },
-      ]);
+      expect(result).toEqual([{ operator: 'AND', field: 'all', value: 'autechre', exact: false, negated: false }]);
     });
 
     it('parses multiple bare terms as separate AND conditions', () => {
@@ -93,9 +91,7 @@ describe('parseSearchQuery', () => {
     it('parses bare quoted value as all-field exact match', () => {
       const result = parseSearchQuery('"Juana Molina"');
 
-      expect(result).toEqual([
-        { operator: 'AND', field: 'all', value: 'Juana Molina', exact: true, negated: false },
-      ]);
+      expect(result).toEqual([{ operator: 'AND', field: 'all', value: 'Juana Molina', exact: true, negated: false }]);
     });
 
     it('handles unmatched quote by treating rest of string as value', () => {

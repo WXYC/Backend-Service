@@ -80,10 +80,7 @@ export async function searchFlowsheet(params: SearchParams): Promise<{ results: 
     ${fullWhere}
   `;
 
-  const [rows, countRows] = await Promise.all([
-    db.execute(dataQuery),
-    db.execute(countQuery),
-  ]);
+  const [rows, countRows] = await Promise.all([db.execute(dataQuery), db.execute(countQuery)]);
 
   const results = (rows as unknown as SearchResultRow[]).map(transformRow);
   const total = (countRows as unknown as Array<{ total: number }>)[0]?.total ?? 0;
