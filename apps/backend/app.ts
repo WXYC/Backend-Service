@@ -23,7 +23,8 @@ import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { requirePermissions } from '@wxyc/authentication';
-import { closeDatabaseConnection } from '@wxyc/database';
+import { closeDatabaseConnection, db } from '@wxyc/database';
+import { sql } from 'drizzle-orm';
 
 const port = process.env.PORT || 8080;
 const app = express();
@@ -91,7 +92,12 @@ app.get('/testAuth', requirePermissions({ flowsheet: ['read'] }), async (req, re
 
 //endpoint for healthchecks
 app.get('/healthcheck', async (req, res) => {
-  res.json({ message: 'Healthy!' });
+  try {
+    await db.execute(sql`SELECT 1`);
+    res.json({ message: 'Healthy!' });
+  } catch {
+    res.status(503).json({ message: 'Database unreachable' });
+  }
 });
 
 // Internal endpoints (ETL sync notifications, key-authenticated)
