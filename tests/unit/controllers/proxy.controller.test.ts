@@ -100,14 +100,13 @@ describe('proxy.controller', () => {
   // --- searchArtwork ---
 
   describe('searchArtwork', () => {
-    it('returns 400 when artistName is missing', async () => {
+    it('throws WxycError 400 when artistName is missing', async () => {
       const req = { query: {} } as unknown as Request;
       const res = createMockRes();
 
-      await searchArtwork(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({ message: 'artistName query parameter is required' });
+      await expect(searchArtwork(req, res as Response, mockNext)).rejects.toThrow(
+        'artistName query parameter is required'
+      );
     });
 
     it('returns SFW image bytes with content type and cache header', async () => {
@@ -187,29 +186,27 @@ describe('proxy.controller', () => {
       expect(res.status).toHaveBeenCalledWith(404);
     });
 
-    it('calls next on error', async () => {
+    it('rejects with error on service failure', async () => {
       const error = new Error('Service failure');
       mockFind.mockRejectedValue(error);
 
       const req = { query: { artistName: 'Test' } } as unknown as Request;
       const res = createMockRes();
 
-      await searchArtwork(req, res as Response, mockNext);
-
-      expect(mockNext).toHaveBeenCalledWith(error);
+      await expect(searchArtwork(req, res as Response, mockNext)).rejects.toThrow(error);
     });
   });
 
   // --- getAlbumMetadata ---
 
   describe('getAlbumMetadata', () => {
-    it('returns 400 when artistName is missing', async () => {
+    it('throws WxycError 400 when artistName is missing', async () => {
       const req = { query: {} } as unknown as Request;
       const res = createMockRes();
 
-      await getAlbumMetadata(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(400);
+      await expect(getAlbumMetadata(req, res as Response, mockNext)).rejects.toThrow(
+        'artistName query parameter is required'
+      );
     });
 
     it('returns merged metadata from LML search + release details', async () => {
@@ -379,24 +376,20 @@ describe('proxy.controller', () => {
   // --- getArtistMetadata ---
 
   describe('getArtistMetadata', () => {
-    it('returns 400 when artistId is missing', async () => {
+    it('throws WxycError 400 when artistId is missing', async () => {
       const req = { query: {} } as unknown as Request;
       const res = createMockRes();
 
-      await getArtistMetadata(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({ message: 'artistId query parameter is required' });
+      await expect(getArtistMetadata(req, res as Response, mockNext)).rejects.toThrow(
+        'artistId query parameter is required'
+      );
     });
 
-    it('returns 400 when artistId is not a number', async () => {
+    it('throws WxycError 400 when artistId is not a number', async () => {
       const req = { query: { artistId: 'abc' } } as unknown as Request;
       const res = createMockRes();
 
-      await getArtistMetadata(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({ message: 'artistId must be an integer' });
+      await expect(getArtistMetadata(req, res as Response, mockNext)).rejects.toThrow('artistId must be an integer');
     });
 
     it('returns artist metadata with raw bio, bioTokens, imageUrl, and cache header', async () => {
@@ -499,63 +492,51 @@ describe('proxy.controller', () => {
       expect(result.imageUrl).toBeNull();
     });
 
-    it('returns 404 when LML returns 404', async () => {
+    it('rejects with LmlClientError when LML returns 404', async () => {
       const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
       mockGetArtistDetails.mockRejectedValue(new LmlClientError('Not found', 404));
 
       const req = { query: { artistId: '99999' } } as unknown as Request;
       const res = createMockRes();
 
-      await getArtistMetadata(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(404);
+      await expect(getArtistMetadata(req, res as Response, mockNext)).rejects.toThrow('Not found');
     });
 
-    it('returns 502 when LML is unreachable', async () => {
+    it('rejects with LmlClientError when LML is unreachable', async () => {
       const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
       mockGetArtistDetails.mockRejectedValue(new LmlClientError('Connection refused', 502));
 
       const req = { query: { artistId: '3840' } } as unknown as Request;
       const res = createMockRes();
 
-      await getArtistMetadata(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(502);
+      await expect(getArtistMetadata(req, res as Response, mockNext)).rejects.toThrow('Connection refused');
     });
   });
 
   // --- resolveEntity ---
 
   describe('resolveEntity', () => {
-    it('returns 400 when type or id is missing', async () => {
+    it('throws WxycError 400 when type or id is missing', async () => {
       const req = { query: { type: 'artist' } } as unknown as Request;
       const res = createMockRes();
 
-      await resolveEntity(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(400);
-    });
-
-    it('returns 400 for invalid type', async () => {
-      const req = { query: { type: 'label', id: '1' } } as unknown as Request;
-      const res = createMockRes();
-
-      await resolveEntity(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ message: expect.stringContaining('artist, release, master') })
+      await expect(resolveEntity(req, res as Response, mockNext)).rejects.toThrow(
+        'type and id query parameters are required'
       );
     });
 
-    it('returns 400 when id is not a number', async () => {
+    it('throws WxycError 400 for invalid type', async () => {
+      const req = { query: { type: 'label', id: '1' } } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(resolveEntity(req, res as Response, mockNext)).rejects.toThrow('type must be one of');
+    });
+
+    it('throws WxycError 400 when id is not a number', async () => {
       const req = { query: { type: 'artist', id: 'abc' } } as unknown as Request;
       const res = createMockRes();
 
-      await resolveEntity(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({ message: 'id must be an integer' });
+      await expect(resolveEntity(req, res as Response, mockNext)).rejects.toThrow('id must be an integer');
     });
 
     it('resolves an artist by ID via LML', async () => {
@@ -596,28 +577,24 @@ describe('proxy.controller', () => {
       expect(res.json).toHaveBeenCalledWith({ name: 'Confield', type: 'master', id: 44444 });
     });
 
-    it('returns 404 when LML returns not found', async () => {
+    it('rejects with LmlClientError when LML returns not found', async () => {
       const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
       mockResolveEntity.mockRejectedValue(new LmlClientError('Not found', 404));
 
       const req = { query: { type: 'artist', id: '99999' } } as unknown as Request;
       const res = createMockRes();
 
-      await resolveEntity(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(404);
+      await expect(resolveEntity(req, res as Response, mockNext)).rejects.toThrow('Not found');
     });
 
-    it('returns 504 when LML times out', async () => {
+    it('rejects with LmlClientError when LML times out', async () => {
       const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
       mockResolveEntity.mockRejectedValue(new LmlClientError('LML request timed out', 504));
 
       const req = { query: { type: 'artist', id: '3840' } } as unknown as Request;
       const res = createMockRes();
 
-      await resolveEntity(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(504);
+      await expect(resolveEntity(req, res as Response, mockNext)).rejects.toThrow('LML request timed out');
     });
   });
 
@@ -636,13 +613,11 @@ describe('proxy.controller', () => {
       process.env = originalEnv;
     });
 
-    it('returns 400 when track ID is missing', async () => {
+    it('throws WxycError 400 when track ID is missing', async () => {
       const req = { params: {} } as unknown as Request;
       const res = createMockRes();
 
-      await getSpotifyTrack(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(400);
+      await expect(getSpotifyTrack(req, res as Response, mockNext)).rejects.toThrow('Track ID is required');
     });
 
     it('returns 503 when Spotify credentials are not configured', async () => {
@@ -728,14 +703,13 @@ describe('proxy.controller', () => {
   });
 
   describe('librarySearch', () => {
-    it('returns 400 when no search params provided', async () => {
+    it('throws WxycError 400 when no search params provided', async () => {
       const req = { query: {} } as unknown as Request;
       const res = createMockRes();
 
-      await librarySearch(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('artist') }));
+      await expect(librarySearch(req, res as Response, mockNext)).rejects.toThrow(
+        'At least one of artist, title, or q is required'
+      );
     });
 
     it('forwards artist and title to LML searchLibrary', async () => {
@@ -772,26 +746,21 @@ describe('proxy.controller', () => {
       expect(res.status).toHaveBeenCalledWith(200);
     });
 
-    it('maps LmlClientError to the correct status code', async () => {
+    it('rejects with LmlClientError (handled by errorHandler)', async () => {
       mockSearchLibrary.mockRejectedValue(new MockLmlClientError('LML not configured', 503));
       const req = { query: { artist: 'Stereolab' } } as unknown as Request;
       const res = createMockRes();
 
-      await librarySearch(req, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(503);
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ message: 'LML not configured' }));
+      await expect(librarySearch(req, res as Response, mockNext)).rejects.toThrow('LML not configured');
     });
 
-    it('passes unexpected errors to next()', async () => {
+    it('rejects with unexpected errors (handled by errorHandler)', async () => {
       const error = new Error('unexpected');
       mockSearchLibrary.mockRejectedValue(error);
       const req = { query: { artist: 'Stereolab' } } as unknown as Request;
       const res = createMockRes();
 
-      await librarySearch(req, res as Response, mockNext);
-
-      expect(mockNext).toHaveBeenCalledWith(error);
+      await expect(librarySearch(req, res as Response, mockNext)).rejects.toThrow(error);
     });
   });
 });

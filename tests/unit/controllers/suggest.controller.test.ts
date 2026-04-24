@@ -8,6 +8,7 @@ import {
   suggestTracksEndpoint,
   getTrackDetailsEndpoint,
 } from '../../../apps/backend/controllers/suggest.controller';
+import WxycError from '../../../apps/backend/utils/error';
 
 function mockReqResNext(query: Record<string, string> = {}) {
   const req = { query } as unknown as Request;
@@ -27,13 +28,11 @@ describe('suggest.controller', () => {
   });
 
   describe('suggestArtistsEndpoint', () => {
-    it('returns 400 when q parameter is missing', async () => {
-      const { req, res, next, statusMock, jsonMock } = mockReqResNext({});
+    it('throws WxycError 400 when q parameter is missing', async () => {
+      const { req, res, next } = mockReqResNext({});
 
-      await suggestArtistsEndpoint(req, res, next);
-
-      expect(statusMock).toHaveBeenCalledWith(400);
-      expect(jsonMock).toHaveBeenCalledWith({ message: 'Missing required query parameter: q' });
+      await expect(suggestArtistsEndpoint(req, res, next)).rejects.toThrow(WxycError);
+      await expect(suggestArtistsEndpoint(req, res, next)).rejects.toThrow('Missing required query parameter: q');
     });
 
     it('returns 200 with artist names', async () => {
@@ -59,35 +58,27 @@ describe('suggest.controller', () => {
       expect(suggestService.suggestArtists).toHaveBeenCalledWith('Aut', 1);
     });
 
-    it('calls next on service error', async () => {
+    it('rejects with the service error', async () => {
       const error = new Error('DB error');
       (suggestService.suggestArtists as jest.Mock).mockRejectedValue(error);
 
       const { req, res, next } = mockReqResNext({ q: 'Aut' });
 
-      await suggestArtistsEndpoint(req, res, next);
-
-      expect(next).toHaveBeenCalledWith(error);
+      await expect(suggestArtistsEndpoint(req, res, next)).rejects.toThrow(error);
     });
   });
 
   describe('suggestTracksEndpoint', () => {
-    it('returns 400 when q parameter is missing', async () => {
-      const { req, res, next, statusMock, jsonMock } = mockReqResNext({ artist: 'Autechre' });
+    it('throws WxycError 400 when q parameter is missing', async () => {
+      const { req, res, next } = mockReqResNext({ artist: 'Autechre' });
 
-      await suggestTracksEndpoint(req, res, next);
-
-      expect(statusMock).toHaveBeenCalledWith(400);
-      expect(jsonMock).toHaveBeenCalledWith({ message: 'Missing required query parameter: q' });
+      await expect(suggestTracksEndpoint(req, res, next)).rejects.toThrow('Missing required query parameter: q');
     });
 
-    it('returns 400 when artist parameter is missing', async () => {
-      const { req, res, next, statusMock, jsonMock } = mockReqResNext({ q: 'VI' });
+    it('throws WxycError 400 when artist parameter is missing', async () => {
+      const { req, res, next } = mockReqResNext({ q: 'VI' });
 
-      await suggestTracksEndpoint(req, res, next);
-
-      expect(statusMock).toHaveBeenCalledWith(400);
-      expect(jsonMock).toHaveBeenCalledWith({ message: 'Missing required query parameter: artist' });
+      await expect(suggestTracksEndpoint(req, res, next)).rejects.toThrow('Missing required query parameter: artist');
     });
 
     it('returns 200 with track results', async () => {
@@ -105,22 +96,20 @@ describe('suggest.controller', () => {
   });
 
   describe('getTrackDetailsEndpoint', () => {
-    it('returns 400 when artist parameter is missing', async () => {
-      const { req, res, next, statusMock, jsonMock } = mockReqResNext({ track: 'VI Scose Poise' });
+    it('throws WxycError 400 when artist parameter is missing', async () => {
+      const { req, res, next } = mockReqResNext({ track: 'VI Scose Poise' });
 
-      await getTrackDetailsEndpoint(req, res, next);
-
-      expect(statusMock).toHaveBeenCalledWith(400);
-      expect(jsonMock).toHaveBeenCalledWith({ message: 'Missing required query parameter: artist' });
+      await expect(getTrackDetailsEndpoint(req, res, next)).rejects.toThrow(
+        'Missing required query parameter: artist'
+      );
     });
 
-    it('returns 400 when track parameter is missing', async () => {
-      const { req, res, next, statusMock, jsonMock } = mockReqResNext({ artist: 'Autechre' });
+    it('throws WxycError 400 when track parameter is missing', async () => {
+      const { req, res, next } = mockReqResNext({ artist: 'Autechre' });
 
-      await getTrackDetailsEndpoint(req, res, next);
-
-      expect(statusMock).toHaveBeenCalledWith(400);
-      expect(jsonMock).toHaveBeenCalledWith({ message: 'Missing required query parameter: track' });
+      await expect(getTrackDetailsEndpoint(req, res, next)).rejects.toThrow(
+        'Missing required query parameter: track'
+      );
     });
 
     it('returns 200 with track details', async () => {

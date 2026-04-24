@@ -1,5 +1,10 @@
 import WxycError from '../utils/error.js';
+import { LmlClientError } from '../services/lml/lml.client.js';
 import { Request, Response, NextFunction } from 'express';
+
+function hasStatusCode(error: Error): error is WxycError | LmlClientError {
+  return error instanceof WxycError || error instanceof LmlClientError;
+}
 
 function errorHandler(err: any, req: Request, res: Response, next: NextFunction) {
   // prettier-ignore
@@ -7,8 +12,8 @@ function errorHandler(err: any, req: Request, res: Response, next: NextFunction)
     ? err
     : new Error(String(err));
 
-  if (error instanceof WxycError) {
-    console.error(`[${req.method} ${req.url}] WxycError ${error.statusCode}: ${error.message}`);
+  if (hasStatusCode(error)) {
+    console.error(`[${req.method} ${req.url}] ${error.name} ${error.statusCode}: ${error.message}`);
     res.status(error.statusCode).json({ message: error.message });
   } else {
     console.error(`[${req.method} ${req.url}] Unhandled error:`, error);
