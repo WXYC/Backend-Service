@@ -41,6 +41,8 @@ const FIELD_PREFIXES: Record<string, SearchField> = {
 
 const OPERATORS = ['AND', 'OR', 'NOT'] as const;
 
+const DATE_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
 /** Parse a search query string into structured conditions. */
 export function parseSearchQuery(q: string): SearchCondition[] {
   const trimmed = q.trim();
@@ -162,6 +164,25 @@ function buildConditions(tokens: Token[]): SearchCondition[] {
         currentField = null;
         i++;
         continue;
+      }
+
+      // Validate date values before accepting them
+      if (currentField === 'add_time' && !DATE_PATTERN.test(value)) {
+        currentField = null;
+        currentOperator = 'AND';
+        negated = false;
+        i++;
+        continue;
+      }
+      if (currentField === 'add_time_range') {
+        const [start, end] = value.split('..');
+        if (!start || !end || !DATE_PATTERN.test(start) || !DATE_PATTERN.test(end)) {
+          currentField = null;
+          currentOperator = 'AND';
+          negated = false;
+          i++;
+          continue;
+        }
       }
 
       conditions.push({

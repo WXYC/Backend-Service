@@ -141,6 +141,40 @@ describe('parseSearchQuery', () => {
     });
   });
 
+  describe('date validation', () => {
+    it.each(['2024-06-15', '2004-11-01', '2026-12-31'])('accepts valid date %s', (date) => {
+      const result = parseSearchQuery(`date:${date}`);
+
+      expect(result).toEqual([{ operator: 'AND', field: 'add_time', value: date, exact: false, negated: false }]);
+    });
+
+    it.each(['garbage', 'not-a-date', '2024/06/15', '15-06-2024', '2024-13-01', '2024-06-32'])(
+      'rejects invalid date %s',
+      (date) => {
+        const result = parseSearchQuery(`date:${date}`);
+
+        expect(result).toEqual([]);
+      }
+    );
+
+    it('accepts valid dateRange', () => {
+      const result = parseSearchQuery('dateRange:2024-01-01..2024-12-31');
+
+      expect(result).toEqual([
+        { operator: 'AND', field: 'add_time_range', value: '2024-01-01..2024-12-31', exact: false, negated: false },
+      ]);
+    });
+
+    it.each(['garbage..also-garbage', '2024-01-01..not-a-date', 'not-a-date..2024-12-31'])(
+      'rejects dateRange with invalid dates: %s',
+      (range) => {
+        const result = parseSearchQuery(`dateRange:${range}`);
+
+        expect(result).toEqual([]);
+      }
+    );
+  });
+
   describe('edge cases', () => {
     it('returns empty array for empty string', () => {
       expect(parseSearchQuery('')).toEqual([]);
