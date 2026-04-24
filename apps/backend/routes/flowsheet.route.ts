@@ -1,12 +1,16 @@
 import { requirePermissions } from '@wxyc/authentication';
 import { Router } from 'express';
 import * as flowsheetController from '../controllers/flowsheet.controller';
+import * as searchController from '../controllers/search.controller';
 import * as suggestController from '../controllers/suggest.controller';
 import { flowsheetMirror } from '../middleware/legacy/flowsheet.mirror';
 import { conditionalGet } from '../middleware/conditionalGet';
 import { showMemberMiddleware } from '../middleware/checkShowMember';
 
 export const flowsheet_route = Router();
+
+// Public playlist archive search
+flowsheet_route.get('/search', searchController.searchFlowsheetEndpoint);
 
 flowsheet_route.get('/', conditionalGet, flowsheetMirror.getEntries, flowsheetController.getEntries);
 
