@@ -68,10 +68,12 @@ jest.mock('@wxyc/authentication', () => ({
     musicDirector: {},
     stationManager: {},
   },
+  sendAccountSetupEmail: jest.fn().mockResolvedValue(undefined),
 }));
 
 // --- Import after mocks ---
 import { provisionUser, ProvisionError } from '../../../apps/auth/provision-user';
+import { sendAccountSetupEmail } from '@wxyc/authentication';
 
 // --- Helpers ---
 const validInput = {
@@ -262,6 +264,41 @@ describe('provisionUser()', () => {
       await provisionUser({ ...validInput, role: 'member' });
 
       expect(mockDbUpdate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('welcome email', () => {
+    it('should send account setup email after successful provisioning', async () => {
+      await provisionUser(validInput);
+
+      expect(sendAccountSetupEmail).toHaveBeenCalledWith({
+        to: validInput.email,
+        setupUrl: expect.stringContaining('/login'),
+      });
+    });
+
+    it('should not send email if user creation fails', async () => {
+      mockCreateUser.mockRejectedValue(new Error('unique constraint violated'));
+
+      await provisionUser(validInput).catch(() => {});
+
+      expect(sendAccountSetupEmail).not.toHaveBeenCalled();
+    });
+
+    it('should not send email if member creation fails', async () => {
+      mockAdapterCreate.mockRejectedValue(new Error('DB constraint violation'));
+
+      await provisionUser(validInput).catch(() => {});
+
+      expect(sendAccountSetupEmail).not.toHaveBeenCalled();
+    });
+
+    it('should not block provisioning if email send fails', async () => {
+      (sendAccountSetupEmail as jest.Mock).mockRejectedValue(new Error('SES error'));
+
+      const result = await provisionUser(validInput);
+
+      expect(result.user).toEqual(fakeUser);
     });
   });
 
