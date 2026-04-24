@@ -12,7 +12,7 @@ export default defineConfig((options) => ({
   outDir: 'dist',
   clean: true,
   sourcemap: true,
-  external: ['@sentry/node'],
+  external: ['@sentry/node', 'ws'],
   onSuccess: options.watch ? 'node ./dist/app.js' : undefined,
   minify: !options.watch,
 
