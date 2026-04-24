@@ -79,7 +79,7 @@ export async function searchFlowsheet(params: SearchParams): Promise<{ results: 
       ${flowsheet.record_label},
       ${flowsheet.show_id},
       ${DJ_NAME_EXPR} AS dj_name,
-      COUNT(*)::int OVER() AS total
+      (COUNT(*) OVER())::int AS total
     ${fullWhere}
     ORDER BY ${sortExpr} ${orderDirection}
     LIMIT ${limit} OFFSET ${offset}
