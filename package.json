@@ -24,7 +24,7 @@
     "test:e2e": "jest --config jest.e2e.config.json",
     "test:all": "npm run test:unit && npm run test:integration",
     "db:start": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev up -d; docker attach wxyc-db-init",
-    "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down db -v --remove-orphans",
+    "db:stop": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile dev down -v --remove-orphans",
     "ci:build": "npm run docker:build --workspace=apps/**",
     "ci:env": "./scripts/ci-env.sh",
     "ci:env:full": "./scripts/ci-env.sh --full",
