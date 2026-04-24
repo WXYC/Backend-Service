@@ -4,7 +4,7 @@
  * endpoint and by createDefaultUser() at startup.
  */
 
-import { auth, WXYCRoles } from '@wxyc/authentication';
+import { auth, WXYCRoles, sendAccountSetupEmail } from '@wxyc/authentication';
 import { db, user } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
 
@@ -122,6 +122,12 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     if (ADMIN_SYNC_ROLES.includes(role)) {
       await db.update(user).set({ role: 'admin' }).where(eq(user.id, newUser.id));
     }
+
+    // 10. Send welcome email (fire-and-forget so provisioning isn't blocked by SES)
+    const frontendUrl = process.env.FRONTEND_SOURCE || 'http://localhost:3000';
+    sendAccountSetupEmail({ to: email, setupUrl: `${frontendUrl}/login` }).catch((error) => {
+      console.error('[PROVISION USER] Failed to send welcome email:', error);
+    });
 
     return { user: newUser, member: createdMember };
   } catch (error) {
