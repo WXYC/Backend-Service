@@ -2,27 +2,15 @@ import { Request, RequestHandler } from 'express';
 import * as ScheduleService from '../services/schedule.service.js';
 import { NewShift } from '@wxyc/database';
 
-export const getSchedule: RequestHandler<object, unknown, object, object> = async (req, res, next) => {
-  try {
-    const schedule = await ScheduleService.getSchedule();
-    res.status(200).json(schedule);
-  } catch (e) {
-    console.error('Error getting schedule');
-    console.error(e);
-    next(e);
-  }
+export const getSchedule: RequestHandler<object, unknown, object, object> = async (req, res) => {
+  const schedule = await ScheduleService.getSchedule();
+  res.status(200).json(schedule);
 };
 
-export const addToSchedule: RequestHandler = async (req: Request<object, object, NewShift>, res, next) => {
+export const addToSchedule: RequestHandler = async (req: Request<object, object, NewShift>, res) => {
   const { body } = req;
-  try {
-    const response = await ScheduleService.addToSchedule(body);
-    res.status(201).json(response);
-  } catch (e) {
-    console.error('Error adding to schedule');
-    console.error(e);
-    next(e);
-  }
+  const response = await ScheduleService.addToSchedule(body);
+  res.status(201).json(response);
 };
 
 /* TODO: stubbed out schedule controller logic

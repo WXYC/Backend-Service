@@ -18,9 +18,9 @@ import {
   getArtistDetails,
   resolveEntity as lmlResolveEntity,
   searchLibrary,
-  LmlClientError,
 } from '../services/lml/lml.client.js';
 import { LRUCache } from 'lru-cache';
+import WxycError from '../utils/error.js';
 
 /** Spotify OAuth2 token response. */
 interface SpotifyTokenResponse {
@@ -101,13 +101,10 @@ function artworkCacheKey(artistName: string, releaseTitle?: string): string {
  * Returns 200 with image bytes and Content-Type if SFW artwork is found.
  * Returns 404 if no artwork found or if artwork is NSFW.
  */
-export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSearchQuery> = async (req, res, next) => {
+export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSearchQuery> = async (req, res) => {
   const { artistName, releaseTitle } = req.query;
 
-  if (!artistName) {
-    res.status(400).json({ message: 'artistName query parameter is required' });
-    return;
-  }
+  if (!artistName) throw new WxycError('artistName query parameter is required', 400);
 
   const cacheKey = artworkCacheKey(artistName, releaseTitle);
 
@@ -126,50 +123,45 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
     return;
   }
 
-  try {
-    const finder = getArtworkFinder();
-    const result = await finder.find({
-      artist: artistName,
-      album: releaseTitle || undefined,
-    });
+  const finder = getArtworkFinder();
+  const result = await finder.find({
+    artist: artistName,
+    album: releaseTitle || undefined,
+  });
 
-    if (!result.artworkUrl) {
-      negativeCache.set(cacheKey, true);
-      res.status(404).json({ message: 'No artwork found' });
-      return;
-    }
-
-    // Download the image
-    const imageResponse = await fetch(result.artworkUrl);
-    if (!imageResponse.ok) {
-      console.warn(`[ProxyController] Failed to download artwork from ${result.artworkUrl}: ${imageResponse.status}`);
-      negativeCache.set(cacheKey, true);
-      res.status(404).json({ message: 'Failed to fetch artwork image' });
-      return;
-    }
-
-    const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
-    const contentType = imageResponse.headers.get('content-type') || 'image/jpeg';
-
-    // Run NSFW classification
-    const nsfwResult = await classifyNSFW(imageBuffer);
-    if (nsfwResult === 'nsfw') {
-      console.log(`[ProxyController] NSFW artwork blocked for ${artistName} - ${releaseTitle || '(no album)'}`);
-      negativeCache.set(cacheKey, true);
-      res.status(404).json({ message: 'No artwork available' });
-      return;
-    }
-
-    // Cache and return the SFW image
-    artworkCache.set(cacheKey, { contentType, data: imageBuffer });
-
-    res.set('Content-Type', contentType);
-    res.set('Cache-Control', 'private, max-age=600');
-    res.status(200).send(imageBuffer);
-  } catch (e) {
-    console.error('[ProxyController] searchArtwork error:', e);
-    next(e);
+  if (!result.artworkUrl) {
+    negativeCache.set(cacheKey, true);
+    res.status(404).json({ message: 'No artwork found' });
+    return;
   }
+
+  // Download the image
+  const imageResponse = await fetch(result.artworkUrl);
+  if (!imageResponse.ok) {
+    console.warn(`[ProxyController] Failed to download artwork from ${result.artworkUrl}: ${imageResponse.status}`);
+    negativeCache.set(cacheKey, true);
+    res.status(404).json({ message: 'Failed to fetch artwork image' });
+    return;
+  }
+
+  const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+  const contentType = imageResponse.headers.get('content-type') || 'image/jpeg';
+
+  // Run NSFW classification
+  const nsfwResult = await classifyNSFW(imageBuffer);
+  if (nsfwResult === 'nsfw') {
+    console.log(`[ProxyController] NSFW artwork blocked for ${artistName} - ${releaseTitle || '(no album)'}`);
+    negativeCache.set(cacheKey, true);
+    res.status(404).json({ message: 'No artwork available' });
+    return;
+  }
+
+  // Cache and return the SFW image
+  artworkCache.set(cacheKey, { contentType, data: imageBuffer });
+
+  res.set('Content-Type', contentType);
+  res.set('Cache-Control', 'private, max-age=600');
+  res.status(200).send(imageBuffer);
 };
 
 /**
@@ -179,84 +171,72 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
  * enriched streaming URLs (Spotify, Apple Music, YouTube Music, Bandcamp,
  * SoundCloud), so no direct calls to those APIs are needed.
  */
-export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMetadataQuery> = async (
-  req,
-  res,
-  next
-) => {
+export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMetadataQuery> = async (req, res) => {
   const { artistName, releaseTitle, trackTitle } = req.query;
 
-  if (!artistName) {
-    res.status(400).json({ message: 'artistName query parameter is required' });
-    return;
-  }
+  if (!artistName) throw new WxycError('artistName query parameter is required', 400);
 
+  const metadata: Record<string, unknown> = {};
+  const searchTerm = releaseTitle || trackTitle || '';
+
+  let lmlResults;
   try {
-    const metadata: Record<string, unknown> = {};
-    const searchTerm = releaseTitle || trackTitle || '';
-
-    let lmlResults;
-    try {
-      lmlResults = await searchDiscogs(artistName, searchTerm || undefined);
-    } catch (searchError) {
-      console.warn('[ProxyController] LML search failed:', searchError);
-    }
-
-    if (lmlResults && lmlResults.results.length > 0) {
-      const topResult = lmlResults.results[0];
-      metadata.discogsReleaseId = topResult.release_id;
-      metadata.discogsUrl = topResult.release_url;
-      metadata.artworkUrl = topResult.artwork_url || undefined;
-
-      // Artist bio and Wikipedia from LML search result
-      if (topResult.artist_bio) metadata.artistBio = topResult.artist_bio;
-      if (topResult.wikipedia_url) metadata.artistWikipediaUrl = topResult.wikipedia_url;
-
-      // Streaming URLs from LML enrichment
-      if (topResult.spotify_url) metadata.spotifyUrl = topResult.spotify_url;
-      if (topResult.apple_music_url) metadata.appleMusicUrl = topResult.apple_music_url;
-      if (topResult.youtube_music_url) metadata.youtubeMusicUrl = topResult.youtube_music_url;
-      if (topResult.bandcamp_url) metadata.bandcampUrl = topResult.bandcamp_url;
-      if (topResult.soundcloud_url) metadata.soundcloudUrl = topResult.soundcloud_url;
-
-      // Fetch enriched release details
-      try {
-        const release = await getRelease(topResult.release_id);
-        metadata.releaseYear = release.year ?? undefined;
-        metadata.genres = release.genres.length > 0 ? release.genres : undefined;
-        metadata.styles = release.styles.length > 0 ? release.styles : undefined;
-        metadata.label = release.label ?? undefined;
-        metadata.discogsArtistId = release.artist_id ?? null;
-        metadata.fullReleaseDate = release.released ?? undefined;
-        if (release.tracklist.length > 0) {
-          metadata.tracklist = release.tracklist.map((t) => ({
-            position: t.position,
-            title: t.title,
-            duration: t.duration ?? undefined,
-          }));
-        }
-        // Prefer release artwork over search artwork
-        if (release.artwork_url) {
-          metadata.artworkUrl = release.artwork_url;
-        }
-      } catch (releaseError) {
-        console.warn('[ProxyController] Failed to fetch release details from LML:', releaseError);
-      }
-    }
-
-    // Fallback: construct search URLs for services without LML-provided URLs
-    const query = searchTerm ? `${artistName} ${searchTerm}` : artistName;
-    const encodedQuery = encodeURIComponent(query);
-    if (!metadata.youtubeMusicUrl) metadata.youtubeMusicUrl = `https://music.youtube.com/search?q=${encodedQuery}`;
-    if (!metadata.bandcampUrl) metadata.bandcampUrl = `https://bandcamp.com/search?q=${encodedQuery}`;
-    if (!metadata.soundcloudUrl) metadata.soundcloudUrl = `https://soundcloud.com/search?q=${encodedQuery}`;
-
-    res.set('Cache-Control', 'private, max-age=600');
-    res.status(200).json(metadata);
-  } catch (e) {
-    console.error('[ProxyController] getAlbumMetadata error:', e);
-    next(e);
+    lmlResults = await searchDiscogs(artistName, searchTerm || undefined);
+  } catch (searchError) {
+    console.warn('[ProxyController] LML search failed:', searchError);
   }
+
+  if (lmlResults && lmlResults.results.length > 0) {
+    const topResult = lmlResults.results[0];
+    metadata.discogsReleaseId = topResult.release_id;
+    metadata.discogsUrl = topResult.release_url;
+    metadata.artworkUrl = topResult.artwork_url || undefined;
+
+    // Artist bio and Wikipedia from LML search result
+    if (topResult.artist_bio) metadata.artistBio = topResult.artist_bio;
+    if (topResult.wikipedia_url) metadata.artistWikipediaUrl = topResult.wikipedia_url;
+
+    // Streaming URLs from LML enrichment
+    if (topResult.spotify_url) metadata.spotifyUrl = topResult.spotify_url;
+    if (topResult.apple_music_url) metadata.appleMusicUrl = topResult.apple_music_url;
+    if (topResult.youtube_music_url) metadata.youtubeMusicUrl = topResult.youtube_music_url;
+    if (topResult.bandcamp_url) metadata.bandcampUrl = topResult.bandcamp_url;
+    if (topResult.soundcloud_url) metadata.soundcloudUrl = topResult.soundcloud_url;
+
+    // Fetch enriched release details
+    try {
+      const release = await getRelease(topResult.release_id);
+      metadata.releaseYear = release.year ?? undefined;
+      metadata.genres = release.genres.length > 0 ? release.genres : undefined;
+      metadata.styles = release.styles.length > 0 ? release.styles : undefined;
+      metadata.label = release.label ?? undefined;
+      metadata.discogsArtistId = release.artist_id ?? null;
+      metadata.fullReleaseDate = release.released ?? undefined;
+      if (release.tracklist.length > 0) {
+        metadata.tracklist = release.tracklist.map((t) => ({
+          position: t.position,
+          title: t.title,
+          duration: t.duration ?? undefined,
+        }));
+      }
+      // Prefer release artwork over search artwork
+      if (release.artwork_url) {
+        metadata.artworkUrl = release.artwork_url;
+      }
+    } catch (releaseError) {
+      console.warn('[ProxyController] Failed to fetch release details from LML:', releaseError);
+    }
+  }
+
+  // Fallback: construct search URLs for services without LML-provided URLs
+  const query = searchTerm ? `${artistName} ${searchTerm}` : artistName;
+  const encodedQuery = encodeURIComponent(query);
+  if (!metadata.youtubeMusicUrl) metadata.youtubeMusicUrl = `https://music.youtube.com/search?q=${encodedQuery}`;
+  if (!metadata.bandcampUrl) metadata.bandcampUrl = `https://bandcamp.com/search?q=${encodedQuery}`;
+  if (!metadata.soundcloudUrl) metadata.soundcloudUrl = `https://soundcloud.com/search?q=${encodedQuery}`;
+
+  res.set('Cache-Control', 'private, max-age=600');
+  res.status(200).json(metadata);
 };
 
 /**
@@ -266,45 +246,26 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
  * Bio is available as both raw Discogs markup (`bio`) and pre-parsed structured
  * tokens (`bioTokens`) for direct rendering by clients.
  */
-export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistMetadataQuery> = async (
-  req,
-  res,
-  next
-) => {
+export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistMetadataQuery> = async (req, res) => {
   const { artistId } = req.query;
 
-  if (!artistId) {
-    res.status(400).json({ message: 'artistId query parameter is required' });
-    return;
-  }
+  if (!artistId) throw new WxycError('artistId query parameter is required', 400);
 
   const id = parseInt(artistId, 10);
-  if (isNaN(id)) {
-    res.status(400).json({ message: 'artistId must be an integer' });
-    return;
-  }
+  if (isNaN(id)) throw new WxycError('artistId must be an integer', 400);
 
-  try {
-    const artist = await getArtistDetails(id);
+  const artist = await getArtistDetails(id);
 
-    const wikipediaUrl = artist.urls.find((url) => url.includes('wikipedia.org')) ?? null;
+  const wikipediaUrl = artist.urls.find((url) => url.includes('wikipedia.org')) ?? null;
 
-    res.set('Cache-Control', 'private, max-age=3600');
-    res.status(200).json({
-      discogsArtistId: artist.artist_id,
-      bio: artist.profile ?? null,
-      bioTokens: artist.profile_tokens ?? null,
-      wikipediaUrl,
-      imageUrl: artist.image_url ?? null,
-    });
-  } catch (e) {
-    if (e instanceof LmlClientError) {
-      res.status(e.statusCode).json({ message: e.message });
-      return;
-    }
-    console.error('[ProxyController] getArtistMetadata error:', e);
-    next(e);
-  }
+  res.set('Cache-Control', 'private, max-age=3600');
+  res.status(200).json({
+    discogsArtistId: artist.artist_id,
+    bio: artist.profile ?? null,
+    bioTokens: artist.profile_tokens ?? null,
+    wikipediaUrl,
+    imageUrl: artist.image_url ?? null,
+  });
 };
 
 /**
@@ -313,39 +274,23 @@ export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistM
  * Resolves a Discogs entity (artist, release, master) by type and ID via LML.
  * Returns the entity's name and basic info.
  */
-export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResolveQuery> = async (req, res, next) => {
+export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResolveQuery> = async (req, res) => {
   const { type, id } = req.query;
 
-  if (!type || !id) {
-    res.status(400).json({ message: 'type and id query parameters are required' });
-    return;
-  }
+  if (!type || !id) throw new WxycError('type and id query parameters are required', 400);
 
   const validTypes = ['artist', 'release', 'master'] as const;
   if (!validTypes.includes(type as (typeof validTypes)[number])) {
-    res.status(400).json({ message: `type must be one of: ${validTypes.join(', ')}` });
-    return;
+    throw new WxycError(`type must be one of: ${validTypes.join(', ')}`, 400);
   }
 
   const entityId = parseInt(id, 10);
-  if (isNaN(entityId)) {
-    res.status(400).json({ message: 'id must be an integer' });
-    return;
-  }
+  if (isNaN(entityId)) throw new WxycError('id must be an integer', 400);
 
-  try {
-    const result = await lmlResolveEntity(type as 'artist' | 'release' | 'master', entityId);
+  const result = await lmlResolveEntity(type as 'artist' | 'release' | 'master', entityId);
 
-    res.set('Cache-Control', 'private, max-age=86400');
-    res.status(200).json({ name: result.name, type: result.type, id: result.id });
-  } catch (e) {
-    if (e instanceof LmlClientError) {
-      res.status(e.statusCode).json({ message: e.message });
-      return;
-    }
-    console.error('[ProxyController] resolveEntity error:', e);
-    next(e);
-  }
+  res.set('Cache-Control', 'private, max-age=86400');
+  res.status(200).json({ name: result.name, type: result.type, id: result.id });
 };
 
 /**
@@ -353,75 +298,67 @@ export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResol
  *
  * Fetches Spotify track metadata using backend credentials.
  */
-export const getSpotifyTrack: RequestHandler<SpotifyTrackParams> = async (req, res, next) => {
+export const getSpotifyTrack: RequestHandler<SpotifyTrackParams> = async (req, res) => {
   const { id } = req.params;
 
-  if (!id) {
-    res.status(400).json({ message: 'Track ID is required' });
+  if (!id) throw new WxycError('Track ID is required', 400);
+
+  // Use the SpotifyProvider's internal auth to call the Spotify API
+  const spotifyClientId = process.env.SPOTIFY_CLIENT_ID;
+  const spotifyClientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+
+  if (!spotifyClientId || !spotifyClientSecret) {
+    res.status(503).json({ message: 'Spotify integration not configured' });
     return;
   }
 
-  try {
-    // Use the SpotifyProvider's internal auth to call the Spotify API
-    const spotifyClientId = process.env.SPOTIFY_CLIENT_ID;
-    const spotifyClientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+  // Get or refresh Spotify access token
+  const tokenResponse = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${spotifyClientId}:${spotifyClientSecret}`).toString('base64')}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  });
 
-    if (!spotifyClientId || !spotifyClientSecret) {
-      res.status(503).json({ message: 'Spotify integration not configured' });
-      return;
-    }
-
-    // Get or refresh Spotify access token
-    const tokenResponse = await fetch('https://accounts.spotify.com/api/token', {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${Buffer.from(`${spotifyClientId}:${spotifyClientSecret}`).toString('base64')}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: 'grant_type=client_credentials',
-    });
-
-    if (!tokenResponse.ok) {
-      console.error(`[ProxyController] Spotify auth failed: ${tokenResponse.status}`);
-      res.status(502).json({ message: 'Spotify authentication failed' });
-      return;
-    }
-
-    const tokenData: SpotifyTokenResponse = (await tokenResponse.json()) as SpotifyTokenResponse;
-
-    const trackResponse = await fetch(`https://api.spotify.com/v1/tracks/${encodeURIComponent(id)}`, {
-      headers: {
-        Authorization: `Bearer ${tokenData.access_token}`,
-      },
-    });
-
-    if (!trackResponse.ok) {
-      if (trackResponse.status === 404) {
-        res.status(404).json({ message: 'Track not found' });
-        return;
-      }
-      console.error(`[ProxyController] Spotify track fetch failed: ${trackResponse.status}`);
-      res.status(502).json({ message: 'Failed to fetch track from Spotify' });
-      return;
-    }
-
-    const track: SpotifyTrackApiResponse = (await trackResponse.json()) as SpotifyTrackApiResponse;
-
-    res.set('Cache-Control', 'private, max-age=600');
-    res.status(200).json({
-      title: track.name,
-      artist: track.artists?.[0]?.name || '',
-      album: track.album?.name || '',
-      artworkUrl: track.album?.images?.[0]?.url || null,
-    });
-  } catch (e) {
-    console.error('[ProxyController] getSpotifyTrack error:', e);
-    next(e);
+  if (!tokenResponse.ok) {
+    console.error(`[ProxyController] Spotify auth failed: ${tokenResponse.status}`);
+    res.status(502).json({ message: 'Spotify authentication failed' });
+    return;
   }
+
+  const tokenData: SpotifyTokenResponse = (await tokenResponse.json()) as SpotifyTokenResponse;
+
+  const trackResponse = await fetch(`https://api.spotify.com/v1/tracks/${encodeURIComponent(id)}`, {
+    headers: {
+      Authorization: `Bearer ${tokenData.access_token}`,
+    },
+  });
+
+  if (!trackResponse.ok) {
+    if (trackResponse.status === 404) {
+      res.status(404).json({ message: 'Track not found' });
+      return;
+    }
+    console.error(`[ProxyController] Spotify track fetch failed: ${trackResponse.status}`);
+    res.status(502).json({ message: 'Failed to fetch track from Spotify' });
+    return;
+  }
+
+  const track: SpotifyTrackApiResponse = (await trackResponse.json()) as SpotifyTrackApiResponse;
+
+  res.set('Cache-Control', 'private, max-age=600');
+  res.status(200).json({
+    title: track.name,
+    artist: track.artists?.[0]?.name || '',
+    album: track.album?.name || '',
+    artworkUrl: track.album?.images?.[0]?.url || null,
+  });
 };
 
 /**
- * GET /proxy/library/search — Search the WXYC library catalog via LML.
+ * GET /proxy/library/search -- Search the WXYC library catalog via LML.
  *
  * Proxies to LML's GET /api/v1/library/search, providing auth, rate limiting,
  * and activity tracking. Used by dj-site for flowsheet autocomplete.
@@ -435,30 +372,18 @@ type LibrarySearchQuery = {
   limit?: string;
 };
 
-export const librarySearch: RequestHandler<object, unknown, unknown, LibrarySearchQuery> = async (req, res, next) => {
+export const librarySearch: RequestHandler<object, unknown, unknown, LibrarySearchQuery> = async (req, res) => {
   const { artist, title, q, limit } = req.query;
 
-  if (!artist && !title && !q) {
-    res.status(400).json({ message: 'At least one of artist, title, or q is required' });
-    return;
-  }
+  if (!artist && !title && !q) throw new WxycError('At least one of artist, title, or q is required', 400);
 
-  try {
-    const results = await searchLibrary({
-      artist,
-      title,
-      q,
-      limit: limit ? parseInt(limit, 10) : undefined,
-    });
+  const results = await searchLibrary({
+    artist,
+    title,
+    q,
+    limit: limit ? parseInt(limit, 10) : undefined,
+  });
 
-    res.set('Cache-Control', 'private, max-age=60');
-    res.status(200).json(results);
-  } catch (e) {
-    if (e instanceof LmlClientError) {
-      res.status(e.statusCode).json({ message: e.message });
-      return;
-    }
-    console.error('[ProxyController] librarySearch error:', e);
-    next(e);
-  }
+  res.set('Cache-Control', 'private, max-age=60');
+  res.status(200).json(results);
 };

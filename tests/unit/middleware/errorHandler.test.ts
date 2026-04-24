@@ -1,5 +1,6 @@
 import errorHandler from '../../../apps/backend/middleware/errorHandler';
 import WxycError from '../../../apps/backend/utils/error';
+import { LmlClientError } from '../../../apps/backend/services/lml/lml.client';
 import { Request, Response, NextFunction } from 'express';
 
 function mockResponse() {
@@ -43,6 +44,16 @@ describe('errorHandler middleware', () => {
 
     expect(statusMock).toHaveBeenCalledWith(500);
     expect(jsonMock).toHaveBeenCalledWith({ message: 'Internal server error' });
+  });
+
+  it('returns { message } with correct status for LmlClientError', () => {
+    const { res, statusMock, jsonMock } = mockResponse();
+    const error = new LmlClientError('LML request timed out', 504);
+
+    errorHandler(error, mockReq, res, mockNext);
+
+    expect(statusMock).toHaveBeenCalledWith(504);
+    expect(jsonMock).toHaveBeenCalledWith({ message: 'LML request timed out' });
   });
 
   it('logs non-WxycError errors to console', () => {

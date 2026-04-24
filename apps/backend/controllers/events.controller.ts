@@ -1,5 +1,6 @@
 import { Request, RequestHandler } from 'express';
 import { serverEventsMgr, TestEvents, Topics, type EventData } from '../utils/serverEvents';
+import WxycError from '../utils/error.js';
 
 // Role constants for event authorization
 const ROLE_DJ = 'dj';
@@ -41,27 +42,18 @@ type subReqBody = {
   topics: string[];
 };
 
-export const subscribeToTopic: RequestHandler<object, unknown, subReqBody> = (req, res, next) => {
+export const subscribeToTopic: RequestHandler<object, unknown, subReqBody> = (req, res) => {
   const { client_id, topics } = req.body;
 
   if (!client_id || !topics) {
-    return res.status(400).json({
-      message: 'Bad Request: client_id or topics missing from request body',
-    });
+    throw new WxycError('Bad Request: client_id or topics missing from request body', 400);
   }
 
-  try {
-    const subbedTopics = serverEventsMgr.subscribe(topics, client_id);
-
-    res.status(200).json({ message: 'successfully subscribed', topics: subbedTopics });
-  } catch (e) {
-    console.error('Failed to subscribe to event: ', e);
-
-    return next(e);
-  }
+  const subbedTopics = serverEventsMgr.subscribe(topics, client_id);
+  res.status(200).json({ message: 'successfully subscribed', topics: subbedTopics });
 };
 
-export const testTrigger: RequestHandler = (req, res, next) => {
+export const testTrigger: RequestHandler = (req, res) => {
   const data: EventData = {
     type: TestEvents.test,
     payload: {
@@ -70,13 +62,7 @@ export const testTrigger: RequestHandler = (req, res, next) => {
     timestamp: new Date(),
   };
 
-  try {
-    serverEventsMgr.broadcast(Topics.test, data);
-  } catch (e) {
-    console.error('Failed to broadcast event: ', e);
-
-    return next(e);
-  }
+  serverEventsMgr.broadcast(Topics.test, data);
 
   res.status(200).json({
     message: 'event triggered',

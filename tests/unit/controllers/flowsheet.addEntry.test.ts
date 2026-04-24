@@ -22,13 +22,11 @@ describe('addEntry', () => {
   const res = { status: mockStatus, send: mockSend, json: mockJson } as any;
   const next = jest.fn();
 
-  it('should call next with the error when getLatestShow throws', async () => {
+  it('should reject with the error when getLatestShow throws', async () => {
     const dbError = new Error('DB connection failed');
     (flowsheet_service.getLatestShow as jest.Mock).mockRejectedValue(dbError);
 
-    await addEntry(req, res, next);
-
-    expect(next).toHaveBeenCalledWith(dbError);
+    await expect(addEntry(req, res, next)).rejects.toThrow(dbError);
     expect(mockStatus).not.toHaveBeenCalled();
   });
 });

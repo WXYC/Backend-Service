@@ -2,6 +2,7 @@ import { RequestHandler } from 'express';
 import { processRequest, parseOnly, getConfig, isParsingEnabled } from '../services/requestLine/index.js';
 import { postTextToSlack } from '../services/slack/index.js';
 import { searchLibrary } from '../services/library.service.js';
+import WxycError from '../utils/error.js';
 
 export type RequestLineBody = {
   message: string;
@@ -62,52 +63,12 @@ export const submitRequestLine: RequestHandler<object, unknown, RequestLineBody>
     timestamp: new Date().toISOString(),
   });
 
-  // Validate message is present (handle empty body case)
-  if (!req.body || req.body.message === undefined) {
-    const errorMsg = 'Bad Request: Missing request line message';
-    console.log(`[${logId}] ${errorMsg}`);
-
-    const responseTime = Date.now() - startTime;
-    console.log(`[${logId}] Request completed:`, {
-      statusCode: 400,
-      responseTime: `${responseTime}ms`,
-      error: errorMsg,
-    });
-
-    res.status(400).json({ message: errorMsg });
-    return;
-  }
-
-  // Validate message length (after trim)
+  // Validate message
+  if (!req.body?.message) throw new WxycError('Missing request line message', 400);
   const trimmedMessage = req.body.message.trim();
-  if (trimmedMessage.length < MESSAGE_MIN_LENGTH) {
-    const errorMsg = 'Bad Request: Message cannot be empty';
-    console.log(`[${logId}] ${errorMsg}`);
-
-    const responseTime = Date.now() - startTime;
-    console.log(`[${logId}] Request completed:`, {
-      statusCode: 400,
-      responseTime: `${responseTime}ms`,
-      error: errorMsg,
-    });
-
-    res.status(400).json({ message: errorMsg });
-    return;
-  }
-
+  if (trimmedMessage.length < MESSAGE_MIN_LENGTH) throw new WxycError('Message cannot be empty', 400);
   if (trimmedMessage.length > MESSAGE_MAX_LENGTH) {
-    const errorMsg = `Bad Request: Message exceeds maximum length of ${MESSAGE_MAX_LENGTH} characters`;
-    console.log(`[${logId}] ${errorMsg}`);
-
-    const responseTime = Date.now() - startTime;
-    console.log(`[${logId}] Request completed:`, {
-      statusCode: 400,
-      responseTime: `${responseTime}ms`,
-      error: errorMsg,
-    });
-
-    res.status(400).json({ message: errorMsg });
-    return;
+    throw new WxycError(`Message exceeds maximum length of ${MESSAGE_MAX_LENGTH} characters`, 400);
   }
 
   try {
