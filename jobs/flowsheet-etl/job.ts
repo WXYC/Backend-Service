@@ -300,6 +300,24 @@ export const runIncremental = async (): Promise<SyncResult> => {
     showsImported++;
   }
 
+  // Clamp show end_times to prevent overlaps: if a show's end_time exceeds the
+  // next show's start_time, truncate it. This handles cases where the ETL or
+  // webhook stamped incorrect times during outage recovery.
+  if (showsImported > 0) {
+    await db.execute(sql`
+      UPDATE wxyc_schema.shows s
+      SET end_time = next.start_time
+      FROM (
+        SELECT id, LEAD(start_time) OVER (ORDER BY start_time) AS next_start
+        FROM wxyc_schema.shows
+      ) next
+      WHERE s.id = next.id
+        AND s.end_time IS NOT NULL
+        AND next.next_start IS NOT NULL
+        AND s.end_time > next.next_start
+    `);
+  }
+
   // Build show mapping
   const showRows = await db.select({ id: shows.id, legacyId: shows.legacy_show_id }).from(shows);
   const showIdMap = new Map<number, number>();
@@ -361,6 +379,9 @@ export const runIncremental = async (): Promise<SyncResult> => {
           request_flag: sql`excluded.request_flag`,
           segue: sql`excluded.segue`,
           entry_type: sql`excluded.entry_type`,
+          add_time: sql`excluded.add_time`,
+          show_id: sql`excluded.show_id`,
+          play_order: sql`excluded.play_order`,
         },
       });
 
