@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
 import {
@@ -391,46 +391,35 @@ export async function searchLibrary(
 
   if (query) {
     // Full text search using pg_trgm similarity
-    const searchQuery = sql`
-      SELECT *,
-        similarity(${library_artist_view.artist_name}, ${query}) as artist_sim,
-        similarity(${library_artist_view.album_title}, ${query}) as album_sim
-      FROM ${library_artist_view}
-      WHERE ${library_artist_view.artist_name} % ${query}
-         OR ${library_artist_view.album_title} % ${query}
-      ORDER BY GREATEST(
-        similarity(${library_artist_view.artist_name}, ${query}),
-        similarity(${library_artist_view.album_title}, ${query})
-      ) DESC
-      LIMIT ${limit}
-    `;
-
-    const response = await db.execute(searchQuery);
-    results = response as unknown as LibraryArtistViewEntry[];
+    results = await db
+      .select()
+      .from(library_artist_view)
+      .where(sql`${library_artist_view.artist_name} % ${query} OR ${library_artist_view.album_title} % ${query}`)
+      .orderBy(
+        desc(
+          sql`GREATEST(similarity(${library_artist_view.artist_name}, ${query}), similarity(${library_artist_view.album_title}, ${query}))`
+        )
+      )
+      .limit(limit);
 
     // If no results with trigram, try LIKE fallback with significant words
     if (results.length === 0) {
       const words = extractSignificantWords(query);
       if (words.length > 0) {
-        // Build LIKE conditions for each word
-        const likeConditions = words
-          .map((w) => `(artist_name ILIKE '%${w}%' OR album_title ILIKE '%${w}%')`)
-          .join(' AND ');
+        const conditions = words.map((w) =>
+          or(ilike(library_artist_view.artist_name, `%${w}%`), ilike(library_artist_view.album_title, `%${w}%`))
+        );
 
-        const fallbackQuery = sql.raw(`
-          SELECT * FROM wxyc_schema.library_artist_view
-          WHERE ${likeConditions}
-          LIMIT ${limit}
-        `);
-
-        const fallbackResponse = await db.execute(fallbackQuery);
-        results = fallbackResponse as unknown as LibraryArtistViewEntry[];
+        results = await db
+          .select()
+          .from(library_artist_view)
+          .where(and(...conditions))
+          .limit(limit);
       }
     }
   } else if (artist || title) {
     // Filtered search by artist and/or title
-    const response = await fuzzySearchLibrary(artist, title, limit, on_streaming);
-    results = response as unknown as LibraryArtistViewEntry[];
+    results = await fuzzySearchLibrary(artist, title, limit, on_streaming);
   }
 
   return results.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
@@ -483,35 +472,25 @@ export async function findSimilarArtist(artistName: string, threshold = 0.85): P
  * @returns Array of enriched library results
  */
 export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promise<EnrichedLibraryResult[]> {
-  const query = sql`
-    SELECT *,
-      similarity(${library_artist_view.album_title}, ${albumTitle}) as sim
-    FROM ${library_artist_view}
-    WHERE ${library_artist_view.album_title} % ${albumTitle}
-    ORDER BY sim DESC
-    LIMIT ${limit}
-  `;
-
-  const response = await db.execute(query);
-  const rows = response as unknown as LibraryArtistViewEntry[];
+  let rows = await db
+    .select()
+    .from(library_artist_view)
+    .where(sql`${library_artist_view.album_title} % ${albumTitle}`)
+    .orderBy(desc(sql`similarity(${library_artist_view.album_title}, ${albumTitle})`))
+    .limit(limit);
 
   // If no trigram matches, try keyword search
   if (rows.length === 0) {
     const words = extractSignificantWords(albumTitle);
     if (words.length > 0) {
-      const significantWords = words.slice(0, 4); // Use up to 4 significant words
-      const likeConditions = significantWords.map((w) => `album_title ILIKE '%${w}%'`).join(' AND ');
+      const significantWords = words.slice(0, 4);
+      const conditions = significantWords.map((w) => ilike(library_artist_view.album_title, `%${w}%`));
 
-      const fallbackQuery = sql.raw(`
-        SELECT * FROM wxyc_schema.library_artist_view
-        WHERE ${likeConditions}
-        LIMIT ${limit}
-      `);
-
-      const fallbackResponse = await db.execute(fallbackQuery);
-      return (fallbackResponse as unknown as LibraryArtistViewEntry[]).map((row) =>
-        enrichLibraryResult(viewRowToLibraryResult(row))
-      );
+      rows = await db
+        .select()
+        .from(library_artist_view)
+        .where(and(...conditions))
+        .limit(limit);
     }
   }
 
@@ -526,17 +505,12 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  * @returns Array of enriched library results
  */
 export async function searchByArtist(artistName: string, limit = 5): Promise<EnrichedLibraryResult[]> {
-  const query = sql`
-    SELECT *,
-      similarity(${library_artist_view.artist_name}, ${artistName}) as sim
-    FROM ${library_artist_view}
-    WHERE ${library_artist_view.artist_name} % ${artistName}
-    ORDER BY sim DESC
-    LIMIT ${limit}
-  `;
-
-  const response = await db.execute(query);
-  const rows = response as unknown as LibraryArtistViewEntry[];
+  const rows = await db
+    .select()
+    .from(library_artist_view)
+    .where(sql`${library_artist_view.artist_name} % ${artistName}`)
+    .orderBy(desc(sql`similarity(${library_artist_view.artist_name}, ${artistName})`))
+    .limit(limit);
 
   return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
 }
