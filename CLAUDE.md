@@ -59,6 +59,7 @@ Express wrapper around better-auth with these plugins: admin, username, anonymou
 - Email verification required
 - Sign-up disabled (admin creates accounts)
 - `POST /auth/admin/provision-user` -- Atomic user provisioning: creates user, credential account, and org membership in one call. Requires admin session. Accepts `organizationSlug` (resolved server-side) so the client never needs to map slugs to UUIDs. See `apps/auth/provision-user.ts`.
+- `GET /auth/admin/resolve-organization?slug=<slug>` -- Resolves an organization slug to its UUID. Requires admin session. Returns `{ id, slug, name }`. Used by dj-site admin pages to avoid the fragile `getFullOrganization` SDK call which requires `orgSessionMiddleware`. See `apps/auth/resolve-organization.ts`.
 - Default user creation from env vars when `CREATE_DEFAULT_USER=TRUE` (uses `provisionUser()` internally)
 - Test-only endpoints (non-production): `/auth/test/verification-token`, `/auth/test/expire-session`
 

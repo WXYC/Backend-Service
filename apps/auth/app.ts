@@ -12,6 +12,7 @@ import type { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { closeDatabaseConnection } from '@wxyc/database';
 import { provisionUser, ProvisionError } from './provision-user';
+import { resolveOrganization } from './resolve-organization';
 
 const port = process.env.AUTH_PORT || '8082';
 
@@ -133,6 +134,36 @@ if (process.env.NODE_ENV !== 'production') {
     '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session, /auth/test/confirm-user)'
   );
 }
+
+// Resolve an organization slug to its UUID.
+// Used by dj-site admin pages to avoid the fragile getFullOrganization SDK call.
+app.get('/auth/admin/resolve-organization', async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+    if (!session?.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if ((session.user as { role?: string }).role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: admin role required' });
+    }
+
+    const slug = req.query.slug;
+    if (!slug || typeof slug !== 'string') {
+      return res.status(400).json({ error: 'Missing required query parameter: slug' });
+    }
+
+    const org = await resolveOrganization(slug);
+    if (!org) {
+      return res.status(404).json({ error: `Organization not found for slug: "${slug}"` });
+    }
+
+    return res.json(org);
+  } catch (error) {
+    console.error('[RESOLVE ORG] Unexpected error:', error);
+    Sentry.captureException(error, { tags: { subsystem: 'resolve-organization' } });
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // Provision a new user atomically: create user + credential + org membership.
 // Registered before the better-auth handler so it intercepts the request.
