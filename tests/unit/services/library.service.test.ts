@@ -12,6 +12,9 @@ jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
 import {
   isISODate,
   fuzzySearchLibrary,
+  searchLibrary,
+  searchByArtist,
+  searchAlbumsByTitle,
   getAlbumFromDB,
   markAlbumMissing,
   markAlbumFound,
@@ -65,6 +68,78 @@ describe('library.service', () => {
 
       expect(results).toHaveLength(1);
       expect(results[0]).toHaveProperty('on_streaming', true);
+    });
+  });
+
+  // Shared mock view row for search function tests
+  const mockViewRow = {
+    id: 1,
+    code_letters: 'AU',
+    code_artist_number: 3,
+    code_number: 2,
+    artist_name: 'Autechre',
+    alphabetical_name: 'Autechre',
+    album_title: 'Confield',
+    format_name: 'cd',
+    genre_name: 'Electronic',
+    rotation_bin: null,
+    add_date: new Date('2024-01-15'),
+    label: 'Warp',
+    label_id: null,
+    on_streaming: true,
+    album_artist: null,
+    plays: 5,
+    artwork_url: null,
+  };
+
+  describe('searchLibrary', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it('maps code_artist_number from the view into codeArtistNumber', async () => {
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+
+      const results = await searchLibrary('Autechre');
+
+      expect(results).toHaveLength(1);
+      expect(results[0]).toHaveProperty('codeArtistNumber', 3);
+    });
+  });
+
+  describe('searchByArtist', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it('maps code_artist_number from the view into codeArtistNumber', async () => {
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+
+      const results = await searchByArtist('Autechre');
+
+      expect(results).toHaveLength(1);
+      expect(results[0]).toHaveProperty('codeArtistNumber', 3);
+    });
+  });
+
+  describe('searchAlbumsByTitle', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it('maps code_artist_number from the view into codeArtistNumber', async () => {
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+
+      const results = await searchAlbumsByTitle('Confield');
+
+      expect(results).toHaveLength(1);
+      expect(results[0]).toHaveProperty('codeArtistNumber', 3);
     });
   });
 
