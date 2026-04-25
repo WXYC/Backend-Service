@@ -40,13 +40,7 @@ async function main(): Promise<void> {
       track_title: flowsheet.track_title,
     })
     .from(flowsheet)
-    .where(
-      and(
-        isNull(flowsheet.artwork_url),
-        isNotNull(flowsheet.artist_name),
-        eq(flowsheet.entry_type, 'track')
-      )
-    )
+    .where(and(isNull(flowsheet.artwork_url), isNotNull(flowsheet.artist_name), eq(flowsheet.entry_type, 'track')))
     .orderBy(desc(flowsheet.id))
     .limit(LIMIT);
 
