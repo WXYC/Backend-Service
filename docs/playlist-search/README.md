@@ -89,11 +89,15 @@ Lets the planner satisfy `ORDER BY add_time DESC LIMIT 50` directly from the ind
 
 ### 3. Cursor-based pagination
 
-The frontend already uses infinite scroll, so `OFFSET` is doing extra work for no benefit — its cost grows linearly with page depth because Postgres still has to scan and discard the skipped rows. Replacing it with a cursor (`WHERE add_time < $cursor`) makes every page O(limit) regardless of depth and pairs cleanly with the new `add_time` index.
+The frontend already uses infinite scroll, so `OFFSET` is doing extra work for no benefit — its cost grows linearly with page depth because Postgres still has to scan and discard the skipped rows. Replacing it with a cursor (`WHERE (add_time, id) < (cursor_time, cursor_id)`) makes every page O(limit) regardless of depth and pairs cleanly with the new `add_time` index.
 
-This also removes the need for a precise `total` for paging UI; the response can return `nextCursor` instead of `totalPages`.
+The cursor is **compound** `(add_time, id)` rather than `add_time` alone because the legacy ETL backfilled many rows with batch-import timestamps that share the same `add_time` value to the microsecond — a single-column cursor would silently drop those rows on page boundaries. The compound form orders by `(add_time, id)` and uses row-value comparison `(add_time, id) < (cursor_time, cursor_id)` to break ties on `id`.
 
-**Compatibility plan.** The dj-site `useLazySearchPlaylistsQuery` is the only known consumer and currently reads `totalPages`. To avoid a breaking change, the response should return both `nextCursor` and (when the count is computed) `totalPages` for one release; once dj-site is migrated, `totalPages` and the `page`/`offset` query parameters can be removed in a follow-up. New consumers should be guided to the cursor form from the start.
+**Sort coverage.** Cursor pagination only applies to `sort=date`. Other sorts (`artist`, `song`, `dj`) keep using offset because their sort columns are not unique and there is no compound index supporting a `(sort_col, id)` cursor. This matches usage: the default Previous Sets view and the empty-`q` recent-tracks path both use date sort.
+
+**Compatibility plan.** The dj-site `useLazySearchPlaylistsQuery` is the only known consumer and currently reads `totalPages`. The response returns both `nextCursor` (when cursor mode is active) and `totalPages` (always) so dj-site can migrate when convenient. Once dj-site is migrated, `totalPages` and the `page` query parameter can be removed in a follow-up. New consumers should be guided to the cursor form from the start.
+
+A malformed cursor returns `400`. Encoding format is `${ISO_timestamp}_${id}` — opaque to clients in spirit, debuggable in practice.
 
 ### 4. Generated `tsvector` column with hybrid trigram fallback
 

@@ -2,9 +2,16 @@ import { Request, Response } from 'express';
 
 const searchFlowsheet = jest.fn();
 
-jest.mock('../../../apps/backend/services/search.service', () => ({
-  searchFlowsheet: (...args: unknown[]) => searchFlowsheet(...args),
-}));
+jest.mock('../../../apps/backend/services/search.service', () => {
+  // Use the real parseCursor implementation so the controller's validation
+  // exercises actual codec semantics rather than a hand-mocked allow-list.
+  const actual = jest.requireActual('../../../apps/backend/services/search.service');
+  return {
+    searchFlowsheet: (...args: unknown[]) => searchFlowsheet(...args),
+    parseCursor: actual.parseCursor,
+    encodeCursor: actual.encodeCursor,
+  };
+});
 
 import { searchFlowsheetEndpoint } from '../../../apps/backend/controllers/search.controller';
 
@@ -147,6 +154,65 @@ describe('searchFlowsheetEndpoint', () => {
       await run();
 
       expect(res._body).toEqual({ results: [], total: 0, page: 0, totalPages: 0 });
+    });
+
+    it('includes nextCursor when the service returns one', async () => {
+      searchFlowsheet.mockResolvedValueOnce({
+        results: ['a'],
+        total: 1000,
+        nextCursor: '2024-06-15T14:30:00.000Z_42',
+      });
+      const { res, run } = invoke({ cursor: '2024-06-16T00:00:00.000Z_99' });
+
+      await run();
+
+      expect(res._body).toMatchObject({
+        results: ['a'],
+        total: 1000,
+        nextCursor: '2024-06-15T14:30:00.000Z_42',
+      });
+    });
+
+    it('omits nextCursor when the service does not return one', async () => {
+      searchFlowsheet.mockResolvedValueOnce({ results: ['a'], total: 1 });
+      const { res, run } = invoke({});
+
+      await run();
+
+      expect(res._body).not.toHaveProperty('nextCursor');
+    });
+  });
+
+  describe('cursor parameter', () => {
+    it('forwards a valid cursor to the service', async () => {
+      const { run } = invoke({ cursor: '2024-06-15T14:30:00.000Z_42' });
+
+      await run();
+
+      expect(searchFlowsheet).toHaveBeenCalledWith(expect.objectContaining({ cursor: '2024-06-15T14:30:00.000Z_42' }));
+    });
+
+    it('passes cursor as undefined when not provided', async () => {
+      const { run } = invoke({});
+
+      await run();
+
+      expect(searchFlowsheet).toHaveBeenCalledWith(expect.objectContaining({ cursor: undefined }));
+    });
+
+    it.each([
+      ['no-underscore'],
+      ['_42'],
+      ['2024-06-15T14:30:00.000Z_'],
+      ['2024-06-15T14:30:00.000Z_abc'],
+      ['not-a-date_42'],
+    ])('returns 400 for malformed cursor %j', async (cursor) => {
+      const { res, run } = invoke({ cursor });
+
+      await run();
+
+      expect(res._status).toBe(400);
+      expect(searchFlowsheet).not.toHaveBeenCalled();
     });
   });
 });
