@@ -9,8 +9,8 @@
 -- apps/backend/services/search.service.ts buildDjNameMatch.
 
 CREATE INDEX "auth_user_dj_name_trgm_idx"
-  ON "wxyc_schema"."auth_user" USING gin ("dj_name" gin_trgm_ops);--> statement-breakpoint
+  ON "auth_user" USING gin ("dj_name" gin_trgm_ops);--> statement-breakpoint
 CREATE INDEX "auth_user_name_trgm_idx"
-  ON "wxyc_schema"."auth_user" USING gin ("name" gin_trgm_ops);--> statement-breakpoint
+  ON "auth_user" USING gin ("name" gin_trgm_ops);--> statement-breakpoint
 CREATE INDEX "shows_legacy_dj_name_trgm_idx"
   ON "wxyc_schema"."shows" USING gin ("legacy_dj_name" gin_trgm_ops);
