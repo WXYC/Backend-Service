@@ -127,12 +127,14 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     // The sendResetPassword hook in auth.definition.ts detects hasCompletedOnboarding === false
     // and sends the accountSetup email template instead of a plain password reset.
     const frontendUrl = process.env.FRONTEND_SOURCE || 'http://localhost:3000';
-    auth.api.requestPasswordReset({
-      body: { email, redirectTo: `${frontendUrl}/login` },
-      headers: new Headers({ origin: frontendUrl }),
-    }).catch((error: unknown) => {
-      console.error('[PROVISION USER] Failed to trigger setup email:', error);
-    });
+    auth.api
+      .requestPasswordReset({
+        body: { email, redirectTo: `${frontendUrl}/login` },
+        headers: new Headers({ origin: frontendUrl }),
+      })
+      .catch((error: unknown) => {
+        console.error('[PROVISION USER] Failed to trigger setup email:', error);
+      });
 
     return { user: newUser, member: createdMember };
   } catch (error) {
