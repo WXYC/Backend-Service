@@ -13,7 +13,7 @@ import { RequestHandler } from 'express';
 import { getArtworkFinder } from '../services/artwork/finder.js';
 import { classify as classifyNSFW } from '../services/artwork/nsfw.js';
 import {
-  searchDiscogs,
+  lookupMetadata,
   getRelease,
   getArtistDetails,
   resolveEntity as lmlResolveEntity,
@@ -179,33 +179,33 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   const metadata: Record<string, unknown> = {};
   const searchTerm = releaseTitle || trackTitle || '';
 
-  let lmlResults;
+  let artwork;
   try {
-    lmlResults = await searchDiscogs(artistName, searchTerm || undefined);
+    const lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle);
+    artwork = lookupResponse.results?.[0]?.artwork;
   } catch (searchError) {
-    console.warn('[ProxyController] LML search failed:', searchError);
+    console.warn('[ProxyController] LML lookup failed:', searchError);
   }
 
-  if (lmlResults && lmlResults.results.length > 0) {
-    const topResult = lmlResults.results[0];
-    metadata.discogsReleaseId = topResult.release_id;
-    metadata.discogsUrl = topResult.release_url;
-    metadata.artworkUrl = topResult.artwork_url || undefined;
+  if (artwork) {
+    metadata.discogsReleaseId = artwork.release_id;
+    metadata.discogsUrl = artwork.release_url;
+    metadata.artworkUrl = artwork.artwork_url || undefined;
 
-    // Artist bio and Wikipedia from LML search result
-    if (topResult.artist_bio) metadata.artistBio = topResult.artist_bio;
-    if (topResult.wikipedia_url) metadata.artistWikipediaUrl = topResult.wikipedia_url;
+    // Artist bio and Wikipedia from lookup result
+    if (artwork.artist_bio) metadata.artistBio = artwork.artist_bio;
+    if (artwork.wikipedia_url) metadata.artistWikipediaUrl = artwork.wikipedia_url;
 
     // Streaming URLs from LML enrichment
-    if (topResult.spotify_url) metadata.spotifyUrl = topResult.spotify_url;
-    if (topResult.apple_music_url) metadata.appleMusicUrl = topResult.apple_music_url;
-    if (topResult.youtube_music_url) metadata.youtubeMusicUrl = topResult.youtube_music_url;
-    if (topResult.bandcamp_url) metadata.bandcampUrl = topResult.bandcamp_url;
-    if (topResult.soundcloud_url) metadata.soundcloudUrl = topResult.soundcloud_url;
+    if (artwork.spotify_url) metadata.spotifyUrl = artwork.spotify_url;
+    if (artwork.apple_music_url) metadata.appleMusicUrl = artwork.apple_music_url;
+    if (artwork.youtube_music_url) metadata.youtubeMusicUrl = artwork.youtube_music_url;
+    if (artwork.bandcamp_url) metadata.bandcampUrl = artwork.bandcamp_url;
+    if (artwork.soundcloud_url) metadata.soundcloudUrl = artwork.soundcloud_url;
 
-    // Fetch enriched release details
+    // Fetch enriched release details (tracklist, genres, styles)
     try {
-      const release = await getRelease(topResult.release_id);
+      const release = await getRelease(artwork.release_id);
       metadata.releaseYear = release.year ?? undefined;
       metadata.genres = release.genres.length > 0 ? release.genres : undefined;
       metadata.styles = release.styles.length > 0 ? release.styles : undefined;
@@ -219,7 +219,7 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
           duration: t.duration ?? undefined,
         }));
       }
-      // Prefer release artwork over search artwork
+      // Prefer release artwork over lookup artwork
       if (release.artwork_url) {
         metadata.artworkUrl = release.artwork_url;
       }

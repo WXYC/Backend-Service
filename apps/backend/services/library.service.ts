@@ -18,7 +18,7 @@ import {
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
 import { extractSignificantWords } from './requestLine/matching/index.js';
-import { searchDiscogs, isLmlConfigured } from './lml/lml.client.js';
+import { lookupMetadata, isLmlConfigured } from './lml/lml.client.js';
 
 export const getFormatsFromDB = async () => {
   const formats = await db
@@ -142,11 +142,11 @@ export async function enrichWithArtwork(
       const artist = row.artist_name as string;
       const album = row.album_title as string;
       const id = row.id as number;
-      const lmlResult = await searchDiscogs(artist, album);
-      const top = lmlResult.results[0];
-      if (!top?.artwork_url || top.artwork_url.includes('spacer.gif')) return;
-      row.artwork_url = top.artwork_url;
-      await updateArtworkUrl(id, top.artwork_url);
+      const lookupResult = await lookupMetadata(artist, album);
+      const artworkUrl = lookupResult.results?.[0]?.artwork?.artwork_url;
+      if (!artworkUrl || artworkUrl.includes('spacer.gif')) return;
+      row.artwork_url = artworkUrl;
+      await updateArtworkUrl(id, artworkUrl);
     })
   );
 

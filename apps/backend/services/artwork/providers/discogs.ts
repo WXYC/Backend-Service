@@ -6,8 +6,7 @@
 
 import { ArtworkProvider } from './base.js';
 import { ArtworkRequest, ArtworkSearchResult } from '../../requestLine/types.js';
-import { searchDiscogs, searchTrackReleases, validateTrackOnRelease, isLmlConfigured } from '../../lml/lml.client.js';
-import { calculateConfidence } from '../../requestLine/matching/index.js';
+import { lookupMetadata, searchTrackReleases, validateTrackOnRelease, isLmlConfigured } from '../../lml/lml.client.js';
 
 /**
  * Artwork provider backed by LML's Discogs endpoints.
@@ -29,29 +28,28 @@ export class DiscogsProvider implements ArtworkProvider {
       return [];
     }
 
-    let lmlResults;
+    let lookupResponse;
     try {
-      lmlResults = await searchDiscogs(request.artist || '', request.album || request.song || undefined);
+      lookupResponse = await lookupMetadata(request.artist || '', request.album, request.song);
     } catch (error) {
-      console.warn('[DiscogsProvider] LML search failed:', error);
+      console.warn('[DiscogsProvider] LML lookup failed:', error);
       return [];
     }
 
     const results: ArtworkSearchResult[] = [];
-    for (const item of lmlResults.results) {
-      if (!item.artwork_url || item.artwork_url.includes('spacer.gif')) {
+    for (const item of lookupResponse.results ?? []) {
+      const artwork = item.artwork;
+      if (!artwork?.artwork_url || artwork.artwork_url.includes('spacer.gif')) {
         continue;
       }
 
-      const confidence = calculateConfidence(request.artist, request.album, item.artist || '', item.album || '');
-
       results.push({
-        artworkUrl: item.artwork_url,
-        releaseUrl: item.release_url,
-        album: item.album || '',
-        artist: item.artist || '',
+        artworkUrl: artwork.artwork_url,
+        releaseUrl: artwork.release_url,
+        album: artwork.album || '',
+        artist: artwork.artist || '',
         source: this.name,
-        confidence,
+        confidence: artwork.confidence ?? 0,
       });
     }
 
