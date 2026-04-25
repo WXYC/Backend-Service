@@ -380,6 +380,10 @@ export const flowsheet = wxyc_schema.table(
     soundcloud_url: varchar('soundcloud_url', { length: 512 }),
     artist_bio: text('artist_bio'),
     artist_wikipedia_url: varchar('artist_wikipedia_url', { length: 512 }),
+    // Resolved DJ name denormalized from shows/auth_user at insert time
+    // (step 5b). Backfilled by migration 0053; populated on write by the
+    // ETL job and the live insert controller from step 5b.2 onward.
+    dj_name: text('dj_name'),
     // STORED GENERATED tsvector covering the four text fields with weight
     // bands (artist=A, track=B, album=C, label=D). Managed by migration
     // 0052; declared here so drizzle-kit drift detection treats it as
