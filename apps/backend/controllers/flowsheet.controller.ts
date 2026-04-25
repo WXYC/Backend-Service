@@ -34,12 +34,7 @@ export interface IFSEntryMetadata {
 // search_doc is a STORED GENERATED tsvector used only by the search hot path
 // (apps/backend/services/search.service.ts); the controller layer never reads
 // or constructs it, so it is excluded from the application-facing entry type.
-//
-// dj_name is the denormalized resolved DJ name introduced in step 5b.1. It is
-// backfilled in 0053 but is not yet written on insert (5b.2) nor read by the
-// controller layer; excluding it here keeps the application contract stable
-// until 5b.2 wires the write path.
-export interface IFSEntry extends Omit<FSEntry, 'search_doc' | 'dj_name'> {
+export interface IFSEntry extends Omit<FSEntry, 'search_doc'> {
   label_id: number | null;
   rotation_bin: string | null;
   on_streaming: boolean | null;
@@ -191,6 +186,11 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     throw new WxycError('Bad Request, There are no active shows', 400);
   }
 
+  // Resolved once per request and denormalized onto every new flowsheet row
+  // (step 5b.2). Mirrors the search service's DJ_NAME_EXPR so the search hot
+  // path can read flowsheet.dj_name directly without joining shows -> auth_user.
+  const dj_name = await flowsheet_service.resolveDjNameForShow(latestShow);
+
   if (body.message !== undefined) {
     //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
     const fsEntry: NewFSEntry = {
@@ -200,6 +200,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       entry_type: body.entry_type ?? inferMessageEntryType(body.message),
       message: body.message,
       show_id: latestShow.id,
+      dj_name,
     };
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
     res.status(201).json(completedEntry);
@@ -227,6 +228,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       request_flag: body.request_flag,
       segue: body.segue ?? false,
       show_id: latestShow.id,
+      dj_name,
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
@@ -238,6 +240,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     const fsEntry: NewFSEntry = {
       ...body,
       show_id: latestShow.id,
+      dj_name,
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);

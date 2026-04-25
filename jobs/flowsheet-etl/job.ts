@@ -69,6 +69,27 @@ const resolveAlbumIds = async () => {
   console.log(`[flowsheet-etl] Resolved album_id for flowsheet entries.`);
 };
 
+/**
+ * Backfill flowsheet.dj_name on freshly inserted track rows (step 5b.2).
+ *
+ * Mirrors migration 0053's COALESCE expression so the search service can read
+ * flowsheet.dj_name directly without joining shows -> auth_user. The ETL has
+ * no auth_user mapping for legacy data, so the COALESCE typically resolves
+ * to shows.legacy_dj_name; the priority order is preserved for completeness.
+ */
+const resolveDjNames = async () => {
+  await db.execute(sql`
+    UPDATE "wxyc_schema"."flowsheet" AS f
+    SET "dj_name" = COALESCE(u."dj_name", s."legacy_dj_name", u."name")
+    FROM "wxyc_schema"."shows" AS s
+    LEFT JOIN "auth_user" AS u ON u."id" = s."primary_dj_id"
+    WHERE f."show_id" = s."id"
+      AND f."entry_type" = 'track'
+      AND f."dj_name" IS NULL
+  `);
+  console.log(`[flowsheet-etl] Resolved dj_name for flowsheet track entries.`);
+};
+
 /** Entry types whose legacy ARTIST_NAME text is display content, not a real artist. */
 const isMessageEntryType = (entryType: string): boolean =>
   entryType === 'breakpoint' || entryType === 'talkset' || entryType === 'message';
@@ -258,6 +279,7 @@ const runBulkLoad = async (dumpPath: string, { replace = false } = {}) => {
 
   await resetSequences();
   await resolveAlbumIds();
+  await resolveDjNames();
   await updateLastRun(JOB_NAME, new Date());
   console.log('[flowsheet-etl] Recorded last_run for future incremental syncs.');
 };
@@ -394,6 +416,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
 
   if (entriesImported > 0) {
     await resolveAlbumIds();
+    await resolveDjNames();
   }
 
   await updateLastRun(JOB_NAME, runStartedAt);
