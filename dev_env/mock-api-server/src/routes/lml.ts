@@ -36,6 +36,35 @@ router.use((req: Request, res: Response, next) => {
   next();
 });
 
+/** POST /api/v1/lookup — wraps search fixtures into LookupResponse format. */
+router.post('/api/v1/lookup', (req: Request, res: Response) => {
+  const { artist, album, song } = req.body ?? {};
+  if (!artist) {
+    res.status(400).json({ error: 'artist is required' });
+    return;
+  }
+
+  const key = (artist as string).toLowerCase();
+  const searchData = fixtures.search as Record<string, { results: Array<Record<string, unknown>> }>;
+  const match = searchData[key];
+
+  if (match && match.results.length > 0) {
+    const results = match.results.map((r: Record<string, unknown>, i: number) => ({
+      library_item: {
+        id: i + 1,
+        title: r.album ?? '',
+        artist: r.artist ?? '',
+        call_number: `Mock CD ${i + 1}`,
+        library_url: `https://library.wxyc.org/mock/${i + 1}`,
+      },
+      artwork: r,
+    }));
+    res.json({ results, search_type: 'direct', song_not_found: false, found_on_compilation: false });
+  } else {
+    res.json({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false });
+  }
+});
+
 /** POST /api/v1/discogs/search */
 router.post('/api/v1/discogs/search', (req: Request, res: Response) => {
   const { artist, album } = req.body ?? {};
