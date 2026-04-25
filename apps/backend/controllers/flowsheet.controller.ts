@@ -34,7 +34,12 @@ export interface IFSEntryMetadata {
 // search_doc is a STORED GENERATED tsvector used only by the search hot path
 // (apps/backend/services/search.service.ts); the controller layer never reads
 // or constructs it, so it is excluded from the application-facing entry type.
-export interface IFSEntry extends Omit<FSEntry, 'search_doc'> {
+//
+// dj_name is the denormalized resolved DJ name introduced in step 5b.1. It is
+// backfilled in 0053 but is not yet written on insert (5b.2) nor read by the
+// controller layer; excluding it here keeps the application contract stable
+// until 5b.2 wires the write path.
+export interface IFSEntry extends Omit<FSEntry, 'search_doc' | 'dj_name'> {
   label_id: number | null;
   rotation_bin: string | null;
   on_streaming: boolean | null;
