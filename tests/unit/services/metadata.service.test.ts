@@ -225,4 +225,57 @@ describe('metadata.service', () => {
     // Year from search result, not release
     expect(result?.album?.releaseYear).toBe(2001);
   });
+
+  describe('track title fallback', () => {
+    it('retries with track title when album title search returns empty', async () => {
+      // First call (album title) returns nothing; second call (track title) finds the release
+      mockSearchDiscogs
+        .mockResolvedValueOnce({ results: [], total: 0, cached: false })
+        .mockResolvedValueOnce({ results: [lmlSearchResult], total: 1, cached: false });
+      mockGetRelease.mockResolvedValue(lmlReleaseResponse);
+      mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
+
+      const result = await fetchMetadata({
+        artistName: 'Cocteau Twins',
+        albumTitle: 'cocteau twins singles collections',
+        trackTitle: 'crushed',
+      });
+
+      expect(mockSearchDiscogs).toHaveBeenCalledTimes(2);
+      expect(mockSearchDiscogs).toHaveBeenNthCalledWith(1, 'Cocteau Twins', 'cocteau twins singles collections');
+      expect(mockSearchDiscogs).toHaveBeenNthCalledWith(2, 'Cocteau Twins', 'crushed');
+      expect(result?.album?.discogsReleaseId).toBe(12345);
+      expect(result?.album?.spotifyUrl).toBe('https://open.spotify.com/album/abc');
+    });
+
+    it('returns search URLs when both album and track title searches return empty', async () => {
+      mockSearchDiscogs.mockResolvedValue({ results: [], total: 0, cached: false });
+
+      const result = await fetchMetadata({
+        artistName: 'Cocteau Twins',
+        albumTitle: 'cocteau twins singles collections',
+        trackTitle: 'crushed',
+      });
+
+      expect(mockSearchDiscogs).toHaveBeenCalledTimes(2);
+      expect(result?.album?.discogsReleaseId).toBeUndefined();
+      expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
+    });
+
+    it('does not retry when album title search returns results', async () => {
+      mockSearchDiscogs.mockResolvedValue({ results: [lmlSearchResult], total: 1, cached: false });
+      mockGetRelease.mockResolvedValue(lmlReleaseResponse);
+      mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
+
+      const result = await fetchMetadata({
+        artistName: 'Autechre',
+        albumTitle: 'Confield',
+        trackTitle: 'VI Scose Poise',
+      });
+
+      expect(mockSearchDiscogs).toHaveBeenCalledTimes(1);
+      expect(mockSearchDiscogs).toHaveBeenCalledWith('Autechre', 'Confield');
+      expect(result?.album?.discogsReleaseId).toBe(12345);
+    });
+  });
 });

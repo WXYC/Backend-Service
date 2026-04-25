@@ -91,6 +91,15 @@ async function fetchAlbumMetadata(request: MetadataRequest): Promise<{
     // Fall through to construct search URLs
   }
 
+  // Fallback: if album title search returned nothing and we have a track title, retry with it
+  if ((!lmlResults || lmlResults.results.length === 0) && albumTitle && trackTitle) {
+    try {
+      lmlResults = await searchDiscogs(artistName, trackTitle);
+    } catch (error) {
+      console.warn('[MetadataService] LML track title fallback failed:', error);
+    }
+  }
+
   if (!lmlResults || lmlResults.results.length === 0) {
     // No LML results — construct search URLs as bare minimum
     const urls = searchUrls.getAllSearchUrls(artistName, albumTitle, trackTitle);
