@@ -12,14 +12,14 @@ The search is implemented in `apps/backend/services/search.service.ts`, parsed b
 
 The parser supports a small DSL on top of a single `q` string parameter:
 
-| Form | Example | Behavior |
-|------|---------|----------|
-| Bare term | `autechre` | ILIKE-substring across `artist_name`, `track_title`, `album_title`, `record_label` |
-| Field prefix | `artist:autechre`, `song:poise`, `album:confield`, `label:warp`, `dj:jake` | Restricts to a single column (or DJ name expression) |
-| Date | `date:2024-06-15` | Equality on the calendar day |
-| Date range | `dateRange:2024-01-01..2024-12-31` | Inclusive range on `add_time` |
-| Boolean operators | `artist:juana AND label:sonamos`, `dj:jake OR dj:nora`, `NOT label:warp` | Composes conditions with `AND`, `OR`, `NOT` |
-| Exact match | `artist:"Cat Power"` | Equality instead of substring |
+| Form              | Example                                                                    | Behavior                                                                           |
+| ----------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Bare term         | `autechre`                                                                 | ILIKE-substring across `artist_name`, `track_title`, `album_title`, `record_label` |
+| Field prefix      | `artist:autechre`, `song:poise`, `album:confield`, `label:warp`, `dj:jake` | Restricts to a single column (or DJ name expression)                               |
+| Date              | `date:2024-06-15`                                                          | Equality on the calendar day                                                       |
+| Date range        | `dateRange:2024-01-01..2024-12-31`                                         | Inclusive range on `add_time`                                                      |
+| Boolean operators | `artist:juana AND label:sonamos`, `dj:jake OR dj:nora`, `NOT label:warp`   | Composes conditions with `AND`, `OR`, `NOT`                                        |
+| Exact match       | `artist:"Cat Power"`                                                       | Equality instead of substring                                                      |
 
 The endpoint accepts `page`, `limit` (max 100), `sort` (`date` \| `artist` \| `song` \| `dj`), and `order` (`asc` \| `desc`). Default sort is `date desc`.
 
@@ -27,17 +27,18 @@ The endpoint accepts `page`, `limit` (max 100), `sort` (`date` \| `artist` \| `s
 
 The `wxyc_schema.flowsheet` table holds one row per playlist entry. Search joins to `shows` and `user` only to resolve the displayed DJ name through `COALESCE(user.dj_name, shows.legacy_dj_name, user.name)`.
 
-| Index | Type | Migration | Purpose |
-|-------|------|-----------|---------|
-| `flowsheet_entry_type_idx` | btree on `entry_type` | `0024` | Filters out break / message rows during search (`WHERE entry_type = 'track'`) |
-| `flowsheet_artist_name_trgm_idx` | GIN `gin_trgm_ops` on `artist_name` | `0042` | Substring match on artist (originally added for ghost-text autocomplete) |
-| `flowsheet_track_title_trgm_idx` | GIN `gin_trgm_ops` on `track_title` | `0042` | Substring match on song title |
-| `flowsheet_album_title_trgm_idx` | GIN `gin_trgm_ops` on `album_title` | `0049` | Substring match on album title |
-| `flowsheet_record_label_trgm_idx` | GIN `gin_trgm_ops` on `record_label` | `0049` | Substring match on label |
+| Index                             | Type                                 | Migration | Purpose                                                                       |
+| --------------------------------- | ------------------------------------ | --------- | ----------------------------------------------------------------------------- |
+| `flowsheet_entry_type_idx`        | btree on `entry_type`                | `0024`    | Filters out break / message rows during search (`WHERE entry_type = 'track'`) |
+| `flowsheet_artist_name_trgm_idx`  | GIN `gin_trgm_ops` on `artist_name`  | `0042`    | Substring match on artist (originally added for ghost-text autocomplete)      |
+| `flowsheet_track_title_trgm_idx`  | GIN `gin_trgm_ops` on `track_title`  | `0042`    | Substring match on song title                                                 |
+| `flowsheet_album_title_trgm_idx`  | GIN `gin_trgm_ops` on `album_title`  | `0049`    | Substring match on album title                                                |
+| `flowsheet_record_label_trgm_idx` | GIN `gin_trgm_ops` on `record_label` | `0049`    | Substring match on label                                                      |
 
 Trigram (`pg_trgm`) GIN indexes support `ILIKE '%term%'` queries by indexing every three-character substring. Postgres can `BitmapOr` matches across all four columns when the bare `q` form fans out, which is the path taken when the user types a single unqualified word.
 
 What is **not** indexed:
+
 - `add_time` — the default sort column, used by every query that omits a more specific sort.
 - The DJ-name `COALESCE` expression — `dj:` filters and `sort=dj` both fall back to a sequential scan of the joined rows.
 
@@ -115,6 +116,7 @@ CREATE INDEX flowsheet_search_doc_idx
 Use `'simple'` (no stemming) — music titles are full of proper nouns, foreign words, and stylized spellings that English stemming distorts. Use `websearch_to_tsquery('simple', $1)` to parse user input naturally; it understands quoted phrases and `OR` already.
 
 Keep the trigram indexes. The router logic at the service layer chooses:
+
 - Multi-character word with letters → `tsvector @@ websearch_to_tsquery(...)` (fast, supports relevance ranking via `ts_rank`)
 - Short fragment, internal substring (e.g., `tron` matching `Strontium`), or explicit wildcard → ILIKE on the trigram-indexed columns
 
@@ -152,14 +154,14 @@ Step 5a is worth doing even if 5b is on the roadmap; it costs nothing to keep bo
 
 ## Alternatives Considered
 
-| Option | When it fits | Why we are not taking it |
-|--------|--------------|--------------------------|
-| **Status quo: trigram only** | Substring matching matters more than word-level; small data | Slow for common terms; no relevance; counts always expensive |
-| **`tsvector` only** | Users always search whole words | Loses the substring intent (`tron` does not match `Autechre`); music titles tokenize unpredictably under any stemmer |
-| **Denormalized search table / materialized view** | Joins to `shows`/`user` dominate query cost | Refresh management; the join can be eliminated more cheaply by denormalizing `dj_name` onto `flowsheet` |
-| **SQLite FTS5 ETL** (matches the `library-metadata-lookup` pattern) | Already in the stack; BM25 ranking is desired | Sync lag would block DJs from finding tracks they played within the last few minutes; doubles storage; loses transactional consistency with writes that the legacy flowsheet ETL already complicates |
-| **Meilisearch / Typesense** | Need typo tolerance, faceting, sub-100ms typeahead, public-facing search | Operational burden, RAM-hungry; overkill for an internal DJ tool at our scale |
-| **Elasticsearch / OpenSearch** | Multi-tenant, large-scale, complex relevance tuning | Ops cost dominates value; nothing in the use case justifies it |
+| Option                                                              | When it fits                                                             | Why we are not taking it                                                                                                                                                                             |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status quo: trigram only**                                        | Substring matching matters more than word-level; small data              | Slow for common terms; no relevance; counts always expensive                                                                                                                                         |
+| **`tsvector` only**                                                 | Users always search whole words                                          | Loses the substring intent (`tron` does not match `Autechre`); music titles tokenize unpredictably under any stemmer                                                                                 |
+| **Denormalized search table / materialized view**                   | Joins to `shows`/`user` dominate query cost                              | Refresh management; the join can be eliminated more cheaply by denormalizing `dj_name` onto `flowsheet`                                                                                              |
+| **SQLite FTS5 ETL** (matches the `library-metadata-lookup` pattern) | Already in the stack; BM25 ranking is desired                            | Sync lag would block DJs from finding tracks they played within the last few minutes; doubles storage; loses transactional consistency with writes that the legacy flowsheet ETL already complicates |
+| **Meilisearch / Typesense**                                         | Need typo tolerance, faceting, sub-100ms typeahead, public-facing search | Operational burden, RAM-hungry; overkill for an internal DJ tool at our scale                                                                                                                        |
+| **Elasticsearch / OpenSearch**                                      | Multi-tenant, large-scale, complex relevance tuning                      | Ops cost dominates value; nothing in the use case justifies it                                                                                                                                       |
 
 ## Why Postgres
 
@@ -169,11 +171,11 @@ The library service (`apps/backend/services/library.service.ts`) already uses `p
 
 ## Migration History
 
-| Migration | Purpose |
-|-----------|---------|
-| `0024_flowsheet_entry_type.sql` | Added `entry_type` column and its btree index |
-| `0042_flowsheet-suggest-indexes.sql` | Added GIN trigram indexes on `artist_name` and `track_title` for ghost-text autocomplete |
-| `0049_flowsheet-search-indexes.sql` | Added GIN trigram indexes on `album_title` and `record_label`; combined the data and count queries into a single window-function query (which subsequently regressed performance — see "Current Performance Behavior") |
+| Migration                            | Purpose                                                                                                                                                                                                                |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0024_flowsheet_entry_type.sql`      | Added `entry_type` column and its btree index                                                                                                                                                                          |
+| `0042_flowsheet-suggest-indexes.sql` | Added GIN trigram indexes on `artist_name` and `track_title` for ghost-text autocomplete                                                                                                                               |
+| `0049_flowsheet-search-indexes.sql`  | Added GIN trigram indexes on `album_title` and `record_label`; combined the data and count queries into a single window-function query (which subsequently regressed performance — see "Current Performance Behavior") |
 
 ## Related
 
