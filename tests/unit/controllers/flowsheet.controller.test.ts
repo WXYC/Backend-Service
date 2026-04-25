@@ -32,6 +32,7 @@ jest.mock('../../../apps/backend/services/metadata/index', () => ({
 }));
 
 import { getEntries, getLatest, getShowInfo, addEntry } from '../../../apps/backend/controllers/flowsheet.controller';
+import WxycError from '../../../apps/backend/utils/error';
 
 // Helper to create mock Express req/res/next
 const createMockReq = (query: Record<string, string> = {}): Partial<Request> => ({
@@ -143,14 +144,11 @@ describe('flowsheet.controller', () => {
         ['abc', 'limit must be a positive number'],
         ['0', 'limit must be a positive number'],
         ['-1', 'limit must be a positive number'],
-      ])('rejects limit=%s with 400', async (limit, expectedMessage) => {
+      ])('rejects limit=%s with WxycError', async (limit, expectedMessage) => {
         const req = createMockReq({ limit });
         const res = createMockRes();
 
-        await getEntries(req as Request, res as Response, mockNext);
-
-        expect(res.status).toHaveBeenCalledWith(400);
-        expect(res.json).toHaveBeenCalledWith({ message: expectedMessage });
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(expectedMessage);
         expect(mockGetEntriesByPage).not.toHaveBeenCalled();
       });
 
@@ -158,10 +156,9 @@ describe('flowsheet.controller', () => {
         const req = createMockReq({ limit: '201' });
         const res = createMockRes();
 
-        await getEntries(req as Request, res as Response, mockNext);
-
-        expect(res.status).toHaveBeenCalledWith(400);
-        expect(res.json).toHaveBeenCalledWith({ message: 'Requested too many entries' });
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(
+          'Requested too many entries'
+        );
       });
 
       it('accepts limit=200 (exactly MAX_ITEMS)', async () => {
@@ -180,14 +177,11 @@ describe('flowsheet.controller', () => {
       it.each([
         ['abc', 'page must be a non-negative number'],
         ['-1', 'page must be a non-negative number'],
-      ])('rejects page=%s with 400', async (page, expectedMessage) => {
+      ])('rejects page=%s with WxycError', async (page, expectedMessage) => {
         const req = createMockReq({ page });
         const res = createMockRes();
 
-        await getEntries(req as Request, res as Response, mockNext);
-
-        expect(res.status).toHaveBeenCalledWith(400);
-        expect(res.json).toHaveBeenCalledWith({ message: expectedMessage });
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(expectedMessage);
         expect(mockGetEntriesByPage).not.toHaveBeenCalled();
       });
 
@@ -204,16 +198,14 @@ describe('flowsheet.controller', () => {
       });
     });
 
-    it('calls next with error on service failure', async () => {
+    it('rejects with error on service failure', async () => {
       const error = new Error('DB connection failed');
       mockGetEntriesByPage.mockRejectedValue(error);
 
       const req = createMockReq();
       const res = createMockRes();
 
-      await getEntries(req as Request, res as Response, mockNext);
-
-      expect(mockNext).toHaveBeenCalledWith(error);
+      await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(error);
     });
   });
 
@@ -247,16 +239,14 @@ describe('flowsheet.controller', () => {
       expect(mockTransformToV2).not.toHaveBeenCalled();
     });
 
-    it('calls next with error on service failure', async () => {
+    it('rejects with error on service failure', async () => {
       const error = new Error('DB timeout');
       mockGetEntriesByPage.mockRejectedValue(error);
 
       const req = createMockReq();
       const res = createMockRes();
 
-      await getLatest(req as Request, res as Response, mockNext);
-
-      expect(mockNext).toHaveBeenCalledWith(error);
+      await expect(getLatest(req as Request, res as Response, mockNext)).rejects.toThrow(error);
     });
   });
 
@@ -307,29 +297,26 @@ describe('flowsheet.controller', () => {
       expect(mockGetEntriesByShow).toHaveBeenCalledWith(1);
     });
 
-    it.each([['abc'], [undefined]])('returns 400 for invalid show_id=%s', async (show_id) => {
+    it.each([['abc'], [undefined]])('throws WxycError for invalid show_id=%s', async (show_id) => {
       const query = show_id !== undefined ? { show_id } : {};
       const req = createMockReq(query as Record<string, string>);
       const res = createMockRes();
 
-      await getShowInfo(req as Request, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({ message: 'Missing or invalid show_id parameter' });
+      await expect(getShowInfo(req as Request, res as Response, mockNext)).rejects.toThrow(
+        'Missing or invalid show_id parameter'
+      );
       expect(mockGetShowMetadata).not.toHaveBeenCalled();
       expect(mockGetEntriesByShow).not.toHaveBeenCalled();
     });
 
-    it('calls next with error on service failure', async () => {
+    it('rejects with error on service failure', async () => {
       const error = new Error('Show not found');
       mockGetShowMetadata.mockRejectedValue(error);
 
       const req = createMockReq({ show_id: '1' });
       const res = createMockRes();
 
-      await getShowInfo(req as Request, res as Response, mockNext);
-
-      expect(mockNext).toHaveBeenCalledWith(error);
+      await expect(getShowInfo(req as Request, res as Response, mockNext)).rejects.toThrow(error);
     });
   });
 

@@ -58,9 +58,14 @@ const mockAuthContext = {
   },
 };
 
+const mockRequestPasswordReset = jest.fn().mockResolvedValue({ status: true } as never);
+
 jest.mock('@wxyc/authentication', () => ({
   auth: {
     $context: Promise.resolve(mockAuthContext),
+    api: {
+      requestPasswordReset: (...args: unknown[]) => mockRequestPasswordReset(...args),
+    },
   },
   WXYCRoles: {
     member: {},
@@ -68,12 +73,10 @@ jest.mock('@wxyc/authentication', () => ({
     musicDirector: {},
     stationManager: {},
   },
-  sendAccountSetupEmail: jest.fn().mockResolvedValue(undefined),
 }));
 
 // --- Import after mocks ---
 import { provisionUser, ProvisionError } from '../../../apps/auth/provision-user';
-import { sendAccountSetupEmail } from '@wxyc/authentication';
 
 // --- Helpers ---
 const validInput = {
@@ -268,33 +271,33 @@ describe('provisionUser()', () => {
   });
 
   describe('welcome email', () => {
-    it('should send account setup email after successful provisioning', async () => {
+    it('should trigger password reset flow after successful provisioning', async () => {
       await provisionUser(validInput);
 
-      expect(sendAccountSetupEmail).toHaveBeenCalledWith({
-        to: validInput.email,
-        setupUrl: expect.stringContaining('/login'),
+      expect(mockRequestPasswordReset).toHaveBeenCalledWith({
+        body: { email: validInput.email, redirectTo: expect.stringContaining('/login') },
+        headers: expect.any(Headers),
       });
     });
 
-    it('should not send email if user creation fails', async () => {
+    it('should not trigger password reset if user creation fails', async () => {
       mockCreateUser.mockRejectedValue(new Error('unique constraint violated'));
 
       await provisionUser(validInput).catch(() => {});
 
-      expect(sendAccountSetupEmail).not.toHaveBeenCalled();
+      expect(mockRequestPasswordReset).not.toHaveBeenCalled();
     });
 
-    it('should not send email if member creation fails', async () => {
+    it('should not trigger password reset if member creation fails', async () => {
       mockAdapterCreate.mockRejectedValue(new Error('DB constraint violation'));
 
       await provisionUser(validInput).catch(() => {});
 
-      expect(sendAccountSetupEmail).not.toHaveBeenCalled();
+      expect(mockRequestPasswordReset).not.toHaveBeenCalled();
     });
 
-    it('should not block provisioning if email send fails', async () => {
-      (sendAccountSetupEmail as jest.Mock).mockRejectedValue(new Error('SES error'));
+    it('should not block provisioning if password reset trigger fails', async () => {
+      mockRequestPasswordReset.mockRejectedValue(new Error('SES error'));
 
       const result = await provisionUser(validInput);
 

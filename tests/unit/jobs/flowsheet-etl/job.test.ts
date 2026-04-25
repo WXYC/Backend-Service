@@ -110,6 +110,33 @@ describe('runIncremental', () => {
     expect(result.entriesUpdated).toBe(0);
   });
 
+  it('clamps overlapping show end_times after importing shows', async () => {
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([]);
+
+    await runIncremental();
+
+    // db.execute is called for the overlap clamping query when shows are imported
+    const executeCalls = (db.execute as jest.Mock).mock.calls;
+    expect(executeCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('skips overlap clamping when no shows are imported', async () => {
+    mockFetchLegacyShows.mockResolvedValue([]);
+    mockFetchLegacyEntries.mockResolvedValue([]);
+
+    // Reset chain.then for the show map + existing IDs queries
+    chain.then
+      .mockReset()
+      .mockImplementationOnce((resolve: (v: unknown) => void) => resolve([]))
+      .mockImplementationOnce((resolve: (v: unknown) => void) => resolve([]));
+
+    await runIncremental();
+
+    // db.execute should NOT be called for overlap clamping
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
+  });
+
   it('distinguishes inserts from updates in return counts', async () => {
     mockFetchLegacyShows.mockResolvedValue([makeShow()]);
     mockFetchLegacyEntries.mockResolvedValue([

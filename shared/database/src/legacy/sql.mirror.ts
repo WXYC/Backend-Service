@@ -78,6 +78,7 @@ export class MirrorSQL {
               --protocol=TCP \\
               --connect-timeout=10 \\
               --skip-ssl \\
+              --default-character-set=utf8 \\
               --batch --raw --silent <<'__SQL__'
 ${sql}
 __SQL__
@@ -89,7 +90,7 @@ __SQL__
     const password = process.env.REMOTE_DB_PASSWORD || '';
     const database = process.env.REMOTE_DB_NAME || 'wxycmusic';
 
-    const command = `docker exec -i ${container} mysql -u${user} -p${password} ${database} --batch --raw --silent`;
+    const command = `docker exec -i ${container} mysql -u${user} -p${password} ${database} --default-character-set=utf8 --batch --raw --silent`;
 
     try {
       const stdout = execSync(command, { encoding: 'utf8', input: sql, maxBuffer: 50 * 1024 * 1024 });

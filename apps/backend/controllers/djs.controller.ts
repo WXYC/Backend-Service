@@ -10,7 +10,7 @@ export type binBody = {
   track_title?: string;
 };
 
-export const addToBin: RequestHandler<object, unknown, binBody> = async (req, res, next) => {
+export const addToBin: RequestHandler<object, unknown, binBody> = async (req, res) => {
   if (req.body.album_id === undefined) {
     throw new WxycError('Bad Request, Missing album identifier: album_id', 400);
   }
@@ -20,14 +20,8 @@ export const addToBin: RequestHandler<object, unknown, binBody> = async (req, re
     album_id: req.body.album_id,
     track_title: req.body.track_title === undefined ? null : req.body.track_title,
   };
-  try {
-    const added_bin_item = await DJService.addToBin(bin_entry);
-    res.status(201).json(added_bin_item);
-  } catch (e) {
-    console.error('Server error: Failed to insert into bin');
-    console.error(e);
-    next(e);
-  }
+  const added_bin_item = await DJService.addToBin(bin_entry);
+  res.status(201).json(added_bin_item);
 };
 
 export type binQuery = {
@@ -37,57 +31,34 @@ export type binQuery = {
   track_title?: string;
 };
 
-export const deleteFromBin: RequestHandler<object, unknown, unknown, binQuery> = async (req, res, next) => {
+export const deleteFromBin: RequestHandler<object, unknown, unknown, binQuery> = async (req, res) => {
   if (req.query.album_id === undefined) {
     throw new WxycError('Bad Request, Missing Bin Entry Identifier: album_id', 400);
   }
 
-  try {
-    const removed_bin_item = await DJService.removeFromBin(parseInt(req.query.album_id), req.auth!.id!);
-    res.status(200).json(removed_bin_item);
-  } catch (e) {
-    console.error(e);
-    next(e);
-  }
+  const removed_bin_item = await DJService.removeFromBin(parseInt(req.query.album_id), req.auth!.id!);
+  res.status(200).json(removed_bin_item);
 };
 
-export const getBin: RequestHandler = async (req, res, next) => {
-  try {
-    const dj_bin = await DJService.getBinFromDB(req.auth!.id!);
-    res.status(200).json(dj_bin);
-  } catch (e) {
-    console.error("Error: Failed to retrieve dj's bin");
-    console.error(e);
-    next(e);
-  }
+export const getBin: RequestHandler = async (req, res) => {
+  const dj_bin = await DJService.getBinFromDB(req.auth!.id!);
+  res.status(200).json(dj_bin);
 };
 
-export const getPlaylistsForDJ: RequestHandler<object, unknown, object, { dj_id: string }> = async (req, res, next) => {
+export const getPlaylistsForDJ: RequestHandler<object, unknown, object, { dj_id: string }> = async (req, res) => {
   if (req.query.dj_id === undefined) {
     throw new WxycError('Bad Request, Missing DJ Identifier: dj_id', 400);
   }
 
-  try {
-    const playlists = await DJService.getPlaylistsForDJ(req.query.dj_id);
-    res.status(200).json(playlists);
-  } catch (e) {
-    console.error('Error: Failed to retrieve playlists');
-    console.error(e);
-    next(e);
-  }
+  const playlists = await DJService.getPlaylistsForDJ(req.query.dj_id);
+  res.status(200).json(playlists);
 };
 
-export const getPlaylist: RequestHandler<object, unknown, object, { playlist_id: string }> = async (req, res, next) => {
+export const getPlaylist: RequestHandler<object, unknown, object, { playlist_id: string }> = async (req, res) => {
   if (req.query.playlist_id === undefined) {
     throw new WxycError('Bad Request, Missing Playlist Identifier: playlist_id', 400);
   }
 
-  try {
-    const playlist = await DJService.getPlaylist(parseInt(req.query.playlist_id));
-    res.status(200).json(playlist);
-  } catch (e) {
-    console.error('Error: Failed to retrieve playlist');
-    console.error(e);
-    next(e);
-  }
+  const playlist = await DJService.getPlaylist(parseInt(req.query.playlist_id));
+  res.status(200).json(playlist);
 };
