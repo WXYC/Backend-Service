@@ -10,7 +10,7 @@ import type { Request, Response, NextFunction } from 'express';
 // --- Mocks ---
 
 // LML client mocks (used by searchArtwork, getAlbumMetadata, getArtistMetadata, resolveEntity)
-const mockSearchDiscogs = jest.fn<() => Promise<unknown>>();
+const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockGetRelease = jest.fn<() => Promise<unknown>>();
 const mockGetArtistDetails = jest.fn<() => Promise<unknown>>();
 const mockResolveEntity = jest.fn<() => Promise<unknown>>();
@@ -26,7 +26,7 @@ class MockLmlClientError extends Error {
 }
 
 jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
-  searchDiscogs: mockSearchDiscogs,
+  lookupMetadata: mockLookupMetadata,
   getRelease: mockGetRelease,
   getArtistDetails: mockGetArtistDetails,
   resolveEntity: mockResolveEntity,
@@ -209,28 +209,35 @@ describe('proxy.controller', () => {
       );
     });
 
-    it('returns merged metadata from LML search + release details', async () => {
-      mockSearchDiscogs.mockResolvedValue({
+    it('returns merged metadata from LML lookup + release details', async () => {
+      mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            release_id: 12345,
-            release_url: 'https://www.discogs.com/release/12345',
-            artwork_url: 'https://i.discogs.com/art.jpg',
-            album: 'Confield',
-            artist: 'Autechre',
-            confidence: 0.95,
-            release_year: null,
-            artist_bio: null,
-            wikipedia_url: null,
-            spotify_url: 'https://open.spotify.com/album/abc',
-            apple_music_url: 'https://music.apple.com/album/xyz',
-            youtube_music_url: 'https://music.youtube.com/search?q=Autechre+Confield',
-            bandcamp_url: 'https://bandcamp.com/search?q=Autechre+Confield',
-            soundcloud_url: 'https://soundcloud.com/search?q=Autechre+Confield',
+            library_item: {
+              id: 1,
+              title: 'Confield',
+              artist: 'Autechre',
+              call_number: 'Electronic CD AUT 1/1',
+              library_url: '',
+            },
+            artwork: {
+              release_id: 12345,
+              release_url: 'https://www.discogs.com/release/12345',
+              artwork_url: 'https://i.discogs.com/art.jpg',
+              album: 'Confield',
+              artist: 'Autechre',
+              confidence: 0.95,
+              spotify_url: 'https://open.spotify.com/album/abc',
+              apple_music_url: 'https://music.apple.com/album/xyz',
+              youtube_music_url: 'https://music.youtube.com/search?q=Autechre+Confield',
+              bandcamp_url: 'https://bandcamp.com/search?q=Autechre+Confield',
+              soundcloud_url: 'https://soundcloud.com/search?q=Autechre+Confield',
+            },
           },
         ],
-        total: 1,
-        cached: false,
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
       });
 
       mockGetRelease.mockResolvedValue({
@@ -285,7 +292,7 @@ describe('proxy.controller', () => {
     });
 
     it('returns fallback search URLs when LML search fails', async () => {
-      mockSearchDiscogs.mockRejectedValue(new Error('LML down'));
+      mockLookupMetadata.mockRejectedValue(new Error('LML down'));
 
       const req = { query: { artistName: 'Test Artist', releaseTitle: 'Test Album' } } as unknown as Request;
       const res = createMockRes();
@@ -304,27 +311,34 @@ describe('proxy.controller', () => {
     });
 
     it('returns search-only metadata when release fetch fails', async () => {
-      mockSearchDiscogs.mockResolvedValue({
+      mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            release_id: 99999,
-            release_url: 'https://www.discogs.com/release/99999',
-            artwork_url: 'https://i.discogs.com/art.jpg',
-            album: 'Moon Pix',
-            artist: 'Cat Power',
-            confidence: 0.9,
-            release_year: null,
-            artist_bio: null,
-            wikipedia_url: null,
-            spotify_url: 'https://open.spotify.com/album/moonpix',
-            apple_music_url: null,
-            youtube_music_url: null,
-            bandcamp_url: null,
-            soundcloud_url: null,
+            library_item: {
+              id: 1,
+              title: 'Moon Pix',
+              artist: 'Cat Power',
+              call_number: 'Rock CD CAT 1/1',
+              library_url: '',
+            },
+            artwork: {
+              release_id: 99999,
+              release_url: 'https://www.discogs.com/release/99999',
+              artwork_url: 'https://i.discogs.com/art.jpg',
+              album: 'Moon Pix',
+              artist: 'Cat Power',
+              confidence: 0.9,
+              spotify_url: 'https://open.spotify.com/album/moonpix',
+              apple_music_url: null,
+              youtube_music_url: null,
+              bandcamp_url: null,
+              soundcloud_url: null,
+            },
           },
         ],
-        total: 1,
-        cached: false,
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
       });
 
       mockGetRelease.mockRejectedValue(new Error('Release fetch failed'));
@@ -348,10 +362,11 @@ describe('proxy.controller', () => {
     });
 
     it('returns fallback search URLs when LML search returns empty results', async () => {
-      mockSearchDiscogs.mockResolvedValue({
+      mockLookupMetadata.mockResolvedValue({
         results: [],
-        total: 0,
-        cached: false,
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
       });
 
       const req = { query: { artistName: 'Obscure Artist', releaseTitle: 'Unknown Album' } } as unknown as Request;

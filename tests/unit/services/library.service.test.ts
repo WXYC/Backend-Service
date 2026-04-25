@@ -1,11 +1,11 @@
 import { jest } from '@jest/globals';
 import { db, createMockQueryChain } from '../../mocks/database.mock';
 
-const mockSearchDiscogs = jest.fn<() => Promise<unknown>>();
+const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
 
 jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
-  searchDiscogs: mockSearchDiscogs,
+  lookupMetadata: mockLookupMetadata,
   isLmlConfigured: mockIsLmlConfigured,
 }));
 
@@ -292,7 +292,7 @@ describe('library.service', () => {
       const enriched = await enrichWithArtwork(results);
 
       expect(enriched).toEqual(results);
-      expect(mockSearchDiscogs).not.toHaveBeenCalled();
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
     });
 
     it('returns results unchanged when all have artwork cached', async () => {
@@ -309,7 +309,7 @@ describe('library.service', () => {
       const enriched = await enrichWithArtwork(results);
 
       expect(enriched).toEqual(results);
-      expect(mockSearchDiscogs).not.toHaveBeenCalled();
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
     });
 
     it('fetches artwork from LML for uncached results and caches to DB', async () => {
@@ -317,19 +317,27 @@ describe('library.service', () => {
       db.update.mockReturnValue(chain);
       chain.returning = jest.fn().mockResolvedValue([{ id: 1 }]);
 
-      mockSearchDiscogs.mockResolvedValue({
+      mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            release_id: 12345,
-            release_url: 'https://www.discogs.com/release/12345',
-            artwork_url: 'https://i.discogs.com/confield.jpg',
-            album: 'Confield',
-            artist: 'Autechre',
-            confidence: 0.95,
+            library_item: {
+              id: 1,
+              title: 'Confield',
+              artist: 'Autechre',
+              call_number: 'Electronic CD AUT 1/1',
+              library_url: '',
+            },
+            artwork: {
+              release_id: 12345,
+              release_url: 'https://www.discogs.com/release/12345',
+              artwork_url: 'https://i.discogs.com/confield.jpg',
+              confidence: 0.95,
+            },
           },
         ],
-        total: 1,
-        cached: false,
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
       });
 
       const results = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
@@ -337,24 +345,32 @@ describe('library.service', () => {
       const enriched = await enrichWithArtwork(results);
 
       expect(enriched[0].artwork_url).toBe('https://i.discogs.com/confield.jpg');
-      expect(mockSearchDiscogs).toHaveBeenCalledWith('Autechre', 'Confield');
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield');
       expect(db.update).toHaveBeenCalled();
     });
 
     it('filters spacer.gif artwork URLs', async () => {
-      mockSearchDiscogs.mockResolvedValue({
+      mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            release_id: 99999,
-            release_url: 'https://www.discogs.com/release/99999',
-            artwork_url: 'https://st.discogs.com/images/spacer.gif',
-            album: 'Unknown',
-            artist: 'Unknown',
-            confidence: 0.5,
+            library_item: {
+              id: 1,
+              title: 'Unknown',
+              artist: 'Unknown',
+              call_number: 'Rock CD UNK 1/1',
+              library_url: '',
+            },
+            artwork: {
+              release_id: 99999,
+              release_url: 'https://www.discogs.com/release/99999',
+              artwork_url: 'https://st.discogs.com/images/spacer.gif',
+              confidence: 0.5,
+            },
           },
         ],
-        total: 1,
-        cached: false,
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
       });
 
       const results = [{ id: 1, artist_name: 'Unknown Artist', album_title: 'Unknown Album', artwork_url: null }];
@@ -366,7 +382,7 @@ describe('library.service', () => {
     });
 
     it('handles LML failure gracefully without throwing', async () => {
-      mockSearchDiscogs.mockRejectedValue(new Error('LML timeout'));
+      mockLookupMetadata.mockRejectedValue(new Error('LML timeout'));
 
       const results = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
 
@@ -381,19 +397,27 @@ describe('library.service', () => {
       db.update.mockReturnValue(chain);
       chain.returning = jest.fn().mockResolvedValue([{ id: 2 }]);
 
-      mockSearchDiscogs.mockResolvedValue({
+      mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            release_id: 67890,
-            release_url: 'https://www.discogs.com/release/67890',
-            artwork_url: 'https://i.discogs.com/lp5.jpg',
-            album: 'LP5',
-            artist: 'Autechre',
-            confidence: 0.9,
+            library_item: {
+              id: 2,
+              title: 'LP5',
+              artist: 'Autechre',
+              call_number: 'Electronic CD AUT 2/1',
+              library_url: '',
+            },
+            artwork: {
+              release_id: 67890,
+              release_url: 'https://www.discogs.com/release/67890',
+              artwork_url: 'https://i.discogs.com/lp5.jpg',
+              confidence: 0.9,
+            },
           },
         ],
-        total: 1,
-        cached: false,
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
       });
 
       const results = [
@@ -408,15 +432,16 @@ describe('library.service', () => {
       // Uncached result enriched
       expect(enriched[1].artwork_url).toBe('https://i.discogs.com/lp5.jpg');
       // Only one LML call (for LP5, not Confield)
-      expect(mockSearchDiscogs).toHaveBeenCalledTimes(1);
-      expect(mockSearchDiscogs).toHaveBeenCalledWith('Autechre', 'LP5');
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5');
     });
 
     it('handles LML returning no results', async () => {
-      mockSearchDiscogs.mockResolvedValue({
+      mockLookupMetadata.mockResolvedValue({
         results: [],
-        total: 0,
-        cached: false,
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
       });
 
       const results = [{ id: 1, artist_name: 'Obscure Artist', album_title: 'Rare Album', artwork_url: null }];

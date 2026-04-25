@@ -15,12 +15,14 @@ import type {
   DiscogsTrackReleasesResponse,
   EntityResolveResponse,
   LibrarySearchResponse,
+  LookupResponse,
   StreamingCheckResponse,
 } from '@wxyc/shared/dtos';
 
 export type {
   DiscogsSearchResponse,
   DiscogsEnrichedSearchResult,
+  DiscogsMatchResult,
   DiscogsReleaseMetadata,
   DiscogsTrackItem,
   DiscogsArtistCredit,
@@ -31,6 +33,9 @@ export type {
   EntityResolveResponse,
   LibrarySearchItem,
   LibrarySearchResponse,
+  LookupRequest,
+  LookupResponse,
+  LookupResultItem,
   StreamingCheckResponse,
   StreamingSourceMatch,
   StreamingCheckSources,
@@ -106,6 +111,31 @@ export async function searchDiscogs(artist: string, album?: string): Promise<Dis
   });
 
   return (await response.json()) as DiscogsSearchResponse;
+}
+
+/**
+ * Look up a release in the library catalog via LML's full search pipeline.
+ *
+ * Provides artist correction, title normalization, fallback strategies,
+ * artwork, streaming URLs, and artist metadata in a single call.
+ *
+ * @param artist - Artist name
+ * @param album - Album/release title
+ * @param song - Song/track title
+ * @returns Lookup results with library items and enriched artwork metadata
+ */
+export async function lookupMetadata(artist: string, album?: string, song?: string): Promise<LookupResponse> {
+  const body: Record<string, string> = { artist };
+  if (album) body.album = album;
+  if (song) body.song = song;
+
+  const response = await lmlFetch('/api/v1/lookup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  return (await response.json()) as LookupResponse;
 }
 
 /**

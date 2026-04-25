@@ -1,21 +1,17 @@
 /**
  * Unit tests for the metadata service.
  *
- * Verifies that fetchMetadata routes through LML and returns metadata
- * for the caller to persist.
+ * Verifies that fetchMetadata routes through LML's /lookup endpoint
+ * and returns metadata for the caller to persist.
  */
 import { jest } from '@jest/globals';
 
 // --- Mocks ---
 
-const mockSearchDiscogs = jest.fn<() => Promise<unknown>>();
-const mockGetRelease = jest.fn<() => Promise<unknown>>();
-const mockGetArtistDetails = jest.fn<() => Promise<unknown>>();
+const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 
 jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
-  searchDiscogs: mockSearchDiscogs,
-  getRelease: mockGetRelease,
-  getArtistDetails: mockGetArtistDetails,
+  lookupMetadata: mockLookupMetadata,
   LmlClientError: class LmlClientError extends Error {
     statusCode: number;
     constructor(message: string, statusCode: number) {
@@ -43,50 +39,44 @@ import { fetchMetadata } from '../../../apps/backend/services/metadata/metadata.
 
 // --- Fixtures ---
 
-const lmlSearchResult = {
-  release_id: 12345,
-  release_url: 'https://www.discogs.com/release/12345',
-  artwork_url: 'https://i.discogs.com/art.jpg',
-  album: 'Confield',
-  artist: 'Autechre',
-  confidence: 0.95,
-  release_year: 2001,
-  artist_bio: '[a=Rob Brown] and [a=Sean Booth] are Autechre.',
-  wikipedia_url: 'https://en.wikipedia.org/wiki/Autechre',
-  spotify_url: 'https://open.spotify.com/album/abc',
-  apple_music_url: 'https://music.apple.com/album/xyz',
-  youtube_music_url: 'https://music.youtube.com/search?q=Autechre+Confield',
-  bandcamp_url: null,
-  soundcloud_url: null,
+const lookupResponseWithResults = {
+  results: [
+    {
+      library_item: {
+        id: 1,
+        title: 'Confield',
+        artist: 'Autechre',
+        call_number: 'Electronic CD AUT 123/1',
+        library_url: 'https://library.wxyc.org/1',
+      },
+      artwork: {
+        release_id: 12345,
+        release_url: 'https://www.discogs.com/release/12345',
+        artwork_url: 'https://i.discogs.com/art.jpg',
+        album: 'Confield',
+        artist: 'Autechre',
+        confidence: 0.95,
+        release_year: 2001,
+        artist_bio: '[a=Rob Brown] and [a=Sean Booth] are Autechre.',
+        wikipedia_url: 'https://en.wikipedia.org/wiki/Autechre',
+        spotify_url: 'https://open.spotify.com/album/abc',
+        apple_music_url: 'https://music.apple.com/album/xyz',
+        youtube_music_url: 'https://music.youtube.com/search?q=Autechre+Confield',
+        bandcamp_url: null,
+        soundcloud_url: null,
+      },
+    },
+  ],
+  search_type: 'direct',
+  song_not_found: false,
+  found_on_compilation: false,
 };
 
-const lmlReleaseResponse = {
-  release_id: 12345,
-  title: 'Confield',
-  artist: 'Autechre',
-  year: 2001,
-  label: 'Warp',
-  artist_id: 3840,
-  genres: ['Electronic'],
-  styles: ['IDM'],
-  tracklist: [],
-  artwork_url: 'https://i.discogs.com/art-release.jpg',
-  release_url: 'https://www.discogs.com/release/12345',
-  released: '2001-04-30',
-  cached: false,
-  artists: [{ artist_id: 3840, name: 'Autechre', join: '', role: null }],
-};
-
-const lmlArtistResponse = {
-  artist_id: 3840,
-  name: 'Autechre',
-  profile: '[a=Rob Brown] and [a=Sean Booth] formed Autechre in [l=Warp Records].',
-  image_url: 'https://i.discogs.com/autechre.jpg',
-  name_variations: [],
-  aliases: [],
-  members: [],
-  urls: ['https://en.wikipedia.org/wiki/Autechre', 'https://autechre.ws'],
-  cached: false,
+const emptyLookupResponse = {
+  results: [],
+  search_type: 'none',
+  song_not_found: false,
+  found_on_compilation: false,
 };
 
 // --- Tests ---
@@ -109,79 +99,96 @@ describe('metadata.service', () => {
     const result = await fetchMetadata({ artistName: 'Autechre' });
 
     expect(result).toBeNull();
-    expect(mockSearchDiscogs).not.toHaveBeenCalled();
+    expect(mockLookupMetadata).not.toHaveBeenCalled();
   });
 
-  it('fetches album and artist metadata via LML and returns it', async () => {
-    mockSearchDiscogs.mockResolvedValue({ results: [lmlSearchResult], total: 1, cached: false });
-    mockGetRelease.mockResolvedValue(lmlReleaseResponse);
-    mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
+  it('calls lookupMetadata with artist, album, and track', async () => {
+    mockLookupMetadata.mockResolvedValue(lookupResponseWithResults);
+
+    await fetchMetadata({
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+      trackTitle: 'VI Scose Poise',
+    });
+
+    expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', 'VI Scose Poise');
+  });
+
+  it('makes a single LML call instead of three', async () => {
+    mockLookupMetadata.mockResolvedValue(lookupResponseWithResults);
+
+    await fetchMetadata({
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+    });
+
+    expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+  });
+
+  it('extracts album metadata from lookup response artwork', async () => {
+    mockLookupMetadata.mockResolvedValue(lookupResponseWithResults);
 
     const result = await fetchMetadata({
       artistName: 'Autechre',
       albumTitle: 'Confield',
-      albumId: 42,
-      artistId: 99,
     });
 
-    // Verify LML was called
-    expect(mockSearchDiscogs).toHaveBeenCalledWith('Autechre', 'Confield');
-    expect(mockGetRelease).toHaveBeenCalledWith(12345);
-    expect(mockGetArtistDetails).toHaveBeenCalledWith(3840);
-
-    // Verify album metadata
     expect(result?.album?.discogsReleaseId).toBe(12345);
-    expect(result?.album?.spotifyUrl).toBe('https://open.spotify.com/album/abc');
-    expect(result?.album?.appleMusicUrl).toBe('https://music.apple.com/album/xyz');
-    expect(result?.album?.artworkUrl).toBe('https://i.discogs.com/art-release.jpg'); // release artwork preferred
+    expect(result?.album?.discogsUrl).toBe('https://www.discogs.com/release/12345');
+    expect(result?.album?.artworkUrl).toBe('https://i.discogs.com/art.jpg');
     expect(result?.album?.releaseYear).toBe(2001);
-    // Fallback search URLs filled for missing fields
-    expect(result?.album?.bandcampUrl).toContain('bandcamp.com');
-    expect(result?.album?.soundcloudUrl).toContain('soundcloud.com');
-
-    // Verify artist metadata — bio should be cleaned of Discogs markup
-    expect(result?.artist?.bio).toBe('Rob Brown and Sean Booth formed Autechre in Warp Records.');
-    expect(result?.artist?.wikipediaUrl).toBe('https://en.wikipedia.org/wiki/Autechre');
-  });
-
-  it('extracts streaming URLs from LML search results', async () => {
-    mockSearchDiscogs.mockResolvedValue({ results: [lmlSearchResult], total: 1, cached: false });
-    mockGetRelease.mockResolvedValue(lmlReleaseResponse);
-    mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
-
-    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
-
     expect(result?.album?.spotifyUrl).toBe('https://open.spotify.com/album/abc');
     expect(result?.album?.appleMusicUrl).toBe('https://music.apple.com/album/xyz');
     expect(result?.album?.youtubeMusicUrl).toBe('https://music.youtube.com/search?q=Autechre+Confield');
   });
 
-  it('uses SearchUrlProvider fallback when LML URLs are null', async () => {
-    const resultNoUrls = {
-      ...lmlSearchResult,
-      spotify_url: null,
-      apple_music_url: null,
-      youtube_music_url: null,
-      bandcamp_url: null,
-      soundcloud_url: null,
-    };
-    mockSearchDiscogs.mockResolvedValue({ results: [resultNoUrls], total: 1, cached: false });
-    mockGetRelease.mockResolvedValue(lmlReleaseResponse);
-    mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
+  it('extracts artist metadata from lookup response artwork', async () => {
+    mockLookupMetadata.mockResolvedValue(lookupResponseWithResults);
+
+    const result = await fetchMetadata({
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+    });
+
+    expect(result?.artist?.bio).toBe('Rob Brown and Sean Booth are Autechre.');
+    expect(result?.artist?.wikipediaUrl).toBe('https://en.wikipedia.org/wiki/Autechre');
+  });
+
+  it('fills missing streaming URLs with search URL fallbacks', async () => {
+    mockLookupMetadata.mockResolvedValue(lookupResponseWithResults);
+
+    const result = await fetchMetadata({
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+    });
+
+    // bandcamp_url and soundcloud_url are null in the fixture, so fallbacks should fill them
+    expect(result?.album?.bandcampUrl).toContain('bandcamp.com');
+    expect(result?.album?.soundcloudUrl).toContain('soundcloud.com');
+  });
+
+  it('uses SearchUrlProvider fallback when all LML URLs are null', async () => {
+    const responseNoUrls = structuredClone(lookupResponseWithResults);
+    const artwork = responseNoUrls.results[0].artwork;
+    artwork.spotify_url = null;
+    artwork.apple_music_url = null;
+    artwork.youtube_music_url = null;
+    artwork.bandcamp_url = null;
+    artwork.soundcloud_url = null;
+    mockLookupMetadata.mockResolvedValue(responseNoUrls);
 
     const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
-    // Search URLs constructed as fallback
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
     expect(result?.album?.bandcampUrl).toContain('bandcamp.com');
     expect(result?.album?.soundcloudUrl).toContain('soundcloud.com');
-    // API-sourced URLs remain undefined
+    // API-sourced URLs remain undefined (null → undefined)
     expect(result?.album?.spotifyUrl).toBeUndefined();
     expect(result?.album?.appleMusicUrl).toBeUndefined();
   });
 
-  it('returns search URLs when LML search fails', async () => {
-    mockSearchDiscogs.mockRejectedValue(new Error('LML down'));
+  it('returns search URLs when lookup fails', async () => {
+    mockLookupMetadata.mockRejectedValue(new Error('LML down'));
 
     const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
@@ -191,8 +198,8 @@ describe('metadata.service', () => {
     expect(result?.artist).toBeUndefined();
   });
 
-  it('returns search URLs when LML search returns empty results', async () => {
-    mockSearchDiscogs.mockResolvedValue({ results: [], total: 0, cached: false });
+  it('returns search URLs when lookup returns empty results', async () => {
+    mockLookupMetadata.mockResolvedValue(emptyLookupResponse);
 
     const result = await fetchMetadata({ artistName: 'Unknown Artist' });
 
@@ -200,29 +207,16 @@ describe('metadata.service', () => {
     expect(result?.album?.discogsReleaseId).toBeUndefined();
   });
 
-  it('falls back to search result bio when artist details fails', async () => {
-    mockSearchDiscogs.mockResolvedValue({ results: [lmlSearchResult], total: 1, cached: false });
-    mockGetRelease.mockResolvedValue(lmlReleaseResponse);
-    mockGetArtistDetails.mockRejectedValue(new Error('Artist fetch failed'));
+  it('returns search URLs when result has no artwork', async () => {
+    const responseNoArtwork = {
+      ...lookupResponseWithResults,
+      results: [{ library_item: lookupResponseWithResults.results[0].library_item, artwork: null }],
+    };
+    mockLookupMetadata.mockResolvedValue(responseNoArtwork);
 
     const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
-    // Falls back to search result bio (cleaned of markup)
-    expect(result?.artist?.bio).toBe('Rob Brown and Sean Booth are Autechre.');
-    expect(result?.artist?.wikipediaUrl).toBe('https://en.wikipedia.org/wiki/Autechre');
-  });
-
-  it('handles release fetch failure gracefully', async () => {
-    mockSearchDiscogs.mockResolvedValue({ results: [lmlSearchResult], total: 1, cached: false });
-    mockGetRelease.mockRejectedValue(new Error('Release fetch failed'));
-    // No artist ID available → falls back to search result
-    mockGetArtistDetails.mockRejectedValue(new Error('No ID'));
-
-    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
-
-    expect(result?.album?.discogsReleaseId).toBe(12345);
-    expect(result?.album?.spotifyUrl).toBe('https://open.spotify.com/album/abc');
-    // Year from search result, not release
-    expect(result?.album?.releaseYear).toBe(2001);
+    expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
+    expect(result?.album?.discogsReleaseId).toBeUndefined();
   });
 });

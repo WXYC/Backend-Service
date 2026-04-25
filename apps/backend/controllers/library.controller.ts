@@ -11,7 +11,7 @@ import {
 } from '@wxyc/database';
 import * as libraryService from '../services/library.service.js';
 import * as labelsService from '../services/labels.service.js';
-import { checkStreamingAvailability, searchDiscogs, isLmlConfigured } from '../services/lml/lml.client.js';
+import { checkStreamingAvailability, lookupMetadata, isLmlConfigured } from '../services/lml/lml.client.js';
 import WxycError from '../utils/error.js';
 
 type NewAlbumRequest = {
@@ -77,7 +77,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     const artistName = body.alternate_artist_name || body.artist_name || '';
     const [streamingResult, artworkResult] = await Promise.allSettled([
       checkStreamingAvailability(artistName, body.album_title),
-      searchDiscogs(artistName, body.album_title),
+      lookupMetadata(artistName, body.album_title),
     ]);
 
     if (streamingResult.status === 'fulfilled' && streamingResult.value.on_streaming !== null) {
@@ -91,11 +91,11 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     }
 
     if (artworkResult.status === 'fulfilled') {
-      const top = artworkResult.value.results[0];
-      if (top?.artwork_url && !top.artwork_url.includes('spacer.gif')) {
+      const artworkUrl = artworkResult.value.results?.[0]?.artwork?.artwork_url;
+      if (artworkUrl && !artworkUrl.includes('spacer.gif')) {
         try {
-          await libraryService.updateArtworkUrl(inserted_album.id, top.artwork_url);
-          (inserted_album as Record<string, unknown>).artwork_url = top.artwork_url;
+          await libraryService.updateArtworkUrl(inserted_album.id, artworkUrl);
+          (inserted_album as Record<string, unknown>).artwork_url = artworkUrl;
         } catch (e) {
           console.warn('Failed to persist artwork URL:', (e as Error).message);
         }

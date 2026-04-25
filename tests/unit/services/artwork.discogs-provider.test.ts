@@ -7,21 +7,16 @@ import { jest } from '@jest/globals';
 
 // --- Mocks ---
 
-const mockSearchDiscogs = jest.fn<() => Promise<unknown>>();
+const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockSearchTrackReleases = jest.fn<() => Promise<unknown>>();
 const mockValidateTrackOnRelease = jest.fn<() => Promise<boolean>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
 
 jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
-  searchDiscogs: mockSearchDiscogs,
+  lookupMetadata: mockLookupMetadata,
   searchTrackReleases: mockSearchTrackReleases,
   validateTrackOnRelease: mockValidateTrackOnRelease,
   isLmlConfigured: mockIsLmlConfigured,
-}));
-
-jest.mock('../../../apps/backend/services/requestLine/matching/index', () => ({
-  calculateConfidence: (_reqArtist: string, _reqAlbum: string, resArtist: string, _resAlbum: string) =>
-    resArtist ? 0.85 : 0.5,
 }));
 
 import { DiscogsProvider } from '../../../apps/backend/services/artwork/providers/discogs';
@@ -42,43 +37,45 @@ describe('artwork DiscogsProvider', () => {
       const results = await provider.search({ artist: 'Autechre', album: 'Confield' });
 
       expect(results).toEqual([]);
-      expect(mockSearchDiscogs).not.toHaveBeenCalled();
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
     });
 
     it('returns empty when no searchable fields provided', async () => {
       const results = await provider.search({});
 
       expect(results).toEqual([]);
-      expect(mockSearchDiscogs).not.toHaveBeenCalled();
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
     });
 
     it('searches LML and maps results to ArtworkSearchResult', async () => {
-      mockSearchDiscogs.mockResolvedValue({
+      mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            release_id: 12345,
-            release_url: 'https://www.discogs.com/release/12345',
-            artwork_url: 'https://i.discogs.com/confield.jpg',
-            album: 'Confield',
-            artist: 'Autechre',
-            confidence: 0.95,
-            release_year: 2001,
-            artist_bio: null,
-            wikipedia_url: null,
-            spotify_url: null,
-            apple_music_url: null,
-            youtube_music_url: null,
-            bandcamp_url: null,
-            soundcloud_url: null,
+            library_item: {
+              id: 1,
+              title: 'Confield',
+              artist: 'Autechre',
+              call_number: 'Electronic CD AUT 1/1',
+              library_url: 'https://library.wxyc.org/1',
+            },
+            artwork: {
+              release_id: 12345,
+              release_url: 'https://www.discogs.com/release/12345',
+              artwork_url: 'https://i.discogs.com/confield.jpg',
+              album: 'Confield',
+              artist: 'Autechre',
+              confidence: 0.95,
+            },
           },
         ],
-        total: 1,
-        cached: false,
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
       });
 
       const results = await provider.search({ artist: 'Autechre', album: 'Confield' });
 
-      expect(mockSearchDiscogs).toHaveBeenCalledWith('Autechre', 'Confield');
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined);
       expect(results).toHaveLength(1);
       expect(results[0]).toEqual({
         artworkUrl: 'https://i.discogs.com/confield.jpg',
@@ -86,48 +83,42 @@ describe('artwork DiscogsProvider', () => {
         album: 'Confield',
         artist: 'Autechre',
         source: 'discogs',
-        confidence: 0.85,
+        confidence: 0.95,
       });
     });
 
     it('filters out results without artwork or with spacer.gif', async () => {
-      mockSearchDiscogs.mockResolvedValue({
+      mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            release_id: 1,
-            release_url: 'https://discogs.com/1',
-            artwork_url: null,
-            album: 'No Art',
-            artist: 'Artist',
-            confidence: 0.9,
-            release_year: null,
-            artist_bio: null,
-            wikipedia_url: null,
-            spotify_url: null,
-            apple_music_url: null,
-            youtube_music_url: null,
-            bandcamp_url: null,
-            soundcloud_url: null,
+            library_item: {
+              id: 1,
+              title: 'No Art',
+              artist: 'Artist',
+              call_number: 'Rock CD ART 1/1',
+              library_url: 'https://library.wxyc.org/1',
+            },
+            artwork: { release_id: 1, release_url: 'https://discogs.com/1', artwork_url: null, confidence: 0 },
           },
           {
-            release_id: 2,
-            release_url: 'https://discogs.com/2',
-            artwork_url: 'https://i.discogs.com/spacer.gif',
-            album: 'Spacer',
-            artist: 'Artist',
-            confidence: 0.8,
-            release_year: null,
-            artist_bio: null,
-            wikipedia_url: null,
-            spotify_url: null,
-            apple_music_url: null,
-            youtube_music_url: null,
-            bandcamp_url: null,
-            soundcloud_url: null,
+            library_item: {
+              id: 2,
+              title: 'Spacer',
+              artist: 'Artist',
+              call_number: 'Rock CD ART 2/1',
+              library_url: 'https://library.wxyc.org/2',
+            },
+            artwork: {
+              release_id: 2,
+              release_url: 'https://discogs.com/2',
+              artwork_url: 'https://i.discogs.com/spacer.gif',
+              confidence: 0,
+            },
           },
         ],
-        total: 2,
-        cached: false,
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
       });
 
       const results = await provider.search({ artist: 'Artist', album: 'Album' });
@@ -136,19 +127,24 @@ describe('artwork DiscogsProvider', () => {
     });
 
     it('returns empty on LML error', async () => {
-      mockSearchDiscogs.mockRejectedValue(new Error('LML down'));
+      mockLookupMetadata.mockRejectedValue(new Error('LML down'));
 
       const results = await provider.search({ artist: 'Autechre', album: 'Confield' });
 
       expect(results).toEqual([]);
     });
 
-    it('uses song as search term when album is not provided', async () => {
-      mockSearchDiscogs.mockResolvedValue({ results: [], total: 0, cached: false });
+    it('uses song when album is not provided', async () => {
+      mockLookupMetadata.mockResolvedValue({
+        results: [],
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
 
       await provider.search({ artist: 'Autechre', song: 'VI Scose Poise' });
 
-      expect(mockSearchDiscogs).toHaveBeenCalledWith('Autechre', 'VI Scose Poise');
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', undefined, 'VI Scose Poise');
     });
   });
 
