@@ -86,6 +86,36 @@ describe('searchFlowsheet', () => {
     expect(result.results[0].artist_name).toBe('Autechre');
   });
 
+  it('handles a dj-name filter without errors', async () => {
+    mockDataAndCount([makeRow({ dj_name: 'jake' })], 1);
+
+    const result = await searchFlowsheet({
+      q: 'dj:jake',
+      page: 0,
+      limit: 50,
+      sort: 'date',
+      order: 'desc',
+    });
+
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].dj_name).toBe('jake');
+  });
+
+  it('handles a dj-name filter with exact match without errors', async () => {
+    mockDataAndCount([makeRow({ dj_name: 'jake' })], 1);
+
+    const result = await searchFlowsheet({
+      q: 'dj:"jake"',
+      page: 0,
+      limit: 50,
+      sort: 'date',
+      order: 'desc',
+    });
+
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].dj_name).toBe('jake');
+  });
+
   it('formats play_date as ISO string', async () => {
     const date = new Date('2024-06-15T14:30:00Z');
     mockDataAndCount([makeRow({ play_date: date })], 1);

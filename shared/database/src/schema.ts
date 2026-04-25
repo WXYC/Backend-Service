@@ -48,6 +48,8 @@ export const user = pgTable(
   (table) => [
     uniqueIndex('auth_user_email_key').on(table.email),
     uniqueIndex('auth_user_username_key').on(table.username),
+    index('auth_user_dj_name_trgm_idx').using('gin', sql`${table.djName} gin_trgm_ops`),
+    index('auth_user_name_trgm_idx').using('gin', sql`${table.name} gin_trgm_ops`),
   ]
 );
 
@@ -489,7 +491,10 @@ export const shows = wxyc_schema.table(
     start_time: timestamp('start_time', { withTimezone: true }).defaultNow().notNull(),
     end_time: timestamp('end_time', { withTimezone: true }),
   },
-  (table) => [uniqueIndex('shows_legacy_show_id_idx').on(table.legacy_show_id)]
+  (table) => [
+    uniqueIndex('shows_legacy_show_id_idx').on(table.legacy_show_id),
+    index('shows_legacy_dj_name_trgm_idx').using('gin', sql`${table.legacy_dj_name} gin_trgm_ops`),
+  ]
 );
 
 export type NewShowDJ = InferInsertModel<typeof show_djs>;
