@@ -4,7 +4,7 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-import { searchFlowsheet } from '../../../apps/backend/services/search.service';
+import { searchFlowsheet, shouldUseTsvector } from '../../../apps/backend/services/search.service';
 
 const makeRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
   id: 1,
@@ -152,5 +152,38 @@ describe('searchFlowsheet', () => {
     expect(result.results[0].track_title).toBe('');
     expect(result.results[0].album_title).toBe('');
     expect(result.results[0].record_label).toBe('');
+  });
+});
+
+describe('shouldUseTsvector', () => {
+  describe('routes to tsvector for well-tokenized queries', () => {
+    it.each([
+      ['autechre'],
+      ['the'],
+      ['Sigur Rós'],
+      ['Belle & Sebastian'],
+      ['Godspeed You! Black Emperor'],
+      ['M.A.N.D.Y.'],
+      ['a&b'],
+      ['123'],
+      ['Mac DeMarco'],
+      ['Jessica Pratt'],
+    ])('uses tsvector for %j', (value) => {
+      expect(shouldUseTsvector(value)).toBe(true);
+    });
+  });
+
+  describe('falls back to trigram for unsuitable queries', () => {
+    it.each([
+      ['', 'empty'],
+      ['a', 'single character'],
+      ['au', 'two characters (under tsvector min)'],
+      ['!!!', 'pure punctuation'],
+      ['$$$', 'pure punctuation'],
+      ['...', 'pure punctuation'],
+      ['   ', 'whitespace only'],
+    ])('uses trigram for %j (%s)', (value) => {
+      expect(shouldUseTsvector(value)).toBe(false);
+    });
   });
 });

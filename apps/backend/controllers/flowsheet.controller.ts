@@ -31,7 +31,10 @@ export interface IFSEntryMetadata {
   artist_wikipedia_url: string | null;
 }
 
-export interface IFSEntry extends FSEntry {
+// search_doc is a STORED GENERATED tsvector used only by the search hot path
+// (apps/backend/services/search.service.ts); the controller layer never reads
+// or constructs it, so it is excluded from the application-facing entry type.
+export interface IFSEntry extends Omit<FSEntry, 'search_doc'> {
   label_id: number | null;
   rotation_bin: string | null;
   on_streaming: boolean | null;

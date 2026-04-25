@@ -118,6 +118,7 @@ export const flowsheet = {
   soundcloud_url: 'soundcloud_url',
   artist_bio: 'artist_bio',
   artist_wikipedia_url: 'artist_wikipedia_url',
+  search_doc: 'search_doc',
 };
 export const bins = {};
 export const shows = {};

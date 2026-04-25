@@ -351,6 +351,13 @@
       "when": 1777560000000,
       "tag": "0051_dj-name-search-indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1777646400000,
+      "tag": "0052_flowsheet-tsvector-search",
+      "breakpoints": true
     }
   ]
 }
