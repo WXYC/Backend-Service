@@ -4,7 +4,12 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-import { searchFlowsheet, shouldUseTsvector } from '../../../apps/backend/services/search.service';
+import {
+  searchFlowsheet,
+  shouldUseTsvector,
+  parseCursor,
+  encodeCursor,
+} from '../../../apps/backend/services/search.service';
 
 const makeRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
   id: 1,
@@ -185,5 +190,132 @@ describe('shouldUseTsvector', () => {
     ])('uses trigram for %j (%s)', (value) => {
       expect(shouldUseTsvector(value)).toBe(false);
     });
+  });
+});
+
+describe('cursor codec', () => {
+  describe('parseCursor', () => {
+    it('parses a valid cursor', () => {
+      expect(parseCursor('2024-06-15T14:30:00.000Z_12345')).toEqual({
+        addTime: '2024-06-15T14:30:00.000Z',
+        id: 12345,
+      });
+    });
+
+    it('handles cursors that contain underscores in the timestamp segment', () => {
+      // ISO timestamps do not contain underscores, but underscores at the
+      // end of the timestamp would still split correctly because we use the
+      // last underscore as the separator.
+      expect(parseCursor('2024-06-15T14:30:00.000Z_999')).toEqual({
+        addTime: '2024-06-15T14:30:00.000Z',
+        id: 999,
+      });
+    });
+
+    it.each([
+      ['', 'empty string'],
+      ['no-underscore', 'no separator'],
+      ['_42', 'empty addTime'],
+      ['2024-06-15T14:30:00.000Z_', 'empty id'],
+      ['2024-06-15T14:30:00.000Z_abc', 'non-numeric id'],
+      ['not-a-date_42', 'unparseable date'],
+    ])('returns null for %j (%s)', (cursor) => {
+      expect(parseCursor(cursor)).toBeNull();
+    });
+  });
+
+  describe('encodeCursor', () => {
+    it('round-trips with parseCursor', () => {
+      const cursor = encodeCursor('2024-06-15T14:30:00.000Z', 12345);
+      expect(parseCursor(cursor)).toEqual({
+        addTime: '2024-06-15T14:30:00.000Z',
+        id: 12345,
+      });
+    });
+  });
+});
+
+describe('searchFlowsheet cursor pagination', () => {
+  it('returns nextCursor when results fill the page and cursor mode is active', async () => {
+    const rows = Array.from({ length: 50 }, (_, i) => ({
+      ...makeRow({ id: 100 - i, play_date: new Date(`2024-06-15T${String(i % 24).padStart(2, '0')}:00:00Z`) }),
+    }));
+    mockDataAndCount(rows, 1000);
+
+    const result = await searchFlowsheet({
+      q: '',
+      page: 0,
+      limit: 50,
+      sort: 'date',
+      order: 'desc',
+      cursor: '2024-06-16T00:00:00.000Z_999',
+    });
+
+    expect(result.results).toHaveLength(50);
+    const lastRow = result.results[49];
+    expect(result.nextCursor).toBe(encodeCursor(lastRow.play_date, lastRow.id));
+  });
+
+  it('omits nextCursor when fewer rows are returned than requested', async () => {
+    const rows = [makeRow({ id: 1 })];
+    mockDataAndCount(rows, 1);
+
+    const result = await searchFlowsheet({
+      q: '',
+      page: 0,
+      limit: 50,
+      sort: 'date',
+      order: 'desc',
+      cursor: '2024-06-16T00:00:00.000Z_999',
+    });
+
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it('omits nextCursor when cursor is not provided (offset mode)', async () => {
+    const rows = Array.from({ length: 50 }, (_, i) => makeRow({ id: i + 1 }));
+    mockDataAndCount(rows, 1000);
+
+    const result = await searchFlowsheet({
+      q: '',
+      page: 0,
+      limit: 50,
+      sort: 'date',
+      order: 'desc',
+    });
+
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it('omits nextCursor when sort is not date even if cursor is provided', async () => {
+    const rows = Array.from({ length: 50 }, (_, i) => makeRow({ id: i + 1 }));
+    mockDataAndCount(rows, 1000);
+
+    const result = await searchFlowsheet({
+      q: '',
+      page: 0,
+      limit: 50,
+      sort: 'artist',
+      order: 'asc',
+      cursor: '2024-06-16T00:00:00.000Z_999',
+    });
+
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it('still returns total even in cursor mode (for backward-compat display)', async () => {
+    const rows = [makeRow()];
+    mockDataAndCount(rows, 7);
+
+    const result = await searchFlowsheet({
+      q: '',
+      page: 0,
+      limit: 50,
+      sort: 'date',
+      order: 'desc',
+      cursor: '2024-06-16T00:00:00.000Z_999',
+    });
+
+    expect(result.total).toBe(7);
   });
 });

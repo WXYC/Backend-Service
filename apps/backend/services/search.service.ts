@@ -8,7 +8,34 @@ export type SearchParams = {
   limit: number;
   sort: 'date' | 'artist' | 'song' | 'dj';
   order: 'asc' | 'desc';
+  /**
+   * Opaque cursor token from a previous response's `nextCursor`. When provided
+   * with `sort: 'date'`, replaces offset pagination with a `WHERE add_time` /
+   * `id` predicate so each page costs O(limit) instead of O(page * limit).
+   * Ignored for non-date sorts (no compound index supports them).
+   */
+  cursor?: string;
 };
+
+export type Cursor = { addTime: string; id: number };
+
+/** Encode a cursor for the next page. Format: `${ISO timestamp}_${id}`. */
+export function encodeCursor(addTime: string, id: number): string {
+  return `${addTime}_${id}`;
+}
+
+/** Parse a cursor token, or return null if malformed. */
+export function parseCursor(cursor: string): Cursor | null {
+  const lastUnderscore = cursor.lastIndexOf('_');
+  if (lastUnderscore <= 0) return null;
+  const addTime = cursor.slice(0, lastUnderscore);
+  const idStr = cursor.slice(lastUnderscore + 1);
+  if (!addTime || !idStr) return null;
+  const id = Number(idStr);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  if (Number.isNaN(Date.parse(addTime))) return null;
+  return { addTime, id };
+}
 
 type SearchResultRow = {
   id: number;
@@ -52,14 +79,22 @@ const COLUMN_MAP: Record<string, SQL> = {
 };
 
 /** Search historical flowsheet entries with filtering, sorting, and pagination. */
-export async function searchFlowsheet(params: SearchParams): Promise<{ results: SearchResult[]; total: number }> {
-  const { q, page, limit, sort, order } = params;
-  const offset = page * limit;
+export async function searchFlowsheet(
+  params: SearchParams
+): Promise<{ results: SearchResult[]; total: number; nextCursor?: string }> {
+  const { q, page, limit, sort, order, cursor } = params;
   const conditions = parseSearchQuery(q);
 
   const whereClause = buildWhereClause(conditions);
   const orderDirection = order === 'asc' ? sql`ASC` : sql`DESC`;
   const sortExpr = SORT_MAP[sort];
+
+  // Cursor pagination is only meaningful for date sort. Other sorts fall back
+  // to offset because their sort columns are not unique and there is no
+  // compound index to support a (sort_col, id) cursor predicate.
+  const parsedCursor = cursor !== undefined && sort === 'date' ? parseCursor(cursor) : null;
+  const useCursor = parsedCursor !== null;
+  const offset = useCursor ? 0 : page * limit;
 
   const baseFrom = sql`
     FROM ${flowsheet}
@@ -68,12 +103,26 @@ export async function searchFlowsheet(params: SearchParams): Promise<{ results: 
     WHERE ${flowsheet.entry_type} = 'track'
   `;
 
-  const fullWhere = whereClause ? sql`${baseFrom} AND ${whereClause}` : baseFrom;
+  let fullWhere = whereClause ? sql`${baseFrom} AND ${whereClause}` : baseFrom;
+  if (parsedCursor) {
+    // Compound (add_time, id) cursor handles ties when multiple rows share an
+    // add_time — common for batch-imported legacy entries that all carry the
+    // same import timestamp.
+    const cmp = order === 'asc' ? sql`>` : sql`<`;
+    fullWhere = sql`${fullWhere} AND (${flowsheet.add_time}, ${flowsheet.id}) ${cmp} (${parsedCursor.addTime}::timestamptz, ${parsedCursor.id})`;
+  }
+
+  // In cursor mode, add id as a tiebreaker so the ORDER BY matches the
+  // cursor predicate's compound key — required for stable pagination.
+  const orderByClause = useCursor
+    ? sql`${sortExpr} ${orderDirection}, ${flowsheet.id} ${orderDirection}`
+    : sql`${sortExpr} ${orderDirection}`;
 
   // Run data and count in parallel. A combined `COUNT(*) OVER()` window query
   // forces Postgres to materialize the full match set before LIMIT can apply,
   // which defeats short-circuiting on the data side. Two queries let the data
   // query stop at LIMIT rows via index, while the count runs concurrently.
+  const limitClause = useCursor ? sql`LIMIT ${limit}` : sql`LIMIT ${limit} OFFSET ${offset}`;
   const dataQuery = sql`
     SELECT
       ${flowsheet.id},
@@ -85,8 +134,8 @@ export async function searchFlowsheet(params: SearchParams): Promise<{ results: 
       ${flowsheet.show_id},
       ${DJ_NAME_EXPR} AS dj_name
     ${fullWhere}
-    ORDER BY ${sortExpr} ${orderDirection}
-    LIMIT ${limit} OFFSET ${offset}
+    ORDER BY ${orderByClause}
+    ${limitClause}
   `;
 
   const countQuery = sql`SELECT COUNT(*)::int AS total ${fullWhere}`;
@@ -96,7 +145,14 @@ export async function searchFlowsheet(params: SearchParams): Promise<{ results: 
   const results = (dataRows as unknown as SearchResultRow[]).map(transformRow);
   const total = (countRows as unknown as CountRow[])[0]?.total ?? 0;
 
-  return { results, total };
+  // nextCursor only when cursor mode is active AND we got a full page —
+  // a short page means there are no more rows.
+  const nextCursor =
+    useCursor && results.length === limit
+      ? encodeCursor(results[results.length - 1].play_date, results[results.length - 1].id)
+      : undefined;
+
+  return nextCursor !== undefined ? { results, total, nextCursor } : { results, total };
 }
 
 function transformRow(row: SearchResultRow): SearchResult {
