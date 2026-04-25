@@ -22,7 +22,7 @@ import { getConfig, isParsingEnabled } from './config.js';
 import { parseRequest, isParserAvailable } from '../ai/index.js';
 import { executeSearchPipeline, getSearchTypeFromState } from './search/index.js';
 import { findSimilarArtist } from '../library.service.js';
-import { searchTrackReleases, searchDiscogs, validateTrackOnRelease, isLmlConfigured } from '../lml/lml.client.js';
+import { searchTrackReleases, lookupMetadata, validateTrackOnRelease, isLmlConfigured } from '../lml/lml.client.js';
 import { fetchArtworkForItems } from '../artwork/index.js';
 import {
   buildSlackBlocks,
@@ -227,11 +227,11 @@ export async function processRequest(body: RequestLineRequestBody): Promise<Unif
               }));
             },
             searchReleasesByArtist: async (artist: string, limit = 10) => {
-              const response = await searchDiscogs(artist);
-              return response.results
-                .filter((r) => r.album)
+              const response = await lookupMetadata(artist);
+              return (response.results ?? [])
+                .filter((r) => r.library_item?.title)
                 .slice(0, limit)
-                .map((r) => ({ artist: r.artist ?? '', album: r.album! }));
+                .map((r) => ({ artist: r.library_item.artist ?? '', album: r.library_item.title ?? '' }));
             },
             validateTrackOnRelease,
           }
