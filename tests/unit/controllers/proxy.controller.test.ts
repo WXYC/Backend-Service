@@ -213,7 +213,13 @@ describe('proxy.controller', () => {
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            library_item: { id: 1, title: 'Confield', artist: 'Autechre', call_number: 'Electronic CD AUT 1/1', library_url: '' },
+            library_item: {
+              id: 1,
+              title: 'Confield',
+              artist: 'Autechre',
+              call_number: 'Electronic CD AUT 1/1',
+              library_url: '',
+            },
             artwork: {
               release_id: 12345,
               release_url: 'https://www.discogs.com/release/12345',
@@ -308,7 +314,13 @@ describe('proxy.controller', () => {
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            library_item: { id: 1, title: 'Moon Pix', artist: 'Cat Power', call_number: 'Rock CD CAT 1/1', library_url: '' },
+            library_item: {
+              id: 1,
+              title: 'Moon Pix',
+              artist: 'Cat Power',
+              call_number: 'Rock CD CAT 1/1',
+              library_url: '',
+            },
             artwork: {
               release_id: 99999,
               release_url: 'https://www.discogs.com/release/99999',
