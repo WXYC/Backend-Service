@@ -200,6 +200,77 @@ describe('metadata.service', () => {
     expect(result?.album?.discogsReleaseId).toBeUndefined();
   });
 
+  it('retries with track title when album title search returns empty', async () => {
+    // First call (album title) returns nothing; second call (track title) succeeds
+    mockSearchDiscogs
+      .mockResolvedValueOnce({ results: [], total: 0, cached: false })
+      .mockResolvedValueOnce({ results: [lmlSearchResult], total: 1, cached: false });
+    mockGetRelease.mockResolvedValue(lmlReleaseResponse);
+    mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
+
+    const result = await fetchMetadata({
+      artistName: 'Cocteau Twins',
+      albumTitle: 'cocteau twins singles collections',
+      trackTitle: 'crushed',
+    });
+
+    // searchDiscogs called twice: first with album title, then with track title
+    expect(mockSearchDiscogs).toHaveBeenCalledTimes(2);
+    expect(mockSearchDiscogs).toHaveBeenNthCalledWith(1, 'Cocteau Twins', 'cocteau twins singles collections');
+    expect(mockSearchDiscogs).toHaveBeenNthCalledWith(2, 'Cocteau Twins', 'crushed');
+    // Metadata populated from the retry result
+    expect(result?.album?.discogsReleaseId).toBe(12345);
+    expect(result?.album?.spotifyUrl).toBe('https://open.spotify.com/album/abc');
+  });
+
+  it('returns search URLs when both album and track title searches return empty', async () => {
+    mockSearchDiscogs.mockResolvedValue({ results: [], total: 0, cached: false });
+
+    const result = await fetchMetadata({
+      artistName: 'Unknown Artist',
+      albumTitle: 'wrong album',
+      trackTitle: 'wrong track',
+    });
+
+    // searchDiscogs called twice, no infinite retry
+    expect(mockSearchDiscogs).toHaveBeenCalledTimes(2);
+    expect(mockSearchDiscogs).toHaveBeenNthCalledWith(1, 'Unknown Artist', 'wrong album');
+    expect(mockSearchDiscogs).toHaveBeenNthCalledWith(2, 'Unknown Artist', 'wrong track');
+    // Falls back to search URLs
+    expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
+    expect(result?.album?.discogsReleaseId).toBeUndefined();
+  });
+
+  it('does not retry when album title search succeeds on first try', async () => {
+    mockSearchDiscogs.mockResolvedValue({ results: [lmlSearchResult], total: 1, cached: false });
+    mockGetRelease.mockResolvedValue(lmlReleaseResponse);
+    mockGetArtistDetails.mockResolvedValue(lmlArtistResponse);
+
+    const result = await fetchMetadata({
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+      trackTitle: 'VI Scose Poise',
+    });
+
+    expect(mockSearchDiscogs).toHaveBeenCalledTimes(1);
+    expect(mockSearchDiscogs).toHaveBeenCalledWith('Autechre', 'Confield');
+    expect(result?.album?.discogsReleaseId).toBe(12345);
+  });
+
+  it('does not retry when albumTitle is absent and trackTitle is used as primary', async () => {
+    mockSearchDiscogs.mockResolvedValue({ results: [], total: 0, cached: false });
+
+    const result = await fetchMetadata({
+      artistName: 'Unknown Artist',
+      trackTitle: 'some track',
+    });
+
+    // Only one call — trackTitle was already the primary search term
+    expect(mockSearchDiscogs).toHaveBeenCalledTimes(1);
+    expect(mockSearchDiscogs).toHaveBeenCalledWith('Unknown Artist', 'some track');
+    expect(result?.album?.discogsReleaseId).toBeUndefined();
+  });
+
   it('falls back to search result bio when artist details fails', async () => {
     mockSearchDiscogs.mockResolvedValue({ results: [lmlSearchResult], total: 1, cached: false });
     mockGetRelease.mockResolvedValue(lmlReleaseResponse);
