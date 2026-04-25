@@ -4,7 +4,7 @@
  * endpoint and by createDefaultUser() at startup.
  */
 
-import { auth, WXYCRoles, sendAccountSetupEmail } from '@wxyc/authentication';
+import { auth, WXYCRoles } from '@wxyc/authentication';
 import { db, user } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
 
@@ -123,10 +123,15 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
       await db.update(user).set({ role: 'admin' }).where(eq(user.id, newUser.id));
     }
 
-    // 10. Send welcome email (fire-and-forget so provisioning isn't blocked by SES)
+    // 10. Trigger password reset flow to send welcome email with a tokenized setup URL.
+    // The sendResetPassword hook in auth.definition.ts detects hasCompletedOnboarding === false
+    // and sends the accountSetup email template instead of a plain password reset.
     const frontendUrl = process.env.FRONTEND_SOURCE || 'http://localhost:3000';
-    sendAccountSetupEmail({ to: email, setupUrl: `${frontendUrl}/login` }).catch((error) => {
-      console.error('[PROVISION USER] Failed to send welcome email:', error);
+    auth.api.requestPasswordReset({
+      body: { email, redirectTo: `${frontendUrl}/login` },
+      headers: new Headers({ origin: frontendUrl }),
+    }).catch((error: unknown) => {
+      console.error('[PROVISION USER] Failed to trigger setup email:', error);
     });
 
     return { user: newUser, member: createdMember };
