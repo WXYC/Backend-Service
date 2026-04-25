@@ -174,10 +174,30 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
   return sql`${col} ILIKE ${'%' + value + '%'}`;
 }
 
+/**
+ * Decide whether an `all`-field bare-term query should use the tsvector path
+ * or fall back to the trigram ILIKE path. Tsvector handles whole-word and
+ * prefix matching cleanly via `websearch_to_tsquery`, but it tokenizes — so
+ * pure-punctuation strings (`!!!`, `$$$`) and single-character fragments are
+ * better served by trigram, which can match arbitrary substrings.
+ */
+export function shouldUseTsvector(value: string): boolean {
+  if (value.length < 3) return false;
+  return /[a-zA-Z0-9]/.test(value);
+}
+
 function buildAllFieldMatch(value: string, exact: boolean): SQL {
   if (exact) {
     return sql`(${flowsheet.artist_name} = ${value} OR ${flowsheet.track_title} = ${value} OR ${flowsheet.album_title} = ${value} OR ${flowsheet.record_label} = ${value})`;
   }
+  if (shouldUseTsvector(value)) {
+    // Tsvector path: tokenized whole-word / prefix matching across all four
+    // weighted fields via the GIN index on flowsheet.search_doc. websearch_
+    // to_tsquery handles natural query input (quoted phrases, OR, etc.).
+    return sql`${flowsheet.search_doc} @@ websearch_to_tsquery('simple', ${value})`;
+  }
+  // Trigram fallback: short queries, pure-punctuation strings, and any other
+  // input that the tsvector path would tokenize away.
   const pattern = '%' + value + '%';
   return sql`(${flowsheet.artist_name} ILIKE ${pattern} OR ${flowsheet.track_title} ILIKE ${pattern} OR ${flowsheet.album_title} ILIKE ${pattern} OR ${flowsheet.record_label} ILIKE ${pattern})`;
 }

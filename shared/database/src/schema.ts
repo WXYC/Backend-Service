@@ -15,7 +15,19 @@ import {
   pgEnum,
   date,
   uniqueIndex,
+  customType,
 } from 'drizzle-orm/pg-core';
+
+// PostgreSQL tsvector. Drizzle has no first-class tsvector type, but we only
+// reference these columns from raw SQL fragments (WHERE search_doc @@ ...),
+// so the in-TS data type does not matter — what matters is the dataType()
+// returned to drizzle-kit so generated migrations / schema diffs use the
+// right SQL type name.
+const tsvector = customType<{ data: string; driverData: string }>({
+  dataType() {
+    return 'tsvector';
+  },
+});
 
 // Schema name is configurable for parallel test isolation (each Jest worker gets its own schema)
 const WXYC_SCHEMA_NAME = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
@@ -368,6 +380,13 @@ export const flowsheet = wxyc_schema.table(
     soundcloud_url: varchar('soundcloud_url', { length: 512 }),
     artist_bio: text('artist_bio'),
     artist_wikipedia_url: varchar('artist_wikipedia_url', { length: 512 }),
+    // STORED GENERATED tsvector covering the four text fields with weight
+    // bands (artist=A, track=B, album=C, label=D). Managed by migration
+    // 0052; declared here so drizzle-kit drift detection treats it as
+    // present rather than proposing to add it.
+    search_doc: tsvector('search_doc').generatedAlwaysAs(
+      sql`setweight(to_tsvector('simple', coalesce("artist_name", '')), 'A') || setweight(to_tsvector('simple', coalesce("track_title", '')), 'B') || setweight(to_tsvector('simple', coalesce("album_title", '')), 'C') || setweight(to_tsvector('simple', coalesce("record_label", '')), 'D')`
+    ),
   },
   (table) => [
     uniqueIndex('flowsheet_legacy_entry_id_idx').on(table.legacy_entry_id),
@@ -379,6 +398,7 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_track_add_time_idx')
       .on(sql`${table.add_time} DESC`)
       .where(sql`${table.entry_type} = 'track'`),
+    index('flowsheet_search_doc_idx').using('gin', sql`${table.search_doc}`),
   ]
 );
 
