@@ -306,7 +306,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
   if (showsImported > 0) {
     await db.execute(sql`
       UPDATE wxyc_schema.shows s
-      SET end_time = next.start_time
+      SET end_time = next.next_start
       FROM (
         SELECT id, LEAD(start_time) OVER (ORDER BY start_time) AS next_start
         FROM wxyc_schema.shows
