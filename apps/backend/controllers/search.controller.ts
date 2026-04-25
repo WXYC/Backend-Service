@@ -20,11 +20,10 @@ export const searchFlowsheetEndpoint: RequestHandler<object, unknown, unknown, S
   res,
   next
 ) => {
-  const q = req.query.q;
-  if (!q) {
-    res.status(400).json({ message: 'Missing required query parameter: q' });
-    return;
-  }
+  // q is optional. Missing or empty q returns the most recent track entries
+  // — the "show recent" default for the playlists landing page. The search
+  // service treats an empty query as no WHERE filter beyond entry_type='track'.
+  const q = req.query.q ?? '';
 
   const page = parseInt(req.query.page ?? '0');
   if (isNaN(page) || page < 0) {
