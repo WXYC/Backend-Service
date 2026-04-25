@@ -71,9 +71,9 @@ describe('Metadata via LML (Mock API)', () => {
       await new Promise((r) => setTimeout(r, 300));
 
       const lmlRequests = await getMockRequests('lml');
-      const searchCalls = lmlRequests.filter((r) => r.path === '/api/v1/discogs/search');
-      expect(searchCalls.length).toBeGreaterThanOrEqual(1);
-      expect(searchCalls[0].body.artist).toBe('Autechre');
+      const lookupCalls = lmlRequests.filter((r) => r.path === '/api/v1/lookup');
+      expect(lookupCalls.length).toBeGreaterThanOrEqual(1);
+      expect(lookupCalls[0].body.artist).toBe('Autechre');
     });
 
     test('messages do not trigger LML calls for the message content', async () => {
@@ -91,10 +91,10 @@ describe('Metadata via LML (Mock API)', () => {
       // We can't assert on total count because fire-and-forget from previous
       // tests may still be completing.
       const lmlRequests = await getMockRequests('lml');
-      const searchCalls = lmlRequests.filter(
-        (r) => r.path === '/api/v1/discogs/search' && r.body?.artist === 'Station ID at the top of the hour'
+      const lookupCalls = lmlRequests.filter(
+        (r) => r.path === '/api/v1/lookup' && r.body?.artist === 'Station ID at the top of the hour'
       );
-      expect(searchCalls.length).toBe(0);
+      expect(lookupCalls.length).toBe(0);
     });
   });
 
@@ -183,7 +183,7 @@ describe('Metadata via LML (Mock API)', () => {
       // Wait for any in-flight fire-and-forget to settle, then reset + simulate
       await new Promise((r) => setTimeout(r, 500));
       await resetMockApi();
-      await simulateError('lml', '/api/v1/discogs/search', 500);
+      await simulateError('lml', '/api/v1/lookup', 500);
 
       const addRes = await request
         .post('/flowsheet')
@@ -271,7 +271,7 @@ describe('Proxy endpoints via LML (Mock API)', () => {
     if (!mockApiAvailable || !anonToken) return;
 
     // Permanent error (no count) — affects all subsequent LML search calls
-    await simulateError('lml', '/api/v1/discogs/search', 500);
+    await simulateError('lml', '/api/v1/lookup', 500);
 
     // Make the proxy call immediately before any fire-and-forget can consume the rule
     const res = await request
