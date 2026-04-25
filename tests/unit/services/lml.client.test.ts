@@ -8,6 +8,7 @@ global.fetch = mockFetch;
 
 import {
   searchDiscogs,
+  lookupMetadata,
   getRelease,
   getArtistDetails,
   resolveEntity,
@@ -61,6 +62,55 @@ describe('lml.client', () => {
           body: JSON.stringify({ artist: 'Autechre' }),
         })
       );
+    });
+  });
+
+  describe('lookupMetadata', () => {
+    it('sends POST to /api/v1/lookup with artist, album, and song', async () => {
+      const mockResponse = { results: [], search_type: 'none', song_not_found: false, found_on_compilation: false };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield', 'VI Scose Poise');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://lml.test:8000/api/v1/lookup',
+        expect.objectContaining({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ artist: 'Autechre', album: 'Confield', song: 'VI Scose Poise' }),
+        })
+      );
+    });
+
+    it('omits album and song when not provided', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://lml.test:8000/api/v1/lookup',
+        expect.objectContaining({
+          body: JSON.stringify({ artist: 'Autechre' }),
+        })
+      );
+    });
+
+    it('does not include raw_message in the request body', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield');
+
+      const callBody = JSON.parse(mockFetch.mock.calls[0][1]?.body as string);
+      expect(callBody).not.toHaveProperty('raw_message');
     });
   });
 
