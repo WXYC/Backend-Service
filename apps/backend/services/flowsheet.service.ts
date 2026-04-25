@@ -69,6 +69,7 @@ const FSEntryFieldsRaw = {
   legacy_entry_id: flowsheet.legacy_entry_id,
   legacy_release_id: flowsheet.legacy_release_id,
   add_time: flowsheet.add_time,
+  dj_name: flowsheet.dj_name,
   // Metadata (inline on flowsheet, will be nested in transform)
   artwork_url: flowsheet.artwork_url,
   discogs_url: flowsheet.discogs_url,
@@ -103,6 +104,7 @@ type FSEntryRaw = {
   legacy_entry_id: number | null;
   legacy_release_id: number | null;
   add_time: Date | null;
+  dj_name: string | null;
   artwork_url: string | null;
   discogs_url: string | null;
   release_year: number | null;
@@ -136,6 +138,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   message: raw.message,
   play_order: raw.play_order ?? 0,
   add_time: raw.add_time ?? new Date(),
+  dj_name: raw.dj_name,
   // Metadata columns (on FSEntry since they're on the flowsheet table)
   artwork_url: raw.artwork_url,
   discogs_url: raw.discogs_url,
@@ -162,6 +165,29 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
     artist_wikipedia_url: raw.artist_wikipedia_url,
   },
 });
+
+/**
+ * Resolve the DJ name for a show using the same priority as the search
+ * service's DJ_NAME_EXPR and migration 0053:
+ *   COALESCE(auth_user.dj_name, shows.legacy_dj_name, auth_user.name).
+ *
+ * Used by the live insert path (step 5b.2) to denormalize the resolved value
+ * onto each new flowsheet row so search no longer needs to join shows -> auth_user.
+ */
+export const resolveDjNameForShow = async (show: Show): Promise<string | null> => {
+  const legacy = (show.legacy_dj_name as string | null | undefined) ?? null;
+  const primaryDjId = (show.primary_dj_id as string | null | undefined) ?? null;
+
+  if (primaryDjId == null) return legacy;
+
+  const rows = await db
+    .select({ djName: user.djName, name: user.name })
+    .from(user)
+    .where(eq(user.id, primaryDjId))
+    .limit(1);
+  const dj = rows[0];
+  return dj?.djName ?? legacy ?? dj?.name ?? null;
+};
 
 /** Count total flowsheet entries (for pagination) */
 export const getEntryCount = async (): Promise<number> => {

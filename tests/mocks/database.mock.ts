@@ -122,7 +122,17 @@ export const flowsheet = {
   search_doc: 'search_doc',
 };
 export const bins = {};
-export const shows = {};
+export const shows = {
+  id: 'id',
+  primary_dj_id: 'primary_dj_id',
+  legacy_dj_name: 'legacy_dj_name',
+  legacy_dj_id: 'legacy_dj_id',
+  legacy_show_id: 'legacy_show_id',
+  start_time: 'start_time',
+  end_time: 'end_time',
+  show_name: 'show_name',
+  specialty_id: 'specialty_id',
+};
 export const show_djs = {};
 export const user = {
   id: 'id',
@@ -235,6 +245,7 @@ export type FSEntry = {
   soundcloud_url: string | null;
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
+  dj_name: string | null;
 };
 
 export type NewFSEntry = Partial<FSEntry>;

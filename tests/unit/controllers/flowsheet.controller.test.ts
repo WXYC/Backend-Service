@@ -14,6 +14,7 @@ const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...(entry as Record<str
 const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByPage: mockGetEntriesByPage,
@@ -24,6 +25,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   addTrack: mockAddTrack,
   getLatestShow: mockGetLatestShow,
   getAlbumFromDB: mockGetAlbumFromDB,
+  resolveDjNameForShow: mockResolveDjNameForShow,
 }));
 
 const mockFetchMetadata = jest.fn<() => Promise<void>>();

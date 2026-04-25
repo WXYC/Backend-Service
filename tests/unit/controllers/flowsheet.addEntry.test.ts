@@ -2,6 +2,7 @@ import { jest } from '@jest/globals';
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLatestShow: jest.fn(),
+  resolveDjNameForShow: jest.fn().mockResolvedValue(null),
 }));
 
 jest.mock('../../../apps/backend/services/metadata/index', () => ({
