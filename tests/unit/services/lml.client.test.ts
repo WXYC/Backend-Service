@@ -88,7 +88,8 @@ describe('lml.client', () => {
     it('omits album and song when not provided', async () => {
       mockFetch.mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
       } as unknown as globalThis.Response);
 
       await lookupMetadata('Autechre');
@@ -104,7 +105,8 @@ describe('lml.client', () => {
     it('does not include raw_message in the request body', async () => {
       mockFetch.mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
       } as unknown as globalThis.Response);
 
       await lookupMetadata('Autechre', 'Confield');

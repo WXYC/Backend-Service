@@ -51,7 +51,13 @@ describe('artwork DiscogsProvider', () => {
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            library_item: { id: 1, title: 'Confield', artist: 'Autechre', call_number: 'Electronic CD AUT 1/1', library_url: 'https://library.wxyc.org/1' },
+            library_item: {
+              id: 1,
+              title: 'Confield',
+              artist: 'Autechre',
+              call_number: 'Electronic CD AUT 1/1',
+              library_url: 'https://library.wxyc.org/1',
+            },
             artwork: {
               release_id: 12345,
               release_url: 'https://www.discogs.com/release/12345',
@@ -85,12 +91,29 @@ describe('artwork DiscogsProvider', () => {
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            library_item: { id: 1, title: 'No Art', artist: 'Artist', call_number: 'Rock CD ART 1/1', library_url: 'https://library.wxyc.org/1' },
+            library_item: {
+              id: 1,
+              title: 'No Art',
+              artist: 'Artist',
+              call_number: 'Rock CD ART 1/1',
+              library_url: 'https://library.wxyc.org/1',
+            },
             artwork: { release_id: 1, release_url: 'https://discogs.com/1', artwork_url: null, confidence: 0 },
           },
           {
-            library_item: { id: 2, title: 'Spacer', artist: 'Artist', call_number: 'Rock CD ART 2/1', library_url: 'https://library.wxyc.org/2' },
-            artwork: { release_id: 2, release_url: 'https://discogs.com/2', artwork_url: 'https://i.discogs.com/spacer.gif', confidence: 0 },
+            library_item: {
+              id: 2,
+              title: 'Spacer',
+              artist: 'Artist',
+              call_number: 'Rock CD ART 2/1',
+              library_url: 'https://library.wxyc.org/2',
+            },
+            artwork: {
+              release_id: 2,
+              release_url: 'https://discogs.com/2',
+              artwork_url: 'https://i.discogs.com/spacer.gif',
+              confidence: 0,
+            },
           },
         ],
         search_type: 'direct',
@@ -112,7 +135,12 @@ describe('artwork DiscogsProvider', () => {
     });
 
     it('uses song when album is not provided', async () => {
-      mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false });
+      mockLookupMetadata.mockResolvedValue({
+        results: [],
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
 
       await provider.search({ artist: 'Autechre', song: 'VI Scose Poise' });
 

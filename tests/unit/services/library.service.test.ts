@@ -320,8 +320,19 @@ describe('library.service', () => {
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            library_item: { id: 1, title: 'Confield', artist: 'Autechre', call_number: 'Electronic CD AUT 1/1', library_url: '' },
-            artwork: { release_id: 12345, release_url: 'https://www.discogs.com/release/12345', artwork_url: 'https://i.discogs.com/confield.jpg', confidence: 0.95 },
+            library_item: {
+              id: 1,
+              title: 'Confield',
+              artist: 'Autechre',
+              call_number: 'Electronic CD AUT 1/1',
+              library_url: '',
+            },
+            artwork: {
+              release_id: 12345,
+              release_url: 'https://www.discogs.com/release/12345',
+              artwork_url: 'https://i.discogs.com/confield.jpg',
+              confidence: 0.95,
+            },
           },
         ],
         search_type: 'direct',
@@ -342,8 +353,19 @@ describe('library.service', () => {
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            library_item: { id: 1, title: 'Unknown', artist: 'Unknown', call_number: 'Rock CD UNK 1/1', library_url: '' },
-            artwork: { release_id: 99999, release_url: 'https://www.discogs.com/release/99999', artwork_url: 'https://st.discogs.com/images/spacer.gif', confidence: 0.5 },
+            library_item: {
+              id: 1,
+              title: 'Unknown',
+              artist: 'Unknown',
+              call_number: 'Rock CD UNK 1/1',
+              library_url: '',
+            },
+            artwork: {
+              release_id: 99999,
+              release_url: 'https://www.discogs.com/release/99999',
+              artwork_url: 'https://st.discogs.com/images/spacer.gif',
+              confidence: 0.5,
+            },
           },
         ],
         search_type: 'direct',
@@ -378,8 +400,19 @@ describe('library.service', () => {
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
-            library_item: { id: 2, title: 'LP5', artist: 'Autechre', call_number: 'Electronic CD AUT 2/1', library_url: '' },
-            artwork: { release_id: 67890, release_url: 'https://www.discogs.com/release/67890', artwork_url: 'https://i.discogs.com/lp5.jpg', confidence: 0.9 },
+            library_item: {
+              id: 2,
+              title: 'LP5',
+              artist: 'Autechre',
+              call_number: 'Electronic CD AUT 2/1',
+              library_url: '',
+            },
+            artwork: {
+              release_id: 67890,
+              release_url: 'https://www.discogs.com/release/67890',
+              artwork_url: 'https://i.discogs.com/lp5.jpg',
+              confidence: 0.9,
+            },
           },
         ],
         search_type: 'direct',
