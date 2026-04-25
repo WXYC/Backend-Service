@@ -183,10 +183,16 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
 }
 
 function buildDjNameMatch(value: string, exact: boolean): SQL {
+  // OR-decompose across the three underlying columns instead of filtering on
+  // the COALESCE expression. Postgres does not push ILIKE predicates through
+  // COALESCE to use the per-column trigram indexes; the OR form lets the
+  // planner BitmapOr across user.dj_name, user.name, and shows.legacy_dj_name.
+  // Display still uses COALESCE (DJ_NAME_EXPR) for the priority-ordered name.
   if (exact) {
-    return sql`${DJ_NAME_EXPR} = ${value}`;
+    return sql`(${user.djName} = ${value} OR ${user.name} = ${value} OR ${shows.legacy_dj_name} = ${value})`;
   }
-  return sql`${DJ_NAME_EXPR} ILIKE ${'%' + value + '%'}`;
+  const pattern = '%' + value + '%';
+  return sql`(${user.djName} ILIKE ${pattern} OR ${user.name} ILIKE ${pattern} OR ${shows.legacy_dj_name} ILIKE ${pattern})`;
 }
 
 function buildDateMatch(value: string): SQL {

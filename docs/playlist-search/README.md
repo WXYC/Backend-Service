@@ -126,20 +126,22 @@ When this lands, the test suite should cover music titles with stylized punctuat
 
 ### 5a. Index DJ name search (independent quick win)
 
-DJ filter and sort hit a `COALESCE(user.dj_name, shows.legacy_dj_name, user.name)` expression with no supporting index. The cheapest mitigation, runnable immediately and not blocked on anything else, is a functional GIN trigram index on the expression:
+DJ filter and sort hit a `COALESCE(user.dj_name, shows.legacy_dj_name, user.name)` expression with no supporting index. The cheapest mitigation, runnable immediately and not blocked on anything else, is twofold:
+
+**Service change:** OR-decompose the WHERE filter across the three underlying columns instead of filtering on the COALESCE result. Postgres does not push ILIKE predicates through `COALESCE` to use per-column indexes, so a `COALESCE(...) ILIKE '%x%'` predicate stays unindexed regardless of what indexes exist on the inputs. Rewriting the filter as `(a ILIKE '%x%' OR b ILIKE '%x%' OR c ILIKE '%x%')` lets the planner BitmapOr across the three columns. Display still uses the COALESCE expression so the priority-ordered name shows in results; only the filter changes shape.
+
+**Schema change:** plain GIN trigram indexes on the three filtered columns:
 
 ```sql
-CREATE INDEX shows_dj_name_trgm_idx
-  ON wxyc_schema.shows USING gin (
-    (COALESCE(legacy_dj_name, '')) gin_trgm_ops
-  );
-CREATE INDEX user_dj_name_trgm_idx
-  ON wxyc_schema."user" USING gin (
-    (COALESCE(dj_name, name, '')) gin_trgm_ops
-  );
+CREATE INDEX auth_user_dj_name_trgm_idx
+  ON wxyc_schema.auth_user USING gin (dj_name gin_trgm_ops);
+CREATE INDEX auth_user_name_trgm_idx
+  ON wxyc_schema.auth_user USING gin (name gin_trgm_ops);
+CREATE INDEX shows_legacy_dj_name_trgm_idx
+  ON wxyc_schema.shows USING gin (legacy_dj_name gin_trgm_ops);
 ```
 
-(Postgres requires the indexed expression to come from a single table, so the `COALESCE` is split across the two underlying tables and the planner combines them via the join.)
+The OR semantics are also a UX upgrade: a search for `dj:jake` now matches if the DJ's preferred name OR display name OR legacy show name contains `jake`, instead of only matching against whichever name the COALESCE happened to surface.
 
 ### 5b. Denormalize `dj_name` onto flowsheet (paired with step 4)
 
