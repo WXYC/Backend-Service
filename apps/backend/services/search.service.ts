@@ -19,8 +19,9 @@ type SearchResultRow = {
   record_label: string | null;
   show_id: number | null;
   dj_name: string | null;
-  total: number;
 };
+
+type CountRow = { total: number };
 
 export type SearchResult = {
   id: number;
@@ -69,7 +70,11 @@ export async function searchFlowsheet(params: SearchParams): Promise<{ results: 
 
   const fullWhere = whereClause ? sql`${baseFrom} AND ${whereClause}` : baseFrom;
 
-  const query = sql`
+  // Run data and count in parallel. A combined `COUNT(*) OVER()` window query
+  // forces Postgres to materialize the full match set before LIMIT can apply,
+  // which defeats short-circuiting on the data side. Two queries let the data
+  // query stop at LIMIT rows via index, while the count runs concurrently.
+  const dataQuery = sql`
     SELECT
       ${flowsheet.id},
       ${flowsheet.add_time} AS play_date,
@@ -78,18 +83,18 @@ export async function searchFlowsheet(params: SearchParams): Promise<{ results: 
       ${flowsheet.album_title},
       ${flowsheet.record_label},
       ${flowsheet.show_id},
-      ${DJ_NAME_EXPR} AS dj_name,
-      (COUNT(*) OVER())::int AS total
+      ${DJ_NAME_EXPR} AS dj_name
     ${fullWhere}
     ORDER BY ${sortExpr} ${orderDirection}
     LIMIT ${limit} OFFSET ${offset}
   `;
 
-  const rows = await db.execute(query);
+  const countQuery = sql`SELECT COUNT(*)::int AS total ${fullWhere}`;
 
-  const typedRows = rows as unknown as SearchResultRow[];
-  const results = typedRows.map(transformRow);
-  const total = typedRows[0]?.total ?? 0;
+  const [dataRows, countRows] = await Promise.all([db.execute(dataQuery), db.execute(countQuery)]);
+
+  const results = (dataRows as unknown as SearchResultRow[]).map(transformRow);
+  const total = (countRows as unknown as CountRow[])[0]?.total ?? 0;
 
   return { results, total };
 }

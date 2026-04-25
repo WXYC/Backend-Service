@@ -374,6 +374,9 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_track_title_trgm_idx').using('gin', sql`${table.track_title} gin_trgm_ops`),
     index('flowsheet_album_title_trgm_idx').using('gin', sql`${table.album_title} gin_trgm_ops`),
     index('flowsheet_record_label_trgm_idx').using('gin', sql`${table.record_label} gin_trgm_ops`),
+    index('flowsheet_track_add_time_idx')
+      .on(sql`${table.add_time} DESC`)
+      .where(sql`${table.entry_type} = 'track'`),
   ]
 );
 
