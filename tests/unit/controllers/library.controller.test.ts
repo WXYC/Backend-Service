@@ -13,6 +13,10 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   markAlbumFound: mockMarkAlbumFound,
   fuzzySearchLibrary: mockFuzzySearchLibrary,
   enrichWithArtwork: mockEnrichWithArtwork,
+  // Identity-preserving wire-shape transform: tests stub it as a pass-through
+  // so the assertions below see the same objects produced by enrichWithArtwork.
+  serializeLibraryArtistViewEntry: (row: unknown) => row,
+  serializeArtist: (row: unknown) => row,
   // Stub out other exports that may be referenced at import time
   getFormatsFromDB: jest.fn(),
   getRotationFromDB: jest.fn(),
