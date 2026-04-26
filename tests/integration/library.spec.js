@@ -329,6 +329,12 @@ describe('Library Artists', () => {
       expect(res.body.artist_name).toContain('Test Artist');
       expect(res.body.alphabetical_name).toBeDefined();
       expect(res.body.code_letters).toBe(uniqueSuffix);
+      // A freshly inserted artist has no resolved external IDs, so the
+      // nested ReconciledIdentity is null. The flat external-ID columns are
+      // not exposed on the wire — they're only accessible via the nested form.
+      expect(res.body.reconciled_identity).toBeNull();
+      expect(res.body).not.toHaveProperty('discogs_artist_id');
+      expect(res.body).not.toHaveProperty('musicbrainz_artist_id');
     });
 
     test('returns 400 when artist_name is missing', async () => {

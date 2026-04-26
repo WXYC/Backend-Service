@@ -181,7 +181,7 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   const response: Artist = await libraryService.insertArtist(new_artist);
   await libraryService.insertArtistGenreCrossreference(response.id, body.genre_id, body.code_number);
   res.status(201).json({
-    ...response,
+    ...libraryService.serializeArtist(response),
     code_number: body.code_number,
     genre_id: body.genre_id,
   });
