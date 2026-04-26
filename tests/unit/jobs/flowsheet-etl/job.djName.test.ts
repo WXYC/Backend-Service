@@ -83,7 +83,7 @@ const findExecuteCallMatching = (pattern: RegExp): unknown[] | undefined => {
   return calls.find((call) => pattern.test(renderSql(call[0])));
 };
 
-describe('runIncremental: dj_name backfill (step 5b.2)', () => {
+describe('runIncremental: dj_name on insert (step 5b.2)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (getLastRunTimestamp as jest.Mock).mockResolvedValue(null);
@@ -93,17 +93,27 @@ describe('runIncremental: dj_name backfill (step 5b.2)', () => {
       .mockImplementationOnce((resolve: (v: unknown) => void) => resolve([]));
   });
 
-  it('runs the dj_name backfill UPDATE after importing new entries', async () => {
+  it('runs the dj_name UPDATE scoped to just-imported legacy_entry_ids', async () => {
+    // After the 2026-04 wedge incident, the ETL no longer rewrites every
+    // NULL-dj_name row on every cron tick. It only updates the rows it just
+    // inserted; legacy rows are handled once by the backfill job.
     mockFetchLegacyShows.mockResolvedValue([makeShow()]);
-    mockFetchLegacyEntries.mockResolvedValue([makeEntry()]);
+    mockFetchLegacyEntries.mockResolvedValue([makeEntry({ id: 2001 })]);
 
     await runIncremental();
 
     const djNameUpdate = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet[\s\S]*dj_name[\s\S]*COALESCE/i);
     expect(djNameUpdate).toBeDefined();
+    const sql = renderSql(djNameUpdate?.[0]);
+    // Must scope by the just-imported legacy_entry_ids (passed in via the IN/ANY clause),
+    // not rewrite every NULL-dj_name row in the table.
+    expect(sql).toMatch(/legacy_entry_id/);
+    expect(sql).toMatch(/=\s*ANY/i);
   });
 
-  it('skips the dj_name backfill UPDATE when no entries are imported', async () => {
+  it('does not run the dj_name UPDATE when no rows were newly inserted', async () => {
+    // When fetchLegacyEntries returns rows that are all already in the DB
+    // (i.e., updates only), there is nothing to populate dj_name on.
     mockFetchLegacyShows.mockResolvedValue([]);
     mockFetchLegacyEntries.mockResolvedValue([]);
 
@@ -116,5 +126,25 @@ describe('runIncremental: dj_name backfill (step 5b.2)', () => {
 
     const djNameUpdate = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet[\s\S]*dj_name[\s\S]*COALESCE/i);
     expect(djNameUpdate).toBeUndefined();
+  });
+
+  it('does not run an unbounded UPDATE (dj_name IS NULL) without a row-id scope', async () => {
+    // Regression guard for the wedge: the original resolveDjNames had no
+    // row-id scope and rewrote every NULL-dj_name row in flowsheet on each
+    // call. Ensure no execute call matches that shape.
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([makeEntry()]);
+
+    await runIncremental();
+
+    const calls = (db.execute as jest.Mock).mock.calls;
+    for (const call of calls) {
+      const sql = renderSql(call[0]);
+      if (/UPDATE[\s\S]*flowsheet[\s\S]*dj_name/i.test(sql)) {
+        // Must have an explicit row-id scope; the legacy `dj_name IS NULL`
+        // alone is not sufficient because it touches every legacy row.
+        expect(sql).toMatch(/=\s*ANY|IN\s*\(/i);
+      }
+    }
   });
 });
