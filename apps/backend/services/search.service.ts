@@ -1,5 +1,5 @@
 import { sql, type SQL } from 'drizzle-orm';
-import { db, flowsheet, shows, user } from '@wxyc/database';
+import { db, flowsheet } from '@wxyc/database';
 import { parseSearchQuery, type SearchCondition } from './search-parser.service.js';
 
 export type SearchParams = {
@@ -61,13 +61,19 @@ export type SearchResult = {
   dj_name: string;
 };
 
-const DJ_NAME_EXPR = sql`COALESCE(${user.djName}, ${shows.legacy_dj_name}, ${user.name}, 'Unknown DJ')`;
+// Display projection for the resolved DJ name. Reads the denormalized column
+// added in step 5b (migrations 0053/0054) instead of joining shows -> auth_user
+// per row. The 'Unknown DJ' fallback guards rows that somehow carry NULL —
+// 0053 backfilled all existing rows and 5b.2 keeps inserts populated, so this
+// branch should be dead in practice, but leaving it keeps the API contract
+// stable (clients see a non-null string).
+const DJ_NAME_EXPR = sql`COALESCE(${flowsheet.dj_name}, 'Unknown DJ')`;
 
 const SORT_MAP: Record<SearchParams['sort'], SQL> = {
   date: sql`${flowsheet.add_time}`,
   artist: sql`${flowsheet.artist_name}`,
   song: sql`${flowsheet.track_title}`,
-  dj: DJ_NAME_EXPR,
+  dj: sql`${flowsheet.dj_name}`,
 };
 
 /** Column references for WHERE clause building, keyed by SearchField name. */
@@ -98,8 +104,6 @@ export async function searchFlowsheet(
 
   const baseFrom = sql`
     FROM ${flowsheet}
-    LEFT JOIN ${shows} ON ${shows.id} = ${flowsheet.show_id}
-    LEFT JOIN ${user} ON ${user.id} = ${shows.primary_dj_id}
     WHERE ${flowsheet.entry_type} = 'track'
   `;
 
@@ -259,16 +263,16 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
 }
 
 function buildDjNameMatch(value: string, exact: boolean): SQL {
-  // OR-decompose across the three underlying columns instead of filtering on
-  // the COALESCE expression. Postgres does not push ILIKE predicates through
-  // COALESCE to use the per-column trigram indexes; the OR form lets the
-  // planner BitmapOr across user.dj_name, user.name, and shows.legacy_dj_name.
-  // Display still uses COALESCE (DJ_NAME_EXPR) for the priority-ordered name.
+  // Single-column predicate on the denormalized flowsheet.dj_name (step 5b.3).
+  // The OR-decomposition this replaced (across user.djName, user.name, and
+  // shows.legacy_dj_name) was a workaround for Postgres not pushing ILIKE
+  // through the COALESCE display expression; with the resolved value stored
+  // on the row the predicate collapses to one column and one trigram index
+  // (flowsheet_dj_name_trgm_idx, migration 0054).
   if (exact) {
-    return sql`(${user.djName} = ${value} OR ${user.name} = ${value} OR ${shows.legacy_dj_name} = ${value})`;
+    return sql`${flowsheet.dj_name} = ${value}`;
   }
-  const pattern = '%' + value + '%';
-  return sql`(${user.djName} ILIKE ${pattern} OR ${user.name} ILIKE ${pattern} OR ${shows.legacy_dj_name} ILIKE ${pattern})`;
+  return sql`${flowsheet.dj_name} ILIKE ${'%' + value + '%'}`;
 }
 
 function buildDateMatch(value: string): SQL {
