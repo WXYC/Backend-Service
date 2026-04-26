@@ -781,3 +781,5 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
     }
   }
 };
+
+// Contributed for bounty: $2
