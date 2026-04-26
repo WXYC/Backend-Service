@@ -5,6 +5,17 @@ import { EventEmitter } from 'node:events';
 import path from 'path';
 import { MirrorSQL } from '@wxyc/database';
 import { cryptoRandomId, expBackoffMs } from './utilities.mirror';
+import {
+  addMirrorBreadcrumb,
+  buildMirrorCommandSummary,
+  captureMirrorException,
+  getMirrorRingIndex,
+  summarizeSql,
+  truncateForMirrorPayload,
+  type MirrorCommandStatus,
+  type MirrorCommandSummary,
+  type MirrorLogContext,
+} from './mirror.logging';
 
 const CommandQueueEvents = {
   enqueued: 'enqueued',
@@ -18,11 +29,15 @@ const CommandQueueEvents = {
 export interface MirrorCommand {
   id: string;
   sql: string;
+  sqlLength: number;
+  sqlHash: string;
+  statementsCount: number;
   enqueuedAt: number;
   attempts: number;
   lastResult?: string;
   lastError?: string;
-  status: 'pending' | 'in_progress' | 'in_progress_retrying' | 'completed' | 'failed';
+  status: MirrorCommandStatus;
+  context?: MirrorLogContext;
 }
 
 export interface MirrorQueueOptions {
@@ -34,11 +49,40 @@ export interface MirrorQueueOptions {
 }
 
 export interface FatalInfo {
-  failedCommand: MirrorCommand;
-  pendingQueue: MirrorCommand[];
+  failedCommand: MirrorCommandSummary;
+  pendingQueue: MirrorCommandSummary[];
+  pendingQueueDepth: number;
   reason: string;
   timestamp: string;
   logFile: string;
+  ringIndex: number;
+}
+
+/**
+ * Internal payload for `createTrigger`. Tagged so each branch is exhaustive
+ * and survives future field additions; the wire shape sent to SSE consumers
+ * stays the bare `MirrorCommand` / `FatalInfo` for backwards compatibility.
+ */
+type TriggerPayload =
+  | { kind: 'command'; cmd: MirrorCommand }
+  | { kind: 'retry'; cmd: MirrorCommand; error: Error; attempt: number }
+  | { kind: 'fatal'; info: FatalInfo };
+
+const DEFAULTS = {
+  fatalReportsMax: 10,
+  fatalReportsIntervalMs: 15 * 60 * 1000,
+  secondaryReportsMax: 10,
+  secondaryReportsIntervalMs: 10 * 60 * 1000,
+  secondaryReportOnAttempt: 1,
+  reportMaxBytes: 64 * 1024,
+  pendingQueueSummariesMax: 20,
+} as const;
+
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 export class MirrorCommandQueue extends EventEmitter {
@@ -48,27 +92,103 @@ export class MirrorCommandQueue extends EventEmitter {
     if (!this._instance) {
       this._instance = new MirrorCommandQueue(options);
 
-      this._instance.on(CommandQueueEvents.enqueued, this.createTrigger('syncStarted'));
-      this._instance.on(CommandQueueEvents.started, this.createTrigger('syncProgress'));
-      this._instance.on(CommandQueueEvents.succeeded, this.createTrigger('syncComplete'));
-      this._instance.on(CommandQueueEvents.failedAttempt, this.createTrigger('syncRetry'));
-      this._instance.on(CommandQueueEvents.fatal, this.createTrigger('syncError'));
-      this._instance.on(CommandQueueEvents.persisted, this.createTrigger('syncError'));
+      this._instance.on(CommandQueueEvents.enqueued, this.dispatch('syncStarted'));
+      this._instance.on(CommandQueueEvents.started, this.dispatch('syncProgress'));
+      this._instance.on(CommandQueueEvents.succeeded, this.dispatch('syncComplete'));
+      this._instance.on(CommandQueueEvents.failedAttempt, this.dispatch('syncRetry'));
+      this._instance.on(CommandQueueEvents.fatal, this.dispatch('syncError'));
+      this._instance.on(CommandQueueEvents.persisted, this.dispatch('syncError'));
     }
 
     return this._instance;
   }
 
-  private static createTrigger = (eventType: keyof typeof MirrorEvents) => (cmd: MirrorCommand) => {
-    const data: EventData = {
-      type: eventType,
-      payload: cmd,
-      timestamp: new Date(),
+  /**
+   * Builds an EventEmitter listener for a given MirrorEvents type.
+   * Wraps the raw payload (cmd / failedAttempt-tuple / FatalInfo) into a
+   * tagged TriggerPayload for the breadcrumb branch, then broadcasts the
+   * unwrapped, original-shape payload to SSE subscribers.
+   */
+  private static dispatch =
+    (eventType: keyof typeof MirrorEvents) =>
+    (raw: MirrorCommand | { cmd: MirrorCommand; error: Error; attempt: number } | FatalInfo) => {
+      const tagged = MirrorCommandQueue.tagPayload(raw);
+
+      // SSE wire format: keep the prior bare-shape payload to avoid breaking dj-site.
+      const data: EventData = {
+        type: eventType,
+        payload: MirrorCommandQueue.broadcastPayload(tagged),
+        timestamp: new Date(),
+      };
+      serverEventsMgr.broadcast('mirror', data);
+
+      try {
+        switch (tagged.kind) {
+          case 'command':
+            addMirrorBreadcrumb(
+              `Mirror queue: ${eventType}`,
+              {
+                eventType,
+                status: tagged.cmd.status,
+                attempt: tagged.cmd.attempts,
+                sql_length: tagged.cmd.sqlLength,
+                sql_hash: tagged.cmd.sqlHash,
+              },
+              tagged.cmd.context ?? { mirrorCmdId: tagged.cmd.id },
+              eventType === 'syncError' ? 'error' : 'info'
+            );
+            return;
+          case 'retry':
+            addMirrorBreadcrumb(
+              'Mirror queue: failed attempt',
+              {
+                eventType,
+                attempt: tagged.attempt,
+                last_error: truncateForMirrorPayload(tagged.error?.message, 256),
+              },
+              tagged.cmd.context ?? { mirrorCmdId: tagged.cmd.id },
+              tagged.attempt >= 2 ? 'warning' : 'info'
+            );
+            return;
+          case 'fatal':
+            addMirrorBreadcrumb(
+              `Mirror queue: ${eventType}`,
+              {
+                eventType,
+                ring_file: tagged.info.logFile,
+                pending_depth: tagged.info.pendingQueueDepth,
+                reason: truncateForMirrorPayload(tagged.info.reason, 256),
+              },
+              tagged.info.failedCommand.context,
+              'error'
+            );
+            return;
+        }
+      } catch {
+        // Never let observability break the queue.
+      }
     };
 
-    serverEventsMgr.broadcast('mirror', data);
-    console.table(cmd);
-  };
+  private static tagPayload(
+    raw: MirrorCommand | { cmd: MirrorCommand; error: Error; attempt: number } | FatalInfo
+  ): TriggerPayload {
+    if ('failedCommand' in raw) return { kind: 'fatal', info: raw };
+    if ('cmd' in raw && 'error' in raw) return { kind: 'retry', ...raw };
+    return { kind: 'command', cmd: raw };
+  }
+
+  private static broadcastPayload(
+    tagged: TriggerPayload
+  ): MirrorCommand | FatalInfo | { cmd: MirrorCommand; error: Error; attempt: number } {
+    switch (tagged.kind) {
+      case 'command':
+        return tagged.cmd;
+      case 'retry':
+        return { cmd: tagged.cmd, error: tagged.error, attempt: tagged.attempt };
+      case 'fatal':
+        return tagged.info;
+    }
+  }
 
   private readonly options: Required<MirrorQueueOptions>;
   private readonly queue: MirrorCommand[] = [];
@@ -87,17 +207,23 @@ export class MirrorCommandQueue extends EventEmitter {
     };
   }
 
-  enqueue(sqls: string[]): MirrorCommand | null {
+  enqueue(sqls: string[], context?: MirrorLogContext): MirrorCommand | null {
     if (!this.alive) return null;
-    let sql = sqls.map((s) => (s.trim().endsWith(';') ? s.trim() : s.trim() + ';')).join('\n');
-    sql = `START TRANSACTION;\n${sql}\nCOMMIT;`;
+    const joined = sqls.map((s) => (s.trim().endsWith(';') ? s.trim() : s.trim() + ';')).join('\n');
+    const sql = `START TRANSACTION;\n${joined}\nCOMMIT;`;
+    const { sqlLength, sqlHash } = summarizeSql(sql);
 
+    const id = cryptoRandomId();
     const cmd: MirrorCommand = {
-      id: cryptoRandomId(),
+      id,
       sql,
+      sqlLength,
+      sqlHash,
+      statementsCount: sqls.length,
       enqueuedAt: Date.now(),
       attempts: 0,
       status: 'pending',
+      context: context ? { ...context, mirrorCmdId: id } : { mirrorCmdId: id },
     };
 
     this.queue.push(cmd);
@@ -109,6 +235,7 @@ export class MirrorCommandQueue extends EventEmitter {
   isAlive() {
     return this.alive;
   }
+
   isDead() {
     return !this.alive;
   }
@@ -165,12 +292,32 @@ export class MirrorCommandQueue extends EventEmitter {
       return;
     }
 
+    const secondaryAttempt = envInt('MIRROR_SECONDARY_REPORT_ON_ATTEMPT', DEFAULTS.secondaryReportOnAttempt);
+    const maxSecondary = envInt('MIRROR_SECONDARY_REPORTS_MAX', DEFAULTS.secondaryReportsMax);
+    if (cmd.attempts === secondaryAttempt && maxSecondary > 0) {
+      // Best-effort: persistSecondaryReport handles its own errors. Awaiting it
+      // is safe because it never throws — we rely on this so a disk write
+      // failure can never abort the retry/re-queue path below.
+      await this.persistSecondaryReport(cmd, err, maxSecondary);
+    }
+
     cmd.status = 'in_progress_retrying';
     const delay = expBackoffMs(
       cmd.attempts,
       this.options.baseBackoffMs,
       this.options.maxBackoffMs,
       this.options.jitterMs
+    );
+
+    addMirrorBreadcrumb(
+      'Mirror queue: retry scheduled',
+      {
+        attempt: cmd.attempts,
+        delay_ms: delay,
+        last_error: truncateForMirrorPayload(cmd.lastError, 256),
+      },
+      cmd.context,
+      'warning'
     );
 
     setTimeout(() => {
@@ -188,34 +335,136 @@ export class MirrorCommandQueue extends EventEmitter {
     this.fatalEmitted = true;
     this.alive = false;
 
+    const ctx: MirrorLogContext = {
+      ...(failedCommand.context ?? {}),
+      mirrorCmdId: failedCommand.id,
+      attempt: failedCommand.attempts,
+      maxAttempts: this.options.maxAttempts,
+    };
+
+    captureMirrorException(new Error(failedCommand.lastError ?? reason), ctx, {
+      reason,
+      sql_length: failedCommand.sqlLength,
+      sql_hash: failedCommand.sqlHash,
+      statements_count: failedCommand.statementsCount,
+    });
+
     const info = await this.persistQueue(reason, failedCommand);
     this.emit(CommandQueueEvents.fatal, info);
   }
 
-  private async persistQueue(reason: string, failedCommand?: MirrorCommand) {
-    await promises.mkdir(this.options.logFile, { recursive: true });
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const logFile = path.join(this.options.logFile, `queue-fatal-${timestamp}.json`);
+  /**
+   * Best-effort: never throws. A failed disk write degrades observability
+   * (caught and surfaced as a Sentry breadcrumb) but never breaks the retry
+   * loop in `handleFailure`.
+   */
+  private async persistSecondaryReport(cmd: MirrorCommand, err: Error, maxReports: number): Promise<void> {
+    const intervalMs = envInt('MIRROR_SECONDARY_REPORTS_INTERVAL_MS', DEFAULTS.secondaryReportsIntervalMs);
+    const maxBytes = envInt('MIRROR_REPORT_MAX_BYTES', DEFAULTS.reportMaxBytes);
+    const nowMs = Date.now();
+    const ringIndex = getMirrorRingIndex(nowMs, intervalMs, maxReports);
+    const logFile = path.join(this.options.logFile, `queue-secondary-ring-${ringIndex}.json`);
 
-    const info: FatalInfo = {
-      failedCommand: failedCommand ?? {
-        id: 'n/a',
-        sql: 'n/a',
-        status: 'failed',
-        enqueuedAt: 0,
-        attempts: 0,
-        lastResult: 'n/a',
-        lastError: 'n/a',
-      },
-      pendingQueue: [...this.queue],
-      reason,
-      timestamp: new Date().toISOString(),
+    const payload = {
+      reportType: 'secondary' as const,
+      ringIndex,
+      timestamp: new Date(nowMs).toISOString(),
       logFile,
+      attempt: cmd.attempts,
+      reason: 'Mirror failedAttempt; retry scheduled',
+      cmd: buildMirrorCommandSummary(cmd),
+      error: truncateForMirrorPayload(err?.message ?? String(err), 2048),
     };
 
-    const payload = JSON.stringify(info, null, 2);
-    await promises.writeFile(logFile, payload, 'utf8');
+    try {
+      await promises.mkdir(this.options.logFile, { recursive: true });
+      const json = boundedJson(payload, maxBytes, () => ({
+        reportType: 'secondary' as const,
+        ringIndex,
+        timestamp: payload.timestamp,
+        logFile: payload.logFile,
+        attempt: payload.attempt,
+        reason: payload.reason,
+        cmd: { ...payload.cmd, context: undefined },
+        error: payload.error,
+        truncated: true,
+      }));
+      await promises.writeFile(logFile, json, 'utf8');
+      addMirrorBreadcrumb('Mirror queue: secondary report persisted', { ringIndex, logFile }, cmd.context, 'info');
+    } catch (writeErr) {
+      addMirrorBreadcrumb(
+        'Mirror queue: secondary report write failed',
+        { ringIndex, logFile, error: truncateForMirrorPayload((writeErr as Error)?.message ?? String(writeErr), 256) },
+        cmd.context,
+        'warning'
+      );
+    }
+  }
+
+  private async persistQueue(reason: string, failedCommand?: MirrorCommand): Promise<FatalInfo> {
+    const intervalMs = envInt('MIRROR_FATAL_REPORTS_INTERVAL_MS', DEFAULTS.fatalReportsIntervalMs);
+    const maxReports = envInt('MIRROR_FATAL_REPORTS_MAX', DEFAULTS.fatalReportsMax);
+    const maxBytes = envInt('MIRROR_REPORT_MAX_BYTES', DEFAULTS.reportMaxBytes);
+    const maxPendingSummaries = envInt('MIRROR_PENDING_QUEUE_SUMMARIES_MAX', DEFAULTS.pendingQueueSummariesMax);
+
+    const nowMs = Date.now();
+    const ringIndex = getMirrorRingIndex(nowMs, intervalMs, maxReports);
+    const logFile = path.join(this.options.logFile, `queue-fatal-ring-${ringIndex}.json`);
+
+    const failedCmdSummary: MirrorCommandSummary = failedCommand
+      ? buildMirrorCommandSummary(failedCommand)
+      : {
+          id: 'n/a',
+          enqueuedAt: 0,
+          attempts: 0,
+          status: 'failed',
+          lastError: 'n/a',
+          sqlLength: 0,
+          sqlHash: 'n/a',
+          statementsCount: 0,
+        };
+
+    const pendingQueue = this.queue.slice(0, maxPendingSummaries).map(buildMirrorCommandSummary);
+
+    const info: FatalInfo = {
+      failedCommand: failedCmdSummary,
+      pendingQueue,
+      pendingQueueDepth: this.queue.length,
+      reason: truncateForMirrorPayload(reason, 2048) ?? reason,
+      timestamp: new Date(nowMs).toISOString(),
+      logFile,
+      ringIndex,
+    };
+
+    try {
+      await promises.mkdir(this.options.logFile, { recursive: true });
+      const json = boundedJson(info, maxBytes, () => ({
+        reportType: 'fatal' as const,
+        ringIndex,
+        timestamp: info.timestamp,
+        logFile: info.logFile,
+        reason: info.reason,
+        failedCommand: { ...info.failedCommand, context: undefined },
+        pendingQueueDepth: info.pendingQueueDepth,
+        truncated: true,
+      }));
+      await promises.writeFile(logFile, json, 'utf8');
+    } catch (writeErr) {
+      addMirrorBreadcrumb(
+        'Mirror queue: fatal report write failed',
+        { ringIndex, logFile, error: truncateForMirrorPayload((writeErr as Error)?.message ?? String(writeErr), 256) },
+        failedCmdSummary.context,
+        'error'
+      );
+    }
+
     this.emit(CommandQueueEvents.persisted, info);
     return info;
   }
+}
+
+function boundedJson<T>(payload: T, maxBytes: number, summarize: () => unknown): string {
+  const full = JSON.stringify(payload);
+  if (full.length <= maxBytes) return full;
+  return JSON.stringify({ ...(summarize() as Record<string, unknown>), jsonBytes: full.length });
 }
