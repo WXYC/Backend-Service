@@ -24,4 +24,11 @@ RUN npm install --omit=dev
 COPY --from=builder ./library-etl-builder/jobs/library-etl/dist ./jobs/library-etl/dist
 COPY --from=builder ./library-etl-builder/shared/database/dist ./shared/database/dist
 
+# Override the @wxyc/database default of 5s. Bulk ETL queries (legacy joins,
+# album/release reconciliation passes) can run tens of seconds on a fresh
+# library cache. Without this override the cron tick would 5s-timeout. See
+# shared/database/src/client.ts for the rationale.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+ENV DB_APPLICATION_NAME=wxyc-library-etl
+
 CMD ["npm", "start", "--workspace=@wxyc/library-etl"]
