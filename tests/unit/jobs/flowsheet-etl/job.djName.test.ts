@@ -53,6 +53,8 @@ const makeEntry = (overrides: Partial<LegacyEntryRow> = {}): LegacyEntryRow => (
 });
 
 import { runIncremental } from '../../../../jobs/flowsheet-etl/job';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * Render a drizzle `sql` template object to a string for substring assertions.
@@ -146,5 +148,58 @@ describe('runIncremental: dj_name on insert (step 5b.2)', () => {
         expect(sql).toMatch(/=\s*ANY|IN\s*\(/i);
       }
     }
+  });
+});
+
+describe('runBulkLoad: dj_name backfill ownership', () => {
+  // Source-grep assertions on the bulk-load path. We verify by reading the
+  // source rather than executing runBulkLoad because mocking the fs module
+  // (to feed it a fake dump) is flaky across Jest worker boundaries — the
+  // mock leaks into other test files when Jest reuses a worker. The source
+  // check is deterministic and locks the design intent equally well: the
+  // bulk-load path does not own dj_name backfill (the dedicated backfill
+  // job at jobs/backfills/flowsheet-dj-name-backfill does).
+  const jobSourcePath = path.resolve(__dirname, '../../../../jobs/flowsheet-etl/job.ts');
+  const jobSource = fs.readFileSync(jobSourcePath, 'utf-8');
+
+  /** Extract the body of a top-level `const NAME = async (...): RetType => { ... };`. */
+  const extractFunctionBody = (name: string): string => {
+    // Allow an optional return type annotation between the parameter list
+    // and the arrow (e.g. `async (): Promise<SyncResult> => {`). The
+    // non-greedy `.*?` matches up through `=> {` on the same logical line.
+    const startMatch = jobSource.match(
+      new RegExp(`(?:export\\s+)?const\\s+${name}\\s*=\\s*async\\s*\\([^)]*\\)[^={]*=>\\s*\\{`)
+    );
+    if (!startMatch || startMatch.index === undefined) {
+      throw new Error(`Could not locate function ${name} in job.ts`);
+    }
+    let depth = 1;
+    let i = startMatch.index + startMatch[0].length;
+    while (i < jobSource.length && depth > 0) {
+      const ch = jobSource[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+      i++;
+    }
+    return jobSource.slice(startMatch.index, i);
+  };
+
+  it('runBulkLoad does not call resolveDjNames (backfill job owns that pass)', () => {
+    // The bulk-load path imports millions of legacy rows. Calling
+    // resolveDjNames there would re-create the wedge from issue #511 because
+    // every row is NULL-dj_name immediately after import — the unbounded
+    // post-pass UPDATE would block reads and orphan database backends.
+    // Backfill is the dedicated job's responsibility.
+    const body = extractFunctionBody('runBulkLoad');
+    expect(body).not.toMatch(/\bresolveDjNames\s*\(/);
+  });
+
+  it('runIncremental still calls resolveDjNames with a row-id list', () => {
+    // Counterpart assertion: incremental sync DOES populate dj_name on the
+    // rows it just inserted (a small batch per cron tick). Verifies the
+    // call site exists and passes an argument (so it remains scoped, not
+    // unbounded).
+    const body = extractFunctionBody('runIncremental');
+    expect(body).toMatch(/\bresolveDjNames\s*\(\s*[A-Za-z_]/);
   });
 });
