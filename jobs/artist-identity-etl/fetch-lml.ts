@@ -65,7 +65,7 @@ export const fetchLmlIdentities = async (sinceMs: number | null): Promise<LmlIde
                musicbrainz_artist_id, spotify_artist_id,
                apple_music_artist_id, bandcamp_id
         FROM entity.identity
-        WHERE updated_at > to_timestamp(${sinceMs / 1000})
+        WHERE updated_at > to_timestamp(${sinceMs}::double precision / 1000.0)
           AND (
             discogs_artist_id IS NOT NULL
             OR wikidata_qid IS NOT NULL
