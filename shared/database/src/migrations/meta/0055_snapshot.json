@@ -1,6 +1,6 @@
 {
-  "id": "afd2abcd-621b-4bc3-8f9b-0262bbec1463",
-  "prevId": "3da6d4df-6305-4c99-b397-ee18f88cffbf",
+  "id": "d165c640-19ba-4f89-b5a3-44a9df7a5bc2",
+  "prevId": "8053be34-f229-4b20-89c2-ebda84aef97b",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -419,6 +419,42 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "discogs_artist_id": {
+          "name": "discogs_artist_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "musicbrainz_artist_id": {
+          "name": "musicbrainz_artist_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wikidata_qid": {
+          "name": "wikidata_qid",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "spotify_artist_id": {
+          "name": "spotify_artist_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "apple_music_artist_id": {
+          "name": "apple_music_artist_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "bandcamp_id": {
+          "name": "bandcamp_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -877,6 +913,22 @@
           "type": "varchar(512)",
           "primaryKey": false,
           "notNull": false
+        },
+        "dj_name": {
+          "name": "dj_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "search_doc": {
+          "name": "search_doc",
+          "type": "tsvector",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "setweight(to_tsvector('simple', coalesce(\"artist_name\", '')), 'A') || setweight(to_tsvector('simple', coalesce(\"track_title\", '')), 'B') || setweight(to_tsvector('simple', coalesce(\"dj_name\", '')), 'B') || setweight(to_tsvector('simple', coalesce(\"album_title\", '')), 'C') || setweight(to_tsvector('simple', coalesce(\"record_label\", '')), 'D')",
+            "type": "stored"
+          }
         }
       },
       "indexes": {
@@ -930,6 +982,82 @@
           "columns": [
             {
               "expression": "\"track_title\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "flowsheet_album_title_trgm_idx": {
+          "name": "flowsheet_album_title_trgm_idx",
+          "columns": [
+            {
+              "expression": "\"album_title\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "flowsheet_record_label_trgm_idx": {
+          "name": "flowsheet_record_label_trgm_idx",
+          "columns": [
+            {
+              "expression": "\"record_label\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "flowsheet_dj_name_trgm_idx": {
+          "name": "flowsheet_dj_name_trgm_idx",
+          "columns": [
+            {
+              "expression": "\"dj_name\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "flowsheet_track_add_time_idx": {
+          "name": "flowsheet_track_add_time_idx",
+          "columns": [
+            {
+              "expression": "\"add_time\" DESC",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"wxyc_schema\".\"flowsheet\".\"entry_type\" = 'track'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "flowsheet_search_doc_idx": {
+          "name": "flowsheet_search_doc_idx",
+          "columns": [
+            {
+              "expression": "\"search_doc\"",
               "asc": true,
               "isExpression": true,
               "nulls": "last"
@@ -1473,6 +1601,12 @@
         "on_streaming": {
           "name": "on_streaming",
           "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "artwork_url": {
+          "name": "artwork_url",
+          "type": "varchar(512)",
           "primaryKey": false,
           "notNull": false
         }
@@ -2418,6 +2552,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "shows_legacy_dj_name_trgm_idx": {
+          "name": "shows_legacy_dj_name_trgm_idx",
+          "columns": [
+            {
+              "expression": "\"legacy_dj_name\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -2656,6 +2805,36 @@
           "isUnique": true,
           "concurrently": false,
           "method": "btree",
+          "with": {}
+        },
+        "auth_user_dj_name_trgm_idx": {
+          "name": "auth_user_dj_name_trgm_idx",
+          "columns": [
+            {
+              "expression": "\"dj_name\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "auth_user_name_trgm_idx": {
+          "name": "auth_user_name_trgm_idx",
+          "columns": [
+            {
+              "expression": "\"name\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
           "with": {}
         }
       },
@@ -2906,9 +3085,15 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "artwork_url": {
+          "name": "artwork_url",
+          "type": "varchar(512)",
+          "primaryKey": false,
+          "notNull": false
         }
       },
-      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\", \"wxyc_schema\".\"library\".\"on_streaming\", \"wxyc_schema\".\"library\".\"album_artist\", \"wxyc_schema\".\"library\".\"plays\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL)",
+      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\", \"wxyc_schema\".\"library\".\"on_streaming\", \"wxyc_schema\".\"library\".\"album_artist\", \"wxyc_schema\".\"library\".\"plays\", \"wxyc_schema\".\"library\".\"artwork_url\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL)",
       "name": "library_artist_view",
       "schema": "wxyc_schema",
       "isExisting": false,

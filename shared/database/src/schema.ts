@@ -229,6 +229,15 @@ export const artists = wxyc_schema.table(
     code_letters: varchar('code_letters', { length: 4 }).notNull(),
     add_date: date('add_date').defaultNow().notNull(),
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+    // Reconciled external identifiers, populated by an ETL from LML's entity.identity table.
+    // Mirrors the @wxyc/shared ReconciledIdentity schema. All nullable; URL construction is
+    // the consumer's responsibility (templates exist for Spotify, Apple Music, and Bandcamp).
+    discogs_artist_id: integer('discogs_artist_id'),
+    musicbrainz_artist_id: varchar('musicbrainz_artist_id', { length: 64 }),
+    wikidata_qid: varchar('wikidata_qid', { length: 32 }),
+    spotify_artist_id: varchar('spotify_artist_id', { length: 64 }),
+    apple_music_artist_id: varchar('apple_music_artist_id', { length: 64 }),
+    bandcamp_id: varchar('bandcamp_id', { length: 255 }),
   },
   (table) => {
     return {

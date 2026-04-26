@@ -1,10 +1,6 @@
 {
-<<<<<<< HEAD
-  "id": "3da6d4df-6305-4c99-b397-ee18f88cffbf",
-=======
-  "id": "afd2abcd-621b-4bc3-8f9b-0262bbec1463",
->>>>>>> 07a6301 (Add artwork_url column to library table and view)
-  "prevId": "1b9abf04-dde6-46cb-a682-83ffd4328c50",
+  "id": "8053be34-f229-4b20-89c2-ebda84aef97b",
+  "prevId": "afd2abcd-621b-4bc3-8f9b-0262bbec1463",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1479,15 +1475,12 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": false
-<<<<<<< HEAD
-=======
         },
         "artwork_url": {
           "name": "artwork_url",
           "type": "varchar(512)",
           "primaryKey": false,
           "notNull": false
->>>>>>> 07a6301 (Add artwork_url column to library table and view)
         }
       },
       "indexes": {
@@ -2913,17 +2906,13 @@
           "primaryKey": false,
           "notNull": false
         },
-<<<<<<< HEAD
         "plays": {
           "name": "plays",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "default": 0
-        }
-      },
-      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\", \"wxyc_schema\".\"library\".\"on_streaming\", \"wxyc_schema\".\"library\".\"album_artist\", \"wxyc_schema\".\"library\".\"plays\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL)",
-=======
+        },
         "artwork_url": {
           "name": "artwork_url",
           "type": "varchar(512)",
@@ -2931,8 +2920,7 @@
           "notNull": false
         }
       },
-      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\", \"wxyc_schema\".\"library\".\"on_streaming\", \"wxyc_schema\".\"library\".\"album_artist\", \"wxyc_schema\".\"library\".\"artwork_url\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL)",
->>>>>>> 07a6301 (Add artwork_url column to library table and view)
+      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\", \"wxyc_schema\".\"library\".\"on_streaming\", \"wxyc_schema\".\"library\".\"album_artist\", \"wxyc_schema\".\"library\".\"plays\", \"wxyc_schema\".\"library\".\"artwork_url\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL)",
       "name": "library_artist_view",
       "schema": "wxyc_schema",
       "isExisting": false,
