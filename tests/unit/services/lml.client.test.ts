@@ -253,6 +253,78 @@ describe('lml.client', () => {
     });
   });
 
+  describe('LML_API_KEY bearer header', () => {
+    function lastCallHeaders(): Record<string, string> {
+      const init = mockFetch.mock.calls.at(-1)?.[1];
+      return (init?.headers ?? {}) as Record<string, string>;
+    }
+
+    it('includes Authorization: Bearer <key> when LML_API_KEY is set (POST)', async () => {
+      process.env.LML_API_KEY = 'test-secret';
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ on_streaming: false, sources: {} }),
+      } as unknown as globalThis.Response);
+
+      await checkStreamingAvailability('Stereolab', 'Aluminum Tunes');
+
+      expect(lastCallHeaders()).toMatchObject({
+        Authorization: 'Bearer test-secret',
+        'Content-Type': 'application/json',
+      });
+    });
+
+    it('includes Authorization: Bearer <key> when LML_API_KEY is set (GET)', async () => {
+      process.env.LML_API_KEY = 'test-secret';
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ artist_id: 1, name: 'Stereolab' }),
+      } as unknown as globalThis.Response);
+
+      await getArtistDetails(1);
+
+      expect(lastCallHeaders()).toMatchObject({ Authorization: 'Bearer test-secret' });
+    });
+
+    it('does not include Authorization header when LML_API_KEY is unset', async () => {
+      delete process.env.LML_API_KEY;
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ artist_id: 1, name: 'Stereolab' }),
+      } as unknown as globalThis.Response);
+
+      await getArtistDetails(1);
+
+      expect(lastCallHeaders()).not.toHaveProperty('Authorization');
+    });
+
+    it('does not include Authorization header when LML_API_KEY is empty string', async () => {
+      process.env.LML_API_KEY = '';
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ on_streaming: false, sources: {} }),
+      } as unknown as globalThis.Response);
+
+      await checkStreamingAvailability('a', 'b');
+
+      expect(lastCallHeaders()).not.toHaveProperty('Authorization');
+    });
+
+    it('preserves caller-provided headers alongside the bearer header', async () => {
+      process.env.LML_API_KEY = 'test-secret';
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ on_streaming: false, sources: {} }),
+      } as unknown as globalThis.Response);
+
+      await checkStreamingAvailability('a', 'b');
+
+      const headers = lastCallHeaders();
+      expect(headers['Content-Type']).toBe('application/json');
+      expect(headers.Authorization).toBe('Bearer test-secret');
+    });
+  });
+
   describe('searchLibrary', () => {
     it('sends GET to /api/v1/library/search with query params', async () => {
       const mockResponse = {
