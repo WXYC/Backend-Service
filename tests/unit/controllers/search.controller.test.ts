@@ -25,11 +25,11 @@ const makeRes = () => {
   res.status = jest.fn(function (this: typeof res, code: number) {
     this._status = code;
     return this;
-  }) as unknown as Response['status'];
+  });
   res.json = jest.fn(function (this: typeof res, body: unknown) {
     this._body = body;
     return this;
-  }) as unknown as Response['json'];
+  });
   return res;
 };
 

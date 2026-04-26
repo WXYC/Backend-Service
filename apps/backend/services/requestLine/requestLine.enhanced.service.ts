@@ -164,8 +164,8 @@ export async function processRequest(body: RequestLineRequestBody): Promise<Unif
 
   let parsed: ParsedRequest;
   let libraryResults: EnrichedLibraryResult[] = [];
-  let itemsWithArtwork: Array<[EnrichedLibraryResult, ArtworkResponse | null]> = [];
-  let songNotFound = false;
+  let itemsWithArtwork: Array<[EnrichedLibraryResult, ArtworkResponse | null]>;
+  let songNotFound: boolean;
   let foundOnCompilation = false;
   let discogsTitles = new Map<number, string>();
   let searchType = 'none';
@@ -178,7 +178,9 @@ export async function processRequest(body: RequestLineRequestBody): Promise<Unif
     } catch (error) {
       console.error('[RequestLine] Parsing failed:', error);
       // Per the plan: "Requests fail if Groq is unavailable"
-      throw new Error(`AI parsing failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`AI parsing failed: ${error instanceof Error ? error.message : String(error)}`, {
+        cause: error,
+      });
     }
   } else if (body.skipParsing) {
     // Create a minimal parsed request when parsing is skipped

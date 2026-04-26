@@ -108,7 +108,7 @@ export async function parseRequest(message: string): Promise<ParsedRequest> {
   } catch (error) {
     if (error instanceof SyntaxError) {
       console.error(`[AI Parser] Failed to parse JSON response:`, error);
-      throw new Error(`Invalid JSON response from Groq: ${error.message}`);
+      throw new Error(`Invalid JSON response from Groq: ${error.message}`, { cause: error });
     }
     console.error(`[AI Parser] Error parsing request:`, error);
     throw error;

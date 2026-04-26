@@ -36,13 +36,7 @@ const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
   const djId = show.primary_dj_id;
   if (!djId || !show) return;
 
-  const dj = (
-    await db
-      .select()
-      .from(user)
-      .where(eq(user.id, djId as string))
-      .limit(1)
-  )?.[0];
+  const dj = (await db.select().from(user).where(eq(user.id, djId)).limit(1))?.[0];
 
   if (!dj) return;
 
@@ -288,11 +282,11 @@ export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) 
       const showRow = await db
         .select({ legacy_show_id: shows.legacy_show_id })
         .from(shows)
-        .where(eq(shows.id, entry.show_id as number))
+        .where(eq(shows.id, entry.show_id))
         .limit(1);
       radioShowID = showRow?.[0]?.legacy_show_id ?? null;
       if (radioShowID != null) {
-        cacheShowId(entry.show_id as number, radioShowID);
+        cacheShowId(entry.show_id, radioShowID);
       }
     } catch {
       // DB lookup failed; fall back to tubafrenzy auto-resolution

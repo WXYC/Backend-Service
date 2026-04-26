@@ -7,7 +7,6 @@
 
 type Statement = Record<string, readonly string[]>;
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export function createAccessControl<S extends Statement>(_statements: S) {
   return {
     newRole(permissions: Partial<{ [K in keyof S]: readonly string[] }>) {

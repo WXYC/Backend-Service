@@ -94,7 +94,7 @@ describe('proxy.controller', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockNext = jest.fn() as unknown as NextFunction;
+    mockNext = jest.fn();
   });
 
   // --- searchArtwork ---

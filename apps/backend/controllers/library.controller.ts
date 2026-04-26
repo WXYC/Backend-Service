@@ -140,7 +140,7 @@ export const searchForAlbum: RequestHandler = async (req: Request<object, object
   const onStreaming = query.on_streaming === 'true' ? true : query.on_streaming === 'false' ? false : undefined;
 
   const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n, onStreaming);
-  const enriched = await libraryService.enrichWithArtwork(response as Array<Record<string, unknown>>);
+  const enriched = await libraryService.enrichWithArtwork(response);
   res.status(200).json(enriched);
 };
 

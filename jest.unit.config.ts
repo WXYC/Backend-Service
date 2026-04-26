@@ -27,6 +27,11 @@ const config: Config = {
     // Remove .js extensions from relative imports (ESM compatibility)
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },
+  // @wxyc/shared is a workspace dep installed under each workspace's node_modules
+  // rather than hoisted to the root, so root-level tests (tests/**) can't resolve it
+  // via standard node module resolution. List the workspace node_modules paths so jest's
+  // resolver finds it.
+  moduleDirectories: ['node_modules', 'apps/backend/node_modules', 'shared/authentication/node_modules'],
   collectCoverageFrom: ['apps/backend/**/*.ts', 'jobs/**/*.ts', '!**/*.d.ts', '!**/dist/**'],
   modulePathIgnorePatterns: ['<rootDir>/.claude/worktrees'],
   clearMocks: true,

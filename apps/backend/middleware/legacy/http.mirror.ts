@@ -52,7 +52,7 @@ export async function mirrorCreateEntry(body: Record<string, unknown>): Promise<
       console.error(`[mirror] POST failed: ${response.status} ${text}`);
       return null;
     }
-    const json = await response.json();
+    const json = (await response.json()) as { id?: number | null };
     return json.id ?? null;
   } catch (e) {
     console.error('[mirror] POST error:', e);
@@ -101,7 +101,7 @@ export function clearEntryIdMap(): void {
  * nowPlayingFlag is always 0 (dropped — nothing in tubafrenzy reads it).
  */
 export function mapEntryToTubafrenzy(entry: MirrorEntry, radioShowID?: number | null): Record<string, unknown> {
-  const startMs = entry.add_time ? new Date(entry.add_time as any).getTime() : Date.now();
+  const startMs = entry.add_time ? new Date(entry.add_time).getTime() : Date.now();
   const radioHour = Math.floor(startMs / 3_600_000) * 3_600_000;
 
   const entryType = entry.entry_type;
@@ -224,7 +224,7 @@ export async function mirrorCreateShow(body: Record<string, unknown>): Promise<n
         body: JSON.stringify(body),
       });
       if (response.ok) {
-        const json = await response.json();
+        const json = (await response.json()) as { id?: number | null };
         return json.id ?? null;
       }
       const text = await response.text();
@@ -299,7 +299,7 @@ interface MirrorDJ {
  * Maps a Backend-Service Show + user to the tubafrenzy radioShow POST body.
  */
 export function mapShowToTubafrenzy(show: MirrorShow, dj: MirrorDJ): Record<string, unknown> {
-  const startMs = show.start_time ? new Date(show.start_time as any).getTime() : Date.now();
+  const startMs = show.start_time ? new Date(show.start_time).getTime() : Date.now();
   return {
     djName: dj.realName || dj.name,
     djHandle: dj.djName || dj.name,

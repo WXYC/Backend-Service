@@ -7,9 +7,9 @@ import { getConfig, getSecrets } from '../../../apps/backend/controllers/config.
 
 const createMockRes = () => {
   const res: Partial<Response> = {};
-  res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
-  res.json = jest.fn().mockReturnValue(res) as unknown as Response['json'];
-  res.set = jest.fn().mockReturnValue(res) as unknown as Response['set'];
+  res.status = jest.fn().mockReturnValue(res);
+  res.json = jest.fn().mockReturnValue(res);
+  res.set = jest.fn().mockReturnValue(res);
   return res;
 };
 

@@ -47,7 +47,7 @@ async function verify(token: string) {
 
     return payload as WXYCAuthJwtPayload;
   } catch (error) {
-    throw new Error(`JWT verification failed: ${error}`);
+    throw new Error(`JWT verification failed: ${error}`, { cause: error });
   }
 }
 
@@ -82,7 +82,7 @@ export function requirePermissions(required: RequiredPermissions) {
         const payload = decodeJwt(token) as WXYCAuthJwtPayload;
         const userId = payload.id || payload.sub;
         if (userId) {
-          req.auth = { ...payload, id: userId } as WXYCAuthJwtPayload;
+          req.auth = { ...payload, id: userId };
         }
       } catch {
         req.auth = { id: token } as WXYCAuthJwtPayload;
@@ -125,7 +125,7 @@ export function requirePermissions(required: RequiredPermissions) {
     req.auth = {
       ...payload,
       id: userId,
-    } as WXYCAuthJwtPayload;
+    };
 
     // Check if user is banned (field is included in JWT payload via ...user spread)
     if (payload.banned) {
@@ -144,13 +144,13 @@ export function requirePermissions(required: RequiredPermissions) {
         return res.status(403).json({ error: 'Forbidden: Missing role in token.' });
       }
 
-      const normalizedRole = normalizeRole(payload.role as string);
+      const normalizedRole = normalizeRole(payload.role);
       if (!normalizedRole) {
         return res.status(403).json({ error: 'Forbidden: Invalid role.' });
       }
 
       // Update req.auth with normalized role so downstream sees a valid WXYCRole
-      req.auth = { ...req.auth!, role: normalizedRole };
+      req.auth = { ...req.auth, role: normalizedRole };
 
       const roleImpl = WXYCRoles[normalizedRole];
 
@@ -161,7 +161,7 @@ export function requirePermissions(required: RequiredPermissions) {
 
         const result = authorize({
           [resource]: actions,
-        } as RequiredPermissions);
+        });
 
         return result.success;
       });

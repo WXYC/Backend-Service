@@ -389,7 +389,7 @@ describe('http.mirror', () => {
         request_flag: undefined as any,
         segue: undefined as any,
       };
-      const result = mapEntryToTubafrenzy(entry as any);
+      const result = mapEntryToTubafrenzy(entry);
       expect(result.artistName).toBe('');
       expect(result.songTitle).toBe('');
       expect(result.releaseTitle).toBe('');
@@ -401,7 +401,7 @@ describe('http.mirror', () => {
     it('uses Date.now() when add_time is null', () => {
       const before = Date.now();
       const entry = { ...baseTrack, add_time: null };
-      const result = mapEntryToTubafrenzy(entry as any);
+      const result = mapEntryToTubafrenzy(entry);
       const after = Date.now();
       const radioHour = result.radioHour as number;
       // radioHour should be a valid hour boundary derived from Date.now()
@@ -487,7 +487,7 @@ describe('http.mirror', () => {
         album_id: null,
         rotation_id: null,
       };
-      const result = mapUpdateToTubafrenzy(entry as any);
+      const result = mapUpdateToTubafrenzy(entry);
       expect(result.artistName).toBe('');
       expect(result.songTitle).toBe('');
       expect(result.releaseTitle).toBe('');
@@ -619,7 +619,7 @@ describe('http.mirror', () => {
         name: 'kate',
       };
 
-      const result = mapShowToTubafrenzy(show as any, dj as any);
+      const result = mapShowToTubafrenzy(show, dj);
 
       expect(result.djName).toBe('Kate Bailey');
       expect(result.djHandle).toBe('DJ Catalyst');
@@ -632,7 +632,7 @@ describe('http.mirror', () => {
       const show = { id: 100, start_time: new Date() };
       const dj = { realName: null, djName: null, name: 'kate' };
 
-      const result = mapShowToTubafrenzy(show as any, dj as any);
+      const result = mapShowToTubafrenzy(show, dj);
 
       expect(result.djName).toBe('kate');
       expect(result.djHandle).toBe('kate');
@@ -642,7 +642,7 @@ describe('http.mirror', () => {
       const show = { id: 100, start_time: new Date() };
       const dj = { name: 'kate' };
 
-      const result = mapShowToTubafrenzy(show as any, dj as any);
+      const result = mapShowToTubafrenzy(show, dj);
 
       expect(result.showName).toBe('');
       expect(result.specialtyShowId).toBe(0);
