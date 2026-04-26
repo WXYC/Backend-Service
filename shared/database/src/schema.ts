@@ -579,6 +579,12 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       album_artist: library.album_artist,
       plays: library.plays,
       artwork_url: library.artwork_url,
+      discogs_artist_id: artists.discogs_artist_id,
+      musicbrainz_artist_id: artists.musicbrainz_artist_id,
+      wikidata_qid: artists.wikidata_qid,
+      spotify_artist_id: artists.spotify_artist_id,
+      apple_music_artist_id: artists.apple_music_artist_id,
+      bandcamp_id: artists.bandcamp_id,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -614,6 +620,12 @@ export type LibraryArtistViewEntry = {
   album_artist: string | null;
   plays: number;
   artwork_url: string | null;
+  discogs_artist_id: number | null;
+  musicbrainz_artist_id: string | null;
+  wikidata_qid: string | null;
+  spotify_artist_id: string | null;
+  apple_music_artist_id: string | null;
+  bandcamp_id: string | null;
 };
 
 export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {

@@ -74,6 +74,22 @@ describe('Library Catalog', () => {
 
       expectErrorContains(res, 'TODO');
     });
+
+    test('returns nested reconciled_identity (no flat external-ID columns)', async () => {
+      const res = await auth.get('/library').query({ artist_name: 'Built to Spill' }).expect(200);
+
+      expectArray(res);
+      if (res.body.length > 0) {
+        const row = res.body[0];
+        expect(row).toHaveProperty('reconciled_identity');
+        expect(row).not.toHaveProperty('discogs_artist_id');
+        expect(row).not.toHaveProperty('musicbrainz_artist_id');
+        expect(row).not.toHaveProperty('wikidata_qid');
+        expect(row).not.toHaveProperty('spotify_artist_id');
+        expect(row).not.toHaveProperty('apple_music_artist_id');
+        expect(row).not.toHaveProperty('bandcamp_id');
+      }
+    });
   });
 
   describe('POST /library (Add Album)', () => {
@@ -192,6 +208,21 @@ describe('Library Rotation', () => {
           'rotation_bin',
           'rotation_id'
         );
+      }
+    });
+
+    test('rotation entries return nested reconciled_identity (no flat external-ID columns)', async () => {
+      const res = await auth.get('/library/rotation').expect(200);
+
+      if (res.body.length > 0) {
+        const row = res.body[0];
+        expect(row).toHaveProperty('reconciled_identity');
+        expect(row).not.toHaveProperty('discogs_artist_id');
+        expect(row).not.toHaveProperty('musicbrainz_artist_id');
+        expect(row).not.toHaveProperty('wikidata_qid');
+        expect(row).not.toHaveProperty('spotify_artist_id');
+        expect(row).not.toHaveProperty('apple_music_artist_id');
+        expect(row).not.toHaveProperty('bandcamp_id');
       }
     });
   });
@@ -571,6 +602,18 @@ describe('Library Album Info', () => {
       const res = await auth.get('/library/info').query({ album_id: 999999 }).expect(200);
 
       expect(res.body).toBeFalsy();
+    });
+
+    test('returns nested reconciled_identity (no flat external-ID columns)', async () => {
+      const res = await auth.get('/library/info').query({ album_id: 1 }).expect(200);
+
+      expect(res.body).toHaveProperty('reconciled_identity');
+      expect(res.body).not.toHaveProperty('discogs_artist_id');
+      expect(res.body).not.toHaveProperty('musicbrainz_artist_id');
+      expect(res.body).not.toHaveProperty('wikidata_qid');
+      expect(res.body).not.toHaveProperty('spotify_artist_id');
+      expect(res.body).not.toHaveProperty('apple_music_artist_id');
+      expect(res.body).not.toHaveProperty('bandcamp_id');
     });
   });
 });
