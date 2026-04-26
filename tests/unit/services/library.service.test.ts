@@ -175,7 +175,7 @@ describe('library.service', () => {
   });
 
   describe('getAlbumFromDB', () => {
-    it('returns album with format_name, genre_name, date_lost, date_found, and on_streaming', async () => {
+    it('returns album with format_name, genre_name, date_lost, date_found, on_streaming, and nested reconciled_identity', async () => {
       const mockAlbum = {
         id: 42,
         code_letters: 'AU',
@@ -194,6 +194,12 @@ describe('library.service', () => {
         date_lost: null,
         date_found: null,
         on_streaming: true,
+        discogs_artist_id: null,
+        musicbrainz_artist_id: null,
+        wikidata_qid: null,
+        spotify_artist_id: null,
+        apple_music_artist_id: null,
+        bandcamp_id: null,
       };
       const chain = createMockQueryChain([mockAlbum]);
       db.select.mockReturnValue(chain);
@@ -201,12 +207,15 @@ describe('library.service', () => {
 
       const result = await getAlbumFromDB(42);
 
-      expect(result).toEqual(mockAlbum);
       expect(result).toHaveProperty('format_name', 'CD');
       expect(result).toHaveProperty('genre_name', 'Electronic');
       expect(result).toHaveProperty('date_lost', null);
       expect(result).toHaveProperty('date_found', null);
       expect(result).toHaveProperty('on_streaming', true);
+      expect(result).toHaveProperty('reconciled_identity', null);
+      // The flat external-ID columns are stripped from the wire shape.
+      expect(result).not.toHaveProperty('discogs_artist_id');
+      expect(result).not.toHaveProperty('musicbrainz_artist_id');
       expect(db.select).toHaveBeenCalled();
     });
 

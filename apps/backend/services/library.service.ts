@@ -23,9 +23,9 @@ import { extractSignificantWords } from './requestLine/matching/index.js';
 import { lookupMetadata, isLmlConfigured } from './lml/lml.client.js';
 
 /**
- * Source columns on `artists` that comprise a ReconciledIdentity. Kept in
- * sync with the @wxyc/shared schema; if a new external-ID field appears on
- * the shared type, add it here too.
+ * Source columns on `artists` (and any joined / view-projected row) that
+ * comprise a ReconciledIdentity. Kept in sync with the @wxyc/shared schema;
+ * if a new external-ID field appears on the shared type, add it here too.
  */
 const RECONCILED_IDENTITY_KEYS = [
   'discogs_artist_id',
@@ -36,20 +36,32 @@ const RECONCILED_IDENTITY_KEYS = [
   'bandcamp_id',
 ] as const;
 
+type ReconciledIdentityKey = (typeof RECONCILED_IDENTITY_KEYS)[number];
+
+/** A row that carries the six external-ID fields (artist row, view row, or any join projection). */
+type ReconciledIdentitySource = {
+  discogs_artist_id: number | null;
+  musicbrainz_artist_id: string | null;
+  wikidata_qid: string | null;
+  spotify_artist_id: string | null;
+  apple_music_artist_id: string | null;
+  bandcamp_id: string | null;
+};
+
 /**
- * Build a shared `ReconciledIdentity` from an artist row, or null when none of
- * the six external-ID fields are populated. Matching the semantic-index
+ * Build a shared `ReconciledIdentity` from any row carrying the six external-ID
+ * fields, or null when all six are populated as null. Matching the semantic-index
  * pattern lets consumers distinguish "no IDs resolved yet" from "resolved with
  * some null IDs."
  */
-export function toReconciledIdentity(artist: Artist): ReconciledIdentity | null {
+export function toReconciledIdentity(row: ReconciledIdentitySource): ReconciledIdentity | null {
   const identity: ReconciledIdentity = {
-    discogs_artist_id: artist.discogs_artist_id,
-    musicbrainz_artist_id: artist.musicbrainz_artist_id,
-    wikidata_qid: artist.wikidata_qid,
-    spotify_artist_id: artist.spotify_artist_id,
-    apple_music_artist_id: artist.apple_music_artist_id,
-    bandcamp_id: artist.bandcamp_id,
+    discogs_artist_id: row.discogs_artist_id,
+    musicbrainz_artist_id: row.musicbrainz_artist_id,
+    wikidata_qid: row.wikidata_qid,
+    spotify_artist_id: row.spotify_artist_id,
+    apple_music_artist_id: row.apple_music_artist_id,
+    bandcamp_id: row.bandcamp_id,
   };
   if (RECONCILED_IDENTITY_KEYS.every((key) => identity[key] === null)) {
     return null;
@@ -58,11 +70,34 @@ export function toReconciledIdentity(artist: Artist): ReconciledIdentity | null 
 }
 
 /**
+ * Strip the six flat external-ID fields from a row and replace them with a
+ * nested `reconciled_identity` object. Works for any shape that includes the
+ * six fields (artist rows, view rows, ad-hoc join projections), so all four
+ * library read endpoints can return the same wire shape.
+ */
+export function serializeReconciledIdentity<T extends ReconciledIdentitySource>(
+  row: T
+): Omit<T, ReconciledIdentityKey> & { reconciled_identity: ReconciledIdentity | null } {
+  const {
+    discogs_artist_id: _discogs,
+    musicbrainz_artist_id: _mb,
+    wikidata_qid: _qid,
+    spotify_artist_id: _spotify,
+    apple_music_artist_id: _apple,
+    bandcamp_id: _bandcamp,
+    ...rest
+  } = row;
+  return { ...rest, reconciled_identity: toReconciledIdentity(row) } as Omit<T, ReconciledIdentityKey> & {
+    reconciled_identity: ReconciledIdentity | null;
+  };
+}
+
+/**
  * Wire-format for an artist response. Replaces the six flat external-ID
  * columns with a nested `reconciled_identity` object that conforms to the
  * shared @wxyc/shared schema.
  */
-export type ArtistResponse = Omit<Artist, (typeof RECONCILED_IDENTITY_KEYS)[number]> & {
+export type ArtistResponse = Omit<Artist, ReconciledIdentityKey> & {
   reconciled_identity: ReconciledIdentity | null;
 };
 
@@ -72,16 +107,7 @@ export type ArtistResponse = Omit<Artist, (typeof RECONCILED_IDENTITY_KEYS)[numb
  * `reconciled_identity` object.
  */
 export function serializeArtist(artist: Artist): ArtistResponse {
-  const {
-    discogs_artist_id: _discogs,
-    musicbrainz_artist_id: _mb,
-    wikidata_qid: _qid,
-    spotify_artist_id: _spotify,
-    apple_music_artist_id: _apple,
-    bandcamp_id: _bandcamp,
-    ...rest
-  } = artist;
-  return { ...rest, reconciled_identity: toReconciledIdentity(artist) };
+  return serializeReconciledIdentity(artist);
 }
 
 export const getFormatsFromDB = async () => {
@@ -115,6 +141,7 @@ export interface Rotation {
   rotation_bin: 'S' | 'L' | 'M' | 'H' | 'N';
   rotation_kill_date: string | null;
   plays: number;
+  reconciled_identity: ReconciledIdentity | null;
 }
 
 export const getRotationFromDB = async (): Promise<Rotation[]> => {
@@ -137,6 +164,12 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
       rotation_bin: rotation.rotation_bin,
       rotation_kill_date: rotation.kill_date,
       plays: library.plays,
+      discogs_artist_id: artists.discogs_artist_id,
+      musicbrainz_artist_id: artists.musicbrainz_artist_id,
+      wikidata_qid: artists.wikidata_qid,
+      spotify_artist_id: artists.spotify_artist_id,
+      apple_music_artist_id: artists.apple_music_artist_id,
+      bandcamp_id: artists.bandcamp_id,
     })
     .from(library)
     .innerJoin(rotation, eq(library.id, rotation.album_id))
@@ -152,7 +185,7 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
     )
     .where(sql`${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL`);
 
-  return rotation_albums;
+  return rotation_albums.map((row) => serializeReconciledIdentity(row));
 };
 
 export const addToRotation = async (newRotation: RotationAddRequest) => {
@@ -193,9 +226,14 @@ export const updateArtworkUrl = async (id: number, artwork_url: string | null) =
  * to the library table (cache-through). Gracefully degrades if LML is
  * unavailable or times out.
  */
-export async function enrichWithArtwork(
-  results: Array<Record<string, unknown>>
-): Promise<Array<Record<string, unknown>>> {
+type ArtworkEnrichable = {
+  id: number;
+  artist_name: string;
+  album_title: string;
+  artwork_url: string | null | undefined;
+};
+
+export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[]): Promise<T[]> {
   if (!isLmlConfigured()) return results;
 
   const uncached = results.filter((r) => r.artwork_url === null || r.artwork_url === undefined);
@@ -203,14 +241,11 @@ export async function enrichWithArtwork(
 
   const settlements = await Promise.allSettled(
     uncached.map(async (row) => {
-      const artist = row.artist_name as string;
-      const album = row.album_title as string;
-      const id = row.id as number;
-      const lookupResult = await lookupMetadata(artist, album);
+      const lookupResult = await lookupMetadata(row.artist_name, row.album_title);
       const artworkUrl = lookupResult.results?.[0]?.artwork?.artwork_url;
       if (!artworkUrl || artworkUrl.includes('spacer.gif')) return;
       row.artwork_url = artworkUrl;
-      await updateArtworkUrl(id, artworkUrl);
+      await updateArtworkUrl(row.id, artworkUrl);
     })
   );
 
@@ -241,6 +276,24 @@ export const fuzzySearchLibrary = async (artist_name?: string, album_title?: str
 
   return results;
 };
+
+/**
+ * Public wire-format for a library_artist_view row: the six flat external-ID
+ * columns are stripped and replaced with a nested `reconciled_identity`.
+ */
+export type LibraryArtistViewResponse = Omit<LibraryArtistViewEntry, ReconciledIdentityKey> & {
+  reconciled_identity: ReconciledIdentity | null;
+};
+
+/**
+ * Serialize a library_artist_view row for the wire (or any iterable of them).
+ * Used at the read-endpoint boundary so the four `/library*` endpoints all
+ * return the same nested-identity shape, regardless of whether they read the
+ * view or join `artists` directly.
+ */
+export function serializeLibraryArtistViewEntry(row: LibraryArtistViewEntry): LibraryArtistViewResponse {
+  return serializeReconciledIdentity(row);
+}
 
 export const artistIdFromName = async (artist_name: string, genre_id: number): Promise<number> => {
   const response = await db
@@ -357,6 +410,12 @@ export const getAlbumFromDB = async (album_id: number) => {
       date_lost: library.date_lost,
       date_found: library.date_found,
       on_streaming: library.on_streaming,
+      discogs_artist_id: artists.discogs_artist_id,
+      musicbrainz_artist_id: artists.musicbrainz_artist_id,
+      wikidata_qid: artists.wikidata_qid,
+      spotify_artist_id: artists.spotify_artist_id,
+      apple_music_artist_id: artists.apple_music_artist_id,
+      bandcamp_id: artists.bandcamp_id,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -372,7 +431,8 @@ export const getAlbumFromDB = async (album_id: number) => {
     .where(eq(library.id, album_id))
     .limit(1);
 
-  return album[0];
+  if (!album[0]) return undefined;
+  return serializeReconciledIdentity(album[0]);
 };
 
 export const markAlbumMissing = async (album_id: number) => {
@@ -427,6 +487,7 @@ function viewRowToLibraryResult(row: LibraryArtistViewEntry): LibraryResult {
     genre: row.genre_name,
     format: row.format_name,
     onStreaming: row.on_streaming,
+    reconciledIdentity: toReconciledIdentity(row),
   };
 }
 

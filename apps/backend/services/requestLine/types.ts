@@ -5,6 +5,8 @@
  * and adapted for TypeScript/Express.
  */
 
+import type { ReconciledIdentity } from '@wxyc/shared/dtos';
+
 // =============================================================================
 // Message Parsing Types
 // =============================================================================
@@ -65,6 +67,13 @@ export interface LibraryResult {
   format: string | null;
   /** Whether this release is available on streaming services */
   onStreaming?: boolean | null;
+  /**
+   * Reconciled external identifiers for the artist (Discogs, MusicBrainz,
+   * Wikidata, Spotify, Apple Music, Bandcamp). Null when the artist hasn't
+   * been reconciled yet -- mirrors the `reconciled_identity` field on the
+   * artist response.
+   */
+  reconciledIdentity?: ReconciledIdentity | null;
 }
 
 /**
