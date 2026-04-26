@@ -8,14 +8,15 @@ API and authentication service for WXYC applications. Provides endpoints for the
 
 npm workspaces with four packages:
 
-| Package                | Path                     | Purpose                                               |
-| ---------------------- | ------------------------ | ----------------------------------------------------- |
-| `@wxyc/backend`        | `apps/backend/`          | Express API server (port 8080)                        |
-| `@wxyc/auth-service`   | `apps/auth/`             | better-auth server (port 8082)                        |
-| `@wxyc/database`       | `shared/database/`       | Drizzle ORM schema, client, migrations, ETL utilities |
-| `@wxyc/authentication` | `shared/authentication/` | Auth middleware, roles, JWT verification              |
-| `@wxyc/flowsheet-etl`  | `jobs/flowsheet-etl/`    | Flowsheet ETL: sync from tubafrenzy                   |
-| `@wxyc/rotation-etl`   | `jobs/rotation-etl/`     | Rotation ETL: sync from tubafrenzy                    |
+| Package                     | Path                        | Purpose                                                |
+| --------------------------- | --------------------------- | ------------------------------------------------------ |
+| `@wxyc/backend`             | `apps/backend/`             | Express API server (port 8080)                         |
+| `@wxyc/auth-service`        | `apps/auth/`                | better-auth server (port 8082)                         |
+| `@wxyc/database`            | `shared/database/`          | Drizzle ORM schema, client, migrations, ETL utilities  |
+| `@wxyc/authentication`      | `shared/authentication/`    | Auth middleware, roles, JWT verification               |
+| `@wxyc/flowsheet-etl`       | `jobs/flowsheet-etl/`       | Flowsheet ETL: sync from tubafrenzy                    |
+| `@wxyc/rotation-etl`        | `jobs/rotation-etl/`        | Rotation ETL: sync from tubafrenzy                     |
+| `@wxyc/artist-identity-etl` | `jobs/artist-identity-etl/` | Artist identity ETL: sync from LML's `entity.identity` |
 
 ### API Server (`apps/backend`)
 
@@ -375,6 +376,10 @@ The flowsheet ETL supports two run modes: one-shot (`npm start`) for cron invoca
 - `ETL_NOTIFY_KEY` -- Shared secret for internal endpoints: ETL sync notification and tubafrenzy webhook (required in production)
 
 The rotation ETL supports the same two run modes as the flowsheet ETL: one-shot (`npm start`) for cron invocation, and continuous polling (`npm run start:poll` or `node dist/job.js --poll`) for real-time sync. In polling mode, it queries tubafrenzy every `ETL_POLL_INTERVAL_MS` for new or modified rotation releases and upserts them into PostgreSQL. It uses the same SSH tunnel, `ETL_POLL_INTERVAL_MS`, `BACKEND_SERVICE_URL`, and `ETL_NOTIFY_KEY` variables as the flowsheet ETL. After importing changes, it notifies the Backend-Service via `POST /internal/rotation-sync-notify`.
+
+The artist identity ETL (`jobs/artist-identity-etl/`) populates the six reconciled-identity columns on `artists` (`discogs_artist_id`, `musicbrainz_artist_id`, `wikidata_qid`, `spotify_artist_id`, `apple_music_artist_id`, `bandcamp_id`) from library-metadata-lookup's `entity.identity` PostgreSQL table. Unlike the flowsheet/rotation ETLs, it does not use the SSH tunnel: it reads directly from the discogs-cache PostgreSQL database via `DATABASE_URL_DISCOGS`. Update strategy is null-fill only — existing non-null values are never overwritten, so any value entered by library staff wins over an LML-derived one. Conflicts (existing non-null differs from LML's value) are logged but skipped. Supports the same one-shot / `--poll` modes as the other ETLs.
+
+- `DATABASE_URL_DISCOGS` -- PostgreSQL URL for LML's discogs-cache database, where `entity.identity` lives. Required for the artist-identity ETL.
 
 ## Relationship to Other Repos
 
