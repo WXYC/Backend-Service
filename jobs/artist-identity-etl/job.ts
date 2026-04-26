@@ -18,7 +18,7 @@
  * applied. This matches #506's "never overwrite human edits" requirement.
  */
 
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import {
   db,
   artists,
@@ -108,20 +108,27 @@ const loadExisting = async (artistName: string): Promise<ExistingArtistIdentity 
 };
 
 /**
- * Only writes the columns in `toFill` -- which the caller has already
- * filtered to (LML has a value AND existing is null). Existing
- * non-null values are preserved by simple omission from the SET
- * clause, so a value entered by library staff always wins.
+ * Writes only the columns in `toFill`, and uses `COALESCE(<col>, $value)`
+ * in the SET expression so the database itself enforces "fill nulls
+ * only" -- existing non-null values are preserved at the row level. This
+ * is correctness-critical because `artists.artist_name` has no unique
+ * constraint: a name like "Stereolab" might match multiple rows with
+ * different existing values. The caller's `loadExisting` only inspects
+ * one row, but this UPDATE applies to all matching rows, and COALESCE
+ * keeps each row's existing value where one already exists.
  */
 const applyFill = async (lml: LmlIdentity, toFill: Array<keyof Omit<LmlIdentity, 'library_name'>>): Promise<void> => {
-  const set: Partial<Pick<typeof artists.$inferInsert, keyof Omit<LmlIdentity, 'library_name'>>> = {};
+  const set: Record<string, ReturnType<typeof sql>> = {};
   for (const key of toFill) {
-    if (key === 'discogs_artist_id') set.discogs_artist_id = lml.discogs_artist_id;
-    else if (key === 'musicbrainz_artist_id') set.musicbrainz_artist_id = lml.musicbrainz_artist_id;
-    else if (key === 'wikidata_qid') set.wikidata_qid = lml.wikidata_qid;
-    else if (key === 'spotify_artist_id') set.spotify_artist_id = lml.spotify_artist_id;
-    else if (key === 'apple_music_artist_id') set.apple_music_artist_id = lml.apple_music_artist_id;
-    else if (key === 'bandcamp_id') set.bandcamp_id = lml.bandcamp_id;
+    const value = lml[key];
+    if (key === 'discogs_artist_id') set.discogs_artist_id = sql`COALESCE(${artists.discogs_artist_id}, ${value})`;
+    else if (key === 'musicbrainz_artist_id')
+      set.musicbrainz_artist_id = sql`COALESCE(${artists.musicbrainz_artist_id}, ${value})`;
+    else if (key === 'wikidata_qid') set.wikidata_qid = sql`COALESCE(${artists.wikidata_qid}, ${value})`;
+    else if (key === 'spotify_artist_id') set.spotify_artist_id = sql`COALESCE(${artists.spotify_artist_id}, ${value})`;
+    else if (key === 'apple_music_artist_id')
+      set.apple_music_artist_id = sql`COALESCE(${artists.apple_music_artist_id}, ${value})`;
+    else if (key === 'bandcamp_id') set.bandcamp_id = sql`COALESCE(${artists.bandcamp_id}, ${value})`;
   }
   await db.update(artists).set(set).where(eq(artists.artist_name, lml.library_name));
 };

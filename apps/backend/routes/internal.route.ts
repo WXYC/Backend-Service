@@ -163,6 +163,24 @@ internal_route.post('/rotation-sync-notify', (req, res) => {
   res.json({ ok: true });
 });
 
+/**
+ * POST /internal/artist-identity-sync-notify
+ *
+ * Called by the artist-identity ETL after copying reconciled external IDs
+ * from LML's `entity.identity` table. No SSE consumer exists today (the
+ * library views are read-on-demand), so this handler exists only to keep
+ * the polling-mode notify call from logging 404s. It still authenticates
+ * so a future SSE topic can be added without changing the contract.
+ */
+internal_route.post('/artist-identity-sync-notify', (req, res) => {
+  if (!authenticateInternal(req.get('X-Internal-Key'))) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  res.json({ ok: true });
+});
+
 const VALID_ROTATION_ACTIONS = new Set(['create', 'update', 'kill', 'unkill']);
 const VALID_ROTATION_BINS = new Set(['S', 'L', 'M', 'H', 'N']);
 
