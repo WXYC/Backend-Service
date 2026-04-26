@@ -27,14 +27,15 @@ describe('schema: flowsheet.dj_name denormalization (step 5b.1)', () => {
     expect(sql).toMatch(/ALTER TABLE\s+"wxyc_schema"\."flowsheet"\s+ADD COLUMN\s+"dj_name"\s+text/i);
   });
 
-  it('migration 0053 backfills dj_name from auth_user.dj_name, shows.legacy_dj_name, auth_user.name', () => {
+  it('migration 0053 is DDL-only — no in-migration backfill', () => {
+    // The backfill was split out of the migration after the 2026-04 wedge
+    // incident: ALTER TABLE acquires AccessExclusiveLock that is held until
+    // commit, and a 13-hour UPDATE inside the same txn took the table out of
+    // service. Backfill now lives in jobs/backfills/flowsheet-dj-name-backfill
+    // and runs as a separate one-shot deploy after this migration ships.
     const sql = fs.readFileSync(migrationPath, 'utf-8');
-    // The backfill UPDATE must reference all three source columns in priority
-    // order matching the search service's DJ_NAME_EXPR.
-    expect(sql).toMatch(/UPDATE\s+"wxyc_schema"\."flowsheet"/i);
-    expect(sql).toMatch(/COALESCE\([^)]*dj_name[^)]*legacy_dj_name[^)]*name/i);
-    // Bound the rewrite to the column we actually populate (track entries).
-    expect(sql).toMatch(/entry_type"?\s*=\s*'track'/i);
+    expect(sql).not.toMatch(/^\s*UPDATE\s+"wxyc_schema"\."flowsheet"/im);
+    expect(sql).not.toMatch(/COALESCE\([^)]*dj_name[^)]*legacy_dj_name[^)]*name/i);
   });
 
   it('journal includes the 0053 entry', () => {

@@ -70,19 +70,22 @@ const resolveAlbumIds = async () => {
 };
 
 /**
- * Backfill flowsheet.dj_name on freshly inserted rows (step 5b.2).
+ * Populate flowsheet.dj_name on freshly inserted rows (step 5b.2).
  *
- * Mirrors the live insert path so every row that belongs to a show carries
- * the resolved DJ name, regardless of entry_type. Search only reads track
- * rows today, but writing the column uniformly keeps both write paths in
- * agreement and avoids a "this row knows its DJ, that one doesn't" gap that
- * depends on which subsystem inserted it.
+ * Scoped to the just-imported legacy_entry_ids only. Legacy rows without
+ * dj_name are NOT touched here — they are handled once by the backfill job
+ * at jobs/backfills/flowsheet-dj-name-backfill.
  *
- * The ETL has no auth_user mapping for legacy data, so the COALESCE typically
- * resolves to shows.legacy_dj_name; the priority order is preserved so that
- * future modern-DJ ETL imports pick up auth_user.dj_name automatically.
+ * The previous unscoped version rewrote every NULL-dj_name row in the table
+ * on every cron tick. With 2.6M legacy rows that took hours, and when the
+ * cron's `docker rm -f` killed the container the orphaned PostgreSQL backend
+ * kept holding row locks, blocking the next tick. See issue #511.
+ *
+ * The COALESCE order matches the search service's DJ_NAME_EXPR so future
+ * modern-DJ ETL imports pick up auth_user.dj_name automatically.
  */
-const resolveDjNames = async () => {
+const resolveDjNames = async (legacyEntryIds: number[]) => {
+  if (legacyEntryIds.length === 0) return;
   await db.execute(sql`
     UPDATE "wxyc_schema"."flowsheet" AS f
     SET "dj_name" = COALESCE(u."dj_name", s."legacy_dj_name", u."name")
@@ -90,8 +93,9 @@ const resolveDjNames = async () => {
     LEFT JOIN "auth_user" AS u ON u."id" = s."primary_dj_id"
     WHERE f."show_id" = s."id"
       AND f."dj_name" IS NULL
+      AND f."legacy_entry_id" = ANY(${legacyEntryIds})
   `);
-  console.log(`[flowsheet-etl] Resolved dj_name for flowsheet entries.`);
+  console.log(`[flowsheet-etl] Resolved dj_name for ${legacyEntryIds.length} entries.`);
 };
 
 /** Entry types whose legacy ARTIST_NAME text is display content, not a real artist. */
@@ -283,7 +287,9 @@ const runBulkLoad = async (dumpPath: string, { replace = false } = {}) => {
 
   await resetSequences();
   await resolveAlbumIds();
-  await resolveDjNames();
+  // dj_name backfill is owned by jobs/backfills/flowsheet-dj-name-backfill,
+  // not the bulk-load path. The bulk load imports raw legacy data; backfilling
+  // 2.6M rows in a single UPDATE is exactly the wedge case from issue #511.
   await updateLastRun(JOB_NAME, new Date());
   console.log('[flowsheet-etl] Recorded last_run for future incremental syncs.');
 };
@@ -370,6 +376,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
   );
   let entriesImported = 0;
   let entriesUpdated = 0;
+  const newlyInsertedLegacyIds: number[] = [];
   for (const entry of legacyEntries) {
     const addTime = resolveEntryTimestamp(entry.startTime, entry.timeCreated, entry.timeLastModified);
     if (!addTime) continue;
@@ -415,12 +422,13 @@ export const runIncremental = async (): Promise<SyncResult> => {
       entriesUpdated++;
     } else {
       entriesImported++;
+      newlyInsertedLegacyIds.push(entry.id);
     }
   }
 
   if (entriesImported > 0) {
     await resolveAlbumIds();
-    await resolveDjNames();
+    await resolveDjNames(newlyInsertedLegacyIds);
   }
 
   await updateLastRun(JOB_NAME, runStartedAt);

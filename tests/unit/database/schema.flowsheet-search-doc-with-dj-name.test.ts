@@ -61,4 +61,17 @@ describe('schema: search_doc augmented with dj_name + dropped trgm indexes (step
     const has54 = journal.entries.some((e: { tag: string }) => e.tag === '0054_flowsheet-search-doc-with-dj-name');
     expect(has54).toBe(true);
   });
+
+  it('migration 0054 has a precondition guard requiring the dj_name backfill', () => {
+    // 0054's DROP+ADD of search_doc rebuilds the tsvector for every flowsheet
+    // row. If dj_name is NULL (because the backfill has not run yet), the new
+    // search_doc has no dj-name terms — search would silently lose dj-name
+    // matching until the next full row rewrite. Block the migration if any
+    // track row still has dj_name IS NULL.
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/RAISE\s+EXCEPTION/i);
+    expect(sql).toMatch(/dj_name\s+IS\s+NULL/i);
+    expect(sql).toMatch(/entry_type\s*=\s*'track'/i);
+    expect(sql).toMatch(/flowsheet-dj-name-backfill/);
+  });
 });

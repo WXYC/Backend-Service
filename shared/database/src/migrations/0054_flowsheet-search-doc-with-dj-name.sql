@@ -1,3 +1,21 @@
+-- Precondition: backfill must have populated dj_name on every track row.
+--
+-- 0054's DROP+ADD of search_doc rebuilds the tsvector for every flowsheet row.
+-- If dj_name is NULL on any track row (because the backfill hasn't run yet),
+-- the new search_doc has no dj-name terms for those rows — search would
+-- silently lose dj-name matching for legacy entries until the next full row
+-- rewrite. Block the migration loudly so the operator runs the backfill
+-- (jobs/backfills/flowsheet-dj-name-backfill) first. See issue #511.
+DO $$
+BEGIN
+  IF (
+    SELECT count(*) FROM "wxyc_schema"."flowsheet"
+    WHERE entry_type = 'track' AND dj_name IS NULL
+  ) > 0 THEN
+    RAISE EXCEPTION 'flowsheet.dj_name backfill incomplete; run jobs/backfills/flowsheet-dj-name-backfill before applying 0054';
+  END IF;
+END $$;--> statement-breakpoint
+
 -- Switch search reads to flowsheet.dj_name (step 5b.3).
 --
 -- Now that 5b.1 backfilled and 5b.2 keeps flowsheet.dj_name current on every
