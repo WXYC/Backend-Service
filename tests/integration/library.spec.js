@@ -79,16 +79,17 @@ describe('Library Catalog', () => {
       const res = await auth.get('/library').query({ artist_name: 'Built to Spill' }).expect(200);
 
       expectArray(res);
-      if (res.body.length > 0) {
-        const row = res.body[0];
-        expect(row).toHaveProperty('reconciled_identity');
-        expect(row).not.toHaveProperty('discogs_artist_id');
-        expect(row).not.toHaveProperty('musicbrainz_artist_id');
-        expect(row).not.toHaveProperty('wikidata_qid');
-        expect(row).not.toHaveProperty('spotify_artist_id');
-        expect(row).not.toHaveProperty('apple_music_artist_id');
-        expect(row).not.toHaveProperty('bandcamp_id');
-      }
+      // Built to Spill is in the seed fixture, so an empty result here means a
+      // schema/seed regression rather than a missing-shape test.
+      expect(res.body.length).toBeGreaterThan(0);
+      const row = res.body[0];
+      expect(row).toHaveProperty('reconciled_identity');
+      expect(row).not.toHaveProperty('discogs_artist_id');
+      expect(row).not.toHaveProperty('musicbrainz_artist_id');
+      expect(row).not.toHaveProperty('wikidata_qid');
+      expect(row).not.toHaveProperty('spotify_artist_id');
+      expect(row).not.toHaveProperty('apple_music_artist_id');
+      expect(row).not.toHaveProperty('bandcamp_id');
     });
   });
 
