@@ -1,0 +1,27 @@
+#Build stage
+FROM node:25-alpine AS builder
+
+WORKDIR /flowsheet-dj-name-backfill-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/flowsheet-dj-name-backfill ./jobs/flowsheet-dj-name-backfill
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-dj-name-backfill
+
+#Production stage
+FROM node:25-alpine AS prod
+
+WORKDIR /flowsheet-dj-name-backfill
+
+COPY ./package* ./
+COPY ./jobs/flowsheet-dj-name-backfill/package* ./jobs/flowsheet-dj-name-backfill/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./flowsheet-dj-name-backfill-builder/jobs/flowsheet-dj-name-backfill/dist ./jobs/flowsheet-dj-name-backfill/dist
+COPY --from=builder ./flowsheet-dj-name-backfill-builder/shared/database/dist ./shared/database/dist
+
+CMD ["npm", "start", "--workspace=@wxyc/flowsheet-dj-name-backfill"]
