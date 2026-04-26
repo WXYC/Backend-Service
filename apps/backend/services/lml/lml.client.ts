@@ -9,7 +9,6 @@
  */
 
 import type {
-  DiscogsSearchResponse,
   DiscogsReleaseMetadata,
   DiscogsArtistDetails,
   DiscogsTrackReleasesResponse,
@@ -20,8 +19,6 @@ import type {
 } from '@wxyc/shared/dtos';
 
 export type {
-  DiscogsSearchResponse,
-  DiscogsEnrichedSearchResult,
   DiscogsMatchResult,
   DiscogsReleaseMetadata,
   DiscogsTrackItem,
@@ -91,26 +88,6 @@ async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
   } finally {
     clearTimeout(timeout);
   }
-}
-
-/**
- * Search Discogs via LML.
- *
- * @param artist - Artist name
- * @param album - Album/release title
- * @returns Search results with enriched metadata
- */
-export async function searchDiscogs(artist: string, album?: string): Promise<DiscogsSearchResponse> {
-  const body: Record<string, string> = { artist };
-  if (album) body.album = album;
-
-  const response = await lmlFetch('/api/v1/discogs/search', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  return (await response.json()) as DiscogsSearchResponse;
 }
 
 /**

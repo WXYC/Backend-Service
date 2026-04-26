@@ -7,7 +7,6 @@ const mockFetch = jest.fn<typeof global.fetch>();
 global.fetch = mockFetch;
 
 import {
-  searchDiscogs,
   lookupMetadata,
   getRelease,
   getArtistDetails,
@@ -27,42 +26,6 @@ describe('lml.client', () => {
 
   afterAll(() => {
     process.env = originalEnv;
-  });
-
-  describe('searchDiscogs', () => {
-    it('sends POST to /api/v1/discogs/search with artist and album', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ results: [], total: 0, cached: false }),
-      } as unknown as globalThis.Response);
-
-      await searchDiscogs('Autechre', 'Confield');
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'http://lml.test:8000/api/v1/discogs/search',
-        expect.objectContaining({
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ artist: 'Autechre', album: 'Confield' }),
-        })
-      );
-    });
-
-    it('omits album when not provided', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ results: [], total: 0, cached: false }),
-      } as unknown as globalThis.Response);
-
-      await searchDiscogs('Autechre');
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'http://lml.test:8000/api/v1/discogs/search',
-        expect.objectContaining({
-          body: JSON.stringify({ artist: 'Autechre' }),
-        })
-      );
-    });
   });
 
   describe('lookupMetadata', () => {
@@ -173,8 +136,8 @@ describe('lml.client', () => {
     it('throws LmlClientError with 503 when LIBRARY_METADATA_URL is not set', async () => {
       delete process.env.LIBRARY_METADATA_URL;
 
-      await expect(searchDiscogs('Autechre')).rejects.toThrow(LmlClientError);
-      await expect(searchDiscogs('Autechre')).rejects.toMatchObject({ statusCode: 503 });
+      await expect(lookupMetadata('Autechre')).rejects.toThrow(LmlClientError);
+      await expect(lookupMetadata('Autechre')).rejects.toMatchObject({ statusCode: 503 });
     });
 
     it('throws LmlClientError with mapped status on non-2xx response', async () => {
@@ -210,12 +173,12 @@ describe('lml.client', () => {
 
       mockFetch.mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ results: [], total: 0, cached: false }),
+        json: () => Promise.resolve({ results: [], search_type: 'none' }),
       } as unknown as globalThis.Response);
 
-      await searchDiscogs('Autechre');
+      await lookupMetadata('Autechre');
 
-      expect(mockFetch).toHaveBeenCalledWith('http://lml.test:8000/api/v1/discogs/search', expect.anything());
+      expect(mockFetch).toHaveBeenCalledWith('http://lml.test:8000/api/v1/lookup', expect.anything());
     });
 
     it('does not double the /api/v1 prefix when LIBRARY_METADATA_URL already includes it', async () => {
@@ -223,14 +186,14 @@ describe('lml.client', () => {
 
       mockFetch.mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ results: [], total: 0, cached: false }),
+        json: () => Promise.resolve({ results: [], search_type: 'none' }),
       } as unknown as globalThis.Response);
 
-      await searchDiscogs('Autechre');
+      await lookupMetadata('Autechre');
 
       const calledUrl = mockFetch.mock.calls[0][0] as string;
       expect(calledUrl).not.toContain('/api/v1/api/v1');
-      expect(calledUrl).toBe('http://lml.test:8000/api/v1/discogs/search');
+      expect(calledUrl).toBe('http://lml.test:8000/api/v1/lookup');
     });
   });
 

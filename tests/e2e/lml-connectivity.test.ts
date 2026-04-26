@@ -13,7 +13,7 @@
  */
 
 import {
-  searchDiscogs,
+  lookupMetadata,
   getRelease,
   getArtistDetails,
   resolveEntity,
@@ -59,26 +59,6 @@ describe('LML Client Connectivity', () => {
       expect([200, 503]).toContain(response.status);
       const body = (await response.json()) as { status: string };
       expect(['healthy', 'degraded', 'unhealthy']).toContain(body.status);
-    });
-  });
-
-  describe('Search', () => {
-    beforeEach(() => skipIfUnreachable());
-
-    test('returns results for known artist and album', async () => {
-      if (!lmlReachable) return;
-
-      const response = await searchDiscogs('Stereolab', 'Dots and Loops');
-      expect(response.results.length).toBeGreaterThan(0);
-      expect(typeof response.results[0].release_id).toBe('number');
-      expect(response.results[0].release_url).toMatch(/^https?:\/\//);
-    });
-
-    test('returns empty results for nonexistent artist', async () => {
-      if (!lmlReachable) return;
-
-      const response = await searchDiscogs('xyznonexistent12345', 'nothing');
-      expect(response.results).toHaveLength(0);
     });
   });
 
@@ -137,8 +117,8 @@ describe('LML Client Connectivity', () => {
       const original = process.env.LIBRARY_METADATA_URL;
       process.env.LIBRARY_METADATA_URL = 'http://localhost:59999';
       try {
-        await expect(searchDiscogs('test')).rejects.toThrow(LmlClientError);
-        await expect(searchDiscogs('test')).rejects.toMatchObject({
+        await expect(lookupMetadata('test')).rejects.toThrow(LmlClientError);
+        await expect(lookupMetadata('test')).rejects.toMatchObject({
           statusCode: 502,
         });
       } finally {
@@ -150,8 +130,8 @@ describe('LML Client Connectivity', () => {
       const original = process.env.LIBRARY_METADATA_URL;
       delete process.env.LIBRARY_METADATA_URL;
       try {
-        await expect(searchDiscogs('test')).rejects.toThrow(LmlClientError);
-        await expect(searchDiscogs('test')).rejects.toMatchObject({
+        await expect(lookupMetadata('test')).rejects.toThrow(LmlClientError);
+        await expect(lookupMetadata('test')).rejects.toMatchObject({
           statusCode: 503,
         });
       } finally {
