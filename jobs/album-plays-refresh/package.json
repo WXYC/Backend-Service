@@ -1,0 +1,25 @@
+{
+  "name": "@wxyc/album-plays-refresh",
+  "cron-schedule": "0 * * * *",
+  "version": "1.0.0",
+  "description": "Refresh the album_plays materialized view (REFRESH MATERIALIZED VIEW CONCURRENTLY).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "start:poll": "node dist/job.js --poll",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

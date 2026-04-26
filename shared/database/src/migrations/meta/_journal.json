@@ -379,6 +379,13 @@
       "when": 1777905600000,
       "tag": "0055_add-reconciled-identity-to-artists",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1777992000000,
+      "tag": "0056_album_plays_materialized_view",
+      "breakpoints": true
     }
   ]
 }
