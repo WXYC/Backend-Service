@@ -39,7 +39,6 @@ jest.mock('../../../apps/backend/services/labels.service', () => ({
 
 jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
   checkStreamingAvailability: jest.fn(),
-  searchDiscogs: jest.fn(),
   isLmlConfigured: jest.fn().mockReturnValue(false),
 }));
 
