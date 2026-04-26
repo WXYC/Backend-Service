@@ -65,9 +65,19 @@ async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
+  // Merge LML_API_KEY bearer header at the single chokepoint. LML rolls auth
+  // out gradually (LML_REQUIRE_AUTH defaults false on the server), so sending
+  // the header before the flag flips is harmless.
+  const apiKey = process.env.LML_API_KEY;
+  const headers: Record<string, string> = { ...((init?.headers as Record<string, string>) ?? {}) };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
   try {
     const response = await fetch(url, {
       ...init,
+      headers,
       signal: controller.signal,
     });
 
