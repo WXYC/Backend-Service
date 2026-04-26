@@ -86,7 +86,12 @@ const resolveAlbumIds = async () => {
  */
 const resolveDjNames = async (legacyEntryIds: number[]) => {
   if (legacyEntryIds.length === 0) return;
-  await db.execute(sql`
+  // Use rowCount (not the input array length) so the log reflects the actual
+  // effect: rows whose dj_name was populated. The two diverge whenever the
+  // live insert path beat the ETL to a row, leaving its dj_name already set
+  // and the `IS NULL` filter excluding it. Useful when chasing "did dj_name
+  // get populated for the row I just inserted?" steady-state questions.
+  const result = await db.execute(sql`
     UPDATE "wxyc_schema"."flowsheet" AS f
     SET "dj_name" = COALESCE(u."dj_name", s."legacy_dj_name", u."name")
     FROM "wxyc_schema"."shows" AS s
@@ -95,7 +100,8 @@ const resolveDjNames = async (legacyEntryIds: number[]) => {
       AND f."dj_name" IS NULL
       AND f."legacy_entry_id" = ANY(${legacyEntryIds})
   `);
-  console.log(`[flowsheet-etl] Resolved dj_name for ${legacyEntryIds.length} entries.`);
+  const updated = Number(result.count ?? 0);
+  console.log(`[flowsheet-etl] Resolved dj_name for ${updated}/${legacyEntryIds.length} new entries.`);
 };
 
 /** Entry types whose legacy ARTIST_NAME text is display content, not a real artist. */
