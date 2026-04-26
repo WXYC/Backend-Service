@@ -674,6 +674,11 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
     entry_type: entry.entry_type,
   };
 
+  // dj_name is intentionally not propagated here. It is denormalized onto the
+  // flowsheet row purely to let the search service skip the shows -> auth_user
+  // join (steps 5b.1-5b.3); V2 API consumers should keep deriving the display
+  // name from the show metadata so this denormalization stays an internal
+  // implementation detail of the search path.
   switch (entry.entry_type) {
     case 'track':
       return {

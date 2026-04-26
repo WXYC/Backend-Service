@@ -70,12 +70,17 @@ const resolveAlbumIds = async () => {
 };
 
 /**
- * Backfill flowsheet.dj_name on freshly inserted track rows (step 5b.2).
+ * Backfill flowsheet.dj_name on freshly inserted rows (step 5b.2).
  *
- * Mirrors migration 0053's COALESCE expression so the search service can read
- * flowsheet.dj_name directly without joining shows -> auth_user. The ETL has
- * no auth_user mapping for legacy data, so the COALESCE typically resolves
- * to shows.legacy_dj_name; the priority order is preserved for completeness.
+ * Mirrors the live insert path so every row that belongs to a show carries
+ * the resolved DJ name, regardless of entry_type. Search only reads track
+ * rows today, but writing the column uniformly keeps both write paths in
+ * agreement and avoids a "this row knows its DJ, that one doesn't" gap that
+ * depends on which subsystem inserted it.
+ *
+ * The ETL has no auth_user mapping for legacy data, so the COALESCE typically
+ * resolves to shows.legacy_dj_name; the priority order is preserved so that
+ * future modern-DJ ETL imports pick up auth_user.dj_name automatically.
  */
 const resolveDjNames = async () => {
   await db.execute(sql`
@@ -84,10 +89,9 @@ const resolveDjNames = async () => {
     FROM "wxyc_schema"."shows" AS s
     LEFT JOIN "auth_user" AS u ON u."id" = s."primary_dj_id"
     WHERE f."show_id" = s."id"
-      AND f."entry_type" = 'track'
       AND f."dj_name" IS NULL
   `);
-  console.log(`[flowsheet-etl] Resolved dj_name for flowsheet track entries.`);
+  console.log(`[flowsheet-etl] Resolved dj_name for flowsheet entries.`);
 };
 
 /** Entry types whose legacy ARTIST_NAME text is display content, not a real artist. */
