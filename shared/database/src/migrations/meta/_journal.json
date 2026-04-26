@@ -386,6 +386,13 @@
       "when": 1777992000000,
       "tag": "0056_project-reconciled-identity-on-library-artist-view",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1778078400000,
+      "tag": "0057_flowsheet-artwork-lookup-partial-idx",
+      "breakpoints": true
     }
   ]
 }

@@ -30,4 +30,10 @@ COPY --from=builder ./auth-builder/apps/auth/dist ./apps/auth/dist
 COPY --from=builder ./auth-builder/shared/database/dist ./shared/database/dist
 COPY --from=builder ./auth-builder/shared/authentication/dist ./shared/authentication/dist
 
+# Inherit the @wxyc/database 5s default. Auth handlers finish in
+# milliseconds (better-auth's queries are JWKS lookups, session reads,
+# permission checks). Anything over 5s is an orphan. See
+# shared/database/src/client.ts.
+ENV DB_APPLICATION_NAME=wxyc-auth
+
 CMD ["npm", "start", "--workspace=@wxyc/auth-service"]

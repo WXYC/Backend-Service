@@ -413,13 +413,26 @@ jobs:
         run: |
           TARGET_APP=${{ matrix.target }}
           if [ -f "jobs/$TARGET_APP/package.json" ]; then
-            TARGET_TYPE="job"
-            CRON_SCHEDULE=$(yq -r '.["cron-schedule"]' jobs/$TARGET_APP/package.json)
-            if [ -z "$CRON_SCHEDULE" ] || [ "$CRON_SCHEDULE" = "null" ]; then
-              echo "Missing cron-schedule in jobs/$TARGET_APP/package.json" >&2
+            # job-type defaults to "cron" for backward compatibility with the
+            # existing flowsheet/library/rotation/artist-identity ETLs. Set
+            # "one-shot" in package.json for backfills that the build pushes
+            # to ECR but does NOT register in the crontab — those are invoked
+            # manually via `docker run` during a maintenance window.
+            JOB_TYPE=$(yq -r '.["job-type"] // "cron"' jobs/$TARGET_APP/package.json)
+            if [ "$JOB_TYPE" = "one-shot" ]; then
+              TARGET_TYPE="one-shot-job"
+            elif [ "$JOB_TYPE" = "cron" ]; then
+              TARGET_TYPE="job"
+              CRON_SCHEDULE=$(yq -r '.["cron-schedule"]' jobs/$TARGET_APP/package.json)
+              if [ -z "$CRON_SCHEDULE" ] || [ "$CRON_SCHEDULE" = "null" ]; then
+                echo "Missing cron-schedule in jobs/$TARGET_APP/package.json (job-type=cron)" >&2
+                exit 1
+              fi
+              echo "cron_schedule=$CRON_SCHEDULE" >> $GITHUB_OUTPUT
+            else
+              echo "Unknown job-type '$JOB_TYPE' in jobs/$TARGET_APP/package.json (expected 'cron' or 'one-shot')" >&2
               exit 1
             fi
-            echo "cron_schedule=$CRON_SCHEDULE" >> $GITHUB_OUTPUT
           else
             TARGET_TYPE="app"
             PUBLISH_PORT=$(yq .publishPort apps/$TARGET_APP/package.json)
