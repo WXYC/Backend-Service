@@ -1,7 +1,9 @@
 import { and, asc, desc, eq, ilike, or, sql } from 'drizzle-orm';
+import type { ReconciledIdentity } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
 import {
+  Artist,
   NewAlbum,
   NewAlbumFormat,
   NewArtist,
@@ -19,6 +21,68 @@ import {
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
 import { extractSignificantWords } from './requestLine/matching/index.js';
 import { lookupMetadata, isLmlConfigured } from './lml/lml.client.js';
+
+/**
+ * Source columns on `artists` that comprise a ReconciledIdentity. Kept in
+ * sync with the @wxyc/shared schema; if a new external-ID field appears on
+ * the shared type, add it here too.
+ */
+const RECONCILED_IDENTITY_KEYS = [
+  'discogs_artist_id',
+  'musicbrainz_artist_id',
+  'wikidata_qid',
+  'spotify_artist_id',
+  'apple_music_artist_id',
+  'bandcamp_id',
+] as const;
+
+/**
+ * Build a shared `ReconciledIdentity` from an artist row, or null when none of
+ * the six external-ID fields are populated. Matching the semantic-index
+ * pattern lets consumers distinguish "no IDs resolved yet" from "resolved with
+ * some null IDs."
+ */
+export function toReconciledIdentity(artist: Artist): ReconciledIdentity | null {
+  const identity: ReconciledIdentity = {
+    discogs_artist_id: artist.discogs_artist_id,
+    musicbrainz_artist_id: artist.musicbrainz_artist_id,
+    wikidata_qid: artist.wikidata_qid,
+    spotify_artist_id: artist.spotify_artist_id,
+    apple_music_artist_id: artist.apple_music_artist_id,
+    bandcamp_id: artist.bandcamp_id,
+  };
+  if (RECONCILED_IDENTITY_KEYS.every((key) => identity[key] === null)) {
+    return null;
+  }
+  return identity;
+}
+
+/**
+ * Wire-format for an artist response. Replaces the six flat external-ID
+ * columns with a nested `reconciled_identity` object that conforms to the
+ * shared @wxyc/shared schema.
+ */
+export type ArtistResponse = Omit<Artist, (typeof RECONCILED_IDENTITY_KEYS)[number]> & {
+  reconciled_identity: ReconciledIdentity | null;
+};
+
+/**
+ * Convert a Drizzle `artists` row to the public-facing artist response.
+ * Strips the six flat external-ID columns and replaces them with a nested
+ * `reconciled_identity` object.
+ */
+export function serializeArtist(artist: Artist): ArtistResponse {
+  const {
+    discogs_artist_id: _discogs,
+    musicbrainz_artist_id: _mb,
+    wikidata_qid: _qid,
+    spotify_artist_id: _spotify,
+    apple_music_artist_id: _apple,
+    bandcamp_id: _bandcamp,
+    ...rest
+  } = artist;
+  return { ...rest, reconciled_identity: toReconciledIdentity(artist) };
+}
 
 export const getFormatsFromDB = async () => {
   const formats = await db
