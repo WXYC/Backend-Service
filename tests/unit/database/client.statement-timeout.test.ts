@@ -55,8 +55,7 @@ const loadResolver = (): ((raw?: string) => number) => {
     // jest.requireActual rather than the bare require keyword (which
     // @typescript-eslint/no-require-imports forbids) preserves the same
     // resolution semantics while staying within the lint rules.
-    const mod: { resolveStatementTimeoutMs: (raw?: string) => number } =
-      jest.requireActual(clientSourcePath);
+    const mod: { resolveStatementTimeoutMs: (raw?: string) => number } = jest.requireActual(clientSourcePath);
     return mod.resolveStatementTimeoutMs;
   } finally {
     logSpy.mockRestore();
