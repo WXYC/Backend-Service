@@ -46,7 +46,7 @@ describe('registerDevice', () => {
     const res = mockRes();
     const next = jest.fn();
 
-    await registerDevice(req, res as unknown as Response, next);
+    await registerDevice(req, res, next);
 
     expect(res._status).toBe(410);
   });
@@ -58,7 +58,7 @@ describe('registerDevice', () => {
     const res = mockRes();
     const next = jest.fn();
 
-    await registerDevice(req, res as unknown as Response, next);
+    await registerDevice(req, res, next);
 
     expect(res._json).toEqual({
       message: 'This endpoint is deprecated. Use POST /auth/sign-in/anonymous for registration.',
@@ -73,7 +73,7 @@ describe('registerDevice', () => {
     const res = mockRes();
     const next = jest.fn();
 
-    await registerDevice(req, res as unknown as Response, next);
+    await registerDevice(req, res, next);
 
     expect(res._status).toBe(410);
     expect((res._json as { endpoint: string }).endpoint).toBe('http://localhost:8082/auth/sign-in/anonymous');

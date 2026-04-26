@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/unbound-method */
 // Set required env vars before module load (ts-jest transforms imports to requires,
 // so these execute before the middleware module's top-level code runs)
 process.env.BETTER_AUTH_JWKS_URL = 'https://test.example.com/.well-known/jwks.json';
@@ -45,7 +44,7 @@ function mockJwtPayload(overrides: Record<string, unknown> = {}) {
     },
     protectedHeader: { alg: 'RS256' },
     key: {} as any,
-  } as any);
+  });
 }
 
 describe('requirePermissions middleware', () => {
@@ -93,7 +92,7 @@ describe('requirePermissions middleware', () => {
         sub: 'jwt-user-id',
         email: 'test@wxyc.org',
         role: 'dj',
-      } as any);
+      });
       const { req, res, next } = createMocks('Bearer some.jwt.token');
       const middleware = requirePermissions({ bin: ['read'] });
 

@@ -98,7 +98,8 @@ __SQL__
     } catch (err: unknown) {
       const e = err as { status?: number; stderr?: string; stdout?: string };
       throw new Error(
-        `Error executing local MySQL command via docker exec. exitCode=${e.status}, stderr=${e.stderr}, stdout=${e.stdout}`
+        `Error executing local MySQL command via docker exec. exitCode=${e.status}, stderr=${e.stderr}, stdout=${e.stdout}`,
+        { cause: err }
       );
     }
   }

@@ -44,7 +44,7 @@ describe('parseMessage', () => {
     } as unknown as Request;
     const res = createMockRes();
 
-    await parseMessage(req, res as Response, mockNext as unknown as NextFunction);
+    await parseMessage(req, res as Response, mockNext);
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({ success: true, parsed });
@@ -63,7 +63,7 @@ describe('parseMessage', () => {
     } as unknown as Request;
     const res = createMockRes();
 
-    await parseMessage(req, res as Response, mockNext as unknown as NextFunction);
+    await parseMessage(req, res as Response, mockNext);
 
     expect(mockNext).toHaveBeenCalledWith(error);
     expect(res.status).not.toHaveBeenCalled();
@@ -73,7 +73,7 @@ describe('parseMessage', () => {
     const req = { body: {}, method: 'POST', originalUrl: '/request/parse', ip: '127.0.0.1' } as unknown as Request;
     const res = createMockRes();
 
-    await parseMessage(req, res as Response, mockNext as unknown as NextFunction);
+    await parseMessage(req, res as Response, mockNext);
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(mockParseOnly).not.toHaveBeenCalled();

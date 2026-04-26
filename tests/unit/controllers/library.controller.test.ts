@@ -76,7 +76,7 @@ describe('library.controller', () => {
   let next: NextFunction;
 
   beforeEach(() => {
-    next = jest.fn() as unknown as NextFunction;
+    next = jest.fn();
   });
 
   describe('markMissing', () => {

@@ -63,7 +63,7 @@ describe('flowsheet.controller', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockNext = jest.fn() as unknown as NextFunction;
+    mockNext = jest.fn();
   });
 
   describe('getEntries', () => {
@@ -301,7 +301,7 @@ describe('flowsheet.controller', () => {
 
     it.each([['abc'], [undefined]])('throws WxycError for invalid show_id=%s', async (show_id) => {
       const query = show_id !== undefined ? { show_id } : {};
-      const req = createMockReq(query as Record<string, string>);
+      const req = createMockReq(query);
       const res = createMockRes();
 
       await expect(getShowInfo(req as Request, res as Response, mockNext)).rejects.toThrow(

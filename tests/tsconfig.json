@@ -3,6 +3,8 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Node",
+    "ignoreDeprecations": "6.0",
+    "rootDir": "..",
     "esModuleInterop": true,
     "strict": false,
     "allowJs": true,

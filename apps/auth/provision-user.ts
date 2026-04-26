@@ -108,7 +108,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     });
 
     // 8. Create organization membership
-    const createdMember = (await adapter.create({
+    const createdMember = await adapter.create({
       model: 'member',
       data: {
         userId: newUser.id,
@@ -116,7 +116,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
         role,
         createdAt: new Date(),
       },
-    })) as { id: string; organizationId: string; role: string; [key: string]: unknown };
+    });
 
     // 9. Sync admin role for stationManager (replicates afterAddMember hook)
     if (ADMIN_SYNC_ROLES.includes(role)) {
@@ -136,7 +136,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
         console.error('[PROVISION USER] Failed to trigger setup email:', error);
       });
 
-    return { user: newUser, member: createdMember };
+    return { user: newUser, member: createdMember as ProvisionUserResult['member'] };
   } catch (error) {
     // Clean up: delete the orphaned user so we don't leave partial state
     try {

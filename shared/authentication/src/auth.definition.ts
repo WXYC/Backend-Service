@@ -279,11 +279,11 @@ export const auth = betterAuth({
             const otherAdminMemberships = await db
               .select({ role: member.role })
               .from(member)
-              .innerJoin(organization, sql`${member.organizationId} = ${organization.id}` as any)
+              .innerJoin(organization, sql`${member.organizationId} = ${organization.id}`)
               .where(
                 sql`${member.userId} = ${userData.id}
                 AND ${organization.slug} = ${defaultOrgSlug}
-                AND ${member.role} IN ('admin', 'owner', 'stationManager')` as any
+                AND ${member.role} IN ('admin', 'owner', 'stationManager')`
               )
               .limit(1);
 
