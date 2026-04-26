@@ -30,4 +30,11 @@ COPY --from=builder ./builder/apps/backend/dist ./apps/backend/dist
 COPY --from=builder ./builder/shared/database/dist ./shared/database/dist
 COPY --from=builder ./builder/shared/authentication/dist ./shared/authentication/dist
 
+# Inherit the @wxyc/database 5s default. Backend HTTP handlers always finish
+# in milliseconds; anything longer than 5s is an orphan from a request that
+# already timed out at the Express layer (see shared/database/src/client.ts).
+# Set the application_name explicitly so pg_stat_activity makes the source
+# obvious during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-backend
+
 CMD ["npm", "start", "--workspace=@wxyc/backend"]

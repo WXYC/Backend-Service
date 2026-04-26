@@ -24,4 +24,11 @@ RUN npm install --omit=dev
 COPY --from=builder ./flowsheet-etl-builder/jobs/flowsheet-etl/dist ./jobs/flowsheet-etl/dist
 COPY --from=builder ./flowsheet-etl-builder/shared/database/dist ./shared/database/dist
 
+# Override the @wxyc/database default of 5s. ETL UPDATE/SELECT batches can
+# legitimately take tens of seconds on the 2.6M-row flowsheet table. The
+# 5min cap still keeps a runaway query from wedging the cron tick. See
+# shared/database/src/client.ts for the rationale.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+ENV DB_APPLICATION_NAME=wxyc-flowsheet-etl
+
 CMD ["npm", "start", "--workspace=@wxyc/flowsheet-etl"]

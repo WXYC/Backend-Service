@@ -24,4 +24,8 @@ RUN npm install --omit=dev
 COPY --from=builder ./rotation-etl-builder/jobs/rotation-etl/dist ./jobs/rotation-etl/dist
 COPY --from=builder ./rotation-etl-builder/shared/database/dist ./shared/database/dist
 
+# Override the @wxyc/database default of 5s. See shared/database/src/client.ts.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+ENV DB_APPLICATION_NAME=wxyc-rotation-etl
+
 CMD ["npm", "start", "--workspace=@wxyc/rotation-etl"]
