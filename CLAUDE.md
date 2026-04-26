@@ -331,6 +331,18 @@ Connects to tubafrenzy's CDC WebSocket and verifies changes land in Backend-Serv
 - `SENTRY_DSN` -- Sentry project DSN (required for error reporting). Without this, Sentry silently disables itself.
 - `SENTRY_RELEASE` -- Set automatically by the deploy action to `<app>@<tag>`
 
+### Legacy mirror queue (`apps/backend/middleware/legacy/commandqueue.mirror.ts`)
+
+Bounded ring-buffer reports written under `mirror-logs/`. Reports never include raw SQL — only length, sha256, and statement count.
+
+- `MIRROR_FATAL_REPORTS_MAX` (default `10`) -- Number of ring slots for fatal reports. Total disk = max × `MIRROR_REPORT_MAX_BYTES`.
+- `MIRROR_FATAL_REPORTS_INTERVAL_MS` (default `900000` / 15 min) -- Bucket width for the fatal ring index. Reports in the same bucket overwrite the same slot.
+- `MIRROR_SECONDARY_REPORTS_MAX` (default `10`) -- Same scheme for first-failure secondary reports. Set to `0` to disable secondaries.
+- `MIRROR_SECONDARY_REPORTS_INTERVAL_MS` (default `600000` / 10 min) -- Bucket width for secondary ring.
+- `MIRROR_SECONDARY_REPORT_ON_ATTEMPT` (default `1`) -- Attempt number that triggers a secondary report.
+- `MIRROR_REPORT_MAX_BYTES` (default `65536` / 64 KiB) -- Per-file JSON cap. Oversize payloads are replaced with a `truncated: true` summary.
+- `MIRROR_PENDING_QUEUE_SUMMARIES_MAX` (default `20`) -- Max number of pending-queue summaries embedded in a fatal report.
+
 ### Metadata Services
 
 - `LIBRARY_METADATA_URL` -- library-metadata-lookup base URL (e.g. `http://localhost:8001`). Required for proxy endpoints, metadata enrichment, and track search. All Discogs access is routed through LML. Do not include the `/api/v1` path prefix; the LML client adds it automatically.
