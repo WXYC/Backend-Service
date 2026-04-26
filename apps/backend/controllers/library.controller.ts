@@ -141,7 +141,7 @@ export const searchForAlbum: RequestHandler = async (req: Request<object, object
 
   const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n, onStreaming);
   const enriched = await libraryService.enrichWithArtwork(response);
-  res.status(200).json(enriched);
+  res.status(200).json(enriched.map((row) => libraryService.serializeLibraryArtistViewEntry(row)));
 };
 
 type NewArtistRequest = {

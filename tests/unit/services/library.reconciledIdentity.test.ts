@@ -30,8 +30,12 @@ jest.mock('../../../apps/backend/services/requestLine/matching/index', () => ({
   extractSignificantWords: jest.fn(),
 }));
 
-import type { Artist } from '@wxyc/database';
-import { serializeArtist, toReconciledIdentity } from '../../../apps/backend/services/library.service';
+import type { Artist, LibraryArtistViewEntry } from '@wxyc/database';
+import {
+  serializeArtist,
+  serializeLibraryArtistViewEntry,
+  toReconciledIdentity,
+} from '../../../apps/backend/services/library.service';
 
 function makeArtist(overrides: Partial<Artist> = {}): Artist {
   return {
@@ -147,6 +151,75 @@ describe('serializeArtist', () => {
   test('attaches reconciled_identity=null for an unreconciled artist', () => {
     const wire = serializeArtist(makeArtist());
 
+    expect(wire.reconciled_identity).toBeNull();
+  });
+});
+
+function makeViewRow(overrides: Partial<LibraryArtistViewEntry> = {}): LibraryArtistViewEntry {
+  return {
+    id: 100,
+    code_letters: 'JM',
+    code_artist_number: 1,
+    code_number: 2,
+    artist_name: 'Juana Molina',
+    alphabetical_name: 'Molina, Juana',
+    album_title: 'DOGA',
+    format_name: 'CD',
+    genre_name: 'Rock',
+    rotation_bin: null,
+    add_date: new Date('2026-01-01T00:00:00Z'),
+    label: 'Sonamos',
+    label_id: 1,
+    on_streaming: true,
+    album_artist: null,
+    plays: 5,
+    artwork_url: null,
+    discogs_artist_id: null,
+    musicbrainz_artist_id: null,
+    wikidata_qid: null,
+    spotify_artist_id: null,
+    apple_music_artist_id: null,
+    bandcamp_id: null,
+    ...overrides,
+  };
+}
+
+describe('serializeLibraryArtistViewEntry', () => {
+  test('strips the six flat external-ID columns and attaches a nested reconciled_identity', () => {
+    const wire = serializeLibraryArtistViewEntry(
+      makeViewRow({
+        discogs_artist_id: 50872,
+        spotify_artist_id: '5C3wCMlqocoBs4riK9DnUq',
+      })
+    );
+
+    expect(wire).not.toHaveProperty('discogs_artist_id');
+    expect(wire).not.toHaveProperty('musicbrainz_artist_id');
+    expect(wire).not.toHaveProperty('wikidata_qid');
+    expect(wire).not.toHaveProperty('spotify_artist_id');
+    expect(wire).not.toHaveProperty('apple_music_artist_id');
+    expect(wire).not.toHaveProperty('bandcamp_id');
+
+    expect(wire.reconciled_identity).toEqual({
+      discogs_artist_id: 50872,
+      musicbrainz_artist_id: null,
+      wikidata_qid: null,
+      spotify_artist_id: '5C3wCMlqocoBs4riK9DnUq',
+      apple_music_artist_id: null,
+      bandcamp_id: null,
+    });
+  });
+
+  test('preserves view-specific columns (album_title, plays, etc.)', () => {
+    const wire = serializeLibraryArtistViewEntry(makeViewRow({ id: 99, album_title: 'Halo', plays: 12 }));
+
+    expect(wire.id).toBe(99);
+    expect(wire.album_title).toBe('Halo');
+    expect(wire.plays).toBe(12);
+  });
+
+  test('returns reconciled_identity=null for a view row whose artist is unreconciled', () => {
+    const wire = serializeLibraryArtistViewEntry(makeViewRow());
     expect(wire.reconciled_identity).toBeNull();
   });
 });
