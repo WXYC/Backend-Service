@@ -4,9 +4,10 @@
   "description": "All necessary app services for the WXYC flowsheet backend",
   "packageManager": "npm@11.11.0",
   "scripts": {
-    "typecheck": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication && npm run typecheck --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
-    "lint": "eslint --cache --cache-strategy content --cache-location .cache/eslint/ .",
-    "lint:fix": "eslint --cache --cache-strategy content --cache-location .cache/eslint/ . --fix",
+    "typecheck": "npm run lint:prebuild && npm run typecheck --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
+    "lint:prebuild": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication",
+    "lint": "npm run lint:prebuild && eslint --cache --cache-strategy content --cache-location .cache/eslint/ .",
+    "lint:fix": "npm run lint:prebuild && eslint --cache --cache-strategy content --cache-location .cache/eslint/ . --fix",
     "lint:env": "node scripts/lint-env.js",
     "format": "prettier --cache --cache-location .cache/prettier/ --write .",
     "format:check": "prettier --cache --cache-location .cache/prettier/ --check .",
