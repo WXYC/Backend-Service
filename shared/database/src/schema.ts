@@ -384,12 +384,13 @@ export const flowsheet = wxyc_schema.table(
     // (step 5b). Backfilled by migration 0053; populated on write by the
     // ETL job and the live insert controller from step 5b.2 onward.
     dj_name: text('dj_name'),
-    // STORED GENERATED tsvector covering the four text fields with weight
-    // bands (artist=A, track=B, album=C, label=D). Managed by migration
-    // 0052; declared here so drizzle-kit drift detection treats it as
+    // STORED GENERATED tsvector covering the searchable text fields with
+    // weight bands (artist=A, track+dj=B, album=C, label=D). Managed by
+    // migration 0054 (which extended the original 0052 expression to include
+    // dj_name); declared here so drizzle-kit drift detection treats it as
     // present rather than proposing to add it.
     search_doc: tsvector('search_doc').generatedAlwaysAs(
-      sql`setweight(to_tsvector('simple', coalesce("artist_name", '')), 'A') || setweight(to_tsvector('simple', coalesce("track_title", '')), 'B') || setweight(to_tsvector('simple', coalesce("album_title", '')), 'C') || setweight(to_tsvector('simple', coalesce("record_label", '')), 'D')`
+      sql`setweight(to_tsvector('simple', coalesce("artist_name", '')), 'A') || setweight(to_tsvector('simple', coalesce("track_title", '')), 'B') || setweight(to_tsvector('simple', coalesce("dj_name", '')), 'B') || setweight(to_tsvector('simple', coalesce("album_title", '')), 'C') || setweight(to_tsvector('simple', coalesce("record_label", '')), 'D')`
     ),
   },
   (table) => [
@@ -399,6 +400,7 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_track_title_trgm_idx').using('gin', sql`${table.track_title} gin_trgm_ops`),
     index('flowsheet_album_title_trgm_idx').using('gin', sql`${table.album_title} gin_trgm_ops`),
     index('flowsheet_record_label_trgm_idx').using('gin', sql`${table.record_label} gin_trgm_ops`),
+    index('flowsheet_dj_name_trgm_idx').using('gin', sql`${table.dj_name} gin_trgm_ops`),
     index('flowsheet_track_add_time_idx')
       .on(sql`${table.add_time} DESC`)
       .where(sql`${table.entry_type} = 'track'`),

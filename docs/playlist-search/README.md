@@ -128,35 +128,9 @@ This hybrid covers both user intents that show up in music search: "I remember a
 
 When this lands, the test suite should cover music titles with stylized punctuation that exercises tokenizer edge cases: `M.A.N.D.Y.`, `!!!`, `Godspeed You! Black Emperor`, dotted initialisms, ampersands (`Belle & Sebastian`), and non-ASCII titles (`Sigur Rós`, Japanese / Cyrillic artist names). The hybrid router must keep these reachable when `tsvector` tokenization drops them.
 
-### 5a. Index DJ name search (independent quick win)
+### Done: DJ name path (steps 5a + 5b)
 
-DJ filter and sort hit a `COALESCE(user.dj_name, shows.legacy_dj_name, user.name)` expression with no supporting index. The cheapest mitigation, runnable immediately and not blocked on anything else, is twofold:
-
-**Service change:** OR-decompose the WHERE filter across the three underlying columns instead of filtering on the COALESCE result. Postgres does not push ILIKE predicates through `COALESCE` to use per-column indexes, so a `COALESCE(...) ILIKE '%x%'` predicate stays unindexed regardless of what indexes exist on the inputs. Rewriting the filter as `(a ILIKE '%x%' OR b ILIKE '%x%' OR c ILIKE '%x%')` lets the planner BitmapOr across the three columns. Display still uses the COALESCE expression so the priority-ordered name shows in results; only the filter changes shape.
-
-**Schema change:** plain GIN trigram indexes on the three filtered columns:
-
-```sql
-CREATE INDEX auth_user_dj_name_trgm_idx
-  ON wxyc_schema.auth_user USING gin (dj_name gin_trgm_ops);
-CREATE INDEX auth_user_name_trgm_idx
-  ON wxyc_schema.auth_user USING gin (name gin_trgm_ops);
-CREATE INDEX shows_legacy_dj_name_trgm_idx
-  ON wxyc_schema.shows USING gin (legacy_dj_name gin_trgm_ops);
-```
-
-The OR semantics are also a UX upgrade: a search for `dj:jake` now matches if the DJ's preferred name OR display name OR legacy show name contains `jake`, instead of only matching against whichever name the COALESCE happened to surface.
-
-### 5b. Denormalize `dj_name` onto flowsheet (paired with step 4)
-
-If step 4 lands, the cleaner long-term shape is to denormalize the resolved DJ name onto the flowsheet row at insert time. Removes the join from the search hot path entirely and lets `dj_name` participate in the `tsvector`. This requires:
-
-- A schema column `flowsheet.dj_name`.
-- A backfill migration computing the value from existing `shows`/`user` rows.
-- A change in `jobs/flowsheet-etl/` so the ETL writes the resolved DJ name when it inserts entries.
-- A change in the live insert path (`flowsheet.controller`) so real-time inserts also populate it.
-
-Step 5a is worth doing even if 5b is on the roadmap; it costs nothing to keep both indexes during a transition, and it removes the DJ-search regression in the meantime.
+Both DJ-name evolution steps shipped. Migration history below has the full chain; the short version: `dj_name` is now a column on `flowsheet`, populated on every insert, indexed for trigram, and folded into the `search_doc` tsvector. The `shows -> auth_user` join is gone from the search hot path, and the auth_user/shows trigram indexes from 5a were dropped.
 
 ## Alternatives Considered
 
@@ -177,11 +151,16 @@ The library service (`apps/backend/services/library.service.ts`) already uses `p
 
 ## Migration History
 
-| Migration                            | Purpose                                                                                                                                                                                                                |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `0024_flowsheet_entry_type.sql`      | Added `entry_type` column and its btree index                                                                                                                                                                          |
-| `0042_flowsheet-suggest-indexes.sql` | Added GIN trigram indexes on `artist_name` and `track_title` for ghost-text autocomplete                                                                                                                               |
-| `0049_flowsheet-search-indexes.sql`  | Added GIN trigram indexes on `album_title` and `record_label`; combined the data and count queries into a single window-function query (which subsequently regressed performance — see "Current Performance Behavior") |
+| Migration                                    | Purpose                                                                                                                                                                                                                                                            |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `0024_flowsheet_entry_type.sql`              | Added `entry_type` column and its btree index                                                                                                                                                                                                                      |
+| `0042_flowsheet-suggest-indexes.sql`         | Added GIN trigram indexes on `artist_name` and `track_title` for ghost-text autocomplete                                                                                                                                                                           |
+| `0049_flowsheet-search-indexes.sql`          | Added GIN trigram indexes on `album_title` and `record_label`; combined the data and count queries into a single window-function query (which subsequently regressed performance — see "Current Performance Behavior")                                             |
+| `0050_flowsheet-track-add-time-idx.sql`      | Partial b-tree index on `(add_time DESC) WHERE entry_type = 'track'` so date-sort and cursor pagination short-circuit through the index instead of sequential scanning                                                                                             |
+| `0051_dj-name-search-indexes.sql`            | Step 5a: GIN trigram indexes on `auth_user.dj_name`, `auth_user.name`, `shows.legacy_dj_name` paired with an OR-decomposition of the dj-name WHERE filter. Indexes dropped by `0054`; the OR-decomposition was replaced when 5b shipped.                           |
+| `0052_flowsheet-tsvector-search.sql`         | Generated `search_doc` tsvector covering artist/track/album/label with weight bands `A/B/C/D`; routed bare-term `all` queries to the GIN index via `websearch_to_tsquery`.                                                                                         |
+| `0053_flowsheet-dj-name-column.sql`          | Step 5b.1: added nullable `flowsheet.dj_name` column and backfilled from `shows`/`auth_user` using the same COALESCE the search service used as a display expression.                                                                                              |
+| `0054_flowsheet-search-doc-with-dj-name.sql` | Step 5b.3: rewrote `search_doc` to include `dj_name` (weight `B`), added a trigram index on `flowsheet.dj_name`, and dropped the now-unused per-column trigram indexes on `auth_user`/`shows`. The search service stopped joining through `shows` and `auth_user`. |
 
 ## Related
 
