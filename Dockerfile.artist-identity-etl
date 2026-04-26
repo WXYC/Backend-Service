@@ -1,0 +1,27 @@
+#Build stage
+FROM node:25-alpine AS builder
+
+WORKDIR /artist-identity-etl-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/artist-identity-etl ./jobs/artist-identity-etl
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/artist-identity-etl
+
+#Production stage
+FROM node:25-alpine AS prod
+
+WORKDIR /artist-identity-etl
+
+COPY ./package* ./
+COPY ./jobs/artist-identity-etl/package* ./jobs/artist-identity-etl/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./artist-identity-etl-builder/jobs/artist-identity-etl/dist ./jobs/artist-identity-etl/dist
+COPY --from=builder ./artist-identity-etl-builder/shared/database/dist ./shared/database/dist
+
+CMD ["npm", "start", "--workspace=@wxyc/artist-identity-etl"]

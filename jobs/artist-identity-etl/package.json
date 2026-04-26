@@ -1,0 +1,28 @@
+{
+  "name": "@wxyc/artist-identity-etl",
+  "cron-schedule": "0 * * * *",
+  "version": "1.0.0",
+  "description": "Populate artists.reconciled_identity_* columns from LML's entity.identity table",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "start:poll": "node dist/job.js --poll",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_artist_identity_etl:ci -f ../../Dockerfile.artist-identity-etl ../../",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0",
+    "postgres": "^3.4.9"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
