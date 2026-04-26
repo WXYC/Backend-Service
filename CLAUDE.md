@@ -6,17 +6,18 @@ API and authentication service for WXYC applications. Provides endpoints for the
 
 ### Monorepo Layout
 
-npm workspaces with four packages:
+npm workspaces:
 
-| Package                     | Path                        | Purpose                                                |
-| --------------------------- | --------------------------- | ------------------------------------------------------ |
-| `@wxyc/backend`             | `apps/backend/`             | Express API server (port 8080)                         |
-| `@wxyc/auth-service`        | `apps/auth/`                | better-auth server (port 8082)                         |
-| `@wxyc/database`            | `shared/database/`          | Drizzle ORM schema, client, migrations, ETL utilities  |
-| `@wxyc/authentication`      | `shared/authentication/`    | Auth middleware, roles, JWT verification               |
-| `@wxyc/flowsheet-etl`       | `jobs/flowsheet-etl/`       | Flowsheet ETL: sync from tubafrenzy                    |
-| `@wxyc/rotation-etl`        | `jobs/rotation-etl/`        | Rotation ETL: sync from tubafrenzy                     |
-| `@wxyc/artist-identity-etl` | `jobs/artist-identity-etl/` | Artist identity ETL: sync from LML's `entity.identity` |
+| Package                            | Path                               | Purpose                                                                                   |
+| ---------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------- |
+| `@wxyc/backend`                    | `apps/backend/`                    | Express API server (port 8080)                                                            |
+| `@wxyc/auth-service`               | `apps/auth/`                       | better-auth server (port 8082)                                                            |
+| `@wxyc/database`                   | `shared/database/`                 | Drizzle ORM schema, client, migrations, ETL utilities                                     |
+| `@wxyc/authentication`             | `shared/authentication/`           | Auth middleware, roles, JWT verification                                                  |
+| `@wxyc/flowsheet-etl`              | `jobs/flowsheet-etl/`              | Flowsheet ETL: sync from tubafrenzy                                                       |
+| `@wxyc/rotation-etl`               | `jobs/rotation-etl/`               | Rotation ETL: sync from tubafrenzy                                                        |
+| `@wxyc/artist-identity-etl`        | `jobs/artist-identity-etl/`        | Artist identity ETL: sync from LML's `entity.identity`                                    |
+| `@wxyc/flowsheet-dj-name-backfill` | `jobs/flowsheet-dj-name-backfill/` | One-shot backfill: populate `flowsheet.dj_name` on legacy track rows after migration 0053 |
 
 ### API Server (`apps/backend`)
 
@@ -83,6 +84,8 @@ npm run drizzle:generate   # Generate SQL migration from schema changes
 npm run drizzle:migrate    # Apply migrations to database
 npm run drizzle:drop       # Delete a migration file
 ```
+
+**Migrations are DDL-only.** Bulk DML (rewrites of more than ~10k rows) does not belong inside a migration file because the DDL portion takes an `AccessExclusiveLock` that is held until the transaction commits, and a long DML can wedge the table for hours. Put the rewrite in a one-shot backfill job under `jobs/<name>-backfill/` (declared with `"job-type": "one-shot"` in `package.json`). The build pipeline pushes the image to ECR; a human invokes it via `docker run --rm --env-file .env <image>` during a low-traffic window. If a downstream migration depends on the backfill having run, gate it with a `DO $$ ... RAISE EXCEPTION ... END $$;` precondition guard at the top of the file. See `0053_flowsheet-dj-name-column.sql` + `jobs/flowsheet-dj-name-backfill/` + `0054_flowsheet-search-doc-with-dj-name.sql` for the canonical pattern, and issue #511 for the incident this rule was learned from.
 
 ### Authentication (`shared/authentication`)
 
