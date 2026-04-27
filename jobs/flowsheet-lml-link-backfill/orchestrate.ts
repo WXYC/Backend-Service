@@ -50,6 +50,45 @@ export type FlowsheetRow = {
 
 export type LookupFn = (artist: string, album?: string) => Promise<LmlLookupResponse>;
 
+/**
+ * Five canonical observability counter names shared with the forward path
+ * (B-2.1). The dashboard keys on these names; renaming or adding one without
+ * a coordinated dashboard change silently breaks the surface.
+ */
+export type LinkageMetricName =
+  | 'linked_high_conf'
+  | 'gray_zone_review'
+  | 'no_candidate'
+  | 'lml_error'
+  | 'lml_timeout';
+
+/**
+ * Injection seam for B-3.2. The orchestrator is library-pure (no Sentry
+ * import) and the production wiring in `job.ts` adapts these calls to the
+ * real Sentry SDK with `subsystem='lml-linkage'`, `path='backfill'` tags.
+ * Tests pass jest mocks; CLI / legacy callers omit the field and get a no-op.
+ */
+export interface MetricsSink {
+  recordOutcome(name: LinkageMetricName): void;
+  reportError(error: unknown, context?: Record<string, unknown>): void;
+}
+
+const NULL_METRICS: MetricsSink = {
+  recordOutcome: () => {},
+  reportError: () => {},
+};
+
+const classifyLinkageError = (error: unknown): 'lml_timeout' | 'lml_error' => {
+  if (!error || typeof error !== 'object') return 'lml_error';
+  const e = error as { name?: unknown; code?: unknown; message?: unknown };
+  if (e.name === 'AbortError' || e.name === 'TimeoutError') return 'lml_timeout';
+  if (e.code === 'ETIMEDOUT' || e.code === 'ECONNABORTED' || e.code === 'UND_ERR_CONNECT_TIMEOUT') {
+    return 'lml_timeout';
+  }
+  if (typeof e.message === 'string' && /timeout/i.test(e.message)) return 'lml_timeout';
+  return 'lml_error';
+};
+
 export type ProcessStatus = 'linked' | 'multi_match' | 'no_library_match' | 'review' | 'no_match' | 'error';
 
 export type Totals = {
@@ -105,11 +144,16 @@ export const findLibraryByCanonicalEntity = async (canonicalEntityId: string): P
  * apply. Returns the outcome. Errors are logged and consumed; they do not
  * bubble up so a single bad row cannot abort the run.
  */
-export const processRow = async (row: FlowsheetRow, deps: { lookup: LookupFn }): Promise<ProcessStatus> => {
+export const processRow = async (
+  row: FlowsheetRow,
+  deps: { lookup: LookupFn; metrics?: MetricsSink }
+): Promise<ProcessStatus> => {
+  const metrics = deps.metrics ?? NULL_METRICS;
   const artist = row.artist_name ?? '';
   const album = row.album_title ?? undefined;
 
   if (!artist || !album) {
+    metrics.recordOutcome('no_candidate');
     return 'no_match';
   }
 
@@ -118,22 +162,39 @@ export const processRow = async (row: FlowsheetRow, deps: { lookup: LookupFn }):
     response = await deps.lookup(artist, album);
   } catch (error) {
     console.warn(`[${JOB_NAME}] LML lookup failed for flowsheet.id=${row.id}:`, (error as Error).message);
+    metrics.recordOutcome(classifyLinkageError(error));
+    metrics.reportError(error, { flowsheetId: row.id, artistName: artist, albumTitle: album });
     return 'error';
   }
 
   const signal = resolveLmlSignal(response);
-  if (signal.status === 'review') return 'review';
-  if (signal.status === 'no_match') return 'no_match';
+  if (signal.status === 'review') {
+    metrics.recordOutcome('gray_zone_review');
+    return 'review';
+  }
+  if (signal.status === 'no_match') {
+    metrics.recordOutcome('no_candidate');
+    return 'no_match';
+  }
 
   const libraryIds = await findLibraryByCanonicalEntity(signal.canonical_entity_id);
-  if (libraryIds.length === 0) return 'no_library_match';
-  if (libraryIds.length > 1) return 'multi_match';
+  if (libraryIds.length === 0) {
+    metrics.recordOutcome('no_candidate');
+    return 'no_library_match';
+  }
+  if (libraryIds.length > 1) {
+    // Multi-match defers to B-2.3 tie-break — review-bound from the
+    // dashboard's perspective since linkage isn't applied here.
+    metrics.recordOutcome('gray_zone_review');
+    return 'multi_match';
+  }
 
   await applyLink({
     flowsheetId: row.id,
     libraryId: libraryIds[0],
     confidence: signal.confidence,
   });
+  metrics.recordOutcome('linked_high_conf');
   return 'linked';
 };
 
@@ -171,9 +232,11 @@ export const runBackfill = async (opts: {
   lookup: LookupFn;
   batchSize?: number;
   throttleMs?: number;
+  metrics?: MetricsSink;
 }): Promise<RunResult> => {
   const batchSize = opts.batchSize ?? BATCH_SIZE;
   const throttleMs = opts.throttleMs ?? THROTTLE_MS;
+  const metrics = opts.metrics ?? NULL_METRICS;
 
   console.log(`[${JOB_NAME}] Starting. batchSize=${batchSize} throttleMs=${throttleMs}`);
 
@@ -195,7 +258,7 @@ export const runBackfill = async (opts: {
 
     batchIndex += 1;
     for (const row of rows) {
-      const status = await processRow(row, { lookup: opts.lookup });
+      const status = await processRow(row, { lookup: opts.lookup, metrics });
       totals.scanned += 1;
       totals[status] += 1;
       lastId = row.id;
