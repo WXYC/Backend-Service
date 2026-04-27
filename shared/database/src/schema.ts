@@ -652,6 +652,19 @@ export type LibraryArtistViewEntry = {
   bandcamp_id: string | null;
 };
 
+// Per-album play count, aggregated from `flowsheet` track entries. The MV is
+// created and indexed by migration 0059, refreshed periodically by
+// `apps/backend/services/album-plays-refresh.service.ts`. Declared with
+// `.existing()` because we own the SQL via the migration; this entry exists
+// so drizzle-kit drift detection treats the MV as known and so the search
+// service can reference its columns through Drizzle.
+export const album_plays = wxyc_schema
+  .materializedView('album_plays', {
+    album_id: integer('album_id').notNull(),
+    plays: integer('plays').notNull(),
+  })
+  .existing();
+
 export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {
   return qb
     .select({

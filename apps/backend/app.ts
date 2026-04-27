@@ -18,6 +18,7 @@ import { internal_route } from './routes/internal.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
+import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
 import { setupCdcWebSocket, shutdownCdcWebSocket } from './services/cdc/index.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
@@ -109,6 +110,7 @@ app.use(errorHandler);
 const server = app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
   startPlaylistProxy();
+  startAlbumPlaysRefresh();
   void setupCdcWebSocket(server);
 });
 
@@ -130,6 +132,7 @@ memoryLogTimer.unref();
 function shutdown(signal: string): void {
   console.log(`[shutdown] Received ${signal}, shutting down...`);
   stopPlaylistProxy();
+  stopAlbumPlaysRefresh();
   void shutdownCdcWebSocket();
   server.close(() => {
     closeDatabaseConnection()
