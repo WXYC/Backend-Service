@@ -224,10 +224,10 @@ The CI environment uses `dev_env/docker-compose.yml` with Docker profiles (`ci`,
 
 GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
-1. **detect-changes** -- Paths-filter identifies what changed (backend, auth, shared, tests, db-init)
+1. **detect-changes** -- Paths-filter identifies what changed (apps, jobs, shared, tests, db-init)
 2. **lint-and-typecheck** -- `typecheck` + `lint` + `format:check` + `build`
 3. **unit-tests** -- Runs affected tests only (`--changedSince=origin/<base>` on PRs)
-4. **integration-tests** -- Only if backend/auth/shared/tests changed. Docker images cached by commit SHA in ECR.
+4. **integration-tests** -- Only if apps/jobs/shared/tests change. Docker images cached by commit SHA in ECR.
 
 ## Deployment
 
