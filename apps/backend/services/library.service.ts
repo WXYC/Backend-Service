@@ -19,7 +19,7 @@ import {
   LibraryArtistViewEntry,
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
-import { lookupMetadata, isLmlConfigured } from './lml/lml.client.js';
+import { lookupMetadata, isLmlConfigured, type LookupResponse } from './lml/lml.client.js';
 
 /**
  * Source columns on `artists` (and any joined / view-projected row) that
@@ -214,6 +214,57 @@ export const updateOnStreaming = async (id: number, on_streaming: boolean | null
 /** Update the cached artwork URL for a library entry. */
 export const updateArtworkUrl = async (id: number, artwork_url: string | null) => {
   const response = await db.update(library).set({ artwork_url }).where(eq(library.id, id)).returning();
+  return response[0];
+};
+
+/**
+ * Confidence heuristics derived from LML's `search_type` per the B-0
+ * calibration (see issue #492). LML does not return per-result confidence,
+ * so the link-time value stored on `library.canonical_entity_confidence` is
+ * a coarse band kept around so future analyses can re-judge weak matches
+ * once LML exposes a real signal.
+ */
+const SEARCH_TYPE_CONFIDENCE: Record<LookupResponse['search_type'], number | null> = {
+  direct: 0.9,
+  fallback: 0.5,
+  alternative: 0.3,
+  compilation: 0.3,
+  song_as_artist: 0.3,
+  none: null,
+};
+
+/**
+ * Map an LML lookup response to a (canonical_entity_id, confidence) pair, or
+ * null if the response carries nothing linkable. The id is namespaced by
+ * source (`discogs:release:<id>`) — the column's contract is opaque text, but
+ * a namespace keeps the door open for MusicBrainz / other resolvers later.
+ */
+export const mapLookupToCanonicalEntity = (
+  response: LookupResponse
+): { id: string; confidence: number } | null => {
+  const top = response.results?.[0];
+  const releaseId = top?.artwork?.release_id;
+  if (!releaseId) return null;
+  const confidence = SEARCH_TYPE_CONFIDENCE[response.search_type];
+  if (confidence === null || confidence === undefined) return null;
+  return { id: `discogs:release:${releaseId}`, confidence };
+};
+
+/**
+ * Persist a canonical-entity linkage on a library row. Stamps
+ * `canonical_entity_resolved_at` with the current time so audits can tell
+ * when the link was made and retry policies can age weak matches.
+ */
+export const updateCanonicalEntity = async (id: number, entityId: string, confidence: number) => {
+  const response = await db
+    .update(library)
+    .set({
+      canonical_entity_id: entityId,
+      canonical_entity_confidence: confidence,
+      canonical_entity_resolved_at: new Date(),
+    })
+    .where(eq(library.id, id))
+    .returning();
   return response[0];
 };
 
