@@ -9,7 +9,12 @@
 
 import type { LmlLookupResponse } from './lml-types.js';
 
-const TIMEOUT_MS = 5000;
+// 30s, not the backend client's 5s. The backfill processes long-tail rows
+// LML hasn't cached, which trigger Discogs/MusicBrainz fallback chains that
+// routinely exceed 5s. The orchestrator's throttle (100ms between rows)
+// caps in-flight requests at one, so the longer per-call cap doesn't risk
+// piling up on LML; it just lets slow lookups complete instead of failing.
+const TIMEOUT_MS = 30000;
 
 const baseUrl = (): string => {
   const url = process.env.LIBRARY_METADATA_URL;
@@ -30,10 +35,19 @@ export const lookupMetadata = async (artist: string, album?: string): Promise<Lm
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
+  // LML now enforces auth in production (LML_REQUIRE_AUTH=true). Send the
+  // bearer header when LML_API_KEY is set; the backend's lml.client.ts
+  // does the same. Sending it before the flag flips is harmless.
+  const apiKey = process.env.LML_API_KEY;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
   try {
     const response = await fetch(`${baseUrl()}/api/v1/lookup`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal: controller.signal,
     });
