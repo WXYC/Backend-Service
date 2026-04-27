@@ -295,6 +295,21 @@ export function serializeLibraryArtistViewEntry(row: LibraryArtistViewEntry): Li
   return serializeReconciledIdentity(row);
 }
 
+/**
+ * Look up the canonical `artist_name` for an `artists.id`. Used by addAlbum
+ * (A.3) to denormalize the canonical name onto the library row so client-
+ * supplied casing variants ("jessica pratt") never get persisted to library
+ * out of sync with the `artists` row.
+ */
+export const getArtistNameById = async (artist_id: number): Promise<string | null> => {
+  const response = await db
+    .select({ artist_name: artists.artist_name })
+    .from(artists)
+    .where(eq(artists.id, artist_id))
+    .limit(1);
+  return response[0]?.artist_name ?? null;
+};
+
 export const artistIdFromName = async (artist_name: string, genre_id: number): Promise<number> => {
   const response = await db
     .select({ id: artists.id })
