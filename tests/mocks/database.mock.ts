@@ -105,6 +105,8 @@ export const flowsheet = {
   show_id: 'show_id',
   album_id: 'album_id',
   legacy_entry_id: 'legacy_entry_id',
+  legacy_release_id: 'legacy_release_id',
+  legacy_link_attempted_at: 'legacy_link_attempted_at',
   entry_type: 'entry_type',
   track_title: 'track_title',
   album_title: 'album_title',
