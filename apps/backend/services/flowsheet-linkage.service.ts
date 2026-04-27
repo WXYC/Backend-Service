@@ -23,11 +23,7 @@ import { eq } from 'drizzle-orm';
 import { db, flowsheet, library } from '@wxyc/database';
 import { lookupMetadata } from './lml/lml.client.js';
 import { mapLookupToCanonicalEntity } from './library.service.js';
-import {
-  classifyLinkageError,
-  incrementLinkageMetric,
-  reportLinkageError,
-} from './linkage-metrics.service.js';
+import { classifyLinkageError, incrementLinkageMetric, reportLinkageError } from './linkage-metrics.service.js';
 
 const AUTO_ACCEPT_THRESHOLD = 0.9;
 

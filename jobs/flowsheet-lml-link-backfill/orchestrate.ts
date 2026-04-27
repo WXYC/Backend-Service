@@ -55,12 +55,7 @@ export type LookupFn = (artist: string, album?: string) => Promise<LmlLookupResp
  * (B-2.1). The dashboard keys on these names; renaming or adding one without
  * a coordinated dashboard change silently breaks the surface.
  */
-export type LinkageMetricName =
-  | 'linked_high_conf'
-  | 'gray_zone_review'
-  | 'no_candidate'
-  | 'lml_error'
-  | 'lml_timeout';
+export type LinkageMetricName = 'linked_high_conf' | 'gray_zone_review' | 'no_candidate' | 'lml_error' | 'lml_timeout';
 
 /**
  * Injection seam for B-3.2. The orchestrator is library-pure (no Sentry
