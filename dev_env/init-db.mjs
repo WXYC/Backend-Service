@@ -119,6 +119,30 @@ async function runMigrations() {
  * independent check by comparing SHA-256 hashes of migration SQL files against
  * the hashes recorded in drizzle.__drizzle_migrations.
  */
+// Tags whose hash is expected NOT to appear in __drizzle_migrations.
+//
+// drizzle's migrator skipped these in production after a journal `when`
+// regression (see #550), and the cursor has since advanced past them.
+// They will never be applied — a follow-up "replay" migration carries
+// their effects under a fresh hash that does land. The verifier needs
+// to know which originals are intentionally absent so it doesn't fail
+// the migrate job for a state we cannot fix retroactively.
+//
+// Each entry is a journal `tag`; both the original and its replay are
+// listed in the comment so future contributors can find the connection.
+const EXPECTED_ABSENT_TAGS = new Set([
+  // 0054 was permanently skipped by drizzle after 0061's far-future
+  // `when` jumped the cursor. PR #551 added 0065 to replay the
+  // search_doc rewrite under a fresh hash.
+  '0054_flowsheet-search-doc-with-dj-name',
+  // 0064 was permanently skipped after commit 7f35fc39 lowered its
+  // `when` below the prod cursor (1779424000000) to match the prod
+  // __drizzle_migrations row that was inserted before the cursor
+  // landing. 0066 replays its mojibake UPDATE block (already idempotent
+  // by design — every UPDATE is keyed on the corrupted value).
+  '0064_propagate-v012-mojibake',
+]);
+
 async function verifyMigrations() {
   console.log(styleText(['bold'], '🔍 Verifying migration completeness...\n'));
 
@@ -143,8 +167,23 @@ async function verifyMigrations() {
   `;
   const appliedHashes = new Set(dbMigrations.map((m) => m.hash));
 
-  // Check for missing migrations
-  const missing = expectedMigrations.filter((m) => !appliedHashes.has(m.hash));
+  // Check for missing migrations, excluding entries we know will never apply
+  const missing = expectedMigrations.filter(
+    (m) => !appliedHashes.has(m.hash) && !EXPECTED_ABSENT_TAGS.has(m.tag),
+  );
+  const allowedAbsent = expectedMigrations.filter(
+    (m) => !appliedHashes.has(m.hash) && EXPECTED_ABSENT_TAGS.has(m.tag),
+  );
+
+  if (allowedAbsent.length > 0) {
+    console.warn(
+      styleText(['yellow'], `Note: ${allowedAbsent.length} journal entry(ies) intentionally absent from __drizzle_migrations:`),
+    );
+    for (const m of allowedAbsent) {
+      console.warn(`  - [idx ${m.idx}] ${m.tag} (replayed under a fresh hash)`);
+    }
+    console.warn('');
+  }
 
   if (missing.length > 0) {
     console.error('MIGRATION VERIFICATION FAILED!');
@@ -171,7 +210,8 @@ async function verifyMigrations() {
     prevTag = entry.tag;
   }
 
-  console.log(`All ${expectedMigrations.length} migrations verified as applied.\n`);
+  const verifiedCount = expectedMigrations.length - allowedAbsent.length;
+  console.log(`All ${verifiedCount} required migrations verified as applied${allowedAbsent.length ? ` (${allowedAbsent.length} allowlisted absent)` : ''}.\n`);
 }
 
 /**
