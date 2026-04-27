@@ -407,6 +407,13 @@
       "when": 1778251200000,
       "tag": "0059_album-plays-materialized-view",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1778337600000,
+      "tag": "0060_library-artist-name-cascade-trigger",
+      "breakpoints": true
     }
   ]
 }
