@@ -21,7 +21,9 @@ describe('schema: flowsheet.legacy_link_attempted_at marker (B-0.5)', () => {
     // resolver ran and could not link. B-2.2's LML backfill picks these up
     // alongside the 889K rows that never had a legacy_release_id at all.
     const def = extractTableDef('flowsheet');
-    expect(def).toMatch(/legacy_link_attempted_at:\s*timestamp\(\s*['"]legacy_link_attempted_at['"][\s\S]*?withTimezone:\s*true/);
+    expect(def).toMatch(
+      /legacy_link_attempted_at:\s*timestamp\(\s*['"]legacy_link_attempted_at['"][\s\S]*?withTimezone:\s*true/
+    );
   });
 
   it('migration 0063 exists and adds the nullable timestamptz column', () => {
@@ -41,9 +43,7 @@ describe('schema: flowsheet.legacy_link_attempted_at marker (B-0.5)', () => {
 
   it('journal includes the 0063 entry', () => {
     const journal = JSON.parse(fs.readFileSync(journalPath, 'utf-8'));
-    const has63 = journal.entries.some(
-      (e: { tag: string }) => e.tag === '0063_flowsheet-legacy-link-attempted-at'
-    );
+    const has63 = journal.entries.some((e: { tag: string }) => e.tag === '0063_flowsheet-legacy-link-attempted-at');
     expect(has63).toBe(true);
   });
 
