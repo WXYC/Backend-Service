@@ -24,4 +24,12 @@ RUN npm install --omit=dev
 COPY --from=builder ./flowsheet-dj-name-backfill-builder/jobs/flowsheet-dj-name-backfill/dist ./jobs/flowsheet-dj-name-backfill/dist
 COPY --from=builder ./flowsheet-dj-name-backfill-builder/shared/database/dist ./shared/database/dist
 
+# Bulk UPDATE workload — async commit is safe here (the job is idempotent,
+# resumes via `WHERE dj_name IS NULL`). Avoids RDS WAL fsync stalls that
+# otherwise dominate batch latency. DB_STATEMENT_TIMEOUT_MS is set high so a
+# slow batch under live load does not abort the run.
+ENV DB_APPLICATION_NAME=wxyc-flowsheet-dj-name-backfill
+ENV DB_STATEMENT_TIMEOUT_MS=900000
+ENV DB_SYNCHRONOUS_COMMIT=off
+
 CMD ["npm", "start", "--workspace=@wxyc/flowsheet-dj-name-backfill"]

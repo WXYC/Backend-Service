@@ -33,6 +33,30 @@ const clientSource = fs.readFileSync(clientSourcePath, 'utf-8');
  * `^@wxyc/database$` and `**\/shared/database/src/client(.js)?$` regex
  * mappings (the latter does not match `.ts`).
  */
+type ClientModule = {
+  resolveStatementTimeoutMs: (raw?: string) => number;
+  resolveSynchronousCommit: (raw?: string) => string;
+};
+
+const loadModule = (): ClientModule => {
+  const prev = { ...process.env };
+  process.env.DB_HOST = process.env.DB_HOST ?? 'localhost';
+  process.env.DB_NAME = process.env.DB_NAME ?? 'wxyc_db';
+  process.env.DB_USERNAME = process.env.DB_USERNAME ?? 'wxyc_admin';
+  process.env.DB_PASSWORD = process.env.DB_PASSWORD ?? 'pw';
+  const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+  try {
+    const mod: ClientModule = jest.requireActual(clientSourcePath);
+    return mod;
+  } finally {
+    logSpy.mockRestore();
+    Object.keys(process.env).forEach((k) => {
+      if (!(k in prev)) delete process.env[k];
+    });
+    Object.assign(process.env, prev);
+  }
+};
+
 const loadResolver = (): ((raw?: string) => number) => {
   // Bare `require` re-runs the module top-level once per resolved path, but
   // this module's only top-level effect is the env-var validation block.
@@ -127,5 +151,47 @@ describe('client.ts: postgres() call shape', () => {
     // the log line surfaces the actual default (5000ms) on the first run
     // rather than waiting for an orphan to accumulate.
     expect(clientSource).toMatch(/console\.log\([\s\S]*statement_timeout=\$\{statementTimeoutMs\}/);
+  });
+
+  it('passes connection.synchronous_commit sourced from the helper', () => {
+    // Source-grep guard: backfill containers set DB_SYNCHRONOUS_COMMIT=off to
+    // skip WAL fsync waits per commit. A refactor that drops this wiring
+    // would re-wedge bulk backfills under live RDS load.
+    expect(clientSource).toMatch(/connection:\s*\{[\s\S]*synchronous_commit:\s*synchronousCommit[\s\S]*\}/);
+  });
+});
+
+describe('resolveSynchronousCommit', () => {
+  let resolveSynchronousCommit: (raw?: string) => string;
+
+  beforeAll(() => {
+    resolveSynchronousCommit = loadModule().resolveSynchronousCommit;
+  });
+
+  it('defaults to "on" when the env var is unset', () => {
+    // Matches Postgres's own default. API + ETL containers inherit this.
+    expect(resolveSynchronousCommit(undefined)).toBe('on');
+  });
+
+  it('accepts "off" for bulk backfills', () => {
+    // Idempotent backfills opt out of fsync waits; recovery from an RDS
+    // crash mid-batch is just "rerun the job".
+    expect(resolveSynchronousCommit('off')).toBe('off');
+  });
+
+  it('normalizes case', () => {
+    // The Postgres GUC is case-insensitive; treat env values the same so a
+    // typo in the Dockerfile does not silently fall back to "on".
+    expect(resolveSynchronousCommit('OFF')).toBe('off');
+  });
+
+  it('accepts the intermediate durability levels', () => {
+    expect(resolveSynchronousCommit('local')).toBe('local');
+    expect(resolveSynchronousCommit('remote_write')).toBe('remote_write');
+    expect(resolveSynchronousCommit('remote_apply')).toBe('remote_apply');
+  });
+
+  it('throws on unknown values rather than silently falling back', () => {
+    expect(() => resolveSynchronousCommit('async')).toThrow(/DB_SYNCHRONOUS_COMMIT=/);
   });
 });
