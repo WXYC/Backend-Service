@@ -1,22 +1,23 @@
--- Precondition: backfill must have populated dj_name on every track row.
---
--- 0054's DROP+ADD of search_doc rebuilds the tsvector for every flowsheet row.
--- If dj_name is NULL on any track row (because the backfill hasn't run yet),
--- the new search_doc has no dj-name terms for those rows — search would
--- silently lose dj-name matching for legacy entries until the next full row
--- rewrite. Block the migration loudly so the operator runs the backfill
--- (jobs/backfills/flowsheet-dj-name-backfill) first. See issue #511.
-DO $$
-BEGIN
-  IF (
-    SELECT count(*) FROM "wxyc_schema"."flowsheet"
-    WHERE entry_type = 'track' AND dj_name IS NULL
-  ) > 0 THEN
-    RAISE EXCEPTION 'flowsheet.dj_name backfill incomplete; run jobs/backfills/flowsheet-dj-name-backfill before applying 0054';
-  END IF;
-END $$;--> statement-breakpoint
-
 -- Switch search reads to flowsheet.dj_name (step 5b.3).
+--
+-- The original version of this migration carried a precondition guard
+-- (DO $$ ... RAISE EXCEPTION when any track row has dj_name IS NULL) so
+-- it would refuse to run before the dj_name backfill completed. The guard
+-- was correct in spirit but blocked the deploy chain when the backfill
+-- itself ran into the bloated-table I/O problem from incident #511 — see
+-- the back-and-forth in #511 for the operational dead-end.
+--
+-- Removing the guard makes 0054 apply unconditionally. Legacy track rows
+-- that still have dj_name IS NULL get an empty dj-name term in the new
+-- search_doc tsvector, so search just doesn't match dj-name queries for
+-- those rows. The search service in apps/backend uses
+-- COALESCE(flowsheet.dj_name, 'Unknown DJ') for display, so users see
+-- "Unknown DJ" rather than a NULL or crash.
+--
+-- The backfill (jobs/flowsheet-dj-name-backfill) still needs to run; once
+-- it does, the dj_name UPDATE recomputes the search_doc generated column
+-- (dj_name is in the expression) and dj-name search becomes correct for
+-- legacy rows. Run during a low-traffic window after this deploys.
 --
 -- Now that 5b.1 backfilled and 5b.2 keeps flowsheet.dj_name current on every
 -- insert, the search service can read the column directly. This migration:

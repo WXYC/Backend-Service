@@ -62,16 +62,24 @@ describe('schema: search_doc augmented with dj_name + dropped trgm indexes (step
     expect(has54).toBe(true);
   });
 
-  it('migration 0054 has a precondition guard requiring the dj_name backfill', () => {
-    // 0054's DROP+ADD of search_doc rebuilds the tsvector for every flowsheet
-    // row. If dj_name is NULL (because the backfill has not run yet), the new
-    // search_doc has no dj-name terms — search would silently lose dj-name
-    // matching until the next full row rewrite. Block the migration if any
-    // track row still has dj_name IS NULL.
+  it('migration 0054 applies unconditionally — no precondition guard', () => {
+    // Originally 0054 had a precondition block that aborted the migration if
+    // any track row still had dj_name IS NULL (i.e. the backfill hadn't run
+    // yet). That block was removed in the hotfix that unblocked production
+    // after the backfill stalled on the bloated table. Legacy rows with NULL
+    // dj_name get an empty dj-name term in the rebuilt search_doc tsvector —
+    // search just doesn't match dj-name queries for those rows until the
+    // backfill eventually runs and the generated search_doc recomputes. The
+    // search service uses COALESCE(flowsheet.dj_name, 'Unknown DJ') for
+    // display so users see "Unknown DJ" rather than a NULL or crash. See
+    // issue #511.
+    //
+    // Strip everything that looks like a SQL line comment ('-- …') before
+    // matching, so explanatory comments in the migration file (which may
+    // mention historical keywords) don't mask the assertion.
     const sql = fs.readFileSync(migrationPath, 'utf-8');
-    expect(sql).toMatch(/RAISE\s+EXCEPTION/i);
-    expect(sql).toMatch(/dj_name\s+IS\s+NULL/i);
-    expect(sql).toMatch(/entry_type\s*=\s*'track'/i);
-    expect(sql).toMatch(/flowsheet-dj-name-backfill/);
+    const sqlNoComments = sql.replace(/--[^\n]*/g, '');
+    expect(sqlNoComments).not.toMatch(/RAISE\s+EXCEPTION/i);
+    expect(sqlNoComments).not.toMatch(/DO\s+\$\$/i);
   });
 });
