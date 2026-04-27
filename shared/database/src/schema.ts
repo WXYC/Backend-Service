@@ -422,6 +422,16 @@ export const flowsheet = wxyc_schema.table(
     // (step 5b). Backfilled by migration 0053; populated on write by the
     // ETL job and the live insert controller from step 5b.2 onward.
     dj_name: text('dj_name'),
+    // Linkage audit (B-1.4). Records how `album_id` was resolved on this
+    // row so we can audit match quality, undo a class of bad matches if a
+    // heuristic regresses, and weight differently in ranking. Setting
+    // these on new linkages is handled in B-2.1 / B-2.2 / B-3.1; this
+    // migration only adds the columns nullable. Source values are
+    // enum-like text: 'etl_legacy_id' | 'dj_bin_pick' | 'lml_high_confidence'
+    // | 'human_review' | 'tubafrenzy_mirror'.
+    linkage_source: text('linkage_source'),
+    linkage_confidence: real('linkage_confidence'),
+    linked_at: timestamp('linked_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, track+dj=B, album=C, label=D). Managed by
     // migration 0054 (which extended the original 0052 expression to include
