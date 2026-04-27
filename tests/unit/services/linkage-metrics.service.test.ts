@@ -182,7 +182,7 @@ describe('getCumulativeLinkageCoverage', () => {
 
     expect(result).toEqual({ linked: 100, total: 250, ratio: 0.4 });
     const sqlText = renderSql((db.execute as jest.Mock).mock.calls[0][0]);
-    expect(sqlText).toMatch(/count\(\*\)\s+FILTER\s*\(\s*WHERE\s+album_id\s+IS\s+NOT\s+NULL\s*\)/i);
+    expect(sqlText).toMatch(/count\(\*\)\s+FILTER\s*\(\s*WHERE\s+"?album_id"?\s+IS\s+NOT\s+NULL\s*\)/i);
     expect(sqlText).toMatch(/FROM[\s\S]*flowsheet/i);
     expect(sqlText).toMatch(/entry_type"?\s*=\s*'track'/i);
   });
