@@ -72,7 +72,7 @@ describe('flowsheet-linkage-audit-backfill: applyBatch', () => {
 
     const call = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet[\s\S]*linked_at/i);
     const sqlText = renderSql(call?.[0]);
-    expect(sqlText).toMatch(/"linked_at"\s*=\s*"add_time"|linked_at"?\s*=\s*[a-z_.]*\.?add_time/i);
+    expect(sqlText).toMatch(/"linked_at"\s*=\s*[a-z_.]*"?add_time"?/i);
   });
 
   it('restricts the UPDATE to album_id IS NOT NULL AND linkage_source IS NULL within a bounded LIMIT batch', async () => {
