@@ -161,6 +161,34 @@ describe('enqueueReview', () => {
     const sqlText = renderSql(call?.[0]);
     expect(sqlText).toMatch(/ON\s+CONFLICT[\s\S]*flowsheet_id[\s\S]*DO\s+NOTHING/i);
   });
+
+  it('emits a well-formed empty array literal when no candidates were found', async () => {
+    // Drizzle's sql tag inlines an empty JS array as `()`, which fails
+    // the `::integer[]` cast at runtime with PG 42601. The fix serializes
+    // to PG's array text literal `{}` and parameter-binds it. Assert on
+    // the serialized SQL object (renderSql doesn't recurse into nested
+    // sql fragments, but JSON.stringify reaches them).
+    (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 });
+
+    await enqueueReview({
+      flowsheetId: 99,
+      candidateLibraryIds: [],
+      candidateConfidences: [],
+      suggestedAction: 'review_fallback',
+    });
+
+    const call = findExecuteCallMatching(/INSERT[\s\S]*flowsheet_linkage_review/i);
+    const serialized = JSON.stringify(call?.[0]);
+    // The broken shape that crashed the first prod run.
+    expect(serialized).not.toMatch(/\(\s*\)\s*::\s*(integer|real)\s*\[\s*\]/i);
+    // The empty array is serialized as PG text literal `{}` (bound as a
+    // parameter — appears once for each of the two array columns).
+    expect(serialized.match(/"\{\}"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    // Both PG type names appear via sql.raw fragments inside the nested
+    // sql object: `{"raw":"integer"}` and `{"raw":"real"}`.
+    expect(serialized).toContain('{"raw":"integer"}');
+    expect(serialized).toContain('{"raw":"real"}');
+  });
 });
 
 describe('findLibraryByCanonicalEntity', () => {
