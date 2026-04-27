@@ -72,6 +72,8 @@ export const library = {
   legacy_release_id: 'legacy_release_id',
   on_streaming: 'on_streaming',
   artwork_url: 'artwork_url',
+  artist_name: 'artist_name',
+  search_doc: 'search_doc',
 };
 export const artists = {};
 export const genres = {};

@@ -287,6 +287,17 @@ export const library = wxyc_schema.table(
     date_found: timestamp('date_found', { withTimezone: true }),
     on_streaming: boolean('on_streaming'),
     artwork_url: varchar('artwork_url', { length: 512 }),
+    // Denormalized from artists.artist_name (Epic A.1). Nullable until A.2
+    // backfills it from the artists join; A.3 keeps it current on insert and
+    // cascades on artists UPDATE. A.5 reads it via search_doc.
+    artist_name: varchar('artist_name', { length: 128 }),
+    // STORED GENERATED tsvector covering the searchable text fields with
+    // weight bands (artist=A, album=B). NULL for rows where artist_name has
+    // not been backfilled yet — A.2 populates legacy rows, A.3 keeps live
+    // writes current. Read by the new tsvector search path in A.5.
+    search_doc: tsvector('search_doc').generatedAlwaysAs(
+      sql`setweight(to_tsvector('simple', coalesce("artist_name", '')), 'A') || setweight(to_tsvector('simple', coalesce("album_title", '')), 'B')`
+    ),
   },
   (table) => {
     return {
@@ -296,6 +307,11 @@ export const library = wxyc_schema.table(
       artistIdIdx: index('artist_id_idx').on(table.artist_id),
       legacyReleaseIdIdx: uniqueIndex('library_legacy_release_id_idx').on(table.legacy_release_id),
       albumArtistTrgmIdx: index('album_artist_trgm_idx').using(`gin`, sql`${table.album_artist} gin_trgm_ops`),
+      libraryArtistNameTrgmIdx: index('library_artist_name_trgm_idx').using(
+        `gin`,
+        sql`${table.artist_name} gin_trgm_ops`
+      ),
+      librarySearchDocIdx: index('library_search_doc_idx').using('gin', sql`${table.search_doc}`),
     };
   }
 );
