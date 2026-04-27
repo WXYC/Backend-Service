@@ -91,18 +91,25 @@ describe('runLmlLinkage observability (B-3.2)', () => {
     expect(getLinkageCounters().no_candidate).toBe(1);
   });
 
-  it('increments gray_zone_review on multi_match (defers to B-2.3 / review)', async () => {
-    // Multiple library rows under one canonical entity = a tie-break decision
-    // a human or B-2.3 has to make. The dashboard treats it as review-bound
-    // so the gauge captures the gap between "LML matched" and "linkage applied".
+  it('increments linked_high_conf on multi_match resolved via B-2.3 tie-break', async () => {
+    // Multi-match used to defer to a review queue; with B-2.3 wired in,
+    // pickPrimaryLibraryRow chooses one row by (rotation > format > plays >
+    // id) and we link to it. The gauge counts this as a successful link
+    // even though tie-break ran, because linkage IS applied.
     mockLookupMetadata.mockResolvedValue(directMatch(42));
     const selectChain = createMockQueryChain();
     selectChain.where.mockResolvedValue([{ id: 10 }, { id: 11 }]);
     db.select.mockReturnValueOnce(selectChain);
+    // The tie-break runs additional queries in pickPrimaryLibraryRow — wire
+    // them up so the picked id is deterministic.
+    const tiebreakChain = createMockQueryChain();
+    tiebreakChain.where.mockResolvedValue([{ id: 10, format_name: 'vinyl', plays: 50 }]);
+    db.select.mockReturnValueOnce(tiebreakChain);
 
     await runLmlLinkage({ flowsheetId: 7, artistName: 'Stereolab', albumTitle: 'Aluminum Tunes' });
 
-    expect(getLinkageCounters().gray_zone_review).toBe(1);
+    expect(getLinkageCounters().linked_high_conf).toBe(1);
+    expect(getLinkageCounters().gray_zone_review).toBe(0);
   });
 
   it("increments lml_error and reports Sentry with subsystem='lml-linkage' on a generic LML failure", async () => {
