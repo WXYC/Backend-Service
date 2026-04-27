@@ -172,7 +172,7 @@ jobs:
       # Only apply new tag if no specific version was provided or latest is provided and there were no existing tags
       - name: Apply Tag to Ref
         if: inputs.version == '' || steps.latest_tag.outputs.is_initial == 'true'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             github.rest.git.createRef({
