@@ -15,11 +15,11 @@ on:
   workflow_dispatch:
     inputs:
       key:
-        description: "Env var name to upsert in .env on EC2"
+        description: 'Env var name to upsert in .env on EC2'
         required: true
         type: string
       secret_name:
-        description: "GH secret name holding the value (defaults to `key`)"
+        description: 'GH secret name holding the value (defaults to `key`)'
         required: false
         type: string
 
