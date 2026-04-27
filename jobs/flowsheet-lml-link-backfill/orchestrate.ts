@@ -124,6 +124,33 @@ export const applyLink = async (args: {
 };
 
 /**
+ * Persist a flowsheet row to the B-3.1 manual review queue. The
+ * `ON CONFLICT (flowsheet_id) DO NOTHING` guard makes re-runs idempotent
+ * — a second sweep over the same fallback row is a no-op rather than a
+ * UNIQUE-constraint error or a duplicate queue entry. Empty candidate
+ * arrays are valid: the operator can still see the flowsheet text and
+ * skip the entry from the CLI.
+ */
+export const enqueueReview = async (args: {
+  flowsheetId: number;
+  candidateLibraryIds: number[];
+  candidateConfidences: number[];
+  suggestedAction: string;
+}): Promise<void> => {
+  await db.execute(sql`
+    INSERT INTO "wxyc_schema"."flowsheet_linkage_review"
+      ("flowsheet_id", "candidate_library_ids", "candidate_confidences", "suggested_action")
+    VALUES (
+      ${args.flowsheetId},
+      ${args.candidateLibraryIds}::integer[],
+      ${args.candidateConfidences}::real[],
+      ${args.suggestedAction}
+    )
+    ON CONFLICT ("flowsheet_id") DO NOTHING
+  `);
+};
+
+/**
  * Look up the library rows whose `canonical_entity_id` equals the LML-derived
  * entity id. Returns 0, 1, or N ids; the caller branches on count.
  */
@@ -165,13 +192,38 @@ export const processRow = async (
   }
 
   const signal = resolveLmlSignal(response);
-  if (signal.status === 'review') {
-    metrics.recordOutcome('gray_zone_review');
-    return 'review';
-  }
   if (signal.status === 'no_match') {
     metrics.recordOutcome('no_candidate');
     return 'no_match';
+  }
+
+  if (signal.status === 'review') {
+    // Resolve each ranked LML candidate to local library rows via
+    // canonical_entity_id, preserving LML's order. Dedupe across candidates
+    // because a single library row may match multiple LML results (rare but
+    // possible if the canonical entity points at the same Discogs id from
+    // two different fallback search paths). Empty candidate arrays are
+    // intentionally enqueued — the operator can still skip the entry.
+    const candidateLibraryIds: number[] = [];
+    const candidateConfidences: number[] = [];
+    const seen = new Set<number>();
+    for (const canonicalEntityId of signal.candidate_canonical_entity_ids) {
+      const ids = await findLibraryByCanonicalEntity(canonicalEntityId);
+      for (const id of ids) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        candidateLibraryIds.push(id);
+        candidateConfidences.push(signal.confidence);
+      }
+    }
+    await enqueueReview({
+      flowsheetId: row.id,
+      candidateLibraryIds,
+      candidateConfidences,
+      suggestedAction: 'review_fallback',
+    });
+    metrics.recordOutcome('gray_zone_review');
+    return 'review';
   }
 
   const libraryIds = await findLibraryByCanonicalEntity(signal.canonical_entity_id);
