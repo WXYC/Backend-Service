@@ -414,6 +414,13 @@
       "when": 1778337600000,
       "tag": "0060_library-artist-name-cascade-trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1779424000000,
+      "tag": "0061_library-canonical-entity",
+      "breakpoints": true
     }
   ]
 }
