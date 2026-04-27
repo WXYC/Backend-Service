@@ -15,7 +15,11 @@
  * library backfill. Future sources (MusicBrainz, etc.) get their own prefix.
  */
 
-import { resolveLmlSignal, AUTO_ACCEPT_CONFIDENCE } from '../../../../jobs/flowsheet-lml-link-backfill/resolve';
+import {
+  resolveLmlSignal,
+  AUTO_ACCEPT_CONFIDENCE,
+  REVIEW_CONFIDENCE,
+} from '../../../../jobs/flowsheet-lml-link-backfill/resolve';
 import type { LmlLookupResponse } from '../../../../jobs/flowsheet-lml-link-backfill/lml-types';
 
 const directResponse = (releaseId: number): LmlLookupResponse => ({
@@ -65,6 +69,47 @@ describe('resolveLmlSignal', () => {
     const result = resolveLmlSignal(fallbackResponse(33));
 
     expect(result.status).toBe('review');
+  });
+
+  it('carries the per-result canonical entity ids on a review signal (B-3.1 queue)', () => {
+    // The B-3.1 review queue persists the ranked candidates so an operator
+    // can pick the right library row. Without the canonical entity ids, the
+    // CLI has nothing to look up and the queue row is useless.
+    const response: LmlLookupResponse = {
+      results: [
+        { library_item: { id: 1 }, artwork: { release_id: 11 } },
+        { library_item: { id: 2 }, artwork: { release_id: 22 } },
+      ],
+      search_type: 'fallback',
+    };
+
+    const result = resolveLmlSignal(response);
+
+    expect(result.status).toBe('review');
+    if (result.status !== 'review') return;
+    expect(result.candidate_canonical_entity_ids).toEqual(['discogs:11', 'discogs:22']);
+    expect(result.confidence).toBe(REVIEW_CONFIDENCE);
+  });
+
+  it('drops review candidates that have no pinable release_id', () => {
+    // No release_id means we can't form a canonical_entity_id to look up
+    // library rows by. Keeping a malformed candidate would make the CLI
+    // present nothing for that slot. Drop them so the array is always
+    // resolvable.
+    const response: LmlLookupResponse = {
+      results: [
+        { library_item: { id: 1 }, artwork: { release_id: 11 } },
+        { library_item: { id: 2 } },
+        { library_item: { id: 3 }, artwork: { release_id: 33 } },
+      ],
+      search_type: 'fallback',
+    };
+
+    const result = resolveLmlSignal(response);
+
+    expect(result.status).toBe('review');
+    if (result.status !== 'review') return;
+    expect(result.candidate_canonical_entity_ids).toEqual(['discogs:11', 'discogs:33']);
   });
 
   it('returns review on alternative / compilation / song_as_artist results', () => {
