@@ -23,6 +23,11 @@ import { eq } from 'drizzle-orm';
 import { db, flowsheet, library } from '@wxyc/database';
 import { lookupMetadata } from './lml/lml.client.js';
 import { mapLookupToCanonicalEntity } from './library.service.js';
+import {
+  classifyLinkageError,
+  incrementLinkageMetric,
+  reportLinkageError,
+} from './linkage-metrics.service.js';
 
 const AUTO_ACCEPT_THRESHOLD = 0.9;
 
@@ -31,7 +36,8 @@ export type LinkageOutcome =
   | { status: 'no_canonical_entity' }
   | { status: 'low_confidence'; canonicalEntityId: string; confidence: number }
   | { status: 'no_library_match'; canonicalEntityId: string; confidence: number }
-  | { status: 'multi_match'; canonicalEntityId: string; confidence: number; libraryIds: number[] };
+  | { status: 'multi_match'; canonicalEntityId: string; confidence: number; libraryIds: number[] }
+  | { status: 'error'; error: unknown };
 
 async function findLibraryRowsByCanonicalEntity(canonicalEntityId: string): Promise<{ id: number }[]> {
   return db.select({ id: library.id }).from(library).where(eq(library.canonical_entity_id, canonicalEntityId));
@@ -60,19 +66,38 @@ export async function runLmlLinkage(args: {
   albumTitle: string | null | undefined;
 }): Promise<LinkageOutcome> {
   const { flowsheetId, artistName, albumTitle } = args;
-  const response = await lookupMetadata(artistName, albumTitle ?? undefined);
+
+  let response;
+  try {
+    response = await lookupMetadata(artistName, albumTitle ?? undefined);
+  } catch (error) {
+    // The forward path is fire-and-forget — we own error reporting here so
+    // the caller's `.catch` is only a safety net for unexpected bugs.
+    incrementLinkageMetric(classifyLinkageError(error));
+    reportLinkageError(error, { flowsheetId, artistName, albumTitle }, { path: 'forward' });
+    return { status: 'error', error };
+  }
+
   const linkage = mapLookupToCanonicalEntity(response);
-  if (!linkage) return { status: 'no_canonical_entity' };
+  if (!linkage) {
+    incrementLinkageMetric('no_candidate');
+    return { status: 'no_canonical_entity' };
+  }
   if (linkage.confidence < AUTO_ACCEPT_THRESHOLD) {
+    incrementLinkageMetric('gray_zone_review');
     return { status: 'low_confidence', canonicalEntityId: linkage.id, confidence: linkage.confidence };
   }
 
   const matches = await findLibraryRowsByCanonicalEntity(linkage.id);
   if (matches.length === 0) {
+    incrementLinkageMetric('no_candidate');
     return { status: 'no_library_match', canonicalEntityId: linkage.id, confidence: linkage.confidence };
   }
 
   if (matches.length > 1) {
+    // Multi-match defers to B-2.3 tie-break (or the B-3.1 review queue) —
+    // count it as review-bound on the dashboard, since linkage isn't applied.
+    incrementLinkageMetric('gray_zone_review');
     return {
       status: 'multi_match',
       canonicalEntityId: linkage.id,
@@ -82,6 +107,7 @@ export async function runLmlLinkage(args: {
   }
 
   await setFlowsheetLinkage(flowsheetId, matches[0].id, 'lml_high_confidence', linkage.confidence);
+  incrementLinkageMetric('linked_high_conf');
   return {
     status: 'linked',
     libraryId: matches[0].id,
