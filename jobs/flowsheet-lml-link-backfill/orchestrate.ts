@@ -27,7 +27,7 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { db } from '@wxyc/database';
+import { db, pickPrimaryLibraryRow } from '@wxyc/database';
 import type { LmlLookupResponse } from './lml-types.js';
 import { resolveLmlSignal } from './resolve.js';
 
@@ -84,12 +84,14 @@ const classifyLinkageError = (error: unknown): 'lml_timeout' | 'lml_error' => {
   return 'lml_error';
 };
 
-export type ProcessStatus = 'linked' | 'multi_match' | 'no_library_match' | 'review' | 'no_match' | 'error';
+// Note: `multi_match` is intentionally NOT a status here — B-2.3's tie-break
+// resolves the multi-match case into either `linked` (picked a row) or
+// `no_library_match` (tie-break returned null due to a concurrent delete).
+export type ProcessStatus = 'linked' | 'no_library_match' | 'review' | 'no_match' | 'error';
 
 export type Totals = {
   scanned: number;
   linked: number;
-  multi_match: number;
   no_library_match: number;
   review: number;
   no_match: number;
@@ -177,16 +179,18 @@ export const processRow = async (
     metrics.recordOutcome('no_candidate');
     return 'no_library_match';
   }
-  if (libraryIds.length > 1) {
-    // Multi-match defers to B-2.3 tie-break — review-bound from the
-    // dashboard's perspective since linkage isn't applied here.
-    metrics.recordOutcome('gray_zone_review');
-    return 'multi_match';
+
+  const pickedId = libraryIds.length === 1 ? libraryIds[0] : await pickPrimaryLibraryRow(libraryIds);
+  if (pickedId === null) {
+    // Tie-break returned no row — the candidates raced with a concurrent
+    // delete. Treat as a temporary no_library_match; the next sweep retries.
+    metrics.recordOutcome('no_candidate');
+    return 'no_library_match';
   }
 
   await applyLink({
     flowsheetId: row.id,
-    libraryId: libraryIds[0],
+    libraryId: pickedId,
     confidence: signal.confidence,
   });
   metrics.recordOutcome('linked_high_conf');
@@ -219,7 +223,7 @@ const loadBatch = async (afterId: number, batchSize: number): Promise<FlowsheetR
 };
 
 const formatTotals = (totals: Totals): string =>
-  `scanned=${totals.scanned} linked=${totals.linked} multi_match=${totals.multi_match} ` +
+  `scanned=${totals.scanned} linked=${totals.linked} ` +
   `no_library_match=${totals.no_library_match} review=${totals.review} ` +
   `no_match=${totals.no_match} error=${totals.error}`;
 
@@ -238,7 +242,6 @@ export const runBackfill = async (opts: {
   const totals: Totals = {
     scanned: 0,
     linked: 0,
-    multi_match: 0,
     no_library_match: 0,
     review: 0,
     no_match: 0,

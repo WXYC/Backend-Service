@@ -394,7 +394,6 @@ describe('runBackfill', () => {
     // Two linked: the single-match (row 1) and the tie-break-picked (row 3).
     expect(result.totals.linked).toBe(2);
     expect(result.totals.no_library_match).toBe(1);
-    expect(result.totals.multi_match).toBe(0);
     expect(result.totals.review).toBe(1);
     expect(result.totals.no_match).toBe(1);
     expect(result.totals.error).toBe(0);
