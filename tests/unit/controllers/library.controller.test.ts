@@ -11,6 +11,9 @@ const mockGetArtistNameById = jest.fn<(id: number) => Promise<string | null>>();
 const mockInsertAlbum = jest.fn<(album: Record<string, unknown>) => Promise<Record<string, unknown>>>();
 const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number) => Promise<number>>();
 const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
+const mockUpdateCanonicalEntity = jest.fn<(id: number, entityId: string, confidence: number) => Promise<unknown>>();
+const mockMapLookupToCanonicalEntity =
+  jest.fn<(response: unknown) => { id: string; confidence: number } | null>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
@@ -30,6 +33,8 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   insertAlbum: mockInsertAlbum,
   updateArtworkUrl: jest.fn(),
   updateOnStreaming: jest.fn(),
+  updateCanonicalEntity: mockUpdateCanonicalEntity,
+  mapLookupToCanonicalEntity: mockMapLookupToCanonicalEntity,
   artistIdFromName: mockArtistIdFromName,
   getArtistNameById: mockGetArtistNameById,
   insertArtist: jest.fn(),
@@ -47,10 +52,14 @@ jest.mock('../../../apps/backend/services/labels.service', () => ({
   createLabel: mockCreateLabel,
 }));
 
+const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
+const mockCheckStreamingAvailability = jest.fn<() => Promise<unknown>>();
+const mockIsLmlConfigured = jest.fn<() => boolean>().mockReturnValue(false);
+
 jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
-  checkStreamingAvailability: jest.fn(),
-  lookupMetadata: jest.fn(),
-  isLmlConfigured: jest.fn().mockReturnValue(false),
+  checkStreamingAvailability: mockCheckStreamingAvailability,
+  lookupMetadata: mockLookupMetadata,
+  isLmlConfigured: mockIsLmlConfigured,
 }));
 
 import { markMissing, markFound, searchForAlbum, addAlbum } from '../../../apps/backend/controllers/library.controller';
@@ -257,6 +266,80 @@ describe('library.controller', () => {
       expect(mockInsertAlbum).toHaveBeenCalledWith(
         expect.objectContaining({ artist_id: 7, artist_name: 'Jessica Pratt' })
       );
+    });
+
+    describe('canonical entity (B-1.3)', () => {
+      beforeEach(() => {
+        mockGetArtistNameById.mockResolvedValue('Juana Molina');
+        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 501, ...album }));
+        mockIsLmlConfigured.mockReturnValue(true);
+        mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: null });
+      });
+
+      const req = () =>
+        ({
+          body: {
+            album_title: 'DOGA',
+            artist_id: 42,
+            label: 'Sonamos',
+            genre_id: 11,
+            format_id: 1,
+          },
+        }) as unknown as Request;
+
+      it('kicks off an LML lookup for canonical entity resolution after insert', async () => {
+        const lookupResponse = { results: [], search_type: 'none' };
+        mockLookupMetadata.mockResolvedValue(lookupResponse);
+        mockMapLookupToCanonicalEntity.mockReturnValue(null);
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+
+        // Controller returns 201 immediately, before fire-and-forget completes.
+        expect(res.status).toHaveBeenCalledWith(201);
+        expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA');
+      });
+
+      it('writes canonical_entity_id back to the inserted row when the lookup yields a match', async () => {
+        const lookupResponse = {
+          results: [{ artwork: { release_id: 999 } }],
+          search_type: 'direct',
+        };
+        mockLookupMetadata.mockResolvedValue(lookupResponse);
+        mockMapLookupToCanonicalEntity.mockReturnValue({ id: 'discogs:release:999', confidence: 0.9 });
+        mockUpdateCanonicalEntity.mockResolvedValue({ id: 501 });
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+
+        // Fire-and-forget — let the microtask queue drain before asserting.
+        await new Promise((r) => setImmediate(r));
+
+        expect(mockMapLookupToCanonicalEntity).toHaveBeenCalledWith(lookupResponse);
+        expect(mockUpdateCanonicalEntity).toHaveBeenCalledWith(501, 'discogs:release:999', 0.9);
+      });
+
+      it('does not write canonical entity when the mapper returns null (no linkable result)', async () => {
+        mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
+        mockMapLookupToCanonicalEntity.mockReturnValue(null);
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+        await new Promise((r) => setImmediate(r));
+
+        expect(mockUpdateCanonicalEntity).not.toHaveBeenCalled();
+      });
+
+      it('skips the lookup entirely when LML is not configured', async () => {
+        mockIsLmlConfigured.mockReturnValue(false);
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+        await new Promise((r) => setImmediate(r));
+
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+        expect(mockUpdateCanonicalEntity).not.toHaveBeenCalled();
+      });
     });
   });
 });
