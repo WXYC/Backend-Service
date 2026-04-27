@@ -26,8 +26,24 @@
  * `lml-fetch.ts`.
  */
 
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { db, pickPrimaryLibraryRow } from '@wxyc/database';
+
+/**
+ * Build a typed Postgres array literal from a JS number array.
+ *
+ * Drizzle's sql tag interpolates a JS array as a parenthesized list:
+ * `[1, 2]` becomes `(1, 2)`, and `[]` becomes `()`. The empty form fails
+ * the `::integer[]` cast with 42601 (`syntax error at or near ")"`),
+ * crashing the backfill the first time `enqueueReview` is called with no
+ * candidate library rows. We side-step the issue by serializing to PG's
+ * array text literal (`'{1,2,3}'`, or `'{}'` for empty) and parameter-
+ * binding that string. Values are typed `number[]` so the join is safe.
+ */
+const numberArrayLit = (values: number[], pgType: 'integer' | 'real'): SQL => {
+  const literal = `{${values.join(',')}}`;
+  return sql`${literal}::${sql.raw(pgType)}[]`;
+};
 import type { LmlLookupResponse } from './lml-types.js';
 import { resolveLmlSignal } from './resolve.js';
 
@@ -142,8 +158,8 @@ export const enqueueReview = async (args: {
       ("flowsheet_id", "candidate_library_ids", "candidate_confidences", "suggested_action")
     VALUES (
       ${args.flowsheetId},
-      ${args.candidateLibraryIds}::integer[],
-      ${args.candidateConfidences}::real[],
+      ${numberArrayLit(args.candidateLibraryIds, 'integer')},
+      ${numberArrayLit(args.candidateConfidences, 'real')},
       ${args.suggestedAction}
     )
     ON CONFLICT ("flowsheet_id") DO NOTHING
