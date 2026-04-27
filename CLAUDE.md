@@ -352,6 +352,21 @@ Connects to tubafrenzy's CDC WebSocket and verifies changes land in Backend-Serv
 - `SENTRY_DSN` -- Sentry project DSN (required for error reporting). Without this, Sentry silently disables itself.
 - `SENTRY_RELEASE` -- Set automatically by the deploy action to `<app>@<tag>`
 
+#### Observability tags (Phase A contract)
+
+ETL/backfill jobs that opt into the Phase A observability contract emit JSON log lines on stdout (errors on stderr) and tag every Sentry event with the same four fields:
+
+| Tag      | Value                                                        |
+| -------- | ------------------------------------------------------------ |
+| `repo`   | `Backend-Service`                                            |
+| `tool`   | `<job-name> <subcommand>` (e.g. `flowsheet-etl incremental`) |
+| `step`   | Per-call: `started`, `bulk-load-shows`, `failed`, etc.       |
+| `run_id` | UUID generated at entrypoint init (one per process)          |
+
+The wireup is per-job: see `jobs/flowsheet-etl/logger.ts` for the canonical pattern (issue #538). The shared Rust/Python `wxyc_etl::logger` foundation lives in the `wxyc-etl` repo and targets non-Node ETLs; Backend-Service mirrors the same tag contract directly so the dashboards in Sentry / log queries are uniform across runtimes. `SENTRY_DSN` is still optional — when unset the SDK no-ops and JSON logging continues to work.
+
+> TODO (separate child task): provision `SENTRY_DSN` for the flowsheet-etl cron in EC2 / GitHub Actions secrets.
+
 ### Legacy mirror queue (`apps/backend/middleware/legacy/commandqueue.mirror.ts`)
 
 Bounded ring-buffer reports written under `mirror-logs/`. Reports never include raw SQL — only length, sha256, and statement count.
