@@ -22,7 +22,7 @@ import {
   THROTTLE_MS,
 } from '../../../../jobs/library-canonical-entity-backfill/orchestrate';
 import type { Resolution } from '../../../../jobs/library-canonical-entity-backfill/resolve';
-import type { LmlLmlLookupResponse } from '../../../../jobs/library-canonical-entity-backfill/lml-types';
+import type { LmlLookupResponse } from '../../../../jobs/library-canonical-entity-backfill/lml-types';
 
 type SqlLike = {
   sql?: string | string[];
@@ -143,24 +143,18 @@ describe('processRow', () => {
     // accidentally swaps artist/album, downstream resolution would still
     // succeed on some inputs but be silently wrong.
     (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 });
-    const lookup = jest.fn(async () => directResponse(123));
+    const lookup = jest.fn(() => Promise.resolve(directResponse(123)));
 
-    await processRow(
-      { id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' },
-      { lookup }
-    );
+    await processRow({ id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' }, { lookup });
 
     expect(lookup).toHaveBeenCalledWith('Juana Molina', 'DOGA');
   });
 
   it('stamps auto_accept on a direct hit', async () => {
     (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 });
-    const lookup = jest.fn(async () => directResponse(987654));
+    const lookup = jest.fn(() => Promise.resolve(directResponse(987654)));
 
-    const status = await processRow(
-      { id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' },
-      { lookup }
-    );
+    const status = await processRow({ id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' }, { lookup });
 
     expect(status).toBe('auto_accept');
     const call = findExecuteCallMatching(/UPDATE[\s\S]*library/i);
@@ -170,23 +164,17 @@ describe('processRow', () => {
 
   it('stamps review on a fallback hit', async () => {
     (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 });
-    const lookup = jest.fn(async () => fallbackResponse(33));
+    const lookup = jest.fn(() => Promise.resolve(fallbackResponse(33)));
 
-    const status = await processRow(
-      { id: 7, artist_name: 'Jessica Pratt', album_title: 'On Your Own' },
-      { lookup }
-    );
+    const status = await processRow({ id: 7, artist_name: 'Jessica Pratt', album_title: 'On Your Own' }, { lookup });
 
     expect(status).toBe('review');
   });
 
   it('writes nothing and reports no_match on an empty LML response', async () => {
-    const lookup = jest.fn(async () => emptyResponse());
+    const lookup = jest.fn(() => Promise.resolve(emptyResponse()));
 
-    const status = await processRow(
-      { id: 7, artist_name: 'Unknown', album_title: 'Unknown' },
-      { lookup }
-    );
+    const status = await processRow({ id: 7, artist_name: 'Unknown', album_title: 'Unknown' }, { lookup });
 
     expect(status).toBe('no_match');
     expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
@@ -196,14 +184,9 @@ describe('processRow', () => {
     // Failure tolerance: LML timeouts and 5xx must not poison-pill the row.
     // Stamping resolved_at on error would remove the row from the retry
     // pool — the issue's "failure tolerant" requirement.
-    const lookup = jest.fn(async () => {
-      throw new Error('LML request timed out');
-    });
+    const lookup = jest.fn(() => Promise.reject(new Error('LML request timed out')));
 
-    const status = await processRow(
-      { id: 7, artist_name: 'Stereolab', album_title: 'Dots and Loops' },
-      { lookup }
-    );
+    const status = await processRow({ id: 7, artist_name: 'Stereolab', album_title: 'Dots and Loops' }, { lookup });
 
     expect(status).toBe('error');
     expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
@@ -253,7 +236,7 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce({ count: 1 }) // UPDATE for id=3
       .mockResolvedValueOnce([]); // empty → terminate
 
-    const lookup = jest.fn(async () => directResponse(111));
+    const lookup = jest.fn(() => Promise.resolve(directResponse(111)));
 
     const result = await runBackfill({ lookup, throttleMs: 0 });
 
@@ -286,7 +269,7 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce({ count: 1 }) // UPDATE for id=2
       .mockResolvedValueOnce([]);
 
-    const lookup = jest.fn(async () => directResponse(111));
+    const lookup = jest.fn(() => Promise.resolve(directResponse(111)));
     await runBackfill({ lookup, throttleMs: 0 });
 
     const selectCalls = (db.execute as jest.Mock).mock.calls
@@ -317,11 +300,11 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce([]);
 
     let call = 0;
-    const lookup = jest.fn(async () => {
+    const lookup = jest.fn(() => {
       call += 1;
-      if (call === 1) return directResponse(111);
-      if (call === 2) return fallbackResponse(222);
-      return emptyResponse();
+      if (call === 1) return Promise.resolve(directResponse(111));
+      if (call === 2) return Promise.resolve(fallbackResponse(222));
+      return Promise.resolve(emptyResponse());
     });
 
     const result = await runBackfill({ lookup, throttleMs: 0 });
@@ -346,10 +329,10 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce([]);
 
     let call = 0;
-    const lookup = jest.fn(async () => {
+    const lookup = jest.fn(() => {
       call += 1;
-      if (call === 1) throw new Error('LML 502');
-      return directResponse(222);
+      if (call === 1) return Promise.reject(new Error('LML 502'));
+      return Promise.resolve(directResponse(222));
     });
 
     const result = await runBackfill({ lookup, throttleMs: 0 });

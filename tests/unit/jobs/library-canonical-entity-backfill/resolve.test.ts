@@ -15,7 +15,10 @@
  * numeric threshold and the search_type branch goes away.
  */
 
-import type { LmlLmlLookupResponse, LmlLmlLookupResultItem } from '../../../../jobs/library-canonical-entity-backfill/lml-types';
+import type {
+  LmlLookupResponse,
+  LmlLookupResultItem,
+} from '../../../../jobs/library-canonical-entity-backfill/lml-types';
 import { resolveCanonicalEntity } from '../../../../jobs/library-canonical-entity-backfill/resolve';
 
 const itemWithReleaseId = (releaseId: number): LmlLookupResultItem => ({
