@@ -135,6 +135,16 @@ export const flowsheet = {
   linked_at: 'linked_at',
   search_doc: 'search_doc',
 };
+export const flowsheet_linkage_review = {
+  id: 'id',
+  flowsheet_id: 'flowsheet_id',
+  candidate_library_ids: 'candidate_library_ids',
+  candidate_confidences: 'candidate_confidences',
+  suggested_action: 'suggested_action',
+  created_at: 'created_at',
+  reviewed_at: 'reviewed_at',
+  reviewed_decision: 'reviewed_decision',
+};
 export const bins = {};
 export const shows = {
   id: 'id',
