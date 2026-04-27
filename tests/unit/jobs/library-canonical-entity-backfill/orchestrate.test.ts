@@ -1,0 +1,397 @@
+/**
+ * Unit tests for the B-1.2 backfill orchestrator.
+ *
+ * The orchestrator iterates library rows where the canonical entity is
+ * unresolved, calls LML per row, and writes the resolution. Tests cover:
+ *
+ *   - applyResolution writes the right columns for each Resolution branch
+ *     (auto_accept stamps id+confidence+resolved_at; review stamps
+ *     resolved_at only; no_match stamps nothing so the row is retried).
+ *   - processRow stitches the lookup → resolve → write pipeline and degrades
+ *     gracefully on LML errors (no stamping, error logged).
+ *   - runBackfill loops until loadBatch returns empty, paginates by id, and
+ *     respects the inter-call throttle.
+ */
+
+import { db } from '@wxyc/database';
+import {
+  applyResolution,
+  processRow,
+  runBackfill,
+  BATCH_SIZE,
+  THROTTLE_MS,
+} from '../../../../jobs/library-canonical-entity-backfill/orchestrate';
+import type { Resolution } from '../../../../jobs/library-canonical-entity-backfill/resolve';
+import type { LookupResponse } from '@wxyc/shared/dtos';
+
+type SqlLike = {
+  sql?: string | string[];
+  queryChunks?: Array<string | { value?: string | string[] }>;
+};
+const renderSql = (value: unknown): string => {
+  const obj = value as SqlLike | null | undefined;
+  if (!obj) return '';
+  if (Array.isArray(obj.sql)) return obj.sql.join('');
+  if (typeof obj.sql === 'string') return obj.sql;
+  if (obj.queryChunks) {
+    return obj.queryChunks
+      .map((chunk) => {
+        if (typeof chunk === 'string') return chunk;
+        if (Array.isArray(chunk.value)) return chunk.value.join('');
+        if (typeof chunk.value === 'string') return chunk.value;
+        return '';
+      })
+      .join('');
+  }
+  return '';
+};
+
+const findExecuteCallMatching = (pattern: RegExp): unknown[] | undefined => {
+  const calls = (db.execute as jest.Mock).mock.calls;
+  return calls.find((call) => pattern.test(renderSql(call[0])));
+};
+
+const directResponse = (releaseId: number): LookupResponse => ({
+  results: [
+    {
+      library_item: {
+        id: 1,
+        title: 'On Your Own Love Again',
+        artist: 'Jessica Pratt',
+        call_number: 'Rock CD JES 001/02',
+        library_url: 'https://wxyc.org/album/1',
+      },
+      artwork: {
+        release_id: releaseId,
+        release_url: `https://www.discogs.com/release/${releaseId}`,
+        confidence: 0.9,
+      },
+    },
+  ],
+  search_type: 'direct',
+  song_not_found: false,
+  found_on_compilation: false,
+});
+
+const fallbackResponse = (releaseId: number): LookupResponse => ({
+  results: [
+    {
+      library_item: {
+        id: 1,
+        title: 'On Your Own Love Again',
+        artist: 'Jessica Pratt',
+        call_number: 'Rock CD JES 001/02',
+        library_url: 'https://wxyc.org/album/1',
+      },
+      artwork: {
+        release_id: releaseId,
+        release_url: `https://www.discogs.com/release/${releaseId}`,
+        confidence: 0.5,
+      },
+    },
+  ],
+  search_type: 'fallback',
+  song_not_found: false,
+  found_on_compilation: false,
+});
+
+const emptyResponse = (): LookupResponse => ({
+  results: [],
+  search_type: 'none',
+  song_not_found: false,
+  found_on_compilation: false,
+});
+
+describe('applyResolution', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('writes id, confidence, and resolved_at on auto_accept', async () => {
+    // Auto-accept is the only branch that fills canonical_entity_id. The
+    // resolved_at stamp is what makes re-runs idempotent (the WHERE filter
+    // skips already-stamped rows).
+    (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 });
+    const resolution: Resolution = {
+      status: 'auto_accept',
+      canonical_entity_id: 'discogs:987654',
+      confidence: 0.95,
+    };
+
+    await applyResolution(42, resolution);
+
+    const call = findExecuteCallMatching(/UPDATE[\s\S]*library/i);
+    expect(call).toBeDefined();
+    const sqlText = renderSql(call?.[0]);
+    expect(sqlText).toMatch(/canonical_entity_id/i);
+    expect(sqlText).toMatch(/canonical_entity_confidence/i);
+    expect(sqlText).toMatch(/canonical_entity_resolved_at"?\s*=\s*now\(\)/i);
+    const serialized = JSON.stringify(call?.[0]);
+    expect(serialized).toContain('discogs:987654');
+    expect(serialized).toContain('42');
+  });
+
+  it('stamps resolved_at only on review (canonical_entity_id stays NULL)', async () => {
+    // Review-flagged rows are picked up by B-3.1 by querying
+    // (canonical_entity_id IS NULL AND canonical_entity_resolved_at IS NOT NULL).
+    // Writing a non-null id here would silently auto-accept a fallback hit.
+    (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 });
+
+    await applyResolution(42, { status: 'review' });
+
+    const call = findExecuteCallMatching(/UPDATE[\s\S]*library/i);
+    expect(call).toBeDefined();
+    const sqlText = renderSql(call?.[0]);
+    expect(sqlText).toMatch(/canonical_entity_resolved_at"?\s*=\s*now\(\)/i);
+    expect(sqlText).not.toMatch(/SET[\s\S]*canonical_entity_id"?\s*=/i);
+  });
+
+  it('writes nothing on no_match so the next sweep retries', async () => {
+    // B-0: empty / unpinable matches are "discard, retry on next sweep". The
+    // backfill's WHERE filter is `canonical_entity_id IS NULL AND
+    // canonical_entity_resolved_at IS NULL`, so any UPDATE here would
+    // remove the row from the retry pool and lose the eventual recovery.
+    await applyResolution(42, { status: 'no_match' });
+
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
+  });
+});
+
+describe('processRow', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('calls the injected lookup with the row artist and album', async () => {
+    // Verifies the wiring between row → lookup. If a future change
+    // accidentally swaps artist/album, downstream resolution would still
+    // succeed on some inputs but be silently wrong.
+    (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 });
+    const lookup = jest.fn(async () => directResponse(123));
+
+    await processRow(
+      { id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' },
+      { lookup }
+    );
+
+    expect(lookup).toHaveBeenCalledWith('Juana Molina', 'DOGA');
+  });
+
+  it('stamps auto_accept on a direct hit', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 });
+    const lookup = jest.fn(async () => directResponse(987654));
+
+    const status = await processRow(
+      { id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' },
+      { lookup }
+    );
+
+    expect(status).toBe('auto_accept');
+    const call = findExecuteCallMatching(/UPDATE[\s\S]*library/i);
+    const serialized = JSON.stringify(call?.[0]);
+    expect(serialized).toContain('discogs:987654');
+  });
+
+  it('stamps review on a fallback hit', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 });
+    const lookup = jest.fn(async () => fallbackResponse(33));
+
+    const status = await processRow(
+      { id: 7, artist_name: 'Jessica Pratt', album_title: 'On Your Own' },
+      { lookup }
+    );
+
+    expect(status).toBe('review');
+  });
+
+  it('writes nothing and reports no_match on an empty LML response', async () => {
+    const lookup = jest.fn(async () => emptyResponse());
+
+    const status = await processRow(
+      { id: 7, artist_name: 'Unknown', album_title: 'Unknown' },
+      { lookup }
+    );
+
+    expect(status).toBe('no_match');
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
+  });
+
+  it('returns error on LML failure without stamping the row (so the next sweep retries)', async () => {
+    // Failure tolerance: LML timeouts and 5xx must not poison-pill the row.
+    // Stamping resolved_at on error would remove the row from the retry
+    // pool — the issue's "failure tolerant" requirement.
+    const lookup = jest.fn(async () => {
+      throw new Error('LML request timed out');
+    });
+
+    const status = await processRow(
+      { id: 7, artist_name: 'Stereolab', album_title: 'Dots and Loops' },
+      { lookup }
+    );
+
+    expect(status).toBe('error');
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
+  });
+});
+
+describe('runBackfill', () => {
+  beforeEach(() => {
+    // mockReset (not just clearAllMocks) — runBackfill tests queue per-test
+    // mockResolvedValueOnce values, and clearAllMocks leaves queued values
+    // intact. Without reset, an unused queued value from one test feeds the
+    // next test's first db.execute call.
+    (db.execute as jest.Mock).mockReset();
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('uses a sensible BATCH_SIZE (bounded reads — never SELECT *)', () => {
+    // The library has tens of thousands of rows. An unbounded SELECT would
+    // pin a connection for minutes; a too-small batch would explode the
+    // round-trip overhead per row.
+    expect(BATCH_SIZE).toBeGreaterThanOrEqual(50);
+    expect(BATCH_SIZE).toBeLessThanOrEqual(2000);
+  });
+
+  it('throttles between LML calls (THROTTLE_MS > 0)', () => {
+    // Throttle is a real LML rate-limit guard, not a configuration hook —
+    // dropping it to 0 risks stampeding LML when the backfill runs.
+    expect(THROTTLE_MS).toBeGreaterThan(0);
+  });
+
+  it('iterates batches until loadBatch returns empty', async () => {
+    // First batch: two rows. Second batch: one row. Third batch: empty → terminate.
+    // 3 SELECTs (loadBatch) + (2 + 1) UPDATEs = 6 db.execute calls in this scenario.
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 1, artist_name: 'Andy Stott', album_title: 'Faith In Strangers' },
+        { id: 2, artist_name: 'Loney Dear', album_title: 'Dear John' },
+      ])
+      .mockResolvedValueOnce({ count: 1 }) // UPDATE for id=1
+      .mockResolvedValueOnce({ count: 1 }) // UPDATE for id=2
+      .mockResolvedValueOnce([{ id: 3, artist_name: 'Cat Power', album_title: 'Sun' }])
+      .mockResolvedValueOnce({ count: 1 }) // UPDATE for id=3
+      .mockResolvedValueOnce([]); // empty → terminate
+
+    const lookup = jest.fn(async () => directResponse(111));
+
+    const result = await runBackfill({ lookup, throttleMs: 0 });
+
+    expect(lookup).toHaveBeenCalledTimes(3);
+    expect(result.totals.auto_accept).toBe(3);
+    expect(result.totals.scanned).toBe(3);
+  });
+
+  it('exits cleanly on the first empty batch (already-backfilled state)', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+    const lookup = jest.fn();
+
+    const result = await runBackfill({ lookup, throttleMs: 0 });
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(result.totals.scanned).toBe(0);
+  });
+
+  it('paginates forward by id (last-id cursor restartable across batches)', async () => {
+    // The second loadBatch must filter `id > 2` (the last id from batch 1)
+    // — otherwise we'd re-scan the same rows forever (the WHERE filter on
+    // canonical_entity_id IS NULL still matches a row that we just updated
+    // to review-status).
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 1, artist_name: 'a', album_title: 'a' },
+        { id: 2, artist_name: 'b', album_title: 'b' },
+      ])
+      .mockResolvedValueOnce({ count: 1 }) // UPDATE for id=1
+      .mockResolvedValueOnce({ count: 1 }) // UPDATE for id=2
+      .mockResolvedValueOnce([]);
+
+    const lookup = jest.fn(async () => directResponse(111));
+    await runBackfill({ lookup, throttleMs: 0 });
+
+    const selectCalls = (db.execute as jest.Mock).mock.calls
+      .map((c) => renderSql(c[0]))
+      .filter((s) => /SELECT/i.test(s));
+    // Two SELECTs: initial scan (id > 0 or no lower bound), and second scan
+    // bounded by the last-seen id from batch 1.
+    expect(selectCalls.length).toBe(2);
+    const secondSelectSerialized = JSON.stringify(
+      (db.execute as jest.Mock).mock.calls.filter((c) => /SELECT/i.test(renderSql(c[0])))[1]?.[0]
+    );
+    expect(secondSelectSerialized).toContain('2');
+  });
+
+  it('counts each Resolution branch separately for the run report', async () => {
+    // The summary the operator sees is what tells us whether B-3.1's review
+    // queue is going to have anything in it. Counting auto_accept separately
+    // from review separately from no_match is the whole point of running the
+    // job.
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 1, artist_name: 'a', album_title: 'a' },
+        { id: 2, artist_name: 'b', album_title: 'b' },
+        { id: 3, artist_name: 'c', album_title: 'c' },
+      ])
+      .mockResolvedValueOnce({ count: 1 }) // auto_accept update
+      .mockResolvedValueOnce({ count: 1 }) // review update
+      .mockResolvedValueOnce([]);
+
+    let call = 0;
+    const lookup = jest.fn(async () => {
+      call += 1;
+      if (call === 1) return directResponse(111);
+      if (call === 2) return fallbackResponse(222);
+      return emptyResponse();
+    });
+
+    const result = await runBackfill({ lookup, throttleMs: 0 });
+
+    expect(result.totals.auto_accept).toBe(1);
+    expect(result.totals.review).toBe(1);
+    expect(result.totals.no_match).toBe(1);
+    expect(result.totals.error).toBe(0);
+    expect(result.totals.scanned).toBe(3);
+  });
+
+  it('keeps going when a single row errors (failure-tolerant — does not abort the run)', async () => {
+    // One LML failure must not poison the run. The error count goes up; the
+    // scan continues. Operationally the row stays NULL (no resolved_at)
+    // and gets retried on the next sweep.
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 1, artist_name: 'a', album_title: 'a' },
+        { id: 2, artist_name: 'b', album_title: 'b' },
+      ])
+      .mockResolvedValueOnce({ count: 1 }) // UPDATE for id=2 (id=1 errored, no UPDATE)
+      .mockResolvedValueOnce([]);
+
+    let call = 0;
+    const lookup = jest.fn(async () => {
+      call += 1;
+      if (call === 1) throw new Error('LML 502');
+      return directResponse(222);
+    });
+
+    const result = await runBackfill({ lookup, throttleMs: 0 });
+
+    expect(result.totals.error).toBe(1);
+    expect(result.totals.auto_accept).toBe(1);
+    expect(result.totals.scanned).toBe(2);
+  });
+});
