@@ -168,10 +168,7 @@ describe('processRow', () => {
       .mockResolvedValueOnce({ count: 1 }); // applyLink
     const lookup = jest.fn(() => Promise.resolve(directResponse(123)));
 
-    await processRow(
-      { id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' },
-      { lookup }
-    );
+    await processRow({ id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' }, { lookup });
 
     expect(lookup).toHaveBeenCalledWith('Juana Molina', 'DOGA');
   });
@@ -182,10 +179,7 @@ describe('processRow', () => {
       .mockResolvedValueOnce({ count: 1 }); // UPDATE flowsheet
     const lookup = jest.fn(() => Promise.resolve(directResponse(987654)));
 
-    const status = await processRow(
-      { id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' },
-      { lookup }
-    );
+    const status = await processRow({ id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' }, { lookup });
 
     expect(status).toBe('linked');
     const updateCall = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet/i);
@@ -202,10 +196,7 @@ describe('processRow', () => {
     (db.execute as jest.Mock).mockResolvedValueOnce([{ id: 100 }, { id: 101 }]);
     const lookup = jest.fn(() => Promise.resolve(directResponse(987654)));
 
-    const status = await processRow(
-      { id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' },
-      { lookup }
-    );
+    const status = await processRow({ id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' }, { lookup });
 
     expect(status).toBe('multi_match');
     expect(findExecuteCallMatching(/UPDATE[\s\S]*flowsheet/i)).toBeUndefined();
@@ -218,10 +209,7 @@ describe('processRow', () => {
     (db.execute as jest.Mock).mockResolvedValueOnce([]);
     const lookup = jest.fn(() => Promise.resolve(directResponse(987654)));
 
-    const status = await processRow(
-      { id: 7, artist_name: 'Stereolab', album_title: 'Dots and Loops' },
-      { lookup }
-    );
+    const status = await processRow({ id: 7, artist_name: 'Stereolab', album_title: 'Dots and Loops' }, { lookup });
 
     expect(status).toBe('no_library_match');
     expect(findExecuteCallMatching(/UPDATE[\s\S]*flowsheet/i)).toBeUndefined();
@@ -232,10 +220,7 @@ describe('processRow', () => {
     // stamp linkage_source on them or B-3.1 misses them.
     const lookup = jest.fn(() => Promise.resolve(fallbackResponse(33)));
 
-    const status = await processRow(
-      { id: 7, artist_name: 'Jessica Pratt', album_title: 'On Your Own' },
-      { lookup }
-    );
+    const status = await processRow({ id: 7, artist_name: 'Jessica Pratt', album_title: 'On Your Own' }, { lookup });
 
     expect(status).toBe('review');
     expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
@@ -244,10 +229,7 @@ describe('processRow', () => {
   it('reports no_match on an empty LML response without writing', async () => {
     const lookup = jest.fn(() => Promise.resolve(emptyResponse()));
 
-    const status = await processRow(
-      { id: 7, artist_name: 'Unknown', album_title: 'Unknown' },
-      { lookup }
-    );
+    const status = await processRow({ id: 7, artist_name: 'Unknown', album_title: 'Unknown' }, { lookup });
 
     expect(status).toBe('no_match');
     expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
@@ -258,10 +240,7 @@ describe('processRow', () => {
     // removed from the retry pool and lose the eventual recovery.
     const lookup = jest.fn(() => Promise.reject(new Error('LML 502')));
 
-    const status = await processRow(
-      { id: 7, artist_name: 'Stereolab', album_title: 'Dots and Loops' },
-      { lookup }
-    );
+    const status = await processRow({ id: 7, artist_name: 'Stereolab', album_title: 'Dots and Loops' }, { lookup });
 
     expect(status).toBe('error');
     expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
