@@ -168,16 +168,15 @@ async function verifyMigrations() {
   const appliedHashes = new Set(dbMigrations.map((m) => m.hash));
 
   // Check for missing migrations, excluding entries we know will never apply
-  const missing = expectedMigrations.filter(
-    (m) => !appliedHashes.has(m.hash) && !EXPECTED_ABSENT_TAGS.has(m.tag),
-  );
-  const allowedAbsent = expectedMigrations.filter(
-    (m) => !appliedHashes.has(m.hash) && EXPECTED_ABSENT_TAGS.has(m.tag),
-  );
+  const missing = expectedMigrations.filter((m) => !appliedHashes.has(m.hash) && !EXPECTED_ABSENT_TAGS.has(m.tag));
+  const allowedAbsent = expectedMigrations.filter((m) => !appliedHashes.has(m.hash) && EXPECTED_ABSENT_TAGS.has(m.tag));
 
   if (allowedAbsent.length > 0) {
     console.warn(
-      styleText(['yellow'], `Note: ${allowedAbsent.length} journal entry(ies) intentionally absent from __drizzle_migrations:`),
+      styleText(
+        ['yellow'],
+        `Note: ${allowedAbsent.length} journal entry(ies) intentionally absent from __drizzle_migrations:`
+      )
     );
     for (const m of allowedAbsent) {
       console.warn(`  - [idx ${m.idx}] ${m.tag} (replayed under a fresh hash)`);
@@ -211,7 +210,9 @@ async function verifyMigrations() {
   }
 
   const verifiedCount = expectedMigrations.length - allowedAbsent.length;
-  console.log(`All ${verifiedCount} required migrations verified as applied${allowedAbsent.length ? ` (${allowedAbsent.length} allowlisted absent)` : ''}.\n`);
+  console.log(
+    `All ${verifiedCount} required migrations verified as applied${allowedAbsent.length ? ` (${allowedAbsent.length} allowlisted absent)` : ''}.\n`
+  );
 }
 
 /**
