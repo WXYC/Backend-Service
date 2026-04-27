@@ -49,15 +49,18 @@ jobs:
             echo "::error::Secret '$SECRET_NAME' is empty or not set"
             exit 1
           fi
-          # Write to GITHUB_OUTPUT with masking so subsequent steps can ${{ steps.resolve.outputs.value }}
-          # without it appearing in logs. ::add-mask:: also masks any future echo of the value.
+          # Mask so the value never appears in logs even if a later step
+          # accidentally echoes $VALUE. Then export to job env so the SSH
+          # action's `envs:` forwarding can pick it up. (Step outputs alone
+          # aren't enough — `envs:` reads from the runner shell's env, which
+          # comes from $GITHUB_ENV, not $GITHUB_OUTPUT.)
           echo "::add-mask::$VALUE"
           {
-            echo "value<<EOF"
+            echo "VALUE<<EOF"
             echo "$VALUE"
             echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          } >> "$GITHUB_ENV"
+          echo "KEY=$KEY" >> "$GITHUB_ENV"
           echo "length=${#VALUE}" >> "$GITHUB_OUTPUT"
 
       - name: Upsert in .env + restart backend container
@@ -147,4 +150,4 @@ jobs:
 
       - name: Summary
         run: |
-          echo "Upserted ${{ steps.resolve.outputs.key }} (${{ steps.resolve.outputs.length }} chars) on EC2 and restarted backend container."
+          echo "Upserted ${{ env.KEY }} (${{ steps.resolve.outputs.length }} chars) on EC2 and restarted backend container."
