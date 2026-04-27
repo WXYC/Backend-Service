@@ -50,13 +50,7 @@ export type FlowsheetRow = {
 
 export type LookupFn = (artist: string, album?: string) => Promise<LmlLookupResponse>;
 
-export type ProcessStatus =
-  | 'linked'
-  | 'multi_match'
-  | 'no_library_match'
-  | 'review'
-  | 'no_match'
-  | 'error';
+export type ProcessStatus = 'linked' | 'multi_match' | 'no_library_match' | 'review' | 'no_match' | 'error';
 
 export type Totals = {
   scanned: number;
@@ -111,10 +105,7 @@ export const findLibraryByCanonicalEntity = async (canonicalEntityId: string): P
  * apply. Returns the outcome. Errors are logged and consumed; they do not
  * bubble up so a single bad row cannot abort the run.
  */
-export const processRow = async (
-  row: FlowsheetRow,
-  deps: { lookup: LookupFn }
-): Promise<ProcessStatus> => {
+export const processRow = async (row: FlowsheetRow, deps: { lookup: LookupFn }): Promise<ProcessStatus> => {
   const artist = row.artist_name ?? '';
   const album = row.album_title ?? undefined;
 
@@ -140,7 +131,7 @@ export const processRow = async (
 
   await applyLink({
     flowsheetId: row.id,
-    libraryId: libraryIds[0]!,
+    libraryId: libraryIds[0],
     confidence: signal.confidence,
   });
   return 'linked';
