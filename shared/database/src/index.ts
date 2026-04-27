@@ -4,3 +4,4 @@ export * from './types/index.js';
 export * from './legacy/sql.mirror.js';
 export * from './legacy/etl-utils.js';
 export * from './cdc-listener.js';
+export * from './library-tiebreak.js';

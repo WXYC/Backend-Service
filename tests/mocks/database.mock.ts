@@ -212,6 +212,11 @@ export const cronjob_runs = {};
 // Mock enum
 export const flowsheetEntryTypeEnum = () => ({});
 
+// B-2.3 multi-match tie-break. Tests that drive the linkage call sites
+// (B-2.1 forward path, B-2.2 backfill) override this per-test to control
+// which library_id the tie-break "picks".
+export const pickPrimaryLibraryRow = jest.fn<(libraryIds: number[]) => Promise<number | null>>();
+
 // Mock types
 export type AnonymousDevice = {
   id: number;
