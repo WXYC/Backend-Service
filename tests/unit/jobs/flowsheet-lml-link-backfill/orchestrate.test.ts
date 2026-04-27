@@ -18,6 +18,7 @@
 import { db, pickPrimaryLibraryRow } from '@wxyc/database';
 import {
   applyLink,
+  enqueueReview,
   findLibraryByCanonicalEntity,
   processRow,
   runBackfill,
@@ -107,6 +108,58 @@ describe('applyLink', () => {
     const call = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet/i);
     const sqlText = renderSql(call?.[0]);
     expect(sqlText).toMatch(/album_id"?\s+IS\s+NULL/i);
+  });
+});
+
+describe('enqueueReview', () => {
+  beforeEach(() => {
+    (db.execute as jest.Mock).mockReset();
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('inserts a review row with the candidate ids, confidences and suggested action', async () => {
+    // The B-3.1 CLI scans flowsheet_linkage_review for unreviewed rows and
+    // shows the operator the candidate library rows in LML's ranking order.
+    // The columns persisted here are exactly the contract that CLI reads.
+    (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 });
+
+    await enqueueReview({
+      flowsheetId: 7,
+      candidateLibraryIds: [100, 101],
+      candidateConfidences: [0.5, 0.5],
+      suggestedAction: 'review_fallback',
+    });
+
+    const call = findExecuteCallMatching(/INSERT[\s\S]*flowsheet_linkage_review/i);
+    expect(call).toBeDefined();
+    const sqlText = renderSql(call?.[0]);
+    expect(sqlText).toMatch(/flowsheet_id/i);
+    expect(sqlText).toMatch(/candidate_library_ids/i);
+    expect(sqlText).toMatch(/candidate_confidences/i);
+    expect(sqlText).toMatch(/suggested_action/i);
+  });
+
+  it('uses ON CONFLICT DO NOTHING on flowsheet_id to make re-runs idempotent', async () => {
+    // The backfill is restartable; without the conflict guard, a second
+    // sweep over the same fallback row would either error on the UNIQUE
+    // constraint or duplicate review rows depending on conflict handling.
+    (db.execute as jest.Mock).mockResolvedValueOnce({ count: 0 });
+
+    await enqueueReview({
+      flowsheetId: 7,
+      candidateLibraryIds: [],
+      candidateConfidences: [],
+      suggestedAction: 'review_fallback',
+    });
+
+    const call = findExecuteCallMatching(/INSERT[\s\S]*flowsheet_linkage_review/i);
+    const sqlText = renderSql(call?.[0]);
+    expect(sqlText).toMatch(/ON\s+CONFLICT[\s\S]*flowsheet_id[\s\S]*DO\s+NOTHING/i);
   });
 });
 
@@ -238,15 +291,55 @@ describe('processRow', () => {
     expect(findExecuteCallMatching(/UPDATE[\s\S]*flowsheet/i)).toBeUndefined();
   });
 
-  it('reports review on a fallback hit without writing', async () => {
-    // Review-flagged rows roll forward to B-3.1; the orchestrator must not
-    // stamp linkage_source on them or B-3.1 misses them.
-    const lookup = jest.fn(() => Promise.resolve(fallbackResponse(33)));
+  it('enqueues a review row on a fallback hit without stamping flowsheet linkage', async () => {
+    // Review-flagged rows roll forward to B-3.1's CLI. The orchestrator must
+    // (a) persist them to flowsheet_linkage_review with the resolved library
+    // candidates, and (b) NOT stamp flowsheet.album_id / linkage_source —
+    // doing so would skip the human-review step entirely.
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([{ id: 100 }, { id: 101 }]) // SELECT library for first candidate
+      .mockResolvedValueOnce([]) // SELECT library for second candidate (no match locally)
+      .mockResolvedValueOnce({ count: 1 }); // INSERT review row
+    const lookup = jest.fn(() =>
+      Promise.resolve({
+        results: [
+          { library_item: { id: 1 }, artwork: { release_id: 33 } },
+          { library_item: { id: 2 }, artwork: { release_id: 44 } },
+        ],
+        search_type: 'fallback' as const,
+      })
+    );
 
     const status = await processRow({ id: 7, artist_name: 'Jessica Pratt', album_title: 'On Your Own' }, { lookup });
 
     expect(status).toBe('review');
-    expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
+    expect(findExecuteCallMatching(/UPDATE[\s\S]*flowsheet"\s/i)).toBeUndefined();
+    const insertCall = findExecuteCallMatching(/INSERT[\s\S]*flowsheet_linkage_review/i);
+    expect(insertCall).toBeDefined();
+    const serialized = JSON.stringify(insertCall?.[0]);
+    expect(serialized).toContain('7'); // flowsheet_id
+    expect(serialized).toContain('100'); // resolved library_id from candidate 1
+    expect(serialized).toContain('101');
+  });
+
+  it('enqueues a review row even when no candidate resolves to a local library row', async () => {
+    // Empty candidate arrays are intentional: the operator can still see the
+    // flowsheet text and skip the entry. Skipping the enqueue would silently
+    // hide the case from the queue.
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([]) // SELECT library for the only candidate
+      .mockResolvedValueOnce({ count: 1 }); // INSERT review row
+    const lookup = jest.fn(() =>
+      Promise.resolve({
+        results: [{ library_item: { id: 1 }, artwork: { release_id: 33 } }],
+        search_type: 'fallback' as const,
+      })
+    );
+
+    const status = await processRow({ id: 7, artist_name: 'Jessica Pratt', album_title: 'On Your Own' }, { lookup });
+
+    expect(status).toBe('review');
+    expect(findExecuteCallMatching(/INSERT[\s\S]*flowsheet_linkage_review/i)).toBeDefined();
   });
 
   it('reports no_match on an empty LML response without writing', async () => {
@@ -372,8 +465,12 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce([])
       // row 3 — auto_accept, library has two matches → tie-break picks 201, link
       .mockResolvedValueOnce([{ id: 200 }, { id: 201 }])
+      .mockResolvedValueOnce({ count: 1 }) // row 3 applyLink after tie-break picks 201
+      // row 4 — review (fallback): SELECT library for the one candidate +
+      // INSERT into flowsheet_linkage_review
+      .mockResolvedValueOnce([{ id: 300 }])
       .mockResolvedValueOnce({ count: 1 })
-      // rows 4 + 5 fall through to review / no_match (no DB writes)
+      // row 5 — no_match (empty results — no DB writes)
       // batch 2 — empty
       .mockResolvedValueOnce([]);
 
