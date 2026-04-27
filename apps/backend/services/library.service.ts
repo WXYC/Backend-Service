@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import type { ReconciledIdentity } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
@@ -9,17 +9,16 @@ import {
   NewArtist,
   NewGenre,
   RotationRelease,
+  album_plays,
   artists,
   genre_artist_crossreference,
   format,
   genres,
   library,
-  library_artist_view,
   rotation,
   LibraryArtistViewEntry,
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
-import { extractSignificantWords } from './requestLine/matching/index.js';
 import { lookupMetadata, isLmlConfigured } from './lml/lml.client.js';
 
 /**
@@ -258,23 +257,173 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
   return results;
 }
 
-export const fuzzySearchLibrary = async (artist_name?: string, album_title?: string, n = 5, on_streaming?: boolean) => {
-  const similarityCondition = sql`(${library_artist_view.artist_name} % ${artist_name || null} OR ${library_artist_view.album_title} % ${album_title || null})`;
+/**
+ * Projection that mirrors `library_artist_view` so the search functions can
+ * read from `library` directly (with explicit joins) and still return the
+ * shape consumers expect. Reading from `library` is what lets the planner
+ * pick the trigram or tsvector index on the predicated column instead of
+ * forcing the 5-way view JOIN to materialize first.
+ */
+const LIBRARY_VIEW_PROJECTION = {
+  id: library.id,
+  code_letters: artists.code_letters,
+  code_artist_number: genre_artist_crossreference.artist_genre_code,
+  code_number: library.code_number,
+  artist_name: artists.artist_name,
+  alphabetical_name: artists.alphabetical_name,
+  album_title: library.album_title,
+  format_name: format.format_name,
+  genre_name: genres.genre_name,
+  rotation_bin: rotation.rotation_bin,
+  add_date: library.add_date,
+  label: library.label,
+  label_id: library.label_id,
+  on_streaming: library.on_streaming,
+  album_artist: library.album_artist,
+  plays: library.plays,
+  artwork_url: library.artwork_url,
+  discogs_artist_id: artists.discogs_artist_id,
+  musicbrainz_artist_id: artists.musicbrainz_artist_id,
+  wikidata_qid: artists.wikidata_qid,
+  spotify_artist_id: artists.spotify_artist_id,
+  apple_music_artist_id: artists.apple_music_artist_id,
+  bandcamp_id: artists.bandcamp_id,
+} as const;
 
-  const streamingCondition =
-    on_streaming !== undefined ? eq(library_artist_view.on_streaming, on_streaming) : undefined;
-
-  const results = await db
-    .select()
-    .from(library_artist_view)
-    .where(streamingCondition ? and(similarityCondition, streamingCondition) : similarityCondition)
-    .orderBy(
-      asc(sql`${library_artist_view.artist_name} <-> ${artist_name || null}`),
-      asc(sql`${library_artist_view.album_title} <-> ${album_title || null}`)
+/**
+ * Build the `FROM library` query shape with the joins needed to project the
+ * `LibraryArtistViewEntry` columns. `withPlays` adds the `album_plays`
+ * materialized view as a LEFT JOIN — only the tsvector ranker needs it, so
+ * single-column trigram paths skip it.
+ */
+function libraryViewQuery(withPlays: boolean) {
+  const base = db
+    .select(LIBRARY_VIEW_PROJECTION)
+    .from(library)
+    .innerJoin(artists, eq(artists.id, library.artist_id))
+    .innerJoin(format, eq(format.id, library.format_id))
+    .innerJoin(genres, eq(genres.id, library.genre_id))
+    .innerJoin(
+      genre_artist_crossreference,
+      and(
+        eq(genre_artist_crossreference.artist_id, library.artist_id),
+        eq(genre_artist_crossreference.genre_id, library.genre_id)
+      )
     )
-    .limit(n);
+    .leftJoin(
+      rotation,
+      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
+    );
+  return withPlays ? base.leftJoin(album_plays, eq(album_plays.album_id, library.id)) : base;
+}
 
-  return results;
+/** A query has at least one alphanumeric character. Pure punctuation skips both search paths. */
+function hasAlphanumeric(query: string): boolean {
+  return /[\p{L}\p{N}]/u.test(query);
+}
+
+/**
+ * Tsvector + plays ranker for the dj-site Both-mode default. Reads
+ * `library.search_doc` (the STORED generated tsvector from migration 0058)
+ * with `websearch_to_tsquery('simple', ...)` so multi-term queries get
+ * AND-semantics, then weights ts_rank by `1 + ln(plays + 1)` to nudge
+ * canonical answers up.
+ *
+ * The `(1 + ln(...))` shape is deliberate: `ln(plays + 1)` zeros out the
+ * text-rank signal for albums with zero plays (most of the catalog), which
+ * erases the ranking entirely for unpopular-but-relevant matches.
+ */
+async function searchLibraryByTsvector(
+  query: string,
+  n: number,
+  on_streaming?: boolean
+): Promise<LibraryArtistViewEntry[]> {
+  const tsquery = sql`websearch_to_tsquery('simple', ${query})`;
+  const tsvectorPredicate = sql`${library.search_doc} @@ ${tsquery}`;
+  const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
+
+  return libraryViewQuery(true)
+    .where(streamingPredicate ? and(tsvectorPredicate, streamingPredicate) : tsvectorPredicate)
+    .orderBy(desc(sql`ts_rank(${library.search_doc}, ${tsquery}) * (1 + ln(coalesce(${album_plays.plays}, 0) + 1))`))
+    .limit(n) as unknown as Promise<LibraryArtistViewEntry[]>;
+}
+
+/**
+ * Trigram fallback for Both-mode: typos and weird casing that
+ * `websearch_to_tsquery` won't match. Operates on the denormalized
+ * `library.artist_name` (backfilled in A.2) so the predicate is
+ * single-table and reachable by the per-column GIN trigram indexes.
+ */
+async function searchLibraryByTrigramBoth(
+  query: string,
+  n: number,
+  on_streaming?: boolean
+): Promise<LibraryArtistViewEntry[]> {
+  const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
+  const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
+
+  return libraryViewQuery(false)
+    .where(streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate)
+    .orderBy(
+      desc(sql`GREATEST(similarity(${library.artist_name}, ${query}), similarity(${library.album_title}, ${query}))`)
+    )
+    .limit(n) as unknown as Promise<LibraryArtistViewEntry[]>;
+}
+
+/**
+ * Run the Both-mode search: tsvector first, trigram fallback only when
+ * tsvector returns 0 rows. The fallback is gated on the query having at
+ * least 2 characters and at least one alphanumeric character — pure
+ * punctuation and 1-char queries return empty without a second roundtrip.
+ */
+async function searchLibraryBothMode(
+  query: string,
+  n: number,
+  on_streaming?: boolean
+): Promise<LibraryArtistViewEntry[]> {
+  const trimmed = query.trim();
+  if (trimmed.length === 0 || !hasAlphanumeric(trimmed)) return [];
+
+  const tsvectorResults = await searchLibraryByTsvector(trimmed, n, on_streaming);
+  if (tsvectorResults.length > 0) return tsvectorResults;
+
+  if (trimmed.length < 2) return [];
+  return searchLibraryByTrigramBoth(trimmed, n, on_streaming);
+}
+
+export const fuzzySearchLibrary = async (
+  artist_name?: string,
+  album_title?: string,
+  n = 5,
+  on_streaming?: boolean
+): Promise<LibraryArtistViewEntry[]> => {
+  // Both-mode default (dj-site sends the same string as artist and title).
+  // Route through tsvector + plays.
+  if (artist_name && album_title && artist_name === album_title) {
+    return searchLibraryBothMode(artist_name, n, on_streaming);
+  }
+
+  const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
+
+  // Both fields set but different — keep the existing OR semantics, but
+  // run on `library` directly so each side of the OR can use its trigram
+  // index via BitmapOr instead of materializing the full view first.
+  if (artist_name && album_title) {
+    const trigramPredicate = sql`(${library.artist_name} % ${artist_name} OR ${library.album_title} % ${album_title})`;
+    return libraryViewQuery(false)
+      .where(streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate)
+      .orderBy(asc(sql`${library.artist_name} <-> ${artist_name}`), asc(sql`${library.album_title} <-> ${album_title}`))
+      .limit(n) as unknown as LibraryArtistViewEntry[];
+  }
+
+  // Single-column trigram path (Artists or Albums mode).
+  const column = artist_name ? library.artist_name : library.album_title;
+  const value = artist_name ?? album_title ?? null;
+  const trigramPredicate = sql`${column} % ${value}`;
+  return libraryViewQuery(false)
+    .where(streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate)
+    .orderBy(asc(sql`${column} <-> ${value}`))
+    .limit(n) as unknown as LibraryArtistViewEntry[];
 };
 
 /**
@@ -509,10 +658,13 @@ function viewRowToLibraryResult(row: LibraryArtistViewEntry): LibraryResult {
 /**
  * Search the library catalog with flexible query options.
  *
- * Uses PostgreSQL pg_trgm for fuzzy matching. Supports:
- * - Combined artist + album/song queries
- * - Artist-only queries
- * - Album/title-only queries
+ * Routes per the A.5 design:
+ * - Free-text `query`: tsvector + plays ranking on `library.search_doc`,
+ *   with a trigram fallback when tsvector returns 0 rows. The fallback is
+ *   gated so pure-punctuation / single-char queries don't hit the DB twice.
+ * - Single-column `artist` or `title`: existing trigram path on the
+ *   matching column, but reading from `library` directly so the planner
+ *   uses the per-column GIN index instead of forcing the 5-way view JOIN.
  *
  * @param query - Free text search query (artist and/or album)
  * @param artist - Artist name filter
@@ -530,35 +682,8 @@ export async function searchLibrary(
   let results: LibraryArtistViewEntry[] = [];
 
   if (query) {
-    // Full text search using pg_trgm similarity
-    results = await db
-      .select()
-      .from(library_artist_view)
-      .where(sql`${library_artist_view.artist_name} % ${query} OR ${library_artist_view.album_title} % ${query}`)
-      .orderBy(
-        desc(
-          sql`GREATEST(similarity(${library_artist_view.artist_name}, ${query}), similarity(${library_artist_view.album_title}, ${query}))`
-        )
-      )
-      .limit(limit);
-
-    // If no results with trigram, try LIKE fallback with significant words
-    if (results.length === 0) {
-      const words = extractSignificantWords(query);
-      if (words.length > 0) {
-        const conditions = words.map((w) =>
-          or(ilike(library_artist_view.artist_name, `%${w}%`), ilike(library_artist_view.album_title, `%${w}%`))
-        );
-
-        results = await db
-          .select()
-          .from(library_artist_view)
-          .where(and(...conditions))
-          .limit(limit);
-      }
-    }
+    results = await searchLibraryBothMode(query, limit, on_streaming);
   } else if (artist || title) {
-    // Filtered search by artist and/or title
     results = await fuzzySearchLibrary(artist, title, limit, on_streaming);
   }
 
@@ -575,12 +700,14 @@ export async function searchLibrary(
  * @returns Corrected artist name if a good match is found, null otherwise
  */
 export async function findSimilarArtist(artistName: string, threshold = 0.85): Promise<string | null> {
-  // Use pg_trgm similarity function to find close matches
+  // Use pg_trgm similarity function to find close matches. Reads from
+  // `library` directly so the planner uses the GIN trigram index on
+  // `library.artist_name` (added in 0058) without materializing the view.
   const query = sql`
-    SELECT DISTINCT artist_name,
-      similarity(artist_name, ${artistName}) as sim
-    FROM ${library_artist_view}
-    WHERE similarity(artist_name, ${artistName}) > ${threshold}
+    SELECT DISTINCT ${library.artist_name} AS artist_name,
+      similarity(${library.artist_name}, ${artistName}) as sim
+    FROM ${library}
+    WHERE similarity(${library.artist_name}, ${artistName}) > ${threshold}
     ORDER BY sim DESC
     LIMIT 1
   `;
@@ -612,27 +739,10 @@ export async function findSimilarArtist(artistName: string, threshold = 0.85): P
  * @returns Array of enriched library results
  */
 export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promise<EnrichedLibraryResult[]> {
-  let rows = await db
-    .select()
-    .from(library_artist_view)
-    .where(sql`${library_artist_view.album_title} % ${albumTitle}`)
-    .orderBy(desc(sql`similarity(${library_artist_view.album_title}, ${albumTitle})`))
-    .limit(limit);
-
-  // If no trigram matches, try keyword search
-  if (rows.length === 0) {
-    const words = extractSignificantWords(albumTitle);
-    if (words.length > 0) {
-      const significantWords = words.slice(0, 4);
-      const conditions = significantWords.map((w) => ilike(library_artist_view.album_title, `%${w}%`));
-
-      rows = await db
-        .select()
-        .from(library_artist_view)
-        .where(and(...conditions))
-        .limit(limit);
-    }
-  }
+  const rows = (await libraryViewQuery(false)
+    .where(sql`${library.album_title} % ${albumTitle}`)
+    .orderBy(desc(sql`similarity(${library.album_title}, ${albumTitle})`))
+    .limit(limit)) as unknown as LibraryArtistViewEntry[];
 
   return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
 }
@@ -645,12 +755,10 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  * @returns Array of enriched library results
  */
 export async function searchByArtist(artistName: string, limit = 5): Promise<EnrichedLibraryResult[]> {
-  const rows = await db
-    .select()
-    .from(library_artist_view)
-    .where(sql`${library_artist_view.artist_name} % ${artistName}`)
-    .orderBy(desc(sql`similarity(${library_artist_view.artist_name}, ${artistName})`))
-    .limit(limit);
+  const rows = (await libraryViewQuery(false)
+    .where(sql`${library.artist_name} % ${artistName}`)
+    .orderBy(desc(sql`similarity(${library.artist_name}, ${artistName})`))
+    .limit(limit)) as unknown as LibraryArtistViewEntry[];
 
   return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
 }
