@@ -180,3 +180,33 @@ INSERT INTO wxyc_schema.rotation(album_id, rotation_bin) VALUES (1, 'L');
 
 -- Add album 4 to rotation for metadata.spec.js rotation tests
 INSERT INTO wxyc_schema.rotation(album_id, rotation_bin) VALUES (4, 'M');
+
+-- Stereolab + multiple albums for catalog-search ranking tests (Epic A.6).
+-- Two albums on the same artist let `stereolab transient` exercise tsvector
+-- AND-semantics: only the Transient-Random-Noise-Bursts row contains both
+-- tokens, and the other Stereolab row must drop out of the result set.
+INSERT INTO wxyc_schema.artists(artist_name, alphabetical_name, code_letters)
+  VALUES ('Stereolab', 'Stereolab', 'ST');
+
+INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
+  VALUES (7, 11, 200);
+
+INSERT INTO wxyc_schema.library(
+    artist_id, genre_id, format_id, album_title, code_number)
+    VALUES (7, 11, 2, 'Transient Random-Noise Bursts With Announcements', 1);
+
+INSERT INTO wxyc_schema.library(
+    artist_id, genre_id, format_id, album_title, code_number)
+    VALUES (7, 11, 2, 'Mars Audiac Quintet', 2);
+
+-- Mirror the A.2 backfill outcome for all seeded library rows so the new
+-- tsvector path (which reads library.artist_name directly) and the trigram
+-- fallback (which uses the GIN index on library.artist_name) have populated
+-- data to match against. In production this is owned by the
+-- @wxyc/library-artist-name-backfill job; the seed has to do it inline
+-- because new fixture rows are inserted by SQL, not the API.
+UPDATE wxyc_schema.library l
+   SET artist_name = a.artist_name
+  FROM wxyc_schema.artists a
+ WHERE l.artist_id = a.id
+   AND l.artist_name IS NULL;
