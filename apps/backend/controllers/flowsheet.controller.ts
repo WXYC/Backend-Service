@@ -8,6 +8,7 @@ import { db, NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ, flowsheet } fr
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import { fetchMetadata } from '../services/metadata/index.js';
+import { runLmlLinkage } from '../services/flowsheet-linkage.service.js';
 import WxycError from '../utils/error.js';
 
 export type QueryParams = {
@@ -46,6 +47,41 @@ export interface IFSEntry extends Omit<FSEntry, 'search_doc' | 'legacy_link_atte
  *
  * Called after a track is inserted. Does not block the HTTP response.
  */
+/**
+ * Fire-and-forget: resolve a canonical entity via LML and link the row to a
+ * library album when there's a single high-confidence match (B-2.1). Only
+ * fires for free-form inserts (no album_id) — bin-picks already carry an
+ * album_id from the catalog click. Logs every non-link outcome at info level
+ * so the operator can spot pattern shifts without a metric pipeline.
+ */
+function fireAndForgetLinkage(completedEntry: FSEntry): void {
+  if (completedEntry.album_id !== null) return;
+  if (!completedEntry.artist_name) return;
+
+  runLmlLinkage({
+    flowsheetId: completedEntry.id,
+    artistName: completedEntry.artist_name,
+    albumTitle: completedEntry.album_title,
+  })
+    .then((outcome) => {
+      if (outcome.status === 'linked') return;
+      console.info(
+        `[Flowsheet] LML linkage outcome=${outcome.status} flowsheet_id=${completedEntry.id} artist="${completedEntry.artist_name}" album="${completedEntry.album_title ?? ''}"`
+      );
+    })
+    .catch((err) => {
+      console.error('[Flowsheet] LML linkage failed:', err);
+      Sentry.captureException(err, {
+        tags: { subsystem: 'flowsheet-linkage' },
+        extra: {
+          flowsheetId: completedEntry.id,
+          artistName: completedEntry.artist_name,
+          albumTitle: completedEntry.album_title,
+        },
+      });
+    });
+}
+
 function fireAndForgetMetadata(completedEntry: FSEntry, artistId?: number): void {
   if (!completedEntry.artist_name) return;
 
@@ -245,6 +281,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
     fireAndForgetMetadata(completedEntry);
+    fireAndForgetLinkage(completedEntry);
     res.status(201).json(completedEntry);
   }
 };
