@@ -210,7 +210,7 @@ describe('library.controller', () => {
       jest.clearAllMocks();
       mockGenerateAlbumCodeNumber.mockResolvedValue(1);
       mockCreateLabel.mockResolvedValue({ id: 99 });
-      mockInsertAlbum.mockImplementation(async (album) => ({ id: 1, ...album }));
+      mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 1, ...album }));
     });
 
     it('writes the canonical artist_name from the artists table when artist_id is supplied', async () => {
