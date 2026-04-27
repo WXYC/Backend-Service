@@ -22,7 +22,7 @@ import type { LmlLookupResponse } from './lml-types.js';
 
 export type LmlSignal =
   | { status: 'auto_accept'; canonical_entity_id: string; confidence: number }
-  | { status: 'review' }
+  | { status: 'review'; candidate_canonical_entity_ids: string[]; confidence: number }
   | { status: 'no_match' };
 
 /**
@@ -31,6 +31,16 @@ export type LmlSignal =
  * filtering. Mirrors `AUTO_ACCEPT_CONFIDENCE` in B-1.2's resolver.
  */
 export const AUTO_ACCEPT_CONFIDENCE = 0.95;
+
+/**
+ * Synthetic confidence for fallback / alternative / compilation /
+ * song_as_artist hits routed to the B-3.1 review queue. Stored on each
+ * candidate in `flowsheet_linkage_review.candidate_confidences` so an
+ * operator (and downstream analytics) can see at a glance which queue
+ * entries came from a low-confidence heuristic. Collapses to a per-result
+ * number once LML exposes one (WXYC/library-metadata-lookup#158).
+ */
+export const REVIEW_CONFIDENCE = 0.5;
 
 const toCanonicalEntityId = (releaseId: number): string => `discogs:${releaseId}`;
 
@@ -53,5 +63,21 @@ export const resolveLmlSignal = (response: LmlLookupResponse): LmlSignal => {
     };
   }
 
-  return { status: 'review' };
+  // Filter the ranked candidates to results with a pinable release_id —
+  // those are the only ones the orchestrator can resolve to library rows
+  // via `library.canonical_entity_id`. Order is preserved so the CLI walks
+  // candidates in LML's ranking.
+  const candidate_canonical_entity_ids: string[] = [];
+  for (const result of response.results) {
+    const id = result.artwork?.release_id;
+    if (typeof id === 'number') {
+      candidate_canonical_entity_ids.push(toCanonicalEntityId(id));
+    }
+  }
+
+  return {
+    status: 'review',
+    candidate_canonical_entity_ids,
+    confidence: REVIEW_CONFIDENCE,
+  };
 };
