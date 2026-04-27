@@ -65,17 +65,20 @@ describe('processRow metrics integration (B-3.2)', () => {
     expect(recordOutcome).toHaveBeenCalledWith('gray_zone_review');
   });
 
-  it('records gray_zone_review on multi_match (defers to B-2.3 / review)', async () => {
-    // The orchestrator returns 'multi_match' and does not stamp the row.
-    // From the dashboard's perspective, it's an unresolved candidate that a
-    // human or B-2.3 has to break — same bucket as low-confidence review.
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ id: 100 }, { id: 101 }]);
+  it('records linked_high_conf on multi_match resolved via B-2.3 tie-break', async () => {
+    // Multi-match used to defer to a review queue; B-2.3 wired the tie-break
+    // (rotation > format > plays > id) into the orchestrator so the row gets
+    // linked to the picked library_id. The metric reflects a successful link.
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([{ id: 100 }, { id: 101 }]) // findLibraryByCanonicalEntity
+      .mockResolvedValueOnce([{ id: 100, format_name: 'vinyl', plays: 50, in_rotation: false }]) // pickPrimaryLibraryRow lookup
+      .mockResolvedValueOnce(undefined); // applyLink
     const { sink, recordOutcome } = makeMetrics();
     const lookup = jest.fn(() => Promise.resolve(directResponse(987654)));
 
     await processRow({ id: 7, artist_name: 'Stereolab', album_title: 'Aluminum Tunes' }, { lookup, metrics: sink });
 
-    expect(recordOutcome).toHaveBeenCalledWith('gray_zone_review');
+    expect(recordOutcome).toHaveBeenCalledWith('linked_high_conf');
   });
 
   it('records no_candidate on no_library_match', async () => {
