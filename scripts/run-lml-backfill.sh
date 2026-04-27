@@ -40,50 +40,67 @@ case "$CMD" in
     # `2>&1 | tee` captures both stdout and stderr to the log file while
     # also showing them on the tmux pane for live monitoring.
     ssh -o ConnectTimeout=10 "$SSH_HOST" bash <<EOF
-set -euo pipefail
+set -uo pipefail
+# Note: NOT using -e — we want to keep going past failed greps so we can
+# emit useful errors. Each step checks its own exit code.
+
+step() { echo "[run-lml-backfill] \$*"; }
+fail() { echo "[run-lml-backfill] ERROR: \$*" >&2; exit 1; }
+
+step "Connected to EC2."
 
 if tmux has-session -t '$TMUX_SESSION' 2>/dev/null; then
-  echo "tmux session '$TMUX_SESSION' is already running on EC2."
-  echo "Use './run-lml-backfill.sh attach' to view it."
-  exit 1
+  fail "tmux session '$TMUX_SESSION' is already running. Run './run-lml-backfill.sh attach'."
 fi
 
-if [ ! -f '$REMOTE_ENV_PATH' ]; then
-  echo "Missing env file: $REMOTE_ENV_PATH" >&2
-  exit 1
+[ -f '$REMOTE_ENV_PATH' ] || fail "Missing env file: $REMOTE_ENV_PATH"
+
+# Extract a value from .env, returning empty if absent. Tolerant by design.
+get_env() {
+  grep "^\$1=" '$REMOTE_ENV_PATH' 2>/dev/null | head -1 | cut -d= -f2- || true
+}
+
+LIBRARY_METADATA_URL=\$(get_env LIBRARY_METADATA_URL)
+[ -n "\$LIBRARY_METADATA_URL" ] || fail "LIBRARY_METADATA_URL missing from .env. Set it with: gh workflow run set-ec2-env-var.yml -f key=LIBRARY_METADATA_URL"
+
+# AWS_REGION / AWS_ECR_URI aren't persisted to .env by the deploy workflow
+# — they're GH secrets injected at deploy time. Recover them from the
+# running backend container's image, which is always tagged with the full
+# ECR URI (e.g. 123456.dkr.ecr.us-east-1.amazonaws.com/backend:abc1234).
+AWS_REGION=\$(get_env AWS_REGION)
+AWS_ECR_URI=\$(get_env AWS_ECR_URI)
+
+if [ -z "\$AWS_ECR_URI" ]; then
+  step "AWS_ECR_URI not in .env; recovering from running 'backend' container."
+  BACKEND_IMAGE=\$(docker inspect -f '{{.Config.Image}}' backend 2>/dev/null || true)
+  [ -n "\$BACKEND_IMAGE" ] || fail "No running 'backend' container found. Set AWS_ECR_URI in .env (via set-ec2-env-var workflow once it's added to the secrets allowlist) or pass it as the IMAGE_REGISTRY env var."
+  # Strip the trailing /<repo>:<tag> to get the registry URI.
+  AWS_ECR_URI="\${BACKEND_IMAGE%/*}"
+fi
+if [ -z "\$AWS_REGION" ]; then
+  # AWS ECR URIs are <account>.dkr.ecr.<region>.amazonaws.com.
+  AWS_REGION=\$(echo "\$AWS_ECR_URI" | awk -F. '{print \$4}')
+  [ -n "\$AWS_REGION" ] || fail "Could not derive AWS_REGION from AWS_ECR_URI=\$AWS_ECR_URI"
 fi
 
-AWS_REGION=\$(grep '^AWS_REGION=' '$REMOTE_ENV_PATH' | cut -d= -f2-)
-AWS_ECR_URI=\$(grep '^AWS_ECR_URI=' '$REMOTE_ENV_PATH' | cut -d= -f2-)
-LIBRARY_METADATA_URL=\$(grep '^LIBRARY_METADATA_URL=' '$REMOTE_ENV_PATH' | cut -d= -f2-)
-
-if [ -z "\$AWS_REGION" ] || [ -z "\$AWS_ECR_URI" ]; then
-  echo "AWS_REGION or AWS_ECR_URI missing from $REMOTE_ENV_PATH" >&2
-  exit 1
-fi
-if [ -z "\$LIBRARY_METADATA_URL" ]; then
-  echo "LIBRARY_METADATA_URL missing from $REMOTE_ENV_PATH" >&2
-  echo "Set it with: gh workflow run set-ec2-env-var.yml -f key=LIBRARY_METADATA_URL" >&2
-  exit 1
-fi
-
-echo "Logging into ECR (\$AWS_REGION)..."
+step "AWS_ECR_URI=\$AWS_ECR_URI region=\$AWS_REGION"
+step "Logging into ECR..."
 aws ecr get-login-password --region "\$AWS_REGION" \\
-  | docker login --username AWS --password-stdin "\$AWS_ECR_URI"
+  | docker login --username AWS --password-stdin "\$AWS_ECR_URI" \\
+  || fail "ECR login failed."
 
 IMAGE="\$AWS_ECR_URI/$IMAGE_NAME:$IMAGE_TAG"
-echo "Pulling \$IMAGE..."
-docker pull "\$IMAGE"
+step "Pulling \$IMAGE..."
+docker pull "\$IMAGE" || fail "docker pull failed for \$IMAGE"
 
 LOG_FILE="\$HOME/lml-backfill-\$(date +%Y%m%d-%H%M%S).log"
-echo "Starting tmux session '$TMUX_SESSION'. Log: \$LOG_FILE"
+step "Starting tmux session '$TMUX_SESSION'. Log: \$LOG_FILE"
 
 tmux new-session -d -s '$TMUX_SESSION' \\
   "docker run --rm --name $IMAGE_NAME --env-file '$REMOTE_ENV_PATH' \\
      '\$IMAGE' 2>&1 | tee '\$LOG_FILE'; echo; echo 'Job exited. Press enter.'; read"
 
-echo
-echo "Started. Inspect with:"
+step "Started. Inspect with:"
 echo "  ./run-lml-backfill.sh attach"
 echo "  ./run-lml-backfill.sh status"
 EOF
