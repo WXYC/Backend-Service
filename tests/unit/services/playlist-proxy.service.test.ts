@@ -48,6 +48,7 @@ jest.mock('drizzle-orm', () => ({
   sql: Object.assign(jest.fn(), { raw: jest.fn() }),
   inArray: jest.fn(),
   isNotNull: jest.fn(),
+  and: jest.fn(),
 }));
 
 // Mock EventSource — we do not want to open real SSE connections in tests.
@@ -396,6 +397,46 @@ describe('playlist-proxy.service', () => {
       expect(result.playcuts).toEqual([]);
       expect(result.talksets).toEqual([]);
       expect(result.breakpoints).toEqual([]);
+    });
+  });
+
+  describe('artwork query: partial-index alignment (regression for #511)', () => {
+    // The partial functional index `flowsheet_artwork_lookup_idx` (migration
+    // 0057) only covers rows where `artwork_url IS NOT NULL`. Without that
+    // filter on the query side, the planner falls back to a sequential scan
+    // of every flowsheet row — which times out at the 5s server-side
+    // statement_timeout and accumulates orphan queries (incident #511).
+    //
+    // Source-grep over the deployed file is the right shape because the
+    // bug is a *missing* clause in the SQL builder. A behavioural test
+    // wouldn't catch a future regression where someone adds a new query
+    // path without the filter; the source-grep does.
+    const fs = jest.requireActual<typeof import('fs')>('fs');
+    const path = jest.requireActual<typeof import('path')>('path');
+
+    const proxySource = fs.readFileSync(
+      path.resolve(__dirname, '../../../apps/backend/services/playlist-proxy.service.ts'),
+      'utf-8'
+    );
+
+    it('imports `and` and `isNotNull` from drizzle-orm', () => {
+      expect(proxySource).toMatch(/from\s+'drizzle-orm'/);
+      expect(proxySource).toMatch(/\band\b/);
+      expect(proxySource).toMatch(/\bisNotNull\b/);
+    });
+
+    it('every flowsheet artwork SELECT filters on isNotNull(flowsheet.artwork_url)', () => {
+      // Find every WHERE that targets the flowsheetLookupKey-on-flowsheet
+      // pattern. Each must be combined with isNotNull(flowsheet.artwork_url).
+      // Two call sites exist today (enrichPlaycuts, enrichSinglePlaycut);
+      // any future addition should match the same shape so the partial
+      // index continues to fire.
+      const whereCalls = proxySource.match(/\.where\([\s\S]*?\)\s*(?:\.|;)/g) ?? [];
+      const artworkWhereCalls = whereCalls.filter((w) => /flowsheetLookupKey/.test(w));
+      expect(artworkWhereCalls.length).toBeGreaterThanOrEqual(2);
+      for (const call of artworkWhereCalls) {
+        expect(call).toMatch(/isNotNull\s*\(\s*flowsheet\.artwork_url\s*\)/);
+      }
     });
   });
 });
