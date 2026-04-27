@@ -136,6 +136,19 @@ npm run dev              # Start auth (8082) + backend (8080) concurrently with 
 
 Stop the database with `npm run db:stop`.
 
+### One-time per-clone: register the journal merge driver
+
+`shared/database/src/migrations/meta/_journal.json` is an append-only Drizzle index. Every PR that adds a migration appends an entry; concurrent PRs collide on the array even when the new entries don't overlap. The repo ships `.gitattributes` with `merge=journal`, but the actual merge driver lives in `.git/config` and isn't checked in — each collaborator must register it once after cloning:
+
+```bash
+npx git-merge-append install \
+  --name journal \
+  --array-path entries --key idx --sort-by idx \
+  -- shared/database/src/migrations/meta/_journal.json
+```
+
+After this, `git rebase` / `git merge` resolve concurrent journal appends automatically. If you skipped the install and are mid-rebase with `<<<<<<<` in `_journal.json`, run `npx git-merge-append resolve --array-path entries --key idx --sort-by idx -- shared/database/src/migrations/meta/_journal.json` to fix it post-hoc. See [git-merge-append](https://github.com/jakebromberg/git-merge-append) for details.
+
 ### Code Quality
 
 Pre-push hook (husky) runs automatically:

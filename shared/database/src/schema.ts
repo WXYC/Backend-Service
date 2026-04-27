@@ -468,6 +468,10 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_artwork_lookup_idx')
       .on(sql`(lower(trim(${table.artist_name})) || '-' || lower(trim(coalesce(${table.album_title}, ''))))`)
       .where(sql`${table.artwork_url} IS NOT NULL`),
+    // FK columns aren't auto-indexed by Postgres. Without this, the
+    // /flowsheet `?shows_limit=N` listing endpoint sequentially scans the
+    // 2.6M-row table on every dj-site poll. See migration 0068 + issue #511.
+    index('flowsheet_show_id_idx').on(table.show_id),
   ]
 );
 

@@ -1,0 +1,153 @@
+name: Set EC2 env var (manual)
+
+# One-shot ops workflow: upserts a single env var into the EC2 host's .env
+# file and restarts the backend container so it picks up the change. Avoids
+# a full image rebuild for env-var-only changes.
+#
+# Usage:
+#   gh workflow run set-ec2-env-var.yml --ref main -f key=LML_API_KEY -f secret_name=LML_API_KEY
+#
+# The value is read from a GH secret whose name is provided via secret_name
+# (defaults to the same name as `key`). The value never appears in logs;
+# the verify step prints only key + length.
+
+on:
+  workflow_dispatch:
+    inputs:
+      key:
+        description: "Env var name to upsert in .env on EC2"
+        required: true
+        type: string
+      secret_name:
+        description: "GH secret name holding the value (defaults to `key`)"
+        required: false
+        type: string
+
+jobs:
+  upsert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve secret value
+        id: resolve
+        env:
+          # Read every potentially relevant secret upfront. GH won't let us
+          # index `secrets[var]` dynamically, so any new key the workflow
+          # supports has to be listed here.
+          LML_API_KEY: ${{ secrets.LML_API_KEY }}
+        run: |
+          set -euo pipefail
+          KEY="${{ inputs.key }}"
+          SECRET_NAME="${{ inputs.secret_name || inputs.key }}"
+          case "$SECRET_NAME" in
+            LML_API_KEY) VALUE="$LML_API_KEY" ;;
+            *)
+              echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
+              exit 1
+              ;;
+          esac
+          if [ -z "${VALUE:-}" ]; then
+            echo "::error::Secret '$SECRET_NAME' is empty or not set"
+            exit 1
+          fi
+          # Mask so the value never appears in logs even if a later step
+          # accidentally echoes $VALUE. Then export to job env so the SSH
+          # action's `envs:` forwarding can pick it up. (Step outputs alone
+          # aren't enough — `envs:` reads from the runner shell's env, which
+          # comes from $GITHUB_ENV, not $GITHUB_OUTPUT.)
+          echo "::add-mask::$VALUE"
+          {
+            echo "VALUE<<EOF"
+            echo "$VALUE"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+          echo "KEY=$KEY" >> "$GITHUB_ENV"
+          echo "length=${#VALUE}" >> "$GITHUB_OUTPUT"
+
+      - name: Upsert in .env + restart backend container
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: KEY,VALUE
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            # KEY/VALUE are passed via the `envs:` field above. Quoting VALUE
+            # with double-quotes so a base64 = doesn't trip up the shell.
+            if [ -z "${KEY:-}" ] || [ -z "${VALUE:-}" ]; then
+              echo "Missing KEY or VALUE in script env"; exit 1
+            fi
+
+            ENV_FILE="$HOME/.env"
+            test -f "$ENV_FILE" || { echo "$ENV_FILE missing on host"; exit 1; }
+
+            TS=$(date +%Y%m%d-%H%M%S)
+            cp "$ENV_FILE" "$ENV_FILE.bak-$TS"
+
+            # Upsert KEY=VALUE: drop any existing line for KEY, then append.
+            # Use a temp file + mv for atomic replace.
+            TMP=$(mktemp)
+            grep -v "^${KEY}=" "$ENV_FILE" > "$TMP" || true
+            printf '%s=%s\n' "$KEY" "$VALUE" >> "$TMP"
+            mv "$TMP" "$ENV_FILE"
+            chmod 600 "$ENV_FILE"
+
+            # Confirm by line count + presence of the key (no value echo)
+            echo "Lines before: $(wc -l < "$ENV_FILE.bak-$TS")"
+            echo "Lines after:  $(wc -l < "$ENV_FILE")"
+            grep -c "^${KEY}=" "$ENV_FILE" | xargs -I{} echo "Occurrences of ${KEY} in .env: {}"
+
+            # Restart the backend container so it picks up the new env var.
+            # The container was originally started with --env-file .env, so
+            # restarting alone is not enough — Docker re-reads --env-file only
+            # on `docker run`, not `docker restart`. Stop + start with the
+            # last-deployed image.
+            CURRENT_IMAGE=$(docker inspect -f '{{.Config.Image}}' backend 2>/dev/null || echo "")
+            CURRENT_CMD=$(docker inspect -f '{{json .Config.Cmd}}' backend 2>/dev/null || echo "[]")
+            CURRENT_PORT=$(docker port backend 8080/tcp 2>/dev/null | head -1 | awk -F: '{print $NF}' || echo "")
+
+            if [ -z "$CURRENT_IMAGE" ]; then
+              echo "::error::No 'backend' container found on EC2. Was it ever deployed?"
+              exit 1
+            fi
+
+            echo "Current image: $CURRENT_IMAGE"
+            echo "Current published port: $CURRENT_PORT"
+
+            docker stop backend
+            docker rm backend
+            docker run -d --name backend \
+              -p "${CURRENT_PORT:-8080}:8080" \
+              --restart unless-stopped \
+              --memory=450m \
+              --env-file "$ENV_FILE" \
+              "$CURRENT_IMAGE"
+
+            sleep 5
+            docker ps --filter name=backend --format '{{.Status}}'
+
+      - name: Health check
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            for i in 1 2 3 4 5 6; do
+              if curl -sf -m 5 http://localhost:8080/healthcheck > /dev/null; then
+                echo "Health attempt $i: ok"
+                exit 0
+              fi
+              echo "Health attempt $i: not ready, retrying..."
+              sleep 5
+            done
+            echo "::error::Backend healthcheck failed after 6 attempts"
+            exit 1
+
+      - name: Summary
+        run: |
+          echo "Upserted ${{ env.KEY }} (${{ steps.resolve.outputs.length }} chars) on EC2 and restarted backend container."
