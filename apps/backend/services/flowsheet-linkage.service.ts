@@ -16,11 +16,12 @@
  *   4. Resolve the canonical entity to library rows.
  *      - 0 rows → unmatched (canonical entity not in WXYC library).
  *      - 1 row  → link with `linkage_source='lml_high_confidence'`.
- *      - 2+ rows → defer to B-2.3 tie-break. Until B-2.3 lands, we leave the
- *        row unlinked rather than picking arbitrarily.
+ *      - 2+ rows → run the B-2.3 tie-break (rotation > format > plays > id)
+ *        and link to the picked row. If the tie-break returns null (a rare
+ *        race with a concurrent delete), leave the row unlinked.
  */
 import { eq } from 'drizzle-orm';
-import { db, flowsheet, library } from '@wxyc/database';
+import { db, flowsheet, library, pickPrimaryLibraryRow } from '@wxyc/database';
 import { lookupMetadata } from './lml/lml.client.js';
 import { mapLookupToCanonicalEntity } from './library.service.js';
 import { classifyLinkageError, incrementLinkageMetric, reportLinkageError } from './linkage-metrics.service.js';
@@ -32,7 +33,6 @@ export type LinkageOutcome =
   | { status: 'no_canonical_entity' }
   | { status: 'low_confidence'; canonicalEntityId: string; confidence: number }
   | { status: 'no_library_match'; canonicalEntityId: string; confidence: number }
-  | { status: 'multi_match'; canonicalEntityId: string; confidence: number; libraryIds: number[] }
   | { status: 'error'; error: unknown };
 
 async function findLibraryRowsByCanonicalEntity(canonicalEntityId: string): Promise<{ id: number }[]> {
@@ -90,23 +90,20 @@ export async function runLmlLinkage(args: {
     return { status: 'no_library_match', canonicalEntityId: linkage.id, confidence: linkage.confidence };
   }
 
-  if (matches.length > 1) {
-    // Multi-match defers to B-2.3 tie-break (or the B-3.1 review queue) —
-    // count it as review-bound on the dashboard, since linkage isn't applied.
-    incrementLinkageMetric('gray_zone_review');
-    return {
-      status: 'multi_match',
-      canonicalEntityId: linkage.id,
-      confidence: linkage.confidence,
-      libraryIds: matches.map((m) => m.id),
-    };
+  const pickedId =
+    matches.length === 1 ? matches[0].id : await pickPrimaryLibraryRow(matches.map((m) => m.id));
+  if (pickedId === null) {
+    // Tie-break returned no row — the candidates raced with a concurrent
+    // delete. Leave the row unlinked; the next B-2.2 sweep will retry.
+    incrementLinkageMetric('no_candidate');
+    return { status: 'no_library_match', canonicalEntityId: linkage.id, confidence: linkage.confidence };
   }
 
-  await setFlowsheetLinkage(flowsheetId, matches[0].id, 'lml_high_confidence', linkage.confidence);
+  await setFlowsheetLinkage(flowsheetId, pickedId, 'lml_high_confidence', linkage.confidence);
   incrementLinkageMetric('linked_high_conf');
   return {
     status: 'linked',
-    libraryId: matches[0].id,
+    libraryId: pickedId,
     canonicalEntityId: linkage.id,
     confidence: linkage.confidence,
   };
