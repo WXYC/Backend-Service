@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { db, createMockQueryChain } from '../../mocks/database.mock';
+import { db, createMockQueryChain, library, library_artist_view, album_plays } from '../../mocks/database.mock';
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
@@ -106,6 +106,90 @@ describe('library.service', () => {
 
       expect(results).toHaveLength(1);
       expect(results[0]).toHaveProperty('codeArtistNumber', 3);
+    });
+
+    it('routes free-text query through library + album_plays join (not library_artist_view)', async () => {
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+
+      await searchLibrary('stereolab transient');
+
+      // Tsvector path reads from `library` directly so the search_doc GIN
+      // index is reachable; reading from the view forces a 5-way join first.
+      expect(chain.from).toHaveBeenCalledWith(library);
+      expect(chain.from).not.toHaveBeenCalledWith(library_artist_view);
+      // album_plays drives the play-weighted ranking factor.
+      const leftJoinTables = chain.leftJoin.mock.calls.map((c) => c[0]);
+      expect(leftJoinTables).toContain(album_plays);
+    });
+
+    it('returns empty without a DB call for pure-punctuation queries', async () => {
+      const results = await searchLibrary('!!!');
+
+      expect(results).toEqual([]);
+      expect(db.select).not.toHaveBeenCalled();
+    });
+
+    it('falls back to trigram when tsvector returns 0 rows', async () => {
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      const trigramChain = createMockQueryChain([mockViewRow]);
+      trigramChain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? tsvectorChain : trigramChain;
+        callIndex += 1;
+        return chain;
+      });
+
+      const results = await searchLibrary('pikn floyd');
+
+      expect(db.select).toHaveBeenCalledTimes(2);
+      expect(results).toHaveLength(1);
+    });
+
+    it('does not fall back to trigram for single-character queries', async () => {
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      db.select.mockReset();
+      db.select.mockReturnValue(tsvectorChain);
+
+      const results = await searchLibrary('a');
+
+      expect(db.select).toHaveBeenCalledTimes(1);
+      expect(results).toEqual([]);
+    });
+  });
+
+  describe('fuzzySearchLibrary Both-mode routing', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it('routes through tsvector + album_plays when artist_name and album_title are identical', async () => {
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+
+      await fuzzySearchLibrary('Stereolab', 'Stereolab', 5);
+
+      expect(chain.from).toHaveBeenCalledWith(library);
+      expect(chain.from).not.toHaveBeenCalledWith(library_artist_view);
+      const leftJoinTables = chain.leftJoin.mock.calls.map((c) => c[0]);
+      expect(leftJoinTables).toContain(album_plays);
+    });
+
+    it('keeps single-column path (no album_plays join) when only artist is provided', async () => {
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+
+      await fuzzySearchLibrary('Autechre', undefined, 5);
+
+      const leftJoinTables = chain.leftJoin.mock.calls.map((c) => c[0]);
+      expect(leftJoinTables).not.toContain(album_plays);
     });
   });
 
