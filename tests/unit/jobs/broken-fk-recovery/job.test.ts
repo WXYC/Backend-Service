@@ -106,9 +106,7 @@ describe('broken-fk-recovery: classifyUnresolvable', () => {
   it('returns counts split by missing / collision / other', async () => {
     // Single round-trip: a CASE/FILTER aggregate beats issuing one COUNT
     // per category against a 1.18M-row table.
-    (db.execute as jest.Mock).mockResolvedValueOnce([
-      { missing: 290000, collision: 0, other: 2226, total: 292226 },
-    ]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ missing: 290000, collision: 0, other: 2226, total: 292226 }]);
 
     const counts = await classifyUnresolvable();
 
@@ -116,9 +114,7 @@ describe('broken-fk-recovery: classifyUnresolvable', () => {
   });
 
   it('coerces row counts to numbers (postgres-js returns bigint as string for COUNT)', async () => {
-    (db.execute as jest.Mock).mockResolvedValueOnce([
-      { missing: '5', collision: '0', other: '2', total: '7' },
-    ]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ missing: '5', collision: '0', other: '2', total: '7' }]);
 
     const counts = await classifyUnresolvable();
 
