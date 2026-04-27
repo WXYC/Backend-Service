@@ -400,6 +400,13 @@
       "when": 1778164800000,
       "tag": "0058_library-artist-name-and-search-doc",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1778251200000,
+      "tag": "0059_album-plays-materialized-view",
+      "breakpoints": true
     }
   ]
 }

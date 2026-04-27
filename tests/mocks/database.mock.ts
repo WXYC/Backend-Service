@@ -93,6 +93,10 @@ export const rotation = {
 export const library_artist_view = {
   on_streaming: 'on_streaming',
 };
+export const album_plays = {
+  album_id: 'album_id',
+  plays: 'plays',
+};
 export const flowsheet = {
   id: 'id',
   show_id: 'show_id',
