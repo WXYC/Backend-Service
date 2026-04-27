@@ -15,35 +15,19 @@
  * numeric threshold and the search_type branch goes away.
  */
 
-import type { LookupResponse, LookupResultItem } from '@wxyc/shared/dtos';
+import type { LmlLmlLookupResponse, LmlLmlLookupResultItem } from '../../../../jobs/library-canonical-entity-backfill/lml-types';
 import { resolveCanonicalEntity } from '../../../../jobs/library-canonical-entity-backfill/resolve';
 
-const itemWithReleaseId = (releaseId: number): LookupResultItem => ({
-  library_item: {
-    id: 12345,
-    title: 'Edits',
-    artist: 'Chuquimamani-Condori',
-    call_number: 'Electronic CD CHU 001/02',
-    library_url: 'https://wxyc.org/album/12345',
-  },
-  artwork: {
-    release_id: releaseId,
-    release_url: `https://www.discogs.com/release/${releaseId}`,
-    confidence: 0.9,
-  },
+const itemWithReleaseId = (releaseId: number): LmlLookupResultItem => ({
+  library_item: { id: 12345 },
+  artwork: { release_id: releaseId },
 });
 
-const itemWithoutArtwork: LookupResultItem = {
-  library_item: {
-    id: 99,
-    title: 'Edits',
-    artist: 'Chuquimamani-Condori',
-    call_number: 'Electronic CD CHU 001/02',
-    library_url: 'https://wxyc.org/album/99',
-  },
+const itemWithoutArtwork: LmlLookupResultItem = {
+  library_item: { id: 99 },
 };
 
-const responseFor = (overrides: Partial<LookupResponse>): LookupResponse => ({
+const responseFor = (overrides: Partial<LmlLookupResponse>): LmlLookupResponse => ({
   results: [],
   search_type: 'none',
   song_not_found: false,
