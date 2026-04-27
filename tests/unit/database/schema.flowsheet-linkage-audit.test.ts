@@ -40,12 +40,8 @@ describe('schema: flowsheet linkage audit columns (B-1.4)', () => {
   it('migration 0062 exists and adds the three columns', () => {
     expect(fs.existsSync(migrationPath)).toBe(true);
     const sql = fs.readFileSync(migrationPath, 'utf-8');
-    expect(sql).toMatch(
-      /ALTER TABLE\s+"wxyc_schema"\."flowsheet"\s+ADD COLUMN\s+"linkage_source"\s+text/i
-    );
-    expect(sql).toMatch(
-      /ALTER TABLE\s+"wxyc_schema"\."flowsheet"\s+ADD COLUMN\s+"linkage_confidence"\s+real/i
-    );
+    expect(sql).toMatch(/ALTER TABLE\s+"wxyc_schema"\."flowsheet"\s+ADD COLUMN\s+"linkage_source"\s+text/i);
+    expect(sql).toMatch(/ALTER TABLE\s+"wxyc_schema"\."flowsheet"\s+ADD COLUMN\s+"linkage_confidence"\s+real/i);
     expect(sql).toMatch(
       /ALTER TABLE\s+"wxyc_schema"\."flowsheet"\s+ADD COLUMN\s+"linked_at"\s+timestamp with time zone/i
     );
@@ -62,9 +58,7 @@ describe('schema: flowsheet linkage audit columns (B-1.4)', () => {
 
   it('journal includes the 0062 entry', () => {
     const journal = JSON.parse(fs.readFileSync(journalPath, 'utf-8'));
-    const has62 = journal.entries.some(
-      (e: { tag: string }) => e.tag === '0062_flowsheet-linkage-audit-columns'
-    );
+    const has62 = journal.entries.some((e: { tag: string }) => e.tag === '0062_flowsheet-linkage-audit-columns');
     expect(has62).toBe(true);
   });
 
