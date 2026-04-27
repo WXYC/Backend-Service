@@ -30,10 +30,19 @@ export const lookupMetadata = async (artist: string, album?: string): Promise<Lm
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
+  // LML now enforces auth in production (LML_REQUIRE_AUTH=true). Send the
+  // bearer header when LML_API_KEY is set; the backend's lml.client.ts
+  // does the same. Sending it before the flag flips is harmless.
+  const apiKey = process.env.LML_API_KEY;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
   try {
     const response = await fetch(`${baseUrl()}/api/v1/lookup`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal: controller.signal,
     });
