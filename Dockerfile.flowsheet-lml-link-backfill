@@ -1,0 +1,27 @@
+#Build stage
+FROM node:25-alpine AS builder
+
+WORKDIR /flowsheet-lml-link-backfill-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/flowsheet-lml-link-backfill ./jobs/flowsheet-lml-link-backfill
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-lml-link-backfill
+
+#Production stage
+FROM node:25-alpine AS prod
+
+WORKDIR /flowsheet-lml-link-backfill
+
+COPY ./package* ./
+COPY ./jobs/flowsheet-lml-link-backfill/package* ./jobs/flowsheet-lml-link-backfill/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./flowsheet-lml-link-backfill-builder/jobs/flowsheet-lml-link-backfill/dist ./jobs/flowsheet-lml-link-backfill/dist
+COPY --from=builder ./flowsheet-lml-link-backfill-builder/shared/database/dist ./shared/database/dist
+
+CMD ["npm", "start", "--workspace=@wxyc/flowsheet-lml-link-backfill"]
