@@ -8,16 +8,17 @@ API and authentication service for WXYC applications. Provides endpoints for the
 
 npm workspaces:
 
-| Package                            | Path                               | Purpose                                                                                   |
-| ---------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------- |
-| `@wxyc/backend`                    | `apps/backend/`                    | Express API server (port 8080)                                                            |
-| `@wxyc/auth-service`               | `apps/auth/`                       | better-auth server (port 8082)                                                            |
-| `@wxyc/database`                   | `shared/database/`                 | Drizzle ORM schema, client, migrations, ETL utilities                                     |
-| `@wxyc/authentication`             | `shared/authentication/`           | Auth middleware, roles, JWT verification                                                  |
-| `@wxyc/flowsheet-etl`              | `jobs/flowsheet-etl/`              | Flowsheet ETL: sync from tubafrenzy                                                       |
-| `@wxyc/rotation-etl`               | `jobs/rotation-etl/`               | Rotation ETL: sync from tubafrenzy                                                        |
-| `@wxyc/artist-identity-etl`        | `jobs/artist-identity-etl/`        | Artist identity ETL: sync from LML's `entity.identity`                                    |
-| `@wxyc/flowsheet-dj-name-backfill` | `jobs/flowsheet-dj-name-backfill/` | One-shot backfill: populate `flowsheet.dj_name` on legacy track rows after migration 0053 |
+| Package                              | Path                                 | Purpose                                                                                                   |
+| ------------------------------------ | ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `@wxyc/backend`                      | `apps/backend/`                      | Express API server (port 8080)                                                                            |
+| `@wxyc/auth-service`                 | `apps/auth/`                         | better-auth server (port 8082)                                                                            |
+| `@wxyc/database`                     | `shared/database/`                   | Drizzle ORM schema, client, migrations, ETL utilities                                                     |
+| `@wxyc/authentication`               | `shared/authentication/`             | Auth middleware, roles, JWT verification                                                                  |
+| `@wxyc/flowsheet-etl`                | `jobs/flowsheet-etl/`                | Flowsheet ETL: sync from tubafrenzy                                                                       |
+| `@wxyc/rotation-etl`                 | `jobs/rotation-etl/`                 | Rotation ETL: sync from tubafrenzy                                                                        |
+| `@wxyc/artist-identity-etl`          | `jobs/artist-identity-etl/`          | Artist identity ETL: sync from LML's `entity.identity`                                                    |
+| `@wxyc/flowsheet-dj-name-backfill`   | `jobs/flowsheet-dj-name-backfill/`   | One-shot backfill: populate `flowsheet.dj_name` on legacy track rows after migration 0053                 |
+| `@wxyc/library-artist-name-backfill` | `jobs/library-artist-name-backfill/` | One-shot backfill: populate `library.artist_name` from the `artists` join after migration 0058 (Epic A.2) |
 
 ### API Server (`apps/backend`)
 
