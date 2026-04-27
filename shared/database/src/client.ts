@@ -52,6 +52,37 @@ export const resolveStatementTimeoutMs = (raw: string | undefined = process.env.
 
 const statementTimeoutMs = resolveStatementTimeoutMs();
 
+/**
+ * Resolve the per-connection `synchronous_commit` value. Default `on` matches
+ * Postgres's own default and preserves durability for the API and ETLs.
+ *
+ * Bulk one-shot backfills should set `DB_SYNCHRONOUS_COMMIT=off` in their
+ * Dockerfile/run env: each per-batch COMMIT then returns as soon as WAL is in
+ * the OS buffer, instead of waiting for fsync. Under live RDS load, fsync
+ * waits dominated batch latency — `pg_stat_wal.wal_buffers_full` was in the
+ * millions and individual batches stalled for minutes. Backfills here are
+ * idempotent (each restart resumes via `WHERE dj_name IS NULL` or equivalent),
+ * so losing a few unfsync'd commits to a hypothetical RDS crash just means
+ * those rows get redone — safe by design.
+ *
+ * Anything stricter than `off` (e.g., `local`, `remote_write`, `on`) is
+ * accepted unchanged so callers can dial durability up rather than down if
+ * they need to.
+ */
+export const resolveSynchronousCommit = (raw: string | undefined = process.env.DB_SYNCHRONOUS_COMMIT): string => {
+  if (raw === undefined) return 'on';
+  const v = raw.trim().toLowerCase();
+  const allowed = new Set(['on', 'off', 'local', 'remote_write', 'remote_apply']);
+  if (!allowed.has(v)) {
+    throw new Error(
+      `Invalid DB_SYNCHRONOUS_COMMIT=${JSON.stringify(raw)}; must be one of: ${[...allowed].join(', ')}.`
+    );
+  }
+  return v;
+};
+
+const synchronousCommit = resolveSynchronousCommit();
+
 const queryClient = postgres({
   host: process.env.DB_HOST,
   port: process.env.DB_PORT != null ? Number(process.env.DB_PORT) : 5432,
@@ -63,10 +94,13 @@ const queryClient = postgres({
     // Server-enforced per-statement timeout. postgres-js issues this as
     // `SET statement_timeout = '<n>ms'` after each session is established.
     statement_timeout: statementTimeoutMs,
+    synchronous_commit: synchronousCommit,
   },
 });
 
-console.log(`[database] statement_timeout=${statementTimeoutMs}ms${statementTimeoutMs === 0 ? ' (disabled)' : ''}`);
+console.log(
+  `[database] statement_timeout=${statementTimeoutMs}ms${statementTimeoutMs === 0 ? ' (disabled)' : ''} synchronous_commit=${synchronousCommit}`
+);
 
 export const db = drizzle(queryClient, { schema });
 
