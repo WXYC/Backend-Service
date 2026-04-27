@@ -9,6 +9,7 @@ type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import { fetchMetadata } from '../services/metadata/index.js';
 import { runLmlLinkage } from '../services/flowsheet-linkage.service.js';
+import { reportLinkageError } from '../services/linkage-metrics.service.js';
 import WxycError from '../utils/error.js';
 
 export type QueryParams = {
@@ -70,15 +71,20 @@ function fireAndForgetLinkage(completedEntry: FSEntry): void {
       );
     })
     .catch((err) => {
+      // Safety net: runLmlLinkage handles LML errors itself (counter +
+      // Sentry tag), so this only fires on unexpected bugs in the linkage
+      // path (e.g., a DB write throwing). Route through the same surface so
+      // the operator sees one consistent `subsystem='lml-linkage'` filter.
       console.error('[Flowsheet] LML linkage failed:', err);
-      Sentry.captureException(err, {
-        tags: { subsystem: 'flowsheet-linkage' },
-        extra: {
+      reportLinkageError(
+        err,
+        {
           flowsheetId: completedEntry.id,
           artistName: completedEntry.artist_name,
           albumTitle: completedEntry.album_title,
         },
-      });
+        { path: 'forward' }
+      );
     });
 }
 
