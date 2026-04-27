@@ -41,6 +41,15 @@ const DROPPED_IDXS = new Set([1, 5, 8]);
 // duplicate idx; both journal entries at that idx are accepted.
 const HISTORICAL_DUPLICATE_IDXS = new Set([47]);
 
+// Historical orphan SQL files: present in the migrations directory and
+// applied to production but never journaled. The 0046 trigger file was
+// deployed via a hotfix path that bypassed drizzle:generate; it has been
+// idempotent in prod since deploy and re-running it would fail because
+// the trigger functions don't use CREATE OR REPLACE. Listing it here
+// acknowledges the orphan rather than fabricating a journal entry that
+// drizzle would then attempt to re-apply.
+const KNOWN_ORPHAN_TAGS = new Set(['0046_cdc_notify_triggers']);
+
 const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
 let errors = 0;
 let warnings = 0;
@@ -71,13 +80,13 @@ for (const entry of journal.entries) {
   }
 }
 
-// Check 3: No orphaned .sql files
+// Check 3: No orphaned .sql files (other than the historical allowlist)
 {
   const journalTags = new Set(journal.entries.map((e) => e.tag));
   const sqlFiles = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql'));
   for (const file of sqlFiles) {
     const tag = file.replace('.sql', '');
-    if (!journalTags.has(tag)) {
+    if (!journalTags.has(tag) && !KNOWN_ORPHAN_TAGS.has(tag)) {
       console.error(`ERROR: Orphaned SQL file not in journal: ${file}`);
       errors++;
     }
