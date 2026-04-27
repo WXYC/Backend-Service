@@ -125,9 +125,18 @@ describe('validate-migrations.mjs', () => {
   });
 
   test('flags a broken prevId chain (not a dropped-idx break)', () => {
-    // The latest snapshot's prevId points at 0046's id. Replace 0055's
-    // prevId with a UUID that doesn't exist in any snapshot.
-    const latestPath = path.join(workdir, 'shared/database/src/migrations/meta/0055_snapshot.json');
+    // Find the latest snapshot file (whatever idx it's at) and break its
+    // prevId so it points at a UUID no other snapshot owns. The walker
+    // starts from the latest snapshot, so this triggers regardless of
+    // which idx is currently the head.
+    const metaDir = path.join(workdir, 'shared/database/src/migrations/meta');
+    const latestFile = fs
+      .readdirSync(metaDir)
+      .filter((f) => f.endsWith('_snapshot.json'))
+      .sort()
+      .pop();
+    if (!latestFile) throw new Error('no snapshot files found in fixture');
+    const latestPath = path.join(metaDir, latestFile);
     const snap = JSON.parse(fs.readFileSync(latestPath, 'utf8'));
     snap.prevId = '00000000-1111-2222-3333-444444444444';
     fs.writeFileSync(latestPath, JSON.stringify(snap, null, 2));
@@ -135,5 +144,45 @@ describe('validate-migrations.mjs', () => {
     const { status, stderr } = run(workdir);
     expect(status).toBe(1);
     expect(stderr).toMatch(/prevId .* not found in any snapshot/);
+  });
+
+  test('flags a journal entry with no matching snapshot file (post-#590 hand-edit canary)', () => {
+    // Add a journal entry at an idx that is not in
+    // HISTORICAL_MISSING_SNAPSHOT_IDXS / DROPPED_IDXS and intentionally
+    // don't write the snapshot. This is the exact pattern that
+    // accumulated 12+ missing snapshots in 0057-0067; the new Check 7
+    // catches it on the next contributor who tries it.
+    const journal = readJournal(workdir);
+    journal.entries.push({
+      idx: 9000,
+      version: '7',
+      when: Date.now() + 1_000_000_000_000,
+      tag: '9000_canary-snapshot-skip',
+      breakpoints: true,
+    });
+    writeJournal(workdir, journal);
+    // Write the SQL so Check 2 doesn't preempt — we want Check 7 to fire.
+    fs.writeFileSync(path.join(workdir, 'shared/database/src/migrations/9000_canary-snapshot-skip.sql'), '-- canary\n');
+
+    const { status, stderr } = run(workdir);
+    expect(status).toBe(1);
+    expect(stderr).toMatch(/Missing snapshot for journal entry idx 9000/);
+    expect(stderr).toMatch(/9000_snapshot\.json/);
+    expect(stderr).toMatch(/drizzle:generate/);
+  });
+
+  test('tolerates the historically-missing 0057-0067 snapshot gap', () => {
+    // No fixture mutation: the current repo state already has the
+    // historical gap. Running the validator with no changes must pass —
+    // i.e. the allowlist is wired into Check 7. This sits alongside the
+    // "passes on the current repo state" test above, but pins Check 7's
+    // tolerance specifically so future allowlist edits can't silently
+    // promote the gap to an error.
+    const { status, stdout, stderr } = run(workdir);
+    expect(status).toBe(0);
+    // No "Missing snapshot for journal entry idx 57" (or 58…67) errors.
+    for (const idx of [57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67]) {
+      expect(stderr + stdout).not.toMatch(new RegExp(`Missing snapshot for journal entry idx ${idx}\\b`));
+    }
   });
 });

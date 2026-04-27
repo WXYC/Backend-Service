@@ -18,9 +18,14 @@
  * 5. No duplicate idxs in journal (with HISTORICAL_DUPLICATE_IDXS allowlist)
  * 6. The latest snapshot's prevId chain is reachable back to the genesis
  *    snapshot (allowing breaks at known-dropped historical idxs)
+ * 7. Every non-allowlisted journal entry has a corresponding snapshot file
+ *    (catches the hand-edit-the-journal-without-running-generate pattern
+ *    that accumulated 12+ missing snapshots between 0057 and 0067 — see
+ *    WXYC/Backend-Service#590)
  *
  * See: WXYC/Backend-Service#400 (timestamp ordering),
  *      WXYC/Backend-Service#505 (metadata repair),
+ *      WXYC/Backend-Service#590 (snapshot catch-up),
  *      WXYC/wxyc-shared#82 (Phase 4 epic).
  */
 
@@ -49,6 +54,19 @@ const HISTORICAL_DUPLICATE_IDXS = new Set([47]);
 // acknowledges the orphan rather than fabricating a journal entry that
 // drizzle would then attempt to re-apply.
 const KNOWN_ORPHAN_TAGS = new Set(['0046_cdc_notify_triggers']);
+
+// Historical idxs whose journal entry has no matching snapshot file. Two
+// origin clusters:
+//   - 36, 41, 47-54: predate this validator; #505 noted but never repaired
+//   - 57-67: accumulated through 2026-04 by the hand-edit-SQL-and-journal
+//            convention that bypassed `drizzle-kit generate`. PR #590
+//            shipped a single 0068_snapshot.json reflecting current schema
+//            and this allowlist tolerates the gap.
+// New PRs that add a migration MUST emit its snapshot — Check 7 enforces
+// this against any new idx outside the allowlist.
+const HISTORICAL_MISSING_SNAPSHOT_IDXS = new Set([
+  36, 41, 47, 48, 49, 50, 51, 52, 53, 54, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67,
+]);
 
 const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
 let errors = 0;
@@ -192,6 +210,35 @@ if (metaFiles.length > 0) {
       cursor = JSON.parse(readFileSync(join(metaDir, next.file), 'utf8'));
       cursorFile = next.file;
     }
+  }
+}
+
+// Check 7: every journal entry has a corresponding snapshot file (with
+// the historical-missing allowlist). drizzle-kit's `generate` emits a
+// snapshot alongside every new migration; hand-editing the journal
+// without running generate skips the snapshot and the rot accumulates
+// silently because Check 6 only walks the latest entry's chain. This
+// check fires on the next contributor who hand-edits the journal.
+{
+  const snapshotIdxs = new Set();
+  for (const file of metaFiles) {
+    const m = file.match(/^(\d+)_snapshot\.json$/);
+    if (m) snapshotIdxs.add(parseInt(m[1], 10));
+  }
+  for (const entry of journal.entries) {
+    if (snapshotIdxs.has(entry.idx)) continue;
+    if (HISTORICAL_MISSING_SNAPSHOT_IDXS.has(entry.idx)) {
+      // Allowlisted gap; do not warn per-idx (would be 21 warnings).
+      continue;
+    }
+    if (DROPPED_IDXS.has(entry.idx)) continue;
+    console.error(
+      `ERROR: Missing snapshot for journal entry idx ${entry.idx} (${entry.tag}): ` +
+        `expected meta/${entry.idx.toString().padStart(4, '0')}_snapshot.json. ` +
+        `Run \`npm run drizzle:generate\` so drizzle-kit emits the snapshot ` +
+        `instead of hand-editing the journal.`
+    );
+    errors++;
   }
 }
 
