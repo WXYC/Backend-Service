@@ -471,6 +471,35 @@ export const flowsheet = wxyc_schema.table(
   ]
 );
 
+// Manual review queue for gray-zone LML matches (B-3.1, issue #501). The
+// B-2.2 backfill enqueues a row per flowsheet entry whose LML lookup hit a
+// fallback (right-artist, possibly-wrong-album). The CLI in
+// `scripts/review-linkage.ts` drains this queue interactively. See
+// migration 0066 for column rationale.
+export type NewFlowsheetLinkageReview = InferInsertModel<typeof flowsheet_linkage_review>;
+export type FlowsheetLinkageReview = InferSelectModel<typeof flowsheet_linkage_review>;
+export const flowsheet_linkage_review = wxyc_schema.table(
+  'flowsheet_linkage_review',
+  {
+    id: serial('id').primaryKey(),
+    flowsheet_id: integer('flowsheet_id')
+      .references(() => flowsheet.id, { onDelete: 'cascade' })
+      .notNull()
+      .unique(),
+    candidate_library_ids: integer('candidate_library_ids').array().notNull(),
+    candidate_confidences: real('candidate_confidences').array().notNull(),
+    suggested_action: text('suggested_action').notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    reviewed_at: timestamp('reviewed_at', { withTimezone: true }),
+    reviewed_decision: text('reviewed_decision'),
+  },
+  (table) => [
+    index('flowsheet_linkage_review_unreviewed_idx')
+      .on(table.created_at)
+      .where(sql`${table.reviewed_at} IS NULL`),
+  ]
+);
+
 export type NewGenre = InferInsertModel<typeof genres>;
 export type Genre = InferSelectModel<typeof genres>;
 export const genres = wxyc_schema.table('genres', {
