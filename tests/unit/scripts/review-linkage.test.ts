@@ -19,11 +19,7 @@
  */
 
 import { db } from '@wxyc/database';
-import {
-  loadNextReviewCase,
-  acceptReviewCase,
-  rejectReviewCase,
-} from '../../../scripts/review-linkage';
+import { loadNextReviewCase, acceptReviewCase, rejectReviewCase } from '../../../scripts/review-linkage';
 
 type SqlLike = {
   sql?: string | string[];
@@ -145,9 +141,7 @@ describe('acceptReviewCase', () => {
   });
 
   it("marks the review row reviewed_at=now(), reviewed_decision='accepted'", async () => {
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce({ count: 1 })
-      .mockResolvedValueOnce({ count: 1 });
+    (db.execute as jest.Mock).mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 1 });
 
     await acceptReviewCase({ reviewId: 1, flowsheetId: 7, libraryId: 100 });
 
@@ -164,7 +158,7 @@ describe('rejectReviewCase', () => {
     (db.execute as jest.Mock).mockReset();
   });
 
-  it("marks the review row reviewed without touching the flowsheet row", async () => {
+  it('marks the review row reviewed without touching the flowsheet row', async () => {
     // Reject = "this isn't the right album". The flowsheet row's album_id
     // stays NULL so a future LML improvement can pick it up; only the
     // review-queue row is marked done.
