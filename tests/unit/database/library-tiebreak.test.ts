@@ -16,6 +16,13 @@
  * Unit tests assert the SQL contract; the per-rule behaviour is exercised
  * by Postgres at integration time.
  */
+// `library-tiebreak.ts` imports `db` from `./client.js`. The
+// moduleNameMapper rewrite only catches the absolute path form, so we mock
+// the relative form explicitly here.
+jest.mock('../../../shared/database/src/client.js', () => jest.requireActual('../../mocks/database.mock'), {
+  virtual: true,
+});
+
 import { db } from '../../mocks/database.mock';
 import { pickPrimaryLibraryRow } from '../../../shared/database/src/library-tiebreak';
 
