@@ -16,8 +16,11 @@
 -- DDL-only migrations are the norm here, but per CLAUDE.md a small DML migration
 -- (≤10k row rewrites) is acceptable inline. 52 rows × 4 columns sit far below
 -- the AccessExclusiveLock duration concern.
-
-BEGIN;
+--
+-- drizzle-kit wraps every migration in its own transaction, so explicit
+-- BEGIN/COMMIT in the SQL file would either no-op (already inside a
+-- transaction) or, worse, prematurely commit drizzle's outer transaction
+-- and break the migrate run.
 
 -- artist_name: 6 distinct values, 17 rows
 UPDATE wxyc_schema.flowsheet SET artist_name = 'μ-Ziq' WHERE artist_name = 'Î¼-Ziq';
@@ -59,5 +62,3 @@ UPDATE wxyc_schema.flowsheet SET album_title = 'Ψ 847' WHERE album_title = 'Î�
 UPDATE wxyc_schema.flowsheet SET record_label = 'Galerija ŠKUC Izdaja / Dark Entries' WHERE record_label = 'Galerija Å KUC Izdaja / Dark Entries';
 UPDATE wxyc_schema.flowsheet SET record_label = 'Više manje zauvijek' WHERE record_label = 'ViÅ¡e manje zauvijek';
 UPDATE wxyc_schema.flowsheet SET record_label = 'Ω' WHERE record_label = 'Î©';
-
-COMMIT;
