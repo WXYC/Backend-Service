@@ -432,6 +432,13 @@ export const flowsheet = wxyc_schema.table(
     linkage_source: text('linkage_source'),
     linkage_confidence: real('linkage_confidence'),
     linked_at: timestamp('linked_at', { withTimezone: true }),
+    // B-0.5 marker: timestamp set when the legacy_release_id → library.id
+    // resolver ran for this row and could not link. Lets B-2.2's LML
+    // backfill find the broken-FK residual alongside the rows that never
+    // had a legacy_release_id at all. NULL means "either already linked,
+    // or the FK resolver hasn't run yet". See migration 0063 +
+    // jobs/broken-fk-recovery for the population pass.
+    legacy_link_attempted_at: timestamp('legacy_link_attempted_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, track+dj=B, album=C, label=D). Managed by
     // migration 0054 (which extended the original 0052 expression to include
