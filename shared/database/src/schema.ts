@@ -16,6 +16,7 @@ import {
   date,
   uniqueIndex,
   customType,
+  real,
 } from 'drizzle-orm/pg-core';
 
 // PostgreSQL tsvector. Drizzle has no first-class tsvector type, but we only
@@ -291,6 +292,17 @@ export const library = wxyc_schema.table(
     // backfills it from the artists join; A.3 keeps it current on insert and
     // cascades on artists UPDATE. A.5 reads it via search_doc.
     artist_name: varchar('artist_name', { length: 128 }),
+    // Reconciled canonical entity for the album, derived via LML lookup
+    // (Epic B.1). Nullable until B-1.2 backfills it; B-1.3 keeps it current
+    // on insert. The identifier is opaque text (e.g. a Discogs/MusicBrainz
+    // release id, optionally namespaced) — schemes are decided per-source by
+    // the resolver, not the column. Confidence is captured at link time so
+    // retroactive analyses can re-judge weak matches; resolved_at supports
+    // audit + retry policy. The B-tree index supports flowsheet → library
+    // joins via canonical entity in B-2.
+    canonical_entity_id: text('canonical_entity_id'),
+    canonical_entity_confidence: real('canonical_entity_confidence'),
+    canonical_entity_resolved_at: timestamp('canonical_entity_resolved_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, album=B). NULL for rows where artist_name has
     // not been backfilled yet — A.2 populates legacy rows, A.3 keeps live
@@ -312,6 +324,7 @@ export const library = wxyc_schema.table(
         sql`${table.artist_name} gin_trgm_ops`
       ),
       librarySearchDocIdx: index('library_search_doc_idx').using('gin', sql`${table.search_doc}`),
+      libraryCanonicalEntityIdIdx: index('library_canonical_entity_id_idx').on(table.canonical_entity_id),
     };
   }
 );

@@ -74,6 +74,9 @@ export const library = {
   artwork_url: 'artwork_url',
   artist_name: 'artist_name',
   search_doc: 'search_doc',
+  canonical_entity_id: 'canonical_entity_id',
+  canonical_entity_confidence: 'canonical_entity_confidence',
+  canonical_entity_resolved_at: 'canonical_entity_resolved_at',
 };
 export const artists = {};
 export const genres = {};
