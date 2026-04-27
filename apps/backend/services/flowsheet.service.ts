@@ -70,6 +70,9 @@ const FSEntryFieldsRaw = {
   legacy_release_id: flowsheet.legacy_release_id,
   add_time: flowsheet.add_time,
   dj_name: flowsheet.dj_name,
+  linkage_source: flowsheet.linkage_source,
+  linkage_confidence: flowsheet.linkage_confidence,
+  linked_at: flowsheet.linked_at,
   // Metadata (inline on flowsheet, will be nested in transform)
   artwork_url: flowsheet.artwork_url,
   discogs_url: flowsheet.discogs_url,
@@ -105,6 +108,9 @@ type FSEntryRaw = {
   legacy_release_id: number | null;
   add_time: Date | null;
   dj_name: string | null;
+  linkage_source: string | null;
+  linkage_confidence: number | null;
+  linked_at: Date | null;
   artwork_url: string | null;
   discogs_url: string | null;
   release_year: number | null;
@@ -139,6 +145,9 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   play_order: raw.play_order ?? 0,
   add_time: raw.add_time ?? new Date(),
   dj_name: raw.dj_name,
+  linkage_source: raw.linkage_source,
+  linkage_confidence: raw.linkage_confidence,
+  linked_at: raw.linked_at,
   // Metadata columns (on FSEntry since they're on the flowsheet table)
   artwork_url: raw.artwork_url,
   discogs_url: raw.discogs_url,

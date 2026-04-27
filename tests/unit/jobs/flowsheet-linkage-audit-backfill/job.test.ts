@@ -9,11 +9,7 @@
  */
 
 import { db } from '@wxyc/database';
-import {
-  applyBatch,
-  runBackfill,
-  BATCH_SIZE,
-} from '../../../../jobs/flowsheet-linkage-audit-backfill/job';
+import { applyBatch, runBackfill, BATCH_SIZE } from '../../../../jobs/flowsheet-linkage-audit-backfill/job';
 
 type SqlLike = {
   sql?: string | string[];
