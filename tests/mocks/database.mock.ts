@@ -128,6 +128,9 @@ export const flowsheet = {
   artist_bio: 'artist_bio',
   artist_wikipedia_url: 'artist_wikipedia_url',
   dj_name: 'dj_name',
+  linkage_source: 'linkage_source',
+  linkage_confidence: 'linkage_confidence',
+  linked_at: 'linked_at',
   search_doc: 'search_doc',
 };
 export const bins = {};
@@ -255,6 +258,9 @@ export type FSEntry = {
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
   dj_name: string | null;
+  linkage_source: string | null;
+  linkage_confidence: number | null;
+  linked_at: Date | null;
 };
 
 export type NewFSEntry = Partial<FSEntry>;
