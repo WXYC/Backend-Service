@@ -21,7 +21,7 @@
 
 import { sql } from 'drizzle-orm';
 import { db } from '@wxyc/database';
-import type { LookupResponse } from '@wxyc/shared/dtos';
+import type { LmlLookupResponse } from './lml-types.js';
 import { resolveCanonicalEntity, type Resolution } from './resolve.js';
 
 const JOB_NAME = 'library-canonical-entity-backfill';
@@ -41,7 +41,7 @@ export type LibraryRow = {
   album_title: string | null;
 };
 
-export type LookupFn = (artist: string, album?: string) => Promise<LookupResponse>;
+export type LookupFn = (artist: string, album?: string) => Promise<LmlLookupResponse>;
 
 export type Totals = {
   scanned: number;
@@ -115,7 +115,7 @@ export const processRow = async (
     return 'no_match';
   }
 
-  let response: LookupResponse;
+  let response: LmlLookupResponse;
   try {
     response = await deps.lookup(artist, album);
   } catch (error) {

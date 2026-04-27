@@ -19,7 +19,7 @@
  *     so the next sweep retries.
  */
 
-import type { LookupResponse } from '@wxyc/shared/dtos';
+import type { LmlLookupResponse } from './lml-types.js';
 
 export type Resolution =
   | { status: 'auto_accept'; canonical_entity_id: string; confidence: number }
@@ -40,7 +40,7 @@ const AUTO_ACCEPT_CONFIDENCE = 0.95;
  */
 const toCanonicalEntityId = (releaseId: number): string => `discogs:${releaseId}`;
 
-export const resolveCanonicalEntity = (response: LookupResponse): Resolution => {
+export const resolveCanonicalEntity = (response: LmlLookupResponse): Resolution => {
   const top = response.results?.[0];
   if (!top) {
     return { status: 'no_match' };

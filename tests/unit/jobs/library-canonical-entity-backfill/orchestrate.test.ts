@@ -22,7 +22,7 @@ import {
   THROTTLE_MS,
 } from '../../../../jobs/library-canonical-entity-backfill/orchestrate';
 import type { Resolution } from '../../../../jobs/library-canonical-entity-backfill/resolve';
-import type { LookupResponse } from '@wxyc/shared/dtos';
+import type { LmlLmlLookupResponse } from '../../../../jobs/library-canonical-entity-backfill/lml-types';
 
 type SqlLike = {
   sql?: string | string[];
@@ -51,55 +51,19 @@ const findExecuteCallMatching = (pattern: RegExp): unknown[] | undefined => {
   return calls.find((call) => pattern.test(renderSql(call[0])));
 };
 
-const directResponse = (releaseId: number): LookupResponse => ({
-  results: [
-    {
-      library_item: {
-        id: 1,
-        title: 'On Your Own Love Again',
-        artist: 'Jessica Pratt',
-        call_number: 'Rock CD JES 001/02',
-        library_url: 'https://wxyc.org/album/1',
-      },
-      artwork: {
-        release_id: releaseId,
-        release_url: `https://www.discogs.com/release/${releaseId}`,
-        confidence: 0.9,
-      },
-    },
-  ],
+const directResponse = (releaseId: number): LmlLookupResponse => ({
+  results: [{ library_item: { id: 1 }, artwork: { release_id: releaseId } }],
   search_type: 'direct',
-  song_not_found: false,
-  found_on_compilation: false,
 });
 
-const fallbackResponse = (releaseId: number): LookupResponse => ({
-  results: [
-    {
-      library_item: {
-        id: 1,
-        title: 'On Your Own Love Again',
-        artist: 'Jessica Pratt',
-        call_number: 'Rock CD JES 001/02',
-        library_url: 'https://wxyc.org/album/1',
-      },
-      artwork: {
-        release_id: releaseId,
-        release_url: `https://www.discogs.com/release/${releaseId}`,
-        confidence: 0.5,
-      },
-    },
-  ],
+const fallbackResponse = (releaseId: number): LmlLookupResponse => ({
+  results: [{ library_item: { id: 1 }, artwork: { release_id: releaseId } }],
   search_type: 'fallback',
-  song_not_found: false,
-  found_on_compilation: false,
 });
 
-const emptyResponse = (): LookupResponse => ({
+const emptyResponse = (): LmlLookupResponse => ({
   results: [],
   search_type: 'none',
-  song_not_found: false,
-  found_on_compilation: false,
 });
 
 describe('applyResolution', () => {
