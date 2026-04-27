@@ -15,7 +15,7 @@
  *     first empty batch, and keeps going past per-row errors.
  */
 
-import { db } from '@wxyc/database';
+import { db, pickPrimaryLibraryRow } from '@wxyc/database';
 import {
   applyLink,
   findLibraryByCanonicalEntity,
@@ -189,16 +189,39 @@ describe('processRow', () => {
     expect(serialized).toContain('7'); // flowsheet_id
   });
 
-  it('reports multi_match without writing when more than one library row matches', async () => {
-    // Tie-break (B-2.3) is out of scope. The orchestrator must surface the
-    // case but not pick arbitrarily — picking by lowest id silently looks
-    // like B-2.2 succeeded and would block B-2.3 from re-running.
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ id: 100 }, { id: 101 }]);
+  it('links via the B-2.3 tie-break when more than one library row matches', async () => {
+    // With B-2.3 in place, multi-match is no longer a terminal "review"
+    // outcome — the tie-break utility picks one library row deterministically
+    // (rotation > format > plays > id) and the orchestrator stamps the
+    // linkage exactly the same way it would for a single match.
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([{ id: 100 }, { id: 101 }]) // SELECT library
+      .mockResolvedValueOnce({ count: 1 }); // UPDATE flowsheet (tie-break-picked)
+    (pickPrimaryLibraryRow as jest.Mock).mockResolvedValueOnce(101);
     const lookup = jest.fn(() => Promise.resolve(directResponse(987654)));
 
     const status = await processRow({ id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' }, { lookup });
 
-    expect(status).toBe('multi_match');
+    expect(pickPrimaryLibraryRow).toHaveBeenCalledWith([100, 101]);
+    expect(status).toBe('linked');
+    const updateCall = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet/i);
+    expect(updateCall).toBeDefined();
+    const serialized = JSON.stringify(updateCall?.[0]);
+    expect(serialized).toContain('101'); // tie-break picked id
+  });
+
+  it('reports no_library_match when the tie-break returns null (concurrent-delete safety net)', async () => {
+    // pickPrimaryLibraryRow returns null when the candidate ids are gone
+    // by the time the tie-break runs. The orchestrator should treat this
+    // the same as the canonical-entity-not-in-library case: no UPDATE,
+    // and the row stays NULL for the next sweep to retry.
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ id: 100 }, { id: 101 }]);
+    (pickPrimaryLibraryRow as jest.Mock).mockResolvedValueOnce(null);
+    const lookup = jest.fn(() => Promise.resolve(directResponse(987654)));
+
+    const status = await processRow({ id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' }, { lookup });
+
+    expect(status).toBe('no_library_match');
     expect(findExecuteCallMatching(/UPDATE[\s\S]*flowsheet/i)).toBeUndefined();
   });
 
@@ -347,11 +370,14 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce({ count: 1 })
       // row 2 — auto_accept, library has zero matches
       .mockResolvedValueOnce([])
-      // row 3 — auto_accept, library has two matches (no UPDATE)
+      // row 3 — auto_accept, library has two matches → tie-break picks 201, link
       .mockResolvedValueOnce([{ id: 200 }, { id: 201 }])
+      .mockResolvedValueOnce({ count: 1 })
       // rows 4 + 5 fall through to review / no_match (no DB writes)
       // batch 2 — empty
       .mockResolvedValueOnce([]);
+
+    (pickPrimaryLibraryRow as jest.Mock).mockResolvedValueOnce(201);
 
     let call = 0;
     const lookup = jest.fn(() => {
@@ -365,9 +391,10 @@ describe('runBackfill', () => {
 
     const result = await runBackfill({ lookup, throttleMs: 0 });
 
-    expect(result.totals.linked).toBe(1);
+    // Two linked: the single-match (row 1) and the tie-break-picked (row 3).
+    expect(result.totals.linked).toBe(2);
     expect(result.totals.no_library_match).toBe(1);
-    expect(result.totals.multi_match).toBe(1);
+    expect(result.totals.multi_match).toBe(0);
     expect(result.totals.review).toBe(1);
     expect(result.totals.no_match).toBe(1);
     expect(result.totals.error).toBe(0);
