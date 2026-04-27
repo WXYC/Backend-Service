@@ -21,7 +21,7 @@
  */
 import { EventSource } from 'eventsource';
 import { db, flowsheet } from '@wxyc/database';
-import { sql, inArray } from 'drizzle-orm';
+import { sql, inArray, and, isNotNull } from 'drizzle-orm';
 
 const TUBAFRENZY_URL = process.env.TUBAFRENZY_URL ?? 'https://www.wxyc.info';
 const MAX_ENTRIES = 200;
@@ -331,7 +331,15 @@ async function enrichPlaycuts(): Promise<void> {
         artwork_url: flowsheet.artwork_url,
       })
       .from(flowsheet)
-      .where(inArray(flowsheetLookupKey, keys))
+      // The `artwork_url IS NOT NULL` filter is required for the planner to
+      // use the partial index `flowsheet_artwork_lookup_idx` (migration 0057).
+      // Without it, the predicate doesn't match the index's WHERE clause and
+      // PG falls back to a sequential scan of every flowsheet row — on a
+      // 2.6M-row table that runs minutes per call and accumulates orphan
+      // queries. The post-query JS filter (`if (row.key && row.artwork_url)`)
+      // already excludes NULL rows, so this is semantically a no-op; it just
+      // pushes the filter to PG so the index can fire. See incident #511.
+      .where(and(inArray(flowsheetLookupKey, keys), isNotNull(flowsheet.artwork_url)))
       .groupBy(flowsheetLookupKey, flowsheet.artwork_url);
 
     // Build new map and only swap on success — preserves existing artwork on DB failure
@@ -366,7 +374,8 @@ async function enrichSinglePlaycut(entry: TubafrenzyEntry): Promise<void> {
     const rows = await db
       .select({ artwork_url: flowsheet.artwork_url })
       .from(flowsheet)
-      .where(inArray(flowsheetLookupKey, [key]))
+      // Same partial-index alignment as enrichPlaycuts — see comment there.
+      .where(and(inArray(flowsheetLookupKey, [key]), isNotNull(flowsheet.artwork_url)))
       .limit(1);
 
     if (rows.length > 0 && rows[0].artwork_url) {
