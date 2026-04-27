@@ -46,10 +46,8 @@ describe('processRow metrics integration (B-3.2)', () => {
     jest.restoreAllMocks();
   });
 
-  it("records linked_high_conf when one library row matches a direct hit", async () => {
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce([{ id: 100 }])
-      .mockResolvedValueOnce({ count: 1 });
+  it('records linked_high_conf when one library row matches a direct hit', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ id: 100 }]).mockResolvedValueOnce({ count: 1 });
     const { sink, recordOutcome } = makeMetrics();
     const lookup = jest.fn(() => Promise.resolve(directResponse(987654)));
 
@@ -58,7 +56,7 @@ describe('processRow metrics integration (B-3.2)', () => {
     expect(recordOutcome).toHaveBeenCalledWith('linked_high_conf');
   });
 
-  it("records gray_zone_review on a fallback hit (review-bound)", async () => {
+  it('records gray_zone_review on a fallback hit (review-bound)', async () => {
     const { sink, recordOutcome } = makeMetrics();
     const lookup = jest.fn(() => Promise.resolve(fallbackResponse(33)));
 
@@ -67,7 +65,7 @@ describe('processRow metrics integration (B-3.2)', () => {
     expect(recordOutcome).toHaveBeenCalledWith('gray_zone_review');
   });
 
-  it("records gray_zone_review on multi_match (defers to B-2.3 / review)", async () => {
+  it('records gray_zone_review on multi_match (defers to B-2.3 / review)', async () => {
     // The orchestrator returns 'multi_match' and does not stamp the row.
     // From the dashboard's perspective, it's an unresolved candidate that a
     // human or B-2.3 has to break — same bucket as low-confidence review.
@@ -80,7 +78,7 @@ describe('processRow metrics integration (B-3.2)', () => {
     expect(recordOutcome).toHaveBeenCalledWith('gray_zone_review');
   });
 
-  it("records no_candidate on no_library_match", async () => {
+  it('records no_candidate on no_library_match', async () => {
     (db.execute as jest.Mock).mockResolvedValueOnce([]);
     const { sink, recordOutcome } = makeMetrics();
     const lookup = jest.fn(() => Promise.resolve(directResponse(987654)));
@@ -90,7 +88,7 @@ describe('processRow metrics integration (B-3.2)', () => {
     expect(recordOutcome).toHaveBeenCalledWith('no_candidate');
   });
 
-  it("records no_candidate on no_match (LML returned nothing)", async () => {
+  it('records no_candidate on no_match (LML returned nothing)', async () => {
     const { sink, recordOutcome } = makeMetrics();
     const lookup = jest.fn(() => Promise.resolve(emptyResponse()));
 
@@ -99,7 +97,7 @@ describe('processRow metrics integration (B-3.2)', () => {
     expect(recordOutcome).toHaveBeenCalledWith('no_candidate');
   });
 
-  it("records no_candidate when a row lacks artist or album text (filtered out before LML)", async () => {
+  it('records no_candidate when a row lacks artist or album text (filtered out before LML)', async () => {
     // The orchestrator short-circuits these to 'no_match' without calling
     // LML. From the metric's perspective, no candidate produced.
     const { sink, recordOutcome } = makeMetrics();
@@ -111,7 +109,7 @@ describe('processRow metrics integration (B-3.2)', () => {
     expect(lookup).not.toHaveBeenCalled();
   });
 
-  it("records lml_error and reports the error on a generic LML failure", async () => {
+  it('records lml_error and reports the error on a generic LML failure', async () => {
     const err = new Error('LML 502');
     const { sink, recordOutcome, reportError } = makeMetrics();
     const lookup = jest.fn(() => Promise.reject(err));
@@ -123,7 +121,7 @@ describe('processRow metrics integration (B-3.2)', () => {
     expect(reportError).toHaveBeenCalledWith(err, expect.objectContaining({ flowsheetId: 7 }));
   });
 
-  it("records lml_timeout (not lml_error) on AbortError-style timeouts", async () => {
+  it('records lml_timeout (not lml_error) on AbortError-style timeouts', async () => {
     const err = Object.assign(new Error('aborted'), { name: 'AbortError' });
     const { sink, recordOutcome, reportError } = makeMetrics();
     const lookup = jest.fn(() => Promise.reject(err));
@@ -134,13 +132,11 @@ describe('processRow metrics integration (B-3.2)', () => {
     expect(reportError).toHaveBeenCalled();
   });
 
-  it("works without a metrics sink (sink is optional — tests/CLI runs are unaffected)", async () => {
+  it('works without a metrics sink (sink is optional — tests/CLI runs are unaffected)', async () => {
     // The existing orchestrate tests do not pass a sink. Adding the sink as
     // required would break every prior call site. The default must be a
     // silent no-op so old wiring still works.
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce([{ id: 100 }])
-      .mockResolvedValueOnce({ count: 1 });
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ id: 100 }]).mockResolvedValueOnce({ count: 1 });
     const lookup = jest.fn(() => Promise.resolve(directResponse(123)));
 
     const status = await processRow({ id: 7, artist_name: 'a', album_title: 'b' }, { lookup });
@@ -160,7 +156,7 @@ describe('runBackfill metrics integration (B-3.2)', () => {
     jest.restoreAllMocks();
   });
 
-  it("threads the metrics sink through to every row processed", async () => {
+  it('threads the metrics sink through to every row processed', async () => {
     (db.execute as jest.Mock)
       .mockResolvedValueOnce([
         { id: 1, artist_name: 'a', album_title: 'a' },

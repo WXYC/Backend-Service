@@ -169,26 +169,26 @@ describe('reportLinkageError', () => {
 
 describe('getCumulativeLinkageCoverage', () => {
   beforeEach(() => {
-    (db.execute as jest.Mock).mockReset();
+    db.execute.mockReset();
   });
 
   it("issues count(*) FILTER (WHERE album_id IS NOT NULL) over flowsheet entry_type='track'", async () => {
     // The exact ratio we want surfaced on the dashboard. FILTER beats the
     // alternative (two queries or a subquery) because PG runs it in a
     // single pass over the table.
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ linked: 100, total: 250 }]);
+    db.execute.mockResolvedValueOnce([{ linked: 100, total: 250 }]);
 
     const result = await getCumulativeLinkageCoverage();
 
     expect(result).toEqual({ linked: 100, total: 250, ratio: 0.4 });
-    const sqlText = renderSql((db.execute as jest.Mock).mock.calls[0][0]);
+    const sqlText = renderSql(db.execute.mock.calls[0][0]);
     expect(sqlText).toMatch(/count\(\*\)\s+FILTER\s*\(\s*WHERE\s+"?album_id"?\s+IS\s+NOT\s+NULL\s*\)/i);
     expect(sqlText).toMatch(/FROM[\s\S]*flowsheet/i);
     expect(sqlText).toMatch(/entry_type"?\s*=\s*'track'/i);
   });
 
   it('handles an empty table without dividing by zero', async () => {
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ linked: 0, total: 0 }]);
+    db.execute.mockResolvedValueOnce([{ linked: 0, total: 0 }]);
 
     const result = await getCumulativeLinkageCoverage();
 
@@ -199,7 +199,7 @@ describe('getCumulativeLinkageCoverage', () => {
     // postgres-js returns BIGINTs as strings to avoid precision loss. The
     // 1.95M-row flowsheet count would surface as a string and JSON.stringify
     // would happily ship "1956737" to the dashboard if we forgot to coerce.
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ linked: '775453', total: '1956737' }]);
+    db.execute.mockResolvedValueOnce([{ linked: '775453', total: '1956737' }]);
 
     const result = await getCumulativeLinkageCoverage();
 
@@ -213,19 +213,19 @@ describe('getCumulativeLinkageCoverage', () => {
 
 describe('getRecentLinkageRate', () => {
   beforeEach(() => {
-    (db.execute as jest.Mock).mockReset();
+    db.execute.mockReset();
   });
 
   it('parameterizes the lookback window in hours', async () => {
     // The forward-path health proxy: of rows inserted in the last N hours,
     // how many were linked? B-2.1's worker should land linkage within
     // minutes; a falling ratio means the worker is falling behind.
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ inserted: 50, linked: 47 }]);
+    db.execute.mockResolvedValueOnce([{ inserted: 50, linked: 47 }]);
 
     const result = await getRecentLinkageRate(24);
 
     expect(result).toEqual({ inserted: 50, linked: 47, ratio: 47 / 50 });
-    const call = (db.execute as jest.Mock).mock.calls[0][0];
+    const call = db.execute.mock.calls[0][0];
     const sqlText = renderSql(call);
     expect(sqlText).toMatch(/add_time/i);
     expect(sqlText).toMatch(/now\(\)\s*-/i);
@@ -233,16 +233,16 @@ describe('getRecentLinkageRate', () => {
   });
 
   it("scopes the rate to entry_type='track' (messages and breaks shouldn't move the gauge)", async () => {
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ inserted: 0, linked: 0 }]);
+    db.execute.mockResolvedValueOnce([{ inserted: 0, linked: 0 }]);
 
     await getRecentLinkageRate(24);
 
-    const sqlText = renderSql((db.execute as jest.Mock).mock.calls[0][0]);
+    const sqlText = renderSql(db.execute.mock.calls[0][0]);
     expect(sqlText).toMatch(/entry_type"?\s*=\s*'track'/i);
   });
 
   it('returns ratio=0 when nothing has been inserted in the window', async () => {
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ inserted: 0, linked: 0 }]);
+    db.execute.mockResolvedValueOnce([{ inserted: 0, linked: 0 }]);
 
     const result = await getRecentLinkageRate(1);
 
