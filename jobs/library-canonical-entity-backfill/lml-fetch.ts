@@ -17,7 +17,7 @@
  *     contract stays "bubble up = retry on next sweep."
  */
 
-import type { LmlLmlLookupResponse } from './lml-types.js';
+import type { LmlLookupResponse } from './lml-types.js';
 
 const TIMEOUT_MS = 5000;
 
@@ -51,7 +51,7 @@ export const lookupMetadata = async (artist: string, album?: string): Promise<Lm
     return (await response.json()) as LmlLookupResponse;
   } catch (error) {
     if ((error as Error).name === 'AbortError') {
-      throw new Error('LML request timed out');
+      throw new Error('LML request timed out', { cause: error });
     }
     throw error;
   } finally {
