@@ -439,6 +439,71 @@ describe('Library Artists', () => {
   });
 });
 
+describe('Library artist_name cascade trigger (A.3 / 0060)', () => {
+  const postgres = require('postgres');
+  let sql;
+  let artistId;
+  let albumIds;
+  const schema = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+  const originalName = `Cascade Origin ${Date.now()}`;
+  const renamedName = `Cascade Renamed ${Date.now()}`;
+
+  beforeAll(async () => {
+    sql = postgres({
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
+      database: process.env.DB_NAME || 'wxyc_db',
+      user: process.env.DB_USERNAME || 'test-user',
+      password: process.env.DB_PASSWORD || 'test-pw',
+    });
+
+    // Seed: one artist, two library rows for that artist with the
+    // pre-rename denormalized name.
+    const codeLetters = `Z${Date.now().toString(36).toUpperCase().slice(-2)}`;
+    const artistRes = await sql.unsafe(`
+      INSERT INTO ${schema}.artists (artist_name, alphabetical_name, code_letters)
+      VALUES ('${originalName}', '${originalName}', '${codeLetters}')
+      RETURNING id
+    `);
+    artistId = artistRes[0].id;
+
+    const albumRes = await sql.unsafe(`
+      INSERT INTO ${schema}.library
+        (artist_id, genre_id, format_id, album_title, label, code_number, artist_name)
+      VALUES
+        (${artistId}, 11, 1, 'Cascade Album One', 'Cascade Label', 1, '${originalName}'),
+        (${artistId}, 11, 1, 'Cascade Album Two', 'Cascade Label', 2, '${originalName}')
+      RETURNING id
+    `);
+    albumIds = albumRes.map((r) => r.id);
+  });
+
+  afterAll(async () => {
+    if (albumIds?.length) {
+      await sql.unsafe(`DELETE FROM ${schema}.library WHERE id IN (${albumIds.join(',')})`);
+    }
+    if (artistId) {
+      await sql.unsafe(`DELETE FROM ${schema}.artists WHERE id = ${artistId}`);
+    }
+    await sql.end();
+  });
+
+  test('renaming artists.artist_name updates every library row for that artist', async () => {
+    await sql.unsafe(`
+      UPDATE ${schema}.artists
+         SET artist_name = '${renamedName}'
+       WHERE id = ${artistId}
+    `);
+
+    const rows = await sql.unsafe(
+      `SELECT artist_name FROM ${schema}.library WHERE artist_id = ${artistId} ORDER BY id`
+    );
+
+    expect(rows).toHaveLength(2);
+    rows.forEach((row) => expect(row.artist_name).toBe(renamedName));
+  });
+});
+
 describe('Library Artists Peek Code', () => {
   let auth;
 
