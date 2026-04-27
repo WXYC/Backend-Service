@@ -8,3 +8,4 @@ mirror-logs
 .cache
 *.tsbuildinfo
 .claude/worktrees/
+__pycache__

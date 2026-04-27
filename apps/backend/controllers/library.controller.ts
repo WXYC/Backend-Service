@@ -51,6 +51,12 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     );
   }
 
+  // Denormalize the canonical artist_name onto library (Epic A.3). We always
+  // re-fetch from `artists` rather than trusting body.artist_name so the
+  // library row stays consistent with the FK target even when the client
+  // sent a casing variant. Renames cascade via the trigger added in 0060.
+  const canonical_artist_name = await libraryService.getArtistNameById(artist_id);
+
   // Resolve label string to label_id via upsert
   let label_id = body.label_id;
   if (label_id === undefined && body.label) {
@@ -60,6 +66,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 
   const new_album: NewAlbum = {
     artist_id: artist_id,
+    artist_name: canonical_artist_name,
     genre_id: body.genre_id,
     format_id: body.format_id,
     album_title: body.album_title,
@@ -103,10 +110,38 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     } else {
       console.warn('Artwork fetch failed for new album:', artworkResult.reason);
     }
+
+    // Fire-and-forget canonical-entity resolution (Epic B.1.3). The library
+    // insert succeeds immediately; the canonical_entity_id lands within
+    // seconds. UI and downstream consumers tolerate the lag. We use the
+    // canonical artist name resolved from the artists table, not the raw
+    // request body, so casing/diacritic variants in client input don't
+    // poison LML's match.
+    fireAndForgetCanonicalEntity(inserted_album.id, canonical_artist_name, body.album_title);
   }
 
   res.status(201).json(inserted_album);
 };
+
+/**
+ * Resolve the canonical entity for a freshly inserted library row via LML and
+ * persist the linkage. Errors are swallowed (logged + reported to Sentry) so
+ * lookup failures never propagate back into the addAlbum response — the row
+ * is already persisted; the link is best-effort.
+ */
+function fireAndForgetCanonicalEntity(libraryId: number, artistName: string | null, albumTitle: string): void {
+  if (!artistName) return;
+
+  lookupMetadata(artistName, albumTitle)
+    .then(async (response) => {
+      const linkage = libraryService.mapLookupToCanonicalEntity(response);
+      if (!linkage) return;
+      await libraryService.updateCanonicalEntity(libraryId, linkage.id, linkage.confidence);
+    })
+    .catch((err) => {
+      console.warn('[Library] Canonical-entity resolution failed:', (err as Error).message);
+    });
+}
 
 type AlbumQueryParams = {
   artist_name?: string;

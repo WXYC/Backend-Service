@@ -119,6 +119,21 @@ async function runMigrations() {
  * independent check by comparing SHA-256 hashes of migration SQL files against
  * the hashes recorded in drizzle.__drizzle_migrations.
  */
+/**
+ * Tags whose hashes will never be in `drizzle.__drizzle_migrations` because
+ * drizzle's "max(applied.created_at) cursor" silently skipped them and a
+ * later replay migration carries their effects forward. The replays apply
+ * cleanly; the originals stay in the journal so their SQL is on disk and
+ * the validator's "missing SQL" check stays satisfied. See #511 + #550.
+ *
+ * Each entry must include the migration that *replays* it so future
+ * audit tooling can trace cause and effect without grepping git history.
+ */
+const HISTORICAL_REPLACED_TAGS = new Map([
+  ['0054_flowsheet-search-doc-with-dj-name', '0065_replay-flowsheet-search-doc-with-dj-name'],
+  ['0064_propagate-v012-mojibake', '0066_replay-v012-mojibake'],
+]);
+
 async function verifyMigrations() {
   console.log(styleText(['bold'], '🔍 Verifying migration completeness...\n'));
 
@@ -143,19 +158,45 @@ async function verifyMigrations() {
   `;
   const appliedHashes = new Set(dbMigrations.map((m) => m.hash));
 
-  // Check for missing migrations
-  const missing = expectedMigrations.filter((m) => !appliedHashes.has(m.hash));
+  // Check for missing migrations, partitioning into "actual misses" (a real
+  // failure to apply) and "expected absent" (cursor-skipped, replayed by a
+  // later migration that *did* apply).
+  const allMissing = expectedMigrations.filter((m) => !appliedHashes.has(m.hash));
+  const expectedAbsent = [];
+  const realMissing = [];
+  for (const m of allMissing) {
+    if (HISTORICAL_REPLACED_TAGS.has(m.tag)) {
+      const replayTag = HISTORICAL_REPLACED_TAGS.get(m.tag);
+      const replay = expectedMigrations.find((e) => e.tag === replayTag);
+      // Only treat as expected-absent if the replay itself *did* apply.
+      // Otherwise the hole is real and the operator should know.
+      if (replay && appliedHashes.has(replay.hash)) {
+        expectedAbsent.push({ ...m, replayTag });
+      } else {
+        realMissing.push(m);
+      }
+    } else {
+      realMissing.push(m);
+    }
+  }
 
-  if (missing.length > 0) {
+  for (const m of expectedAbsent) {
+    console.warn(
+      `WARN:  Journal entry idx ${m.idx} (${m.tag}) has no row in __drizzle_migrations ` +
+        `(allowlisted: replayed by ${m.replayTag}).`
+    );
+  }
+
+  if (realMissing.length > 0) {
     console.error('MIGRATION VERIFICATION FAILED!');
-    console.error(`${missing.length} migration(s) were NOT applied:\n`);
-    for (const m of missing) {
+    console.error(`${realMissing.length} migration(s) were NOT applied:\n`);
+    for (const m of realMissing) {
       console.error(`  - [idx ${m.idx}] ${m.tag} (when: ${m.when})`);
     }
     console.error('\nThis likely indicates an out-of-order timestamp in _journal.json.');
     console.error('The "when" timestamps MUST be monotonically increasing.');
     console.error('See: https://github.com/WXYC/Backend-Service/issues/400\n');
-    throw new Error(`Migration verification failed: ${missing.length} missing migration(s)`);
+    throw new Error(`Migration verification failed: ${realMissing.length} missing migration(s)`);
   }
 
   // Warn about out-of-order timestamps (prevention for future)
@@ -171,7 +212,15 @@ async function verifyMigrations() {
     prevTag = entry.tag;
   }
 
-  console.log(`All ${expectedMigrations.length} migrations verified as applied.\n`);
+  const appliedCount = expectedMigrations.length - expectedAbsent.length;
+  if (expectedAbsent.length > 0) {
+    console.log(
+      `${appliedCount} of ${expectedMigrations.length} migrations applied; ` +
+        `${expectedAbsent.length} expected absent (allowlisted, see HISTORICAL_REPLACED_TAGS).\n`
+    );
+  } else {
+    console.log(`All ${expectedMigrations.length} migrations verified as applied.\n`);
+  }
 }
 
 /**

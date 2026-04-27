@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/flowsheet-lml-link-backfill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot backfill: link unlinked flowsheet rows to library via LML canonical-entity lookup (B-2.2)",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_flowsheet_lml_link_backfill:ci -f ../../Dockerfile.flowsheet-lml-link-backfill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.50.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

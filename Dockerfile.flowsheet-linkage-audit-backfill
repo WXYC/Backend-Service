@@ -1,0 +1,27 @@
+#Build stage
+FROM node:25-alpine AS builder
+
+WORKDIR /flowsheet-linkage-audit-backfill-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/flowsheet-linkage-audit-backfill ./jobs/flowsheet-linkage-audit-backfill
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-linkage-audit-backfill
+
+#Production stage
+FROM node:25-alpine AS prod
+
+WORKDIR /flowsheet-linkage-audit-backfill
+
+COPY ./package* ./
+COPY ./jobs/flowsheet-linkage-audit-backfill/package* ./jobs/flowsheet-linkage-audit-backfill/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./flowsheet-linkage-audit-backfill-builder/jobs/flowsheet-linkage-audit-backfill/dist ./jobs/flowsheet-linkage-audit-backfill/dist
+COPY --from=builder ./flowsheet-linkage-audit-backfill-builder/shared/database/dist ./shared/database/dist
+
+CMD ["npm", "start", "--workspace=@wxyc/flowsheet-linkage-audit-backfill"]

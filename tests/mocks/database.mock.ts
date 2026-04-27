@@ -72,6 +72,11 @@ export const library = {
   legacy_release_id: 'legacy_release_id',
   on_streaming: 'on_streaming',
   artwork_url: 'artwork_url',
+  artist_name: 'artist_name',
+  search_doc: 'search_doc',
+  canonical_entity_id: 'canonical_entity_id',
+  canonical_entity_confidence: 'canonical_entity_confidence',
+  canonical_entity_resolved_at: 'canonical_entity_resolved_at',
 };
 export const artists = {};
 export const genres = {};
@@ -91,11 +96,17 @@ export const rotation = {
 export const library_artist_view = {
   on_streaming: 'on_streaming',
 };
+export const album_plays = {
+  album_id: 'album_id',
+  plays: 'plays',
+};
 export const flowsheet = {
   id: 'id',
   show_id: 'show_id',
   album_id: 'album_id',
   legacy_entry_id: 'legacy_entry_id',
+  legacy_release_id: 'legacy_release_id',
+  legacy_link_attempted_at: 'legacy_link_attempted_at',
   entry_type: 'entry_type',
   track_title: 'track_title',
   album_title: 'album_title',
@@ -119,7 +130,20 @@ export const flowsheet = {
   artist_bio: 'artist_bio',
   artist_wikipedia_url: 'artist_wikipedia_url',
   dj_name: 'dj_name',
+  linkage_source: 'linkage_source',
+  linkage_confidence: 'linkage_confidence',
+  linked_at: 'linked_at',
   search_doc: 'search_doc',
+};
+export const flowsheet_linkage_review = {
+  id: 'id',
+  flowsheet_id: 'flowsheet_id',
+  candidate_library_ids: 'candidate_library_ids',
+  candidate_confidences: 'candidate_confidences',
+  suggested_action: 'suggested_action',
+  created_at: 'created_at',
+  reviewed_at: 'reviewed_at',
+  reviewed_decision: 'reviewed_decision',
 };
 export const bins = {};
 export const shows = {
@@ -198,6 +222,11 @@ export const cronjob_runs = {};
 // Mock enum
 export const flowsheetEntryTypeEnum = () => ({});
 
+// B-2.3 multi-match tie-break. Tests that drive the linkage call sites
+// (B-2.1 forward path, B-2.2 backfill) override this per-test to control
+// which library_id the tie-break "picks".
+export const pickPrimaryLibraryRow = jest.fn<(libraryIds: number[]) => Promise<number | null>>();
+
 // Mock types
 export type AnonymousDevice = {
   id: number;
@@ -246,6 +275,9 @@ export type FSEntry = {
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
   dj_name: string | null;
+  linkage_source: string | null;
+  linkage_confidence: number | null;
+  linked_at: Date | null;
 };
 
 export type NewFSEntry = Partial<FSEntry>;

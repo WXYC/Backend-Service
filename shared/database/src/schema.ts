@@ -16,6 +16,7 @@ import {
   date,
   uniqueIndex,
   customType,
+  real,
 } from 'drizzle-orm/pg-core';
 
 // PostgreSQL tsvector. Drizzle has no first-class tsvector type, but we only
@@ -287,6 +288,28 @@ export const library = wxyc_schema.table(
     date_found: timestamp('date_found', { withTimezone: true }),
     on_streaming: boolean('on_streaming'),
     artwork_url: varchar('artwork_url', { length: 512 }),
+    // Denormalized from artists.artist_name (Epic A.1). Nullable until A.2
+    // backfills it from the artists join; A.3 keeps it current on insert and
+    // cascades on artists UPDATE. A.5 reads it via search_doc.
+    artist_name: varchar('artist_name', { length: 128 }),
+    // Reconciled canonical entity for the album, derived via LML lookup
+    // (Epic B.1). Nullable until B-1.2 backfills it; B-1.3 keeps it current
+    // on insert. The identifier is opaque text (e.g. a Discogs/MusicBrainz
+    // release id, optionally namespaced) — schemes are decided per-source by
+    // the resolver, not the column. Confidence is captured at link time so
+    // retroactive analyses can re-judge weak matches; resolved_at supports
+    // audit + retry policy. The B-tree index supports flowsheet → library
+    // joins via canonical entity in B-2.
+    canonical_entity_id: text('canonical_entity_id'),
+    canonical_entity_confidence: real('canonical_entity_confidence'),
+    canonical_entity_resolved_at: timestamp('canonical_entity_resolved_at', { withTimezone: true }),
+    // STORED GENERATED tsvector covering the searchable text fields with
+    // weight bands (artist=A, album=B). NULL for rows where artist_name has
+    // not been backfilled yet — A.2 populates legacy rows, A.3 keeps live
+    // writes current. Read by the new tsvector search path in A.5.
+    search_doc: tsvector('search_doc').generatedAlwaysAs(
+      sql`setweight(to_tsvector('simple', coalesce("artist_name", '')), 'A') || setweight(to_tsvector('simple', coalesce("album_title", '')), 'B')`
+    ),
   },
   (table) => {
     return {
@@ -296,6 +319,12 @@ export const library = wxyc_schema.table(
       artistIdIdx: index('artist_id_idx').on(table.artist_id),
       legacyReleaseIdIdx: uniqueIndex('library_legacy_release_id_idx').on(table.legacy_release_id),
       albumArtistTrgmIdx: index('album_artist_trgm_idx').using(`gin`, sql`${table.album_artist} gin_trgm_ops`),
+      libraryArtistNameTrgmIdx: index('library_artist_name_trgm_idx').using(
+        `gin`,
+        sql`${table.artist_name} gin_trgm_ops`
+      ),
+      librarySearchDocIdx: index('library_search_doc_idx').using('gin', sql`${table.search_doc}`),
+      libraryCanonicalEntityIdIdx: index('library_canonical_entity_id_idx').on(table.canonical_entity_id),
     };
   }
 );
@@ -393,6 +422,23 @@ export const flowsheet = wxyc_schema.table(
     // (step 5b). Backfilled by migration 0053; populated on write by the
     // ETL job and the live insert controller from step 5b.2 onward.
     dj_name: text('dj_name'),
+    // Linkage audit (B-1.4). Records how `album_id` was resolved on this
+    // row so we can audit match quality, undo a class of bad matches if a
+    // heuristic regresses, and weight differently in ranking. Setting
+    // these on new linkages is handled in B-2.1 / B-2.2 / B-3.1; this
+    // migration only adds the columns nullable. Source values are
+    // enum-like text: 'etl_legacy_id' | 'dj_bin_pick' | 'lml_high_confidence'
+    // | 'human_review' | 'tubafrenzy_mirror'.
+    linkage_source: text('linkage_source'),
+    linkage_confidence: real('linkage_confidence'),
+    linked_at: timestamp('linked_at', { withTimezone: true }),
+    // B-0.5 marker: timestamp set when the legacy_release_id → library.id
+    // resolver ran for this row and could not link. Lets B-2.2's LML
+    // backfill find the broken-FK residual alongside the rows that never
+    // had a legacy_release_id at all. NULL means "either already linked,
+    // or the FK resolver hasn't run yet". See migration 0063 +
+    // jobs/broken-fk-recovery for the population pass.
+    legacy_link_attempted_at: timestamp('legacy_link_attempted_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, track+dj=B, album=C, label=D). Managed by
     // migration 0054 (which extended the original 0052 expression to include
@@ -422,6 +468,39 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_artwork_lookup_idx')
       .on(sql`(lower(trim(${table.artist_name})) || '-' || lower(trim(coalesce(${table.album_title}, ''))))`)
       .where(sql`${table.artwork_url} IS NOT NULL`),
+    // FK columns aren't auto-indexed by Postgres. Without this, the
+    // /flowsheet `?shows_limit=N` listing endpoint sequentially scans the
+    // 2.6M-row table on every dj-site poll. See migration 0068 + issue #511.
+    index('flowsheet_show_id_idx').on(table.show_id),
+  ]
+);
+
+// Manual review queue for gray-zone LML matches (B-3.1, issue #501). The
+// B-2.2 backfill enqueues a row per flowsheet entry whose LML lookup hit a
+// fallback (right-artist, possibly-wrong-album). The CLI in
+// `scripts/review-linkage.ts` drains this queue interactively. See
+// migration 0066 for column rationale.
+export type NewFlowsheetLinkageReview = InferInsertModel<typeof flowsheet_linkage_review>;
+export type FlowsheetLinkageReview = InferSelectModel<typeof flowsheet_linkage_review>;
+export const flowsheet_linkage_review = wxyc_schema.table(
+  'flowsheet_linkage_review',
+  {
+    id: serial('id').primaryKey(),
+    flowsheet_id: integer('flowsheet_id')
+      .references(() => flowsheet.id, { onDelete: 'cascade' })
+      .notNull()
+      .unique(),
+    candidate_library_ids: integer('candidate_library_ids').array().notNull(),
+    candidate_confidences: real('candidate_confidences').array().notNull(),
+    suggested_action: text('suggested_action').notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    reviewed_at: timestamp('reviewed_at', { withTimezone: true }),
+    reviewed_decision: text('reviewed_decision'),
+  },
+  (table) => [
+    index('flowsheet_linkage_review_unreviewed_idx')
+      .on(table.created_at)
+      .where(sql`${table.reviewed_at} IS NULL`),
   ]
 );
 
@@ -635,6 +714,19 @@ export type LibraryArtistViewEntry = {
   apple_music_artist_id: string | null;
   bandcamp_id: string | null;
 };
+
+// Per-album play count, aggregated from `flowsheet` track entries. The MV is
+// created and indexed by migration 0059, refreshed periodically by
+// `apps/backend/services/album-plays-refresh.service.ts`. Declared with
+// `.existing()` because we own the SQL via the migration; this entry exists
+// so drizzle-kit drift detection treats the MV as known and so the search
+// service can reference its columns through Drizzle.
+export const album_plays = wxyc_schema
+  .materializedView('album_plays', {
+    album_id: integer('album_id').notNull(),
+    plays: integer('plays').notNull(),
+  })
+  .existing();
 
 export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {
   return qb

@@ -8,16 +8,17 @@ API and authentication service for WXYC applications. Provides endpoints for the
 
 npm workspaces:
 
-| Package                            | Path                               | Purpose                                                                                   |
-| ---------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------- |
-| `@wxyc/backend`                    | `apps/backend/`                    | Express API server (port 8080)                                                            |
-| `@wxyc/auth-service`               | `apps/auth/`                       | better-auth server (port 8082)                                                            |
-| `@wxyc/database`                   | `shared/database/`                 | Drizzle ORM schema, client, migrations, ETL utilities                                     |
-| `@wxyc/authentication`             | `shared/authentication/`           | Auth middleware, roles, JWT verification                                                  |
-| `@wxyc/flowsheet-etl`              | `jobs/flowsheet-etl/`              | Flowsheet ETL: sync from tubafrenzy                                                       |
-| `@wxyc/rotation-etl`               | `jobs/rotation-etl/`               | Rotation ETL: sync from tubafrenzy                                                        |
-| `@wxyc/artist-identity-etl`        | `jobs/artist-identity-etl/`        | Artist identity ETL: sync from LML's `entity.identity`                                    |
-| `@wxyc/flowsheet-dj-name-backfill` | `jobs/flowsheet-dj-name-backfill/` | One-shot backfill: populate `flowsheet.dj_name` on legacy track rows after migration 0053 |
+| Package                              | Path                                 | Purpose                                                                                                   |
+| ------------------------------------ | ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `@wxyc/backend`                      | `apps/backend/`                      | Express API server (port 8080)                                                                            |
+| `@wxyc/auth-service`                 | `apps/auth/`                         | better-auth server (port 8082)                                                                            |
+| `@wxyc/database`                     | `shared/database/`                   | Drizzle ORM schema, client, migrations, ETL utilities                                                     |
+| `@wxyc/authentication`               | `shared/authentication/`             | Auth middleware, roles, JWT verification                                                                  |
+| `@wxyc/flowsheet-etl`                | `jobs/flowsheet-etl/`                | Flowsheet ETL: sync from tubafrenzy                                                                       |
+| `@wxyc/rotation-etl`                 | `jobs/rotation-etl/`                 | Rotation ETL: sync from tubafrenzy                                                                        |
+| `@wxyc/artist-identity-etl`          | `jobs/artist-identity-etl/`          | Artist identity ETL: sync from LML's `entity.identity`                                                    |
+| `@wxyc/flowsheet-dj-name-backfill`   | `jobs/flowsheet-dj-name-backfill/`   | One-shot backfill: populate `flowsheet.dj_name` on legacy track rows after migration 0053                 |
+| `@wxyc/library-artist-name-backfill` | `jobs/library-artist-name-backfill/` | One-shot backfill: populate `library.artist_name` from the `artists` join after migration 0058 (Epic A.2) |
 
 ### API Server (`apps/backend`)
 
@@ -134,6 +135,19 @@ npm run dev              # Start auth (8082) + backend (8080) concurrently with 
 ```
 
 Stop the database with `npm run db:stop`.
+
+### One-time per-clone: register the journal merge driver
+
+`shared/database/src/migrations/meta/_journal.json` is an append-only Drizzle index. Every PR that adds a migration appends an entry; concurrent PRs collide on the array even when the new entries don't overlap. The repo ships `.gitattributes` with `merge=journal`, but the actual merge driver lives in `.git/config` and isn't checked in — each collaborator must register it once after cloning:
+
+```bash
+npx git-merge-append install \
+  --name journal \
+  --array-path entries --key idx --sort-by idx \
+  -- shared/database/src/migrations/meta/_journal.json
+```
+
+After this, `git rebase` / `git merge` resolve concurrent journal appends automatically. If you skipped the install and are mid-rebase with `<<<<<<<` in `_journal.json`, run `npx git-merge-append resolve --array-path entries --key idx --sort-by idx -- shared/database/src/migrations/meta/_journal.json` to fix it post-hoc. See [git-merge-append](https://github.com/jakebromberg/git-merge-append) for details.
 
 ### Code Quality
 

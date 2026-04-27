@@ -393,6 +393,83 @@
       "when": 1778078400000,
       "tag": "0057_flowsheet-artwork-lookup-partial-idx",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1778164800000,
+      "tag": "0058_library-artist-name-and-search-doc",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1778251200000,
+      "tag": "0059_album-plays-materialized-view",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1778337600000,
+      "tag": "0060_library-artist-name-cascade-trigger",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1778424000000,
+      "tag": "0061_library-canonical-entity",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1778510400000,
+      "tag": "0062_flowsheet-linkage-audit-columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1778596800000,
+      "tag": "0063_flowsheet-legacy-link-attempted-at",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1778683200000,
+      "tag": "0064_propagate-v012-mojibake",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1779683200001,
+      "tag": "0065_replay-flowsheet-search-doc-with-dj-name",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1779683200002,
+      "tag": "0066_replay-v012-mojibake",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1779769600000,
+      "tag": "0067_flowsheet-linkage-review",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1779856000000,
+      "tag": "0068_flowsheet-show-id-idx",
+      "breakpoints": true
     }
   ]
 }
