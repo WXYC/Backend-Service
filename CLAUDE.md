@@ -381,6 +381,7 @@ Bounded ring-buffer reports written under `mirror-logs/`. Reports never include 
 ### Metadata Services
 
 - `LIBRARY_METADATA_URL` -- library-metadata-lookup base URL (e.g. `http://localhost:8001`). Required for proxy endpoints, metadata enrichment, and track search. All Discogs access is routed through LML. Do not include the `/api/v1` path prefix; the LML client adds it automatically.
+- `LML_API_KEY` -- Bearer token sent on every LML request. Must match LML's `LML_API_KEY`. Optional in dev; required in production once LML's `LML_REQUIRE_AUTH` is flipped to `true`. Injected at the single `lmlFetch` chokepoint in `apps/backend/services/lml/lml.client.ts`.
 - `DISCOGS_API_KEY`, `DISCOGS_API_SECRET` -- Served to dj-site via `/config/secrets` endpoint. Not used by the backend itself (Discogs access goes through LML).
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`
 
