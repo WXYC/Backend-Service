@@ -30,7 +30,11 @@ const baseUrl = (): string => {
 };
 
 export const lookupMetadata = async (artist: string, album?: string): Promise<LmlLookupResponse> => {
-  const body: Record<string, string> = { artist };
+  // LML's /lookup contract requires `raw_message` even when artist/album are
+  // already structured. Synthesize "<artist> - <album>" — matches the shape
+  // the parser expects in LML's e2e fixtures.
+  const rawMessage = album ? `${artist} - ${album}` : artist;
+  const body: Record<string, string> = { artist, raw_message: rawMessage };
   if (album) body.album = album;
 
   const controller = new AbortController();
