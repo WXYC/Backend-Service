@@ -199,6 +199,23 @@ INSERT INTO wxyc_schema.library(
     artist_id, genre_id, format_id, album_title, code_number)
     VALUES (7, 11, 2, 'Mars Audiac Quintet', 2);
 
+-- Autechre + Confield for the B-2.1 forward-path linkage E2E. The mock LML
+-- fixture (dev_env/mock-api-server/src/fixtures/lml.json) returns release_id
+-- 4080 for an "autechre" lookup; pre-stamping the library row with the
+-- matching canonical entity id lets the resolver find a single library row
+-- and link the flowsheet entry without any additional setup.
+INSERT INTO wxyc_schema.artists(artist_name, alphabetical_name, code_letters)
+  VALUES ('Autechre', 'Autechre', 'AU');
+
+INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
+  VALUES (8, 15, 1);
+
+INSERT INTO wxyc_schema.library(
+    artist_id, genre_id, format_id, album_title, code_number,
+    canonical_entity_id, canonical_entity_confidence, canonical_entity_resolved_at)
+    VALUES (8, 15, 1, 'Confield', 1,
+            'discogs:release:4080', 0.9, NOW());
+
 -- Mirror the A.2 backfill outcome for all seeded library rows so the new
 -- tsvector path (which reads library.artist_name directly) and the trigram
 -- fallback (which uses the GIN index on library.artist_name) have populated
