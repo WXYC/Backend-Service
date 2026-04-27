@@ -15,10 +15,7 @@
  * library backfill. Future sources (MusicBrainz, etc.) get their own prefix.
  */
 
-import {
-  resolveLmlSignal,
-  AUTO_ACCEPT_CONFIDENCE,
-} from '../../../../jobs/flowsheet-lml-link-backfill/resolve';
+import { resolveLmlSignal, AUTO_ACCEPT_CONFIDENCE } from '../../../../jobs/flowsheet-lml-link-backfill/resolve';
 import type { LmlLookupResponse } from '../../../../jobs/flowsheet-lml-link-backfill/lml-types';
 
 const directResponse = (releaseId: number): LmlLookupResponse => ({
@@ -73,9 +70,24 @@ describe('resolveLmlSignal', () => {
   it('returns review on alternative / compilation / song_as_artist results', () => {
     // Anything non-empty that isn't a direct hit is gray-zone — surface to
     // review rather than guessing.
-    expect(resolveLmlSignal({ results: [{ library_item: { id: 1 }, artwork: { release_id: 1 } }], search_type: 'alternative' }).status).toBe('review');
-    expect(resolveLmlSignal({ results: [{ library_item: { id: 1 }, artwork: { release_id: 1 } }], search_type: 'compilation' }).status).toBe('review');
-    expect(resolveLmlSignal({ results: [{ library_item: { id: 1 }, artwork: { release_id: 1 } }], search_type: 'song_as_artist' }).status).toBe('review');
+    expect(
+      resolveLmlSignal({
+        results: [{ library_item: { id: 1 }, artwork: { release_id: 1 } }],
+        search_type: 'alternative',
+      }).status
+    ).toBe('review');
+    expect(
+      resolveLmlSignal({
+        results: [{ library_item: { id: 1 }, artwork: { release_id: 1 } }],
+        search_type: 'compilation',
+      }).status
+    ).toBe('review');
+    expect(
+      resolveLmlSignal({
+        results: [{ library_item: { id: 1 }, artwork: { release_id: 1 } }],
+        search_type: 'song_as_artist',
+      }).status
+    ).toBe('review');
   });
 
   it('returns no_match on an empty results set', () => {
