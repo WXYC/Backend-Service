@@ -90,8 +90,7 @@ export async function runLmlLinkage(args: {
     return { status: 'no_library_match', canonicalEntityId: linkage.id, confidence: linkage.confidence };
   }
 
-  const pickedId =
-    matches.length === 1 ? matches[0].id : await pickPrimaryLibraryRow(matches.map((m) => m.id));
+  const pickedId = matches.length === 1 ? matches[0].id : await pickPrimaryLibraryRow(matches.map((m) => m.id));
   if (pickedId === null) {
     // Tie-break returned no row — the candidates raced with a concurrent
     // delete. Leave the row unlinked; the next B-2.2 sweep will retry.
