@@ -393,6 +393,13 @@
       "when": 1778078400000,
       "tag": "0057_flowsheet-artwork-lookup-partial-idx",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1778164800000,
+      "tag": "0058_library-artist-name-and-search-doc",
+      "breakpoints": true
     }
   ]
 }
