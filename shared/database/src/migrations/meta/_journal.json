@@ -313,6 +313,13 @@
     {
       "idx": 47,
       "version": "7",
+      "when": 1777062000000,
+      "tag": "0046_cdc_notify_triggers",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
       "when": 1777214400000,
       "tag": "0047_replica-identity-for-pkless-tables",
       "breakpoints": true
@@ -411,7 +418,7 @@
     {
       "idx": 61,
       "version": "7",
-      "when": 1779424000000,
+      "when": 1778424000000,
       "tag": "0061_library-canonical-entity",
       "breakpoints": true
     },
