@@ -6,6 +6,11 @@ const mockMarkAlbumMissing = jest.fn<() => Promise<{ id: number } | undefined>>(
 const mockMarkAlbumFound = jest.fn<() => Promise<{ id: number } | undefined>>();
 const mockFuzzySearchLibrary = jest.fn<() => Promise<unknown[]>>();
 const mockEnrichWithArtwork = jest.fn<(results: unknown[]) => Promise<unknown[]>>();
+const mockArtistIdFromName = jest.fn<(name: string, genreId: number) => Promise<number>>();
+const mockGetArtistNameById = jest.fn<(id: number) => Promise<string | null>>();
+const mockInsertAlbum = jest.fn<(album: Record<string, unknown>) => Promise<Record<string, unknown>>>();
+const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number) => Promise<number>>();
+const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
@@ -22,14 +27,15 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   getRotationFromDB: jest.fn(),
   addToRotation: jest.fn(),
   killRotationInDB: jest.fn(),
-  insertAlbum: jest.fn(),
+  insertAlbum: mockInsertAlbum,
   updateArtworkUrl: jest.fn(),
   updateOnStreaming: jest.fn(),
-  artistIdFromName: jest.fn(),
+  artistIdFromName: mockArtistIdFromName,
+  getArtistNameById: mockGetArtistNameById,
   insertArtist: jest.fn(),
   insertArtistGenreCrossreference: jest.fn(),
   getArtistByCode: jest.fn(),
-  generateAlbumCodeNumber: jest.fn(),
+  generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
   generateArtistNumber: jest.fn(),
   getGenresFromDB: jest.fn(),
   insertGenre: jest.fn(),
@@ -38,15 +44,16 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
-  createLabel: jest.fn(),
+  createLabel: mockCreateLabel,
 }));
 
 jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
   checkStreamingAvailability: jest.fn(),
+  lookupMetadata: jest.fn(),
   isLmlConfigured: jest.fn().mockReturnValue(false),
 }));
 
-import { markMissing, markFound, searchForAlbum } from '../../../apps/backend/controllers/library.controller';
+import { markMissing, markFound, searchForAlbum, addAlbum } from '../../../apps/backend/controllers/library.controller';
 
 function mockResponse(): Response {
   const res = {} as Response;
@@ -195,6 +202,61 @@ describe('library.controller', () => {
       const res = mockResponse();
 
       await expect(searchForAlbum(req, res, next)).rejects.toThrow(enrichError);
+    });
+  });
+
+  describe('addAlbum', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockGenerateAlbumCodeNumber.mockResolvedValue(1);
+      mockCreateLabel.mockResolvedValue({ id: 99 });
+      mockInsertAlbum.mockImplementation(async (album) => ({ id: 1, ...album }));
+    });
+
+    it('writes the canonical artist_name from the artists table when artist_id is supplied', async () => {
+      mockGetArtistNameById.mockResolvedValue('Juana Molina');
+
+      const req = {
+        body: {
+          album_title: 'DOGA',
+          artist_id: 42,
+          label: 'Sonamos',
+          genre_id: 11,
+          format_id: 1,
+        },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await addAlbum(req, res, next);
+
+      expect(mockGetArtistNameById).toHaveBeenCalledWith(42);
+      expect(mockInsertAlbum).toHaveBeenCalledWith(
+        expect.objectContaining({ artist_id: 42, artist_name: 'Juana Molina' })
+      );
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('resolves the canonical artist_name even when the request body provides one', async () => {
+      mockArtistIdFromName.mockResolvedValue(7);
+      mockGetArtistNameById.mockResolvedValue('Jessica Pratt');
+
+      const req = {
+        body: {
+          album_title: 'On Your Own Love Again',
+          artist_name: 'jessica pratt',
+          label: 'Drag City',
+          genre_id: 11,
+          format_id: 1,
+        },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await addAlbum(req, res, next);
+
+      expect(mockGetArtistNameById).toHaveBeenCalledWith(7);
+      expect(mockInsertAlbum).toHaveBeenCalledWith(
+        expect.objectContaining({ artist_id: 7, artist_name: 'Jessica Pratt' })
+      );
     });
   });
 });
