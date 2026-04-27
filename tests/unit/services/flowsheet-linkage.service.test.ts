@@ -8,7 +8,7 @@
  * no_library_match / multi_match.
  */
 import { jest } from '@jest/globals';
-import { db, createMockQueryChain } from '../../mocks/database.mock';
+import { db, createMockQueryChain, pickPrimaryLibraryRow } from '../../mocks/database.mock';
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 
@@ -133,12 +133,58 @@ describe('runLmlLinkage (B-2.1)', () => {
     expect(db.update).not.toHaveBeenCalled();
   });
 
-  it('returns multi_match (no link, defers to B-2.3 tie-break) when several library rows share the canonical entity', async () => {
+  it('links via the B-2.3 tie-break when several library rows share the canonical entity', async () => {
+    // The forward path used to surface multi-match as an unlinked outcome.
+    // With B-2.3 in place, the tie-break utility picks one library row
+    // (rotation > format > plays > id) and the row is linked the same way
+    // a single-match would be. This is the visible difference between the
+    // old contract (multi_match) and the new one (linked).
     mockLookupMetadata.mockResolvedValue(directMatch(42));
 
     const selectChain = createMockQueryChain();
     selectChain.where.mockResolvedValue([{ id: 10 }, { id: 11 }, { id: 12 }]);
     db.select.mockReturnValueOnce(selectChain);
+
+    pickPrimaryLibraryRow.mockResolvedValueOnce(11);
+
+    const updateChain = createMockQueryChain();
+    db.update.mockReturnValueOnce(updateChain);
+
+    const outcome = await runLmlLinkage({
+      flowsheetId: 7,
+      artistName: 'Stereolab',
+      albumTitle: 'Aluminum Tunes',
+    });
+
+    expect(pickPrimaryLibraryRow).toHaveBeenCalledWith([10, 11, 12]);
+    expect(outcome).toEqual({
+      status: 'linked',
+      libraryId: 11,
+      canonicalEntityId: 'discogs:release:42',
+      confidence: 0.9,
+    });
+    expect(updateChain.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        album_id: 11,
+        linkage_source: 'lml_high_confidence',
+        linkage_confidence: 0.9,
+        linked_at: expect.any(Date),
+      })
+    );
+  });
+
+  it('returns no_library_match if the tie-break somehow picks nothing (concurrent delete safety net)', async () => {
+    // pickPrimaryLibraryRow returns null when the candidate ids race with
+    // a delete. The forward path should not fall back to a stale id from
+    // its own SELECT — leave the row unlinked and let the next sweep
+    // re-evaluate.
+    mockLookupMetadata.mockResolvedValue(directMatch(42));
+
+    const selectChain = createMockQueryChain();
+    selectChain.where.mockResolvedValue([{ id: 10 }, { id: 11 }]);
+    db.select.mockReturnValueOnce(selectChain);
+
+    pickPrimaryLibraryRow.mockResolvedValueOnce(null);
 
     const outcome = await runLmlLinkage({
       flowsheetId: 7,
@@ -147,10 +193,9 @@ describe('runLmlLinkage (B-2.1)', () => {
     });
 
     expect(outcome).toEqual({
-      status: 'multi_match',
+      status: 'no_library_match',
       canonicalEntityId: 'discogs:release:42',
       confidence: 0.9,
-      libraryIds: [10, 11, 12],
     });
     expect(db.update).not.toHaveBeenCalled();
   });
