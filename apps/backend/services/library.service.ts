@@ -239,9 +239,7 @@ const SEARCH_TYPE_CONFIDENCE: Record<LookupResponse['search_type'], number | nul
  * source (`discogs:release:<id>`) — the column's contract is opaque text, but
  * a namespace keeps the door open for MusicBrainz / other resolvers later.
  */
-export const mapLookupToCanonicalEntity = (
-  response: LookupResponse
-): { id: string; confidence: number } | null => {
+export const mapLookupToCanonicalEntity = (response: LookupResponse): { id: string; confidence: number } | null => {
   const top = response.results?.[0];
   const releaseId = top?.artwork?.release_id;
   if (!releaseId) return null;

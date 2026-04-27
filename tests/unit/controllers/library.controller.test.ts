@@ -12,8 +12,7 @@ const mockInsertAlbum = jest.fn<(album: Record<string, unknown>) => Promise<Reco
 const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number) => Promise<number>>();
 const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
 const mockUpdateCanonicalEntity = jest.fn<(id: number, entityId: string, confidence: number) => Promise<unknown>>();
-const mockMapLookupToCanonicalEntity =
-  jest.fn<(response: unknown) => { id: string; confidence: number } | null>();
+const mockMapLookupToCanonicalEntity = jest.fn<(response: unknown) => { id: string; confidence: number } | null>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,

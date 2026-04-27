@@ -9,10 +9,7 @@ jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
   isLmlConfigured: mockIsLmlConfigured,
 }));
 
-import {
-  mapLookupToCanonicalEntity,
-  updateCanonicalEntity,
-} from '../../../apps/backend/services/library.service';
+import { mapLookupToCanonicalEntity, updateCanonicalEntity } from '../../../apps/backend/services/library.service';
 
 describe('library.service: canonical entity (B-1.3)', () => {
   describe('mapLookupToCanonicalEntity', () => {
