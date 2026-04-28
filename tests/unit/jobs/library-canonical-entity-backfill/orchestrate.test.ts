@@ -17,6 +17,7 @@ import { db } from '@wxyc/database';
 import {
   applyResolution,
   processRow,
+  resolvePartitionFilter,
   runBackfill,
   BATCH_SIZE,
   THROTTLE_MS,
@@ -220,6 +221,54 @@ describe('runBackfill', () => {
     // Throttle is a real LML rate-limit guard, not a configuration hook —
     // dropping it to 0 risks stampeding LML when the backfill runs.
     expect(THROTTLE_MS).toBeGreaterThan(0);
+  });
+
+  describe('resolvePartitionFilter', () => {
+    it('returns no fragment when partitioning is disabled (default count=1)', () => {
+      const r = resolvePartitionFilter(undefined, undefined);
+      expect(r.sqlFragment).toBeNull();
+      expect(r.description).toBe('partition=none');
+    });
+
+    it('returns a modulo fragment when count > 1', () => {
+      const r = resolvePartitionFilter('2', '4');
+      expect(r.sqlFragment).not.toBeNull();
+      const serialized = JSON.stringify(r.sqlFragment);
+      expect(serialized).toContain('%');
+      expect(r.description).toBe('partition=2/4');
+    });
+
+    it('rejects out-of-range partition index', () => {
+      expect(() => resolvePartitionFilter('4', '4')).toThrow(/PARTITION_INDEX/);
+      expect(() => resolvePartitionFilter('-1', '4')).toThrow(/PARTITION_INDEX/);
+    });
+
+    it('rejects non-positive partition count', () => {
+      expect(() => resolvePartitionFilter('0', '0')).toThrow(/PARTITION_COUNT/);
+      expect(() => resolvePartitionFilter('0', '-1')).toThrow(/PARTITION_COUNT/);
+    });
+
+    it('rejects non-integer values', () => {
+      expect(() => resolvePartitionFilter('1.5', '4')).toThrow(/PARTITION_INDEX/);
+      expect(() => resolvePartitionFilter('0', '2.5')).toThrow(/PARTITION_COUNT/);
+      expect(() => resolvePartitionFilter('abc', '4')).toThrow(/PARTITION_INDEX/);
+    });
+  });
+
+  it('plumbs the partition fragment into loadBatch when count > 1', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    await runBackfill({
+      lookup: jest.fn(),
+      throttleMs: 0,
+      partition: resolvePartitionFilter('1', '3'),
+    });
+
+    const select = findExecuteCallMatching(/SELECT/i);
+    const serialized = JSON.stringify(select?.[0]);
+    // The partition fragment is parameterized with `id % count = index`.
+    // Both numbers appear among the bound values.
+    expect(serialized).toContain('%');
   });
 
   it('iterates batches until loadBatch returns empty', async () => {

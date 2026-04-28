@@ -21,6 +21,7 @@ import {
   enqueueReview,
   findLibraryByCanonicalEntity,
   processRow,
+  resolvePartitionFilter,
   runBackfill,
   BATCH_SIZE,
   THROTTLE_MS,
@@ -414,6 +415,41 @@ describe('runBackfill', () => {
     // The throttle is what keeps a multi-day sweep from stampeding LML.
     // Dropping it to 0 risks blowing through LML's rate budget in seconds.
     expect(THROTTLE_MS).toBeGreaterThan(0);
+  });
+
+  describe('resolvePartitionFilter', () => {
+    it('returns no fragment when partitioning is disabled (default count=1)', () => {
+      const r = resolvePartitionFilter(undefined, undefined);
+      expect(r.sqlFragment).toBeNull();
+      expect(r.description).toBe('partition=none');
+    });
+
+    it('returns a modulo fragment when count > 1', () => {
+      const r = resolvePartitionFilter('2', '4');
+      expect(r.sqlFragment).not.toBeNull();
+      expect(r.description).toBe('partition=2/4');
+    });
+
+    it('rejects out-of-range partition index and non-positive count', () => {
+      expect(() => resolvePartitionFilter('4', '4')).toThrow(/PARTITION_INDEX/);
+      expect(() => resolvePartitionFilter('-1', '4')).toThrow(/PARTITION_INDEX/);
+      expect(() => resolvePartitionFilter('0', '0')).toThrow(/PARTITION_COUNT/);
+      expect(() => resolvePartitionFilter('1.5', '4')).toThrow(/PARTITION_INDEX/);
+    });
+  });
+
+  it('plumbs the partition fragment into loadBatch when count > 1', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    await runBackfill({
+      lookup: jest.fn(),
+      throttleMs: 0,
+      partition: resolvePartitionFilter('1', '3'),
+    });
+
+    const select = (db.execute as jest.Mock).mock.calls.find((c) => /SELECT/i.test(renderSql(c[0])));
+    const serialized = JSON.stringify(select?.[0]);
+    expect(serialized).toContain('%');
   });
 
   it('selects only unlinked track rows that have artist+album text', async () => {
