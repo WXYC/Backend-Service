@@ -21,6 +21,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
 
 jest.mock('../../../apps/backend/services/metadata/index', () => ({
   fetchMetadata: jest.fn(),
+  fireAndForgetMetadataForRow: jest.fn(),
 }));
 
 import { addEntry } from '../../../apps/backend/controllers/flowsheet.controller';
