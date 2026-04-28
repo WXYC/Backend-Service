@@ -185,4 +185,32 @@ describe('validate-migrations.mjs', () => {
       expect(stderr + stdout).not.toMatch(new RegExp(`Missing snapshot for journal entry idx ${idx}\\b`));
     }
   });
+
+  test('HISTORICAL_MISSING_SNAPSHOT_IDXS does not grow', () => {
+    // Tripwire: converts the "must not grow" comment in
+    // scripts/validate-migrations.mjs into an enforced invariant. A
+    // contributor who hand-edits a journal entry without running
+    // `drizzle:generate` cannot quietly add their idx to the allowlist
+    // to make CI pass — this test fails first, forcing an explicit
+    // edit-and-justify pass through review.
+    //
+    // If a snapshot is properly *backfilled* for one of these idxs in
+    // the future, that idx may be removed from the allowlist; the test
+    // expectation below is the maximum allowed set, not the minimum.
+    const src = fs.readFileSync(path.join(repoRoot, 'scripts/validate-migrations.mjs'), 'utf8');
+    const match = src.match(/HISTORICAL_MISSING_SNAPSHOT_IDXS = new Set\(\[([\s\S]*?)\]\)/);
+    if (!match) throw new Error('HISTORICAL_MISSING_SNAPSHOT_IDXS not found in validator source');
+    const idxs = match[1]
+      .split(',')
+      .map((s) => parseInt(s.trim(), 10))
+      .filter(Number.isFinite);
+    const expected = new Set([36, 41, 47, 48, 49, 50, 51, 52, 53, 54, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67]);
+    const actual = new Set(idxs);
+    // Every idx in `actual` must be in `expected` (no growth allowed).
+    for (const idx of actual) {
+      expect(expected.has(idx)).toBe(true);
+    }
+    // `actual` is allowed to be a subset of `expected` (snapshot backfilled
+    // for that idx) but cannot contain anything outside the set.
+  });
 });
