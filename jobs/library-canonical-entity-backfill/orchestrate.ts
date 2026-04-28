@@ -19,7 +19,7 @@
  * `lml-fetch.ts`.
  */
 
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { db } from '@wxyc/database';
 import type { LmlLookupResponse } from './lml-types.js';
 import { resolveCanonicalEntity, type Resolution } from './resolve.js';
@@ -34,6 +34,42 @@ export const BATCH_SIZE = 500;
  * if LML's deployed rate limit tightens. Tests override to 0.
  */
 export const THROTTLE_MS = 100;
+
+/**
+ * Resolve PARTITION_INDEX / PARTITION_COUNT env vars into a SQL fragment that
+ * picks every Nth row by id-modulo. The N-container deploy pattern is:
+ *
+ *   PARTITION_COUNT=4 PARTITION_INDEX=0 docker run ...
+ *   PARTITION_COUNT=4 PARTITION_INDEX=1 docker run ...
+ *   PARTITION_COUNT=4 PARTITION_INDEX=2 docker run ...
+ *   PARTITION_COUNT=4 PARTITION_INDEX=3 docker run ...
+ *
+ * Each container processes a disjoint subset and they finish in roughly the
+ * same wall time. The default (count=1, index=0) is a no-op pass-through so
+ * single-container runs are unaffected.
+ *
+ * Exported so unit tests can drive it without mucking with process.env.
+ */
+export const resolvePartitionFilter = (
+  rawIndex: string | undefined = process.env.PARTITION_INDEX,
+  rawCount: string | undefined = process.env.PARTITION_COUNT
+): { sqlFragment: SQL | null; description: string } => {
+  const count = rawCount === undefined ? 1 : Number(rawCount);
+  const index = rawIndex === undefined ? 0 : Number(rawIndex);
+  if (!Number.isInteger(count) || count < 1) {
+    throw new Error(`Invalid PARTITION_COUNT=${JSON.stringify(rawCount)}; must be a positive integer.`);
+  }
+  if (!Number.isInteger(index) || index < 0 || index >= count) {
+    throw new Error(`Invalid PARTITION_INDEX=${JSON.stringify(rawIndex)}; must be 0 <= index < PARTITION_COUNT (${count}).`);
+  }
+  if (count === 1) {
+    return { sqlFragment: null, description: 'partition=none' };
+  }
+  return {
+    sqlFragment: sql`AND ("id" % ${count}) = ${index}`,
+    description: `partition=${index}/${count}`,
+  };
+};
 
 export type LibraryRow = {
   id: number;
@@ -140,7 +176,12 @@ export const processRow = async (
  * short-circuits every row and the job runs at throttle speed without
  * ever calling LML.
  */
-const loadBatch = async (afterId: number, batchSize: number): Promise<LibraryRow[]> => {
+const loadBatch = async (
+  afterId: number,
+  batchSize: number,
+  partitionFilter: SQL | null
+): Promise<LibraryRow[]> => {
+  const partitionClause = partitionFilter ?? sql``;
   const rows = (await db.execute(sql`
     SELECT
       l."id",
@@ -151,6 +192,7 @@ const loadBatch = async (afterId: number, batchSize: number): Promise<LibraryRow
     WHERE l."canonical_entity_id" IS NULL
       AND l."canonical_entity_resolved_at" IS NULL
       AND l."id" > ${afterId}
+      ${partitionClause}
     ORDER BY l."id" ASC
     LIMIT ${batchSize}
   `)) as unknown as LibraryRow[];
@@ -165,18 +207,22 @@ export const runBackfill = async (opts: {
   lookup: LookupFn;
   batchSize?: number;
   throttleMs?: number;
+  partition?: { sqlFragment: SQL | null; description: string };
 }): Promise<RunResult> => {
   const batchSize = opts.batchSize ?? BATCH_SIZE;
   const throttleMs = opts.throttleMs ?? THROTTLE_MS;
+  const partition = opts.partition ?? resolvePartitionFilter();
 
-  console.log(`[${JOB_NAME}] Starting. batchSize=${batchSize} throttleMs=${throttleMs}`);
+  console.log(
+    `[${JOB_NAME}] Starting. batchSize=${batchSize} throttleMs=${throttleMs} ${partition.description}`
+  );
 
   const totals: Totals = { scanned: 0, auto_accept: 0, review: 0, no_match: 0, error: 0 };
   let lastId = 0;
   let batchIndex = 0;
 
   while (true) {
-    const rows = await loadBatch(lastId, batchSize);
+    const rows = await loadBatch(lastId, batchSize, partition.sqlFragment);
     if (rows.length === 0) break;
 
     batchIndex += 1;
