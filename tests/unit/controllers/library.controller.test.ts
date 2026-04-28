@@ -209,9 +209,8 @@ describe('library.controller', () => {
       const previous = process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
       process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = '20';
       jest.resetModules();
-      const { searchForAlbum: searchWithTightBudget } = await import(
-        '../../../apps/backend/controllers/library.controller'
-      );
+      const { searchForAlbum: searchWithTightBudget } =
+        await import('../../../apps/backend/controllers/library.controller');
 
       const req = { query: { artist_name: 'Autechre' } } as unknown as Request;
       const res = mockResponse();
@@ -243,9 +242,8 @@ describe('library.controller', () => {
       const previous = process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
       process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = '5';
       jest.resetModules();
-      const { searchForAlbum: searchWithTightBudget } = await import(
-        '../../../apps/backend/controllers/library.controller'
-      );
+      const { searchForAlbum: searchWithTightBudget } =
+        await import('../../../apps/backend/controllers/library.controller');
 
       const req = { query: { artist_name: 'Autechre' } } as unknown as Request;
       const res = mockResponse();
