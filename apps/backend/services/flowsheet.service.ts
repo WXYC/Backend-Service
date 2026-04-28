@@ -606,6 +606,11 @@ export const getAlbumFromDB = async (album_id: number) => {
       album_title: library.album_title,
       record_label: library.label,
       label_id: library.label_id,
+      // Denormalized onto the new flowsheet row at INSERT time so dj-site
+      // and the iOS playlist-proxy see artwork immediately, without waiting
+      // for the asynchronous LML enrichment UPDATE to land. Free-form
+      // entries (no album_id) still rely on enrichment. See #628.
+      artwork_url: library.artwork_url,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))

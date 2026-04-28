@@ -440,6 +440,84 @@ describe('flowsheet.controller', () => {
       });
     });
 
+    it('denormalizes artwork_url from the library row onto the new flowsheet entry on the bin-pick path (#628)', async () => {
+      // Bin-pick path eliminates the artwork race entirely when library has
+      // a cached artwork_url: the addEntry response carries the URL, so the
+      // DJ's screen renders artwork immediately rather than waiting up to
+      // 60s for the next dj-site poll to pick up the LML enrichment UPDATE.
+      const albumInfo = {
+        artist_name: 'Jessica Pratt',
+        album_title: 'On Your Own Love Again',
+        record_label: 'Drag City',
+        label_id: 31,
+        artist_id: 9,
+        artwork_url: 'https://example.com/jp-oyola.jpg',
+      };
+      mockGetAlbumFromDB.mockResolvedValue(albumInfo);
+      mockAddTrack.mockResolvedValue({
+        id: 100,
+        show_id: activeShow.id,
+        artist_name: 'Jessica Pratt',
+        album_title: 'On Your Own Love Again',
+        track_title: 'Back, Baby',
+        album_id: 12,
+        rotation_id: null,
+        play_order: 1,
+        add_time: new Date(),
+      });
+
+      const req = createMockBodyReq({
+        artist_name: 'Jessica Pratt',
+        album_title: 'On Your Own Love Again',
+        track_title: 'Back, Baby',
+        record_label: 'Drag City',
+        album_id: 12,
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(201);
+      expect(mockAddTrack).toHaveBeenCalledWith(
+        expect.objectContaining({ artwork_url: 'https://example.com/jp-oyola.jpg', album_id: 12 })
+      );
+    });
+
+    it('passes through a null artwork_url when the library row has none (#628)', async () => {
+      const albumInfo = {
+        artist_name: 'Stereolab',
+        album_title: 'Aluminum Tunes',
+        record_label: 'Duophonic',
+        artist_id: 7,
+        artwork_url: null,
+      };
+      mockGetAlbumFromDB.mockResolvedValue(albumInfo);
+      mockAddTrack.mockResolvedValue({
+        id: 101,
+        show_id: activeShow.id,
+        artist_name: 'Stereolab',
+        album_title: 'Aluminum Tunes',
+        track_title: 'Cybele\u2019s Reverie',
+        album_id: 13,
+        rotation_id: null,
+        play_order: 1,
+        add_time: new Date(),
+      });
+
+      const req = createMockBodyReq({
+        artist_name: 'Stereolab',
+        album_title: 'Aluminum Tunes',
+        track_title: 'Cybele\u2019s Reverie',
+        record_label: 'Duophonic',
+        album_id: 13,
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockAddTrack).toHaveBeenCalledWith(expect.objectContaining({ artwork_url: null, album_id: 13 }));
+    });
+
     it('delegates metadata enrichment without artistId for free-form inserts (no album_id)', async () => {
       const completedEntry = {
         id: 2,
