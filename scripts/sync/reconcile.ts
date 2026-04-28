@@ -611,6 +611,16 @@ function connectSse(
   const client = url.protocol === 'https:' ? https : http;
   let reconnectDelay = 1000;
 
+  let reconnectScheduled = false;
+  const triggerReconnect = (reason: string) => {
+    if (reconnectScheduled) return;
+    reconnectScheduled = true;
+    console.error(`[${timestamp()}] [${label}] ${reason}`);
+    logInfo(`[${label}] Reconnecting in ${reconnectDelay / 1000}s...`);
+    setTimeout(() => connectSse(label, sseUrl, tableHandlers), reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+  };
+
   const req = client.get(
     url,
     {
@@ -621,9 +631,8 @@ function connectSse(
     },
     (res) => {
       if (res.statusCode !== 200) {
-        console.error(`[${timestamp()}] [${label}] SSE error: HTTP ${res.statusCode}`);
         res.resume();
-        scheduleReconnect();
+        triggerReconnect(`SSE error: HTTP ${res.statusCode}`);
         return;
       }
 
@@ -646,27 +655,15 @@ function connectSse(
         }
       });
 
-      res.on('end', () => {
-        console.error(`[${timestamp()}] [${label}] SSE connection ended`);
-        scheduleReconnect();
-      });
-
-      res.on('error', (err) => {
-        console.error(`[${timestamp()}] [${label}] SSE response error:`, err.message);
-      });
+      // Any of end/error/close/aborted leaves the response unusable. The
+      // first one wins; subsequent fires are ignored by triggerReconnect.
+      res.on('end', () => triggerReconnect('SSE connection ended'));
+      res.on('error', (err: Error) => triggerReconnect(`SSE response error: ${err.message}`));
+      res.on('close', () => triggerReconnect('SSE connection closed'));
     }
   );
 
-  req.on('error', (err) => {
-    console.error(`[${timestamp()}] [${label}] SSE request error:`, err.message);
-    scheduleReconnect();
-  });
-
-  function scheduleReconnect() {
-    logInfo(`[${label}] Reconnecting in ${reconnectDelay / 1000}s...`);
-    setTimeout(() => connectSse(label, sseUrl, tableHandlers), reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
-  }
+  req.on('error', (err) => triggerReconnect(`SSE request error: ${err.message}`));
 }
 
 async function processSseFrame(
