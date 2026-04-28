@@ -50,14 +50,16 @@ export function createMockQueryChain(resolvedValue: unknown = []): MockQueryChai
 
 export function createMockDb() {
   const mockChain = createMockQueryChain();
-  return {
+  const mockDb = {
     select: mockChain.select,
     insert: mockChain.insert,
     update: mockChain.update,
     delete: mockChain.delete,
     execute: mockChain.execute,
+    transaction: jest.fn(async (fn: (tx: unknown) => Promise<void>) => fn(mockDb)),
     _chain: mockChain,
   };
+  return mockDb;
 }
 
 // Mock database client
