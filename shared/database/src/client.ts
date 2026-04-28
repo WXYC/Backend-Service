@@ -83,20 +83,47 @@ export const resolveSynchronousCommit = (raw: string | undefined = process.env.D
 
 const synchronousCommit = resolveSynchronousCommit();
 
-const queryClient = postgres({
-  host: process.env.DB_HOST,
-  port: process.env.DB_PORT != null ? Number(process.env.DB_PORT) : 5432,
-  database: process.env.DB_NAME,
-  username: process.env.DB_USERNAME,
-  password: process.env.DB_PASSWORD,
-  connection: {
-    application_name: process.env.DB_APPLICATION_NAME ?? 'wxyc-backend',
-    // Server-enforced per-statement timeout. postgres-js issues this as
-    // `SET statement_timeout = '<n>ms'` after each session is established.
-    statement_timeout: statementTimeoutMs,
-    synchronous_commit: synchronousCommit,
-  },
-});
+/**
+ * Build a postgres-js client from the shared env-driven defaults, with
+ * optional per-call overrides for connection-level options.
+ *
+ * The shared `db` is built from this with no overrides. Specialized
+ * callers (e.g., the `album_plays` materialized-view refresh, which
+ * legitimately needs a longer per-statement timeout than the API's 5s
+ * default) build their own dedicated client by passing overrides — that
+ * keeps the override scoped to one connection rather than mutating the
+ * pool that serves request-path traffic.
+ *
+ * Overrides applied to the returned client:
+ *   - `statementTimeoutMs` — overrides `connection.statement_timeout`. Use
+ *     this when a job legitimately needs more than the process default.
+ *   - `applicationName` — overrides `connection.application_name`. Set a
+ *     distinct name so `pg_stat_activity` makes the source obvious during
+ *     incident triage.
+ *   - `max` — pool size. Defaults to postgres-js's own default (10). Set
+ *     to `1` for serial single-purpose clients.
+ */
+export function createPostgresClient(
+  overrides: { statementTimeoutMs?: number; applicationName?: string; max?: number } = {}
+): ReturnType<typeof postgres> {
+  return postgres({
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT != null ? Number(process.env.DB_PORT) : 5432,
+    database: process.env.DB_NAME,
+    username: process.env.DB_USERNAME,
+    password: process.env.DB_PASSWORD,
+    ...(overrides.max !== undefined && { max: overrides.max }),
+    connection: {
+      application_name: overrides.applicationName ?? process.env.DB_APPLICATION_NAME ?? 'wxyc-backend',
+      // Server-enforced per-statement timeout. postgres-js issues this as
+      // `SET statement_timeout = '<n>ms'` after each session is established.
+      statement_timeout: overrides.statementTimeoutMs ?? statementTimeoutMs,
+      synchronous_commit: synchronousCommit,
+    },
+  });
+}
+
+const queryClient = createPostgresClient();
 
 console.log(
   `[database] statement_timeout=${statementTimeoutMs}ms${statementTimeoutMs === 0 ? ' (disabled)' : ''} synchronous_commit=${synchronousCommit}`
