@@ -52,7 +52,12 @@ export const THROTTLE_MS = 100;
  */
 export const resolvePartitionFilter = (
   rawIndex: string | undefined = process.env.PARTITION_INDEX,
-  rawCount: string | undefined = process.env.PARTITION_COUNT
+  rawCount: string | undefined = process.env.PARTITION_COUNT,
+  // Default qualifier targets the library table's `id` column. The B-1.2
+  // loadBatch joins library against artists, both of which have an `id`
+  // column; an unqualified `"id"` here would be ambiguous and PG would
+  // reject the query with `column reference "id" is ambiguous`.
+  columnSql: SQL = sql`l."id"`
 ): { sqlFragment: SQL | null; description: string } => {
   const count = rawCount === undefined ? 1 : Number(rawCount);
   const index = rawIndex === undefined ? 0 : Number(rawIndex);
@@ -66,7 +71,7 @@ export const resolvePartitionFilter = (
     return { sqlFragment: null, description: 'partition=none' };
   }
   return {
-    sqlFragment: sql`AND ("id" % ${count}) = ${index}`,
+    sqlFragment: sql`AND (${columnSql} % ${count}) = ${index}`,
     description: `partition=${index}/${count}`,
   };
 };

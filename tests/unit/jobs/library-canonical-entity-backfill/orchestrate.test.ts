@@ -271,6 +271,26 @@ describe('runBackfill', () => {
     expect(serialized).toContain('%');
   });
 
+  it('qualifies the partition column as l."id" so it does not collide with artists.id', async () => {
+    // Regression for the first prod run with PARTITIONS=4: every container
+    // crashed with `column reference "id" is ambiguous` because the
+    // partition fragment used unqualified "id" while loadBatch joins
+    // library against artists (both have an `id` column). The default
+    // qualifier in B-1.2's resolvePartitionFilter must be `l."id"`.
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    await runBackfill({
+      lookup: jest.fn(),
+      throttleMs: 0,
+      partition: resolvePartitionFilter('1', '3'),
+    });
+
+    const select = findExecuteCallMatching(/SELECT/i);
+    const serialized = JSON.stringify(select?.[0]);
+    // Qualified `l."id"` survives JSON serialization as `l.\\"id\\"`.
+    expect(serialized).toContain('l.\\"id\\"');
+  });
+
   it('iterates batches until loadBatch returns empty', async () => {
     // First batch: two rows. Second batch: one row. Third batch: empty → terminate.
     // 3 SELECTs (loadBatch) + (2 + 1) UPDATEs = 6 db.execute calls in this scenario.

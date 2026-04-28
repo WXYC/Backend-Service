@@ -74,7 +74,11 @@ export const THROTTLE_MS = 100;
  */
 export const resolvePartitionFilter = (
   rawIndex: string | undefined = process.env.PARTITION_INDEX,
-  rawCount: string | undefined = process.env.PARTITION_COUNT
+  rawCount: string | undefined = process.env.PARTITION_COUNT,
+  // The flowsheet loadBatch reads from a single (unaliased) table, so the
+  // unqualified `"id"` is unambiguous. Parameter is here for symmetry with
+  // the B-1.2 backfill (which JOINs and must qualify).
+  columnSql: SQL = sql`"id"`
 ): { sqlFragment: SQL | null; description: string } => {
   const count = rawCount === undefined ? 1 : Number(rawCount);
   const index = rawIndex === undefined ? 0 : Number(rawIndex);
@@ -88,7 +92,7 @@ export const resolvePartitionFilter = (
     return { sqlFragment: null, description: 'partition=none' };
   }
   return {
-    sqlFragment: sql`AND ("id" % ${count}) = ${index}`,
+    sqlFragment: sql`AND (${columnSql} % ${count}) = ${index}`,
     description: `partition=${index}/${count}`,
   };
 };
