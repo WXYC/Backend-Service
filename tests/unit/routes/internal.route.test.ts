@@ -380,9 +380,7 @@ describe('POST /internal/streaming-status-webhook', () => {
   // -- Auth (Bearer token, not X-Internal-Key) --
 
   it('returns 401 without Authorization header', async () => {
-    const res = await request(app)
-      .post('/internal/streaming-status-webhook')
-      .send({ changes: [] });
+    const res = await request(app).post('/internal/streaming-status-webhook').send({ changes: [] });
 
     expect(res.status).toBe(401);
   });

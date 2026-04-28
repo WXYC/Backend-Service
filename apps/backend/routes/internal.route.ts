@@ -345,10 +345,7 @@ internal_route.post('/streaming-status-webhook', async (req, res) => {
       const legacyId = change.library_release_id;
       const onStreaming = change.on_streaming ?? null;
 
-      await db
-        .update(library)
-        .set({ on_streaming: onStreaming })
-        .where(eq(library.legacy_release_id, legacyId));
+      await db.update(library).set({ on_streaming: onStreaming }).where(eq(library.legacy_release_id, legacyId));
 
       processed++;
     } catch (e) {
