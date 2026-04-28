@@ -130,7 +130,15 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
             entry_type: sql`excluded.entry_type`,
           },
         })
-        .returning({ id: flowsheet.id });
+        // `(xmax = 0)` distinguishes a fresh INSERT from an UPDATE branch:
+        // a row produced by INSERT has xmax=0 (no prior tx touched it),
+        // while the DO UPDATE branch sets xmax to the current tx id. We
+        // gate enrichment on this so benign retries / no-op updates from
+        // tubafrenzy don't re-fetch from LML and re-write the 10 metadata
+        // columns (each rewrite triggers CDC + search_doc tsvector regen
+        // + 6-index churn). Backfill is the safety net for rows whose
+        // first INSERT enrichment returned null.
+        .returning({ id: flowsheet.id, created: sql<boolean>`(xmax = 0)` });
 
       // Trigger LML metadata enrichment for tracks. Fire-and-forget: errors
       // are caught inside fireAndForgetMetadataForRow and reported to Sentry,
@@ -138,12 +146,12 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // arriving via tubafrenzy — the dj-site addEntry controller has its
       // own call site.
       const upsertedRow = upserted[0];
-      if (upsertedRow && entryType === 'track' && artistName) {
+      if (upsertedRow?.created && entryType === 'track' && artistName) {
         fireAndForgetMetadataForRow({
           flowsheetId: upsertedRow.id,
           artistName,
-          albumTitle: albumTitle ?? undefined,
-          trackTitle: trackTitle ?? undefined,
+          albumTitle,
+          trackTitle,
         });
       }
     }

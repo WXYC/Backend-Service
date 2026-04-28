@@ -106,6 +106,25 @@ describe('fireAndForgetMetadataForRow', () => {
     expect(mockDb.update).not.toHaveBeenCalled();
   });
 
+  it('accepts null albumTitle/trackTitle from truncate() and forwards as undefined to fetchMetadata', () => {
+    mockFetchMetadata.mockReturnValue(new Promise(() => undefined));
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 5,
+      artistName: 'Lone Anonymous',
+      albumTitle: null,
+      trackTitle: null,
+    });
+
+    expect(mockFetchMetadata).toHaveBeenCalledWith({
+      albumId: undefined,
+      artistId: undefined,
+      artistName: 'Lone Anonymous',
+      albumTitle: undefined,
+      trackTitle: undefined,
+    });
+  });
+
   it('reports fetchMetadata errors to Sentry with subsystem=metadata and does not throw', async () => {
     const error = new Error('LML responded with 502');
     mockFetchMetadata.mockRejectedValue(error);
