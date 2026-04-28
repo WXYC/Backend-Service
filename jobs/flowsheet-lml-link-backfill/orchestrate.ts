@@ -86,7 +86,9 @@ export const resolvePartitionFilter = (
     throw new Error(`Invalid PARTITION_COUNT=${JSON.stringify(rawCount)}; must be a positive integer.`);
   }
   if (!Number.isInteger(index) || index < 0 || index >= count) {
-    throw new Error(`Invalid PARTITION_INDEX=${JSON.stringify(rawIndex)}; must be 0 <= index < PARTITION_COUNT (${count}).`);
+    throw new Error(
+      `Invalid PARTITION_INDEX=${JSON.stringify(rawIndex)}; must be 0 <= index < PARTITION_COUNT (${count}).`
+    );
   }
   if (count === 1) {
     return { sqlFragment: null, description: 'partition=none' };
@@ -313,11 +315,7 @@ export const processRow = async (
  * union pulls in both the never-had-FK rows (~889K) and the B-0.5 broken-FK
  * residuals stamped by `jobs/broken-fk-recovery`.
  */
-const loadBatch = async (
-  afterId: number,
-  batchSize: number,
-  partitionFilter: SQL | null
-): Promise<FlowsheetRow[]> => {
+const loadBatch = async (afterId: number, batchSize: number, partitionFilter: SQL | null): Promise<FlowsheetRow[]> => {
   const partitionClause = partitionFilter ?? sql``;
   const rows = (await db.execute(sql`
     SELECT "id", "artist_name", "album_title"
@@ -352,9 +350,7 @@ export const runBackfill = async (opts: {
   const metrics = opts.metrics ?? NULL_METRICS;
   const partition = opts.partition ?? resolvePartitionFilter();
 
-  console.log(
-    `[${JOB_NAME}] Starting. batchSize=${batchSize} throttleMs=${throttleMs} ${partition.description}`
-  );
+  console.log(`[${JOB_NAME}] Starting. batchSize=${batchSize} throttleMs=${throttleMs} ${partition.description}`);
 
   const totals: Totals = {
     scanned: 0,
