@@ -340,18 +340,26 @@ internal_route.post('/streaming-status-webhook', async (req, res) => {
   let processed = 0;
   let errors = 0;
 
-  for (const change of changes as StreamingChange[]) {
-    try {
-      const legacyId = change.library_release_id;
-      const onStreaming = change.on_streaming ?? null;
+  try {
+    await db.transaction(async (tx) => {
+      for (const change of changes as StreamingChange[]) {
+        try {
+          const legacyId = change.library_release_id;
+          const onStreaming = change.on_streaming ?? null;
 
-      await db.update(library).set({ on_streaming: onStreaming }).where(eq(library.legacy_release_id, legacyId));
+          await tx.update(library).set({ on_streaming: onStreaming }).where(eq(library.legacy_release_id, legacyId));
 
-      processed++;
-    } catch (e) {
-      console.error('[webhook] Streaming status update error:', e);
-      errors++;
-    }
+          processed++;
+        } catch (e) {
+          console.error('[webhook] Streaming status update error:', e);
+          errors++;
+        }
+      }
+    });
+  } catch (e) {
+    console.error('[webhook] Streaming status transaction error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+    return;
   }
 
   res.json({ processed, errors });
