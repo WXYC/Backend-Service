@@ -6,6 +6,19 @@ This document describes how the backend service fetches and serves album/artist 
 
 When a track is added to the flowsheet, the backend fetches metadata from [library-metadata-lookup](https://github.com/WXYC/library-metadata-lookup) (LML) asynchronously and stores it directly on the flowsheet row. Subsequent GET requests return the metadata inline with the entry. LML handles its own caching of Discogs API data, so no additional cache layer is needed on the backend.
 
+```mermaid
+graph TD
+    djsite[dj-site] -->|POST /flowsheet| ctrl[flowsheet.controller.ts]
+    tuba[tubafrenzy] -->|POST /internal/flowsheet-webhook| webhook[internal.route.ts]
+    ctrl & webhook --> helper[fireAndForgetMetadataForRow<br/>enrichment.service.ts]
+    helper --> fetchm[fetchMetadata<br/>metadata.service.ts]
+    fetchm --> lml[(LML /api/v1/lookup)]
+    helper -->|UPDATE 10 metadata columns| pg[(flowsheet)]
+    djsite -.->|GET /flowsheet| pg
+    proxy[playlist-proxy.service.ts] -.->|SELECT artwork_url| pg
+    proxy -.->|grouped response| ios[iOS]
+```
+
 ## Architecture
 
 | Component                                                                       | Responsibility                                                                                           |
@@ -42,7 +55,7 @@ Both flowsheet write paths converge on the same shared helper, `fireAndForgetMet
 2. If the entry has an `artist_name`, `fireAndForgetMetadataForRow` is invoked.
 3. The HTTP response returns immediately (metadata columns are null).
 4. The helper calls LML's `/api/v1/lookup` endpoint.
-5. On a result with artwork, the row is updated with all 10 metadata columns.
+5. The row is updated with all 10 metadata columns (see "Always-Update Semantics" below).
 6. On the next GET request, the metadata is included in the response.
 
 ### Tubafrenzy webhook path: `POST /internal/flowsheet-webhook`
@@ -51,7 +64,7 @@ Both flowsheet write paths converge on the same shared helper, `fireAndForgetMet
 2. The upsert uses `RETURNING { id, created: (xmax = 0) }`. The `xmax = 0` predicate distinguishes a fresh INSERT from the `ON CONFLICT DO UPDATE` branch.
 3. **Enrichment is gated on `created`.** Benign retries / no-op updates from tubafrenzy do not re-fetch from LML and do not re-write the metadata columns. This avoids amplifying CDC trigger fires + search_doc tsvector regen + 6-index updates on every duplicate webhook delivery.
 4. On INSERT, `fireAndForgetMetadataForRow` runs identically to the dj-site path.
-5. The `liveFs` SSE refetch event broadcasts immediately after the upsert (does not wait for enrichment to land — see [#628](https://github.com/WXYC/Backend-Service/issues/628) for the follow-up to re-emit after enrichment).
+5. The `liveFs` SSE refetch event broadcasts immediately after the upsert and does not wait for enrichment to land. **iOS does not subscribe to `liveFs`** — it gets data via `apps/backend/services/playlist-proxy.service.ts`, which subscribes to _tubafrenzy's_ SSE and synchronously SELECTs `flowsheet.artwork_url` per entry. The metadata UPDATE from the floating enrichment promise typically commits ~1–2s after the proxy's SELECT, so iOS shows the new track without art for that window. See [#628](https://github.com/WXYC/Backend-Service/issues/628) for the follow-up that addresses both consumer paths.
 
 ### LML Endpoint Used
 
@@ -61,13 +74,15 @@ Both flowsheet write paths converge on the same shared helper, `fireAndForgetMet
 
 The legacy per-component endpoints (`/api/v1/discogs/search`, `/api/v1/discogs/release/{id}`, `/api/v1/discogs/artist/{id}`) are still available on LML and are used by other Backend-Service paths (catalog search, proxy endpoints), but the metadata enrichment path consolidates onto `/lookup`.
 
-### Fallback Behavior
+### Always-Update Semantics
 
-When LML returns no results or is unavailable, the metadata service constructs search URLs for YouTube Music, Bandcamp, and SoundCloud as a bare minimum. These are generic search links, not direct album/track URLs. They give iOS/dj-site at least a "search for this on $service" affordance for the long tail of releases LML can't match.
+`fetchMetadata` always returns a non-null result when LML is configured: when LML returns no artwork, the service fills in `youtube_music_url`, `bandcamp_url`, and `soundcloud_url` with `search?q=<artist> <title>` URLs as a bare-minimum fallback. These are generic search links, not direct album/track URLs — they give iOS / dj-site at least a "search for this on $service" affordance for the long tail of releases LML can't match.
+
+The helper writes all 10 columns on every successful enrichment. A successful enrichment with no artwork still writes search URLs into 3 of those columns and `null` into the other 7. This means **`bandcamp_url IS NULL` is a reliable "this row has never been enriched" signal** — useful for idempotent backfill filters and for distinguishing "we tried and LML found nothing" from "we never tried."
 
 ## One-shot Recovery: `scripts/backfill-metadata.ts`
 
-For populating metadata on rows inserted before this enrichment was wired in (or for rows where a prior enrichment returned null because LML's cache hadn't been populated yet), there's a one-shot script:
+For populating metadata on rows inserted before enrichment was wired in (PR #627), or for rows where a prior enrichment failed silently because LML auth was misconfigured (see Configuration), there's a one-shot script:
 
 ```bash
 dotenvx run -f .env -- npx tsx scripts/backfill-metadata.ts
@@ -78,9 +93,9 @@ Env knobs:
 - `BACKFILL_LIMIT` — number of entries to process (default `1000`)
 - `BACKFILL_DRY_RUN` — set `true` to preview without updating
 
-The script's WHERE filter is `WHERE artwork_url IS NULL` and it only updates rows when LML returns artwork. No-match rows are left null (so they'll be re-attempted on a future run if the LML matcher improves).
+**Same semantics as the runtime path.** The script always UPDATEs every fetched row, including no-artwork rows that get only the search-URL fallbacks. Filter is `WHERE bandcamp_url IS NULL AND entry_type = 'track'`, so re-runs naturally skip rows already touched by any prior enrichment regardless of artwork outcome.
 
-For the historical tail (~1.86M legacy NULL rows as of 2026-04-28), see [#631](https://github.com/WXYC/Backend-Service/issues/631) — that work needs a containerized backfill job rather than the inline script.
+For the historical tail (legacy NULL rows accumulated before #627 deployed), see [#631](https://github.com/WXYC/Backend-Service/issues/631) — that work needs a containerized backfill job rather than the inline script.
 
 ## Conditional GET (304 Not Modified)
 
@@ -106,6 +121,45 @@ The flowsheet endpoints support conditional requests via the `Last-Modified` hea
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `LIBRARY_METADATA_URL` | LML service base URL (e.g. `http://localhost:8001`). Without this, metadata fetching is silently skipped.                |
 | `LML_API_KEY`          | Bearer token sent on every LML request. Required in production once LML's `LML_REQUIRE_AUTH` is `true`. Optional in dev. |
+
+> ⚠️ **Silent-failure mode.** If `LML_API_KEY` is missing or stale in a deployment where LML enforces auth, every `/lookup` call returns 401. `metadata.service.ts:58-60` catches the error as a `console.warn` and `fetchMetadata` returns null; `fireAndForgetMetadataForRow` then short-circuits without an UPDATE. There's no Sentry escalation, no 5xx — just every flowsheet row writing with all metadata columns null and no obvious symptom. If iOS / dj-site show empty art on every new track, this is the first thing to check.
+
+## Troubleshooting
+
+When iOS or dj-site is missing artwork, walk these in order:
+
+1. **Confirm the row exists.**
+
+   ```sql
+   SELECT id, artist_name, album_title, artwork_url, bandcamp_url
+   FROM wxyc_schema.flowsheet
+   WHERE id = <id>;
+   ```
+
+   If `bandcamp_url IS NULL`, no enrichment ever ran on this row — go to step 2. If `bandcamp_url IS NOT NULL` but `artwork_url IS NULL`, enrichment ran and LML found no match — that's a coverage issue, not a wiring issue (see step 5).
+
+2. **Confirm enrichment fired.** Look for `[Flowsheet] Metadata fetch failed` in backend logs around the row's `add_time`. If you see it, the enrichment ran and threw — read the cause. If you see _nothing_, the helper was never called: check that the row's source path (dj-site addEntry vs tubafrenzy webhook) wires `fireAndForgetMetadataForRow`. The webhook path additionally requires `entry_type='track'`, non-null `artist_name`, and the `xmax = 0` (true INSERT) gate.
+
+3. **Confirm LML auth.** SSH to the backend host and run:
+
+   ```sh
+   curl -sf -X POST "$LIBRARY_METADATA_URL/api/v1/lookup" \
+     -H "Authorization: Bearer $LML_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"artist":"King Crimson","album":"Discipline","raw_message":"King Crimson Discipline"}'
+   ```
+
+   If it returns `{"detail":"Missing authorization"}` or 401, the key on this host doesn't match LML's expected key. See the silent-failure callout in Configuration above.
+
+4. **Confirm LML is healthy.**
+
+   ```sh
+   curl -sf "$LIBRARY_METADATA_URL/health"
+   ```
+
+   Expect `status: healthy` with all three services (`database`, `discogs_api`, `discogs_cache`) reporting `ok`. A `degraded` Discogs status means the upstream Discogs token is broken — separate operational issue.
+
+5. **Confirm LML can match this artist.** Hit the lookup endpoint directly with the row's exact field values (see step 3's curl). If the response has `song_not_found: true` and `cache_stats.api_calls > 0`, LML actively searched and decided not to match — typically a coverage gap (obscure artist, collaboration trio name, etc.) rather than a Backend-Service bug. File against [`library-metadata-lookup`](https://github.com/WXYC/library-metadata-lookup) with the reproducer.
 
 ## Migration History
 
