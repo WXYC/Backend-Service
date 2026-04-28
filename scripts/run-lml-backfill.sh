@@ -1,23 +1,31 @@
 #!/bin/bash
 #
-# Starts (or attaches to) the flowsheet-lml-link-backfill one-shot job on
-# EC2 as a detached docker container. The backfill iterates ~1.18M
-# flowsheet rows where album_id IS NULL, calling LML once per row at the
-# orchestrator's default throttle, so a full sweep takes ~1.5 days.
+# Starts (or attaches to) an LML-driven backfill one-shot job on EC2 as a
+# detached docker container. The two callers in tree are
+# `flowsheet-lml-link-backfill` (B-2.2; ~1.18M flowsheet rows) and
+# `library-canonical-entity-backfill` (B-1.2; ~64K library rows). Both
+# call LML once per row at the orchestrator's default throttle.
 # Detached docker (`docker run -d`) means the container survives the SSH
 # session ending — no tmux needed (Amazon Linux doesn't ship it).
 #
 # Resumability: re-running this script after a crash or stop is safe.
-# Linked rows fall out of the backfill's WHERE filter on the next sweep,
+# Each backfill's WHERE filter sees only rows that haven't been resolved,
 # so the job picks up where it left off without a persistent cursor.
 #
 # Usage:
-#   ./run-lml-backfill.sh start          # default — start a new container
+#   ./run-lml-backfill.sh start          # default — start the B-2.2 backfill
 #   ./run-lml-backfill.sh attach         # follow logs (Ctrl-C to detach)
 #   ./run-lml-backfill.sh status         # container state + last 20 log lines
 #   ./run-lml-backfill.sh stop           # docker stop the container
 #
+#   # Run B-1.2 instead:
+#   BACKFILL=library-canonical-entity-backfill ./scripts/run-lml-backfill.sh start
+#
 # Environment:
+#   BACKFILL          Job to run, also used as the docker container name
+#                     and the ECR repo name. Must match a directory under
+#                     jobs/ and an image in ECR.
+#                     (default: flowsheet-lml-link-backfill)
 #   REMOTE_ENV_PATH   Path to .env on EC2  (default: /home/ec2-user/.env)
 #   IMAGE_TAG         ECR image tag        (default: latest)
 #   SSH_HOST          SSH alias for EC2    (default: wxyc-ec2)
@@ -27,7 +35,9 @@ set -euo pipefail
 REMOTE_ENV_PATH="${REMOTE_ENV_PATH:-/home/ec2-user/.env}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 SSH_HOST="${SSH_HOST:-wxyc-ec2}"
-IMAGE_NAME="flowsheet-lml-link-backfill"
+# IMAGE_NAME doubles as the ECR repo path and the docker container name.
+# Both backfills follow the convention `<job-name>` for repo + container.
+IMAGE_NAME="${BACKFILL:-flowsheet-lml-link-backfill}"
 
 CMD="${1:-start}"
 
@@ -106,11 +116,11 @@ CONTAINER_ID=\$(docker run -d --name '$IMAGE_NAME' \\
   "\$IMAGE") \\
   || fail "docker run failed."
 
-step "Started. Container ID: \${CONTAINER_ID:0:12}"
+step "Started '$IMAGE_NAME'. Container ID: \${CONTAINER_ID:0:12}"
 echo "Inspect with:"
-echo "  ./run-lml-backfill.sh attach    # live tail (Ctrl-C to detach, doesn't stop the job)"
-echo "  ./run-lml-backfill.sh status    # one-shot status + last 20 log lines"
-echo "  ./run-lml-backfill.sh stop      # stop the container"
+echo "  BACKFILL=$IMAGE_NAME ./run-lml-backfill.sh attach    # live tail (Ctrl-C to detach, doesn't stop the job)"
+echo "  BACKFILL=$IMAGE_NAME ./run-lml-backfill.sh status    # one-shot status + last 20 log lines"
+echo "  BACKFILL=$IMAGE_NAME ./run-lml-backfill.sh stop      # stop the container"
 EOF
     ;;
 
