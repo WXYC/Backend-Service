@@ -198,10 +198,32 @@ export const resolveDjNameForShow = async (show: Show): Promise<string | null> =
   return dj?.djName ?? legacy ?? dj?.name ?? null;
 };
 
-/** Count total flowsheet entries (for pagination) */
+/**
+ * Estimate total flowsheet entries for pagination.
+ *
+ * Reads `pg_class.reltuples`, the planner's row-count estimate maintained by
+ * autovacuum/ANALYZE. Constant-time vs. an exact `count(*)` which would
+ * sequentially scan ~2.6M rows and routinely exceed the 5s per-statement
+ * timeout on this RDS instance — that's the immediate cause of
+ * `/flowsheet?page=0&limit=20` 500ing under live load. The estimate is
+ * typically within a few hundred of the true count, which is fine for a
+ * paginated UI's "Page X of N" display; pages near the upper bound may shift
+ * by one as autovacuum lags.
+ *
+ * `reltuples = -1` is the "never analyzed" sentinel; treat it as 0. The same
+ * goes for a missing row (no permissions on `pg_class` would surface as an
+ * error from the surrounding query, not as a missing row).
+ */
 export const getEntryCount = async (): Promise<number> => {
-  const result = await db.select({ count: sql<number>`count(*)::int` }).from(flowsheet);
-  return result[0].count;
+  const schema = process.env.WXYC_SCHEMA_NAME ?? 'wxyc_schema';
+  const result = await db.execute(
+    sql`SELECT GREATEST(reltuples::bigint, 0)::int AS count
+        FROM pg_class
+        WHERE relname = 'flowsheet'
+          AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = ${schema})`
+  );
+  const row = (result as unknown as Array<{ count: number }>)[0];
+  return Number(row?.count ?? 0);
 };
 
 /** Gets flowsheet entries by page with metadata joins */
