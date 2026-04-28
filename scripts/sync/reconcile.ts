@@ -186,9 +186,12 @@ async function reconcileFlowsheetEntry(event: CdcEvent) {
   const entryType = mapEntryType(Number(data.flowsheetEntryType ?? 0));
   const isStructural = ['talkset', 'breakpoint', 'show_start', 'show_end', 'message'].includes(entryType);
 
+  // play_order is intentionally excluded from comparison: it churns during
+  // DJ reorder operations (drag-drop in the flowsheet UI shifts many rows in
+  // sequence) and reaches consistency eventually. Comparing it produces
+  // transient false-positive mismatches without surfacing real issues.
   const expected: Record<string, unknown> = {
     entry_type: entryType,
-    play_order: data.sequenceWithinShow,
   };
 
   if (isStructural) {
@@ -201,8 +204,8 @@ async function reconcileFlowsheetEntry(event: CdcEvent) {
   }
 
   const fieldsToCompare = isStructural
-    ? ['entry_type', 'play_order']
-    : ['entry_type', 'artist_name', 'track_title', 'album_title', 'record_label', 'play_order'];
+    ? ['entry_type']
+    : ['entry_type', 'artist_name', 'track_title', 'album_title', 'record_label'];
 
   const diffs = compareFields(expected, row, fieldsToCompare);
 
@@ -408,10 +411,20 @@ async function reverseReconcileFlowsheet(event: CdcEvent) {
 
   const row = (rows as any[])[0];
   const diffs: FieldDiff[] = [];
-  const artistName = String(data.artist_name ?? data.message ?? '');
-  const mysqlArtist = String(row.ARTIST_NAME ?? '');
-  if (artistName && mysqlArtist && truncate(mysqlArtist, 128) !== truncate(artistName, 128)) {
-    diffs.push({ field: 'artist_name', expected: artistName, actual: mysqlArtist });
+
+  // Skip artist_name comparison for show delimiters: tubafrenzy stores the
+  // formatted message ("END OF SHOW: <dj> SIGNED OFF at <time> (<date>)")
+  // while Backend-Service stores just the DJ name. Both are correct
+  // representations for their respective UIs — not a sync issue.
+  const entryType = String(data.entry_type ?? '');
+  const isShowDelimiter = entryType === 'show_start' || entryType === 'show_end';
+
+  if (!isShowDelimiter) {
+    const artistName = String(data.artist_name ?? data.message ?? '');
+    const mysqlArtist = String(row.ARTIST_NAME ?? '');
+    if (artistName && mysqlArtist && truncate(mysqlArtist, 128) !== truncate(artistName, 128)) {
+      diffs.push({ field: 'artist_name', expected: artistName, actual: mysqlArtist });
+    }
   }
 
   if (diffs.length === 0) {
@@ -528,6 +541,15 @@ const UNSYNCED_TABLES = new Set([
   'genre_artist_crossreference',
   'artist_library_crossreference',
   'artist_crossreference',
+  // Library catalog tables: populated by library-etl from tubafrenzy via
+  // composite-key matching (no legacy_*_id columns). Reverse direction has
+  // no specific row to verify since Backend-Service is the consumer, not the
+  // source. Forward direction is covered via TUBAFRENZY_TABLES (LIBRARY_CODE,
+  // GENRE, FORMAT, COMPANY).
+  'artists',
+  'genres',
+  'format',
+  'labels',
 ]);
 
 // --- Batch reconciliation (startup) ---
