@@ -133,8 +133,11 @@ describe('client.ts: postgres() call shape', () => {
     // Source-grep guard: catches refactors that reshape the postgres() call
     // and accidentally drop the timeout. The exact value is the helper's
     // responsibility (covered above) — this test just verifies the wiring.
+    // The optional `overrides.statementTimeoutMs ??` prefix lets dedicated
+    // callers (e.g. album_plays refresh) override per-client without
+    // touching the env-driven default.
     expect(clientSource).toMatch(
-      /postgres\(\{[\s\S]*connection:\s*\{[\s\S]*statement_timeout:\s*statementTimeoutMs[\s\S]*\}/
+      /postgres\(\{[\s\S]*connection:\s*\{[\s\S]*statement_timeout:\s*(?:overrides\.statementTimeoutMs\s*\?\?\s*)?statementTimeoutMs[\s\S]*\}/
     );
   });
 
@@ -142,8 +145,12 @@ describe('client.ts: postgres() call shape', () => {
     // pg_stat_activity's application_name column is the only fast way to
     // tell at incident time which subsystem is holding a runaway query.
     // Default + override pattern lets backfills and migrations identify
-    // themselves without code changes.
-    expect(clientSource).toMatch(/application_name:\s*process\.env\.DB_APPLICATION_NAME\s*\?\?\s*'wxyc-/);
+    // themselves without code changes. The optional
+    // `overrides.applicationName ??` prefix lets dedicated callers tag
+    // their own connection name without touching the env-driven default.
+    expect(clientSource).toMatch(
+      /application_name:\s*(?:overrides\.applicationName\s*\?\?\s*)?process\.env\.DB_APPLICATION_NAME\s*\?\?\s*'wxyc-/
+    );
   });
 
   it('logs the resolved timeout at startup so operators can verify config', () => {
