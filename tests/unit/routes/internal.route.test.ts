@@ -20,6 +20,11 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   updateLastModified: mockUpdateLastModified,
 }));
 
+const mockFireAndForgetMetadataForRow = jest.fn();
+jest.mock('../../../apps/backend/services/metadata/index', () => ({
+  fireAndForgetMetadataForRow: mockFireAndForgetMetadataForRow,
+}));
+
 import { db } from '@wxyc/database';
 import express from 'express';
 import request from 'supertest';
@@ -29,12 +34,17 @@ process.env.ETL_NOTIFY_KEY = 'test-secret-key';
 
 import { internal_route } from '../../../apps/backend/routes/internal.route';
 
-// Make the DB mock chain's terminal methods resolve to arrays (needed by webhook handler)
+// Make the DB mock chain's terminal methods resolve appropriately for the
+// webhook handler. `onConflictDoNothing` is terminal in the show-resolution
+// path (resolves to undefined). The flowsheet upsert is `onConflictDoUpdate`
+// followed by `.returning()`, so the chain stays open through the upsert and
+// the terminal `.returning` resolves to a row array.
 const mockDb = db as unknown as Record<string, jest.Mock>;
 const mockChain = mockDb.select();
 (mockChain as Record<string, jest.Mock>).limit = jest.fn().mockResolvedValue([]);
 (mockChain as Record<string, jest.Mock>).onConflictDoNothing = jest.fn().mockResolvedValue(undefined);
-(mockChain as Record<string, jest.Mock>).onConflictDoUpdate = jest.fn().mockResolvedValue(undefined);
+const mockReturning = jest.fn().mockResolvedValue([]);
+(mockChain as Record<string, jest.Mock>).returning = mockReturning;
 
 const app = express();
 app.use(express.json());
@@ -180,6 +190,68 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(mockUpdateLastModified).toHaveBeenCalled();
+  });
+
+  // -- Metadata enrichment trigger --
+  //
+  // Tubafrenzy is the source of ~all flowsheet inserts in production today.
+  // Without this trigger, every track row arrives with all 10 metadata
+  // columns NULL and the iOS app sees no album art / streaming URLs / bio.
+  // The dj-site addEntry controller has its own call site; this is the
+  // tubafrenzy → BS path.
+
+  it('fires metadata enrichment when a track upserts with artist_name', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
+      flowsheetId: 5555,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+      trackTitle: 'VI Scose Poise',
+    });
+  });
+
+  it('does not fire enrichment when entry_type is not track (talkset)', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5556 }]);
+
+    // flowsheetEntryType=7 maps to talkset (see mapProdEntryType); message
+    // entries put the artistName in `message` and clear `artist_name`.
+    const talksetEntry = { ...validEntry, flowsheetEntryType: 7, artistName: 'Talkset' };
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: talksetEntry });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).not.toHaveBeenCalled();
+  });
+
+  it('does not fire enrichment when artist_name is empty', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5557 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, artistName: '' } });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).not.toHaveBeenCalled();
+  });
+
+  it('does not fire enrichment on delete actions', async () => {
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'delete', entryId: 2002 });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).not.toHaveBeenCalled();
   });
 
   // -- Delete --

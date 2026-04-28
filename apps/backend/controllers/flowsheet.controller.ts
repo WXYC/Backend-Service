@@ -1,13 +1,11 @@
 import { Request, RequestHandler } from 'express';
 import { Mutex } from 'async-mutex';
-import * as Sentry from '@sentry/node';
-import { eq } from 'drizzle-orm';
-import { db, NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ, flowsheet } from '@wxyc/database';
+import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/database';
 
 // play_order is computed by the service layer, not provided by controllers
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
-import { fetchMetadata } from '../services/metadata/index.js';
+import { fireAndForgetMetadataForRow } from '../services/metadata/index.js';
 import { runLmlLinkage } from '../services/flowsheet-linkage.service.js';
 import { reportLinkageError } from '../services/linkage-metrics.service.js';
 import WxycError from '../utils/error.js';
@@ -91,38 +89,14 @@ function fireAndForgetLinkage(completedEntry: FSEntry): void {
 function fireAndForgetMetadata(completedEntry: FSEntry, artistId?: number): void {
   if (!completedEntry.artist_name) return;
 
-  fetchMetadata({
+  fireAndForgetMetadataForRow({
+    flowsheetId: completedEntry.id,
+    artistName: completedEntry.artist_name,
     albumId: completedEntry.album_id ?? undefined,
     artistId,
-    artistName: completedEntry.artist_name,
     albumTitle: completedEntry.album_title ?? undefined,
     trackTitle: completedEntry.track_title ?? undefined,
-  })
-    .then(async (metadata) => {
-      if (!metadata) return;
-      await db
-        .update(flowsheet)
-        .set({
-          artwork_url: metadata.album?.artworkUrl ?? null,
-          discogs_url: metadata.album?.discogsUrl ?? null,
-          release_year: metadata.album?.releaseYear ?? null,
-          spotify_url: metadata.album?.spotifyUrl ?? null,
-          apple_music_url: metadata.album?.appleMusicUrl ?? null,
-          youtube_music_url: metadata.album?.youtubeMusicUrl ?? null,
-          bandcamp_url: metadata.album?.bandcampUrl ?? null,
-          soundcloud_url: metadata.album?.soundcloudUrl ?? null,
-          artist_bio: metadata.artist?.bio ?? null,
-          artist_wikipedia_url: metadata.artist?.wikipediaUrl ?? null,
-        })
-        .where(eq(flowsheet.id, completedEntry.id));
-    })
-    .catch((err) => {
-      console.error('[Flowsheet] Metadata fetch failed:', err);
-      Sentry.captureException(err, {
-        tags: { subsystem: 'metadata' },
-        extra: { artistName: completedEntry.artist_name, albumTitle: completedEntry.album_title },
-      });
-    });
+  });
 }
 
 const MAX_ITEMS = 200;

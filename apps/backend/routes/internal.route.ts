@@ -3,6 +3,7 @@ import { eq, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, rotation, library, truncate } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
 import { updateLastModified } from '../services/flowsheet.service.js';
+import { fireAndForgetMetadataForRow } from '../services/metadata/index.js';
 import { mapProdEntryType, isMessageEntryType } from '../utils/flowsheet-transform.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
@@ -97,16 +98,19 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       const entryType = mapProdEntryType(entry.flowsheetEntryType ?? 0);
       const showId = await resolveShowId(entry.radioShowId);
       const isMsgType = isMessageEntryType(entryType);
+      const artistName = isMsgType ? null : truncate(entry.artistName, 128);
+      const albumTitle = truncate(entry.releaseTitle, 128);
+      const trackTitle = truncate(entry.songTitle, 128);
 
-      await db
+      const upserted = await db
         .insert(flowsheet)
         .values({
           legacy_entry_id: entry.id,
           show_id: showId,
           entry_type: entryType,
-          artist_name: isMsgType ? null : truncate(entry.artistName, 128),
-          album_title: truncate(entry.releaseTitle, 128),
-          track_title: truncate(entry.songTitle, 128),
+          artist_name: artistName,
+          album_title: albumTitle,
+          track_title: trackTitle,
           record_label: truncate(entry.labelName, 128),
           message: isMsgType ? truncate(entry.artistName, 250) : null,
           request_flag: !!entry.requestFlag,
@@ -125,7 +129,23 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
             request_flag: sql`excluded.request_flag`,
             entry_type: sql`excluded.entry_type`,
           },
+        })
+        .returning({ id: flowsheet.id });
+
+      // Trigger LML metadata enrichment for tracks. Fire-and-forget: errors
+      // are caught inside fireAndForgetMetadataForRow and reported to Sentry,
+      // never propagated. This is the only enrichment trigger for entries
+      // arriving via tubafrenzy — the dj-site addEntry controller has its
+      // own call site.
+      const upsertedRow = upserted[0];
+      if (upsertedRow && entryType === 'track' && artistName) {
+        fireAndForgetMetadataForRow({
+          flowsheetId: upsertedRow.id,
+          artistName,
+          albumTitle: albumTitle ?? undefined,
+          trackTitle: trackTitle ?? undefined,
         });
+      }
     }
 
     updateLastModified();
