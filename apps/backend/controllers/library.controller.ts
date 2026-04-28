@@ -175,9 +175,37 @@ export const searchForAlbum: RequestHandler = async (req: Request<object, object
   const onStreaming = query.on_streaming === 'true' ? true : query.on_streaming === 'false' ? false : undefined;
 
   const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n, onStreaming);
-  const enriched = await libraryService.enrichWithArtwork(response);
+  const enriched = await raceEnrichmentBudget(response, libraryService.enrichWithArtwork(response));
   res.status(200).json(enriched.map((row) => libraryService.serializeLibraryArtistViewEntry(row)));
 };
+
+/**
+ * Cap how long an interactive search will wait on artwork enrichment. LML's
+ * own per-call timeout is 5s — appropriate for non-interactive callers
+ * (request line, single-album lookup) but unacceptable on the search hot path
+ * where one cache-miss gates the entire response. If the budget elapses we
+ * return the raw search rows; the in-flight LML lookups keep running and still
+ * write artwork_url to the DB, so subsequent searches benefit.
+ */
+const SEARCH_ENRICHMENT_BUDGET_MS = Number(process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS ?? 500);
+
+async function raceEnrichmentBudget<T>(unenriched: T[], enrichment: Promise<T[]>): Promise<T[]> {
+  let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<T[]>((resolve) => {
+    budgetTimer = setTimeout(() => resolve(unenriched), SEARCH_ENRICHMENT_BUDGET_MS);
+  });
+  // Swallow rejections from the enrichment promise so the budget path can win
+  // without an unhandledRejection. enrichWithArtwork already collects per-row
+  // failures internally; this guard covers the rare case it throws as a whole.
+  enrichment.catch((err) => {
+    console.warn('[Library] Search-time artwork enrichment failed:', err);
+  });
+  try {
+    return await Promise.race([enrichment, budget]);
+  } finally {
+    if (budgetTimer) clearTimeout(budgetTimer);
+  }
+}
 
 type NewArtistRequest = {
   artist_name: string;
