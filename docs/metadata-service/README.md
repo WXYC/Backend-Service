@@ -8,12 +8,14 @@ When a track is added to the flowsheet, the backend fetches metadata from [libra
 
 ## Architecture
 
-| Component                | Responsibility                                                                                                   |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| **Flowsheet Controller** | Handles HTTP requests, triggers async metadata fetch, updates the flowsheet row                                  |
-| **Flowsheet Service**    | Database queries returning entries with inline metadata                                                          |
-| **Metadata Service**     | Calls LML for Discogs data and enriched streaming URLs                                                           |
-| **LML**                  | External service: Discogs search, release details, artist details, streaming URL enrichment (with its own cache) |
+| Component                                                                       | Responsibility                                                                                           |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Flowsheet Controller** (`apps/backend/controllers/flowsheet.controller.ts`)   | Handles `POST /flowsheet` from dj-site; calls the shared enrichment helper after the row is inserted     |
+| **Webhook Receiver** (`apps/backend/routes/internal.route.ts`)                  | Handles `POST /internal/flowsheet-webhook` from tubafrenzy; calls the shared enrichment helper on INSERT |
+| **Enrichment Service** (`apps/backend/services/metadata/enrichment.service.ts`) | Shared `fireAndForgetMetadataForRow` — fetches metadata and updates the flowsheet row                    |
+| **Metadata Service** (`apps/backend/services/metadata/metadata.service.ts`)     | `fetchMetadata` — calls LML's `/lookup` endpoint and shapes the response into the column-mapped result   |
+| **LML Client** (`apps/backend/services/lml/lml.client.ts`)                      | Single HTTP chokepoint with timeout + bearer auth header                                                 |
+| **LML**                                                                         | External service: unified `/lookup` endpoint with 3-tier caching (memory + PostgreSQL + Discogs API)     |
 
 ### Metadata Fields on Flowsheet
 
@@ -30,28 +32,55 @@ When a track is added to the flowsheet, the backend fetches metadata from [libra
 | `artist_bio`           | text         | LML (Discogs artist profile, markup stripped) |
 | `artist_wikipedia_url` | varchar(512) | LML (Discogs artist URLs)                     |
 
-## Fire-and-Forget Metadata Fetch
+## Fire-and-Forget Enrichment
 
-When a track is added, metadata is fetched asynchronously without blocking the response:
+Both flowsheet write paths converge on the same shared helper, `fireAndForgetMetadataForRow` (`apps/backend/services/metadata/enrichment.service.ts`). The promise is intentionally not awaited — enrichment must never block the HTTP response. Errors are logged and reported to Sentry under `subsystem='metadata'`, never thrown.
 
-1. `POST /flowsheet` inserts the entry to the database
-2. If the entry has an `artist_name`, `fetchMetadata()` is called asynchronously
-3. The HTTP response returns immediately (metadata columns are null)
-4. `fetchMetadata()` calls LML's Discogs search, release details, and artist details endpoints
-5. On success, the flowsheet row is updated with the metadata via `db.update(flowsheet).set(...)`
-6. On the next GET request, the metadata is included in the response
+### dj-site path: `POST /flowsheet`
 
-### LML Endpoints Used
+1. The controller inserts the entry to the database.
+2. If the entry has an `artist_name`, `fireAndForgetMetadataForRow` is invoked.
+3. The HTTP response returns immediately (metadata columns are null).
+4. The helper calls LML's `/api/v1/lookup` endpoint.
+5. On a result with artwork, the row is updated with all 10 metadata columns.
+6. On the next GET request, the metadata is included in the response.
 
-| Endpoint                           | Data Retrieved                                                                    |
-| ---------------------------------- | --------------------------------------------------------------------------------- |
-| `POST /api/v1/discogs/search`      | artwork_url, release_url, release_year, streaming URLs, artist_bio, wikipedia_url |
-| `GET /api/v1/discogs/release/{id}` | Enriched artwork_url, year, artist_id                                             |
-| `GET /api/v1/discogs/artist/{id}`  | Artist profile (bio), Wikipedia URL                                               |
+### Tubafrenzy webhook path: `POST /internal/flowsheet-webhook`
+
+1. The receiver upserts the row from the tubafrenzy event payload.
+2. The upsert uses `RETURNING { id, created: (xmax = 0) }`. The `xmax = 0` predicate distinguishes a fresh INSERT from the `ON CONFLICT DO UPDATE` branch.
+3. **Enrichment is gated on `created`.** Benign retries / no-op updates from tubafrenzy do not re-fetch from LML and do not re-write the metadata columns. This avoids amplifying CDC trigger fires + search_doc tsvector regen + 6-index updates on every duplicate webhook delivery.
+4. On INSERT, `fireAndForgetMetadataForRow` runs identically to the dj-site path.
+5. The `liveFs` SSE refetch event broadcasts immediately after the upsert (does not wait for enrichment to land — see [#628](https://github.com/WXYC/Backend-Service/issues/628) for the follow-up to re-emit after enrichment).
+
+### LML Endpoint Used
+
+| Endpoint              | Purpose                                                                                                                                |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/v1/lookup` | Unified lookup: artist correction, title normalization, fallback strategies, artwork, streaming URLs, artist metadata in a single call |
+
+The legacy per-component endpoints (`/api/v1/discogs/search`, `/api/v1/discogs/release/{id}`, `/api/v1/discogs/artist/{id}`) are still available on LML and are used by other Backend-Service paths (catalog search, proxy endpoints), but the metadata enrichment path consolidates onto `/lookup`.
 
 ### Fallback Behavior
 
-When LML returns no results or is unavailable, the metadata service constructs search URLs for YouTube Music, Bandcamp, and SoundCloud as a bare minimum. These are generic search links, not direct album/track URLs.
+When LML returns no results or is unavailable, the metadata service constructs search URLs for YouTube Music, Bandcamp, and SoundCloud as a bare minimum. These are generic search links, not direct album/track URLs. They give iOS/dj-site at least a "search for this on $service" affordance for the long tail of releases LML can't match.
+
+## One-shot Recovery: `scripts/backfill-metadata.ts`
+
+For populating metadata on rows inserted before this enrichment was wired in (or for rows where a prior enrichment returned null because LML's cache hadn't been populated yet), there's a one-shot script:
+
+```bash
+dotenvx run -f .env -- npx tsx scripts/backfill-metadata.ts
+```
+
+Env knobs:
+
+- `BACKFILL_LIMIT` — number of entries to process (default `1000`)
+- `BACKFILL_DRY_RUN` — set `true` to preview without updating
+
+The script's WHERE filter is `WHERE artwork_url IS NULL` and it only updates rows when LML returns artwork. No-match rows are left null (so they'll be re-attempted on a future run if the LML matcher improves).
+
+For the historical tail (~1.86M legacy NULL rows as of 2026-04-28), see [#631](https://github.com/WXYC/Backend-Service/issues/631) — that work needs a containerized backfill job rather than the inline script.
 
 ## Conditional GET (304 Not Modified)
 
@@ -73,7 +102,10 @@ The flowsheet endpoints support conditional requests via the `Last-Modified` hea
 
 ## Configuration
 
-The `LIBRARY_METADATA_URL` environment variable must be set to the LML service base URL (e.g., `http://localhost:8001`). Without this, metadata fetching is silently skipped and all metadata columns remain null.
+| Env var                | Purpose                                                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `LIBRARY_METADATA_URL` | LML service base URL (e.g. `http://localhost:8001`). Without this, metadata fetching is silently skipped.                |
+| `LML_API_KEY`          | Bearer token sent on every LML request. Required in production once LML's `LML_REQUIRE_AUTH` is `true`. Optional in dev. |
 
 ## Migration History
 
