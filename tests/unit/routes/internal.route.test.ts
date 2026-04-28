@@ -4,6 +4,7 @@
  * - POST /internal/flowsheet-webhook (tubafrenzy webhook receiver)
  * - POST /internal/rotation-sync-notify (rotation ETL SSE notification)
  * - POST /internal/rotation-webhook (tubafrenzy rotation webhook receiver)
+ * - POST /internal/streaming-status-webhook (LML streaming status receiver)
  */
 
 const mockBroadcast = jest.fn();
@@ -366,5 +367,103 @@ describe('POST /internal/rotation-webhook', () => {
       type: 'refetch',
       payload: { source: 'rotation-webhook' },
     });
+  });
+});
+
+// ---- streaming-status-webhook ----
+
+describe('POST /internal/streaming-status-webhook', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  // -- Auth (Bearer token, not X-Internal-Key) --
+
+  it('returns 401 without Authorization header', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .send({ changes: [] });
+
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 with wrong Bearer token', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer wrong-key')
+      .send({ changes: [] });
+
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 with X-Internal-Key (must use Bearer)', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ changes: [] });
+
+    expect(res.status).toBe(401);
+  });
+
+  // -- Validation --
+
+  it('returns 400 when changes field is missing', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({ timestamp: '2026-04-27T00:00:00Z' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('changes');
+  });
+
+  it('returns 400 when changes is not an array', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({ changes: 'not-an-array' });
+
+    expect(res.status).toBe(400);
+  });
+
+  // -- Processing --
+
+  it('returns 200 with processed count for valid changes', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [
+          { library_release_id: 42, on_streaming: true },
+          { library_release_id: 99, on_streaming: false },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(2);
+    expect(res.body.errors).toBe(0);
+  });
+
+  it('returns 200 with zero counts for empty changes array', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({ changes: [] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(0);
+    expect(res.body.errors).toBe(0);
+  });
+
+  it('handles null on_streaming value', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [{ library_release_id: 42, on_streaming: null }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(1);
   });
 });

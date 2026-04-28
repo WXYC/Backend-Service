@@ -295,3 +295,67 @@ internal_route.post('/rotation-webhook', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// ---- Streaming Status Webhook ----
+
+/**
+ * Authenticate via Authorization: Bearer token (used by LML streaming webhook).
+ * Separate from authenticateInternal which uses X-Internal-Key.
+ */
+function authenticateBearer(authHeader: string | undefined): boolean {
+  if (!ETL_NOTIFY_KEY || !authHeader) return false;
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  return !!match && match[1] === ETL_NOTIFY_KEY;
+}
+
+interface StreamingChange {
+  library_release_id: number;
+  on_streaming: boolean | null;
+}
+
+/**
+ * POST /internal/streaming-status-webhook
+ *
+ * Receives bulk ON_STREAMING updates from LML after each library.db upload.
+ * Updates the `on_streaming` column in the `library` table for each change.
+ *
+ * Auth: Authorization: Bearer <ETL_NOTIFY_KEY>
+ *
+ * Payload:
+ *   { changes: [{ library_release_id: number, on_streaming: boolean | null }], timestamp: string }
+ */
+internal_route.post('/streaming-status-webhook', async (req, res) => {
+  if (!authenticateBearer(req.get('Authorization'))) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const { changes } = req.body ?? {};
+
+  if (!Array.isArray(changes)) {
+    res.status(400).json({ error: 'Missing or invalid field: changes (expected array)' });
+    return;
+  }
+
+  let processed = 0;
+  let errors = 0;
+
+  for (const change of changes as StreamingChange[]) {
+    try {
+      const legacyId = change.library_release_id;
+      const onStreaming = change.on_streaming ?? null;
+
+      await db
+        .update(library)
+        .set({ on_streaming: onStreaming })
+        .where(eq(library.legacy_release_id, legacyId));
+
+      processed++;
+    } catch (e) {
+      console.error('[webhook] Streaming status update error:', e);
+      errors++;
+    }
+  }
+
+  res.json({ processed, errors });
+});
