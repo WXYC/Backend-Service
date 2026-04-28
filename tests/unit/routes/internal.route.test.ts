@@ -43,7 +43,7 @@ const mockDb = db as unknown as Record<string, jest.Mock>;
 const mockChain = mockDb.select();
 (mockChain as Record<string, jest.Mock>).limit = jest.fn().mockResolvedValue([]);
 (mockChain as Record<string, jest.Mock>).onConflictDoNothing = jest.fn().mockResolvedValue(undefined);
-const mockReturning = jest.fn().mockResolvedValue([]);
+const mockReturning = jest.fn();
 (mockChain as Record<string, jest.Mock>).returning = mockReturning;
 
 const app = express();
@@ -104,6 +104,12 @@ describe('POST /internal/flowsheet-webhook', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // jest.clearAllMocks() does not drain queued mockResolvedValueOnce
+    // values. Reset this mock fully so per-test queues don't bleed across
+    // tests. Default it to a created-row response; tests that need an
+    // update-branch response override with mockResolvedValueOnce.
+    mockReturning.mockReset();
+    mockReturning.mockResolvedValue([{ id: 5555, created: true }]);
   });
 
   // -- Auth --
@@ -200,8 +206,8 @@ describe('POST /internal/flowsheet-webhook', () => {
   // The dj-site addEntry controller has its own call site; this is the
   // tubafrenzy → BS path.
 
-  it('fires metadata enrichment when a track upserts with artist_name', async () => {
-    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+  it('fires metadata enrichment when a track INSERT lands (xmax=0 → created)', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555, created: true }]);
 
     const res = await request(app)
       .post('/internal/flowsheet-webhook')
@@ -217,9 +223,23 @@ describe('POST /internal/flowsheet-webhook', () => {
     });
   });
 
-  it('does not fire enrichment when entry_type is not track (talkset)', async () => {
-    mockReturning.mockResolvedValueOnce([{ id: 5556 }]);
+  it('does not fire enrichment when the upsert took the UPDATE branch (xmax≠0)', async () => {
+    // ON CONFLICT DO UPDATE on a re-sent legacy_entry_id sets xmax to the
+    // current tx id, so `created` is false. Skip enrichment here so benign
+    // tubafrenzy retries don't trigger LML re-fetch + 10-column rewrite +
+    // CDC/index churn on every duplicate webhook delivery.
+    mockReturning.mockResolvedValueOnce([{ id: 5555, created: false }]);
 
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', entry: validEntry });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).not.toHaveBeenCalled();
+  });
+
+  it('does not fire enrichment when entry_type is not track (talkset)', async () => {
     // flowsheetEntryType=7 maps to talkset (see mapProdEntryType); message
     // entries put the artistName in `message` and clear `artist_name`.
     const talksetEntry = { ...validEntry, flowsheetEntryType: 7, artistName: 'Talkset' };
@@ -233,8 +253,6 @@ describe('POST /internal/flowsheet-webhook', () => {
   });
 
   it('does not fire enrichment when artist_name is empty', async () => {
-    mockReturning.mockResolvedValueOnce([{ id: 5557 }]);
-
     const res = await request(app)
       .post('/internal/flowsheet-webhook')
       .set('X-Internal-Key', 'test-secret-key')

@@ -20,8 +20,10 @@ export interface EnrichmentInput {
   artistName: string;
   albumId?: number;
   artistId?: number;
-  albumTitle?: string;
-  trackTitle?: string;
+  // null is accepted because the webhook receiver's `truncate()` returns
+  // `string | null`; converting to undefined at every call site is noise.
+  albumTitle?: string | null;
+  trackTitle?: string | null;
 }
 
 export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
@@ -29,8 +31,8 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
     albumId: input.albumId,
     artistId: input.artistId,
     artistName: input.artistName,
-    albumTitle: input.albumTitle,
-    trackTitle: input.trackTitle,
+    albumTitle: input.albumTitle ?? undefined,
+    trackTitle: input.trackTitle ?? undefined,
   })
     .then(async (metadata) => {
       if (!metadata) return;
