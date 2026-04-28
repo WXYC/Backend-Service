@@ -1,14 +1,13 @@
--- Direct text-match pre-pass for the B-2.2 flowsheet → library linkage.
--- Links unlinked flowsheet rows to library rows whose normalized
--- (artist_name, album_title) text is identical, skipping the LML round-trip
--- entirely. Designed to run before flowsheet-lml-link-backfill so the LML
--- job processes a smaller residual.
+-- Direct text-match pass for the B-2.2 flowsheet → library backfill.
+-- See docs/flowsheet-linkage/README.md (section "Backfill: SQL-direct, not
+-- LML") for the full rationale.
 --
 -- Why this exists:
---   The default linkage path goes through LML, which on cache-miss takes
---   3-7 s per row. About 6.7% of unlinked flowsheet rows already have an
---   exact normalized text twin in the library — for those rows the LML
---   call is wasted work. This SQL pass links them in one transaction.
+--   About 6.7% of unlinked flowsheet rows have an exact normalized text twin
+--   in the library — `lower + strip leading "the " + strip non-alphanumeric`
+--   collapses most punctuation/case differences without any external lookup.
+--   For those rows we link them in a single prod transaction; the residual
+--   falls through to the rest of the SQL-direct chain.
 --
 -- Normalization (applied to both sides):
 --   - lowercase
