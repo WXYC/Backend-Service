@@ -58,6 +58,47 @@ export const BATCH_SIZE = 500;
  */
 export const THROTTLE_MS = 100;
 
+/**
+ * Resolve PARTITION_INDEX / PARTITION_COUNT env vars into a SQL fragment that
+ * picks every Nth row by id-modulo. The N-container deploy pattern is:
+ *
+ *   PARTITION_COUNT=4 PARTITION_INDEX=0 docker run ...
+ *   PARTITION_COUNT=4 PARTITION_INDEX=1 docker run ...
+ *   ...
+ *
+ * Each container processes a disjoint subset of unlinked flowsheet rows and
+ * they finish in roughly the same wall time. The default (count=1, index=0)
+ * is a no-op pass-through so single-container runs are unaffected.
+ *
+ * Exported so unit tests can drive it without mucking with process.env.
+ */
+export const resolvePartitionFilter = (
+  rawIndex: string | undefined = process.env.PARTITION_INDEX,
+  rawCount: string | undefined = process.env.PARTITION_COUNT,
+  // The flowsheet loadBatch reads from a single (unaliased) table, so the
+  // unqualified `"id"` is unambiguous. Parameter is here for symmetry with
+  // the B-1.2 backfill (which JOINs and must qualify).
+  columnSql: SQL = sql`"id"`
+): { sqlFragment: SQL | null; description: string } => {
+  const count = rawCount === undefined ? 1 : Number(rawCount);
+  const index = rawIndex === undefined ? 0 : Number(rawIndex);
+  if (!Number.isInteger(count) || count < 1) {
+    throw new Error(`Invalid PARTITION_COUNT=${JSON.stringify(rawCount)}; must be a positive integer.`);
+  }
+  if (!Number.isInteger(index) || index < 0 || index >= count) {
+    throw new Error(
+      `Invalid PARTITION_INDEX=${JSON.stringify(rawIndex)}; must be 0 <= index < PARTITION_COUNT (${count}).`
+    );
+  }
+  if (count === 1) {
+    return { sqlFragment: null, description: 'partition=none' };
+  }
+  return {
+    sqlFragment: sql`AND (${columnSql} % ${count}) = ${index}`,
+    description: `partition=${index}/${count}`,
+  };
+};
+
 export type FlowsheetRow = {
   id: number;
   artist_name: string | null;
@@ -274,7 +315,8 @@ export const processRow = async (
  * union pulls in both the never-had-FK rows (~889K) and the B-0.5 broken-FK
  * residuals stamped by `jobs/broken-fk-recovery`.
  */
-const loadBatch = async (afterId: number, batchSize: number): Promise<FlowsheetRow[]> => {
+const loadBatch = async (afterId: number, batchSize: number, partitionFilter: SQL | null): Promise<FlowsheetRow[]> => {
+  const partitionClause = partitionFilter ?? sql``;
   const rows = (await db.execute(sql`
     SELECT "id", "artist_name", "album_title"
     FROM "wxyc_schema"."flowsheet"
@@ -284,6 +326,7 @@ const loadBatch = async (afterId: number, batchSize: number): Promise<FlowsheetR
       AND "album_title" IS NOT NULL
       AND ("legacy_release_id" IS NULL OR "legacy_link_attempted_at" IS NOT NULL)
       AND "id" > ${afterId}
+      ${partitionClause}
     ORDER BY "id" ASC
     LIMIT ${batchSize}
   `)) as unknown as FlowsheetRow[];
@@ -300,12 +343,14 @@ export const runBackfill = async (opts: {
   batchSize?: number;
   throttleMs?: number;
   metrics?: MetricsSink;
+  partition?: { sqlFragment: SQL | null; description: string };
 }): Promise<RunResult> => {
   const batchSize = opts.batchSize ?? BATCH_SIZE;
   const throttleMs = opts.throttleMs ?? THROTTLE_MS;
   const metrics = opts.metrics ?? NULL_METRICS;
+  const partition = opts.partition ?? resolvePartitionFilter();
 
-  console.log(`[${JOB_NAME}] Starting. batchSize=${batchSize} throttleMs=${throttleMs}`);
+  console.log(`[${JOB_NAME}] Starting. batchSize=${batchSize} throttleMs=${throttleMs} ${partition.description}`);
 
   const totals: Totals = {
     scanned: 0,
@@ -319,7 +364,7 @@ export const runBackfill = async (opts: {
   let batchIndex = 0;
 
   while (true) {
-    const rows = await loadBatch(lastId, batchSize);
+    const rows = await loadBatch(lastId, batchSize, partition.sqlFragment);
     if (rows.length === 0) break;
 
     batchIndex += 1;

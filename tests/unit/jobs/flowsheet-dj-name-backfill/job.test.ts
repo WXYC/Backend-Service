@@ -14,6 +14,7 @@ import {
   verifyComplete,
   formatDuration,
   BATCH_SIZE,
+  resolveBatchSize,
 } from '../../../../jobs/flowsheet-dj-name-backfill/job';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
@@ -140,11 +141,41 @@ describe('flowsheet-dj-name-backfill: runBackfill loop control', () => {
     expect((db.execute as jest.Mock).mock.calls.length).toBe(1);
   });
 
-  it('uses BATCH_SIZE of 5000 (not unbounded)', () => {
-    // The whole point of the rewrite is bounded UPDATEs. If a future change
-    // accidentally bumps the batch size into the millions or removes the LIMIT,
-    // this test catches it.
+  it('defaults BATCH_SIZE to 5000 when BACKFILL_BATCH_SIZE is unset', () => {
+    // The whole point of the rewrite is bounded UPDATEs. The default is
+    // chosen so a single batch finishes well under the per-statement
+    // timeout even on a hot table; operators can opt into a larger value
+    // via env when the prod instance has headroom.
     expect(BATCH_SIZE).toBe(5000);
+  });
+});
+
+describe('flowsheet-dj-name-backfill: resolveBatchSize', () => {
+  it('returns 5000 by default when the env var is unset', () => {
+    expect(resolveBatchSize(undefined)).toBe(5000);
+  });
+
+  it('parses a custom positive integer', () => {
+    // Operators set this to e.g. 20000 once the prod instance has gp3
+    // capacity and async commit is in play — fewer commits + fewer trigger
+    // dispatches per batch amortizes per-tx overhead.
+    expect(resolveBatchSize('20000')).toBe(20000);
+  });
+
+  it('rejects zero (a no-op infinite loop)', () => {
+    expect(() => resolveBatchSize('0')).toThrow(/BACKFILL_BATCH_SIZE=.*positive integer/);
+  });
+
+  it('rejects negative values', () => {
+    expect(() => resolveBatchSize('-1')).toThrow(/BACKFILL_BATCH_SIZE=.*positive integer/);
+  });
+
+  it('rejects non-numeric values', () => {
+    expect(() => resolveBatchSize('twenty-thousand')).toThrow(/BACKFILL_BATCH_SIZE=.*positive integer/);
+  });
+
+  it('rejects fractional values (the planner LIMIT must be integral)', () => {
+    expect(() => resolveBatchSize('5000.5')).toThrow(/BACKFILL_BATCH_SIZE=.*positive integer/);
   });
 });
 

@@ -1,23 +1,45 @@
 #!/bin/bash
 #
-# Starts (or attaches to) the flowsheet-lml-link-backfill one-shot job on
-# EC2 as a detached docker container. The backfill iterates ~1.18M
-# flowsheet rows where album_id IS NULL, calling LML once per row at the
-# orchestrator's default throttle, so a full sweep takes ~1.5 days.
-# Detached docker (`docker run -d`) means the container survives the SSH
+# Starts (or attaches to) an LML-driven backfill one-shot job on EC2 as a
+# detached docker container — optionally as N partitioned containers in
+# parallel for an N-fold throughput speedup. The two callers in tree are
+# `flowsheet-lml-link-backfill` (B-2.2; ~1.18M flowsheet rows) and
+# `library-canonical-entity-backfill` (B-1.2; ~64K library rows). Both
+# call LML once per row at the orchestrator's default throttle.
+# Detached docker (`docker run -d`) means each container survives the SSH
 # session ending — no tmux needed (Amazon Linux doesn't ship it).
 #
 # Resumability: re-running this script after a crash or stop is safe.
-# Linked rows fall out of the backfill's WHERE filter on the next sweep,
-# so the job picks up where it left off without a persistent cursor.
+# Each backfill's WHERE filter sees only rows that haven't been resolved,
+# so the job picks up where it left off without a persistent cursor. With
+# partitioning, each partition independently resumes its own subset.
 #
 # Usage:
-#   ./run-lml-backfill.sh start          # default — start a new container
-#   ./run-lml-backfill.sh attach         # follow logs (Ctrl-C to detach)
-#   ./run-lml-backfill.sh status         # container state + last 20 log lines
-#   ./run-lml-backfill.sh stop           # docker stop the container
+#   ./run-lml-backfill.sh start          # default — start B-2.2, single container
+#   ./run-lml-backfill.sh attach         # follow logs of partition 0
+#   ./run-lml-backfill.sh status         # all containers + last log lines each
+#   ./run-lml-backfill.sh stop           # docker stop all partitions
+#
+#   # Run B-1.2 instead:
+#   BACKFILL=library-canonical-entity-backfill ./scripts/run-lml-backfill.sh start
+#
+#   # Run B-2.2 with 4 partitions in parallel:
+#   PARTITIONS=4 ./scripts/run-lml-backfill.sh start
+#
+#   # Attach to a specific partition (default = 0):
+#   PARTITION=2 ./scripts/run-lml-backfill.sh attach
+#
+# Container naming:
+#   PARTITIONS=1 (default) → container name = $IMAGE_NAME (no suffix)
+#   PARTITIONS=N (>1)      → container names = $IMAGE_NAME-0..$IMAGE_NAME-(N-1)
 #
 # Environment:
+#   BACKFILL          Job to run; doubles as the docker container name prefix
+#                     and the ECR repo name. Must match a directory under
+#                     jobs/ and an image in ECR.
+#                     (default: flowsheet-lml-link-backfill)
+#   PARTITIONS        Number of parallel containers (default: 1).
+#   PARTITION         Which partition to attach to (default: 0).
 #   REMOTE_ENV_PATH   Path to .env on EC2  (default: /home/ec2-user/.env)
 #   IMAGE_TAG         ECR image tag        (default: latest)
 #   SSH_HOST          SSH alias for EC2    (default: wxyc-ec2)
@@ -27,9 +49,34 @@ set -euo pipefail
 REMOTE_ENV_PATH="${REMOTE_ENV_PATH:-/home/ec2-user/.env}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 SSH_HOST="${SSH_HOST:-wxyc-ec2}"
-IMAGE_NAME="flowsheet-lml-link-backfill"
+IMAGE_NAME="${BACKFILL:-flowsheet-lml-link-backfill}"
+PARTITIONS="${PARTITIONS:-1}"
+PARTITION="${PARTITION:-0}"
+
+# Validate numeric env vars locally so the SSH'd bash never has to deal
+# with a stray non-integer that would expand into something weird.
+case "$PARTITIONS" in
+  ''|*[!0-9]*) echo "PARTITIONS must be a positive integer (got '$PARTITIONS')" >&2; exit 1 ;;
+esac
+[ "$PARTITIONS" -ge 1 ] || { echo "PARTITIONS must be >= 1" >&2; exit 1; }
+case "$PARTITION" in
+  ''|*[!0-9]*) echo "PARTITION must be a non-negative integer (got '$PARTITION')" >&2; exit 1 ;;
+esac
+[ "$PARTITION" -lt "$PARTITIONS" ] || { echo "PARTITION ($PARTITION) must be < PARTITIONS ($PARTITIONS)" >&2; exit 1; }
 
 CMD="${1:-start}"
+
+# Container-naming helper. Single-container runs keep the bare image name
+# so existing operator muscle memory ("attach to flowsheet-lml-link-backfill")
+# continues to work. Partitioned runs append the index.
+container_name_for_partition() {
+  local idx="$1"
+  if [ "$PARTITIONS" -eq 1 ]; then
+    echo "$IMAGE_NAME"
+  else
+    echo "$IMAGE_NAME-$idx"
+  fi
+}
 
 case "$CMD" in
   start)
@@ -42,16 +89,6 @@ step() { echo "[run-lml-backfill] \$*"; }
 fail() { echo "[run-lml-backfill] ERROR: \$*" >&2; exit 1; }
 
 step "Connected to EC2."
-
-# Refuse to start if a container with the same name is already running;
-# clean up an exited one so a fresh \`docker run\` can reuse the name.
-if docker ps --format '{{.Names}}' | grep -qx '$IMAGE_NAME'; then
-  fail "Container '$IMAGE_NAME' is already running. Run './run-lml-backfill.sh attach'."
-fi
-if docker ps -a --format '{{.Names}}' | grep -qx '$IMAGE_NAME'; then
-  step "Removing previous exited container '$IMAGE_NAME'..."
-  docker rm '$IMAGE_NAME' >/dev/null || fail "docker rm failed."
-fi
 
 [ -f '$REMOTE_ENV_PATH' ] || fail "Missing env file: $REMOTE_ENV_PATH"
 
@@ -91,62 +128,96 @@ IMAGE="\$AWS_ECR_URI/$IMAGE_NAME:$IMAGE_TAG"
 step "Pulling \$IMAGE..."
 docker pull "\$IMAGE" || fail "docker pull failed for \$IMAGE"
 
-step "Starting detached container '$IMAGE_NAME'..."
-# -d: detached; container survives SSH disconnect. No --rm — we want the
-# stopped container to stick around so post-mortem 'docker logs' works.
-# Stdout/stderr are captured by docker's default json-file log driver,
-# accessible via 'docker logs' (the 'attach' and 'status' subcommands).
-# DB_STATEMENT_TIMEOUT_MS=300000 (5 min) overrides the .env default of 5s,
-# which is right for HTTP request handlers but kills the backfill's batch
-# SELECT on the unlinked-flowsheet predicate (a multi-million-row scan).
-# See shared/database/src/client.ts for the per-caller-class rationale.
-CONTAINER_ID=\$(docker run -d --name '$IMAGE_NAME' \\
-  --env-file '$REMOTE_ENV_PATH' \\
-  -e DB_STATEMENT_TIMEOUT_MS=300000 \\
-  "\$IMAGE") \\
-  || fail "docker run failed."
+# Spawn one container per partition. PARTITION_COUNT is the same for all;
+# PARTITION_INDEX varies. The orchestrator's loadBatch uses these env vars
+# to filter rows by 'id % count = index', so the partitions touch disjoint
+# subsets and finish in roughly the same wall time.
+PARTITIONS=$PARTITIONS
+for IDX in \$(seq 0 \$((PARTITIONS - 1))); do
+  if [ "\$PARTITIONS" -eq 1 ]; then
+    NAME='$IMAGE_NAME'
+  else
+    NAME="$IMAGE_NAME-\$IDX"
+  fi
 
-step "Started. Container ID: \${CONTAINER_ID:0:12}"
+  # Refuse to start if a container with that name is already running;
+  # clean up an exited one so a fresh 'docker run' can reuse the name.
+  if docker ps --format '{{.Names}}' | grep -qx "\$NAME"; then
+    fail "Container '\$NAME' is already running. Stop it first."
+  fi
+  if docker ps -a --format '{{.Names}}' | grep -qx "\$NAME"; then
+    step "Removing previous exited container '\$NAME'..."
+    docker rm "\$NAME" >/dev/null || fail "docker rm \$NAME failed."
+  fi
+
+  step "Starting detached container '\$NAME' (PARTITION_INDEX=\$IDX/\$PARTITIONS)..."
+  # -d: detached; container survives SSH disconnect. No --rm — we want the
+  # stopped container to stick around so post-mortem 'docker logs' works.
+  # DB_STATEMENT_TIMEOUT_MS=300000 (5 min) overrides the .env default of 5s,
+  # which is right for HTTP request handlers but kills the backfill's batch
+  # SELECT on the unlinked-flowsheet predicate (a multi-million-row scan).
+  CONTAINER_ID=\$(docker run -d --name "\$NAME" \\
+    --env-file '$REMOTE_ENV_PATH' \\
+    -e DB_STATEMENT_TIMEOUT_MS=300000 \\
+    -e PARTITION_INDEX=\$IDX \\
+    -e PARTITION_COUNT=\$PARTITIONS \\
+    "\$IMAGE") \\
+    || fail "docker run \$NAME failed."
+  step "  Started '\$NAME'. Container ID: \${CONTAINER_ID:0:12}"
+done
+
+step "All \$PARTITIONS partition(s) started."
 echo "Inspect with:"
-echo "  ./run-lml-backfill.sh attach    # live tail (Ctrl-C to detach, doesn't stop the job)"
-echo "  ./run-lml-backfill.sh status    # one-shot status + last 20 log lines"
-echo "  ./run-lml-backfill.sh stop      # stop the container"
+echo "  BACKFILL=$IMAGE_NAME PARTITIONS=$PARTITIONS ./run-lml-backfill.sh status    # all partitions + tails"
+echo "  BACKFILL=$IMAGE_NAME PARTITIONS=$PARTITIONS PARTITION=0 ./run-lml-backfill.sh attach    # follow one"
+echo "  BACKFILL=$IMAGE_NAME PARTITIONS=$PARTITIONS ./run-lml-backfill.sh stop      # stop all partitions"
 EOF
     ;;
 
   attach)
+    NAME=$(container_name_for_partition "$PARTITION")
     # -t forces a TTY so Ctrl-C cleanly detaches docker logs without
-    # killing the SSH session. The --since=0 keeps things tidy on first
-    # attach; --follow streams new lines as they arrive.
-    exec ssh -t "$SSH_HOST" "docker logs -f --tail 50 '$IMAGE_NAME'"
+    # killing the SSH session. --tail 50 keeps things tidy on first attach.
+    exec ssh -t "$SSH_HOST" "docker logs -f --tail 50 '$NAME'"
     ;;
 
   status)
+    # Filter by container-name prefix. Bare $IMAGE_NAME catches both the
+    # single-container case and all '$IMAGE_NAME-N' partitions.
     ssh "$SSH_HOST" bash <<EOF
 set -uo pipefail
-echo "Container:"
+echo "Containers (prefix '$IMAGE_NAME'):"
 docker ps -a --filter "name=$IMAGE_NAME" \\
   --format 'table {{.Names}}\t{{.Status}}\t{{.RunningFor}}' \\
-  || echo "  (not present)"
+  || echo "  (none present)"
 
-echo
-echo "Last 20 log lines:"
-docker logs --tail 20 '$IMAGE_NAME' 2>&1 || echo "  (no logs available)"
+# Per-container last 5 log lines. Walk the names so each gets its own header.
+NAMES=\$(docker ps -a --filter "name=$IMAGE_NAME" --format '{{.Names}}' | sort)
+if [ -n "\$NAMES" ]; then
+  for n in \$NAMES; do
+    echo
+    echo "--- \$n (last 5) ---"
+    docker logs --tail 5 "\$n" 2>&1 || echo "  (no logs)"
+  done
+fi
 EOF
     ;;
 
   stop)
     ssh "$SSH_HOST" bash <<EOF
 set -uo pipefail
-if docker ps --format '{{.Names}}' | grep -qx '$IMAGE_NAME'; then
-  echo "Stopping '$IMAGE_NAME'..."
-  docker stop '$IMAGE_NAME'
-else
-  echo "Container '$IMAGE_NAME' is not running."
+NAMES=\$(docker ps --filter "name=$IMAGE_NAME" --format '{{.Names}}' | sort)
+if [ -z "\$NAMES" ]; then
+  echo "No running containers matching prefix '$IMAGE_NAME'."
+  exit 0
 fi
+for n in \$NAMES; do
+  echo "Stopping '\$n'..."
+  docker stop "\$n"
+done
 
-# Leave the stopped container in place so post-mortem 'docker logs' works.
-# 'start' will 'docker rm' it on the next run.
+# Leave stopped containers in place so post-mortem 'docker logs' works.
+# 'start' will 'docker rm' them on the next run.
 EOF
     ;;
 
