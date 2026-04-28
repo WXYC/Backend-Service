@@ -255,6 +255,25 @@ describe('runBackfill', () => {
     expect(result.totals.scanned).toBe(0);
   });
 
+  it('joins library against artists to read artist_name (denormalized library column is NULL)', async () => {
+    // Regression: the library schema has both `artist_id` (FK) and a
+    // denormalized `artist_name` column. The denormalized column is NULL
+    // on every row in production; the source of truth is
+    // `wxyc_schema.artists.artist_name` reached via the FK. Without the
+    // JOIN, processRow short-circuits to no_match for every row and the
+    // job runs at throttle speed without ever calling LML.
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    await runBackfill({ lookup: jest.fn(), throttleMs: 0 });
+
+    const select = findExecuteCallMatching(/SELECT/i);
+    const sqlText = renderSql(select?.[0]);
+    expect(sqlText).toMatch(/FROM\s+"wxyc_schema"\."library"/i);
+    expect(sqlText).toMatch(/JOIN\s+"wxyc_schema"\."artists"/i);
+    expect(sqlText).toMatch(/a\."artist_name"/i);
+    expect(sqlText).toMatch(/a\."id"\s*=\s*l\."artist_id"/i);
+  });
+
   it('paginates forward by id (last-id cursor restartable across batches)', async () => {
     // The second loadBatch must filter `id > 2` (the last id from batch 1)
     // — otherwise we'd re-scan the same rows forever (the WHERE filter on

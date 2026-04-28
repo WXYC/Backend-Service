@@ -132,15 +132,26 @@ export const processRow = async (
  * Read the next batch of unresolved library rows. The id-cursor predicate
  * keeps the SELECT bounded as the run progresses; combined with the
  * canonical_entity_id IS NULL filter, it also makes restarts cheap.
+ *
+ * Joins `artists` because the library's denormalized `artist_name` column
+ * is NULL across the board — the source of truth is
+ * `wxyc_schema.artists.artist_name` reached via the FK `library.artist_id`.
+ * Without the JOIN, processRow's `if (!artist) return 'no_match'`
+ * short-circuits every row and the job runs at throttle speed without
+ * ever calling LML.
  */
 const loadBatch = async (afterId: number, batchSize: number): Promise<LibraryRow[]> => {
   const rows = (await db.execute(sql`
-    SELECT "id", "artist_name", "album_title"
-    FROM "wxyc_schema"."library"
-    WHERE "canonical_entity_id" IS NULL
-      AND "canonical_entity_resolved_at" IS NULL
-      AND "id" > ${afterId}
-    ORDER BY "id" ASC
+    SELECT
+      l."id",
+      a."artist_name" AS "artist_name",
+      l."album_title"
+    FROM "wxyc_schema"."library" l
+    LEFT JOIN "wxyc_schema"."artists" a ON a."id" = l."artist_id"
+    WHERE l."canonical_entity_id" IS NULL
+      AND l."canonical_entity_resolved_at" IS NULL
+      AND l."id" > ${afterId}
+    ORDER BY l."id" ASC
     LIMIT ${batchSize}
   `)) as unknown as LibraryRow[];
   return rows ?? [];
