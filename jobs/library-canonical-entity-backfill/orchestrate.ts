@@ -65,7 +65,9 @@ export const resolvePartitionFilter = (
     throw new Error(`Invalid PARTITION_COUNT=${JSON.stringify(rawCount)}; must be a positive integer.`);
   }
   if (!Number.isInteger(index) || index < 0 || index >= count) {
-    throw new Error(`Invalid PARTITION_INDEX=${JSON.stringify(rawIndex)}; must be 0 <= index < PARTITION_COUNT (${count}).`);
+    throw new Error(
+      `Invalid PARTITION_INDEX=${JSON.stringify(rawIndex)}; must be 0 <= index < PARTITION_COUNT (${count}).`
+    );
   }
   if (count === 1) {
     return { sqlFragment: null, description: 'partition=none' };
@@ -181,11 +183,7 @@ export const processRow = async (
  * short-circuits every row and the job runs at throttle speed without
  * ever calling LML.
  */
-const loadBatch = async (
-  afterId: number,
-  batchSize: number,
-  partitionFilter: SQL | null
-): Promise<LibraryRow[]> => {
+const loadBatch = async (afterId: number, batchSize: number, partitionFilter: SQL | null): Promise<LibraryRow[]> => {
   const partitionClause = partitionFilter ?? sql``;
   const rows = (await db.execute(sql`
     SELECT
@@ -218,9 +216,7 @@ export const runBackfill = async (opts: {
   const throttleMs = opts.throttleMs ?? THROTTLE_MS;
   const partition = opts.partition ?? resolvePartitionFilter();
 
-  console.log(
-    `[${JOB_NAME}] Starting. batchSize=${batchSize} throttleMs=${throttleMs} ${partition.description}`
-  );
+  console.log(`[${JOB_NAME}] Starting. batchSize=${batchSize} throttleMs=${throttleMs} ${partition.description}`);
 
   const totals: Totals = { scanned: 0, auto_accept: 0, review: 0, no_match: 0, error: 0 };
   let lastId = 0;

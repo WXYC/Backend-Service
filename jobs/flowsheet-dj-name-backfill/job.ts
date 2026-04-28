@@ -40,9 +40,7 @@ const resolveBatchSize = (raw: string | undefined = process.env.BACKFILL_BATCH_S
   if (raw === undefined) return 5000;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(
-      `Invalid BACKFILL_BATCH_SIZE=${JSON.stringify(raw)}; must be a positive integer.`
-    );
+    throw new Error(`Invalid BACKFILL_BATCH_SIZE=${JSON.stringify(raw)}; must be a positive integer.`);
   }
   return parsed;
 };
