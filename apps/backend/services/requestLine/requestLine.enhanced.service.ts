@@ -22,6 +22,7 @@ import { getConfig, isParsingEnabled } from './config.js';
 import { parseRequest, isParserAvailable } from '../ai/index.js';
 import { executeSearchPipeline, getSearchTypeFromState } from './search/index.js';
 import { findSimilarArtist } from '../library.service.js';
+import { LibraryArtistNameMissingError } from '../library-artist-name-assertion.service.js';
 import { searchTrackReleases, lookupMetadata, validateTrackOnRelease, isLmlConfigured } from '../lml/lml.client.js';
 import { fetchArtworkForItems } from '../artwork/index.js';
 import {
@@ -206,6 +207,10 @@ export async function processRequest(body: RequestLineRequestBody): Promise<Unif
         parsed = { ...parsed, artist: correctedArtist };
       }
     } catch (error) {
+      if (error instanceof LibraryArtistNameMissingError) {
+        // Catalog-search precondition is global; surface the 503 instead of degrading silently.
+        throw error;
+      }
       console.warn('[RequestLine] Artist correction failed:', error);
     }
   }

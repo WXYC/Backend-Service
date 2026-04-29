@@ -10,7 +10,7 @@ import WxycError from '../utils/error.js';
  * points operators at the backfill job.
  */
 export class LibraryArtistNameMissingError extends WxycError {
-  constructor(public readonly nullCount: number) {
+  constructor(nullCount: number) {
     super(
       `library.artist_name has ${nullCount} NULL row(s); catalog search is disabled. ` +
         `Run jobs/library-artist-name-backfill/ and restart the backend.`,
