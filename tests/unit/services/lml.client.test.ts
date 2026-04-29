@@ -150,6 +150,52 @@ describe('lml.client', () => {
       expect(mockSpanSetAttributes).not.toHaveBeenCalled();
     });
 
+    it('does not call setAttributes when cache_stats is an array (defensive narrowing)', async () => {
+      // Defensive narrowing: Object.entries([1, 2, 3]) yields [["0",1],["1",2],["2",3]],
+      // which would otherwise project as junk attributes lml.cache.0=1, lml.cache.1=2, ...
+      // Guard the projection to require a real plain object (not array, not scalar).
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [],
+            search_type: 'none',
+            song_not_found: false,
+            found_on_compilation: false,
+            cache_stats: [1, 2, 3],
+          }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre');
+
+      expect(mockSpanSetAttributes).not.toHaveBeenCalled();
+    });
+
+    it('resolves successfully when span.setAttributes throws (observability must not break the request path)', async () => {
+      // Wrapping in try/catch keeps lookupMetadata's contract: a Sentry/SDK bug
+      // in setAttributes must not surface as a failed metadata lookup.
+      const cache_stats = { memory_hits: 1, pg_hits: 4 };
+      const lookupResponse = {
+        results: [],
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
+        cache_stats,
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(lookupResponse),
+      } as unknown as globalThis.Response);
+
+      mockSpanSetAttributes.mockImplementation(() => {
+        throw new Error('sentry boom');
+      });
+
+      const result = await lookupMetadata('Autechre');
+
+      expect(result).toEqual(lookupResponse);
+    });
+
     it('returns the LookupResponse intact when wrapped in a span', async () => {
       // Regression: the span wrapper must not swallow or alter the response payload.
       const lookupResponse = {
