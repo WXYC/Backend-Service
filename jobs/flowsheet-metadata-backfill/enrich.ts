@@ -150,8 +150,24 @@ export const applyEnrichment = async (row: EnrichRow, response: LmlLookupRespons
     return updated.length === 0 ? 'enriched_match_raced' : 'enriched_match';
   }
 
-  // No-match: synthesize search URLs and stamp. The other 7 metadata
-  // columns stay NULL — same shape the runtime path produces.
+  // No-match: synthesize search URLs and stamp. Critically, the other 7
+  // metadata columns are NOT touched. This diverges from the runtime path
+  // (`apps/backend/services/metadata/enrichment.service.ts`) — the
+  // runtime nulls all 10 columns on no-match because it runs at insert
+  // time over fresh rows with nothing to lose.
+  //
+  // The backfill encounters rows that may already have prior values from
+  // out-of-band paths: the 2026-04-28 inline recovery
+  // (`scripts/backfill-metadata.ts`) wrote the full 10-column payload to
+  // ~618 rows pre-#658, so their `metadata_attempt_at` is NULL even
+  // though `artwork_url` / `discogs_url` / etc are populated. If LML now
+  // returns no-match for such a row, the recovery's prior data is the
+  // better signal and should be preserved. Nulling here would be silent
+  // data loss.
+  //
+  // The divergence is intentional, not a bug. Future: if the runtime
+  // path ever needs to run over rows with prior values (e.g., a
+  // re-enrichment trigger), it should adopt the same preserve semantics.
   const updated = await db
     .update(flowsheet)
     .set({
