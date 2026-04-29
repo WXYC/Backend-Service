@@ -36,6 +36,16 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
   })
     .then(async (metadata) => {
       if (!metadata) return;
+      // The `?? null` on the 7 non-search-URL columns nulls them on
+      // no-match. Safe here because the runtime path runs at insert
+      // time on fresh rows — there's nothing to overwrite. The
+      // backfill (`jobs/flowsheet-metadata-backfill/enrich.ts`) takes
+      // the opposite stance on no-match (preserves prior values)
+      // because it runs over rows the recovery script may have
+      // populated. See that file's no-match branch for the rationale;
+      // if the runtime ever runs over rows with prior values
+      // (e.g., a re-enrichment trigger), this side should adopt the
+      // same preserve semantics.
       await db
         .update(flowsheet)
         .set({
