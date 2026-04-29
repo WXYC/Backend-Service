@@ -177,7 +177,7 @@ describe('Metadata via LML (Mock API)', () => {
   });
 
   describe('LML failure handling', () => {
-    test('LML 500 error: entry created, search URLs still present', async () => {
+    test('LML 500 error: entry created, no metadata columns populated, no attempt stamp', async () => {
       if (!mockApiAvailable) return;
 
       // Wait for any in-flight fire-and-forget to settle, then reset + simulate
@@ -195,13 +195,26 @@ describe('Metadata via LML (Mock API)', () => {
         })
         .expect(201);
 
-      // Entry should be created regardless of LML failure
+      // Entry should be created regardless of LML failure — the HTTP path
+      // doesn't depend on metadata enrichment.
       expect(addRes.body.id).toBeDefined();
 
-      // Search URLs are constructed locally and should still appear
-      const entry = await waitForMetadata(addRes.body.id, 'youtube_music_url', 500);
-      expect(entry).not.toBeNull();
-      expect(entry.youtube_music_url).toContain('music.youtube.com');
+      // Per #639, fetchMetadata re-throws on LML failure. The .catch branch
+      // in enrichment.service.ts logs to Sentry and deliberately does not
+      // touch the row, so:
+      //   - metadata_attempt_at stays NULL (the row stays retryable by the
+      //     historical drain in #638 and the recurring drift-repair sweep);
+      //   - none of the metadata URL columns are populated, including the
+      //     synthesized search URLs (they used to be filled here, which
+      //     conflated tried-and-no-match with tried-and-LML-failed).
+      // Give the fire-and-forget enough time to settle into the .catch.
+      await new Promise((r) => setTimeout(r, 500));
+      const res = await request.get('/flowsheet').query({ limit: 20 }).send();
+      const entry = res.body.entries?.find((e) => e.id === addRes.body.id);
+      expect(entry).toBeDefined();
+      expect(entry.youtube_music_url).toBeNull();
+      expect(entry.bandcamp_url).toBeNull();
+      expect(entry.soundcloud_url).toBeNull();
     });
   });
 });
