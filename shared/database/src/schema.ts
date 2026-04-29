@@ -486,6 +486,17 @@ export const flowsheet = wxyc_schema.table(
     // /flowsheet `?shows_limit=N` listing endpoint sequentially scans the
     // 2.6M-row table on every dj-site poll. See migration 0068 + issue #511.
     index('flowsheet_show_id_idx').on(table.show_id),
+    // Partial B-tree on (id) covering the `metadata_attempt_at IS NULL`
+    // tail. Both #638 (historical drain) and #639 Phase 2 (recurring
+    // drift-repair sweep) keyset-paginate through this slice — without
+    // the index every batch seq-scans the 2.6M+ row table just to find
+    // the small NULL residual. See migration 0070 + issue #659. Built
+    // CONCURRENTLY out-of-band on prod before the migration deploys.
+    index('flowsheet_metadata_attempt_pending_idx')
+      .on(table.id)
+      .where(
+        sql`${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL AND ${table.metadata_attempt_at} IS NULL`
+      ),
   ]
 );
 
