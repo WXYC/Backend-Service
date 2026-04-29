@@ -139,9 +139,11 @@ export async function lookupMetadata(artist: string, album?: string, song?: stri
 
     // cache_stats schema is freeform today (additionalProperties: true). Until
     // wxyc-shared#86 tightens the type, treat it as a loose record and only
-    // forward numeric fields onto the span.
-    const stats = (parsed as { cache_stats?: Record<string, unknown> }).cache_stats;
-    if (stats && span) {
+    // forward numeric fields onto the span. Narrow defensively to a real plain
+    // object — Object.entries on a string/array would produce junk attributes
+    // like lml.cache.0=...
+    const stats = (parsed as { cache_stats?: unknown }).cache_stats;
+    if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
       const attrs: Record<string, number> = {};
       for (const [key, value] of Object.entries(stats)) {
         if (typeof value === 'number' && Number.isFinite(value)) {
@@ -149,7 +151,14 @@ export async function lookupMetadata(artist: string, album?: string, song?: stri
         }
       }
       if (Object.keys(attrs).length > 0) {
-        span.setAttributes(attrs);
+        // Observability must never break the request path. If the Sentry SDK
+        // (or a custom transport hook) throws, swallow the error and continue
+        // — the lookup result is what callers depend on.
+        try {
+          span.setAttributes(attrs);
+        } catch (err) {
+          console.warn('lml.client: failed to project cache_stats onto span', err);
+        }
       }
     }
 
