@@ -34,7 +34,10 @@ export interface IFSEntryMetadata {
 // search_doc is a STORED GENERATED tsvector used only by the search hot path
 // (apps/backend/services/search.service.ts); the controller layer never reads
 // or constructs it, so it is excluded from the application-facing entry type.
-export interface IFSEntry extends Omit<FSEntry, 'search_doc' | 'legacy_link_attempted_at'> {
+// `legacy_link_attempted_at` and `metadata_attempt_at` are job-internal
+// markers consumed only by the broken-FK recovery and metadata backfill
+// jobs respectively, so they're excluded from the controller-facing entry.
+export interface IFSEntry extends Omit<FSEntry, 'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at'> {
   label_id: number | null;
   rotation_bin: string | null;
   on_streaming: boolean | null;

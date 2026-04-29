@@ -439,6 +439,14 @@ export const flowsheet = wxyc_schema.table(
     // or the FK resolver hasn't run yet". See migration 0063 +
     // jobs/broken-fk-recovery for the population pass.
     legacy_link_attempted_at: timestamp('legacy_link_attempted_at', { withTimezone: true }),
+    // #639 marker: timestamp set when LML metadata fetch responded for this
+    // row (success-with-match OR success-no-match). NULL means either the
+    // row pre-dates the marker or LML threw on the attempt. Lets the
+    // historical drain (#638) and the recurring drift-repair sweep target
+    // exactly the rows that still need an attempt, without confusing
+    // tried-and-no-match for tried-and-LML-failed. Stamped by
+    // `enrichment.service.ts` and #638's job.
+    metadata_attempt_at: timestamp('metadata_attempt_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, track+dj=B, album=C, label=D). Managed by
     // migration 0054 (which extended the original 0052 expression to include

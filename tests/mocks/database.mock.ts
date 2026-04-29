@@ -109,6 +109,7 @@ export const flowsheet = {
   legacy_entry_id: 'legacy_entry_id',
   legacy_release_id: 'legacy_release_id',
   legacy_link_attempted_at: 'legacy_link_attempted_at',
+  metadata_attempt_at: 'metadata_attempt_at',
   entry_type: 'entry_type',
   track_title: 'track_title',
   album_title: 'album_title',

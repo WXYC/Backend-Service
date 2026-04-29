@@ -187,15 +187,16 @@ describe('metadata.service', () => {
     expect(result?.album?.appleMusicUrl).toBeUndefined();
   });
 
-  it('returns search URLs when lookup fails', async () => {
+  it('rethrows when lookup fails so the caller can route to Sentry', async () => {
+    // The previous behavior — swallowing LML errors and falling through to
+    // synthesized search URLs — is removed in #639. Failures now propagate
+    // to the caller (`enrichment.service.ts` Sentry-reports them; the
+    // historical-drain job in #638 logs and skips). A swallowed throw makes
+    // the new `metadata_attempt_at` stamp meaningless because the runtime
+    // path can no longer distinguish "tried-no-match" from "tried-LML-down".
     mockLookupMetadata.mockRejectedValue(new Error('LML down'));
 
-    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
-
-    expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
-    expect(result?.album?.bandcampUrl).toContain('bandcamp.com');
-    expect(result?.album?.spotifyUrl).toBeUndefined();
-    expect(result?.artist).toBeUndefined();
+    await expect(fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' })).rejects.toThrow('LML down');
   });
 
   it('returns search URLs when lookup returns empty results', async () => {
