@@ -11,6 +11,11 @@
 -- `.catch()` branch deliberately leaves the column NULL so transient
 -- failures stay retryable).
 --
+-- NULL has three causes, all of which the drain/sweep correctly retry:
+-- (1) row pre-dates this marker, (2) row was inserted in the deploy race
+-- window between this DDL applying and the runtime stamp shipping, and
+-- (3) LML threw on the attempt. See schema.ts for the full prose.
+--
 -- Filter shared by both modes:
 --   WHERE entry_type = 'track'
 --     AND artist_name IS NOT NULL

@@ -440,12 +440,18 @@ export const flowsheet = wxyc_schema.table(
     // jobs/broken-fk-recovery for the population pass.
     legacy_link_attempted_at: timestamp('legacy_link_attempted_at', { withTimezone: true }),
     // #639 marker: timestamp set when LML metadata fetch responded for this
-    // row (success-with-match OR success-no-match). NULL means either the
-    // row pre-dates the marker or LML threw on the attempt. Lets the
-    // historical drain (#638) and the recurring drift-repair sweep target
-    // exactly the rows that still need an attempt, without confusing
-    // tried-and-no-match for tried-and-LML-failed. Stamped by
-    // `enrichment.service.ts` and #638's job.
+    // row (success-with-match OR success-no-match). NULL has three causes,
+    // all valid targets for the historical drain (#638) and the recurring
+    // drift-repair sweep (#639 Phase 2):
+    //   1. Row pre-dates this marker (every flowsheet row before 0069).
+    //   2. Row was inserted between 0069's apply and the runtime stamp's
+    //      deploy (the small race window during the same release).
+    //   3. LML threw on the attempt — `.catch` in enrichment.service.ts
+    //      logs to Sentry under subsystem='metadata' and leaves the column
+    //      NULL precisely so the row stays retryable.
+    // Lets both jobs target exactly the rows that still need an attempt,
+    // without confusing tried-and-no-match for tried-and-LML-failed.
+    // Stamped by `enrichment.service.ts` and #638's job.
     metadata_attempt_at: timestamp('metadata_attempt_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, track+dj=B, album=C, label=D). Managed by
