@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/flowsheet-metadata-backfill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot backfill: drain the historical flowsheet rows that never ran LML metadata enrichment (#631 / #638). Recurring drift-repair flip is tracked under #639 Phase 2.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_flowsheet_metadata_backfill:ci -f ../../Dockerfile.flowsheet-metadata-backfill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.50.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
