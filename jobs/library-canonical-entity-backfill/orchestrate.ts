@@ -26,6 +26,17 @@ import { resolveCanonicalEntity, type Resolution } from './resolve.js';
 
 const JOB_NAME = 'library-canonical-entity-backfill';
 
+/**
+ * Schema-qualified table references, honoring `WXYC_SCHEMA_NAME` so parallel
+ * Jest workers (which override the env var) and any future integration test
+ * harness target the right schema. The default `wxyc_schema` matches
+ * production. Sanitised against `"` to keep the SQL well-formed. Same
+ * shape as `jobs/flowsheet-metadata-backfill/orchestrate.ts` (PR #673).
+ */
+const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
+const LIBRARY_TABLE = sql.raw(`"${SCHEMA}"."library"`);
+const ARTISTS_TABLE = sql.raw(`"${SCHEMA}"."artists"`);
+
 export const BATCH_SIZE = 500;
 
 /**
@@ -115,7 +126,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 export const applyResolution = async (libraryId: number, resolution: Resolution): Promise<void> => {
   if (resolution.status === 'auto_accept') {
     await db.execute(sql`
-      UPDATE "wxyc_schema"."library"
+      UPDATE ${LIBRARY_TABLE}
       SET "canonical_entity_id" = ${resolution.canonical_entity_id},
           "canonical_entity_confidence" = ${resolution.confidence},
           "canonical_entity_resolved_at" = now()
@@ -127,7 +138,7 @@ export const applyResolution = async (libraryId: number, resolution: Resolution)
 
   if (resolution.status === 'review') {
     await db.execute(sql`
-      UPDATE "wxyc_schema"."library"
+      UPDATE ${LIBRARY_TABLE}
       SET "canonical_entity_resolved_at" = now()
       WHERE "id" = ${libraryId}
         AND "canonical_entity_id" IS NULL
@@ -190,8 +201,8 @@ const loadBatch = async (afterId: number, batchSize: number, partitionFilter: SQ
       l."id",
       a."artist_name" AS "artist_name",
       l."album_title"
-    FROM "wxyc_schema"."library" l
-    LEFT JOIN "wxyc_schema"."artists" a ON a."id" = l."artist_id"
+    FROM ${LIBRARY_TABLE} l
+    LEFT JOIN ${ARTISTS_TABLE} a ON a."id" = l."artist_id"
     WHERE l."canonical_entity_id" IS NULL
       AND l."canonical_entity_resolved_at" IS NULL
       AND l."id" > ${afterId}
