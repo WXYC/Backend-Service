@@ -54,24 +54,16 @@ RDS_PASS=$(parse_env_var DB_PASSWORD)
 RDS_NAME=$(parse_env_var DB_NAME)
 
 if [ -n "$RDS_USER" ] && [ -n "$RDS_PASS" ] && [ -n "$RDS_NAME" ]; then
-    STALE_COUNT=$(PGPASSWORD="$RDS_PASS" psql -h localhost -p "$TUNNEL_PORT" -U "$RDS_USER" -d "$RDS_NAME" -tAc \
-        "SELECT count(*) FROM pg_replication_slots WHERE NOT active;" 2>/dev/null)
+    SLOT_EXISTS=$(PGPASSWORD="$RDS_PASS" psql -h localhost -p "$TUNNEL_PORT" -U "$RDS_USER" -d "$RDS_NAME" -tAc \
+        "SELECT 1 FROM pg_replication_slots WHERE slot_name = 'local_sync' AND NOT active;" 2>/dev/null)
 
-    if [ "$STALE_COUNT" -gt 0 ] 2>/dev/null; then
-        echo "  Found $STALE_COUNT inactive slot(s). Dropping..."
-        PGPASSWORD="$RDS_PASS" psql -h localhost -p "$TUNNEL_PORT" -U "$RDS_USER" -d "$RDS_NAME" -c "
-        DO \$\$
-        DECLARE r RECORD;
-        BEGIN
-            FOR r IN SELECT slot_name FROM pg_replication_slots WHERE NOT active
-            LOOP
-                PERFORM pg_drop_replication_slot(r.slot_name);
-                RAISE NOTICE 'Dropped slot: %', r.slot_name;
-            END LOOP;
-        END \$\$;
-        "
+    if [ "$SLOT_EXISTS" = "1" ]; then
+        echo "  Found inactive local_sync slot. Dropping..."
+        PGPASSWORD="$RDS_PASS" psql -h localhost -p "$TUNNEL_PORT" -U "$RDS_USER" -d "$RDS_NAME" -c \
+            "SELECT pg_drop_replication_slot('local_sync');"
+        echo "  Dropped."
     else
-        echo "  No orphaned slots found."
+        echo "  No local_sync slot to clean up."
     fi
 else
     echo "  Warning: could not read RDS credentials — skipping slot cleanup on publisher."

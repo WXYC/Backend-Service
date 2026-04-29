@@ -101,28 +101,20 @@ fi
 
 echo "  wal_level = logical ✓"
 
-# --- Step 4: Drop stale replication slots on RDS ---
+# --- Step 4: Drop stale local_sync replication slot on RDS ---
 
 echo ""
-echo "Checking for stale replication slots on RDS..."
-STALE_COUNT=$(PGPASSWORD="$RDS_PASS" psql -h localhost -p "$TUNNEL_PORT" -U "$RDS_USER" -d "$RDS_NAME" -tAc \
-    "SELECT count(*) FROM pg_replication_slots WHERE NOT active;" 2>/dev/null)
+echo "Checking for stale local_sync replication slot on RDS..."
+SLOT_EXISTS=$(PGPASSWORD="$RDS_PASS" psql -h localhost -p "$TUNNEL_PORT" -U "$RDS_USER" -d "$RDS_NAME" -tAc \
+    "SELECT 1 FROM pg_replication_slots WHERE slot_name = 'local_sync' AND NOT active;" 2>/dev/null)
 
-if [ "$STALE_COUNT" -gt 0 ] 2>/dev/null; then
-    echo "  Found $STALE_COUNT inactive slot(s). Dropping..."
-    PGPASSWORD="$RDS_PASS" psql -h localhost -p "$TUNNEL_PORT" -U "$RDS_USER" -d "$RDS_NAME" -c "
-    DO \$\$
-    DECLARE r RECORD;
-    BEGIN
-        FOR r IN SELECT slot_name FROM pg_replication_slots WHERE NOT active
-        LOOP
-            PERFORM pg_drop_replication_slot(r.slot_name);
-            RAISE NOTICE 'Dropped stale slot: %', r.slot_name;
-        END LOOP;
-    END \$\$;
-    "
+if [ "$SLOT_EXISTS" = "1" ]; then
+    echo "  Found inactive local_sync slot. Dropping..."
+    PGPASSWORD="$RDS_PASS" psql -h localhost -p "$TUNNEL_PORT" -U "$RDS_USER" -d "$RDS_NAME" -c \
+        "SELECT pg_drop_replication_slot('local_sync');"
+    echo "  Dropped."
 else
-    echo "  No stale slots found."
+    echo "  No stale local_sync slot found."
 fi
 
 # --- Step 5: Create publication on RDS (if it doesn't exist) ---
