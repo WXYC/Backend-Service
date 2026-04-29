@@ -599,11 +599,7 @@ async function batchReconcile() {
 
 // --- SSE CDC client (used for tubafrenzy, since Kattare's Apache proxy lacks mod_proxy_wstunnel) ---
 
-function connectSse(
-  label: string,
-  sseUrl: string,
-  tableHandlers: Record<string, (event: CdcEvent) => Promise<void>>
-) {
+function connectSse(label: string, sseUrl: string, tableHandlers: Record<string, (event: CdcEvent) => Promise<void>>) {
   const url = new URL(sseUrl);
   url.searchParams.set('key', CDC_SECRET!);
   logInfo(`[${label}] Connecting to ${sseUrl}...`);
