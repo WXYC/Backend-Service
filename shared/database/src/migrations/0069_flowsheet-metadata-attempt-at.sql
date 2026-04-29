@@ -1,0 +1,24 @@
+-- #639 marker column: stamp rows where the LML metadata fetch responded
+-- (success-with-match OR success-no-match).
+--
+-- Background: `fireAndForgetMetadataForRow` is best-effort — transient LML
+-- failures will keep producing NULL-artwork rows at low rates indefinitely.
+-- A search-URL-presence filter cannot distinguish *tried-and-no-match* from
+-- *tried-and-LML-failed*, so the historical drain (#638) and the recurring
+-- drift-repair sweep (#639 Phase 2) need a real attempt marker. The runtime
+-- path stamps this column from `apps/backend/services/metadata/enrichment.service.ts`
+-- inside the `.then()` branch (which only runs when LML responded — the
+-- `.catch()` branch deliberately leaves the column NULL so transient
+-- failures stay retryable).
+--
+-- Filter shared by both modes:
+--   WHERE entry_type = 'track'
+--     AND artist_name IS NOT NULL
+--     AND metadata_attempt_at IS NULL
+--     AND add_time < now() - interval '60 seconds'
+--
+-- DDL-only — no in-migration UPDATE. ALTER TABLE ADD COLUMN of a nullable
+-- column is metadata-only and instant on PostgreSQL 11+, regardless of
+-- table size. Same hard-won pattern as 0053 / 0063 (see issue #511).
+
+ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "metadata_attempt_at" timestamp with time zone;
