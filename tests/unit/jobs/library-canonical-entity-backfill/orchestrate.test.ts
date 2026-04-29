@@ -25,24 +25,67 @@ import {
 import type { Resolution } from '../../../../jobs/library-canonical-entity-backfill/resolve';
 import type { LmlLookupResponse } from '../../../../jobs/library-canonical-entity-backfill/lml-types';
 
+/**
+ * Render a drizzle `sql` template object to a string for substring
+ * assertions. Drizzle's `db.execute(sql\`...\`)` argument serializes to
+ * `{ sql: string[], values: unknown[] }` where `sql` is the literal
+ * template fragments and `values` is the interpolated parameters in
+ * positional order. Reconstruct the rendered SQL by interleaving them.
+ *
+ * Each value can itself be a nested `sql.raw(...)` chunk (whose
+ * `queryChunks` re-fold into `value: string[]`), or a parameter, or
+ * another nested SQL template — recurse where applicable.
+ */
+type SqlChunk = {
+  value?: string | string[];
+  queryChunks?: SqlChunk[];
+  raw?: string;
+};
 type SqlLike = {
   sql?: string | string[];
-  queryChunks?: Array<string | { value?: string | string[] }>;
+  values?: unknown[];
+  queryChunks?: Array<string | SqlChunk>;
+  raw?: string;
 };
 const renderSql = (value: unknown): string => {
   const obj = value as SqlLike | null | undefined;
   if (!obj) return '';
-  if (Array.isArray(obj.sql)) return obj.sql.join('');
+  if (Array.isArray(obj.sql)) {
+    const fragments = obj.sql;
+    const values = obj.values ?? [];
+    let out = '';
+    for (let i = 0; i < fragments.length; i++) {
+      out += fragments[i];
+      if (i < values.length) out += renderValue(values[i]);
+    }
+    return out;
+  }
   if (typeof obj.sql === 'string') return obj.sql;
   if (obj.queryChunks) {
     return obj.queryChunks
       .map((chunk) => {
         if (typeof chunk === 'string') return chunk;
+        if (Array.isArray(chunk.queryChunks)) return renderSql(chunk);
         if (Array.isArray(chunk.value)) return chunk.value.join('');
         if (typeof chunk.value === 'string') return chunk.value;
         return '';
       })
       .join('');
+  }
+  return '';
+};
+
+/** Render a single interpolated value: strings/numbers verbatim, nested SQL recursively. */
+const renderValue = (v: unknown): string => {
+  if (v == null) return '';
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (typeof v === 'object') {
+    const o = v as SqlChunk & SqlLike;
+    // sql.raw(...) serializes to { raw: string }
+    if (typeof o.raw === 'string') return o.raw;
+    if (Array.isArray(o.queryChunks) || Array.isArray(o.sql)) return renderSql(o);
+    if (Array.isArray(o.value)) return o.value.join('');
+    if (typeof o.value === 'string') return o.value;
   }
   return '';
 };
