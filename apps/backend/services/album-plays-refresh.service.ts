@@ -59,16 +59,31 @@ let refreshDb: ReturnType<typeof drizzle> | null = null;
  * the refresh is serial (self-rescheduling timer cannot stack), and a
  * distinct `application_name` so this connection is obvious in
  * `pg_stat_activity` during incident triage. Recreated after a teardown.
+ *
+ * `ALBUM_PLAYS_REFRESH_TIMEOUT_MS` is captured here, on the first
+ * refresh after process start (or after a stop/start cycle). Mid-process
+ * env mutations do not retroactively change the timeout — restart the
+ * process or call `stopAlbumPlaysRefresh()` then `startAlbumPlaysRefresh()`
+ * to pick up a new value.
+ *
+ * Caller must serialize. The self-rescheduling timer is the canonical
+ * caller; ad-hoc parallel callers would race and could leak a pool.
+ *
+ * Module-scoped state is assigned only after both the postgres-js client
+ * and the drizzle wrap succeed — otherwise a throw between the two would
+ * leak the partially-built client across subsequent re-entries.
  */
-function getRefreshDb(timeoutMs: number): ReturnType<typeof drizzle> {
+function getRefreshDb(): ReturnType<typeof drizzle> {
   if (refreshDb !== null) return refreshDb;
-  refreshClient = createPostgresClient({
-    statementTimeoutMs: timeoutMs,
+  const client = createPostgresClient({
+    statementTimeoutMs: readRefreshTimeoutFromEnv(),
     applicationName: APPLICATION_NAME,
     max: 1,
   });
-  refreshDb = drizzle(refreshClient);
-  return refreshDb;
+  const handle = drizzle(client);
+  refreshClient = client;
+  refreshDb = handle;
+  return handle;
 }
 
 /**
@@ -77,7 +92,7 @@ function getRefreshDb(timeoutMs: number): ReturnType<typeof drizzle> {
  * caller is responsible for catching errors if it cares about them.
  */
 export async function refreshAlbumPlays(): Promise<void> {
-  const refreshDbInstance = getRefreshDb(readRefreshTimeoutFromEnv());
+  const refreshDbInstance = getRefreshDb();
   await refreshDbInstance.execute(sql`REFRESH MATERIALIZED VIEW CONCURRENTLY ${album_plays}`);
   const now = new Date();
   await db
@@ -119,8 +134,10 @@ export function stopAlbumPlaysRefresh(): void {
   if (refreshClient !== null) {
     // Fire-and-forget — `end()` returns a promise but shutdown callers
     // (process exit, test cleanup) don't need to await it. The pool has
-    // `max: 1`, so at most one connection is being closed.
-    void refreshClient.end();
+    // `max: 1`, so at most one connection is being closed. We do attach
+    // a `.catch` so a rejection (e.g. queries still draining) surfaces
+    // in logs instead of vanishing into an unhandled-rejection warning.
+    refreshClient.end().catch((err) => console.error('[album-plays-refresh] dedicated client end() failed:', err));
     refreshClient = null;
     refreshDb = null;
   }
