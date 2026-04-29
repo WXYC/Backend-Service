@@ -1,0 +1,43 @@
+#Build stage
+FROM node:25-alpine AS builder
+
+WORKDIR /flowsheet-metadata-backfill-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/flowsheet-metadata-backfill ./jobs/flowsheet-metadata-backfill
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-metadata-backfill
+
+#Production stage
+FROM node:25-alpine AS prod
+
+WORKDIR /flowsheet-metadata-backfill
+
+COPY ./package* ./
+COPY ./jobs/flowsheet-metadata-backfill/package* ./jobs/flowsheet-metadata-backfill/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./flowsheet-metadata-backfill-builder/jobs/flowsheet-metadata-backfill/dist ./jobs/flowsheet-metadata-backfill/dist
+COPY --from=builder ./flowsheet-metadata-backfill-builder/shared/database/dist ./shared/database/dist
+
+# Long-running per-statement timeout: a per-row UPDATE over the 1.86M-row
+# tail can spend tens of seconds on the rare hot batch (search_doc tsvector
+# regen + 6 indexes per the bulk-update playbook). The API's tight 5s default
+# is too aggressive here.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+
+# Async commit: each per-batch COMMIT returns as soon as the WAL hits the
+# OS buffer rather than waiting for fsync. Safe because the WHERE filter is
+# idempotent (`metadata_attempt_at IS NULL` naturally resumes any work lost
+# to an RDS crash). Saves ~30% per-batch latency at the cost of a tiny
+# RPO under crash, which the retry contract already covers.
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# Identifies the connection in pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-flowsheet-metadata-backfill
+
+CMD ["npm", "start", "--workspace=@wxyc/flowsheet-metadata-backfill"]
