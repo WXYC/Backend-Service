@@ -11,7 +11,7 @@
  * under `subsystem='metadata'`, never thrown.
  */
 import * as Sentry from '@sentry/node';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db, flowsheet } from '@wxyc/database';
 import { fetchMetadata } from './metadata.service.js';
 
@@ -49,6 +49,11 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
           soundcloud_url: metadata.album?.soundcloudUrl ?? null,
           artist_bio: metadata.artist?.bio ?? null,
           artist_wikipedia_url: metadata.artist?.wikipediaUrl ?? null,
+          // Stamps both LML success-with-match and LML success-no-match
+          // (the `.then` only runs when fetchMetadata resolved). Transient
+          // LML failures land in `.catch` below and stay retryable by the
+          // recurring drift-repair sweep — see #639.
+          metadata_attempt_at: sql`NOW()`,
         })
         .where(eq(flowsheet.id, input.flowsheetId));
     })

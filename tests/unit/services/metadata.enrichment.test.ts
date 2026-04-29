@@ -21,6 +21,32 @@ jest.mock('@sentry/node', () => ({ captureException: mockCaptureException }));
 import { db } from '@wxyc/database';
 import { fireAndForgetMetadataForRow } from '../../../apps/backend/services/metadata/enrichment.service';
 
+/**
+ * Render a drizzle `sql` template object to a string for substring assertions.
+ * Mirrors the helper in tests/unit/jobs/flowsheet-etl/job.djName.test.ts —
+ * drizzle's SQL serializes to `{ sql: string[], values: unknown[] }` with the
+ * literal fragments split across the array, or to a `queryChunks` shape under
+ * other code paths.
+ */
+type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
+const renderSql = (value: unknown): string => {
+  const obj = value as SqlLike | null | undefined;
+  if (!obj) return '';
+  if (Array.isArray(obj.sql)) return obj.sql.join('');
+  if (typeof obj.sql === 'string') return obj.sql;
+  if (obj.queryChunks) {
+    return obj.queryChunks
+      .map((chunk) => {
+        if (typeof chunk === 'string') return chunk;
+        if (Array.isArray(chunk.value)) return chunk.value.join('');
+        if (typeof chunk.value === 'string') return chunk.value;
+        return '';
+      })
+      .join('');
+  }
+  return '';
+};
+
 const mockDb = db as unknown as {
   update: jest.Mock;
   _chain: { set: jest.Mock; where: jest.Mock };
@@ -79,18 +105,83 @@ describe('fireAndForgetMetadataForRow', () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(mockDb.update).toHaveBeenCalled();
-    expect(mockDb._chain.set).toHaveBeenCalledWith({
-      artwork_url: 'https://i.discogs.com/art.jpg',
-      discogs_url: 'https://www.discogs.com/release/12345',
-      release_year: 2001,
-      spotify_url: 'https://open.spotify.com/album/abc',
-      apple_music_url: 'https://music.apple.com/album/xyz',
-      youtube_music_url: 'https://music.youtube.com/album/aaa',
-      bandcamp_url: 'https://bandcamp.com/album/bbb',
-      soundcloud_url: 'https://soundcloud.com/album/ccc',
-      artist_bio: 'Rob Brown and Sean Booth are Autechre.',
-      artist_wikipedia_url: 'https://en.wikipedia.org/wiki/Autechre',
+    expect(mockDb._chain.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artwork_url: 'https://i.discogs.com/art.jpg',
+        discogs_url: 'https://www.discogs.com/release/12345',
+        release_year: 2001,
+        spotify_url: 'https://open.spotify.com/album/abc',
+        apple_music_url: 'https://music.apple.com/album/xyz',
+        youtube_music_url: 'https://music.youtube.com/album/aaa',
+        bandcamp_url: 'https://bandcamp.com/album/bbb',
+        soundcloud_url: 'https://soundcloud.com/album/ccc',
+        artist_bio: 'Rob Brown and Sean Booth are Autechre.',
+        artist_wikipedia_url: 'https://en.wikipedia.org/wiki/Autechre',
+      })
+    );
+  });
+
+  it('stamps metadata_attempt_at = sql`NOW()` on LML success-with-match', async () => {
+    mockFetchMetadata.mockResolvedValue({
+      album: { artworkUrl: 'https://i.discogs.com/art.jpg' },
     });
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 42,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setArgs).toBeDefined();
+    // Pin the value to a drizzle SQL chunk that calls Postgres's NOW().
+    // A bare `new Date()` here would silently switch to *application*-host
+    // time, masking clock skew across containers — the regression this
+    // assertion guards against. Substring match (rather than equality)
+    // tolerates whitespace / case variants without admitting `current_date`,
+    // `clock_timestamp`, or a JS Date.
+    expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/NOW\(\)/i);
+  });
+
+  it('stamps metadata_attempt_at = sql`NOW()` on LML success-no-match (search URLs only)', async () => {
+    // No match: album payload contains only synthesized search URLs, no
+    // artwork. The stamp must still fire — the row was attempted.
+    mockFetchMetadata.mockResolvedValue({
+      album: {
+        youtubeMusicUrl: 'https://music.youtube.com/search?q=x',
+        bandcampUrl: 'https://bandcamp.com/search?q=x',
+        soundcloudUrl: 'https://soundcloud.com/search?q=x',
+      },
+    });
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 43,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setArgs).toBeDefined();
+    expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/NOW\(\)/i);
+  });
+
+  it('does NOT stamp metadata_attempt_at when fetchMetadata throws', async () => {
+    mockFetchMetadata.mockRejectedValue(new Error('LML responded with 502'));
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 44,
+      artistName: 'King Crimson',
+      albumTitle: 'Discipline',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockDb.update).not.toHaveBeenCalled();
+    expect(mockDb._chain.set).not.toHaveBeenCalled();
   });
 
   it('skips the DB update when fetchMetadata returns null', async () => {
