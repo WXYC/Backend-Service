@@ -20,6 +20,7 @@ import {
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
 import { lookupMetadata, isLmlConfigured, type LookupResponse } from './lml/lml.client.js';
+import { assertLibraryArtistNamePopulated } from './library-artist-name-assertion.service.js';
 
 /**
  * Source columns on `artists` (and any joined / view-projected row) that
@@ -446,6 +447,8 @@ export const fuzzySearchLibrary = async (
   n = 5,
   on_streaming?: boolean
 ): Promise<LibraryArtistViewEntry[]> => {
+  await assertLibraryArtistNamePopulated();
+
   // Both-mode default (dj-site sends the same string as artist and title).
   // Route through tsvector + plays.
   if (artist_name && album_title && artist_name === album_title) {
@@ -728,6 +731,8 @@ export async function searchLibrary(
   limit = 5,
   on_streaming?: boolean
 ): Promise<EnrichedLibraryResult[]> {
+  await assertLibraryArtistNamePopulated();
+
   let results: LibraryArtistViewEntry[] = [];
 
   if (query) {
@@ -749,6 +754,8 @@ export async function searchLibrary(
  * @returns Corrected artist name if a good match is found, null otherwise
  */
 export async function findSimilarArtist(artistName: string, threshold = 0.85): Promise<string | null> {
+  await assertLibraryArtistNamePopulated();
+
   // Use pg_trgm similarity function to find close matches. Reads from
   // `library` directly so the planner uses the GIN trigram index on
   // `library.artist_name` (added in 0058) without materializing the view.
@@ -788,6 +795,8 @@ export async function findSimilarArtist(artistName: string, threshold = 0.85): P
  * @returns Array of enriched library results
  */
 export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promise<EnrichedLibraryResult[]> {
+  await assertLibraryArtistNamePopulated();
+
   const rows = (await libraryViewQuery(false)
     .where(sql`${library.album_title} % ${albumTitle}`)
     .orderBy(desc(sql`similarity(${library.album_title}, ${albumTitle})`))
@@ -804,6 +813,8 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  * @returns Array of enriched library results
  */
 export async function searchByArtist(artistName: string, limit = 5): Promise<EnrichedLibraryResult[]> {
+  await assertLibraryArtistNamePopulated();
+
   const rows = (await libraryViewQuery(false)
     .where(sql`${library.artist_name} % ${artistName}`)
     .orderBy(desc(sql`similarity(${library.artist_name}, ${artistName})`))
