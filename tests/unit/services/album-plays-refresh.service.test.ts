@@ -148,6 +148,41 @@ describe('album-plays-refresh.service', () => {
       expect(dedicatedExecute).toHaveBeenCalledTimes(2);
     });
 
+    test('captures the timeout at first init; mid-process env changes are not retroactive', async () => {
+      // First refresh captures the (default) timeout.
+      await refreshAlbumPlays();
+      expect(createPostgresClient).toHaveBeenCalledTimes(1);
+      const initialTimeout = (createPostgresClient.mock.calls[0]?.[0] as { statementTimeoutMs: number })
+        .statementTimeoutMs;
+      expect(initialTimeout).toBe(__TEST_ONLY__.DEFAULT_REFRESH_TIMEOUT_MS);
+
+      // Operator mutates the env mid-process; the second refresh should
+      // *not* rebuild — it reuses the cached client at the original
+      // timeout. Picking up the new value requires a stop/start cycle.
+      process.env.ALBUM_PLAYS_REFRESH_TIMEOUT_MS = '120000';
+      await refreshAlbumPlays();
+      expect(createPostgresClient).toHaveBeenCalledTimes(1);
+    });
+
+    test('rebuilds the dedicated client after a teardown', async () => {
+      // First refresh constructs the client.
+      await refreshAlbumPlays();
+      expect(createPostgresClient).toHaveBeenCalledTimes(1);
+      expect(__TEST_ONLY__.hasDedicatedClient()).toBe(true);
+
+      // Teardown closes the client and clears the cache.
+      stopAlbumPlaysRefresh();
+      expect(__TEST_ONLY__.hasDedicatedClient()).toBe(false);
+
+      // Subsequent refresh constructs a fresh client (and re-reads env).
+      process.env.ALBUM_PLAYS_REFRESH_TIMEOUT_MS = '90000';
+      await refreshAlbumPlays();
+      expect(createPostgresClient).toHaveBeenCalledTimes(2);
+      const reinitTimeout = (createPostgresClient.mock.calls[1]?.[0] as { statementTimeoutMs: number })
+        .statementTimeoutMs;
+      expect(reinitTimeout).toBe(90000);
+    });
+
     test('propagates errors from the REFRESH so callers can decide what to do', async () => {
       dedicatedExecute.mockRejectedValueOnce(new Error('boom'));
       await expect(refreshAlbumPlays()).rejects.toThrow('boom');
