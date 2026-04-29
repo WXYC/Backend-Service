@@ -8,6 +8,8 @@
  * Response types are generated from wxyc-shared/api.yaml — see @wxyc/shared/dtos.
  */
 
+import * as Sentry from '@sentry/node';
+
 import type {
   DiscogsReleaseMetadata,
   DiscogsArtistDetails,
@@ -112,21 +114,47 @@ async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
  * @returns Lookup results with library items and enriched artwork metadata
  */
 export async function lookupMetadata(artist: string, album?: string, song?: string): Promise<LookupResponse> {
-  // LML's /lookup contract requires `raw_message` even when artist/album/song
-  // are already structured. Synthesize a free-form description that the LML
-  // parser would have produced — matches the e2e fixtures in LML's repo.
-  const rawMessage = [artist, album, song].filter(Boolean).join(' - ');
-  const body: Record<string, string> = { artist, raw_message: rawMessage };
-  if (album) body.album = album;
-  if (song) body.song = song;
+  // Wrap the call in a Sentry span so the LML response's cache_stats (memory
+  // hits / pg hits / pg misses / api calls / pg time / api time) lands as
+  // attributes on the BS transaction's trace. Filterable in Sentry's trace
+  // explorer (e.g. `lml.cache.api_calls > 0`) so per-callsite instrumentation
+  // isn't needed for the metadata-backfill pilot or the runtime hot path.
+  // Sibling LML-side projection at WXYC/library-metadata-lookup#213.
+  return Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
+    // LML's /lookup contract requires `raw_message` even when artist/album/song
+    // are already structured. Synthesize a free-form description that the LML
+    // parser would have produced — matches the e2e fixtures in LML's repo.
+    const rawMessage = [artist, album, song].filter(Boolean).join(' - ');
+    const body: Record<string, string> = { artist, raw_message: rawMessage };
+    if (album) body.album = album;
+    if (song) body.song = song;
 
-  const response = await lmlFetch('/api/v1/lookup', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    const response = await lmlFetch('/api/v1/lookup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    const parsed = (await response.json()) as LookupResponse;
+
+    // cache_stats schema is freeform today (additionalProperties: true). Until
+    // wxyc-shared#86 tightens the type, treat it as a loose record and only
+    // forward numeric fields onto the span.
+    const stats = (parsed as { cache_stats?: Record<string, unknown> }).cache_stats;
+    if (stats && span) {
+      const attrs: Record<string, number> = {};
+      for (const [key, value] of Object.entries(stats)) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          attrs[`lml.cache.${key}`] = value;
+        }
+      }
+      if (Object.keys(attrs).length > 0) {
+        span.setAttributes(attrs);
+      }
+    }
+
+    return parsed;
   });
-
-  return (await response.json()) as LookupResponse;
 }
 
 /**
