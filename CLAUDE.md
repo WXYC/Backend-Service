@@ -323,7 +323,9 @@ PostgreSQL triggers (`cdc_notify()`) fire `pg_notify('cdc', payload)` on every I
 CDC_SECRET=xxx npx tsx scripts/sync/reconcile.ts
 ```
 
-Connects to tubafrenzy's CDC WebSocket and verifies changes land in Backend-Service's PostgreSQL. Reports matches, mismatches, and missing records in real time.
+Bidirectional: forward verifies tubafrenzy SSE events land in Backend-Service PG; reverse verifies PG WS events land in a local `wxycmusic` MySQL clone (defaults to `localhost:3306`). Reports matches, mismatches, missing in real time.
+
+The reverse direction's local clone is refreshed via `scripts/sync/refresh-local-mysql.sh`, which chains tubafrenzy's `backup-database.sh` (mysqldump over SSH) with a local DROP + CREATE + import. Run it on a cron / launchd timer (e.g. every 15 min) — without periodic refresh the clone drifts and produces false `NOT FOUND` warnings for any row newer than the last snapshot. There is no event-driven sync; the snapshot cadence is the reverse-direction freshness ceiling.
 
 ## Environment Variables
 
