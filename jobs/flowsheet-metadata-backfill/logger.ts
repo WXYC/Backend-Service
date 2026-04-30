@@ -27,21 +27,7 @@ type BaseTags = { repo: string; tool: string; run_id: string };
 
 let baseTags: BaseTags | null = null;
 
-/**
- * Resolve `SENTRY_TRACES_SAMPLE_RATE` from the environment, falling back to
- * `0` (no sampling) when unset. Operators flip this to e.g. `1.0` for
- * one-shot pilots that need span/trace data (see #640); production default
- * stays off so steady-state runs don't pay the sampling overhead. Without
- * this env-controlled hook, `@sentry/node` v10 defaults `tracesSampleRate`
- * to `0`, which silently produces zero spans and breaks any downstream
- * trace-explorer validation that depends on the job emitting them.
- *
- * Malformed values (non-numeric, NaN, Infinity, negative, > 1) fall back to
- * `0` — Sentry rejects out-of-range rates with a runtime warning, and we'd
- * rather no-op silently than crash on a typo'd env var.
- *
- * Exported so unit tests can drive it without mucking with process.env.
- */
+// `@sentry/node` v10 silently produces zero spans when tracesSampleRate is unset.
 export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
   if (raw === undefined) return 0;
   const parsed = Number(raw);
