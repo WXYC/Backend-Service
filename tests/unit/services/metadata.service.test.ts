@@ -220,4 +220,30 @@ describe('metadata.service', () => {
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
     expect(result?.album?.discogsReleaseId).toBeUndefined();
   });
+
+  it('strips Discogs spacer.gif placeholder from artworkUrl (#649)', async () => {
+    // Discogs returns spacer.gif when a release has no real cover art.
+    // Persisting that to flowsheet.artwork_url makes the playlist-proxy
+    // partial index treat the row as "has artwork" and iOS shows a
+    // broken/blank image. Drop the URL at the chokepoint so every
+    // downstream caller of fetchMetadata benefits without remembering.
+    const responseWithSpacer = structuredClone(lookupResponseWithResults);
+    responseWithSpacer.results[0].artwork.artwork_url = 'https://s.discogs.com/images/spacer.gif';
+    mockLookupMetadata.mockResolvedValue(responseWithSpacer);
+
+    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
+
+    expect(result?.album?.artworkUrl).toBeUndefined();
+    // Other album metadata is preserved — the filter only nulls artworkUrl.
+    expect(result?.album?.discogsReleaseId).toBe(12345);
+    expect(result?.album?.releaseYear).toBe(2001);
+  });
+
+  it('preserves non-spacer artwork URLs unchanged (#649 negative case)', async () => {
+    mockLookupMetadata.mockResolvedValue(lookupResponseWithResults);
+
+    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
+
+    expect(result?.album?.artworkUrl).toBe('https://i.discogs.com/art.jpg');
+  });
 });

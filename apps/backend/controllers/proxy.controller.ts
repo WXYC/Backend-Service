@@ -190,7 +190,11 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   if (artwork) {
     metadata.discogsReleaseId = artwork.release_id;
     metadata.discogsUrl = artwork.release_url;
-    metadata.artworkUrl = artwork.artwork_url || undefined;
+    // Drop Discogs spacer.gif placeholder so the iOS client knows to draw its
+    // own placeholder rather than rendering a broken/blank image. See #649
+    // for the full callsite audit.
+    metadata.artworkUrl =
+      artwork.artwork_url && !artwork.artwork_url.includes('spacer.gif') ? artwork.artwork_url : undefined;
 
     // Artist bio and Wikipedia from lookup result
     if (artwork.artist_bio) metadata.artistBio = artwork.artist_bio;
@@ -219,8 +223,9 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
           duration: t.duration ?? undefined,
         }));
       }
-      // Prefer release artwork over lookup artwork
-      if (release.artwork_url) {
+      // Prefer release artwork over lookup artwork — but still filter out
+      // spacer.gif placeholders (see #649).
+      if (release.artwork_url && !release.artwork_url.includes('spacer.gif')) {
         metadata.artworkUrl = release.artwork_url;
       }
     } catch (releaseError) {
