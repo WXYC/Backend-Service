@@ -491,6 +491,13 @@
       "when": 1779856000003,
       "tag": "0071_rotation-active-album-bin-uniq",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1779856000004,
+      "tag": "0072_drop-rotation-active-album-bin-uniq",
+      "breakpoints": true
     }
   ]
 }
