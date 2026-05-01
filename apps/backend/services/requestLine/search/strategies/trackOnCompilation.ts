@@ -10,7 +10,6 @@
 
 import { ParsedRequest, EnrichedLibraryResult, SearchState, SearchStrategyType } from '../../types.js';
 import { searchLibrary, searchAlbumsByTitle, filterResultsByArtist } from '../../../library.service.js';
-import { LibraryArtistNameMissingError } from '../../../library-artist-name-assertion.service.js';
 import { extractSignificantWords, isCompilationArtist, STOPWORDS, MAX_SEARCH_RESULTS } from '../../matching/index.js';
 
 // Forward declaration - will be imported when Discogs service is ready
@@ -89,7 +88,6 @@ export async function executeTrackOnCompilation(
       }
     }
   } catch (e) {
-    if (e instanceof LibraryArtistNameMissingError) throw e;
     console.warn(`[Search] Keyword search failed:`, e);
     keywordMatches = [];
   }
@@ -161,7 +159,6 @@ export async function executeTrackOnCompilation(
         }
       }
     } catch (e) {
-      if (e instanceof LibraryArtistNameMissingError) throw e;
       console.warn(`[Search] Failed to search for track on other releases:`, e);
     }
   }
