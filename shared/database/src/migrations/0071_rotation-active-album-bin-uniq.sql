@@ -1,0 +1,44 @@
+-- #694 unique partial index pinning at most one active rotation row per
+-- (album_id, rotation_bin).
+--
+-- Companion to the rotation-dedupe one-shot job (jobs/rotation-dedupe/),
+-- which collapses the historical duplicates that this index would
+-- otherwise reject. Tubafrenzy historically allowed multiple rotation
+-- entries for the same album over time, and dj-site renders every active
+-- row in a bucket — so a single album with 9 active rows surfaces 9
+-- times. The dedupe job is the one-time cleanup; this index prevents
+-- recurrence.
+--
+-- The partial WHERE matches the dedupe job's keeper predicate exactly:
+--   kill_date IS NULL OR kill_date > CURRENT_DATE
+-- so historical kills (kill_date <= CURRENT_DATE) are intentionally
+-- excluded from uniqueness — the same (album_id, rotation_bin) can have
+-- many killed rows over time. Only the active set is constrained.
+--
+-- Production ops:
+--   - Run the rotation-dedupe job FIRST. If duplicate active rows still
+--     exist, the index build fails with `could not create unique index`.
+--   - This is NOT `CREATE UNIQUE INDEX CONCURRENTLY` because Drizzle
+--     wraps each migration file in a transaction and `CREATE INDEX
+--     CONCURRENTLY cannot run inside a transaction block` — same
+--     constraint as 0057, 0061, 0068, 0070.
+--   - Build the index out-of-band on prod first via:
+--       CREATE UNIQUE INDEX CONCURRENTLY "rotation_active_album_bin_uniq"
+--         ON "wxyc_schema"."rotation" ("album_id", "rotation_bin")
+--         WHERE kill_date IS NULL OR kill_date > CURRENT_DATE;
+--     Expected build window on prod: sub-second — the rotation table is
+--     small (a few hundred active rows). No AccessExclusiveLock, no
+--     INSERT pause. CONCURRENTLY still requires the duplicates to be
+--     gone; if the build fails, drop the invalid index and re-run the
+--     dedupe.
+--   - Then merge this PR. `IF NOT EXISTS` makes the migration apply a
+--     no-op against the prod DB where the index is already present, while
+--     fresh dev databases pick it up on first migrate. Same shape as 0068
+--     and 0070.
+--   - If this migration runs against prod *without* the manual
+--     CONCURRENTLY pre-build, it would acquire a ShareLock on rotation
+--     for the (sub-second) build duration and queue any concurrent
+--     INSERT briefly. On the small rotation table that's tolerable, but
+--     CONCURRENTLY is still the preferred path.
+
+CREATE UNIQUE INDEX IF NOT EXISTS "rotation_active_album_bin_uniq" ON "wxyc_schema"."rotation" USING btree ("album_id","rotation_bin") WHERE kill_date IS NULL OR kill_date > CURRENT_DATE;

@@ -484,6 +484,13 @@
       "when": 1779856000002,
       "tag": "0070_flowsheet-metadata-attempt-pending-idx",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1779856000003,
+      "tag": "0071_rotation-active-album-bin-uniq",
+      "breakpoints": true
     }
   ]
 }

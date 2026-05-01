@@ -381,6 +381,16 @@ export const rotation = wxyc_schema.table(
     return {
       albumIdIdx: index('album_id_idx').on(table.album_id),
       legacyRotationIdIdx: uniqueIndex('rotation_legacy_rotation_id_idx').on(table.legacy_rotation_id),
+      // Unique partial index that pins "at most one active row per
+      // (album_id, rotation_bin)". Companion to the rotation-dedupe
+      // one-shot job (jobs/rotation-dedupe/) and issue #694: tubafrenzy
+      // historically allowed multiple rotation entries for the same album
+      // over time, and dj-site renders every active row in a bucket. The
+      // dedupe job collapses the historical duplicates; this index
+      // prevents recurrence.
+      activeAlbumBinUniq: uniqueIndex('rotation_active_album_bin_uniq')
+        .on(table.album_id, table.rotation_bin)
+        .where(sql`kill_date IS NULL OR kill_date > CURRENT_DATE`),
     };
   }
 );
