@@ -2374,7 +2374,7 @@
             }
           ],
           "isUnique": true,
-          "where": "kill_date IS NULL OR kill_date > CURRENT_DATE",
+          "where": "kill_date IS NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

@@ -388,9 +388,14 @@ export const rotation = wxyc_schema.table(
       // over time, and dj-site renders every active row in a bucket. The
       // dedupe job collapses the historical duplicates; this index
       // prevents recurrence.
+      // Predicate is `kill_date IS NULL` only — `CURRENT_DATE` is a STABLE
+      // (not IMMUTABLE) function so PG rejects it in an index predicate.
+      // Equivalent for current data (no rows have a future kill_date) and
+      // matches the current product semantics where kills always use
+      // CURRENT_DATE immediately. See migration 0071's comment header.
       activeAlbumBinUniq: uniqueIndex('rotation_active_album_bin_uniq')
         .on(table.album_id, table.rotation_bin)
-        .where(sql`kill_date IS NULL OR kill_date > CURRENT_DATE`),
+        .where(sql`kill_date IS NULL`),
     };
   }
 );

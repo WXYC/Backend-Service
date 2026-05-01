@@ -9,11 +9,18 @@
 -- times. The dedupe job is the one-time cleanup; this index prevents
 -- recurrence.
 --
--- The partial WHERE matches the dedupe job's keeper predicate exactly:
---   kill_date IS NULL OR kill_date > CURRENT_DATE
--- so historical kills (kill_date <= CURRENT_DATE) are intentionally
--- excluded from uniqueness — the same (album_id, rotation_bin) can have
--- many killed rows over time. Only the active set is constrained.
+-- The partial WHERE is `kill_date IS NULL` only. The semantically richer
+-- predicate `kill_date IS NULL OR kill_date > CURRENT_DATE` is rejected
+-- by Postgres because `CURRENT_DATE` is STABLE (not IMMUTABLE) and PG
+-- requires index predicates to be IMMUTABLE — the planner needs the
+-- predicate to evaluate identically forever for a given row, regardless
+-- of when the query runs. Today's product semantics make this a
+-- distinction without a difference: every code path that sets kill_date
+-- uses `CURRENT_DATE` immediately, so future-dated kills don't occur in
+-- practice. If we ever introduce future-dated retirement of rotation
+-- rows, the right move is a CHECK constraint that bans them
+-- (`kill_date <= CURRENT_DATE`) which keeps `kill_date IS NULL`
+-- equivalent to the original intent.
 --
 -- Production ops:
 --   - Run the rotation-dedupe job FIRST. If duplicate active rows still
@@ -25,7 +32,7 @@
 --   - Build the index out-of-band on prod first via:
 --       CREATE UNIQUE INDEX CONCURRENTLY "rotation_active_album_bin_uniq"
 --         ON "wxyc_schema"."rotation" ("album_id", "rotation_bin")
---         WHERE kill_date IS NULL OR kill_date > CURRENT_DATE;
+--         WHERE kill_date IS NULL;
 --     Expected build window on prod: sub-second — the rotation table is
 --     small (a few hundred active rows). No AccessExclusiveLock, no
 --     INSERT pause. CONCURRENTLY still requires the duplicates to be
@@ -41,4 +48,4 @@
 --     INSERT briefly. On the small rotation table that's tolerable, but
 --     CONCURRENTLY is still the preferred path.
 
-CREATE UNIQUE INDEX IF NOT EXISTS "rotation_active_album_bin_uniq" ON "wxyc_schema"."rotation" USING btree ("album_id","rotation_bin") WHERE kill_date IS NULL OR kill_date > CURRENT_DATE;
+CREATE UNIQUE INDEX IF NOT EXISTS "rotation_active_album_bin_uniq" ON "wxyc_schema"."rotation" USING btree ("album_id","rotation_bin") WHERE kill_date IS NULL;
