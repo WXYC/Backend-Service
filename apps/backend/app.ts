@@ -22,6 +22,7 @@ import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-
 import { setupCdcWebSocket, shutdownCdcWebSocket } from './services/cdc/index.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
+import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { requirePermissions } from '@wxyc/authentication';
 import { closeDatabaseConnection, db } from '@wxyc/database';
@@ -104,7 +105,7 @@ app.get('/healthcheck', async (req, res) => {
 // Internal endpoints (ETL sync notifications, key-authenticated)
 app.use('/internal', internal_route);
 
-Sentry.setupExpressErrorHandler(app);
+Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureExpressError });
 app.use(errorHandler);
 
 const server = app.listen(port, () => {
