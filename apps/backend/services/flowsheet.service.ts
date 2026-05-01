@@ -24,12 +24,20 @@ import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 let lastModifiedAt: Date = new Date();
 
 /**
- * Compute the next play_order value for a new flowsheet entry.
- * play_order is manually managed (not a serial/sequence), so we derive it
- * from the current max value.
+ * Compute the next play_order value for a new flowsheet entry within a given
+ * show. play_order is manually managed (not a serial/sequence) and is scoped
+ * per show — tubafrenzy's webhook writes per-show play_orders (1, 2, 3, ...)
+ * and Backend-Service inserts must continue that sequence rather than picking
+ * up the global table max. Without the `WHERE show_id = ?` predicate a brand
+ * new track in show B would inherit `max + 1` from a prior show A's late
+ * additions, producing the discontinuous play_order sequence that breaks
+ * dj-site's optimistic update + cache reconciliation (#693).
  */
-const nextPlayOrder = async (): Promise<number> => {
-  const result = await db.select({ max: sql<number>`coalesce(max(${flowsheet.play_order}), 0)` }).from(flowsheet);
+const nextPlayOrder = async (showId: number): Promise<number> => {
+  const result = await db
+    .select({ max: sql<number>`coalesce(max(${flowsheet.play_order}), 0)` })
+    .from(flowsheet)
+    .where(eq(flowsheet.show_id, showId));
   return result[0].max + 1;
 };
 
@@ -293,7 +301,10 @@ export const addTrack = async (entry: Omit<NewFSEntry, 'play_order'>): Promise<F
   //   }
   // }
 
-  const play_order = await nextPlayOrder();
+  if (entry.show_id == null) {
+    throw new WxycError('Cannot add flowsheet entry without show_id', 400);
+  }
+  const play_order = await nextPlayOrder(entry.show_id);
   const response = await db
     .insert(flowsheet)
     .values({ ...entry, play_order })
@@ -393,7 +404,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
     entry_type: 'show_start',
-    play_order: await nextPlayOrder(),
+    play_order: await nextPlayOrder(new_show[0].id),
     message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString(
       'en-US',
       {
@@ -457,7 +468,7 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
     .values({
       show_id: show_id,
       entry_type: 'dj_join',
-      play_order: await nextPlayOrder(),
+      play_order: await nextPlayOrder(show_id),
       message: message,
     })
     .returning();
@@ -492,7 +503,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
     entry_type: 'show_end',
-    play_order: await nextPlayOrder(),
+    play_order: await nextPlayOrder(currentShow.id),
     message: `End of Show: ${dj_name} left the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
@@ -539,7 +550,7 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
     .values({
       show_id: show_id,
       entry_type: 'dj_leave',
-      play_order: await nextPlayOrder(),
+      play_order: await nextPlayOrder(show_id),
       message: message,
     })
     .returning();
