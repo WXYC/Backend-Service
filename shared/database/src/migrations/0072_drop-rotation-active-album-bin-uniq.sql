@@ -1,0 +1,29 @@
+-- Revert of #694 / migration 0071. The unique partial index on
+-- (rotation.album_id, rotation.rotation_bin) WHERE kill_date IS NULL was
+-- the wrong shape for this table: rotation rows in BS are downstream of
+-- tubafrenzy, where the music director is the source of truth and may
+-- legitimately add the same (album, bucket) pair multiple times over the
+-- album's history (each tubafrenzy add gets its own legacy_rotation_id).
+-- Constraining the BS rotation table to one active row per (album, bin)
+-- contradicts the upstream's data shape and would block the
+-- rotation-etl's UPSERT path the next time the MD adds a duplicate.
+--
+-- The original symptom (dj-site renders 9 Little Brother rows in the
+-- Heavy bucket because the rotation API returns 9 distinct rotation_id
+-- rows for the same album_id) needs a read-side fix: the rotation API
+-- query in `apps/backend/services/library.service.ts` should DISTINCT ON
+-- (album_id, rotation_bin) and pick the most-recent add_date row per
+-- group. That preserves tubafrenzy's data faithfully while presenting a
+-- single dropdown row per album. Tracked under #694 (re-scoped) and
+-- companion #689.
+--
+-- Production state when this migration runs: the index has already been
+-- dropped manually on prod (immediately after we realized the
+-- constraint was wrong), and any rotation rows the rotation-dedupe job
+-- killed today have already been restored (kill_date set back to NULL).
+-- This migration brings the schema state in line with reality. `IF
+-- EXISTS` makes it a no-op against the manually-cleaned prod DB while
+-- still applying cleanly against fresh dev databases that picked up
+-- 0071.
+
+DROP INDEX IF EXISTS "wxyc_schema"."rotation_active_album_bin_uniq";

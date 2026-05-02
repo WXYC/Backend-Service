@@ -8,17 +8,18 @@ API and authentication service for WXYC applications. Provides endpoints for the
 
 npm workspaces:
 
-| Package                              | Path                                 | Purpose                                                                                                   |
-| ------------------------------------ | ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `@wxyc/backend`                      | `apps/backend/`                      | Express API server (port 8080)                                                                            |
-| `@wxyc/auth-service`                 | `apps/auth/`                         | better-auth server (port 8082)                                                                            |
-| `@wxyc/database`                     | `shared/database/`                   | Drizzle ORM schema, client, migrations, ETL utilities                                                     |
-| `@wxyc/authentication`               | `shared/authentication/`             | Auth middleware, roles, JWT verification                                                                  |
-| `@wxyc/flowsheet-etl`                | `jobs/flowsheet-etl/`                | Flowsheet ETL: sync from tubafrenzy                                                                       |
-| `@wxyc/rotation-etl`                 | `jobs/rotation-etl/`                 | Rotation ETL: sync from tubafrenzy                                                                        |
-| `@wxyc/artist-identity-etl`          | `jobs/artist-identity-etl/`          | Artist identity ETL: sync from LML's `entity.identity`                                                    |
-| `@wxyc/flowsheet-dj-name-backfill`   | `jobs/flowsheet-dj-name-backfill/`   | One-shot backfill: populate `flowsheet.dj_name` on legacy track rows after migration 0053                 |
-| `@wxyc/library-artist-name-backfill` | `jobs/library-artist-name-backfill/` | One-shot backfill: populate `library.artist_name` from the `artists` join after migration 0058 (Epic A.2) |
+| Package                              | Path                                 | Purpose                                                                                                                                                                       |
+| ------------------------------------ | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@wxyc/backend`                      | `apps/backend/`                      | Express API server (port 8080)                                                                                                                                                |
+| `@wxyc/auth-service`                 | `apps/auth/`                         | better-auth server (port 8082)                                                                                                                                                |
+| `@wxyc/database`                     | `shared/database/`                   | Drizzle ORM schema, client, migrations, ETL utilities                                                                                                                         |
+| `@wxyc/authentication`               | `shared/authentication/`             | Auth middleware, roles, JWT verification                                                                                                                                      |
+| `@wxyc/flowsheet-etl`                | `jobs/flowsheet-etl/`                | Flowsheet ETL: sync from tubafrenzy                                                                                                                                           |
+| `@wxyc/rotation-etl`                 | `jobs/rotation-etl/`                 | Rotation ETL: sync from tubafrenzy                                                                                                                                            |
+| `@wxyc/artist-identity-etl`          | `jobs/artist-identity-etl/`          | Artist identity ETL: sync from LML's `entity.identity`                                                                                                                        |
+| `@wxyc/flowsheet-dj-name-backfill`   | `jobs/flowsheet-dj-name-backfill/`   | One-shot backfill: populate `flowsheet.dj_name` on legacy track rows after migration 0053                                                                                     |
+| `@wxyc/library-artist-name-backfill` | `jobs/library-artist-name-backfill/` | One-shot backfill: populate `library.artist_name` from the `artists` join after migration 0058 (Epic A.2)                                                                     |
+| `@wxyc/flowsheet-metadata-backfill`  | `jobs/flowsheet-metadata-backfill/`  | One-shot drain: enrich the historical `flowsheet` track rows that never ran LML metadata enrichment (#631 / #638). Recurring drift-repair flip is tracked under #639 Phase 2. |
 
 ### API Server (`apps/backend`)
 
@@ -102,6 +103,34 @@ npm run drizzle:drop       # Delete a migration file
 **`CREATE INDEX` migrations may add `IF NOT EXISTS` by hand.** When an index ships against a large prod table, the deploy runbook is to build it CONCURRENTLY out-of-band first (no AccessExclusiveLock, no INSERT pause) and then merge a migration that finds it already there. Drizzle-kit doesn't emit `IF NOT EXISTS` for indexes; hand-edit it onto the `CREATE INDEX` line so the migration is a no-op against the prod DB while fresh dev databases pick the index up on first migrate. The comment block must include the exact `CREATE INDEX CONCURRENTLY ...` command for ops to run, and must explain that the in-migration form is _not_ CONCURRENTLY because Drizzle wraps each migration in a transaction (`CONCURRENTLY cannot run inside a transaction block`). Reference: 0057, 0068, 0070. Don't add `IF NOT EXISTS` to other DDL (ALTER TABLE, etc.) — the index pattern is the only one that needs prod pre-prep.
 
 **Migrations are DDL-only.** Bulk DML (rewrites of more than ~10k rows) does not belong inside a migration file because the DDL portion takes an `AccessExclusiveLock` that is held until the transaction commits, and a long DML can wedge the table for hours. Put the rewrite in a one-shot backfill job under `jobs/<name>-backfill/` (declared with `"job-type": "one-shot"` in `package.json`). The build pipeline pushes the image to ECR; a human invokes it via `docker run --rm --env-file .env <image>` during a low-traffic window. If a downstream migration depends on the backfill having run, gate it with a `DO $$ ... RAISE EXCEPTION ... END $$;` precondition guard at the top of the file. See `0053_flowsheet-dj-name-column.sql` + `jobs/flowsheet-dj-name-backfill/` + `0054_flowsheet-search-doc-with-dj-name.sql` for the canonical pattern, and issue #511 for the incident this rule was learned from.
+
+**Constraint-adding migrations should include precondition guards.** Any migration that adds a `UNIQUE`, `CHECK`, `NOT NULL`, or `FOREIGN KEY` constraint depends on a data invariant that current rows must satisfy. If they don't, Postgres aborts the migration mid-apply and the deploy wedges (recovery pattern: #511). Guard the DDL with a `DO $$ ... RAISE EXCEPTION ... END $$;` block above the `CREATE`/`ALTER` so the migration fails fast with a readable message and the transaction rolls back cleanly. Example for the rotation unique partial index from #694:
+
+```sql
+-- 0071 unique partial index on (rotation.album_id, rotation.rotation_bin) WHERE kill_date IS NULL
+-- Requires: all duplicate active groups must be resolved first.
+
+DO $$
+DECLARE dup_count int;
+BEGIN
+  SELECT COUNT(*) INTO dup_count
+  FROM (
+    SELECT album_id, rotation_bin
+    FROM wxyc_schema.rotation
+    WHERE kill_date IS NULL
+    GROUP BY album_id, rotation_bin
+    HAVING COUNT(*) > 1
+  ) g;
+  IF dup_count > 0 THEN
+    RAISE EXCEPTION 'Cannot apply rotation_active_album_bin_uniq: % duplicate groups remain. Run rotation-dedupe job first or pre-clean manually.', dup_count;
+  END IF;
+END $$;
+
+-- The actual DDL follows
+CREATE UNIQUE INDEX IF NOT EXISTS ...
+```
+
+The same shape covers `NOT NULL` (count `WHERE col IS NULL`), `CHECK` (count rows that violate the predicate), and `FK` (count orphans via `LEFT JOIN ... WHERE referenced.id IS NULL`). The pattern is the same prevention this codebase already uses on the 0053 + `jobs/flowsheet-dj-name-backfill/` + 0054 chain — generalize it to any constraint-adding migration. Some constraints are provably safe (e.g. a `UNIQUE` index on a freshly-added nullable column, or `NOT NULL` paired with a `DEFAULT`); when no real precondition exists, document the reasoning with a `-- @no-precondition-needed: <reason>` comment so the linter (`scripts/validate-migrations.mjs` Check 8) suppresses its warning. The PR-bot data-shape report (companion #703) catches violations at PR time; the precondition guard is the last line of defense at apply time.
 
 ### Authentication (`shared/authentication`)
 
@@ -322,7 +351,9 @@ PostgreSQL triggers (`cdc_notify()`) fire `pg_notify('cdc', payload)` on every I
 CDC_SECRET=xxx npx tsx scripts/sync/reconcile.ts
 ```
 
-Connects to tubafrenzy's CDC WebSocket and verifies changes land in Backend-Service's PostgreSQL. Reports matches, mismatches, and missing records in real time.
+Bidirectional: forward verifies tubafrenzy SSE events land in Backend-Service PG; reverse verifies PG WS events land in a local `wxycmusic` MySQL clone (defaults to `localhost:3306`). Reports matches, mismatches, missing in real time.
+
+The reverse direction's local clone is refreshed via `scripts/sync/refresh-local-mysql.sh`, which chains tubafrenzy's `backup-database.sh` (mysqldump over SSH) with a local DROP + CREATE + import. Run it on a cron / launchd timer (e.g. every 15 min) — without periodic refresh the clone drifts and produces false `NOT FOUND` warnings for any row newer than the last snapshot. There is no event-driven sync; the snapshot cadence is the reverse-direction freshness ceiling.
 
 ## Environment Variables
 
@@ -330,6 +361,7 @@ Connects to tubafrenzy's CDC WebSocket and verifies changes land in Backend-Serv
 
 - `PORT` (default 8080)
 - `CI_PORT` (default 8081)
+- `MUTATION_4XX_METRICS_DISABLED` (default unset / enabled) -- Set to `true` to short-circuit the `apps/backend/middleware/responseMetrics.ts` middleware that emits the `WXYC/BackendService` `MutationClientError` CloudWatch metric for `POST/PATCH/DELETE /flowsheet/*` responses with `400 ≤ status < 500` (replacement signal post-#691, since Sentry no longer auto-captures 4xx). Disable in CI / local dev where AWS credentials aren't present so a noisy `PutMetricData` rejection doesn't pollute logs. The middleware is otherwise self-clamping (in-memory ring buffer flushed every 30s or every 10 errors, whichever comes first; `PutMetricData` failures are logged + swallowed and never block the response).
 
 ### Database
 
@@ -369,6 +401,7 @@ Connects to tubafrenzy's CDC WebSocket and verifies changes land in Backend-Serv
 
 - `SENTRY_DSN` -- Sentry project DSN (required for error reporting). Without this, Sentry silently disables itself.
 - `SENTRY_RELEASE` -- Set automatically by the deploy action to `<app>@<tag>`
+- `SENTRY_TRACES_SAMPLE_RATE` (default `0`, read by `jobs/flowsheet-etl/logger.ts` and `jobs/flowsheet-metadata-backfill/logger.ts`) -- Per-job tracing sample rate. The job loggers default `tracesSampleRate` to 0 so steady-state runs don't pay the sampling overhead, and `@sentry/node` v10 itself defaults to 0 if the field is omitted (silently producing zero spans). Operators flip this to e.g. `1.0` on `docker run --env-file .env -e SENTRY_TRACES_SAMPLE_RATE=1.0 ...` for one-shot pilots that need span / trace data (see #640). Malformed or out-of-range values fall back to 0. The runtime API container at `apps/backend/instrument.ts` sets its own `tracesSampleRate: 1.0` directly and isn't affected by this knob.
 
 #### Observability tags (Phase A contract)
 

@@ -2,11 +2,11 @@
 
 ## What this is
 
-A defensive pattern for _code_ changes that depend on a column having been backfilled. The backfill itself runs as a one-shot job under `jobs/<name>-backfill/`; the question is how the runtime guards against being asked to serve traffic before the backfill has run.
+A defensive pattern for _code_ changes that depend on a column having been backfilled. The backfill itself runs as a one-shot job under `jobs/<name>-backfill/`; the question is how the runtime guards against being asked to serve traffic before the backfill has run, or against new leak paths re-introducing NULL rows after the fact.
 
 For _migrations_ that depend on a backfill, the canonical pattern is the `DO $$ ... RAISE EXCEPTION ... END $$;` precondition guard at the top of the migration file (see `0053_flowsheet-dj-name-column.sql` → `jobs/flowsheet-dj-name-backfill/` → `0054_flowsheet-search-doc-with-dj-name.sql`). That guard fires inside the DDL transaction.
 
-This document covers the _runtime_ analog: a boot-time assertion that fails loud when a backfill-dependent code path is called before the backfill has populated the column.
+This document covers the _runtime_ analog: a boot-time data-quality check that flags a backfill-dependent column slipping back into a degraded state.
 
 ## Why
 
@@ -19,55 +19,64 @@ This pattern was introduced after the 2026-04-28 catalog-search incident:
 
 The migration-precondition guard pattern doesn't apply here — there was no follow-up migration after 0058 to refuse, and the `search_doc` column itself was perfectly valid SQL with NULL inputs. The bug was a _code-side_ assumption that the backfill had run.
 
-## The pattern
+## What NOT to do — the 2026-04-30 follow-up incident
 
-For any code path that depends on a backfilled column being non-NULL, gate it behind a boot-time assertion that:
+The original version of this pattern made the runtime check a hard precondition that 503'd the search endpoint for the lifetime of the process whenever any single row had `artist_name IS NULL`. That worked while the column was uniformly empty (the intended trigger), but it weaponized itself against a single bad row:
 
-1. Runs the cheapest possible `SELECT count(*) ... WHERE col IS NULL LIMIT 1` once per process.
-2. Caches the result for the lifetime of the process — once the column is populated, it stays populated, so re-checking on every request is wasted work.
-3. Throws a typed error subclassing `WxycError` with `statusCode: 503` so the existing `errorHandler` middleware refuses requests with a body that points operators at the backfill job.
-4. Logs to Sentry with `tool=<feature>`, `step=startup-assertion`, `count=<n>` so the alert path is observable.
-5. Caches the missing-backfill failure as well as success — the operator response is "run the backfill, restart the process" — but does _not_ cache transient DB errors so the next call retries.
+- 2026-04-28: a new release ("Tranquilizer", Oneohtrix Point Never) was inserted by the library ETL, which had not been updated to set `library.artist_name`.
+- 2026-04-30: the backend container was restarted as part of routine ops. The first authenticated `/library/?artist_name=...` call ran the precondition, found one NULL row out of 64,164, threw 503, and cached the failure for the lifetime of the new process.
+- DJs lost catalog search station-wide for the rest of the on-air session, despite LML being healthy and 64,163 rows being well-formed.
 
-The canonical implementation is `apps/backend/services/library-artist-name-assertion.service.ts`. Mirror it for any new gate.
+The lesson: a process-cached 503 turns "degraded data" into "outage" — and once any future leak path drips a single NULL into the table, every subsequent restart re-poisons. Hard gates that depend on _zero_ NULLs are too brittle; the gate amplifies a row-level data-quality issue into a service-level one.
 
-## When to add a gate
+## The pattern (revised)
 
-When you ship code that reads a backfilled column and silently produces wrong answers if the column has NULL rows. Examples:
+For any code path that depends on a backfilled column, do all of:
 
-- A search index built from a column.
-- A constraint enforced at write time but not at read time.
-- A denormalized join key.
+1. **Make the read path tolerate NULL rows.** Trigram (`%`) and tsvector (`@@`) predicates already drop NULLs naturally — degraded rows fall out of search instead of poisoning it. Project the value from a non-degraded source (e.g., the JOIN target) at the result level so even degraded rows that match a different predicate still serialize correctly.
 
-When _not_ to add a gate:
+2. **Add a soft data-quality check, not a hard gate.** Run the cheapest possible `SELECT count(*) ... WHERE col IS NULL LIMIT 1` once per process, cache the result, and emit a Sentry warning (`level: 'warning'`) if `count > 0`. Do **not** throw — degraded data is observability, not a precondition.
 
-- The column is nullable by design and the code handles NULL correctly.
+3. **Plug the leak path at the source.** If the column is meant to be denormalized at insert time, every insert path needs to set it. Audit `INSERT INTO library` (or whichever table) across the controllers AND every ETL/job. The canonical pattern: lift the canonical value into the helper that returns the FK target so the insert can't compile without it. See `ensureArtist` in `jobs/library-etl/job.ts` for the post-fix shape.
+
+4. **Run the backfill job to repair existing degradation.** `jobs/<name>-backfill/` is the recovery tool, not the prevention tool. It exists for incidents and migrations; the steady-state defense is (1) + (3).
+
+The canonical implementation is `apps/backend/services/library-artist-name-assertion.service.ts` (post-2026-04-30 revision). Mirror it for any new degradation-prone column.
+
+## When to add a soft check
+
+When you ship code that reads a backfilled column and the column is denormalized from another source of truth, so leak paths are realistic. The check exists to make the leak visible in Sentry before it grows.
+
+When _not_ to add a check:
+
+- The column is nullable by design and the code handles NULL correctly already.
 - The dependency is one-way: a migration that depends on a backfill (use the migration-precondition guard instead).
-- The cost of running the gate query exceeds the cost of being wrong (rare — the gate query is a single indexed lookup with `LIMIT 1`).
+- The column has a NOT NULL constraint and the database itself rejects bad inserts.
 
 ## Wiring
 
-Each public entry point on the affected service should `await` the assertion before any other DB work:
+Each public entry point on the affected service should `await` the check before any other DB work:
 
 ```ts
 export async function searchLibrary(...): Promise<...> {
-  await assertLibraryArtistNamePopulated();
+  await checkLibraryArtistNameHealth();
   // ... actual search ...
 }
 ```
 
-The assertion is cached per-process, so subsequent calls are sub-microsecond after the first.
+The check is cached per-process, so subsequent calls are sub-microsecond after the first.
 
 ## Operator response
 
-When the assertion fails, the search endpoint returns 503 with a body like:
+When the check fires a Sentry warning, the operator response is:
 
-```json
-{
-  "message": "library.artist_name has 64163 NULL row(s); catalog search is disabled. Run jobs/library-artist-name-backfill/ and restart the backend."
-}
-```
-
-The operator runs the backfill job (`docker run --rm --env-file .env <image>` on EC2), then restarts the backend container. The next request after restart re-runs the assertion against the populated column, sees count=0, caches success, and serves traffic normally.
-
-A backend restart is required because the assertion caches the failure for the lifetime of the process — once the runtime has decided to refuse search, it won't reconsider until the next process boot. This is intentional: it means a half-finished backfill (partially populated column) can't accidentally re-enable a path that's still serving partially-correct results.
+1. Identify the leak path. Recent inserts with NULL in the affected column are the smoking gun:
+   ```sql
+   SELECT id, artist_id, album_title, add_date
+     FROM library
+    WHERE artist_name IS NULL
+    ORDER BY add_date DESC;
+   ```
+2. Patch the code path that's inserting NULL (controller, ETL, internal endpoint).
+3. Run the backfill job to repair the existing rows: `docker run --rm --env-file .env <library-artist-name-backfill-image>`.
+4. No restart needed — the search functions already tolerate NULLs; the degraded rows just reappear as searchable once backfilled.
