@@ -1,0 +1,25 @@
+-- #687 / closes #687: backing index for `nextPlayOrder()` global-MAX scan.
+--
+-- `apps/backend/services/flowsheet.service.ts:nextPlayOrder` runs
+-- `SELECT max(play_order) FROM flowsheet ...` on every POST /flowsheet/.
+-- With 2.6M rows and no index on `play_order`, that's a parallel
+-- Seq Scan (~6s on prod, EXPLAIN 2026-04-30) which exceeds the
+-- 5s `DB_STATEMENT_TIMEOUT_MS` and returns 500 to every track and
+-- talkset a DJ tries to log. The DESC index makes MAX an O(1) leaf
+-- lookup — post-build EXPLAIN measured 0.119ms (~51,000x speedup).
+--
+-- Production ops (already done 2026-04-30 ~03:46 UTC):
+--   CREATE INDEX CONCURRENTLY "flowsheet_play_order_idx"
+--     ON "wxyc_schema"."flowsheet" USING btree ("play_order" DESC);
+-- Build completed in <8s, index size 17 MB, VALID. CONCURRENTLY takes
+-- only a ShareUpdateExclusiveLock so DJs continued logging tracks
+-- during the build. This migration is the schema follow-up so fresh
+-- dev databases pick the index up on init.
+--
+-- The in-migration form is NOT CONCURRENTLY because Drizzle wraps each
+-- migration in a transaction (`CREATE INDEX CONCURRENTLY cannot run
+-- inside a transaction block`). `IF NOT EXISTS` makes this a no-op
+-- against the prod DB where the index is already present. Same pattern
+-- as 0057, 0068, 0070, 0071-as-was-before-revert.
+
+CREATE INDEX IF NOT EXISTS "flowsheet_play_order_idx" ON "wxyc_schema"."flowsheet" USING btree ("play_order" DESC);

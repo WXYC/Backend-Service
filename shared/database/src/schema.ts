@@ -230,9 +230,27 @@ export const artists = wxyc_schema.table(
     code_letters: varchar('code_letters', { length: 4 }).notNull(),
     add_date: date('add_date').defaultNow().notNull(),
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
-    // Reconciled external identifiers, populated by an ETL from LML's entity.identity table.
-    // Mirrors the @wxyc/shared ReconciledIdentity schema. All nullable; URL construction is
-    // the consumer's responsibility (templates exist for Spotify, Apple Music, and Bandcamp).
+    /**
+     * SOURCE: LML's `entity.identity` PostgreSQL table via
+     * `jobs/artist-identity-etl/`. Library staff own everything else on
+     * this row; the six reconciled-identity columns below are populated
+     * (null-fill only) by the LML ETL. Shapes LML permits and the ETL
+     * preserves:
+     *
+     *   - All six are nullable. LML resolves identifiers per source
+     *     independently; an artist can have a Discogs match but no
+     *     MusicBrainz match, etc. Do NOT add NOT NULL or any composite
+     *     uniqueness across these columns.
+     *   - Library-staff-entered values win on conflict (the ETL only
+     *     null-fills); a non-null value here is the authoritative one
+     *     even if it differs from LML's current resolution.
+     *   - URL construction is the consumer's responsibility (templates
+     *     exist for Spotify, Apple Music, and Bandcamp).
+     *
+     * Constraints added to these six columns must accept the full LML
+     * shape. See WXYC/Backend-Service#702 + the artist-identity-etl
+     * docs in CLAUDE.md.
+     */
     discogs_artist_id: integer('discogs_artist_id'),
     musicbrainz_artist_id: varchar('musicbrainz_artist_id', { length: 64 }),
     wikidata_qid: varchar('wikidata_qid', { length: 32 }),
@@ -259,30 +277,61 @@ export const format = wxyc_schema.table('format', {
 
 export type NewAlbum = InferInsertModel<typeof library>;
 export type Album = InferSelectModel<typeof library>;
+/**
+ * SOURCE: legacy MySQL via `scripts/run-library-etl.sh` (and tubafrenzy
+ * mirror writes for live additions). Library staff curate the music
+ * collection in tubafrenzy/MySQL; Backend-Service is downstream. Shapes the
+ * upstream permits and the ETL preserves include:
+ *
+ *   - NULL `artist_name` until the A.2 backfill / A.3 live-cascade has run
+ *     for that row. Code paths reading `artist_name` must tolerate NULL.
+ *   - NULL `album_artist`, `label`, `label_id`, `alternate_artist_name`,
+ *     `artwork_url`, `on_streaming`, `code_volume_letters` (genuine library
+ *     metadata gaps).
+ *   - Multiple `library` rows pointing at the same `(artists.id,
+ *     album_title)` — the legacy library is per-physical-format, so a CD
+ *     and an LP issue of the same album are distinct rows.
+ *   - NULL `canonical_entity_id` / `canonical_entity_confidence` /
+ *     `canonical_entity_resolved_at` until LML resolves them (Epic B-1).
+ *   - `legacy_release_id` is unique per row when present, but a small
+ *     residual of rows have NULL `legacy_release_id` (orphaned from the
+ *     ETL's link pass).
+ *
+ * Constraints added here must accept the full upstream shape, or they will
+ * block the next library-etl pass. See WXYC/Backend-Service#702.
+ */
 export const library = wxyc_schema.table(
   'library',
   {
     id: serial('id').primaryKey(),
+    // FK + notNull preserved from the upstream schema; library rows must
+    // belong to an artist in tubafrenzy.
     artist_id: integer('artist_id')
       .references(() => artists.id)
-      .notNull(),
+      .notNull(), // eslint-disable-line wxyc/source-tagged-constraint-confirmed
     genre_id: integer('genre_id')
       .references(() => genres.id)
-      .notNull(),
+      .notNull(), // eslint-disable-line wxyc/source-tagged-constraint-confirmed
     format_id: integer('format_id')
       .references(() => format.id)
-      .notNull(),
+      .notNull(), // eslint-disable-line wxyc/source-tagged-constraint-confirmed
     alternate_artist_name: varchar('alternate_artist_name', { length: 128 }),
     album_artist: varchar('album_artist', { length: 128 }),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     album_title: varchar('album_title', { length: 128 }).notNull(),
     label: varchar('label', { length: 128 }),
     label_id: integer('label_id').references(() => labels.id),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     code_number: smallint('code_number').notNull(),
     code_volume_letters: varchar('code_volume_letters', { length: 4 }),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     disc_quantity: smallint('disc_quantity').default(1).notNull(),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     plays: integer('plays').default(0).notNull(),
     legacy_release_id: integer('legacy_release_id'),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     add_date: timestamp('add_date', { withTimezone: true }).defaultNow().notNull(),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
     date_lost: timestamp('date_lost', { withTimezone: true }),
     date_found: timestamp('date_found', { withTimezone: true }),
@@ -317,6 +366,10 @@ export const library = wxyc_schema.table(
       genreIdIdx: index('genre_id_idx').on(table.genre_id),
       formatIdIdx: index('format_id_idx').on(table.format_id),
       artistIdIdx: index('artist_id_idx').on(table.artist_id),
+      // legacy_release_id is the surrogate key the legacy MySQL library
+      // assigns each release; one row per legacy_release_id by the upstream
+      // invariant (NULLs allowed for never-imported rows).
+      // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
       legacyReleaseIdIdx: uniqueIndex('library_legacy_release_id_idx').on(table.legacy_release_id),
       albumArtistTrgmIdx: index('album_artist_trgm_idx').using(`gin`, sql`${table.album_artist} gin_trgm_ops`),
       libraryArtistNameTrgmIdx: index('library_artist_name_trgm_idx').using(
@@ -363,6 +416,27 @@ export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
   'breakpoint',
   'message',
 ]);
+/**
+ * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes
+ * rotation rows in tubafrenzy; Backend-Service is downstream. Tubafrenzy
+ * permits and the rotation-etl preserves shapes that constraints added
+ * here can easily contradict:
+ *
+ *   - Multiple active rows per (album_id, rotation_bin) over an album's
+ *     lifecycle (re-bins, re-adds, label-driven re-promotes). Do NOT add
+ *     a partial-unique index on (album_id, rotation_bin) — see PR #696
+ *     and the 2026-04-30 incident.
+ *   - NULL `album_id` (rotation entries that pre-date or didn't link to
+ *     a library row).
+ *   - `kill_date` in the future (scheduled-kill rows are written ahead
+ *     of time and only become "killed" when the date passes).
+ *   - Rows with a populated `legacy_rotation_id` that haven't yet been
+ *     joined to a library row by id.
+ *
+ * Constraints added to this table must accept the full upstream shape, or
+ * they will block the next ETL pass. See WXYC/Backend-Service#702 +
+ * CLAUDE.md (Rotation ETL: sync from tubafrenzy).
+ */
 export const rotation = wxyc_schema.table(
   'rotation',
   {
@@ -370,7 +444,9 @@ export const rotation = wxyc_schema.table(
     album_id: integer('album_id').references(() => library.id, { onDelete: 'cascade' }),
     legacy_rotation_id: integer('legacy_rotation_id'),
     legacy_library_release_id: integer('legacy_library_release_id'),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     rotation_bin: freqEnum('rotation_bin').notNull(),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     add_date: date('add_date').defaultNow().notNull(),
     kill_date: date('kill_date'),
     artist_name: varchar('artist_name', { length: 128 }),
@@ -380,6 +456,9 @@ export const rotation = wxyc_schema.table(
   (table) => {
     return {
       albumIdIdx: index('album_id_idx').on(table.album_id),
+      // legacy_rotation_id is the surrogate key tubafrenzy assigns each
+      // rotation row; one row per legacy_rotation_id by tubafrenzy's invariant.
+      // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
       legacyRotationIdIdx: uniqueIndex('rotation_legacy_rotation_id_idx').on(table.legacy_rotation_id),
     };
   }
@@ -387,6 +466,36 @@ export const rotation = wxyc_schema.table(
 
 export type NewFSEntry = InferInsertModel<typeof flowsheet>;
 export type FSEntry = InferSelectModel<typeof flowsheet>;
+/**
+ * SOURCE: tubafrenzy via the real-time webhook (`/internal/tubafrenzy-event`)
+ * and `jobs/flowsheet-etl/`. DJs write flowsheet entries from tubafrenzy or
+ * dj-site; tubafrenzy is the canonical authority and Backend-Service is
+ * downstream. Shapes the upstream permits and the ETL/webhook preserve
+ * include:
+ *
+ *   - NULL `show_id`, `album_id`, `rotation_id` (entries that pre-date a
+ *     show, talkset / message rows, or never-linked tracks).
+ *   - NULL `track_title`, `album_title`, `artist_name`, `record_label`
+ *     (talkset / breakpoint / message / dj_join / dj_leave entries — see
+ *     `flowsheetEntryTypeEnum` for non-track shapes).
+ *   - `play_order` is set independently by tubafrenzy (webhook path) and
+ *     dj-site (live insert path); the two paths can produce overlapping
+ *     values and the read layer reconciles. Do NOT add a per-show UNIQUE
+ *     on `play_order` — see the 2026-05-01 incident memo.
+ *   - NULL metadata fields (`artwork_url`, `discogs_url`, `*_url`,
+ *     `release_year`, `artist_bio`, `artist_wikipedia_url`,
+ *     `metadata_attempt_at`) are valid before LML enrichment runs;
+ *     `metadata_attempt_at` is specifically NULL on transient LML failures
+ *     so the row stays retryable.
+ *   - `legacy_entry_id` is unique per row when present, but a sizable
+ *     residual of dj-site-originated rows have NULL `legacy_entry_id`.
+ *   - `linkage_source` and `linkage_confidence` are NULL until B-2 / B-3
+ *     resolves a linkage; do not add NOT NULL.
+ *
+ * Constraints added here must accept the full upstream shape, or they will
+ * block the next ETL pass / webhook write. See WXYC/Backend-Service#702 +
+ * the 2026-05-01 flowsheet/rotation incident.
+ */
 export const flowsheet = wxyc_schema.table(
   'flowsheet',
   {
@@ -396,16 +505,21 @@ export const flowsheet = wxyc_schema.table(
     rotation_id: integer('rotation_id').references(() => rotation.id, { onDelete: 'set null' }),
     legacy_entry_id: integer('legacy_entry_id'),
     legacy_release_id: integer('legacy_release_id'),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
     track_title: varchar('track_title', { length: 128 }),
     album_title: varchar('album_title', { length: 128 }),
     artist_name: varchar('artist_name', { length: 128 }),
     record_label: varchar('record_label', { length: 128 }),
     label_id: integer('label_id').references(() => labels.id),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     play_order: integer('play_order').notNull(),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     request_flag: boolean('request_flag').default(false).notNull(),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     segue: boolean('segue').default(false).notNull(),
     message: varchar('message', { length: 250 }),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
     // Metadata (fetched from LML on insert, stored inline)
     artwork_url: varchar('artwork_url', { length: 512 }),
@@ -439,6 +553,20 @@ export const flowsheet = wxyc_schema.table(
     // or the FK resolver hasn't run yet". See migration 0063 +
     // jobs/broken-fk-recovery for the population pass.
     legacy_link_attempted_at: timestamp('legacy_link_attempted_at', { withTimezone: true }),
+    // #639 marker: timestamp set when LML metadata fetch responded for this
+    // row (success-with-match OR success-no-match). NULL has three causes,
+    // all valid targets for the historical drain (#638) and the recurring
+    // drift-repair sweep (#639 Phase 2):
+    //   1. Row pre-dates this marker (every flowsheet row before 0069).
+    //   2. Row was inserted between 0069's apply and the runtime stamp's
+    //      deploy (the small race window during the same release).
+    //   3. LML threw on the attempt — `.catch` in enrichment.service.ts
+    //      logs to Sentry under subsystem='metadata' and leaves the column
+    //      NULL precisely so the row stays retryable.
+    // Lets both jobs target exactly the rows that still need an attempt,
+    // without confusing tried-and-no-match for tried-and-LML-failed.
+    // Stamped by `enrichment.service.ts` and #638's job.
+    metadata_attempt_at: timestamp('metadata_attempt_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, track+dj=B, album=C, label=D). Managed by
     // migration 0054 (which extended the original 0052 expression to include
@@ -449,6 +577,10 @@ export const flowsheet = wxyc_schema.table(
     ),
   },
   (table) => [
+    // legacy_entry_id is the surrogate key tubafrenzy assigns each entry;
+    // unique per row when present (NULL allowed for dj-site-originated rows
+    // before the webhook round-trip).
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     uniqueIndex('flowsheet_legacy_entry_id_idx').on(table.legacy_entry_id),
     index('flowsheet_legacy_release_id_idx').on(table.legacy_release_id),
     index('flowsheet_artist_name_trgm_idx').using('gin', sql`${table.artist_name} gin_trgm_ops`),
@@ -472,6 +604,25 @@ export const flowsheet = wxyc_schema.table(
     // /flowsheet `?shows_limit=N` listing endpoint sequentially scans the
     // 2.6M-row table on every dj-site poll. See migration 0068 + issue #511.
     index('flowsheet_show_id_idx').on(table.show_id),
+    // `nextPlayOrder()` runs `SELECT max(play_order) FROM flowsheet` on every
+    // POST /flowsheet/ to derive the next monotonic play_order. Without this
+    // index that's a 2.6M-row parallel Seq Scan (~6s on prod) that exceeds
+    // the 5s `DB_STATEMENT_TIMEOUT_MS`, so postgres-js cancels and the API
+    // returns 500. With it, MAX is an O(1) leaf-page lookup. Built
+    // CONCURRENTLY out-of-band on prod 2026-04-30 to unblock the flowsheet
+    // during a live show. See migration 0071.
+    index('flowsheet_play_order_idx').on(sql`${table.play_order} DESC`),
+    // Partial B-tree on (id) covering the `metadata_attempt_at IS NULL`
+    // tail. Both #638 (historical drain) and #639 Phase 2 (recurring
+    // drift-repair sweep) keyset-paginate through this slice — without
+    // the index every batch seq-scans the 2.6M+ row table just to find
+    // the small NULL residual. See migration 0070 + issue #659. Built
+    // CONCURRENTLY out-of-band on prod before the migration deploys.
+    index('flowsheet_metadata_attempt_pending_idx')
+      .on(table.id)
+      .where(
+        sql`${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL AND ${table.metadata_attempt_at} IS NULL`
+      ),
   ]
 );
 
@@ -600,6 +751,26 @@ export const artist_crossreference = wxyc_schema.table(
 
 export type NewShow = InferInsertModel<typeof shows>;
 export type Show = InferSelectModel<typeof shows>;
+/**
+ * SOURCE: tubafrenzy via `jobs/flowsheet-etl/` (and the live show-lifecycle
+ * mirror in `apps/backend/middleware/legacy/flowsheet.mirror.ts`).
+ * Tubafrenzy is the canonical authority for the show calendar / who's on
+ * air; Backend-Service is downstream. Shapes the upstream permits and the
+ * ETL preserves include:
+ *
+ *   - NULL `primary_dj_id` (legacy shows that pre-date the auth_user
+ *     migration; "shadow" / fill-in shows logged before the operator
+ *     account was provisioned).
+ *   - NULL `specialty_id` (regular shows).
+ *   - NULL `show_name` (most shows; only specialty shows carry a name).
+ *   - NULL `end_time` (the active show — set when the DJ closes the show).
+ *   - NULL `legacy_show_id`, `legacy_dj_id`, `legacy_dj_name` for shows
+ *     that originated in dj-site (no tubafrenzy round-trip yet).
+ *
+ * Constraints added here must accept the full upstream shape, or they will
+ * block the next flowsheet-etl pass / show-lifecycle webhook.
+ * See WXYC/Backend-Service#702.
+ */
 export const shows = wxyc_schema.table(
   'shows',
   {
@@ -610,10 +781,15 @@ export const shows = wxyc_schema.table(
     legacy_dj_name: varchar('legacy_dj_name', { length: 128 }),
     legacy_dj_id: integer('legacy_dj_id'),
     show_name: varchar('show_name', { length: 128 }),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     start_time: timestamp('start_time', { withTimezone: true }).defaultNow().notNull(),
     end_time: timestamp('end_time', { withTimezone: true }),
   },
   (table) => [
+    // legacy_show_id is the surrogate key tubafrenzy assigns each show; one
+    // row per legacy_show_id by the upstream invariant. NULL allowed for
+    // dj-site-originated shows.
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     uniqueIndex('shows_legacy_show_id_idx').on(table.legacy_show_id),
     index('shows_legacy_dj_name_trgm_idx').using('gin', sql`${table.legacy_dj_name} gin_trgm_ops`),
   ]

@@ -3,6 +3,7 @@ import { eq, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, rotation, library, truncate } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
 import { updateLastModified } from '../services/flowsheet.service.js';
+import { fireAndForgetMetadataForRow } from '../services/metadata/index.js';
 import { mapProdEntryType, isMessageEntryType } from '../utils/flowsheet-transform.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
@@ -97,16 +98,19 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       const entryType = mapProdEntryType(entry.flowsheetEntryType ?? 0);
       const showId = await resolveShowId(entry.radioShowId);
       const isMsgType = isMessageEntryType(entryType);
+      const artistName = isMsgType ? null : truncate(entry.artistName, 128);
+      const albumTitle = truncate(entry.releaseTitle, 128);
+      const trackTitle = truncate(entry.songTitle, 128);
 
-      await db
+      const upserted = await db
         .insert(flowsheet)
         .values({
           legacy_entry_id: entry.id,
           show_id: showId,
           entry_type: entryType,
-          artist_name: isMsgType ? null : truncate(entry.artistName, 128),
-          album_title: truncate(entry.releaseTitle, 128),
-          track_title: truncate(entry.songTitle, 128),
+          artist_name: artistName,
+          album_title: albumTitle,
+          track_title: trackTitle,
           record_label: truncate(entry.labelName, 128),
           message: isMsgType ? truncate(entry.artistName, 250) : null,
           request_flag: !!entry.requestFlag,
@@ -125,7 +129,31 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
             request_flag: sql`excluded.request_flag`,
             entry_type: sql`excluded.entry_type`,
           },
+        })
+        // `(xmax = 0)` distinguishes a fresh INSERT from an UPDATE branch:
+        // a row produced by INSERT has xmax=0 (no prior tx touched it),
+        // while the DO UPDATE branch sets xmax to the current tx id. We
+        // gate enrichment on this so benign retries / no-op updates from
+        // tubafrenzy don't re-fetch from LML and re-write the 10 metadata
+        // columns (each rewrite triggers CDC + search_doc tsvector regen
+        // + 6-index churn). Backfill is the safety net for rows whose
+        // first INSERT enrichment returned null.
+        .returning({ id: flowsheet.id, created: sql<boolean>`(xmax = 0)` });
+
+      // Trigger LML metadata enrichment for tracks. Fire-and-forget: errors
+      // are caught inside fireAndForgetMetadataForRow and reported to Sentry,
+      // never propagated. This is the only enrichment trigger for entries
+      // arriving via tubafrenzy — the dj-site addEntry controller has its
+      // own call site.
+      const upsertedRow = upserted[0];
+      if (upsertedRow?.created && entryType === 'track' && artistName) {
+        fireAndForgetMetadataForRow({
+          flowsheetId: upsertedRow.id,
+          artistName,
+          albumTitle,
+          trackTitle,
         });
+      }
     }
 
     updateLastModified();
@@ -294,4 +322,73 @@ internal_route.post('/rotation-webhook', async (req, res) => {
     console.error('[webhook] Rotation webhook error:', e);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// ---- Streaming Status Webhook ----
+
+/**
+ * Authenticate via Authorization: Bearer token (used by LML streaming webhook).
+ * Separate from authenticateInternal which uses X-Internal-Key.
+ */
+function authenticateBearer(authHeader: string | undefined): boolean {
+  if (!ETL_NOTIFY_KEY || !authHeader) return false;
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  return !!match && match[1] === ETL_NOTIFY_KEY;
+}
+
+interface StreamingChange {
+  library_release_id: number;
+  on_streaming: boolean | null;
+}
+
+/**
+ * POST /internal/streaming-status-webhook
+ *
+ * Receives bulk ON_STREAMING updates from LML after each library.db upload.
+ * Updates the `on_streaming` column in the `library` table for each change.
+ *
+ * Auth: Authorization: Bearer <ETL_NOTIFY_KEY>
+ *
+ * Payload:
+ *   { changes: [{ library_release_id: number, on_streaming: boolean | null }], timestamp: string }
+ */
+internal_route.post('/streaming-status-webhook', async (req, res) => {
+  if (!authenticateBearer(req.get('Authorization'))) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const { changes } = req.body ?? {};
+
+  if (!Array.isArray(changes)) {
+    res.status(400).json({ error: 'Missing or invalid field: changes (expected array)' });
+    return;
+  }
+
+  let processed = 0;
+  let errors = 0;
+
+  try {
+    await db.transaction(async (tx) => {
+      for (const change of changes as StreamingChange[]) {
+        try {
+          const legacyId = change.library_release_id;
+          const onStreaming = change.on_streaming ?? null;
+
+          await tx.update(library).set({ on_streaming: onStreaming }).where(eq(library.legacy_release_id, legacyId));
+
+          processed++;
+        } catch (e) {
+          console.error('[webhook] Streaming status update error:', e);
+          errors++;
+        }
+      }
+    });
+  } catch (e) {
+    console.error('[webhook] Streaming status transaction error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+    return;
+  }
+
+  res.json({ processed, errors });
 });

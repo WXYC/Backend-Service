@@ -47,6 +47,11 @@
 -- but holds no data, so this is fast on any DB. Index creation on an empty
 -- table is instant.
 
+-- @no-precondition-needed: brand-new CREATE TABLE. The UNIQUE on
+-- flowsheet_id, the NOT NULL columns, and the FK to flowsheet(id) are all
+-- evaluated against zero rows at apply time — no existing data can violate
+-- them. Subsequent inserts are bounded by the constraints themselves.
+
 CREATE TABLE "wxyc_schema"."flowsheet_linkage_review" (
   "id" serial PRIMARY KEY,
   "flowsheet_id" integer NOT NULL UNIQUE

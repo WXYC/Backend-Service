@@ -360,6 +360,8 @@ const fetchLegacyReleases = async (lastRunMs: number | null) => {
   }
 };
 
+type EnsuredArtist = { id: number; artist_name: string };
+
 const ensureArtist = async (
   dbClient: DbClient,
   artistName: string,
@@ -368,10 +370,10 @@ const ensureArtist = async (
   genreId: number,
   codeLetters: string | null,
   artistGenreCode: number,
-  artistCache: Map<string, number>,
+  artistCache: Map<string, EnsuredArtist>,
   addDate?: string,
   lastModified?: Date
-) => {
+): Promise<EnsuredArtist> => {
   const normalizedLetters = codeLetters ?? '??';
   const artistKey = isVarious
     ? `${artistName.toLowerCase()}|${normalizedLetters}`
@@ -383,14 +385,14 @@ const ensureArtist = async (
   const lettersLower = normalizedLetters.toLowerCase().trim();
   const query = isVarious
     ? dbClient
-        .select({ id: artists.id })
+        .select({ id: artists.id, artist_name: artists.artist_name })
         .from(artists)
         .where(
           and(sql`lower(${artists.artist_name}) = ${nameLower}`, sql`lower(${artists.code_letters}) = ${lettersLower}`)
         )
         .limit(1)
     : dbClient
-        .select({ id: artists.id })
+        .select({ id: artists.id, artist_name: artists.artist_name })
         .from(artists)
         .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
         .where(
@@ -405,8 +407,9 @@ const ensureArtist = async (
 
   const existing = await query;
   if (existing.length) {
-    artistCache.set(artistKey, existing[0].id);
-    return existing[0].id;
+    const ensured = { id: existing[0].id, artist_name: existing[0].artist_name };
+    artistCache.set(artistKey, ensured);
+    return ensured;
   }
 
   const inserted = await dbClient
@@ -424,8 +427,9 @@ const ensureArtist = async (
   if (!id) {
     throw new Error(`[library-etl] Failed to insert artist ${artistName}.`);
   }
-  artistCache.set(artistKey, id);
-  return id;
+  const ensured = { id, artist_name: artistName };
+  artistCache.set(artistKey, ensured);
+  return ensured;
 };
 
 const ensureGenreArtistCrossref = async (
@@ -868,7 +872,7 @@ const run = async () => {
       const formatRows = await tx.select().from(format);
       const formatMap = new Map(formatRows.map((row) => [row.format_name.toLowerCase(), row.id]));
 
-      const artistCache = new Map<string, number>();
+      const artistCache = new Map<string, EnsuredArtist>();
 
       for (const release of legacyReleases) {
         if (isDbOnlyGenre(release.genre_ref_name)) {
@@ -910,7 +914,7 @@ const run = async () => {
           : normalizeCodeLetters(release.artist_call_letters);
         const artistGenreCode = artistInfo.isVarious ? VARIOUS_ARTISTS_CODE_NUMBER : (release.artist_call_numbers ?? 0);
 
-        const artistId = await ensureArtist(
+        const { id: artistId, artist_name: canonicalArtistName } = await ensureArtist(
           tx,
           artistInfo.name,
           alphabeticalName,
@@ -972,8 +976,14 @@ const run = async () => {
           continue;
         }
 
+        // Denormalize the canonical `artists.artist_name` onto `library.artist_name`
+        // so the column the tsvector / trigram catalog search reads against
+        // (`library.artist_name`) is populated at insert time. Omitting it lets
+        // the row land NULL — invisible to search, and (pre-fix) tripping the
+        // 503-on-any-NULL precondition in library-artist-name-assertion.service.
         await tx.insert(library).values({
           artist_id: artistId,
+          artist_name: canonicalArtistName,
           genre_id: genreId,
           format_id: formatId,
           alternate_artist_name: release.release_alternate_artist_name,

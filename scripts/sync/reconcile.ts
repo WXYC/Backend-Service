@@ -1,9 +1,13 @@
 /**
  * Bidirectional real-time cross-database reconciliation monitor.
  *
- * Connects to BOTH CDC WebSocket endpoints:
- *   - tubafrenzy (MySQL changes) → verifies in Backend-Service PostgreSQL
- *   - Backend-Service (PostgreSQL changes) → verifies in tubafrenzy MySQL
+ * Connects to BOTH CDC endpoints:
+ *   - tubafrenzy (MySQL changes, SSE) → verifies in Backend-Service PostgreSQL
+ *   - Backend-Service (PostgreSQL changes, WebSocket) → verifies in tubafrenzy MySQL
+ *
+ * tubafrenzy uses SSE because Kattare's Apache reverse proxy doesn't support
+ * the WebSocket upgrade (no mod_proxy_wstunnel). Backend-Service uses WebSocket
+ * because nginx is configured for it.
  *
  * On startup, runs a batch comparison of row counts. Then streams CDC events
  * from both sides and cross-checks each one.
@@ -12,7 +16,7 @@
  *   npx tsx scripts/sync/reconcile.ts
  *
  * Environment:
- *   TUBAFRENZY_CDC_URL     tubafrenzy CDC WebSocket URL (default: ws://localhost:8080/cdc)
+ *   TUBAFRENZY_CDC_URL     tubafrenzy CDC SSE URL (default: http://localhost:8080/playlists/cdcStream)
  *   BACKEND_CDC_URL        Backend-Service CDC WebSocket URL (default: ws://localhost:8080/cdc)
  *   CDC_SECRET             Shared secret for CDC auth (required)
  *   PROPAGATION_DELAY_MS   Delay before checking the other database (default: 5000)
@@ -20,13 +24,15 @@
  *   MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD  MySQL connection
  */
 
+import http from 'http';
+import https from 'https';
 import WebSocket from 'ws';
 import postgres from 'postgres';
 import mysql from 'mysql2/promise';
 
 // --- Configuration ---
 
-const TUBAFRENZY_CDC_URL = process.env.TUBAFRENZY_CDC_URL ?? 'ws://localhost:8080/cdc';
+const TUBAFRENZY_CDC_URL = process.env.TUBAFRENZY_CDC_URL ?? 'http://localhost:8080/playlists/cdcStream';
 const BACKEND_CDC_URL = process.env.BACKEND_CDC_URL ?? 'ws://localhost:8080/cdc';
 const CDC_SECRET = process.env.CDC_SECRET;
 const PROPAGATION_DELAY_MS = Number(process.env.PROPAGATION_DELAY_MS ?? '5000');
@@ -186,9 +192,12 @@ async function reconcileFlowsheetEntry(event: CdcEvent) {
   const entryType = mapEntryType(Number(data.flowsheetEntryType ?? 0));
   const isStructural = ['talkset', 'breakpoint', 'show_start', 'show_end', 'message'].includes(entryType);
 
+  // play_order is intentionally excluded from comparison: it churns during
+  // DJ reorder operations (drag-drop in the flowsheet UI shifts many rows in
+  // sequence) and reaches consistency eventually. Comparing it produces
+  // transient false-positive mismatches without surfacing real issues.
   const expected: Record<string, unknown> = {
     entry_type: entryType,
-    play_order: data.sequenceWithinShow,
   };
 
   if (isStructural) {
@@ -201,8 +210,8 @@ async function reconcileFlowsheetEntry(event: CdcEvent) {
   }
 
   const fieldsToCompare = isStructural
-    ? ['entry_type', 'play_order']
-    : ['entry_type', 'artist_name', 'track_title', 'album_title', 'record_label', 'play_order'];
+    ? ['entry_type']
+    : ['entry_type', 'artist_name', 'track_title', 'album_title', 'record_label'];
 
   const diffs = compareFields(expected, row, fieldsToCompare);
 
@@ -408,10 +417,20 @@ async function reverseReconcileFlowsheet(event: CdcEvent) {
 
   const row = (rows as any[])[0];
   const diffs: FieldDiff[] = [];
-  const artistName = String(data.artist_name ?? data.message ?? '');
-  const mysqlArtist = String(row.ARTIST_NAME ?? '');
-  if (artistName && mysqlArtist && truncate(mysqlArtist, 128) !== truncate(artistName, 128)) {
-    diffs.push({ field: 'artist_name', expected: artistName, actual: mysqlArtist });
+
+  // Skip artist_name comparison for show delimiters: tubafrenzy stores the
+  // formatted message ("END OF SHOW: <dj> SIGNED OFF at <time> (<date>)")
+  // while Backend-Service stores just the DJ name. Both are correct
+  // representations for their respective UIs — not a sync issue.
+  const entryType = String(data.entry_type ?? '');
+  const isShowDelimiter = entryType === 'show_start' || entryType === 'show_end';
+
+  if (!isShowDelimiter) {
+    const artistName = String(data.artist_name ?? data.message ?? '');
+    const mysqlArtist = String(row.ARTIST_NAME ?? '');
+    if (artistName && mysqlArtist && truncate(mysqlArtist, 128) !== truncate(artistName, 128)) {
+      diffs.push({ field: 'artist_name', expected: artistName, actual: mysqlArtist });
+    }
   }
 
   if (diffs.length === 0) {
@@ -528,6 +547,15 @@ const UNSYNCED_TABLES = new Set([
   'genre_artist_crossreference',
   'artist_library_crossreference',
   'artist_crossreference',
+  // Library catalog tables: populated by library-etl from tubafrenzy via
+  // composite-key matching (no legacy_*_id columns). Reverse direction has
+  // no specific row to verify since Backend-Service is the consumer, not the
+  // source. Forward direction is covered via TUBAFRENZY_TABLES (LIBRARY_CODE,
+  // GENRE, FORMAT, COMPANY).
+  'artists',
+  'genres',
+  'format',
+  'labels',
 ]);
 
 // --- Batch reconciliation (startup) ---
@@ -569,7 +597,106 @@ async function batchReconcile() {
   console.log('');
 }
 
-// --- WebSocket CDC client (generic, used for both directions) ---
+// --- SSE CDC client (used for tubafrenzy, since Kattare's Apache proxy lacks mod_proxy_wstunnel) ---
+
+function connectSse(label: string, sseUrl: string, tableHandlers: Record<string, (event: CdcEvent) => Promise<void>>) {
+  const url = new URL(sseUrl);
+  url.searchParams.set('key', CDC_SECRET!);
+  logInfo(`[${label}] Connecting to ${sseUrl}...`);
+
+  const client = url.protocol === 'https:' ? https : http;
+  let reconnectDelay = 1000;
+
+  let reconnectScheduled = false;
+  const triggerReconnect = (reason: string) => {
+    if (reconnectScheduled) return;
+    reconnectScheduled = true;
+    console.error(`[${timestamp()}] [${label}] ${reason}`);
+    logInfo(`[${label}] Reconnecting in ${reconnectDelay / 1000}s...`);
+    setTimeout(() => connectSse(label, sseUrl, tableHandlers), reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+  };
+
+  const req = client.get(
+    url,
+    {
+      headers: {
+        Accept: 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      },
+    },
+    (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        triggerReconnect(`SSE error: HTTP ${res.statusCode}`);
+        return;
+      }
+
+      logInfo(`[${label}] Connected`);
+      reconnectDelay = 1000;
+
+      res.setEncoding('utf8');
+      let buffer = '';
+
+      res.on('data', (chunk: string) => {
+        buffer += chunk;
+        let idx;
+        // SSE frames are separated by a blank line ("\n\n")
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          processSseFrame(label, frame, tableHandlers).catch((err) => {
+            console.error(`[${timestamp()}] [${label}] Error processing frame:`, err);
+          });
+        }
+      });
+
+      // Any of end/error/close/aborted leaves the response unusable. The
+      // first one wins; subsequent fires are ignored by triggerReconnect.
+      res.on('end', () => triggerReconnect('SSE connection ended'));
+      res.on('error', (err: Error) => triggerReconnect(`SSE response error: ${err.message}`));
+      res.on('close', () => triggerReconnect('SSE connection closed'));
+    }
+  );
+
+  req.on('error', (err) => triggerReconnect(`SSE request error: ${err.message}`));
+}
+
+async function processSseFrame(
+  label: string,
+  frame: string,
+  tableHandlers: Record<string, (event: CdcEvent) => Promise<void>>
+) {
+  const dataLines: string[] = [];
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+  if (dataLines.length === 0) return;
+
+  const payload = dataLines.join('\n');
+  const msg = JSON.parse(payload);
+
+  if (msg.type === 'heartbeat' || msg.type === 'connected') {
+    if (msg.type === 'connected') {
+      logInfo(`[${label}] Server time: ${new Date(msg.serverTime).toISOString()}`);
+    }
+    return;
+  }
+
+  const event = msg as CdcEvent;
+  const handler = tableHandlers[event.table];
+
+  if (handler) {
+    await new Promise((resolve) => setTimeout(resolve, PROPAGATION_DELAY_MS));
+    await handler(event);
+  } else if (!UNSYNCED_TABLES.has(event.table)) {
+    logSkipped(event.table, event.id ?? 0, `[${label}] unknown table`);
+  }
+}
+
+// --- WebSocket CDC client (used for Backend-Service direction) ---
 
 function connectCdc(label: string, wsUrl: string, tableHandlers: Record<string, (event: CdcEvent) => Promise<void>>) {
   const url = `${wsUrl}?key=${CDC_SECRET}`;
@@ -660,10 +787,10 @@ async function main() {
   logInfo('Streaming — bidirectional monitoring');
   console.log('='.repeat(60) + '\n');
 
-  // Forward: tubafrenzy changes → check PostgreSQL
-  connectCdc('tubafrenzy→PG', TUBAFRENZY_CDC_URL, TUBAFRENZY_TABLES);
+  // Forward: tubafrenzy changes (SSE — Apache proxy lacks WS upgrade support) → check PostgreSQL
+  connectSse('tubafrenzy→PG', TUBAFRENZY_CDC_URL, TUBAFRENZY_TABLES);
 
-  // Reverse: Backend-Service changes → check MySQL
+  // Reverse: Backend-Service changes (WebSocket via nginx) → check MySQL
   connectCdc('PG→tubafrenzy', BACKEND_CDC_URL, BACKEND_TABLES);
 
   // Graceful shutdown

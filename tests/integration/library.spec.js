@@ -226,6 +226,65 @@ describe('Library Rotation', () => {
         expect(row).not.toHaveProperty('bandcamp_id');
       }
     });
+
+    // The shape fixture (tests/fixtures/shape.sql, BS#701) seeds 3 duplicate
+    // active rotation groups + 2 NULL-album_id rows. The next two tests
+    // assert the read-side fix for #694 (dedup) + #689 (NULL-album surface).
+
+    test('collapses duplicate active rows per (album_id, rotation_bin) to one (#694)', async () => {
+      const res = await auth.get('/library/rotation').expect(200);
+
+      // Group fixture rotation rows by (album_id, rotation_bin) for the
+      // shape-fixture albums (id range 7000-7099). Each group should
+      // resolve to exactly one row in the response.
+      const fixtureRows = res.body.filter((r) => r.id !== null && r.id >= 7000 && r.id < 7100);
+      const groups = new Map();
+      for (const row of fixtureRows) {
+        const key = `${row.id}|${row.rotation_bin}`;
+        groups.set(key, (groups.get(key) || 0) + 1);
+      }
+      for (const [key, count] of groups.entries()) {
+        expect({ key, count }).toEqual({ key, count: 1 });
+      }
+
+      // Specifically: album 7000 in bin 'H' had 3 active rows in the
+      // fixture; assert the response has exactly one entry with the
+      // most-recent rotation_add_date.
+      const album7000H = res.body.filter((r) => r.id === 7000 && r.rotation_bin === 'H');
+      expect(album7000H).toHaveLength(1);
+      expect(album7000H[0].rotation_add_date).toBe('2024-08-22');
+    });
+
+    test('surfaces rotation rows with NULL album_id using denormalized snapshot fields (#689)', async () => {
+      const res = await auth.get('/library/rotation').expect(200);
+
+      // The shape fixture seeds 2 rotation rows with album_id IS NULL.
+      // They should appear with id=null and artist_name/album_title
+      // populated from rotation's denormalized columns.
+      const orphans = res.body.filter((r) => r.id === null);
+      expect(orphans.length).toBeGreaterThanOrEqual(2);
+
+      const fixtureOrphans = orphans.filter((r) => r.artist_name && r.artist_name.startsWith('Shape Fixture Orphan'));
+      expect(fixtureOrphans).toHaveLength(2);
+
+      const orphanOne = fixtureOrphans.find((r) => r.artist_name === 'Shape Fixture Orphan One');
+      expect(orphanOne).toBeDefined();
+      expect(orphanOne).toMatchObject({
+        id: null,
+        artist_name: 'Shape Fixture Orphan One',
+        album_title: 'Shape Fixture Orphan Album One',
+        rotation_bin: 'L',
+      });
+
+      const orphanTwo = fixtureOrphans.find((r) => r.artist_name === 'Shape Fixture Orphan Two');
+      expect(orphanTwo).toBeDefined();
+      expect(orphanTwo).toMatchObject({
+        id: null,
+        artist_name: 'Shape Fixture Orphan Two',
+        album_title: 'Shape Fixture Orphan Album Two',
+        rotation_bin: 'M',
+      });
+    });
   });
 
   describe('POST /library/rotation', () => {

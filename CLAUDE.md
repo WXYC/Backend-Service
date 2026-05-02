@@ -8,17 +8,18 @@ API and authentication service for WXYC applications. Provides endpoints for the
 
 npm workspaces:
 
-| Package                              | Path                                 | Purpose                                                                                                   |
-| ------------------------------------ | ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `@wxyc/backend`                      | `apps/backend/`                      | Express API server (port 8080)                                                                            |
-| `@wxyc/auth-service`                 | `apps/auth/`                         | better-auth server (port 8082)                                                                            |
-| `@wxyc/database`                     | `shared/database/`                   | Drizzle ORM schema, client, migrations, ETL utilities                                                     |
-| `@wxyc/authentication`               | `shared/authentication/`             | Auth middleware, roles, JWT verification                                                                  |
-| `@wxyc/flowsheet-etl`                | `jobs/flowsheet-etl/`                | Flowsheet ETL: sync from tubafrenzy                                                                       |
-| `@wxyc/rotation-etl`                 | `jobs/rotation-etl/`                 | Rotation ETL: sync from tubafrenzy                                                                        |
-| `@wxyc/artist-identity-etl`          | `jobs/artist-identity-etl/`          | Artist identity ETL: sync from LML's `entity.identity`                                                    |
-| `@wxyc/flowsheet-dj-name-backfill`   | `jobs/flowsheet-dj-name-backfill/`   | One-shot backfill: populate `flowsheet.dj_name` on legacy track rows after migration 0053                 |
-| `@wxyc/library-artist-name-backfill` | `jobs/library-artist-name-backfill/` | One-shot backfill: populate `library.artist_name` from the `artists` join after migration 0058 (Epic A.2) |
+| Package                              | Path                                 | Purpose                                                                                                                                                                       |
+| ------------------------------------ | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@wxyc/backend`                      | `apps/backend/`                      | Express API server (port 8080)                                                                                                                                                |
+| `@wxyc/auth-service`                 | `apps/auth/`                         | better-auth server (port 8082)                                                                                                                                                |
+| `@wxyc/database`                     | `shared/database/`                   | Drizzle ORM schema, client, migrations, ETL utilities                                                                                                                         |
+| `@wxyc/authentication`               | `shared/authentication/`             | Auth middleware, roles, JWT verification                                                                                                                                      |
+| `@wxyc/flowsheet-etl`                | `jobs/flowsheet-etl/`                | Flowsheet ETL: sync from tubafrenzy                                                                                                                                           |
+| `@wxyc/rotation-etl`                 | `jobs/rotation-etl/`                 | Rotation ETL: sync from tubafrenzy                                                                                                                                            |
+| `@wxyc/artist-identity-etl`          | `jobs/artist-identity-etl/`          | Artist identity ETL: sync from LML's `entity.identity`                                                                                                                        |
+| `@wxyc/flowsheet-dj-name-backfill`   | `jobs/flowsheet-dj-name-backfill/`   | One-shot backfill: populate `flowsheet.dj_name` on legacy track rows after migration 0053                                                                                     |
+| `@wxyc/library-artist-name-backfill` | `jobs/library-artist-name-backfill/` | One-shot backfill: populate `library.artist_name` from the `artists` join after migration 0058 (Epic A.2)                                                                     |
+| `@wxyc/flowsheet-metadata-backfill`  | `jobs/flowsheet-metadata-backfill/`  | One-shot drain: enrich the historical `flowsheet` track rows that never ran LML metadata enrichment (#631 / #638). Recurring drift-repair flip is tracked under #639 Phase 2. |
 
 ### API Server (`apps/backend`)
 
@@ -74,6 +75,11 @@ Drizzle ORM with PostgreSQL (`postgres-js` driver).
 
 **Domain tables** (custom schema): `dj_stats`, `schedule`, `shift_covers`, `artists`, and flowsheet-related tables.
 
+**Flowsheet attempt-at markers.** `flowsheet` carries two `timestamp with time zone` markers that record "this row was attempted by job X" so subsequent passes can target only the rows that still need work, without confusing tried-and-no-match for tried-and-failed:
+
+- `legacy_link_attempted_at` — set when the `legacy_release_id → library.id` resolver ran for the row and could not link. Migration 0063, populated by `jobs/broken-fk-recovery`. Lets B-2.2's LML backfill query both never-had-legacy-id rows and the broken-FK residual in one predicate.
+- `metadata_attempt_at` — set when the LML metadata fetch responded for the row (success-with-match OR success-no-match). Migration 0069 (#639), stamped at runtime by `apps/backend/services/metadata/enrichment.service.ts` inside `.then()` (the `.catch` branch deliberately leaves it NULL so transient LML failures stay retryable). The historical drain (#638) and the recurring drift-repair sweep (#639 Phase 2) target `metadata_attempt_at IS NULL`.
+
 Schema is in `shared/database/src/schema.ts`. Migrations are in `shared/database/src/migrations/`.
 
 **Test isolation**: Each Jest worker gets its own PostgreSQL schema via the `WXYC_SCHEMA_NAME` env var (defaults to `wxyc_schema`).
@@ -86,7 +92,45 @@ npm run drizzle:migrate    # Apply migrations to database
 npm run drizzle:drop       # Delete a migration file
 ```
 
+**Always run `drizzle:generate` to add a migration — never hand-create a journal entry, and never hand-edit the SQL file or the snapshot.** The `meta/` directory holds two parallel artifacts: `_journal.json` (one entry per migration, ordered by idx) and per-migration `meta/<idx>_snapshot.json` files (each capturing cumulative schema state through that idx). Drizzle-kit emits all three (SQL, journal entry, snapshot) as a side-effect of `generate`. Hand-creating a journal entry without running `generate` ships the migration but skips the snapshot, and the chain rots silently — `drizzle:generate` then diffs against the last _real_ snapshot, producing a noisy catch-up migration that contains operations the database already has. WXYC/Backend-Service#590 covers the cleanup. `scripts/validate-migrations.mjs` Check 7 enforces the rule going forward via the `HISTORICAL_MISSING_SNAPSHOT_IDXS` allowlist (which must not grow).
+
+**The one sanctioned hand-edit on the new journal entry is the `when` field.** Drizzle-kit auto-stamps `when = Date.now()`, but Drizzle's runtime migrator (`drizzle-orm/pg-core/dialect.js`) decides what to apply by comparing each entry's `when` against `max(__drizzle_migrations.created_at)` in production — anything `when <= max` is silently skipped on every subsequent migrate run, with no way to re-insert (see #400 / #550 for the two production incidents this caused). Once a previous PR landed a future-dated `when` (deliberately or via a now-stale fake clock), every subsequent migration's auto-stamped `when` will be below that cursor and must be bumped. **The recipe is: set the new entry's `when` to `previous_entry.when + 1` (one millisecond above the journal tail).** PR #551 did this explicitly when replaying 0054 as 0065 (`when=1779683200001`); PR #564 used `1779683200002` for 0066; the practice continues through 0067/0068. Validator Check 1 enforces strict monotonicity, so any deviation from `+1ms` is fine as long as it's strictly greater. Do not touch any other journal field by hand, and do not edit the snapshot — drizzle-kit uses snapshots as the diff baseline, so any hand-edit there rots the chain.
+
+**Parallel-PR collision on `when`.** Two open PRs picking the same `previous_entry.when + 1` would each generate a journal entry at identical `when`. The `git-merge-append` driver resolves _structural_ conflicts on the entries array (concurrent appends), but it does not detect that two entries carry the same `when` value — both can land cleanly, and Drizzle's runtime cursor would silently skip the second on first deploy (the same #400 / #550 failure mode this rule exists to prevent). When the journal-merge driver auto-resolves your branch and the resulting tail has a duplicate `when`, the second-merging PR must rebase and bump again before merging.
+
+**The generated SQL file may grow a leading comment block.** Drizzle-kit emits the bare DDL; the established practice (see 0053, 0063, 0065) is to prepend a `--`-comment header explaining the migration's purpose, the operational caveats (lock behavior, expected duration), and any companion backfill job. The DDL itself stays exactly as drizzle-kit produced it.
+
+**`CREATE INDEX` migrations may add `IF NOT EXISTS` by hand.** When an index ships against a large prod table, the deploy runbook is to build it CONCURRENTLY out-of-band first (no AccessExclusiveLock, no INSERT pause) and then merge a migration that finds it already there. Drizzle-kit doesn't emit `IF NOT EXISTS` for indexes; hand-edit it onto the `CREATE INDEX` line so the migration is a no-op against the prod DB while fresh dev databases pick the index up on first migrate. The comment block must include the exact `CREATE INDEX CONCURRENTLY ...` command for ops to run, and must explain that the in-migration form is _not_ CONCURRENTLY because Drizzle wraps each migration in a transaction (`CONCURRENTLY cannot run inside a transaction block`). Reference: 0057, 0068, 0070. Don't add `IF NOT EXISTS` to other DDL (ALTER TABLE, etc.) — the index pattern is the only one that needs prod pre-prep.
+
 **Migrations are DDL-only.** Bulk DML (rewrites of more than ~10k rows) does not belong inside a migration file because the DDL portion takes an `AccessExclusiveLock` that is held until the transaction commits, and a long DML can wedge the table for hours. Put the rewrite in a one-shot backfill job under `jobs/<name>-backfill/` (declared with `"job-type": "one-shot"` in `package.json`). The build pipeline pushes the image to ECR; a human invokes it via `docker run --rm --env-file .env <image>` during a low-traffic window. If a downstream migration depends on the backfill having run, gate it with a `DO $$ ... RAISE EXCEPTION ... END $$;` precondition guard at the top of the file. See `0053_flowsheet-dj-name-column.sql` + `jobs/flowsheet-dj-name-backfill/` + `0054_flowsheet-search-doc-with-dj-name.sql` for the canonical pattern, and issue #511 for the incident this rule was learned from.
+
+**Constraint-adding migrations should include precondition guards.** Any migration that adds a `UNIQUE`, `CHECK`, `NOT NULL`, or `FOREIGN KEY` constraint depends on a data invariant that current rows must satisfy. If they don't, Postgres aborts the migration mid-apply and the deploy wedges (recovery pattern: #511). Guard the DDL with a `DO $$ ... RAISE EXCEPTION ... END $$;` block above the `CREATE`/`ALTER` so the migration fails fast with a readable message and the transaction rolls back cleanly. Example for the rotation unique partial index from #694:
+
+```sql
+-- 0071 unique partial index on (rotation.album_id, rotation.rotation_bin) WHERE kill_date IS NULL
+-- Requires: all duplicate active groups must be resolved first.
+
+DO $$
+DECLARE dup_count int;
+BEGIN
+  SELECT COUNT(*) INTO dup_count
+  FROM (
+    SELECT album_id, rotation_bin
+    FROM wxyc_schema.rotation
+    WHERE kill_date IS NULL
+    GROUP BY album_id, rotation_bin
+    HAVING COUNT(*) > 1
+  ) g;
+  IF dup_count > 0 THEN
+    RAISE EXCEPTION 'Cannot apply rotation_active_album_bin_uniq: % duplicate groups remain. Run rotation-dedupe job first or pre-clean manually.', dup_count;
+  END IF;
+END $$;
+
+-- The actual DDL follows
+CREATE UNIQUE INDEX IF NOT EXISTS ...
+```
+
+The same shape covers `NOT NULL` (count `WHERE col IS NULL`), `CHECK` (count rows that violate the predicate), and `FK` (count orphans via `LEFT JOIN ... WHERE referenced.id IS NULL`). The pattern is the same prevention this codebase already uses on the 0053 + `jobs/flowsheet-dj-name-backfill/` + 0054 chain — generalize it to any constraint-adding migration. Some constraints are provably safe (e.g. a `UNIQUE` index on a freshly-added nullable column, or `NOT NULL` paired with a `DEFAULT`); when no real precondition exists, document the reasoning with a `-- @no-precondition-needed: <reason>` comment so the linter (`scripts/validate-migrations.mjs` Check 8) suppresses its warning. The PR-bot data-shape report (companion #703) catches violations at PR time; the precondition guard is the last line of defense at apply time.
 
 ### Authentication (`shared/authentication`)
 
@@ -307,7 +351,9 @@ PostgreSQL triggers (`cdc_notify()`) fire `pg_notify('cdc', payload)` on every I
 CDC_SECRET=xxx npx tsx scripts/sync/reconcile.ts
 ```
 
-Connects to tubafrenzy's CDC WebSocket and verifies changes land in Backend-Service's PostgreSQL. Reports matches, mismatches, and missing records in real time.
+Bidirectional: forward verifies tubafrenzy SSE events land in Backend-Service PG; reverse verifies PG WS events land in a local `wxycmusic` MySQL clone (defaults to `localhost:3306`). Reports matches, mismatches, missing in real time.
+
+The reverse direction's local clone is refreshed via `scripts/sync/refresh-local-mysql.sh`, which chains tubafrenzy's `backup-database.sh` (mysqldump over SSH) with a local DROP + CREATE + import. Run it on a cron / launchd timer (e.g. every 15 min) — without periodic refresh the clone drifts and produces false `NOT FOUND` warnings for any row newer than the last snapshot. There is no event-driven sync; the snapshot cadence is the reverse-direction freshness ceiling.
 
 ## Environment Variables
 
@@ -315,6 +361,7 @@ Connects to tubafrenzy's CDC WebSocket and verifies changes land in Backend-Serv
 
 - `PORT` (default 8080)
 - `CI_PORT` (default 8081)
+- `MUTATION_4XX_METRICS_DISABLED` (default unset / enabled) -- Set to `true` to short-circuit the `apps/backend/middleware/responseMetrics.ts` middleware that emits the `WXYC/BackendService` `MutationClientError` CloudWatch metric for `POST/PATCH/DELETE /flowsheet/*` responses with `400 ≤ status < 500` (replacement signal post-#691, since Sentry no longer auto-captures 4xx). Disable in CI / local dev where AWS credentials aren't present so a noisy `PutMetricData` rejection doesn't pollute logs. The middleware is otherwise self-clamping (in-memory ring buffer flushed every 30s or every 10 errors, whichever comes first; `PutMetricData` failures are logged + swallowed and never block the response).
 
 ### Database
 
@@ -324,6 +371,10 @@ Connects to tubafrenzy's CDC WebSocket and verifies changes land in Backend-Serv
 - `WXYC_SCHEMA_NAME` (default `wxyc_schema`)
 - `DB_STATEMENT_TIMEOUT_MS` (default `5000` / 5s) -- Server-enforced per-statement timeout on every postgres-js connection. Backend and auth inherit the default — any HTTP-handler query that runs longer than 5s is by definition an orphan (Express's request timeout has already fired). ETLs override to `300000` (5min) in their Dockerfiles because their bulk passes can legitimately take tens of seconds. Backfills override similarly. Set `0` to disable (use only for unit-test fixtures).
 - `DB_APPLICATION_NAME` (default `wxyc-backend`) -- Sets `application_name` on the postgres connection so `pg_stat_activity` makes the source obvious during incident triage. Each Dockerfile overrides this with its own service name (`wxyc-backend`, `wxyc-auth`, `wxyc-flowsheet-etl`, etc.).
+- `DB_SYNCHRONOUS_COMMIT` (default `on`) -- Per-connection `synchronous_commit` setting. Default `on` preserves Postgres's full durability guarantee for the API and ETLs. Bulk backfills set this to `off` in their Dockerfile so each per-batch COMMIT returns as soon as the WAL is in the OS buffer, rather than waiting for fsync. Safe because backfills are idempotent (`WHERE col IS NULL` filters naturally resume any work lost to an RDS crash). Accepted values: `on`, `off`, `local`, `remote_write`, `remote_apply`.
+- `BACKFILL_BATCH_SIZE` (default `5000`, used by `flowsheet-dj-name-backfill`) -- Rows updated per individually-committed UPDATE inside the backfill loop. The default keeps each batch well under the per-statement timeout on a healthy host. Operators can pass e.g. `BACKFILL_BATCH_SIZE=20000` at `docker run -e ...` when the prod instance has IOPS headroom and async commit is in play — larger batches amortize per-tx overhead and reduce the number of trigger-firing dispatches.
+- `ALBUM_PLAYS_REFRESH_INTERVAL_MS` (default `3600000` / 1 hour) -- Cadence at which `apps/backend/services/album-plays-refresh.service.ts` rebuilds the `album_plays` materialized view that feeds the catalog search ranker.
+- `ALBUM_PLAYS_REFRESH_TIMEOUT_MS` (default `300000` / 5 min) -- Per-statement timeout for the refresh's dedicated postgres-js client (`max: 1`, `application_name = wxyc-album-plays-refresh`). The API container's connection-level `DB_STATEMENT_TIMEOUT_MS=5000` is too tight for `REFRESH MATERIALIZED VIEW CONCURRENTLY` on prod, but loosening it globally would defeat the orphan-query protection it exists for. The dedicated client sidesteps that by carrying its own `statement_timeout` while the shared pool keeps the tight default. Set to a positive integer; non-numeric or non-positive values fall back to the default.
 
 ### better-auth
 
@@ -350,6 +401,7 @@ Connects to tubafrenzy's CDC WebSocket and verifies changes land in Backend-Serv
 
 - `SENTRY_DSN` -- Sentry project DSN (required for error reporting). Without this, Sentry silently disables itself.
 - `SENTRY_RELEASE` -- Set automatically by the deploy action to `<app>@<tag>`
+- `SENTRY_TRACES_SAMPLE_RATE` (default `0`, read by `jobs/flowsheet-etl/logger.ts` and `jobs/flowsheet-metadata-backfill/logger.ts`) -- Per-job tracing sample rate. The job loggers default `tracesSampleRate` to 0 so steady-state runs don't pay the sampling overhead, and `@sentry/node` v10 itself defaults to 0 if the field is omitted (silently producing zero spans). Operators flip this to e.g. `1.0` on `docker run --env-file .env -e SENTRY_TRACES_SAMPLE_RATE=1.0 ...` for one-shot pilots that need span / trace data (see #640). Malformed or out-of-range values fall back to 0. The runtime API container at `apps/backend/instrument.ts` sets its own `tracesSampleRate: 1.0` directly and isn't affected by this knob.
 
 #### Observability tags (Phase A contract)
 

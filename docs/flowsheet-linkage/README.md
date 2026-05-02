@@ -13,9 +13,19 @@ Of ~1.96M flowsheet `track` rows on production at the start of Epic B, only ~775
 
 Without a populated `album_id` we can't compute per-album play counts (which power Epic A's ranking), can't enrich a free-form entry with the same metadata a bin-pick gets, and can't run any analysis that wants to join flowsheet → library (genre over time, label distribution, rotation effectiveness). Closing the gap unblocks all of those.
 
-## What we deliberately did not do
+## Backfill: SQL-direct, not LML
 
-A direct exact-text match between `flowsheet.{artist_name,album_title}` and `library.{artist_name,album_title}` is **not** part of the pipeline. The empirical recovery on a production sample is ~0.13% (1,568 of 1.18M unlinked rows), and LML's lookup already runs exact → normalized → fuzzy internally — pre-filtering by exact text would just shadow LML's pipeline without adding signal. Every match flows through LML.
+Backfill no longer routes through LML. The empirical numbers we landed on changed the calculus: a normalized exact-text match between `flowsheet.{artist_name,album_title}` and `library.{artist_name,album_title}` recovers ~6.7% of the unlinked residual (52,984 of ~793K rows on the 2026-04-27 prod run), bridging via the local Discogs snapshot adds another ~1.7% (13,548 rows), and `pg_trgm` fuzzy text adds ~7.7% (61,122 rows) — 127K rows total in seconds, well above LML's reachable yield against the same residual at its rate ceiling.
+
+The remaining ~666K residual is bounded by library-catalog coverage (albums simply not in WXYC's library), not by any matching strategy. LML's data source is the same Discogs corpus our local snapshot already covers, so re-running an LML-driven backfill against the residual would mostly produce 429s and "no candidate" outcomes.
+
+The three SQL-direct passes live under `scripts/` and document their own normalization, confidence, idempotency, and reversal:
+
+- `scripts/direct-link-flowsheet.sql` — exact normalized text match (`linkage_source='direct_text_match'`, confidence 1.0).
+- `scripts/discogs-bridge-flowsheet.sql` — flowsheet → local Discogs snapshot → library via `canonical_entity_id` (`linkage_source='discogs_local_bridge'`, confidence 0.9).
+- `scripts/fuzzy-trigram-flowsheet.sql` — `pg_trgm` similarity match with same-album tie-break (`linkage_source='fuzzy_trigram_match'`, confidence 0.85).
+
+The forward path (live `addEntry` linkage) still goes through LML — the rate ceiling that breaks backfill is fine for one row at a time on a webhook.
 
 ## Architecture
 
@@ -88,12 +98,13 @@ Migration numbers are illustrative — the canonical numbers are in `shared/data
 
 ### Backfill jobs
 
-| Job                               | Path                                      | Inputs                                                                                                                                     | Outputs                                                                                                                              |
-| --------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Library canonical-entity backfill | `jobs/library-canonical-entity-backfill/` | `library` rows where `canonical_entity_id IS NULL`                                                                                         | Stamps `canonical_entity_id`, `_confidence`, `_resolved_at`. Throttled, restartable via id cursor.                                   |
-| Broken-FK recovery                | `jobs/broken-fk-recovery/`                | `flowsheet` rows with `legacy_release_id` whose FK doesn't resolve                                                                         | Re-runs the legacy-id resolver. Stamps `legacy_link_attempted_at` on rows that still don't resolve so the next job can pick them up. |
-| Flowsheet LML-link backfill       | `jobs/flowsheet-lml-link-backfill/`       | `flowsheet` rows where `album_id IS NULL AND entry_type='track'` AND `(legacy_release_id IS NULL OR legacy_link_attempted_at IS NOT NULL)` | Same logic as the forward path: links high-confidence matches, enqueues fallbacks for review.                                        |
-| Flowsheet linkage audit backfill  | `jobs/flowsheet-linkage-audit-backfill/`  | All `flowsheet` rows with `album_id` already populated                                                                                     | Stamps `linkage_source` retroactively for the legacy-linked rows so audits can attribute every linked row to a source.               |
+| Job                               | Path                                      | Inputs                                                             | Outputs                                                                                                                              |
+| --------------------------------- | ----------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Library canonical-entity backfill | `jobs/library-canonical-entity-backfill/` | `library` rows where `canonical_entity_id IS NULL`                 | Stamps `canonical_entity_id`, `_confidence`, `_resolved_at`. Throttled, restartable via id cursor.                                   |
+| Broken-FK recovery                | `jobs/broken-fk-recovery/`                | `flowsheet` rows with `legacy_release_id` whose FK doesn't resolve | Re-runs the legacy-id resolver. Stamps `legacy_link_attempted_at` on rows that still don't resolve so the next job can pick them up. |
+| Flowsheet linkage audit backfill  | `jobs/flowsheet-linkage-audit-backfill/`  | All `flowsheet` rows with `album_id` already populated             | Stamps `linkage_source` retroactively for the legacy-linked rows so audits can attribute every linked row to a source.               |
+
+The flowsheet → library backfill itself is the trio of SQL scripts described in [Backfill: SQL-direct, not LML](#backfill-sql-direct-not-lml) above; it isn't a Docker job. The previous `jobs/flowsheet-lml-link-backfill/` Docker job was removed in 2026-04 — see the kill PR's commit message for the full rationale.
 
 All jobs share the package layout in `CLAUDE.md`'s "Migrations are DDL-only" section: `"job-type": "one-shot"` in `package.json`, ECR-built Docker image, invoked via `docker run --rm --env-file .env <image>` during a low-traffic window.
 
@@ -106,7 +117,7 @@ When the canonical-entity lookup returns multiple library rows, `pickPrimaryLibr
 3. Most flowsheet plays in the last 12 months.
 4. Lowest `library.id` (deterministic tiebreaker — proxies "first imported, longest in the catalog").
 
-Returns `null` only when the candidate set raced with a concurrent delete; callers treat that as a transient no-match and let the next sweep retry. Both forward and backfill paths share this helper so the same album wins the tie-break in every context.
+Returns `null` only when the candidate set raced with a concurrent delete; callers treat that as a transient no-match and let the next sweep retry. The forward path uses this helper directly; the SQL-direct backfill scripts express the same priority order in the equivalent `MIN(library_id)` plus shared-canonical fallback so the same album wins the tie-break in every context.
 
 ### Review queue (B-3.1)
 
@@ -124,11 +135,11 @@ A web UI is out of scope for v1. Volume needs to materially exceed the CLI's thr
 
 `apps/backend/services/linkage-metrics.service.ts` exposes:
 
-- **In-process counters** keyed by outcome (`linked_high_conf`, `gray_zone_review`, `no_candidate`, `lml_error`, `lml_timeout`). Both forward and backfill paths increment them.
+- **In-process counters** keyed by outcome (`linked_high_conf`, `gray_zone_review`, `no_candidate`, `lml_error`, `lml_timeout`). The forward path increments them; SQL-direct backfill rows are accounted for via post-run `SELECT count(*) GROUP BY linkage_source`, not the in-process counters.
 - **SQL-backed gauges**:
   - `getCumulativeLinkageCoverage()` — fraction of all track rows with `album_id` set. Watch this fall as B-2.2 sweeps run.
   - `getRecentLinkageRate(hours)` — fraction of recently inserted rows that are linked. A falling ratio means the forward worker is behind.
-- **Sentry tagging**: `reportLinkageError` tags every captured exception with `subsystem='lml-linkage'` and `path='forward'|'backfill'|'review'` so the operator can filter the Sentry issue stream by subsystem instead of by stack trace.
+- **Sentry tagging**: `reportLinkageError` tags every captured exception with `subsystem='lml-linkage'` and `path='forward'|'review'` so the operator can filter the Sentry issue stream by subsystem instead of by stack trace. (`path='backfill'` was reachable while the LML-driven backfill existed; the SQL-direct scripts surface failures as psql errors instead of Sentry events.)
 
 ## Cross-epic interaction with Epic A
 
@@ -139,7 +150,7 @@ Epic A (catalog search ranking, see `docs/catalog-search/`) and Epic B share two
 | `library.artist_name` (denormalized) | Drives the `search_doc` tsvector and the `library_artist_name_trgm_idx` trigram index. | Read by the LML-linkage forward path indirectly via `library` joins, but linkage matches on `canonical_entity_id`, not text.                                                                                                                       |
 | `album_plays` materialized view      | Powers the play-count factor in the catalog ranker.                                    | The view aggregates `flowsheet WHERE entry_type='track' GROUP BY album_id`. **Every row Epic B links makes Epic A's ranker more accurate.** Going from 40% → ~55% linkage moves ~290K plays from "uncounted" to "counted" in the per-album rollup. |
 
-Implication: Epic B is most valuable to Epic A when the backfill has run to completion. The deploy order is forward path first, then backfill, so coverage doesn't drift further during the multi-day backfill.
+Implication: Epic B is most valuable to Epic A when the backfill has run to completion. The SQL-direct backfill takes minutes rather than days, so the coverage gap closes in a single maintenance window once the forward path is live.
 
 ## Related issues
 

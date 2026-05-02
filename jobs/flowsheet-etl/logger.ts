@@ -28,6 +28,14 @@ type BaseTags = { repo: string; tool: string; run_id: string };
 
 let baseTags: BaseTags | null = null;
 
+// `@sentry/node` v10 silently produces zero spans when tracesSampleRate is unset.
+export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
+  if (raw === undefined) return 0;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 0;
+  return parsed;
+};
+
 /**
  * Initialize Sentry and the structured logger. Call once at the top of the
  * entrypoint, before any other logic. Returns the resolved `run_id` so the
@@ -41,6 +49,7 @@ export const initLogger = (config: LoggerConfig): string => {
     dsn: process.env.SENTRY_DSN,
     release: process.env.SENTRY_RELEASE,
     environment: process.env.NODE_ENV || 'production',
+    tracesSampleRate: resolveTracesSampleRate(),
   });
   Sentry.setTag('repo', config.repo);
   Sentry.setTag('tool', config.tool);
