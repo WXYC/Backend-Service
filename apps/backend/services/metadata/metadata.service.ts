@@ -83,13 +83,28 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
 }
 
 /**
+ * Drop Discogs `spacer.gif` placeholder URLs.
+ *
+ * Discogs returns `spacer.gif` when a release has no real cover artwork.
+ * Persisting that to `flowsheet.artwork_url` would trip the playlist-proxy
+ * partial index ("has artwork") and result in a broken/blank image on iOS.
+ * Filtering at this single chokepoint covers every caller of `fetchMetadata`
+ * (runtime enrichment, iOS playcut detail, and the historical-drain job)
+ * so callers don't have to remember. See #649.
+ */
+function filterSpacerGif(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  return url.includes('spacer.gif') ? undefined : url;
+}
+
+/**
  * Extract album metadata from a DiscogsMatchResult.
  */
 function extractAlbumMetadata(artwork: DiscogsMatchResult): AlbumMetadataResult {
   return {
     discogsReleaseId: artwork.release_id,
     discogsUrl: artwork.release_url,
-    artworkUrl: artwork.artwork_url ?? undefined,
+    artworkUrl: filterSpacerGif(artwork.artwork_url),
     releaseYear: artwork.release_year ?? undefined,
     spotifyUrl: artwork.spotify_url ?? undefined,
     appleMusicUrl: artwork.apple_music_url ?? undefined,
