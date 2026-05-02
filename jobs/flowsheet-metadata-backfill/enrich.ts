@@ -20,8 +20,12 @@
  *
  * Spacer.gif filter: applied inline until #649 lands. Discogs occasionally
  * returns `spacer.gif` placeholder images; persisting them would pollute
- * 1.86M rows for the historical drain alone. Once #649 ships a shared
- * helper, swap the inline `filterSpacerGif` for the import.
+ * 1.86M rows for the historical drain alone. Applied only to `artwork_url`
+ * — the other URL columns in the same `.set()` block come from the
+ * `streaming_links` table or LML-constructed search URLs, never Discogs
+ * image responses (verified against `lookup/orchestrator.py:855-970`, see
+ * #679). Once #649 ships a shared helper, swap the inline `filterSpacerGif`
+ * for the import.
  */
 
 import { sql } from 'drizzle-orm';
