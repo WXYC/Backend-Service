@@ -1,5 +1,22 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
+const postgres = require('postgres');
 const fls_util = require('../utils/flowsheet_util');
+
+const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+
+// Per-spec sql client used by the #712 cross-show snapshot test below.
+// Mirrors the client construction in tests/integration/migrations.spec.js.
+function makeSql() {
+  return postgres({
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
+    database: process.env.DB_NAME || 'wxyc_db',
+    user: process.env.DB_USERNAME || 'test-user',
+    password: process.env.DB_PASSWORD || 'test-pw',
+    onnotice: () => {},
+    max: 2,
+  });
+}
 
 /*
  * Start Show (Primary dj hits /flowsheet/join)
@@ -586,6 +603,57 @@ describe('Shift Flowsheet Entries', () => {
 
     // get_entries_res = await request.get('/flowsheet').query({ limit: 4 }).send().expect(200);
     expect(res.body.play_order).toEqual(entries[0].play_order);
+  });
+
+  // Regression guard for #712. The shape fixture (#701) seeds show 7003
+  // with flowsheet rows at play_orders 1, 2, 3, 4, 5, 471. Pre-#712 the
+  // unscoped bump UPDATEs in `changeOrder` would mutate any row whose
+  // play_order fell in the moved range — including rows in *other* shows
+  // (the active one created by the surrounding describe + the fixture's
+  // ended show 7003). Snapshot show 7003's rows by id+play_order before
+  // the reorder and assert byte-equality after.
+  test('reordering inside the active show does not touch show 7003 (#712)', async () => {
+    const sql = makeSql();
+    try {
+      const before = await sql.unsafe(
+        `SELECT id, play_order FROM "${SCHEMA}".flowsheet WHERE show_id = 7003 ORDER BY id ASC`
+      );
+      // Sanity-check the fixture preconditions so a future fixture edit
+      // can't silently turn this test into a no-op.
+      expect(before.length).toBeGreaterThanOrEqual(6);
+      const orders = before.map((r) => r.play_order).sort((a, b) => a - b);
+      expect(orders).toEqual(expect.arrayContaining([1, 2, 3, 4, 5, 471]));
+
+      // Run a reorder in the active show — the same shape the
+      // "Start > Destination" test above exercises.
+      const get_entries_res = await request.get('/flowsheet').query({ limit: 4 }).send().expect(200);
+      const entries = get_entries_res.body.entries;
+      await request
+        .patch('/flowsheet/play-order')
+        .set('Authorization', global.access_token)
+        .send({ entry_id: entries[0].id, new_position: entries[2].play_order })
+        .expect(200);
+
+      // And the reverse direction, to cover both bump branches.
+      const get_entries_res2 = await request.get('/flowsheet').query({ limit: 4 }).send().expect(200);
+      const entries2 = get_entries_res2.body.entries;
+      await request
+        .patch('/flowsheet/play-order')
+        .set('Authorization', global.access_token)
+        .send({ entry_id: entries2[2].id, new_position: entries2[0].play_order })
+        .expect(200);
+
+      const after = await sql.unsafe(
+        `SELECT id, play_order FROM "${SCHEMA}".flowsheet WHERE show_id = 7003 ORDER BY id ASC`
+      );
+      // Byte-equal pre/post: no row in show 7003 had its play_order
+      // bumped by the reorders above. Pre-#712 some of these rows would
+      // have been mutated (the 1..4 range overlaps with the active
+      // show's bump range), corrupting the fixture for subsequent tests.
+      expect(after).toEqual(before);
+    } finally {
+      await sql.end();
+    }
   });
 });
 

@@ -634,6 +634,7 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
       const result = await trx
         .select({
           play_order: flowsheet.play_order,
+          show_id: flowsheet.show_id,
         })
         .from(flowsheet)
         .where(eq(flowsheet.id, entry_id))
@@ -644,17 +645,38 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
       }
 
       const position_old = result[0].play_order;
+      const show_id = result[0].show_id;
+
+      // Defensive: every flowsheet row has show_id post-#693. Be loud, not
+      // silent, if the invariant ever breaks — an unscoped bump UPDATE
+      // (#712) corrupts cross-show play_order ranges in ways that don't
+      // surface until much later.
+      if (show_id == null) {
+        throw new WxycError(`Flowsheet entry ${entry_id} has no show_id`, 500);
+      }
 
       if (position_new < position_old) {
         await trx
           .update(flowsheet)
           .set({ play_order: sql`play_order + 1` })
-          .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
+          .where(
+            and(
+              eq(flowsheet.show_id, show_id),
+              gte(flowsheet.play_order, position_new),
+              lte(flowsheet.play_order, position_old - 1)
+            )
+          );
       } else if (position_new > position_old) {
         await trx
           .update(flowsheet)
           .set({ play_order: sql`play_order - 1` })
-          .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
+          .where(
+            and(
+              eq(flowsheet.show_id, show_id),
+              gte(flowsheet.play_order, position_old + 1),
+              lte(flowsheet.play_order, position_new)
+            )
+          );
       }
 
       await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, entry_id));
@@ -667,7 +689,10 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
   );
 
   updateLastModified();
-  const response = await db.select().from(flowsheet).where(eq(flowsheet.play_order, position_new)).limit(1);
+  // Filter by id, not play_order — post-#693 multiple shows legitimately
+  // share play_order values, so `WHERE play_order = ? LIMIT 1` could
+  // surface a row from a different show.
+  const response = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
 
   return response[0];
 };
