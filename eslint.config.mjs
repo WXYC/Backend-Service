@@ -2,6 +2,7 @@ import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import security from 'eslint-plugin-security';
 import prettierConfig from 'eslint-config-prettier';
+import wxycLocalRules from './eslint-rules/source-tagged-constraint.cjs';
 
 export default tseslint.config(
   // Global ignores
@@ -14,6 +15,7 @@ export default tseslint.config(
       'coverage/',
       '**/*.js',
       '**/*.mjs',
+      '**/*.cjs',
       '**/*.d.ts',
       '**/*.d.mts',
       'shared/database/src/migrations/**',
@@ -46,6 +48,24 @@ export default tseslint.config(
         projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
+    },
+  },
+
+  // WXYC custom rules — schema annotations (#702)
+  {
+    files: ['shared/database/**/*.ts'],
+    plugins: {
+      wxyc: wxycLocalRules,
+    },
+    rules: {
+      // Warn when a constraint is added to a SOURCE-tagged table. The rule is
+      // intentionally a warning, not an error — it's a friction point that
+      // forces an explicit acknowledgement, not a CI gate. Suppress per
+      // occurrence with:
+      //   // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+      // once the constraint has been confirmed consistent with the upstream's
+      // data shape.
+      'wxyc/source-tagged-constraint-confirmed': 'warn',
     },
   },
 

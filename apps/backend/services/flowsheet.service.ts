@@ -24,12 +24,20 @@ import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 let lastModifiedAt: Date = new Date();
 
 /**
- * Compute the next play_order value for a new flowsheet entry.
- * play_order is manually managed (not a serial/sequence), so we derive it
- * from the current max value.
+ * Compute the next play_order value for a new flowsheet entry within a given
+ * show. play_order is manually managed (not a serial/sequence) and is scoped
+ * per show — tubafrenzy's webhook writes per-show play_orders (1, 2, 3, ...)
+ * and Backend-Service inserts must continue that sequence rather than picking
+ * up the global table max. Without the `WHERE show_id = ?` predicate a brand
+ * new track in show B would inherit `max + 1` from a prior show A's late
+ * additions, producing the discontinuous play_order sequence that breaks
+ * dj-site's optimistic update + cache reconciliation (#693).
  */
-const nextPlayOrder = async (): Promise<number> => {
-  const result = await db.select({ max: sql<number>`coalesce(max(${flowsheet.play_order}), 0)` }).from(flowsheet);
+const nextPlayOrder = async (showId: number): Promise<number> => {
+  const result = await db
+    .select({ max: sql<number>`coalesce(max(${flowsheet.play_order}), 0)` })
+    .from(flowsheet)
+    .where(eq(flowsheet.show_id, showId));
   return result[0].max + 1;
 };
 
@@ -198,10 +206,32 @@ export const resolveDjNameForShow = async (show: Show): Promise<string | null> =
   return dj?.djName ?? legacy ?? dj?.name ?? null;
 };
 
-/** Count total flowsheet entries (for pagination) */
+/**
+ * Estimate total flowsheet entries for pagination.
+ *
+ * Reads `pg_class.reltuples`, the planner's row-count estimate maintained by
+ * autovacuum/ANALYZE. Constant-time vs. an exact `count(*)` which would
+ * sequentially scan ~2.6M rows and routinely exceed the 5s per-statement
+ * timeout on this RDS instance — that's the immediate cause of
+ * `/flowsheet?page=0&limit=20` 500ing under live load. The estimate is
+ * typically within a few hundred of the true count, which is fine for a
+ * paginated UI's "Page X of N" display; pages near the upper bound may shift
+ * by one as autovacuum lags.
+ *
+ * `reltuples = -1` is the "never analyzed" sentinel; treat it as 0. The same
+ * goes for a missing row (no permissions on `pg_class` would surface as an
+ * error from the surrounding query, not as a missing row).
+ */
 export const getEntryCount = async (): Promise<number> => {
-  const result = await db.select({ count: sql<number>`count(*)::int` }).from(flowsheet);
-  return result[0].count;
+  const schema = process.env.WXYC_SCHEMA_NAME ?? 'wxyc_schema';
+  const result = await db.execute(
+    sql`SELECT GREATEST(reltuples::bigint, 0)::int AS count
+        FROM pg_class
+        WHERE relname = 'flowsheet'
+          AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = ${schema})`
+  );
+  const row = (result as unknown as Array<{ count: number }>)[0];
+  return Number(row?.count ?? 0);
 };
 
 /** Gets flowsheet entries by page with metadata joins */
@@ -271,7 +301,10 @@ export const addTrack = async (entry: Omit<NewFSEntry, 'play_order'>): Promise<F
   //   }
   // }
 
-  const play_order = await nextPlayOrder();
+  if (entry.show_id == null) {
+    throw new WxycError('Cannot add flowsheet entry without show_id', 400);
+  }
+  const play_order = await nextPlayOrder(entry.show_id);
   const response = await db
     .insert(flowsheet)
     .values({ ...entry, play_order })
@@ -371,7 +404,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
     entry_type: 'show_start',
-    play_order: await nextPlayOrder(),
+    play_order: await nextPlayOrder(new_show[0].id),
     message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString(
       'en-US',
       {
@@ -435,7 +468,7 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
     .values({
       show_id: show_id,
       entry_type: 'dj_join',
-      play_order: await nextPlayOrder(),
+      play_order: await nextPlayOrder(show_id),
       message: message,
     })
     .returning();
@@ -470,7 +503,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
     entry_type: 'show_end',
-    play_order: await nextPlayOrder(),
+    play_order: await nextPlayOrder(currentShow.id),
     message: `End of Show: ${dj_name} left the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
@@ -517,7 +550,7 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
     .values({
       show_id: show_id,
       entry_type: 'dj_leave',
-      play_order: await nextPlayOrder(),
+      play_order: await nextPlayOrder(show_id),
       message: message,
     })
     .returning();
@@ -601,6 +634,7 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
       const result = await trx
         .select({
           play_order: flowsheet.play_order,
+          show_id: flowsheet.show_id,
         })
         .from(flowsheet)
         .where(eq(flowsheet.id, entry_id))
@@ -611,17 +645,38 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
       }
 
       const position_old = result[0].play_order;
+      const show_id = result[0].show_id;
+
+      // Defensive: every flowsheet row has show_id post-#693. Be loud, not
+      // silent, if the invariant ever breaks — an unscoped bump UPDATE
+      // (#712) corrupts cross-show play_order ranges in ways that don't
+      // surface until much later.
+      if (show_id == null) {
+        throw new WxycError(`Flowsheet entry ${entry_id} has no show_id`, 500);
+      }
 
       if (position_new < position_old) {
         await trx
           .update(flowsheet)
           .set({ play_order: sql`play_order + 1` })
-          .where(and(gte(flowsheet.play_order, position_new), lte(flowsheet.play_order, position_old - 1)));
+          .where(
+            and(
+              eq(flowsheet.show_id, show_id),
+              gte(flowsheet.play_order, position_new),
+              lte(flowsheet.play_order, position_old - 1)
+            )
+          );
       } else if (position_new > position_old) {
         await trx
           .update(flowsheet)
           .set({ play_order: sql`play_order - 1` })
-          .where(and(gte(flowsheet.play_order, position_old + 1), lte(flowsheet.play_order, position_new)));
+          .where(
+            and(
+              eq(flowsheet.show_id, show_id),
+              gte(flowsheet.play_order, position_old + 1),
+              lte(flowsheet.play_order, position_new)
+            )
+          );
       }
 
       await trx.update(flowsheet).set({ play_order: position_new }).where(eq(flowsheet.id, entry_id));
@@ -634,7 +689,10 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
   );
 
   updateLastModified();
-  const response = await db.select().from(flowsheet).where(eq(flowsheet.play_order, position_new)).limit(1);
+  // Filter by id, not play_order — post-#693 multiple shows legitimately
+  // share play_order values, so `WHERE play_order = ? LIMIT 1` could
+  // surface a row from a different show.
+  const response = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
 
   return response[0];
 };

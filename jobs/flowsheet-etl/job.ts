@@ -31,6 +31,7 @@ import {
 import { parseInsertLine } from './parse-dump.js';
 import { mapProdEntryType, resolveEntryTimestamp, parseShowEntryDJName } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
+import { initLogger, log, captureError, closeLogger } from './logger.js';
 
 const JOB_NAME = 'flowsheet-etl';
 const BATCH_SIZE = 5000;
@@ -49,7 +50,7 @@ const resetSequences = async () => {
   await db.execute(
     sql`SELECT setval(pg_get_serial_sequence('wxyc_schema.flowsheet', 'play_order'), COALESCE((SELECT MAX(play_order) FROM wxyc_schema.flowsheet), 0) + 1, false)`
   );
-  console.log('[flowsheet-etl] Reset sequences to max(id)+1.');
+  log('info', 'reset-sequences', 'Reset sequences to max(id)+1.');
 };
 
 /**
@@ -66,7 +67,7 @@ const resolveAlbumIds = async () => {
       AND f.legacy_release_id IS NOT NULL
       AND f.album_id IS NULL
   `);
-  console.log(`[flowsheet-etl] Resolved album_id for flowsheet entries.`);
+  log('info', 'resolve-album-ids', 'Resolved album_id for flowsheet entries.');
 };
 
 /**
@@ -101,7 +102,10 @@ const resolveDjNames = async (legacyEntryIds: number[]) => {
       AND f."legacy_entry_id" = ANY(${legacyEntryIds})
   `);
   const updated = Number(result.count ?? 0);
-  console.log(`[flowsheet-etl] Resolved dj_name for ${updated}/${legacyEntryIds.length} new entries.`);
+  log('info', 'resolve-dj-names', `Resolved dj_name for ${updated}/${legacyEntryIds.length} new entries.`, {
+    updated,
+    candidates: legacyEntryIds.length,
+  });
 };
 
 /** Entry types whose legacy ARTIST_NAME text is display content, not a real artist. */
@@ -247,7 +251,7 @@ const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map
         entryCount += pendingEntries.length;
         pendingEntries.length = 0;
         if (entryCount % 50000 === 0) {
-          console.log(`[flowsheet-etl] ...${entryCount} entries processed.`);
+          log('info', 'bulk-load-entries', `...${entryCount} entries processed.`, { entryCount });
         }
       }
     }
@@ -262,25 +266,25 @@ const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map
 };
 
 const runBulkLoad = async (dumpPath: string, { replace = false } = {}) => {
-  console.log(`[flowsheet-etl] Bulk load from: ${dumpPath}${replace ? ' (--replace: truncate + reimport)' : ''}`);
+  log('info', 'bulk-load-start', `Bulk load from: ${dumpPath}`, { dumpPath, replace });
   const content = readFileSync(dumpPath, 'utf-8');
   const lines = content.split('\n');
 
   const doBulkLoad = async (dbClient: DbClient) => {
     if (replace) {
-      console.log('[flowsheet-etl] Truncating flowsheet and shows tables...');
+      log('info', 'bulk-load-truncate', 'Truncating flowsheet and shows tables...');
       await dbClient.execute(sql`TRUNCATE ${flowsheet}, ${shows} CASCADE`);
     }
 
-    console.log('[flowsheet-etl] Pass 1: Importing shows...');
+    log('info', 'bulk-load-shows', 'Pass 1: Importing shows...');
     const showCount = await importShows(dbClient, lines);
-    console.log(`[flowsheet-etl] Imported ${showCount} shows.`);
+    log('info', 'bulk-load-shows', `Imported ${showCount} shows.`, { showCount });
 
     const showIdMap = await buildShowIdMap(dbClient);
 
-    console.log('[flowsheet-etl] Pass 2: Importing entries...');
+    log('info', 'bulk-load-entries', 'Pass 2: Importing entries...');
     const entryCount = await importEntries(dbClient, lines, showIdMap);
-    console.log(`[flowsheet-etl] Imported ${entryCount} entries.`);
+    log('info', 'bulk-load-entries', `Imported ${entryCount} entries.`, { entryCount });
   };
 
   if (replace) {
@@ -297,7 +301,7 @@ const runBulkLoad = async (dumpPath: string, { replace = false } = {}) => {
   // not the bulk-load path. The bulk load imports raw legacy data; backfilling
   // 2.6M rows in a single UPDATE is exactly the wedge case from issue #511.
   await updateLastRun(JOB_NAME, new Date());
-  console.log('[flowsheet-etl] Recorded last_run for future incremental syncs.');
+  log('info', 'bulk-load-complete', 'Recorded last_run for future incremental syncs.');
 };
 
 // ---- Incremental Sync Mode ----
@@ -440,7 +444,11 @@ export const runIncremental = async (): Promise<SyncResult> => {
   await updateLastRun(JOB_NAME, runStartedAt);
   const parts = [`${showsImported} shows`, `${entriesImported} new entries`];
   if (entriesUpdated > 0) parts.push(`${entriesUpdated} updated entries`);
-  console.log(`[flowsheet-etl] Incremental sync: ${parts.join(', ')}.`);
+  log('info', 'incremental-complete', `Incremental sync: ${parts.join(', ')}.`, {
+    showsImported,
+    entriesImported,
+    entriesUpdated,
+  });
 
   return { showsImported, entriesImported, entriesUpdated };
 };
@@ -448,9 +456,13 @@ export const runIncremental = async (): Promise<SyncResult> => {
 // ---- Main ----
 
 const run = async () => {
+  const args = process.argv.slice(2);
+  const dumpPath = args.find((a) => !a.startsWith('--'));
+  const subcommand = dumpPath ? 'bulk-load' : args.includes('--poll') ? 'poll' : 'incremental';
+  initLogger({ repo: 'Backend-Service', tool: `${JOB_NAME} ${subcommand}` });
+  log('info', 'started', `${JOB_NAME} ${subcommand} started`);
+
   try {
-    const args = process.argv.slice(2);
-    const dumpPath = args.find((a) => !a.startsWith('--'));
     if (dumpPath) {
       await runBulkLoad(dumpPath, { replace: args.includes('--replace') });
     } else if (args.includes('--poll')) {
@@ -470,7 +482,12 @@ const run = async () => {
   }
 };
 
-run().catch((error) => {
-  console.error('[flowsheet-etl] Failed:', error);
-  process.exitCode = 1;
-});
+run()
+  .catch((error) => {
+    log('error', 'failed', `${JOB_NAME} failed`, { error: error instanceof Error ? error.message : String(error) });
+    captureError(error, 'failed');
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    void closeLogger();
+  });

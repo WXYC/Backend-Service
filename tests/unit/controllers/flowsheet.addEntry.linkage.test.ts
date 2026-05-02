@@ -21,8 +21,10 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
 }));
 
 const mockFetchMetadata = jest.fn<() => Promise<unknown>>();
+const mockFireAndForgetMetadataForRow = jest.fn();
 jest.mock('../../../apps/backend/services/metadata/index', () => ({
   fetchMetadata: mockFetchMetadata,
+  fireAndForgetMetadataForRow: mockFireAndForgetMetadataForRow,
 }));
 
 const mockRunLmlLinkage = jest.fn<() => Promise<unknown>>();

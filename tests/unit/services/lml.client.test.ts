@@ -29,7 +29,7 @@ describe('lml.client', () => {
   });
 
   describe('lookupMetadata', () => {
-    it('sends POST to /api/v1/lookup with artist, album, and song', async () => {
+    it('sends POST to /api/v1/lookup with artist, album, song, and synthesized raw_message', async () => {
       const mockResponse = { results: [], search_type: 'none', song_not_found: false, found_on_compilation: false };
       mockFetch.mockResolvedValue({
         ok: true,
@@ -43,12 +43,17 @@ describe('lml.client', () => {
         expect.objectContaining({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ artist: 'Autechre', album: 'Confield', song: 'VI Scose Poise' }),
+          body: JSON.stringify({
+            artist: 'Autechre',
+            raw_message: 'Autechre - Confield - VI Scose Poise',
+            album: 'Confield',
+            song: 'VI Scose Poise',
+          }),
         })
       );
     });
 
-    it('omits album and song when not provided', async () => {
+    it('omits album and song when not provided; raw_message falls back to the artist', async () => {
       mockFetch.mockResolvedValue({
         ok: true,
         json: () =>
@@ -60,12 +65,12 @@ describe('lml.client', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         'http://lml.test:8000/api/v1/lookup',
         expect.objectContaining({
-          body: JSON.stringify({ artist: 'Autechre' }),
+          body: JSON.stringify({ artist: 'Autechre', raw_message: 'Autechre' }),
         })
       );
     });
 
-    it('does not include raw_message in the request body', async () => {
+    it('synthesizes raw_message from artist and album when song is omitted', async () => {
       mockFetch.mockResolvedValue({
         ok: true,
         json: () =>
@@ -75,7 +80,7 @@ describe('lml.client', () => {
       await lookupMetadata('Autechre', 'Confield');
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1]?.body as string);
-      expect(callBody).not.toHaveProperty('raw_message');
+      expect(callBody.raw_message).toBe('Autechre - Confield');
     });
   });
 

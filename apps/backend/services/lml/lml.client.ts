@@ -112,7 +112,11 @@ async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
  * @returns Lookup results with library items and enriched artwork metadata
  */
 export async function lookupMetadata(artist: string, album?: string, song?: string): Promise<LookupResponse> {
-  const body: Record<string, string> = { artist };
+  // LML's /lookup contract requires `raw_message` even when artist/album/song
+  // are already structured. Synthesize a free-form description that the LML
+  // parser would have produced — matches the e2e fixtures in LML's repo.
+  const rawMessage = [artist, album, song].filter(Boolean).join(' - ');
+  const body: Record<string, string> = { artist, raw_message: rawMessage };
   if (album) body.album = album;
   if (song) body.song = song;
 

@@ -20,6 +20,7 @@ import {
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
 import { lookupMetadata, isLmlConfigured, type LookupResponse } from './lml/lml.client.js';
+import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
 
 /**
  * Source columns on `artists` (and any joined / view-projected row) that
@@ -123,68 +124,118 @@ export const insertFormat = async (new_format: NewAlbumFormat) => {
 };
 
 export interface Rotation {
-  id: number;
-  code_letters: string;
-  code_artist_number: number;
-  code_number: number;
-  artist_name: string;
-  alphabetical_name: string;
-  album_title: string;
+  id: number | null;
+  code_letters: string | null;
+  code_artist_number: number | null;
+  code_number: number | null;
+  artist_name: string | null;
+  alphabetical_name: string | null;
+  album_title: string | null;
   record_label: string | null;
   label_id: number | null;
-  genre_name: string;
-  format_name: string;
+  genre_name: string | null;
+  format_name: string | null;
   rotation_id: number;
-  add_date: Date;
+  add_date: Date | null;
   rotation_add_date: string;
   rotation_bin: 'S' | 'L' | 'M' | 'H' | 'N';
   rotation_kill_date: string | null;
-  plays: number;
+  plays: number | null;
   reconciled_identity: ReconciledIdentity | null;
 }
 
-export const getRotationFromDB = async (): Promise<Rotation[]> => {
-  const rotation_albums = await db
-    .select({
-      id: library.id,
-      code_letters: artists.code_letters,
-      code_artist_number: genre_artist_crossreference.artist_genre_code,
-      code_number: library.code_number,
-      artist_name: artists.artist_name,
-      alphabetical_name: artists.alphabetical_name,
-      album_title: library.album_title,
-      record_label: library.label,
-      label_id: library.label_id,
-      genre_name: genres.genre_name,
-      format_name: format.format_name,
-      rotation_id: rotation.id,
-      add_date: library.add_date,
-      rotation_add_date: rotation.add_date,
-      rotation_bin: rotation.rotation_bin,
-      rotation_kill_date: rotation.kill_date,
-      plays: library.plays,
-      discogs_artist_id: artists.discogs_artist_id,
-      musicbrainz_artist_id: artists.musicbrainz_artist_id,
-      wikidata_qid: artists.wikidata_qid,
-      spotify_artist_id: artists.spotify_artist_id,
-      apple_music_artist_id: artists.apple_music_artist_id,
-      bandcamp_id: artists.bandcamp_id,
-    })
-    .from(library)
-    .innerJoin(rotation, eq(library.id, rotation.album_id))
-    .innerJoin(artists, eq(artists.id, library.artist_id))
-    .innerJoin(format, eq(library.format_id, format.id))
-    .innerJoin(genres, eq(library.genre_id, genres.id))
-    .innerJoin(
-      genre_artist_crossreference,
-      and(
-        eq(genre_artist_crossreference.artist_id, library.artist_id),
-        eq(genre_artist_crossreference.genre_id, library.genre_id)
-      )
-    )
-    .where(sql`${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL`);
+/**
+ * Raw row shape returned by the rotation query before reconciled-identity
+ * serialization. Mirrors the SELECT list in `getRotationFromDB`. Carries
+ * the six external-ID columns flat; `serializeReconciledIdentity` strips
+ * them and replaces them with a nested `reconciled_identity` object.
+ *
+ * Most fields are nullable because the LEFT JOINs (#689) intentionally
+ * surface rotation rows whose `album_id` doesn't resolve to a `library`
+ * row; those rows fall back to rotation's denormalized
+ * artist/album/label snapshot fields and have NULL ancillary metadata
+ * (`code_letters`, `genre_name`, `format_name`, identity ids).
+ */
+type RotationRow = Omit<Rotation, 'reconciled_identity'> & ReconciledIdentitySource;
 
-  return rotation_albums.map((row) => serializeReconciledIdentity(row));
+/**
+ * Read-side query for `GET /library/rotation`.
+ *
+ * **Shape rules** (see #689 / #694, BS CLAUDE.md `SOURCE: tubafrenzy`
+ * annotation on the rotation table). Tubafrenzy is the upstream writer
+ * and BS is downstream; we cannot constrain what tubafrenzy writes, so
+ * the read collapses the full upstream shape on the way out.
+ *
+ * - **LEFT JOIN to library, artists, format, genres,
+ *   genre_artist_crossreference.** Tubafrenzy permits rotation rows
+ *   with NULL `album_id` (rotation entries that pre-date or didn't
+ *   link to a library row); ~147 such rows are currently active in
+ *   prod and were dropped by the previous INNER JOIN. We instead
+ *   surface them and `COALESCE` artist_name/album_title/record_label
+ *   from rotation's denormalized snapshot columns when the library
+ *   join is NULL.
+ *
+ * - **DISTINCT ON `(coalesce(album_id, -id), rotation_bin)` ORDER BY
+ *   `coalesce(album_id, -id), rotation_bin, add_date DESC, id ASC`.**
+ *   Tubafrenzy permits multiple active rows per
+ *   `(album_id, rotation_bin)` over an album's lifecycle (re-bins,
+ *   re-adds, label-driven re-promotes); we collapse those duplicates
+ *   to one row per group on the way out, picking the most-recently
+ *   added (tie-broken by lowest rotation id for deterministic output).
+ *   The `coalesce(album_id, -id)` trick keeps NULL-album rows in
+ *   separate groups (Postgres DISTINCT ON treats NULLs as equal
+ *   without it, which would collapse the 147 NULL-album rows down
+ *   to one).
+ *
+ * - **`kill_date IS NULL OR kill_date > CURRENT_DATE`.** Active rows
+ *   only; the planner-stable predicate also excludes future-dated
+ *   kills correctly.
+ */
+export const getRotationFromDB = async (): Promise<Rotation[]> => {
+  const query = sql`
+    SELECT DISTINCT ON (COALESCE(${rotation.album_id}, -${rotation.id}), ${rotation.rotation_bin})
+      ${library.id} AS id,
+      ${artists.code_letters} AS code_letters,
+      ${genre_artist_crossreference.artist_genre_code} AS code_artist_number,
+      ${library.code_number} AS code_number,
+      COALESCE(${artists.artist_name}, ${rotation.artist_name}) AS artist_name,
+      COALESCE(${artists.alphabetical_name}, ${rotation.artist_name}) AS alphabetical_name,
+      COALESCE(${library.album_title}, ${rotation.album_title}) AS album_title,
+      COALESCE(${library.label}, ${rotation.record_label}) AS record_label,
+      ${library.label_id} AS label_id,
+      ${genres.genre_name} AS genre_name,
+      ${format.format_name} AS format_name,
+      ${rotation.id} AS rotation_id,
+      ${library.add_date} AS add_date,
+      ${rotation.add_date} AS rotation_add_date,
+      ${rotation.rotation_bin} AS rotation_bin,
+      ${rotation.kill_date} AS rotation_kill_date,
+      ${library.plays} AS plays,
+      ${artists.discogs_artist_id} AS discogs_artist_id,
+      ${artists.musicbrainz_artist_id} AS musicbrainz_artist_id,
+      ${artists.wikidata_qid} AS wikidata_qid,
+      ${artists.spotify_artist_id} AS spotify_artist_id,
+      ${artists.apple_music_artist_id} AS apple_music_artist_id,
+      ${artists.bandcamp_id} AS bandcamp_id
+    FROM ${rotation}
+    LEFT JOIN ${library} ON ${library.id} = ${rotation.album_id}
+    LEFT JOIN ${artists} ON ${artists.id} = ${library.artist_id}
+    LEFT JOIN ${format} ON ${library.format_id} = ${format.id}
+    LEFT JOIN ${genres} ON ${library.genre_id} = ${genres.id}
+    LEFT JOIN ${genre_artist_crossreference}
+      ON ${genre_artist_crossreference.artist_id} = ${library.artist_id}
+      AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
+    WHERE ${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL
+    ORDER BY COALESCE(${rotation.album_id}, -${rotation.id}),
+             ${rotation.rotation_bin},
+             ${rotation.add_date} DESC,
+             ${rotation.id} ASC
+  `;
+
+  const response = await db.execute(query);
+  const rows = response as unknown as RotationRow[];
+
+  return rows.map((row) => serializeReconciledIdentity(row));
 };
 
 export const addToRotation = async (newRotation: RotationAddRequest) => {
@@ -446,6 +497,8 @@ export const fuzzySearchLibrary = async (
   n = 5,
   on_streaming?: boolean
 ): Promise<LibraryArtistViewEntry[]> => {
+  await checkLibraryArtistNameHealth();
+
   // Both-mode default (dj-site sends the same string as artist and title).
   // Route through tsvector + plays.
   if (artist_name && album_title && artist_name === album_title) {
@@ -728,6 +781,8 @@ export async function searchLibrary(
   limit = 5,
   on_streaming?: boolean
 ): Promise<EnrichedLibraryResult[]> {
+  await checkLibraryArtistNameHealth();
+
   let results: LibraryArtistViewEntry[] = [];
 
   if (query) {
@@ -749,6 +804,8 @@ export async function searchLibrary(
  * @returns Corrected artist name if a good match is found, null otherwise
  */
 export async function findSimilarArtist(artistName: string, threshold = 0.85): Promise<string | null> {
+  await checkLibraryArtistNameHealth();
+
   // Use pg_trgm similarity function to find close matches. Reads from
   // `library` directly so the planner uses the GIN trigram index on
   // `library.artist_name` (added in 0058) without materializing the view.
@@ -788,6 +845,8 @@ export async function findSimilarArtist(artistName: string, threshold = 0.85): P
  * @returns Array of enriched library results
  */
 export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promise<EnrichedLibraryResult[]> {
+  await checkLibraryArtistNameHealth();
+
   const rows = (await libraryViewQuery(false)
     .where(sql`${library.album_title} % ${albumTitle}`)
     .orderBy(desc(sql`similarity(${library.album_title}, ${albumTitle})`))
@@ -804,6 +863,8 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  * @returns Array of enriched library results
  */
 export async function searchByArtist(artistName: string, limit = 5): Promise<EnrichedLibraryResult[]> {
+  await checkLibraryArtistNameHealth();
+
   const rows = (await libraryViewQuery(false)
     .where(sql`${library.artist_name} % ${artistName}`)
     .orderBy(desc(sql`similarity(${library.artist_name}, ${artistName})`))

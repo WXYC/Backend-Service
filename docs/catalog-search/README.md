@@ -115,8 +115,8 @@ The fallback is single-table and uses `BitmapOr` across the two GIN trigram inde
 The MV is rebuilt by `apps/backend/services/album-plays-refresh.service.ts`, which runs at backend startup and self-reschedules with `setTimeout` (not `setInterval`, so a slow refresh cannot stack overlapping runs).
 
 - Default cadence: **1 hour** (`ALBUM_PLAYS_REFRESH_INTERVAL_MS = 3600000`).
-- Measured refresh on the staging clone (2.6M flowsheet rows): ~98 ms.
-- Last-run timestamp is stored in `cronjob_runs` under `job_name = 'album-plays-refresh'`.
+- Per-refresh statement timeout: **5 min** (`ALBUM_PLAYS_REFRESH_TIMEOUT_MS = 300000`). The refresh runs against a dedicated single-connection postgres-js client (`max: 1`, `application_name = wxyc-album-plays-refresh`) with the timeout baked into its connection params. The shared API pool keeps its 5 s `DB_STATEMENT_TIMEOUT_MS`. Measured at ~200–330 ms on the staging clone for `REFRESH ... CONCURRENTLY`; the 5 min ceiling matches the ETL containers and absorbs prod's slower instance plus concurrent flowsheet writes.
+- Last-run timestamp is stored in `cronjob_runs` under `job_name = 'album-plays-refresh'` (written via the shared `db`, not the dedicated client).
 
 `REFRESH MATERIALIZED VIEW CONCURRENTLY` is used so reads keep hitting the previous snapshot while the new one builds. Search ranking is robust to a slightly stale signal: a 1-hour cadence means a freshly-played album is at most one hour late showing up as a tiebreaker, which never feels wrong in practice.
 

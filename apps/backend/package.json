@@ -16,6 +16,7 @@
   "author": "AyBruno",
   "license": "MIT",
   "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.1041.0",
     "@sentry/node": "^10.50.0",
     "@tensorflow/tfjs": "^4.22.0",
     "@wxyc/authentication": "^1.0.0",

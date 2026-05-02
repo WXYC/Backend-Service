@@ -25,7 +25,27 @@ import { sql } from 'drizzle-orm';
 import { db, closeDatabaseConnection } from '@wxyc/database';
 
 const JOB_NAME = 'flowsheet-dj-name-backfill';
-const BATCH_SIZE = 5000;
+
+/**
+ * Resolve `BATCH_SIZE` from the environment, falling back to 5000.
+ *
+ * Default `5000` was chosen empirically to balance per-batch lock duration
+ * (kept under a few seconds when the host is healthy) against per-tx
+ * overhead. With `synchronous_commit = off` already eliminating the per-COMMIT
+ * fsync wait, larger batches are sometimes preferable: fewer planner cycles,
+ * fewer trigger-firing dispatches, fewer round trips. Operators can opt in
+ * via `BACKFILL_BATCH_SIZE=20000` when the prod instance has headroom.
+ */
+const resolveBatchSize = (raw: string | undefined = process.env.BACKFILL_BATCH_SIZE): number => {
+  if (raw === undefined) return 5000;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid BACKFILL_BATCH_SIZE=${JSON.stringify(raw)}; must be a positive integer.`);
+  }
+  return parsed;
+};
+
+const BATCH_SIZE = resolveBatchSize();
 const PROGRESS_LOG_EVERY = 1; // every batch; the operation is rare enough that verbose is fine
 
 /**
@@ -142,4 +162,4 @@ main().catch((error) => {
 
 // Exports for unit tests. Production entry point is the `main()` invocation
 // above; tests reach into the individual primitives.
-export { applyBatch, runBackfill, verifyComplete, formatDuration, BATCH_SIZE };
+export { applyBatch, runBackfill, verifyComplete, formatDuration, BATCH_SIZE, resolveBatchSize };

@@ -1,0 +1,42 @@
+#Build stage
+FROM node:25-alpine AS builder
+
+WORKDIR /rotation-dedupe-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/rotation-dedupe ./jobs/rotation-dedupe
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/rotation-dedupe
+
+#Production stage
+FROM node:25-alpine AS prod
+
+WORKDIR /rotation-dedupe
+
+COPY ./package* ./
+COPY ./jobs/rotation-dedupe/package* ./jobs/rotation-dedupe/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./rotation-dedupe-builder/jobs/rotation-dedupe/dist ./jobs/rotation-dedupe/dist
+COPY --from=builder ./rotation-dedupe-builder/shared/database/dist ./shared/database/dist
+
+# Long-running per-statement timeout: the dedupe is a single transaction
+# with one CTE-driven UPDATE. On the small active rotation set (a few
+# hundred rows) the work is sub-second, but matching the sibling backfills'
+# 5-minute timeout gives headroom for any future scale-up.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+
+# Async commit: the WHERE filter is idempotent (`HAVING COUNT(*) > 1` over
+# active rows naturally re-targets any work lost to an RDS crash), so the
+# WAL-fsync wait is unnecessary. Saves a few ms at the cost of a tiny RPO
+# under crash, which the retry contract already covers.
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# Identifies the connection in pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-rotation-dedupe
+
+CMD ["npm", "start", "--workspace=@wxyc/rotation-dedupe"]

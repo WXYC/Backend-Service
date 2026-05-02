@@ -38,9 +38,15 @@ function isLmlConfigured(): boolean {
 /**
  * Fetch metadata for a single flowsheet entry from LML.
  *
- * Returns album and artist metadata, or null if LML is not configured or
- * an unrecoverable error occurs. The caller is responsible for persisting
- * the result (e.g., updating the flowsheet row).
+ * Returns album and artist metadata, or `null` if LML is not configured.
+ * On LML success-with-match, returns full metadata. On LML success-no-match,
+ * returns metadata with synthesized search URLs only. On LML failure, the
+ * underlying error is re-thrown — the caller is responsible for routing it
+ * (`enrichment.service.ts` Sentry-reports under `subsystem='metadata'`;
+ * #638's historical-drain job logs and skips). Swallowing the throw here
+ * would defeat the `flowsheet.metadata_attempt_at` stamp in
+ * `enrichment.service.ts`, which exists precisely to distinguish
+ * "tried-and-no-match" from "tried-and-LML-failed". See #639.
  */
 export async function fetchMetadata(request: MetadataRequest): Promise<FlowsheetMetadata | null> {
   if (!isLmlConfigured()) {
@@ -51,13 +57,8 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
   const { artistName, albumTitle, trackTitle } = request;
   const result: FlowsheetMetadata = {};
 
-  let artwork: DiscogsMatchResult | null = null;
-  try {
-    const lookupResponse = await lookupMetadata(artistName, albumTitle, trackTitle);
-    artwork = lookupResponse.results?.[0]?.artwork ?? null;
-  } catch (error) {
-    console.warn('[MetadataService] LML lookup failed:', error);
-  }
+  const lookupResponse = await lookupMetadata(artistName, albumTitle, trackTitle);
+  const artwork: DiscogsMatchResult | null = lookupResponse.results?.[0]?.artwork ?? null;
 
   if (artwork) {
     result.album = extractAlbumMetadata(artwork);

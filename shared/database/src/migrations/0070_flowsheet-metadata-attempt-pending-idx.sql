@@ -1,0 +1,54 @@
+-- #659 partial B-tree on flowsheet(id) covering the pending-metadata tail.
+--
+-- Both #638 (historical drain of the ~1.86M-row NULL backlog) and #639
+-- Phase 2 (recurring drift-repair sweep) keyset-paginate through the same
+-- predicate:
+--
+--   WHERE entry_type = 'track'
+--     AND artist_name IS NOT NULL
+--     AND metadata_attempt_at IS NULL
+--     AND add_time < now() - interval '60 seconds'
+--     AND id > $lastId
+--   ORDER BY id ASC
+--   LIMIT $batchSize
+--
+-- Without this index the planner seq-scans the 2.6M+ row flowsheet on every
+-- batch just to find the small NULL slice. The recurring sweep amplifies
+-- the cost: it runs forever, the residual stays small, and a per-batch seq
+-- scan on a hot table is exactly the kind of orphan accumulator that drove
+-- the #511 wedge.
+--
+-- Why a partial B-tree on (id) alone:
+--   - Only the never-attempted residual matters (1.86M rows pre-drain;
+--     small drift residual long-term). Filtering at the index keeps it
+--     ~50 MB, vs. ~250 MB for a full index that the planner would pick
+--     less reliably anyway because of bitmap-vs-index decision-making.
+--   - The drain orders by id and pages by id > $lastId. A B-tree on (id)
+--     is the natural match and the planner trivially picks it.
+--   - add_time is NOT in the predicate. The `now() - interval '60 seconds'`
+--     filter is to dodge the legacy mirror's eventual-consistency window
+--     on freshly-inserted rows (see WXYC/Backend-Service#628), not for
+--     selectivity. With the partial WHERE already narrow, an extra column
+--     would inflate the index without improving plans.
+--
+-- Production ops:
+--   - This is NOT `CREATE INDEX CONCURRENTLY` because Drizzle wraps each
+--     migration file in a transaction and `CREATE INDEX CONCURRENTLY
+--     cannot run inside a transaction block` — same constraint as 0057,
+--     0061, 0068.
+--   - Build the index out-of-band on prod first via:
+--       CREATE INDEX CONCURRENTLY "flowsheet_metadata_attempt_pending_idx"
+--         ON "wxyc_schema"."flowsheet" USING btree ("id")
+--         WHERE "entry_type" = 'track'
+--           AND "artist_name" IS NOT NULL
+--           AND "metadata_attempt_at" IS NULL;
+--     Expected build window on prod: a few minutes, no AccessExclusiveLock,
+--     no INSERT pause.
+--   - Then merge this PR. `IF NOT EXISTS` makes the migration apply a
+--     no-op against the prod DB where the index is already present, while
+--     fresh dev databases pick it up on first migrate. Same shape as 0068.
+--   - If this migration runs against prod *without* the manual
+--     CONCURRENTLY pre-build, it would acquire a ShareLock on flowsheet
+--     for the build duration and queue every concurrent INSERT. Don't.
+
+CREATE INDEX IF NOT EXISTS "flowsheet_metadata_attempt_pending_idx" ON "wxyc_schema"."flowsheet" USING btree ("id") WHERE "wxyc_schema"."flowsheet"."entry_type" = 'track' AND "wxyc_schema"."flowsheet"."artist_name" IS NOT NULL AND "wxyc_schema"."flowsheet"."metadata_attempt_at" IS NULL;
