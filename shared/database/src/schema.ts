@@ -604,6 +604,14 @@ export const flowsheet = wxyc_schema.table(
     // /flowsheet `?shows_limit=N` listing endpoint sequentially scans the
     // 2.6M-row table on every dj-site poll. See migration 0068 + issue #511.
     index('flowsheet_show_id_idx').on(table.show_id),
+    // `nextPlayOrder()` runs `SELECT max(play_order) FROM flowsheet` on every
+    // POST /flowsheet/ to derive the next monotonic play_order. Without this
+    // index that's a 2.6M-row parallel Seq Scan (~6s on prod) that exceeds
+    // the 5s `DB_STATEMENT_TIMEOUT_MS`, so postgres-js cancels and the API
+    // returns 500. With it, MAX is an O(1) leaf-page lookup. Built
+    // CONCURRENTLY out-of-band on prod 2026-04-30 to unblock the flowsheet
+    // during a live show. See migration 0071.
+    index('flowsheet_play_order_idx').on(sql`${table.play_order} DESC`),
     // Partial B-tree on (id) covering the `metadata_attempt_at IS NULL`
     // tail. Both #638 (historical drain) and #639 Phase 2 (recurring
     // drift-repair sweep) keyset-paginate through this slice — without
