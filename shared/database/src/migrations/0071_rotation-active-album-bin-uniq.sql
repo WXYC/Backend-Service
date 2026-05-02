@@ -48,4 +48,29 @@
 --     INSERT briefly. On the small rotation table that's tolerable, but
 --     CONCURRENTLY is still the preferred path.
 
+-- Precondition guard (issue #705). The unique partial index can't apply
+-- if duplicate active rows remain. On 2026-05-01 prod had 39 duplicate
+-- groups / 237 conflict rows; without this guard the deploy aborts
+-- mid-migration and leaves the DB partially modified — exactly the wedge
+-- mode #511 codified the recovery pattern for. The guard fails fast with
+-- a readable message inside the migration's transaction, so a clean
+-- rollback is the only outcome.
+
+DO $$
+DECLARE dup_count int;
+BEGIN
+  SELECT COUNT(*) INTO dup_count
+  FROM (
+    SELECT album_id, rotation_bin
+    FROM wxyc_schema.rotation
+    WHERE kill_date IS NULL
+    GROUP BY album_id, rotation_bin
+    HAVING COUNT(*) > 1
+  ) g;
+  IF dup_count > 0 THEN
+    RAISE EXCEPTION 'Cannot apply rotation_active_album_bin_uniq: % duplicate groups remain. Run rotation-dedupe job first or pre-clean manually.', dup_count;
+  END IF;
+END $$;
+--> statement-breakpoint
+
 CREATE UNIQUE INDEX IF NOT EXISTS "rotation_active_album_bin_uniq" ON "wxyc_schema"."rotation" USING btree ("album_id","rotation_bin") WHERE kill_date IS NULL;

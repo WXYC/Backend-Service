@@ -104,6 +104,34 @@ npm run drizzle:drop       # Delete a migration file
 
 **Migrations are DDL-only.** Bulk DML (rewrites of more than ~10k rows) does not belong inside a migration file because the DDL portion takes an `AccessExclusiveLock` that is held until the transaction commits, and a long DML can wedge the table for hours. Put the rewrite in a one-shot backfill job under `jobs/<name>-backfill/` (declared with `"job-type": "one-shot"` in `package.json`). The build pipeline pushes the image to ECR; a human invokes it via `docker run --rm --env-file .env <image>` during a low-traffic window. If a downstream migration depends on the backfill having run, gate it with a `DO $$ ... RAISE EXCEPTION ... END $$;` precondition guard at the top of the file. See `0053_flowsheet-dj-name-column.sql` + `jobs/flowsheet-dj-name-backfill/` + `0054_flowsheet-search-doc-with-dj-name.sql` for the canonical pattern, and issue #511 for the incident this rule was learned from.
 
+**Constraint-adding migrations should include precondition guards.** Any migration that adds a `UNIQUE`, `CHECK`, `NOT NULL`, or `FOREIGN KEY` constraint depends on a data invariant that current rows must satisfy. If they don't, Postgres aborts the migration mid-apply and the deploy wedges (recovery pattern: #511). Guard the DDL with a `DO $$ ... RAISE EXCEPTION ... END $$;` block above the `CREATE`/`ALTER` so the migration fails fast with a readable message and the transaction rolls back cleanly. Example for the rotation unique partial index from #694:
+
+```sql
+-- 0071 unique partial index on (rotation.album_id, rotation.rotation_bin) WHERE kill_date IS NULL
+-- Requires: all duplicate active groups must be resolved first.
+
+DO $$
+DECLARE dup_count int;
+BEGIN
+  SELECT COUNT(*) INTO dup_count
+  FROM (
+    SELECT album_id, rotation_bin
+    FROM wxyc_schema.rotation
+    WHERE kill_date IS NULL
+    GROUP BY album_id, rotation_bin
+    HAVING COUNT(*) > 1
+  ) g;
+  IF dup_count > 0 THEN
+    RAISE EXCEPTION 'Cannot apply rotation_active_album_bin_uniq: % duplicate groups remain. Run rotation-dedupe job first or pre-clean manually.', dup_count;
+  END IF;
+END $$;
+
+-- The actual DDL follows
+CREATE UNIQUE INDEX IF NOT EXISTS ...
+```
+
+The same shape covers `NOT NULL` (count `WHERE col IS NULL`), `CHECK` (count rows that violate the predicate), and `FK` (count orphans via `LEFT JOIN ... WHERE referenced.id IS NULL`). The pattern is the same prevention this codebase already uses on the 0053 + `jobs/flowsheet-dj-name-backfill/` + 0054 chain — generalize it to any constraint-adding migration. Some constraints are provably safe (e.g. a `UNIQUE` index on a freshly-added nullable column, or `NOT NULL` paired with a `DEFAULT`); when no real precondition exists, document the reasoning with a `-- @no-precondition-needed: <reason>` comment so the linter (`scripts/validate-migrations.mjs` Check 8) suppresses its warning. The PR-bot data-shape report (companion #703) catches violations at PR time; the precondition guard is the last line of defense at apply time.
+
 ### Authentication (`shared/authentication`)
 
 **Key files:**
