@@ -333,6 +333,7 @@ The reverse direction's local clone is refreshed via `scripts/sync/refresh-local
 
 - `PORT` (default 8080)
 - `CI_PORT` (default 8081)
+- `MUTATION_4XX_METRICS_DISABLED` (default unset / enabled) -- Set to `true` to short-circuit the `apps/backend/middleware/responseMetrics.ts` middleware that emits the `WXYC/BackendService` `MutationClientError` CloudWatch metric for `POST/PATCH/DELETE /flowsheet/*` responses with `400 ≤ status < 500` (replacement signal post-#691, since Sentry no longer auto-captures 4xx). Disable in CI / local dev where AWS credentials aren't present so a noisy `PutMetricData` rejection doesn't pollute logs. The middleware is otherwise self-clamping (in-memory ring buffer flushed every 30s or every 10 errors, whichever comes first; `PutMetricData` failures are logged + swallowed and never block the response).
 
 ### Database
 
