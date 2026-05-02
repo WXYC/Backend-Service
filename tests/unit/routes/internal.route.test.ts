@@ -4,6 +4,7 @@
  * - POST /internal/flowsheet-webhook (tubafrenzy webhook receiver)
  * - POST /internal/rotation-sync-notify (rotation ETL SSE notification)
  * - POST /internal/rotation-webhook (tubafrenzy rotation webhook receiver)
+ * - POST /internal/streaming-status-webhook (LML streaming status receiver)
  */
 
 const mockBroadcast = jest.fn();
@@ -19,6 +20,11 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   updateLastModified: mockUpdateLastModified,
 }));
 
+const mockFireAndForgetMetadataForRow = jest.fn();
+jest.mock('../../../apps/backend/services/metadata/index', () => ({
+  fireAndForgetMetadataForRow: mockFireAndForgetMetadataForRow,
+}));
+
 import { db } from '@wxyc/database';
 import express from 'express';
 import request from 'supertest';
@@ -28,12 +34,17 @@ process.env.ETL_NOTIFY_KEY = 'test-secret-key';
 
 import { internal_route } from '../../../apps/backend/routes/internal.route';
 
-// Make the DB mock chain's terminal methods resolve to arrays (needed by webhook handler)
+// Make the DB mock chain's terminal methods resolve appropriately for the
+// webhook handler. `onConflictDoNothing` is terminal in the show-resolution
+// path (resolves to undefined). The flowsheet upsert is `onConflictDoUpdate`
+// followed by `.returning()`, so the chain stays open through the upsert and
+// the terminal `.returning` resolves to a row array.
 const mockDb = db as unknown as Record<string, jest.Mock>;
 const mockChain = mockDb.select();
 (mockChain as Record<string, jest.Mock>).limit = jest.fn().mockResolvedValue([]);
 (mockChain as Record<string, jest.Mock>).onConflictDoNothing = jest.fn().mockResolvedValue(undefined);
-(mockChain as Record<string, jest.Mock>).onConflictDoUpdate = jest.fn().mockResolvedValue(undefined);
+const mockReturning = jest.fn();
+(mockChain as Record<string, jest.Mock>).returning = mockReturning;
 
 const app = express();
 app.use(express.json());
@@ -93,6 +104,12 @@ describe('POST /internal/flowsheet-webhook', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // jest.clearAllMocks() does not drain queued mockResolvedValueOnce
+    // values. Reset this mock fully so per-test queues don't bleed across
+    // tests. Default it to a created-row response; tests that need an
+    // update-branch response override with mockResolvedValueOnce.
+    mockReturning.mockReset();
+    mockReturning.mockResolvedValue([{ id: 5555, created: true }]);
   });
 
   // -- Auth --
@@ -179,6 +196,80 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(mockUpdateLastModified).toHaveBeenCalled();
+  });
+
+  // -- Metadata enrichment trigger --
+  //
+  // Tubafrenzy is the source of ~all flowsheet inserts in production today.
+  // Without this trigger, every track row arrives with all 10 metadata
+  // columns NULL and the iOS app sees no album art / streaming URLs / bio.
+  // The dj-site addEntry controller has its own call site; this is the
+  // tubafrenzy → BS path.
+
+  it('fires metadata enrichment when a track INSERT lands (xmax=0 → created)', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555, created: true }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
+      flowsheetId: 5555,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+      trackTitle: 'VI Scose Poise',
+    });
+  });
+
+  it('does not fire enrichment when the upsert took the UPDATE branch (xmax≠0)', async () => {
+    // ON CONFLICT DO UPDATE on a re-sent legacy_entry_id sets xmax to the
+    // current tx id, so `created` is false. Skip enrichment here so benign
+    // tubafrenzy retries don't trigger LML re-fetch + 10-column rewrite +
+    // CDC/index churn on every duplicate webhook delivery.
+    mockReturning.mockResolvedValueOnce([{ id: 5555, created: false }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', entry: validEntry });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).not.toHaveBeenCalled();
+  });
+
+  it('does not fire enrichment when entry_type is not track (talkset)', async () => {
+    // flowsheetEntryType=7 maps to talkset (see mapProdEntryType); message
+    // entries put the artistName in `message` and clear `artist_name`.
+    const talksetEntry = { ...validEntry, flowsheetEntryType: 7, artistName: 'Talkset' };
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: talksetEntry });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).not.toHaveBeenCalled();
+  });
+
+  it('does not fire enrichment when artist_name is empty', async () => {
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, artistName: '' } });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).not.toHaveBeenCalled();
+  });
+
+  it('does not fire enrichment on delete actions', async () => {
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'delete', entryId: 2002 });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).not.toHaveBeenCalled();
   });
 
   // -- Delete --
@@ -366,5 +457,101 @@ describe('POST /internal/rotation-webhook', () => {
       type: 'refetch',
       payload: { source: 'rotation-webhook' },
     });
+  });
+});
+
+// ---- streaming-status-webhook ----
+
+describe('POST /internal/streaming-status-webhook', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  // -- Auth (Bearer token, not X-Internal-Key) --
+
+  it('returns 401 without Authorization header', async () => {
+    const res = await request(app).post('/internal/streaming-status-webhook').send({ changes: [] });
+
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 with wrong Bearer token', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer wrong-key')
+      .send({ changes: [] });
+
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 with X-Internal-Key (must use Bearer)', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ changes: [] });
+
+    expect(res.status).toBe(401);
+  });
+
+  // -- Validation --
+
+  it('returns 400 when changes field is missing', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({ timestamp: '2026-04-27T00:00:00Z' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('changes');
+  });
+
+  it('returns 400 when changes is not an array', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({ changes: 'not-an-array' });
+
+    expect(res.status).toBe(400);
+  });
+
+  // -- Processing --
+
+  it('returns 200 with processed count for valid changes', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [
+          { library_release_id: 42, on_streaming: true },
+          { library_release_id: 99, on_streaming: false },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(2);
+    expect(res.body.errors).toBe(0);
+  });
+
+  it('returns 200 with zero counts for empty changes array', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({ changes: [] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(0);
+    expect(res.body.errors).toBe(0);
+  });
+
+  it('handles null on_streaming value', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [{ library_release_id: 42, on_streaming: null }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(1);
   });
 });

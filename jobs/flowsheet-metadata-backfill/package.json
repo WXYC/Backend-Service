@@ -1,15 +1,15 @@
 {
-  "name": "@wxyc/flowsheet-lml-link-backfill",
+  "name": "@wxyc/flowsheet-metadata-backfill",
   "job-type": "one-shot",
   "version": "1.0.0",
-  "description": "WXYC one-shot backfill: link unlinked flowsheet rows to library via LML canonical-entity lookup (B-2.2)",
+  "description": "WXYC one-shot backfill: drain the historical flowsheet rows that never ran LML metadata enrichment (#631 / #638). Recurring drift-repair flip is tracked under #639 Phase 2.",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {
     "start": "node dist/job.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
-    "docker:build": "docker build -t wxyc_flowsheet_lml_link_backfill:ci -f ../../Dockerfile.flowsheet-lml-link-backfill ../../",
+    "docker:build": "docker build -t wxyc_flowsheet_metadata_backfill:ci -f ../../Dockerfile.flowsheet-metadata-backfill ../../",
     "dev": "tsup --watch"
   },
   "license": "MIT",

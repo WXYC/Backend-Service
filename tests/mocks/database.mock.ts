@@ -50,14 +50,16 @@ export function createMockQueryChain(resolvedValue: unknown = []): MockQueryChai
 
 export function createMockDb() {
   const mockChain = createMockQueryChain();
-  return {
+  const mockDb = {
     select: mockChain.select,
     insert: mockChain.insert,
     update: mockChain.update,
     delete: mockChain.delete,
     execute: mockChain.execute,
+    transaction: jest.fn(async (fn: (tx: unknown) => Promise<void>) => fn(mockDb)),
     _chain: mockChain,
   };
+  return mockDb;
 }
 
 // Mock database client
@@ -107,6 +109,7 @@ export const flowsheet = {
   legacy_entry_id: 'legacy_entry_id',
   legacy_release_id: 'legacy_release_id',
   legacy_link_attempted_at: 'legacy_link_attempted_at',
+  metadata_attempt_at: 'metadata_attempt_at',
   entry_type: 'entry_type',
   track_title: 'track_title',
   album_title: 'album_title',
