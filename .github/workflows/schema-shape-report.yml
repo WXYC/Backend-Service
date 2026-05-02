@@ -1,0 +1,124 @@
+name: Schema shape report
+
+# When a PR touches schema.ts or a migration SQL file, generate a markdown
+# summary of the new constraints (UNIQUE / NOT NULL / CHECK / FK), probe the
+# staging Postgres clone for rows that would violate them, and post / update
+# a single PR comment with the result.
+#
+# Non-blocking: this workflow always exits 0. The comment is informational.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'shared/database/src/schema.ts'
+      - 'shared/database/src/migrations/*.sql'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: schema-shape-report-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  shape-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout PR head with merge-base history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch base branch
+        run: git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.ref }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies (postgres only)
+        # We don't need the full workspace install for this script — the
+        # `postgres` client is the only runtime dep. Keep it cheap.
+        run: npm install --no-audit --no-fund --no-save postgres@^3.4.9
+
+      - name: Compute diff
+        id: diff
+        run: |
+          set -euo pipefail
+          BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
+          mkdir -p .cache
+          git diff "$BASE_REF"...HEAD -- \
+            'shared/database/src/schema.ts' \
+            'shared/database/src/migrations/*.sql' \
+            > .cache/pr.diff || true
+          echo "diff_bytes=$(wc -c < .cache/pr.diff)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate comment body
+        id: report
+        env:
+          STAGING_DATABASE_URL_RO: ${{ secrets.STAGING_DATABASE_URL_RO }}
+          STAGING_SCHEMA_NAME: ${{ vars.STAGING_SCHEMA_NAME }}
+          STAGING_SNAPSHOT_LABEL: ${{ vars.STAGING_SNAPSHOT_LABEL }}
+        run: |
+          set -uo pipefail
+          # The script itself never throws — it always emits a comment-shaped
+          # markdown blob to stdout, even on internal failures.
+          if ! node scripts/schema-shape-report.mjs --diff .cache/pr.diff > .cache/comment.md 2> .cache/script.err; then
+            EXIT_CODE=$?
+            ERR_TEXT=$(tr '\n' ' ' < .cache/script.err | sed 's/[][`*_]//g' | head -c 300)
+            cat > .cache/comment.md <<EOF
+          <!-- wxyc-schema-shape-report -->
+          ## Schema constraint shape report
+
+          _data-shape report errored (exit $EXIT_CODE): ${ERR_TEXT:-no stderr captured}; manual check required_
+          EOF
+          fi
+          # Always succeed — the comment carries the failure mode in its text.
+          exit 0
+
+      - name: Find existing comment
+        id: find-comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- wxyc-schema-shape-report -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find(
+              (c) => c.user?.type === 'Bot' && c.body && c.body.includes(marker),
+            ) || comments.find((c) => c.body && c.body.includes(marker));
+            return existing ? existing.id : '';
+
+      - name: Post or update comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('.cache/comment.md', 'utf8');
+            const existingId = ${{ steps.find-comment.outputs.result || 'null' }};
+            if (existingId) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingId,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

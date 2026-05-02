@@ -181,7 +181,7 @@ describe('library.controller', () => {
   });
 
   describe('searchForAlbum', () => {
-    it('calls enrichWithArtwork after fuzzy search', async () => {
+    it('returns enriched results when enrichment finishes within the budget', async () => {
       const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
       const enrichedResults = [
         { id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: 'https://i.discogs.com/confield.jpg' },
@@ -200,16 +200,65 @@ describe('library.controller', () => {
       expect(res.json).toHaveBeenCalledWith(enrichedResults);
     });
 
-    it('rejects when enrichment throws', async () => {
+    it('returns raw results without waiting when enrichment exceeds the budget', async () => {
       const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
       mockFuzzySearchLibrary.mockResolvedValue(searchResults);
-      const enrichError = new Error('enrichment failed');
-      mockEnrichWithArtwork.mockRejectedValue(enrichError);
+      // Enrichment that never resolves within any reasonable budget.
+      mockEnrichWithArtwork.mockReturnValue(new Promise<unknown[]>(() => undefined));
+
+      const previous = process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
+      process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = '20';
+      jest.resetModules();
+      const { searchForAlbum: searchWithTightBudget } =
+        await import('../../../apps/backend/controllers/library.controller');
 
       const req = { query: { artist_name: 'Autechre' } } as unknown as Request;
       const res = mockResponse();
 
-      await expect(searchForAlbum(req, res, next)).rejects.toThrow(enrichError);
+      const start = Date.now();
+      await searchWithTightBudget(req, res, next);
+      const elapsed = Date.now() - start;
+
+      try {
+        expect(elapsed).toBeLessThan(500);
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(res.json).toHaveBeenCalledWith(searchResults);
+      } finally {
+        if (previous === undefined) delete process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
+        else process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = previous;
+      }
+    });
+
+    it('does not propagate enrichment errors as request failures', async () => {
+      const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
+      mockFuzzySearchLibrary.mockResolvedValue(searchResults);
+      const enrichError = new Error('enrichment failed');
+      // Reject *after* the budget would naturally fire — the budget should win
+      // and the rejection should be swallowed.
+      mockEnrichWithArtwork.mockReturnValue(
+        new Promise<unknown[]>((_, reject) => setTimeout(() => reject(enrichError), 50))
+      );
+
+      const previous = process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
+      process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = '5';
+      jest.resetModules();
+      const { searchForAlbum: searchWithTightBudget } =
+        await import('../../../apps/backend/controllers/library.controller');
+
+      const req = { query: { artist_name: 'Autechre' } } as unknown as Request;
+      const res = mockResponse();
+
+      try {
+        await expect(searchWithTightBudget(req, res, next)).resolves.toBeUndefined();
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(res.json).toHaveBeenCalledWith(searchResults);
+        // Give the late rejection time to settle into the catch handler so the
+        // assertion below isn't subject to a process-level unhandledRejection.
+        await new Promise((resolve) => setTimeout(resolve, 75));
+      } finally {
+        if (previous === undefined) delete process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
+        else process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = previous;
+      }
     });
   });
 

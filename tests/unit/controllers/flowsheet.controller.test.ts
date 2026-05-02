@@ -29,8 +29,10 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
 }));
 
 const mockFetchMetadata = jest.fn<() => Promise<void>>();
+const mockFireAndForgetMetadataForRow = jest.fn();
 jest.mock('../../../apps/backend/services/metadata/index', () => ({
   fetchMetadata: mockFetchMetadata,
+  fireAndForgetMetadataForRow: mockFireAndForgetMetadataForRow,
 }));
 
 import { getEntries, getLatest, getShowInfo, addEntry } from '../../../apps/backend/controllers/flowsheet.controller';
@@ -396,7 +398,11 @@ describe('flowsheet.controller', () => {
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
-    it('reports metadata fetch failure to Sentry when album_id is provided', async () => {
+    // The Sentry/error path is owned by enrichment.service.ts and is
+    // covered in tests/unit/services/metadata.enrichment.test.ts. Here we
+    // verify only that the controller delegates to it with the right args.
+
+    it('delegates metadata enrichment with artistId from album lookup when album_id is provided', async () => {
       const albumInfo = { artist_name: 'Autechre', album_title: 'Confield', record_label: 'Warp', artist_id: 5 };
       mockGetAlbumFromDB.mockResolvedValue(albumInfo);
       const completedEntry = {
@@ -411,8 +417,6 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      const metadataError = new Error('Discogs timeout');
-      mockFetchMetadata.mockRejectedValue(metadataError);
 
       const req = createMockBodyReq({
         artist_name: 'Autechre',
@@ -425,17 +429,18 @@ describe('flowsheet.controller', () => {
 
       await addEntry(req as Request, res as Response, mockNext);
 
-      // Wait for fire-and-forget .catch() to execute
-      await new Promise((r) => setTimeout(r, 10));
-
       expect(res.status).toHaveBeenCalledWith(201);
-      expect(mockCaptureException).toHaveBeenCalledWith(
-        metadataError,
-        expect.objectContaining({ tags: { subsystem: 'metadata' } })
-      );
+      expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
+        flowsheetId: 1,
+        artistName: 'Autechre',
+        albumId: 10,
+        artistId: 5,
+        albumTitle: 'Confield',
+        trackTitle: 'VI Scose Poise',
+      });
     });
 
-    it('reports metadata fetch failure to Sentry when no album_id', async () => {
+    it('delegates metadata enrichment without artistId for free-form inserts (no album_id)', async () => {
       const completedEntry = {
         id: 2,
         show_id: activeShow.id,
@@ -449,8 +454,6 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      const metadataError = new Error('Spotify rate limit');
-      mockFetchMetadata.mockRejectedValue(metadataError);
 
       const req = createMockBodyReq({
         artist_name: 'Juana Molina',
@@ -462,13 +465,15 @@ describe('flowsheet.controller', () => {
 
       await addEntry(req as Request, res as Response, mockNext);
 
-      await new Promise((r) => setTimeout(r, 10));
-
       expect(res.status).toHaveBeenCalledWith(201);
-      expect(mockCaptureException).toHaveBeenCalledWith(
-        metadataError,
-        expect.objectContaining({ tags: { subsystem: 'metadata' } })
-      );
+      expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
+        flowsheetId: 2,
+        artistName: 'Juana Molina',
+        albumId: undefined,
+        artistId: undefined,
+        albumTitle: 'DOGA',
+        trackTitle: 'la paradoja',
+      });
     });
 
     it('passes segue field through for library-linked tracks (album_id provided)', async () => {

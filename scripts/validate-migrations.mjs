@@ -18,9 +18,23 @@
  * 5. No duplicate idxs in journal (with HISTORICAL_DUPLICATE_IDXS allowlist)
  * 6. The latest snapshot's prevId chain is reachable back to the genesis
  *    snapshot (allowing breaks at known-dropped historical idxs)
+ * 7. Every non-allowlisted journal entry has a corresponding snapshot file
+ *    (catches the hand-edit-the-journal-without-running-generate pattern
+ *    that accumulated 12+ missing snapshots between 0057 and 0067 — see
+ *    WXYC/Backend-Service#590)
+ * 8. WARNING: every constraint-adding migration (UNIQUE, CHECK, NOT NULL,
+ *    FOREIGN KEY) carries a `DO $$ ... RAISE EXCEPTION ... END $$;`
+ *    precondition guard above the DDL. Suppressible per-migration with a
+ *    `-- @no-precondition-needed: <reason>` comment when the constraint
+ *    is provably safe (e.g. UNIQUE on a freshly-added nullable column,
+ *    NOT NULL paired with DEFAULT, fresh CREATE TABLE). This is a
+ *    warning, not an error — guards aren't always needed and CI must
+ *    not gate on the soft signal. See WXYC/Backend-Service#705.
  *
  * See: WXYC/Backend-Service#400 (timestamp ordering),
  *      WXYC/Backend-Service#505 (metadata repair),
+ *      WXYC/Backend-Service#590 (snapshot catch-up),
+ *      WXYC/Backend-Service#705 (precondition guards),
  *      WXYC/wxyc-shared#82 (Phase 4 epic).
  */
 
@@ -49,6 +63,48 @@ const HISTORICAL_DUPLICATE_IDXS = new Set([47]);
 // acknowledges the orphan rather than fabricating a journal entry that
 // drizzle would then attempt to re-apply.
 const KNOWN_ORPHAN_TAGS = new Set(['0046_cdc_notify_triggers']);
+
+// Historical idxs whose journal entry has no matching snapshot file. Two
+// origin clusters:
+//   - 36, 41, 47-54: predate this validator; #505 noted but never repaired
+//   - 57-67: accumulated through 2026-04 by the hand-edit-SQL-and-journal
+//            convention that bypassed `drizzle-kit generate`. PR #590
+//            shipped a single 0068_snapshot.json reflecting current schema
+//            and this allowlist tolerates the gap.
+// New PRs that add a migration MUST emit its snapshot — Check 7 enforces
+// this against any new idx outside the allowlist.
+const HISTORICAL_MISSING_SNAPSHOT_IDXS = new Set([
+  36, 41, 47, 48, 49, 50, 51, 52, 53, 54, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67,
+]);
+
+// Tags that predate the precondition-guard rule (issue #705). Already
+// applied to prod; the rule was introduced 2026-05-01 and was retroactively
+// applied to the five most recent constraint-adding migrations as exemplars
+// (0034, 0048, 0059, 0067, 0071). Everything else in this set is grandfathered
+// and Check 8 ignores it. New tags must NOT be added here — Check 8 fires on
+// any future PR's migration that adds a constraint without a guard or a
+// `-- @no-precondition-needed:` annotation.
+const HISTORICAL_NO_GUARD_NEEDED_TAGS = new Set([
+  '0000_rare_prima',
+  '0004_thin_alice',
+  '0010_polite_black_tarantula',
+  '0012_chubby_bromley',
+  '0014_zippy_secret_warriors',
+  '0016_nervous_hydra',
+  '0020_sticky_alex_power',
+  '0021_user-table-migration',
+  '0022_library_cross_reference',
+  '0023_metadata_tables',
+  '0024_anonymous_devices',
+  '0024_flowsheet_entry_type',
+  '0025_rate_limiting_tables',
+  '0029_add_artists_alphabetical_name',
+  '0030_labels_table',
+  '0032_audit_f19_f20',
+  '0033_crossreference_tables',
+  '0037_etl-schema-sync',
+  '0041_rotation_etl_support',
+]);
 
 const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
 let errors = 0;
@@ -192,6 +248,132 @@ if (metaFiles.length > 0) {
       cursor = JSON.parse(readFileSync(join(metaDir, next.file), 'utf8'));
       cursorFile = next.file;
     }
+  }
+}
+
+// Check 7: every journal entry has a corresponding snapshot file (with
+// the historical-missing allowlist). drizzle-kit's `generate` emits a
+// snapshot alongside every new migration; hand-editing the journal
+// without running generate skips the snapshot and the rot accumulates
+// silently because Check 6 only walks the latest entry's chain. This
+// check fires on the next contributor who hand-edits the journal.
+{
+  const snapshotIdxs = new Set();
+  for (const file of metaFiles) {
+    const m = file.match(/^(\d+)_snapshot\.json$/);
+    if (m) snapshotIdxs.add(parseInt(m[1], 10));
+  }
+  for (const entry of journal.entries) {
+    if (snapshotIdxs.has(entry.idx)) continue;
+    if (HISTORICAL_MISSING_SNAPSHOT_IDXS.has(entry.idx)) {
+      // Allowlisted gap; do not warn per-idx (would be 21 warnings).
+      continue;
+    }
+    if (DROPPED_IDXS.has(entry.idx)) continue;
+    console.error(
+      `ERROR: Missing snapshot for journal entry idx ${entry.idx} (${entry.tag}): ` +
+        `expected meta/${entry.idx.toString().padStart(4, '0')}_snapshot.json. ` +
+        `Run \`npm run drizzle:generate\` so drizzle-kit emits the snapshot ` +
+        `instead of hand-editing the journal.`
+    );
+    errors++;
+  }
+}
+
+// Check 8: WARNING — constraint-adding DDL outside a CREATE TABLE body
+// should be paired with a DO $$ ... RAISE EXCEPTION ... END $$;
+// precondition guard earlier in the file. Suppressible via a
+// `-- @no-precondition-needed: <reason>` comment anywhere in the file.
+//
+// This is a soft warning (never bumps `errors`) because the guard is a
+// defense-in-depth signal, not a strict prerequisite — some constraints
+// are provably safe (UNIQUE on a freshly-added nullable column, FK shape
+// changes that re-target the same column, fresh materialized views with
+// GROUP BY uniqueness). The annotation forces the author to reason about
+// the case explicitly. See WXYC/Backend-Service#705.
+//
+// Detection scope (post-creation constraint-adding only — CREATE TABLE
+// bodies are skipped because the constraints are evaluated against zero
+// rows at apply time):
+//   - CREATE UNIQUE INDEX (partial or full)
+//   - ALTER TABLE ... ADD CONSTRAINT (UNIQUE / CHECK / FK / PK)
+//   - ALTER TABLE ... ALTER COLUMN ... SET NOT NULL
+//   - ALTER TABLE ... ADD COLUMN ... NOT NULL (without DEFAULT — DEFAULT
+//     paired with NOT NULL is provably safe because every row gets the
+//     default at add time)
+{
+  const sqlFiles = readdirSync(migrationsDir)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
+
+  for (const file of sqlFiles) {
+    const tag = file.replace(/\.sql$/, '');
+    if (HISTORICAL_NO_GUARD_NEEDED_TAGS.has(tag)) continue;
+    const path = join(migrationsDir, file);
+    const raw = readFileSync(path, 'utf8');
+
+    // Strip line comments so `-- adds NOT NULL` doesn't false-trigger the
+    // detection. Block comments aren't used in this codebase.
+    const stripped = raw
+      .split('\n')
+      .map((line) => {
+        const idx = line.indexOf('--');
+        return idx >= 0 ? line.slice(0, idx) : line;
+      })
+      .join('\n');
+
+    // Strip CREATE TABLE bodies. A fresh table's constraints can't be
+    // violated by data that doesn't exist yet. We consume from
+    // `CREATE TABLE` through the matching closing `);` (greedy across
+    // lines). drizzle-kit emits CREATE TABLE bodies on multiple lines
+    // ending with `);` then either `\n` or a `--> statement-breakpoint`.
+    const withoutCreateTable = stripped.replace(/\bCREATE\s+TABLE\b[\s\S]*?\)\s*;/gi, '');
+
+    const constraintPatterns = [
+      { name: 'CREATE UNIQUE INDEX', re: /\bCREATE\s+UNIQUE\s+INDEX\b/i },
+      { name: 'ALTER TABLE ... ADD CONSTRAINT', re: /\bALTER\s+TABLE\b[\s\S]*?\bADD\s+CONSTRAINT\b/i },
+      {
+        name: 'ALTER TABLE ... ALTER COLUMN ... SET NOT NULL',
+        re: /\bALTER\s+TABLE\b[\s\S]*?\bALTER\s+COLUMN\b[\s\S]*?\bSET\s+NOT\s+NULL\b/i,
+      },
+      {
+        // ADD COLUMN ... NOT NULL with no DEFAULT in the same statement.
+        // We bound the lookahead to `;` to keep it within one statement.
+        name: 'ALTER TABLE ... ADD COLUMN ... NOT NULL (no DEFAULT)',
+        re: /\bALTER\s+TABLE\b[^;]*\bADD\s+COLUMN\b(?:(?!\bDEFAULT\b)[^;])*?\bNOT\s+NULL\b(?:(?!\bDEFAULT\b)[^;])*;/i,
+      },
+    ];
+
+    const matches = constraintPatterns.filter((p) => p.re.test(withoutCreateTable));
+    if (matches.length === 0) continue;
+
+    // Suppression comment is matched against the raw file (including
+    // comment lines) so authors can place it anywhere.
+    if (/--\s*@no-precondition-needed\s*:/i.test(raw)) continue;
+
+    // Guard: a DO $$ ... RAISE EXCEPTION ... END $$; block above the
+    // first constraint-adding DDL match. We approximate "earlier in the
+    // file" by requiring the guard to appear somewhere in `stripped`
+    // before the earliest match index.
+    const firstMatchIdx = Math.min(
+      ...matches.map((p) => {
+        const m = withoutCreateTable.match(p.re);
+        return m ? withoutCreateTable.indexOf(m[0]) : Number.POSITIVE_INFINITY;
+      })
+    );
+    const head = withoutCreateTable.slice(0, firstMatchIdx);
+    const guardPresent = /\bDO\s+\$\$[\s\S]*?\bRAISE\s+EXCEPTION\b[\s\S]*?\bEND\s*\$\$/i.test(head);
+    if (guardPresent) continue;
+
+    console.warn(
+      `WARN:  ${file} adds a constraint (${matches.map((m) => m.name).join(', ')}) ` +
+        `but has no \`DO $$ ... RAISE EXCEPTION ... END $$;\` precondition guard. ` +
+        `Add a guard above the DDL, or document why one isn't needed with ` +
+        `a \`-- @no-precondition-needed: <reason>\` comment. ` +
+        `See CLAUDE.md "Constraint-adding migrations should include precondition guards" ` +
+        `and issue #705.`
+    );
+    warnings++;
   }
 }
 

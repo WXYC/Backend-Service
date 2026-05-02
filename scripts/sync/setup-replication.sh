@@ -5,9 +5,10 @@
 #
 # This script:
 #   1. Opens an SSH tunnel to RDS (if not already open)
-#   2. Ensures the local database schema exists (via Drizzle migrations)
+#   2. Drops any stale (inactive) replication slots on RDS
 #   3. Creates the publication on RDS (if it doesn't exist)
-#   4. Creates a subscription on the local database
+#   4. Ensures the local database schema exists (via Drizzle migrations)
+#   5. Creates a subscription on the local database
 #
 # The subscription copies all existing data (copy_data=true) and then
 # streams ongoing changes in real time. If the tunnel drops, the
@@ -100,7 +101,23 @@ fi
 
 echo "  wal_level = logical ✓"
 
-# --- Step 4: Create publication on RDS (if it doesn't exist) ---
+# --- Step 4: Drop stale local_sync replication slot on RDS ---
+
+echo ""
+echo "Checking for stale local_sync replication slot on RDS..."
+SLOT_EXISTS=$(PGPASSWORD="$RDS_PASS" psql -h localhost -p "$TUNNEL_PORT" -U "$RDS_USER" -d "$RDS_NAME" -tAc \
+    "SELECT 1 FROM pg_replication_slots WHERE slot_name = 'local_sync' AND NOT active;" 2>/dev/null)
+
+if [ "$SLOT_EXISTS" = "1" ]; then
+    echo "  Found inactive local_sync slot. Dropping..."
+    PGPASSWORD="$RDS_PASS" psql -h localhost -p "$TUNNEL_PORT" -U "$RDS_USER" -d "$RDS_NAME" -c \
+        "SELECT pg_drop_replication_slot('local_sync');"
+    echo "  Dropped."
+else
+    echo "  No stale local_sync slot found."
+fi
+
+# --- Step 5: Create publication on RDS (if it doesn't exist) ---
 
 echo ""
 echo "Creating publication on RDS..."
@@ -116,7 +133,7 @@ BEGIN
 END $$;
 SQL
 
-# --- Step 5: Ensure local schema exists ---
+# --- Step 6: Ensure local schema exists ---
 
 echo ""
 echo "Ensuring local schema exists (running Drizzle migrations)..."
@@ -129,7 +146,7 @@ else
     echo "Warning: init-db.mjs not found, assuming schema exists."
 fi
 
-# --- Step 6: Create subscription on local database ---
+# --- Step 7: Create subscription on local database ---
 
 echo ""
 echo "Creating subscription on local database..."
@@ -148,7 +165,7 @@ else
     echo "Subscription local_sync created. Initial data copy starting..."
 fi
 
-# --- Step 7: Show replication status ---
+# --- Step 8: Show replication status ---
 
 echo ""
 echo "Replication status:"

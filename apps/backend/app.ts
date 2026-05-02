@@ -22,7 +22,9 @@ import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-
 import { setupCdcWebSocket, shutdownCdcWebSocket } from './services/cdc/index.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
+import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
+import { responseMetricsMiddleware } from './middleware/responseMetrics.js';
 import { requirePermissions } from '@wxyc/authentication';
 import { closeDatabaseConnection, db } from '@wxyc/database';
 import { sql } from 'drizzle-orm';
@@ -37,6 +39,13 @@ app.use(express.json());
 
 // Cross-service request correlation
 app.use(requestIdMiddleware);
+
+// CloudWatch metric for flowsheet mutation 4xx (replacement signal post-#691).
+// Mounted before routes so its `res.on('finish')` listener attaches for every
+// request — route handlers normally end the response with `res.json(...)`
+// without calling `next()`, so a late mount never observes their status. The
+// filter inside the listener keeps emission scoped to mutation routes only.
+app.use(responseMetricsMiddleware);
 
 //CORS
 app.use(
@@ -104,7 +113,7 @@ app.get('/healthcheck', async (req, res) => {
 // Internal endpoints (ETL sync notifications, key-authenticated)
 app.use('/internal', internal_route);
 
-Sentry.setupExpressErrorHandler(app);
+Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureExpressError });
 app.use(errorHandler);
 
 const server = app.listen(port, () => {

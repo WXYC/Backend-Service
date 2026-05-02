@@ -17,6 +17,7 @@ import { db } from '@wxyc/database';
 import {
   applyResolution,
   processRow,
+  resolvePartitionFilter,
   runBackfill,
   BATCH_SIZE,
   THROTTLE_MS,
@@ -24,24 +25,67 @@ import {
 import type { Resolution } from '../../../../jobs/library-canonical-entity-backfill/resolve';
 import type { LmlLookupResponse } from '../../../../jobs/library-canonical-entity-backfill/lml-types';
 
+/**
+ * Render a drizzle `sql` template object to a string for substring
+ * assertions. Drizzle's `db.execute(sql\`...\`)` argument serializes to
+ * `{ sql: string[], values: unknown[] }` where `sql` is the literal
+ * template fragments and `values` is the interpolated parameters in
+ * positional order. Reconstruct the rendered SQL by interleaving them.
+ *
+ * Each value can itself be a nested `sql.raw(...)` chunk (whose
+ * `queryChunks` re-fold into `value: string[]`), or a parameter, or
+ * another nested SQL template — recurse where applicable.
+ */
+type SqlChunk = {
+  value?: string | string[];
+  queryChunks?: SqlChunk[];
+  raw?: string;
+};
 type SqlLike = {
   sql?: string | string[];
-  queryChunks?: Array<string | { value?: string | string[] }>;
+  values?: unknown[];
+  queryChunks?: Array<string | SqlChunk>;
+  raw?: string;
 };
 const renderSql = (value: unknown): string => {
   const obj = value as SqlLike | null | undefined;
   if (!obj) return '';
-  if (Array.isArray(obj.sql)) return obj.sql.join('');
+  if (Array.isArray(obj.sql)) {
+    const fragments = obj.sql;
+    const values = obj.values ?? [];
+    let out = '';
+    for (let i = 0; i < fragments.length; i++) {
+      out += fragments[i];
+      if (i < values.length) out += renderValue(values[i]);
+    }
+    return out;
+  }
   if (typeof obj.sql === 'string') return obj.sql;
   if (obj.queryChunks) {
     return obj.queryChunks
       .map((chunk) => {
         if (typeof chunk === 'string') return chunk;
+        if (Array.isArray(chunk.queryChunks)) return renderSql(chunk);
         if (Array.isArray(chunk.value)) return chunk.value.join('');
         if (typeof chunk.value === 'string') return chunk.value;
         return '';
       })
       .join('');
+  }
+  return '';
+};
+
+/** Render a single interpolated value: strings/numbers verbatim, nested SQL recursively. */
+const renderValue = (v: unknown): string => {
+  if (v == null) return '';
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (typeof v === 'object') {
+    const o = v as SqlChunk & SqlLike;
+    // sql.raw(...) serializes to { raw: string }
+    if (typeof o.raw === 'string') return o.raw;
+    if (Array.isArray(o.queryChunks) || Array.isArray(o.sql)) return renderSql(o);
+    if (Array.isArray(o.value)) return o.value.join('');
+    if (typeof o.value === 'string') return o.value;
   }
   return '';
 };
@@ -222,6 +266,74 @@ describe('runBackfill', () => {
     expect(THROTTLE_MS).toBeGreaterThan(0);
   });
 
+  describe('resolvePartitionFilter', () => {
+    it('returns no fragment when partitioning is disabled (default count=1)', () => {
+      const r = resolvePartitionFilter(undefined, undefined);
+      expect(r.sqlFragment).toBeNull();
+      expect(r.description).toBe('partition=none');
+    });
+
+    it('returns a modulo fragment when count > 1', () => {
+      const r = resolvePartitionFilter('2', '4');
+      expect(r.sqlFragment).not.toBeNull();
+      const serialized = JSON.stringify(r.sqlFragment);
+      expect(serialized).toContain('%');
+      expect(r.description).toBe('partition=2/4');
+    });
+
+    it('rejects out-of-range partition index', () => {
+      expect(() => resolvePartitionFilter('4', '4')).toThrow(/PARTITION_INDEX/);
+      expect(() => resolvePartitionFilter('-1', '4')).toThrow(/PARTITION_INDEX/);
+    });
+
+    it('rejects non-positive partition count', () => {
+      expect(() => resolvePartitionFilter('0', '0')).toThrow(/PARTITION_COUNT/);
+      expect(() => resolvePartitionFilter('0', '-1')).toThrow(/PARTITION_COUNT/);
+    });
+
+    it('rejects non-integer values', () => {
+      expect(() => resolvePartitionFilter('1.5', '4')).toThrow(/PARTITION_INDEX/);
+      expect(() => resolvePartitionFilter('0', '2.5')).toThrow(/PARTITION_COUNT/);
+      expect(() => resolvePartitionFilter('abc', '4')).toThrow(/PARTITION_INDEX/);
+    });
+  });
+
+  it('plumbs the partition fragment into loadBatch when count > 1', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    await runBackfill({
+      lookup: jest.fn(),
+      throttleMs: 0,
+      partition: resolvePartitionFilter('1', '3'),
+    });
+
+    const select = findExecuteCallMatching(/SELECT/i);
+    const serialized = JSON.stringify(select?.[0]);
+    // The partition fragment is parameterized with `id % count = index`.
+    // Both numbers appear among the bound values.
+    expect(serialized).toContain('%');
+  });
+
+  it('qualifies the partition column as l."id" so it does not collide with artists.id', async () => {
+    // Regression for the first prod run with PARTITIONS=4: every container
+    // crashed with `column reference "id" is ambiguous` because the
+    // partition fragment used unqualified "id" while loadBatch joins
+    // library against artists (both have an `id` column). The default
+    // qualifier in B-1.2's resolvePartitionFilter must be `l."id"`.
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    await runBackfill({
+      lookup: jest.fn(),
+      throttleMs: 0,
+      partition: resolvePartitionFilter('1', '3'),
+    });
+
+    const select = findExecuteCallMatching(/SELECT/i);
+    const serialized = JSON.stringify(select?.[0]);
+    // Qualified `l."id"` survives JSON serialization as `l.\\"id\\"`.
+    expect(serialized).toContain('l.\\"id\\"');
+  });
+
   it('iterates batches until loadBatch returns empty', async () => {
     // First batch: two rows. Second batch: one row. Third batch: empty → terminate.
     // 3 SELECTs (loadBatch) + (2 + 1) UPDATEs = 6 db.execute calls in this scenario.
@@ -253,6 +365,25 @@ describe('runBackfill', () => {
 
     expect(lookup).not.toHaveBeenCalled();
     expect(result.totals.scanned).toBe(0);
+  });
+
+  it('joins library against artists to read artist_name (denormalized library column is NULL)', async () => {
+    // Regression: the library schema has both `artist_id` (FK) and a
+    // denormalized `artist_name` column. The denormalized column is NULL
+    // on every row in production; the source of truth is
+    // `wxyc_schema.artists.artist_name` reached via the FK. Without the
+    // JOIN, processRow short-circuits to no_match for every row and the
+    // job runs at throttle speed without ever calling LML.
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    await runBackfill({ lookup: jest.fn(), throttleMs: 0 });
+
+    const select = findExecuteCallMatching(/SELECT/i);
+    const sqlText = renderSql(select?.[0]);
+    expect(sqlText).toMatch(/FROM\s+"wxyc_schema"\."library"/i);
+    expect(sqlText).toMatch(/JOIN\s+"wxyc_schema"\."artists"/i);
+    expect(sqlText).toMatch(/a\."artist_name"/i);
+    expect(sqlText).toMatch(/a\."id"\s*=\s*l\."artist_id"/i);
   });
 
   it('paginates forward by id (last-id cursor restartable across batches)', async () => {
