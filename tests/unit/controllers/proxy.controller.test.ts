@@ -361,6 +361,76 @@ describe('proxy.controller', () => {
       expect(result.tracklist).toBeUndefined();
     });
 
+    it('strips Discogs spacer.gif placeholder from artworkUrl (#649)', async () => {
+      // The iOS playcut-detail endpoint returns artworkUrl directly to the
+      // client. Discogs occasionally sends spacer.gif as a placeholder when a
+      // release has no real cover art; passing that through results in a
+      // broken/blank image on iOS. Drop it at this callsite the same way
+      // metadata.service.ts does.
+      mockLookupMetadata.mockResolvedValue({
+        results: [
+          {
+            library_item: {
+              id: 1,
+              title: 'On Your Own Love Again',
+              artist: 'Jessica Pratt',
+              call_number: 'Rock CD PRA 1/1',
+              library_url: '',
+            },
+            artwork: {
+              release_id: 7777,
+              release_url: 'https://www.discogs.com/release/7777',
+              artwork_url: 'https://s.discogs.com/images/spacer.gif',
+              album: 'On Your Own Love Again',
+              artist: 'Jessica Pratt',
+              confidence: 0.92,
+              spotify_url: null,
+              apple_music_url: null,
+              youtube_music_url: null,
+              bandcamp_url: null,
+              soundcloud_url: null,
+            },
+          },
+        ],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      mockGetRelease.mockResolvedValue({
+        release_id: 7777,
+        title: 'On Your Own Love Again',
+        artist: 'Jessica Pratt',
+        year: 2015,
+        label: 'Drag City',
+        artist_id: 5555,
+        genres: ['Rock'],
+        styles: [],
+        tracklist: [],
+        artwork_url: 'https://s.discogs.com/images/spacer.gif',
+        release_url: 'https://www.discogs.com/release/7777',
+        released: '2015-02-03',
+        cached: false,
+        artists: [{ artist_id: 5555, name: 'Jessica Pratt', join: '', role: null }],
+      });
+
+      const req = {
+        query: { artistName: 'Jessica Pratt', releaseTitle: 'On Your Own Love Again' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await getAlbumMetadata(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const result = (res.json as jest.Mock).mock.calls[0][0];
+      // artworkUrl is dropped entirely so iOS knows to draw its own placeholder.
+      expect(result.artworkUrl).toBeUndefined();
+      // Other Discogs metadata is preserved — spacer.gif is only a cover-art
+      // placeholder, not an "the entire release is bogus" signal.
+      expect(result.discogsReleaseId).toBe(7777);
+      expect(result.label).toBe('Drag City');
+    });
+
     it('returns fallback search URLs when LML search returns empty results', async () => {
       mockLookupMetadata.mockResolvedValue({
         results: [],
