@@ -1,0 +1,81 @@
+-- Covering variant of the partial index from migration 0070 / issue #659.
+-- The base index gets the orchestrator (#638 + #639 Phase 2) to the right
+-- id range fast; this covering variant additionally INCLUDEs the four
+-- columns the loadBatch SELECT actually reads (`artist_name`, `album_title`,
+-- `track_title`, `add_time`) so the SELECT is a true index-only scan — no
+-- per-row heap fetch, and the `add_time < now() - 60s` race-guard predicate
+-- evaluates from the INCLUDE column.
+--
+-- Why now (the #640 pilot data, 2026-05-04):
+--
+--   The Step-1 single-partition pilot ran 1000 rows at 0.834 rows/s
+--   sustained while burning 2125 ReadIOPS — 71 % of the gp3 3000 IOPS
+--   ceiling. That worked out to ~2550 reads per row processed, dominated
+--   by heap fetches for the four SELECT'd columns plus the buffer-eviction
+--   collateral those reads produced on shared resources. Concretely, the
+--   pilot pushed `/library/` p95 from 710 ms to 3034 ms (4.3 ×) and
+--   `/library/rotation` p95 from 385 ms to 2156 ms (5.6 ×) over the 47-min
+--   window — a user-visible regression that scaled with the rollout's
+--   per-second IOPS draw. The migration 0070 comment explicitly noted
+--   "add_time would inflate the index without improving plans", which was
+--   correct in isolation but didn't account for the full read-side cost
+--   when the rollout actually started running.
+--
+--   Adding the four INCLUDE columns lets index-only scan return all
+--   columns the SELECT needs without touching the heap. For long-tail
+--   rows that autovacuum has marked all-visible (the historical drain's
+--   target set), the heap fetch goes away entirely. Estimated effect:
+--   ~95 % reduction in per-row read IOPS during the SELECT, with no
+--   change to per-row write IOPS beyond one extra leaf-page write per
+--   UPDATE (when the row's `metadata_attempt_at` flips to non-NULL and
+--   leaves both partial indexes). The pilot's read:write ratio of 92:1
+--   makes that trade favorable.
+--
+-- Why partial + INCLUDE rather than a column-extending of the existing
+-- index: Postgres doesn't allow `ALTER INDEX … INCLUDE`, so the only
+-- way to retrofit is to drop+recreate, which on a 1.86M-row partial set
+-- means an AccessExclusiveLock for tens of seconds. Building a second
+-- index alongside the existing one is additive, doesn't disturb running
+-- queries, and lets us drop the bare-`(id)` partial in a follow-up PR
+-- once query plans confirm they pick the covering version.
+--
+-- Storage cost: 1.96 M entries × ~150 bytes (id + 3 text columns +
+-- timestamp + tuple overhead) ≈ 250–350 MB on a 40 GB gp3 instance
+-- (~1 % of disk). The bare-`(id)` partial from 0070 stays at ~50 MB.
+--
+-- Production ops:
+--
+--   - This is NOT `CREATE INDEX CONCURRENTLY` because Drizzle wraps each
+--     migration file in a transaction and `CREATE INDEX CONCURRENTLY
+--     cannot run inside a transaction block` — same constraint as 0057,
+--     0061, 0068, 0070.
+--   - Build the index out-of-band on prod first via:
+--
+--       CREATE INDEX CONCURRENTLY "flowsheet_metadata_attempt_pending_covering_idx"
+--         ON "wxyc_schema"."flowsheet" USING btree ("id")
+--         INCLUDE ("artist_name", "album_title", "track_title", "add_time")
+--         WHERE "entry_type" = 'track'
+--           AND "artist_name" IS NOT NULL
+--           AND "metadata_attempt_at" IS NULL;
+--
+--   - Run `ANALYZE wxyc_schema.flowsheet;` afterwards so the planner sees
+--     the new index in pg_stats and routes the orchestrator's SELECT
+--     through it.
+--   - The `IF NOT EXISTS` below makes the migration a no-op against a
+--     prod DB where the CONCURRENTLY build already happened, while fresh
+--     dev databases pick the index up on first migrate.
+--
+-- INCLUDE columns aren't expressible through Drizzle's `index()` builder,
+-- so the migration SQL is hand-edited (same pattern as the hand-added
+-- `IF NOT EXISTS` in 0057, 0068, 0070). Drizzle's snapshot sees this as
+-- a plain partial `(id)` index with no INCLUDE; the actual DB carries
+-- the INCLUDE columns via this migration. Future drizzle:generate runs
+-- compare schema.ts (no INCLUDE) to snapshot (no INCLUDE) and produce
+-- no diff, so the chain stays clean.
+
+CREATE INDEX IF NOT EXISTS "flowsheet_metadata_attempt_pending_covering_idx"
+  ON "wxyc_schema"."flowsheet" USING btree ("id")
+  INCLUDE ("artist_name", "album_title", "track_title", "add_time")
+  WHERE "wxyc_schema"."flowsheet"."entry_type" = 'track'
+    AND "wxyc_schema"."flowsheet"."artist_name" IS NOT NULL
+    AND "wxyc_schema"."flowsheet"."metadata_attempt_at" IS NULL;
