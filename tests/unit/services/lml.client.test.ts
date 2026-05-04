@@ -6,6 +6,21 @@ import { jest } from '@jest/globals';
 const mockFetch = jest.fn<typeof global.fetch>();
 global.fetch = mockFetch;
 
+// Mock @sentry/node so we can assert span/setAttributes calls without
+// initializing Sentry. startSpan(opts, callback) is implemented as a
+// thin wrapper that invokes the callback with a span mock and returns
+// the callback's result — preserving lookupMetadata's return value.
+const mockSpanSetAttributes = jest.fn();
+type SpanLike = { setAttributes: typeof mockSpanSetAttributes };
+const mockStartSpan = jest.fn(
+  async (_opts: { name: string; op: string }, callback: (span: SpanLike) => unknown) =>
+    await callback({ setAttributes: mockSpanSetAttributes })
+);
+jest.mock('@sentry/node', () => ({
+  startSpan: (opts: { name: string; op: string }, callback: (span: SpanLike) => unknown) =>
+    mockStartSpan(opts, callback),
+}));
+
 import {
   lookupMetadata,
   getRelease,
@@ -81,6 +96,122 @@ describe('lml.client', () => {
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1]?.body as string);
       expect(callBody.raw_message).toBe('Autechre - Confield');
+    });
+
+    it('wraps the call in a Sentry span and projects cache_stats onto it', async () => {
+      const cache_stats = {
+        memory_hits: 1,
+        pg_hits: 4,
+        pg_misses: 2,
+        api_calls: 3,
+        pg_time_ms: 7.5,
+        api_time_ms: 250,
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [],
+            search_type: 'none',
+            song_not_found: false,
+            found_on_compilation: false,
+            cache_stats,
+          }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield');
+
+      // Span created with the contracted name + http.client op (so it shows
+      // up under the BS transaction in Sentry's trace explorer).
+      expect(mockStartSpan).toHaveBeenCalledTimes(1);
+      expect(mockStartSpan.mock.calls[0][0]).toEqual({ name: 'lml.lookup', op: 'http.client' });
+
+      // Each numeric cache_stats field becomes lml.cache.<key> on the span.
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+        'lml.cache.memory_hits': 1,
+        'lml.cache.pg_hits': 4,
+        'lml.cache.pg_misses': 2,
+        'lml.cache.api_calls': 3,
+        'lml.cache.pg_time_ms': 7.5,
+        'lml.cache.api_time_ms': 250,
+      });
+    });
+
+    it('does not call setAttributes when LML response omits cache_stats', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre');
+
+      expect(mockStartSpan).toHaveBeenCalledTimes(1);
+      expect(mockSpanSetAttributes).not.toHaveBeenCalled();
+    });
+
+    it('does not call setAttributes when cache_stats is an array (defensive narrowing)', async () => {
+      // Defensive narrowing: Object.entries([1, 2, 3]) yields [["0",1],["1",2],["2",3]],
+      // which would otherwise project as junk attributes lml.cache.0=1, lml.cache.1=2, ...
+      // Guard the projection to require a real plain object (not array, not scalar).
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [],
+            search_type: 'none',
+            song_not_found: false,
+            found_on_compilation: false,
+            cache_stats: [1, 2, 3],
+          }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre');
+
+      expect(mockSpanSetAttributes).not.toHaveBeenCalled();
+    });
+
+    it('resolves successfully when span.setAttributes throws (observability must not break the request path)', async () => {
+      // Wrapping in try/catch keeps lookupMetadata's contract: a Sentry/SDK bug
+      // in setAttributes must not surface as a failed metadata lookup.
+      const cache_stats = { memory_hits: 1, pg_hits: 4 };
+      const lookupResponse = {
+        results: [],
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
+        cache_stats,
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(lookupResponse),
+      } as unknown as globalThis.Response);
+
+      mockSpanSetAttributes.mockImplementation(() => {
+        throw new Error('sentry boom');
+      });
+
+      const result = await lookupMetadata('Autechre');
+
+      expect(result).toEqual(lookupResponse);
+    });
+
+    it('returns the LookupResponse intact when wrapped in a span', async () => {
+      // Regression: the span wrapper must not swallow or alter the response payload.
+      const lookupResponse = {
+        results: [{ library_item: { id: 42 } }],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(lookupResponse),
+      } as unknown as globalThis.Response);
+
+      const result = await lookupMetadata('Autechre', 'Confield');
+
+      expect(result).toEqual(lookupResponse);
     });
   });
 
