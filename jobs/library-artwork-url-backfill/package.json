@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/library-artwork-url-backfill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot backfill: warm library.artwork_url for Discogs-resolvable rows so search-time enrichWithArtwork short-circuits and the 500ms enrichment budget stops firing on first load (#637).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_library_artwork_url_backfill:ci -f ../../Dockerfile.library-artwork-url-backfill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.50.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
