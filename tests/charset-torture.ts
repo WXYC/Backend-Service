@@ -1,4 +1,3 @@
-// Loader for the cross-repo charset-torture corpus. See WXYC/docs#15.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
