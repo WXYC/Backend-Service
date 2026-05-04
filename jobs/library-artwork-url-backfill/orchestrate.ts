@@ -26,9 +26,13 @@
  * but not a correctness concern (both writers source from the same LML
  * response, which itself sources from `discogs-cache.release.artwork_url`).
  * The reverse direction — runtime UPDATE landing AFTER the job's UPDATE —
- * required hardening on the runtime side: see #718 / PR #720, which adds the
- * symmetric `AND artwork_url IS NULL` predicate to
- * `library.service.ts:updateArtworkUrl` so the two writers no longer fight.
+ * needs the symmetric guard on the runtime side. Tracked at #718, addressed
+ * by PR #720 which adds the matching `AND artwork_url IS NULL` predicate to
+ * `library.service.ts:updateArtworkUrl`. Until that lands the asymmetry is
+ * benign because both writers source from the same LML response (and LML
+ * itself sources from `discogs-cache.release.artwork_url`), so the clobbering
+ * write is value-identical — but the symmetric narrowing makes the contract
+ * explicit and forecloses future divergence.
  *
  * The `lookup` and `enrich` functions are injected so tests can drive the
  * orchestration without a live LML or DB. Production wires them to
