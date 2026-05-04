@@ -1,0 +1,44 @@
+#Build stage
+FROM node:25-alpine AS builder
+
+WORKDIR /library-artwork-url-backfill-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/library-artwork-url-backfill ./jobs/library-artwork-url-backfill
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/library-artwork-url-backfill
+
+#Production stage
+FROM node:25-alpine AS prod
+
+WORKDIR /library-artwork-url-backfill
+
+COPY ./package* ./
+COPY ./jobs/library-artwork-url-backfill/package* ./jobs/library-artwork-url-backfill/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./library-artwork-url-backfill-builder/jobs/library-artwork-url-backfill/dist ./jobs/library-artwork-url-backfill/dist
+COPY --from=builder ./library-artwork-url-backfill-builder/shared/database/dist ./shared/database/dist
+
+# Long-running per-statement timeout: per-row UPDATEs are tiny (single-column,
+# id-equality WHERE) but the SELECT batch joins library to artists; a tightly
+# scoped 5s default is overkill for the latter and the former. The flowsheet-
+# metadata-backfill precedent uses 300s; keep parity. Disable per-statement
+# timeouts and rely on the orchestrator's per-LML-call abort signal for the
+# only operation that can actually exceed seconds.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+
+# Async commit: each per-row UPDATE returns as soon as the WAL hits the OS
+# buffer rather than waiting for fsync. Safe because the WHERE filter is
+# idempotent (`artwork_url IS NULL`); any work lost to an RDS crash is picked
+# up on the next sweep. Saves per-batch latency at the cost of a tiny RPO.
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# Identifies the connection in pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-library-artwork-url-backfill
+
+CMD ["npm", "start", "--workspace=@wxyc/library-artwork-url-backfill"]
