@@ -17,11 +17,7 @@
 import { jest } from '@jest/globals';
 
 import { db, library } from '@wxyc/database';
-import {
-  applyEnrichment,
-  extractArtwork,
-  type EnrichRow,
-} from '../../../../jobs/library-artwork-url-backfill/enrich';
+import { applyEnrichment, extractArtwork, type EnrichRow } from '../../../../jobs/library-artwork-url-backfill/enrich';
 import type { LmlLookupResponse } from '../../../../jobs/library-artwork-url-backfill/lml-types';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
