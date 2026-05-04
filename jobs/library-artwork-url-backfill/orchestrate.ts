@@ -17,14 +17,18 @@
  *   - One LML failure is logged, counted as `lml_error`, and the loop
  *     continues. The row stays NULL so a future sweep retries it.
  *
- * Race contract with the search-path runtime: `enrichWithArtwork` (in the
+ * Race interaction with the search-path runtime: `enrichWithArtwork` (in the
  * backend service) writes `library.artwork_url` on first lookup of un-cached
  * albums. The job's `applyEnrichment` narrows its UPDATE by
  * `artwork_url IS NULL`, so a row the runtime stamps between the
- * orchestrator's SELECT and the job's UPDATE matches 0 rows. The
- * `enriched_match_raced` counter tracks how many rows were beaten by the
- * runtime — useful operational signal but not a correctness concern (data
- * is identical either way).
+ * orchestrator's SELECT and the job's UPDATE matches 0 rows — the
+ * `enriched_match_raced` counter tracks this case, useful operational signal
+ * but not a correctness concern (both writers source from the same LML
+ * response, which itself sources from `discogs-cache.release.artwork_url`).
+ * The reverse direction — runtime UPDATE landing AFTER the job's UPDATE —
+ * required hardening on the runtime side: see #718 / PR #720, which adds the
+ * symmetric `AND artwork_url IS NULL` predicate to
+ * `library.service.ts:updateArtworkUrl` so the two writers no longer fight.
  *
  * The `lookup` and `enrich` functions are injected so tests can drive the
  * orchestration without a live LML or DB. Production wires them to
@@ -193,6 +197,19 @@ export const processRow = async (
  * artist_id` is NOT NULL per schema) rather than `library.artist_name` (which
  * was nullable until A.2's backfill shipped) — guarantees a non-null artist
  * for the LML lookup regardless of A.2 backfill state.
+ *
+ * No supporting partial index. The flowsheet-metadata-backfill precedent
+ * relies on `flowsheet_metadata_attempt_pending_idx` (#659) because that
+ * job scans the 1.86M-row flowsheet tail. This job's eligible set is
+ * bounded by the ~24% of artists with a Discogs identity (~5.7K) joined
+ * to their library rows (~18.5K out of 64K total), small enough that an
+ * unindexed seq-scan-then-hash-join per ~37 batches is acceptable for a
+ * one-shot pass during a low-traffic window. If this becomes recurring or
+ * the resolvable set grows materially, ship a partial index migration:
+ * `CREATE INDEX CONCURRENTLY library_artwork_pending_idx ON
+ * wxyc_schema.library (id) WHERE artwork_url IS NULL` (paired with the
+ * artists join, per the deploy runbook for index-with-IF-NOT-EXISTS in
+ * CLAUDE.md).
  */
 const loadBatch = async (afterId: number, batchSize: number, partitionFilter: SQL | null): Promise<EnrichRow[]> => {
   const partitionClause = partitionFilter ?? sql``;
