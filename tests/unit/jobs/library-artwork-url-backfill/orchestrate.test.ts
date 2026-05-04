@@ -201,6 +201,32 @@ describe('runBackfill', () => {
     expect(sql).toMatch(/LIMIT/i);
   });
 
+  it('composes the partition fragment into the SELECT WHERE when partitioning is active', async () => {
+    // resolvePartitionFilter returns an `AND (l."id" % N) = M` SQL fragment
+    // when PARTITION_COUNT > 1. The orchestrator must splice it into the
+    // loadBatch query so each container scans a disjoint slice of ids.
+    // Default (count=1) is exercised by the canonical-WHERE test above.
+    //
+    // The fragment's SQL text doesn't render through this test helper because
+    // it's a nested drizzle SQL object. The drizzle params live in the outer
+    // query's `values` array as a nested SQL object whose own `values` carry
+    // the partition's count/index — flatten and check both are present.
+    (db.execute as jest.Mock).mockResolvedValue([]);
+
+    const partition = resolvePartitionFilter('1', '4');
+    await runBackfill({ lookup, enrich, throttleMs: 0, partition });
+
+    const call = (db.execute as jest.Mock).mock.calls[0];
+    const flattenValues = (v: unknown): unknown[] => {
+      if (Array.isArray(v)) return v.flatMap(flattenValues);
+      if (v && typeof v === 'object' && 'values' in v) return flattenValues((v as { values: unknown[] }).values);
+      return [v];
+    };
+    const flat = flattenValues((call?.[0] as { values?: unknown[] })?.values ?? []);
+    expect(flat).toContain(4); // PARTITION_COUNT
+    expect(flat).toContain(1); // PARTITION_INDEX
+  });
+
   it('advances the id-cursor across batches and terminates on empty', async () => {
     const batch1 = [
       { id: 10, artist_name: 'a', album_title: 'a1' },
