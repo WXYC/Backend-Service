@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { ReconciledIdentity } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
@@ -262,9 +262,25 @@ export const updateOnStreaming = async (id: number, on_streaming: boolean | null
   return response[0];
 };
 
-/** Update the cached artwork URL for a library entry. */
+/**
+ * Cache the artwork URL for a library entry, but only when the row's current
+ * `artwork_url` is NULL. The narrowing predicate makes this safe to call
+ * concurrently with `jobs/library-artwork-url-backfill` (#637) and forecloses
+ * a class of last-write-wins inconsistencies if a future LML response shape
+ * ever diverges between the runtime and backfill code paths. Today both
+ * writers source from the same `discogs-cache.release.artwork_url`, so the
+ * clobber was benign — but the symmetry with the backfill's WHERE makes the
+ * race contract honest. Returns the updated row when a write happened, or
+ * `undefined` when the row was already populated; both callers (search-path
+ * `enrichWithArtwork` and post-create cache-through in
+ * `library.controller.ts`) ignore the return.
+ */
 export const updateArtworkUrl = async (id: number, artwork_url: string | null) => {
-  const response = await db.update(library).set({ artwork_url }).where(eq(library.id, id)).returning();
+  const response = await db
+    .update(library)
+    .set({ artwork_url })
+    .where(and(eq(library.id, id), isNull(library.artwork_url)))
+    .returning();
   return response[0];
 };
 

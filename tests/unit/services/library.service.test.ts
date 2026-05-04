@@ -361,7 +361,7 @@ describe('library.service', () => {
   });
 
   describe('updateArtworkUrl', () => {
-    it('updates the artwork_url column and returns the updated row', async () => {
+    it('updates the artwork_url column and returns the updated row when current value is NULL', async () => {
       const chain = createMockQueryChain();
       db.update.mockReturnValue(chain);
       chain.returning = jest.fn().mockResolvedValue([{ id: 42, artwork_url: 'https://i.discogs.com/confield.jpg' }]);
@@ -370,6 +370,32 @@ describe('library.service', () => {
 
       expect(result).toEqual({ id: 42, artwork_url: 'https://i.discogs.com/confield.jpg' });
       expect(db.update).toHaveBeenCalled();
+    });
+
+    it('narrows the UPDATE WHERE by id AND artwork_url IS NULL (race guard, #718)', async () => {
+      // The mocked `chain.where` is a self-returning stub — it doesn't
+      // actually filter — so a returning() of [] alone wouldn't catch a
+      // future revert that drops the narrowing predicate. Capture the SQL
+      // expression passed to `.where(...)` and assert it composes both
+      // operands. The drizzle-orm auto-mock at tests/__mocks__/drizzle-orm.ts
+      // makes `and(a, b)` return `{ and: [a, b] }`, `eq(c, v)` return
+      // `{ eq: [c, v] }`, and `isNull(c)` return `{ isNull: c }` — so a
+      // direct structural assertion suffices and a regression that swaps
+      // `and(eq(...), isNull(...))` back to `eq(...)` alone would no longer
+      // produce the same shape.
+      const chain = createMockQueryChain();
+      db.update.mockReturnValue(chain);
+      chain.returning = jest.fn().mockResolvedValue([]);
+
+      const result = await updateArtworkUrl(42, 'https://i.discogs.com/confield.jpg');
+
+      expect(result).toBeUndefined();
+      expect(chain.where).toHaveBeenCalledTimes(1);
+
+      const whereArg = chain.where.mock.calls[0]?.[0] as { and?: unknown[] };
+      expect(whereArg).toEqual({
+        and: [{ eq: ['id', 42] }, { isNull: 'artwork_url' }],
+      });
     });
   });
 
