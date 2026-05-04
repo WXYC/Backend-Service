@@ -1,7 +1,3 @@
-// WX-1.2.2 detector: catches future regressions in the JSON codec used to
-// decode HTTP request bodies (express.json under the hood is JSON.parse on a
-// UTF-8 buffer) and serialize @wxyc/shared DTOs out across mirror webhooks
-// and HTTP responses.
 import { CHARSET_TORTURE_ENTRIES, charsetEntryId } from '../../charset-torture';
 
 describe('charset-torture: HTTP body wire codec', () => {
