@@ -20,6 +20,7 @@ npm workspaces:
 | `@wxyc/flowsheet-dj-name-backfill`   | `jobs/flowsheet-dj-name-backfill/`   | One-shot backfill: populate `flowsheet.dj_name` on legacy track rows after migration 0053                                                                                     |
 | `@wxyc/library-artist-name-backfill` | `jobs/library-artist-name-backfill/` | One-shot backfill: populate `library.artist_name` from the `artists` join after migration 0058 (Epic A.2)                                                                     |
 | `@wxyc/flowsheet-metadata-backfill`  | `jobs/flowsheet-metadata-backfill/`  | One-shot drain: enrich the historical `flowsheet` track rows that never ran LML metadata enrichment (#631 / #638). Recurring drift-repair flip is tracked under #639 Phase 2. |
+| `@wxyc/library-artwork-url-backfill` | `jobs/library-artwork-url-backfill/` | One-shot warm: populate `library.artwork_url` for Discogs-resolvable rows (joined to `artists.discogs_artist_id`) so search-time `enrichWithArtwork` short-circuits (#637).   |
 
 ### API Server (`apps/backend`)
 
