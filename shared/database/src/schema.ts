@@ -623,6 +623,44 @@ export const flowsheet = wxyc_schema.table(
       .where(
         sql`${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL AND ${table.metadata_attempt_at} IS NULL`
       ),
+    // Covering variant of the partial index above. The base index gets
+    // the orchestrator to the right id range fast; the covering one
+    // additionally INCLUDEs (artist_name, album_title, track_title,
+    // add_time) so the orchestrator's loadBatch SELECT is an index-only
+    // scan — no heap fetches per row, and the `add_time < now() - 60s`
+    // race-guard predicate evaluates from the INCLUDE column.
+    //
+    // The 2026-05-04 #640 pilot showed 2125 ReadIOPS sustained (71% of
+    // the gp3 3000 IOPS ceiling) for 0.834 rows/s — ~2550 reads per row,
+    // dominated by heap fetches for those four columns and the buffer-
+    // eviction collateral those reads produced on /library/* queries.
+    // Index-only scan eliminates the per-row heap fetch on the SELECT
+    // side; the buffer cache stays warm for the API path.
+    //
+    // INCLUDE columns are stored in the leaf pages and used for
+    // index-only scans without heap access. The visibility map gates
+    // when index-only scan applies — long-tail rows that autovacuum has
+    // marked all-visible are eligible. Recently-UPDATEd rows aren't, but
+    // the orchestrator moves forward by id and never re-reads its own
+    // updates.
+    //
+    // Storage cost: ~250-350 MB on a 40 GB gp3 instance (~1% of disk).
+    // Per-UPDATE write cost: one extra partial-index entry to delete
+    // when the row's `metadata_attempt_at` flips to non-NULL — a single
+    // leaf-page write. Net IOPS reduction: ~95% on reads, +1 leaf
+    // write per UPDATE. Read:write ratio in the pilot was 92:1.
+    //
+    // INCLUDE columns aren't expressible through Drizzle's `index()`
+    // builder, so the migration SQL is hand-edited (same pattern as the
+    // hand-added IF NOT EXISTS in 0057, 0068, 0070). Drizzle's snapshot
+    // sees this as a plain partial `(id)` index with no INCLUDE, so
+    // future drizzle:generate runs don't drift; the actual DB carries
+    // the INCLUDE columns via the migration SQL.
+    index('flowsheet_metadata_attempt_pending_covering_idx')
+      .on(table.id)
+      .where(
+        sql`${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL AND ${table.metadata_attempt_at} IS NULL`
+      ),
   ]
 );
 
