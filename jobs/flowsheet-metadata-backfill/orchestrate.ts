@@ -18,6 +18,16 @@
  *   - One LML failure is logged, counted as `lml_error`, and the loop
  *     continues. The row stays `metadata_attempt_at IS NULL`, so the
  *     next sweep (recurring drift-repair, #639 Phase 2) retries it.
+ *   - Cooperative pause: WXYC has no quiet hours — there is always a DJ in
+ *     the booth. Before each batch, the orchestrator probes `flowsheet` for
+ *     any track row added in the last `LIVE_ACTIVITY_LOOKBACK_SECONDS`
+ *     (default 60). If found, the batch is deferred for
+ *     `LIVE_ACTIVITY_PAUSE_MS` (default 30000) and re-probed. The loop
+ *     yields whenever a DJ is actively touching the playout — exactly the
+ *     window where any incremental p95 hit is most user-visible. The probe
+ *     uses migration 0050's partial index on (add_time DESC) WHERE
+ *     entry_type='track', so the per-batch cost is one buffer read.
+ *     Set `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` to disable for catch-up runs.
  *
  * Concurrent runtime + job stamp race: the runtime path
  * (`enrichment.service.ts`) and this job both stamp on the same column.
@@ -53,6 +63,24 @@ export const BATCH_SIZE = 500;
  * override to 0.
  */
 export const THROTTLE_MS = 100;
+
+/**
+ * Default cooperative-pause lookback window, in seconds. Before each batch
+ * the orchestrator probes `flowsheet` for any track inserts within this
+ * window; if found, a DJ is actively managing the playout and the batch is
+ * deferred until the window clears. This keeps the backfill out of the way
+ * during exactly the moments when UX matters most. Set
+ * `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` to disable the probe (catch-up runs).
+ */
+export const LIVE_ACTIVITY_LOOKBACK_SECONDS = 60;
+
+/**
+ * Default sleep between cooperative-pause re-probes, in ms. After a deferral
+ * the loop sleeps this long, then re-checks. If activity persists, defer
+ * again. There is no defer cap — the cron's outer `timeout 14400` is the
+ * effective ceiling, and the next run picks up where this one left off.
+ */
+export const LIVE_ACTIVITY_PAUSE_MS = 30_000;
 
 /**
  * Schema-qualified table reference, honoring `WXYC_SCHEMA_NAME` so parallel
@@ -95,6 +123,66 @@ export const resolveThrottleMs = (raw: string | undefined = process.env.BACKFILL
     throw new Error(`Invalid BACKFILL_THROTTLE_MS=${JSON.stringify(raw)}; must be a non-negative integer.`);
   }
   return parsed;
+};
+
+/**
+ * Resolve `LIVE_ACTIVITY_LOOKBACK_SECONDS` from the environment, falling
+ * back to `LIVE_ACTIVITY_LOOKBACK_SECONDS`. Operators set `0` to disable
+ * the cooperative-pause probe entirely (e.g., emergency catch-up runs).
+ *
+ * Exported so unit tests can drive it without mucking with process.env.
+ */
+export const resolveLiveActivityLookback = (
+  raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
+): number => {
+  if (raw === undefined) return LIVE_ACTIVITY_LOOKBACK_SECONDS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(
+      `Invalid LIVE_ACTIVITY_LOOKBACK_SECONDS=${JSON.stringify(raw)}; must be a non-negative integer (s). Use 0 to disable the cooperative pause.`
+    );
+  }
+  return parsed;
+};
+
+/**
+ * Resolve `LIVE_ACTIVITY_PAUSE_MS` from the environment, falling back to
+ * `LIVE_ACTIVITY_PAUSE_MS`. Tests pass `0` to keep the deferral loop tight.
+ *
+ * Exported so unit tests can drive it without mucking with process.env.
+ */
+export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number => {
+  if (raw === undefined) return LIVE_ACTIVITY_PAUSE_MS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`Invalid LIVE_ACTIVITY_PAUSE_MS=${JSON.stringify(raw)}; must be a non-negative integer (ms).`);
+  }
+  return parsed;
+};
+
+export type CheckLiveActivityFn = (lookbackSeconds: number) => Promise<boolean>;
+
+/**
+ * Probe `flowsheet` for any track row inserted within the lookback window.
+ * Returns true when a DJ is actively adding tracks (the highest UX-sensitivity
+ * moment); returns false otherwise. Bypassed entirely when lookbackSeconds is
+ * zero or negative.
+ *
+ * Uses the partial index from migration 0050
+ * (`flowsheet_track_add_time_idx ON (add_time DESC) WHERE entry_type='track'`)
+ * for an index-only check. Cost is negligible — single buffer read of the
+ * leftmost leaf page.
+ */
+export const checkLiveActivity: CheckLiveActivityFn = async (lookbackSeconds) => {
+  if (lookbackSeconds <= 0) return false;
+  const rows = (await db.execute(sql`
+    SELECT 1
+    FROM ${FLOWSHEET_TABLE}
+    WHERE "entry_type" = 'track'
+      AND "add_time" > now() - (interval '1 second' * ${lookbackSeconds})
+    LIMIT 1
+  `)) as unknown as Array<unknown>;
+  return rows.length > 0;
 };
 
 /**
@@ -230,15 +318,23 @@ export const runBackfill = async (opts: {
   batchSize?: number;
   throttleMs?: number;
   partition?: { sqlFragment: SQL | null; description: string };
+  liveActivityLookbackSeconds?: number;
+  liveActivityPauseMs?: number;
+  checkLiveActivity?: CheckLiveActivityFn;
 }): Promise<RunResult> => {
   const batchSize = opts.batchSize ?? resolveBatchSize();
   const throttleMs = opts.throttleMs ?? resolveThrottleMs();
   const partition = opts.partition ?? resolvePartitionFilter();
+  const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
+  const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
+  const probe = opts.checkLiveActivity ?? checkLiveActivity;
 
   log('info', 'started', `${JOB_NAME} starting`, {
     batch_size: batchSize,
     throttle_ms: throttleMs,
     partition: partition.description,
+    live_activity_lookback_seconds: liveActivityLookbackSeconds,
+    live_activity_pause_ms: liveActivityPauseMs,
   });
 
   const totals: Totals = {
@@ -253,6 +349,16 @@ export const runBackfill = async (opts: {
   let batchIndex = 0;
 
   while (true) {
+    if (liveActivityLookbackSeconds > 0) {
+      while (await probe(liveActivityLookbackSeconds)) {
+        log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
+          lookback_seconds: liveActivityLookbackSeconds,
+          pause_ms: liveActivityPauseMs,
+        });
+        if (liveActivityPauseMs > 0) await sleep(liveActivityPauseMs);
+      }
+    }
+
     const rows = await loadBatch(lastId, batchSize, partition.sqlFragment);
     if (rows.length === 0) break;
 

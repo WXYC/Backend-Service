@@ -20,12 +20,17 @@ import { jest } from '@jest/globals';
 import { db } from '@wxyc/database';
 import {
   BATCH_SIZE,
+  LIVE_ACTIVITY_LOOKBACK_SECONDS,
+  LIVE_ACTIVITY_PAUSE_MS,
   THROTTLE_MS,
   processRow,
   resolveBatchSize,
+  resolveLiveActivityLookback,
+  resolveLiveActivityPauseMs,
   resolvePartitionFilter,
   resolveThrottleMs,
   runBackfill,
+  type CheckLiveActivityFn,
   type EnrichFn,
   type LookupFn,
 } from '../../../../jobs/flowsheet-metadata-backfill/orchestrate';
@@ -128,6 +133,46 @@ describe('resolveThrottleMs', () => {
   });
 });
 
+describe('resolveLiveActivityLookback', () => {
+  it('falls back to LIVE_ACTIVITY_LOOKBACK_SECONDS when env var is unset', () => {
+    expect(resolveLiveActivityLookback(undefined)).toBe(LIVE_ACTIVITY_LOOKBACK_SECONDS);
+  });
+
+  it('accepts 0 (operators can disable the cooperative pause for catch-up runs)', () => {
+    expect(resolveLiveActivityLookback('0')).toBe(0);
+  });
+
+  it('returns the parsed value for a positive integer', () => {
+    expect(resolveLiveActivityLookback('120')).toBe(120);
+  });
+
+  it('throws on negative, non-integer, or garbage input', () => {
+    expect(() => resolveLiveActivityLookback('-1')).toThrow(/LIVE_ACTIVITY_LOOKBACK_SECONDS/);
+    expect(() => resolveLiveActivityLookback('1.5')).toThrow(/LIVE_ACTIVITY_LOOKBACK_SECONDS/);
+    expect(() => resolveLiveActivityLookback('abc')).toThrow(/LIVE_ACTIVITY_LOOKBACK_SECONDS/);
+  });
+});
+
+describe('resolveLiveActivityPauseMs', () => {
+  it('falls back to LIVE_ACTIVITY_PAUSE_MS when env var is unset', () => {
+    expect(resolveLiveActivityPauseMs(undefined)).toBe(LIVE_ACTIVITY_PAUSE_MS);
+  });
+
+  it('accepts 0 (tests may want no pause)', () => {
+    expect(resolveLiveActivityPauseMs('0')).toBe(0);
+  });
+
+  it('returns the parsed value for a positive integer', () => {
+    expect(resolveLiveActivityPauseMs('15000')).toBe(15000);
+  });
+
+  it('throws on negative, non-integer, or garbage input', () => {
+    expect(() => resolveLiveActivityPauseMs('-1')).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
+    expect(() => resolveLiveActivityPauseMs('1.5')).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
+    expect(() => resolveLiveActivityPauseMs('abc')).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
+  });
+});
+
 describe('processRow', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -191,7 +236,7 @@ describe('runBackfill', () => {
   it('issues a SELECT carrying the canonical WHERE filter (entry_type, artist_name, marker, race guard, cursor, ORDER BY, LIMIT)', async () => {
     (db.execute as jest.Mock).mockResolvedValue([]);
 
-    await runBackfill({ lookup, enrich, throttleMs: 0 });
+    await runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0 });
 
     const call = (db.execute as jest.Mock).mock.calls[0];
     expect(call).toBeDefined();
@@ -214,7 +259,7 @@ describe('runBackfill', () => {
 
     (db.execute as jest.Mock).mockResolvedValueOnce(batch1).mockResolvedValueOnce(batch2).mockResolvedValueOnce([]);
 
-    const result = await runBackfill({ lookup, enrich, throttleMs: 0 });
+    const result = await runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0 });
 
     expect((db.execute as jest.Mock).mock.calls.length).toBe(3);
     expect(result.totals.scanned).toBe(3);
@@ -254,7 +299,12 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce('enriched_match')
       .mockResolvedValueOnce('enriched_no_match');
 
-    const result = await runBackfill({ lookup: lookupFlaky, enrich: enrichLocal, throttleMs: 0 });
+    const result = await runBackfill({
+      lookup: lookupFlaky,
+      enrich: enrichLocal,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+    });
 
     expect(result.totals.scanned).toBe(3);
     expect(result.totals.enriched_match).toBe(1);
@@ -268,6 +318,77 @@ describe('runBackfill', () => {
   it('exposes BATCH_SIZE and THROTTLE_MS constants for ops tuning', () => {
     expect(BATCH_SIZE).toBe(500);
     expect(THROTTLE_MS).toBe(100);
+  });
+
+  it('exposes LIVE_ACTIVITY_LOOKBACK_SECONDS and LIVE_ACTIVITY_PAUSE_MS for ops tuning', () => {
+    expect(LIVE_ACTIVITY_LOOKBACK_SECONDS).toBe(60);
+    expect(LIVE_ACTIVITY_PAUSE_MS).toBe(30_000);
+  });
+
+  it('defers a batch when checkLiveActivity returns true, then proceeds when it clears', async () => {
+    // First two probes return true (DJ active), third clears.
+    // Then loadBatch returns one row, then empty.
+    const checkLiveActivity = jest
+      .fn<CheckLiveActivityFn>()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(false);
+
+    const batch = [{ id: 99, artist_name: 'a', album_title: null, track_title: null }];
+    (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 60,
+      liveActivityPauseMs: 0,
+      checkLiveActivity,
+    });
+
+    // Three probes: two-true-then-false before the first batch, then one
+    // probe before the (empty) terminal poll.
+    expect(checkLiveActivity).toHaveBeenCalledTimes(4);
+    expect(result.totals.scanned).toBe(1);
+    expect(result.totals.enriched_match).toBe(1);
+    // loadBatch was called only after the probe cleared; lookup was not
+    // called during the deferral window.
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(2);
+  });
+
+  it('skips the cooperative-pause probe when liveActivityLookbackSeconds is 0', async () => {
+    const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true);
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      liveActivityPauseMs: 0,
+      checkLiveActivity,
+    });
+
+    // With lookback=0 the probe is bypassed entirely; no calls even though
+    // the stub would have returned true.
+    expect(checkLiveActivity).not.toHaveBeenCalled();
+  });
+
+  it('forwards liveActivityLookbackSeconds to checkLiveActivity so the probe window is tunable', async () => {
+    const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 120,
+      liveActivityPauseMs: 0,
+      checkLiveActivity,
+    });
+
+    expect(checkLiveActivity).toHaveBeenCalledWith(120);
   });
 
   it('counts enriched_match_raced separately from enriched_match', async () => {
@@ -288,7 +409,12 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce('enriched_match_raced')
       .mockResolvedValueOnce('enriched_no_match_raced');
 
-    const result = await runBackfill({ lookup, enrich: enrichWithRaces, throttleMs: 0 });
+    const result = await runBackfill({
+      lookup,
+      enrich: enrichWithRaces,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+    });
 
     expect(result.totals.scanned).toBe(3);
     expect(result.totals.enriched_match).toBe(1);
