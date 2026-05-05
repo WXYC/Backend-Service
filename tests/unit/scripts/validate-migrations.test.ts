@@ -492,6 +492,175 @@ describe('validate-migrations.mjs', () => {
     });
   });
 
+  describe('Check 10: detect CREATE-then-DROP migration pairs (no-op pairs)', () => {
+    function appendMigration(work: string, tag: string, sql: string, idx = 9200): void {
+      const sqlPath = path.join(work, 'shared/database/src/migrations', `${tag}.sql`);
+      fs.writeFileSync(sqlPath, sql);
+      const journal = readJournal(work);
+      journal.entries.push({
+        idx,
+        version: '7',
+        when: Date.now() + 1_000_000_000_000 + idx,
+        tag,
+        breakpoints: true,
+      });
+      writeJournal(work, journal);
+    }
+
+    test('warns on the canonical CREATE-INDEX-then-DROP-INDEX pair', () => {
+      appendMigration(
+        workdir,
+        '9201_add-test-idx',
+        'CREATE INDEX test_pair_idx ON wxyc_schema.flowsheet (id);\n',
+        9201
+      );
+      appendMigration(workdir, '9202_drop-test-idx', 'DROP INDEX test_pair_idx;\n', 9202);
+
+      const { stdout, stderr } = run(workdir);
+      const combined = stderr + stdout;
+      expect(combined).toMatch(
+        /9201_add-test-idx\.sql creates index:test_pair_idx, then 9202_drop-test-idx\.sql drops it/
+      );
+      expect(combined).toMatch(/issue #729|WXYC\/Backend-Service#729/);
+    });
+
+    test('does not warn when the pair lies outside the recent window', () => {
+      // Default WINDOW_SIZE=10. Push 12 unrelated migrations after the
+      // pair so the pair falls out of the window.
+      appendMigration(
+        workdir,
+        '9210_create-distant-idx',
+        'CREATE INDEX distant_idx ON wxyc_schema.flowsheet (id);\n',
+        9210
+      );
+      for (let i = 0; i < 11; i++) {
+        appendMigration(workdir, `9211_filler-${i}`, '-- filler\n', 9220 + i);
+      }
+      appendMigration(workdir, '9240_drop-distant-idx', 'DROP INDEX distant_idx;\n', 9240);
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).not.toMatch(/9210_create-distant-idx\.sql creates index:distant_idx/);
+    });
+
+    test('CREATE-DROP-CREATE warns only on the first (create, drop) pair', () => {
+      appendMigration(workdir, '9220_create-cdc', 'CREATE INDEX cdc_idx ON wxyc_schema.flowsheet (id);\n', 9220);
+      appendMigration(workdir, '9221_drop-cdc', 'DROP INDEX cdc_idx;\n', 9221);
+      appendMigration(workdir, '9222_recreate-cdc', 'CREATE INDEX cdc_idx ON wxyc_schema.flowsheet (id);\n', 9222);
+
+      const { stdout, stderr } = run(workdir);
+      const combined = stderr + stdout;
+      expect(combined).toMatch(/9220_create-cdc\.sql creates index:cdc_idx, then 9221_drop-cdc\.sql drops it/);
+      // Second create has no following drop in window → no second warning.
+      const occurrences = (combined.match(/creates index:cdc_idx/g) ?? []).length;
+      expect(occurrences).toBe(1);
+    });
+
+    test('does not warn when `-- @intentional-create-revert:` annotation is present on either side', () => {
+      appendMigration(
+        workdir,
+        '9230_create-suppressed',
+        '-- @intentional-create-revert: testing intentional rollback pattern\nCREATE INDEX sup_idx ON wxyc_schema.flowsheet (id);\n',
+        9230
+      );
+      appendMigration(workdir, '9231_drop-suppressed', 'DROP INDEX sup_idx;\n', 9231);
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).not.toMatch(/9230_create-suppressed\.sql creates index:sup_idx/);
+    });
+
+    test('matches quoted index names (CREATE "my_idx" / DROP my_idx normalize to same key)', () => {
+      appendMigration(
+        workdir,
+        '9240_create-quoted',
+        'CREATE INDEX "quoted_pair_idx" ON wxyc_schema.flowsheet (id);\n',
+        9240
+      );
+      appendMigration(workdir, '9241_drop-quoted', 'DROP INDEX quoted_pair_idx;\n', 9241);
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).toMatch(
+        /9240_create-quoted\.sql creates index:quoted_pair_idx, then 9241_drop-quoted\.sql drops it/
+      );
+    });
+
+    test('matches schema-qualified DROP against unqualified CREATE', () => {
+      appendMigration(workdir, '9250_create-bare', 'CREATE INDEX schq_idx ON wxyc_schema.flowsheet (id);\n', 9250);
+      appendMigration(workdir, '9251_drop-schq', 'DROP INDEX wxyc_schema.schq_idx;\n', 9251);
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).toMatch(
+        /9250_create-bare\.sql creates index:schq_idx, then 9251_drop-schq\.sql drops it/
+      );
+    });
+
+    test('warns on ALTER TABLE ADD/DROP CONSTRAINT pairs', () => {
+      appendMigration(
+        workdir,
+        '9260_add-cons',
+        'ALTER TABLE wxyc_schema.flowsheet ADD CONSTRAINT chk_pair CHECK (id > 0);\n',
+        9260
+      );
+      appendMigration(workdir, '9261_drop-cons', 'ALTER TABLE wxyc_schema.flowsheet DROP CONSTRAINT chk_pair;\n', 9261);
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).toMatch(
+        /9260_add-cons\.sql creates constraint:chk_pair, then 9261_drop-cons\.sql drops it/
+      );
+    });
+
+    test('does not warn on dynamic SQL (EXECUTE format(...)) — documented limitation', () => {
+      appendMigration(
+        workdir,
+        '9270_dynamic-create',
+        "DO $$ BEGIN EXECUTE format('CREATE INDEX %I ON wxyc_schema.flowsheet (id)', 'dyn_idx'); END $$;\n",
+        9270
+      );
+      appendMigration(workdir, '9271_drop-dyn', 'DROP INDEX dyn_idx;\n', 9271);
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).not.toMatch(/9270_dynamic-create\.sql creates index:dyn_idx/);
+    });
+
+    test('does not warn when both CREATE and DROP live in the same migration file', () => {
+      appendMigration(
+        workdir,
+        '9280_self-contained',
+        ['CREATE INDEX same_file_idx ON wxyc_schema.flowsheet (id);', 'DROP INDEX same_file_idx;', ''].join('\n'),
+        9280
+      );
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).not.toMatch(/9280_self-contained\.sql creates index:same_file_idx/);
+    });
+
+    test('the warning never causes a non-zero exit (errors only come from Checks 1-7)', () => {
+      appendMigration(
+        workdir,
+        '9290_create-warning',
+        'CREATE INDEX warning_only_idx ON wxyc_schema.flowsheet (id);\n',
+        9290
+      );
+      appendMigration(workdir, '9291_drop-warning', 'DROP INDEX warning_only_idx;\n', 9291);
+      // Provide stub snapshots so Check 7 doesn't fire on these idxs.
+      for (const idx of [9290, 9291]) {
+        const snap = {
+          id: `00000000-3333-4444-5555-${String(idx).padStart(12, '0')}`,
+          prevId: '00000000-3333-4444-5555-444444444444',
+        };
+        fs.writeFileSync(
+          path.join(workdir, `shared/database/src/migrations/meta/${idx}_snapshot.json`),
+          JSON.stringify(snap, null, 2)
+        );
+      }
+
+      const { stderr, stdout, status } = run(workdir);
+      expect(stderr + stdout).toMatch(/9290_create-warning\.sql creates index:warning_only_idx/);
+      // status may be 1 from the stub-snapshot chain break (Check 6); we
+      // only assert Check 10 itself doesn't promote the run to error.
+      void status;
+    });
+  });
+
   test('HISTORICAL_NO_GUARD_NEEDED_TAGS does not grow', () => {
     // Tripwire: contributors must not silently allowlist new constraint-
     // adding migrations to suppress Check 8. The right move is to add

@@ -40,12 +40,29 @@
  *    false positives. The check is forward-looking; future migrations
  *    that explicitly write `jobs/foo` will be caught. Suppressible with
  *    `-- @no-runbook-needed: <reason>`. See WXYC/Backend-Service#727.
+ * 10. WARNING: detect CREATE-then-DROP migration pairs that net to a
+ *     no-op within the last N migrations (default N=10, configurable
+ *     via `CHECK_10_WINDOW_SIZE`). The 0071/0072 case shipped a unique
+ *     index in 0071 and dropped it in 0072 two hours later — but the
+ *     chain runs each in isolation, so 0071's retroactively-added
+ *     precondition guard fires against current prod even though 0072
+ *     would undo the index moments later. Folding the pair into a
+ *     single no-op migration prevents the wedge.
+ *     **Strict-DDL detection** (CREATE/DROP INDEX, ADD/DROP CONSTRAINT
+ *     by name); dynamic SQL via `EXECUTE format(...)`, renames-then-
+ *     drops, and cascading DROPs are out of scope by design.
+ *     Suppressible with `-- @intentional-create-revert: <reason>` when
+ *     the pair is intentional schema evolution rather than a bugfix-
+ *     revert. The warning fires on the CREATE-side migration because
+ *     that's the one whose precondition would fire on apply. See
+ *     WXYC/Backend-Service#729.
  *
  * See: WXYC/Backend-Service#400 (timestamp ordering),
  *      WXYC/Backend-Service#505 (metadata repair),
  *      WXYC/Backend-Service#590 (snapshot catch-up),
  *      WXYC/Backend-Service#705 (precondition guards),
  *      WXYC/Backend-Service#727 (RAISE message paths),
+ *      WXYC/Backend-Service#729 (CREATE/DROP pairs),
  *      WXYC/wxyc-shared#82 (Phase 4 epic).
  */
 
@@ -438,6 +455,124 @@ if (metaFiles.length > 0) {
           );
           warnings++;
         }
+      }
+    }
+  }
+}
+
+// Check 10: WARNING — detect CREATE-then-DROP migration pairs that net to
+// a no-op within the last N migrations (default 10, configurable via
+// `CHECK_10_WINDOW_SIZE`). The 0071+0072 case shipped a unique index in
+// 0071 and dropped it in 0072 two hours later — but the chain runs each
+// migration in isolation, so 0071's retroactively-added precondition guard
+// fired against current prod even though 0072 would undo the index moments
+// later. Folding the pair into a single no-op migration prevents the wedge.
+//
+// Strict-DDL detection only: CREATE/DROP INDEX, ALTER TABLE ADD/DROP
+// CONSTRAINT by name. Dynamic SQL via `EXECUTE format(...)`, renames-then-
+// drops (`ALTER INDEX X RENAME TO Y` then `DROP INDEX Y`), and cascading
+// DROPs (`DROP TABLE` removing all indexes) are out of scope by design —
+// loose matching adds maintenance burden for marginal gain. Suppress
+// per-migration with `-- @intentional-create-revert: <reason>` when the
+// pair is intentional schema evolution rather than a bugfix-revert.
+//
+// Warning is emitted on the CREATE-side migration because that's the
+// migration whose precondition would fire on apply, pointing the operator
+// at the file responsible for the wedge.
+{
+  const WINDOW_SIZE = Math.max(1, Number(process.env.CHECK_10_WINDOW_SIZE ?? 10));
+  const SUPPRESS_PATTERN = /--\s*@intentional-create-revert\s*:/i;
+
+  const PATTERNS = [
+    {
+      kind: 'index',
+      op: 'create',
+      // CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS]
+      // [<schema>.]<name>
+      re: /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?:["']?[\w.]+["']?\s*\.\s*)?["']?(\w+)["']?/gi,
+    },
+    {
+      kind: 'index',
+      op: 'drop',
+      re: /\bDROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?(?:["']?[\w.]+["']?\s*\.\s*)?["']?(\w+)["']?/gi,
+    },
+    {
+      kind: 'constraint',
+      op: 'create',
+      // ALTER TABLE ... ADD CONSTRAINT <name>
+      re: /\bADD\s+CONSTRAINT\s+["']?(\w+)["']?/gi,
+    },
+    {
+      kind: 'constraint',
+      op: 'drop',
+      // ALTER TABLE ... DROP CONSTRAINT [IF EXISTS] <name>
+      re: /\bDROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?["']?(\w+)["']?/gi,
+    },
+  ];
+
+  // Sorted ascending by idx (journal entries are appended in idx order).
+  // Take the tail window so we only fire on recent pairs — older pairs
+  // are likely intentional schema evolution rather than bugfix-revert.
+  const recentEntries = journal.entries.slice(-WINDOW_SIZE);
+
+  // Per-object timeline: key = `<kind>:<name>`, value = [{ idx, tag, op }]
+  // ordered by occurrence (idx then within-file lexical position).
+  const timeline = new Map();
+
+  for (const entry of recentEntries) {
+    const sqlPath = join(migrationsDir, `${entry.tag}.sql`);
+    if (!existsSync(sqlPath)) continue;
+    const content = readFileSync(sqlPath, 'utf8');
+    if (SUPPRESS_PATTERN.test(content)) continue;
+
+    // Strip line comments so a comment containing "DROP INDEX foo" doesn't
+    // false-trigger. Block comments aren't used in this codebase's
+    // migrations.
+    const stripped = content
+      .split('\n')
+      .map((line) => {
+        const idx = line.indexOf('--');
+        return idx >= 0 ? line.slice(0, idx) : line;
+      })
+      .join('\n');
+
+    for (const { kind, op, re } of PATTERNS) {
+      // Reset state per file (regex with /g preserves lastIndex).
+      re.lastIndex = 0;
+      let match;
+      while ((match = re.exec(stripped)) !== null) {
+        const name = match[1];
+        const key = `${kind}:${name}`;
+        if (!timeline.has(key)) timeline.set(key, []);
+        timeline.get(key).push({ idx: entry.idx, tag: entry.tag, op, position: match.index });
+      }
+    }
+  }
+
+  // Find CREATE-then-DROP pairs. We walk each object's op-list in order
+  // and flag the first (create, drop) adjacency. CREATE-DROP-CREATE only
+  // warns on the first pair — the second create is fresh schema, not a
+  // revert.
+  for (const [key, ops] of timeline) {
+    for (let i = 0; i < ops.length - 1; i++) {
+      if (ops[i].op === 'create' && ops[i + 1].op === 'drop') {
+        const createOp = ops[i];
+        const dropOp = ops[i + 1];
+        // Skip same-file CREATE/DROP — that's intentional setup-then-
+        // teardown within one migration (rare, but the warning would be
+        // misleading).
+        if (createOp.tag === dropOp.tag) continue;
+        const createFile = `${createOp.tag}.sql`;
+        console.warn(
+          `WARN:  ${createFile} creates ${key}, then ${dropOp.tag}.sql drops it. ` +
+            `The pair nets to a no-op but the chain runs each in isolation — if the CREATE ` +
+            `has a precondition guard, it fires even though the effect is reverted moments ` +
+            `later. Consider folding the pair into a single no-op migration, or suppress ` +
+            `with '-- @intentional-create-revert: <reason>' if this is intentional schema ` +
+            `evolution. See WXYC/Backend-Service#729.`
+        );
+        warnings++;
+        break; // only warn on the first create→drop pair per object
       }
     }
   }
