@@ -63,7 +63,7 @@ detect-changes:
     tests: ${{ steps.changes.outputs.tests }}
     src: ${{ steps.changes.outputs.src }}
     run-integration: ${{ steps.should-run.outputs.run-integration }}
-    db-init: ${{ steps.changes.outputs.db-init }}  # NEW
+    db-init: ${{ steps.changes.outputs.db-init }} # NEW
 ```
 
 The `db-init` name is correct as the trigger condition for `migrate-dryrun` — it covers exactly the paths whose changes could move the migration result on prod-shaped data.

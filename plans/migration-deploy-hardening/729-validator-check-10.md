@@ -79,7 +79,11 @@ function checkCreateThenDropPairs() {
   const timeline = new Map();
   const PATTERNS = [
     // CREATE [UNIQUE] INDEX [IF NOT EXISTS] <name>
-    { kind: 'index', op: 'create', re: /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:["']?[\w.]+["']?\.)?["']?(\w+)["']?/gi },
+    {
+      kind: 'index',
+      op: 'create',
+      re: /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:["']?[\w.]+["']?\.)?["']?(\w+)["']?/gi,
+    },
     // DROP INDEX [IF EXISTS] [schema.]<name>
     { kind: 'index', op: 'drop', re: /DROP\s+INDEX\s+(?:IF\s+EXISTS\s+)?(?:["']?[\w.]+["']?\.)?["']?(\w+)["']?/gi },
     // ALTER TABLE <t> ADD CONSTRAINT <name>
@@ -158,7 +162,7 @@ Use temp-directory fixtures with synthetic SQL files.
 ## Risks / gotchas
 
 1. **Regex SQL parsing has known limits.** Acceptable — Check 10 is a hint, not a guarantee. If false positives become noisy, suppression syntax handles it; if false negatives bite, #726 (pre-flight dry-run) catches the runtime failure.
-2. **Window size is a tuning knob.** Default 10 is enough to catch 0071/0072 (1-apart) and any reasonable future pair. If a pair lands more than 10 apart, that's likely intentional schema evolution that *shouldn't* be folded — the false-negative is correct behavior.
+2. **Window size is a tuning knob.** Default 10 is enough to catch 0071/0072 (1-apart) and any reasonable future pair. If a pair lands more than 10 apart, that's likely intentional schema evolution that _shouldn't_ be folded — the false-negative is correct behavior.
 3. **The warning-on-CREATE choice.** Could warn on either migration in the pair. CREATE-side is preferred because that's the migration whose precondition would fire — pointing the operator's eye at the migration that causes the wedge. Document the choice in the check's docstring.
 4. **CONSTRAINT-name extraction is fragile.** The `ADD CONSTRAINT <name>` pattern is consistent in our migrations, but Postgres allows `CHECK (...)` without a name (auto-generated). Auto-generated names won't match across the pair. Acceptable false-negative; document.
 

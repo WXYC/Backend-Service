@@ -122,7 +122,7 @@ Use temp-directory fixtures with synthetic SQL files; don't depend on real migra
 
 ## Out of scope
 
-- Validating that the cited path is *runnable* (executable, has a README). Existence is the bar.
+- Validating that the cited path is _runnable_ (executable, has a README). Existence is the bar.
 - Tightening the regex to catch prose-style references. The signal/noise becomes too low.
 - Auto-fixing or auto-rephrasing messages. Human judgment.
 

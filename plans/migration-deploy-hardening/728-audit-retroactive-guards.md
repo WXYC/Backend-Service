@@ -51,8 +51,8 @@ Require `lag_seconds < 60` and `lag_bytes < 1000` before running any Bucket B/C 
 For each of the 5 migrations (including 0071 for completeness):
 
 | Migration | when | cursor < when? | Bucket |
-|---|---|---|---|
-| ... | ... | ... | ... |
+| --------- | ---- | -------------- | ------ |
+| ...       | ...  | ...            | ...    |
 
 - **Bucket A** (cursor >= when): migration was applied before the guard was added. Guard never runs again. Safe.
 - **Bucket B** (cursor < when, guard predicate is currently false): guard exists, guard would run on next migrate, but it'll pass. Safe.
