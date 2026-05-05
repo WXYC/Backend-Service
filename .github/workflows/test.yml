@@ -38,6 +38,7 @@ jobs:
       tests: ${{ steps.changes.outputs.tests }}
       src: ${{ steps.changes.outputs.src }}
       run-integration: ${{ steps.should-run.outputs.run-integration }}
+      db-init: ${{ steps.changes.outputs.db-init }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -364,3 +365,100 @@ jobs:
           name: integration-test-coverage
           path: coverage/
           retention-days: 14
+
+  # Pre-flight migrate-dryrun: restores the most recent automated RDS
+  # snapshot to a sandbox DB instance and runs `node scripts/dryrun-migrate.mjs`
+  # against it. Catches preconditions that depend on prod data shape (e.g.
+  # the `RAISE EXCEPTION` guards added per WXYC/Backend-Service#705) at
+  # PR-review time rather than at deploy time. See WXYC/Backend-Service#726.
+  #
+  # Requires repo-level secrets (one-time ops setup):
+  #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION — already present
+  #     for the deploy workflow; needs additional rds:* permissions.
+  #   PROD_DB_ID — RDS instance identifier of the prod DB.
+  #   PROD_DB_NAME, PROD_DB_USERNAME, PROD_DB_PASSWORD — match the source
+  #     instance's master credentials (snapshots restore with the source's
+  #     master user).
+  #   SG_DRYRUN_GHA — security group id allowing port 5432 from GitHub
+  #     Actions egress IPs only. See plan #726 §4 for provisioning.
+  migrate-dryrun:
+    name: Migration Dry-Run (prod-shaped data)
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.db-init == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '25'
+          cache: 'npm'
+
+      - name: Install minimal deps for dryrun script
+        # postgres + drizzle-orm are the only runtime imports the script
+        # needs. Install them directly at the repo root rather than running
+        # the full `npm install` (which would build all workspaces). The
+        # script imports `../dev_env/format-pg-error.mjs` by relative path,
+        # so it doesn't need anything inside dev_env to be npm-installed.
+        run: npm install --no-save --no-package-lock --no-audit --no-fund postgres drizzle-orm
+
+      - name: Configure AWS credentials
+        # Long-lived AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY pattern
+        # already used by .github/workflows/deploy-base.yml (lines 246, 254,
+        # 265, 329, 337, 363, 454). Migrating to OIDC is a separate concern.
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Restore latest prod snapshot to ephemeral sandbox
+        id: restore
+        # Publicly accessible because GitHub-hosted runners have no VPC
+        # connectivity to the prod VPC. Ingress is gated by SG_DRYRUN_GHA,
+        # which allows port 5432 from GitHub's documented egress IP ranges
+        # only. The sandbox is torn down in the always-run step below.
+        run: |
+          set -euo pipefail
+          SNAPSHOT_ID=$(aws rds describe-db-snapshots \
+            --db-instance-identifier "${{ secrets.PROD_DB_ID }}" \
+            --snapshot-type automated \
+            --query 'sort_by(DBSnapshots, &SnapshotCreateTime)[-1].DBSnapshotIdentifier' \
+            --output text)
+          SANDBOX_ID="dryrun-${{ github.run_id }}"
+          echo "SANDBOX_ID=$SANDBOX_ID" >> "$GITHUB_ENV"
+          aws rds restore-db-instance-from-db-snapshot \
+            --db-instance-identifier "$SANDBOX_ID" \
+            --db-snapshot-identifier "$SNAPSHOT_ID" \
+            --db-instance-class db.t4g.micro \
+            --publicly-accessible \
+            --vpc-security-group-ids "${{ secrets.SG_DRYRUN_GHA }}"
+          aws rds wait db-instance-available --db-instance-identifier "$SANDBOX_ID"
+          ENDPOINT=$(aws rds describe-db-instances \
+            --db-instance-identifier "$SANDBOX_ID" \
+            --query 'DBInstances[0].Endpoint.Address' --output text)
+          echo "DB_HOST=$ENDPOINT" >> "$GITHUB_ENV"
+
+      - name: Run drizzle:migrate against sandbox
+        env:
+          DB_HOST: ${{ env.DB_HOST }}
+          DB_PORT: '5432'
+          DB_NAME: ${{ secrets.PROD_DB_NAME }}
+          DB_USERNAME: ${{ secrets.PROD_DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+        run: node scripts/dryrun-migrate.mjs
+
+      - name: Tear down sandbox
+        # The guard on SANDBOX_ID handles the case where restore failed
+        # before the env var was written; without it, delete-db-instance
+        # would error and obscure the actual failure.
+        if: always()
+        run: |
+          if [ -n "${SANDBOX_ID:-}" ]; then
+            aws rds delete-db-instance \
+              --db-instance-identifier "$SANDBOX_ID" \
+              --skip-final-snapshot \
+              --delete-automated-backups
+          fi
