@@ -58,6 +58,7 @@ jobs:
             db-init:
               - 'dev_env/Dockerfile.init'
               - 'dev_env/init-db.mjs'
+              - 'dev_env/format-pg-error.mjs'
               - 'dev_env/package.init.json'
               - 'dev_env/seed_db.sql'
               - 'shared/database/src/migrations/**'
