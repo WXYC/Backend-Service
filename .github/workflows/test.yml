@@ -157,6 +157,9 @@ jobs:
       - name: Validate migration journal
         run: npm run lint:migrations
 
+      - name: Cross-cache-identity flag-doc consistency
+        run: scripts/check-cross-cache-identity-flags.sh
+
       - name: Build
         run: npm run build
 
