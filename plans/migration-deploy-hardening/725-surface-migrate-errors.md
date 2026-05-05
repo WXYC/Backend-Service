@@ -36,7 +36,7 @@ New shape:
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 
-const db = drizzle(sql);  // sql is the existing postgres-js client
+const db = drizzle(sql); // sql is the existing postgres-js client
 try {
   await migrate(db, { migrationsFolder: join(__dirname, 'database/migrations') });
 } catch (error) {
@@ -47,7 +47,18 @@ try {
   // violations.
   process.stderr.write('\n=== drizzle:migrate failed ===\n');
   if (error && typeof error === 'object') {
-    for (const field of ['code', 'severity', 'message', 'detail', 'hint', 'where', 'schema', 'table', 'column', 'constraint']) {
+    for (const field of [
+      'code',
+      'severity',
+      'message',
+      'detail',
+      'hint',
+      'where',
+      'schema',
+      'table',
+      'column',
+      'constraint',
+    ]) {
       const value = error[field];
       if (value !== undefined) {
         process.stderr.write(`${field}: ${value}\n`);

@@ -27,7 +27,7 @@ Migration-touching PRs should trigger a deploy soon after merge — ideally same
 
 The canonical recent example is the 2026-05-04 deploy wedge (run [25337297761](https://github.com/WXYC/Backend-Service/actions/runs/25337297761)), where 4 days of accumulated migrations (0071, 0072, 0073) compounded with a retroactive precondition guard added in commit `2710f2e`. Migration 0071's guard fired against current prod state and aborted the chain, leaving the deploy stuck. Had 0071 deployed in isolation immediately after authoring (2026-05-01), the guard wouldn't have been retrofitted yet, and the wedge wouldn't have happened.
 
-The other defenses in [Project #26 — Migration Deploy Hardening](https://github.com/orgs/WXYC/projects/26) (legible failure output, pre-flight dry-runs against prod-shaped data) reduce the cost of an individual wedge. This cadence note reduces the *likelihood* by limiting how many migrations stack up between deploys.
+The other defenses in [Project #26 — Migration Deploy Hardening](https://github.com/orgs/WXYC/projects/26) (legible failure output, pre-flight dry-runs against prod-shaped data) reduce the cost of an individual wedge. This cadence note reduces the _likelihood_ by limiting how many migrations stack up between deploys.
 
 **Practical rule of thumb**: when a PR that touches `shared/database/src/migrations/**` merges, run Manual Build & Deploy within 24 hours.
 ```
@@ -42,9 +42,11 @@ If anyone wants visibility into the gap, a small script under `scripts/` could e
 // Wired into init-db.mjs after migrate completes.
 const cursor = await sql`SELECT MAX(created_at) FROM drizzle.__drizzle_migrations`;
 const journal = JSON.parse(readFileSync('database/migrations/meta/_journal.json'));
-const undeployed = journal.entries.filter(e => Number(e.when) > Number(cursor[0].max));
+const undeployed = journal.entries.filter((e) => Number(e.when) > Number(cursor[0].max));
 if (undeployed.length > 3) {
-  console.warn(`[cadence] ${undeployed.length} migrations applied this run; consider deploying more frequently. Sentry breadcrumb emitted.`);
+  console.warn(
+    `[cadence] ${undeployed.length} migrations applied this run; consider deploying more frequently. Sentry breadcrumb emitted.`
+  );
   // Optionally: Sentry.addBreadcrumb({ category: 'migrate-cadence', level: 'info', message: `...`, data: { undeployed: undeployed.length } });
 }
 ```
