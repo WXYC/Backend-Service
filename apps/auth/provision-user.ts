@@ -4,7 +4,7 @@
  * endpoint and by createDefaultUser() at startup.
  */
 
-import { auth, WXYCRoles } from '@wxyc/authentication';
+import { auth, formatUsernameError, validateUsername, WXYCRoles } from '@wxyc/authentication';
 import { db, user } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
 
@@ -52,6 +52,15 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
   // 1. Validate role
   if (!(role in WXYCRoles)) {
     throw new ProvisionError(400, `Invalid role: "${role}". Must be one of: ${Object.keys(WXYCRoles).join(', ')}`);
+  }
+
+  // 1b. Validate username matches what better-auth's username plugin will accept
+  // at sign-in time. Otherwise we'd create accounts that can never log in via
+  // /sign-in/username (the validator there rejects the request before the DB
+  // is touched). See shared/authentication/src/auth.username.ts.
+  const usernameError = validateUsername(username);
+  if (usernameError) {
+    throw new ProvisionError(400, formatUsernameError(usernameError));
   }
 
   // 2. Get auth context
