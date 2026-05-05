@@ -60,20 +60,25 @@ const mockAuthContext = {
 
 const mockRequestPasswordReset = jest.fn().mockResolvedValue({ status: true } as never);
 
-jest.mock('@wxyc/authentication', () => ({
-  auth: {
-    $context: Promise.resolve(mockAuthContext),
-    api: {
-      requestPasswordReset: (...args: unknown[]) => mockRequestPasswordReset(...args),
+jest.mock('@wxyc/authentication', () => {
+  // Use the real validator so the tests exercise the production regex.
+  const actual = jest.requireActual('../../../shared/authentication/src/auth.username');
+  return {
+    ...actual,
+    auth: {
+      $context: Promise.resolve(mockAuthContext),
+      api: {
+        requestPasswordReset: (...args: unknown[]) => mockRequestPasswordReset(...args),
+      },
     },
-  },
-  WXYCRoles: {
-    member: {},
-    dj: {},
-    musicDirector: {},
-    stationManager: {},
-  },
-}));
+    WXYCRoles: {
+      member: {},
+      dj: {},
+      musicDirector: {},
+      stationManager: {},
+    },
+  };
+});
 
 // --- Import after mocks ---
 import { provisionUser, ProvisionError } from '../../../apps/auth/provision-user';
@@ -189,6 +194,37 @@ describe('provisionUser()', () => {
           role: 'dj',
         }),
       });
+    });
+  });
+
+  describe('username validation', () => {
+    it.each([['billb'], ['bill_b'], ['bill.b'], ['BillB'], ['dj42'], ['abc'], ['a'.repeat(30)]])(
+      'should accept valid username: "%s"',
+      async (username) => {
+        await expect(provisionUser({ ...validInput, username })).resolves.toBeDefined();
+      }
+    );
+
+    it.each([
+      ['contains a space', 'bill b'],
+      ['contains a dash', 'bill-b'],
+      ['contains an @', 'bill@b'],
+      ['contains punctuation', "bill's"],
+      ['contains unicode', 'billé'],
+      ['leading space', ' billb'],
+      ['trailing space', 'billb '],
+      ['too short (1 char)', 'a'],
+      ['too short (2 chars)', 'ab'],
+      ['too long (31 chars)', 'a'.repeat(31)],
+      ['empty string', ''],
+    ])('should reject invalid username (%s)', async (_label, username) => {
+      await expect(provisionUser({ ...validInput, username })).rejects.toThrow(ProvisionError);
+      await expect(provisionUser({ ...validInput, username })).rejects.toMatchObject({ statusCode: 400 });
+    });
+
+    it('should not call createUser when username is invalid', async () => {
+      await provisionUser({ ...validInput, username: 'bill b' }).catch(() => {});
+      expect(mockCreateUser).not.toHaveBeenCalled();
     });
   });
 
