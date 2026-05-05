@@ -30,11 +30,22 @@
  *    NOT NULL paired with DEFAULT, fresh CREATE TABLE). This is a
  *    warning, not an error — guards aren't always needed and CI must
  *    not gate on the soft signal. See WXYC/Backend-Service#705.
+ * 9. WARNING: RAISE EXCEPTION messages cite **explicit paths** under
+ *    `jobs/`, `scripts/`, `apps/`, or `shared/` that exist in the repo.
+ *    Migrations whose precondition guards point operators at a runbook
+ *    on an unmerged feature branch leave the deploy with no recoverable
+ *    next step. **Scope limitation:** free-form prose references (e.g.
+ *    "Run rotation-dedupe job" without a `jobs/` prefix) are not
+ *    detected — tightening the regex to catch prose would inflate
+ *    false positives. The check is forward-looking; future migrations
+ *    that explicitly write `jobs/foo` will be caught. Suppressible with
+ *    `-- @no-runbook-needed: <reason>`. See WXYC/Backend-Service#727.
  *
  * See: WXYC/Backend-Service#400 (timestamp ordering),
  *      WXYC/Backend-Service#505 (metadata repair),
  *      WXYC/Backend-Service#590 (snapshot catch-up),
  *      WXYC/Backend-Service#705 (precondition guards),
+ *      WXYC/Backend-Service#727 (RAISE message paths),
  *      WXYC/wxyc-shared#82 (Phase 4 epic).
  */
 
@@ -374,6 +385,61 @@ if (metaFiles.length > 0) {
         `and issue #705.`
     );
     warnings++;
+  }
+}
+
+// Check 9: WARNING — RAISE EXCEPTION messages should cite paths reachable
+// from main. Migrations whose precondition guards reference a runbook
+// (e.g. "Run jobs/rotation-dedupe first") that points to an unmerged
+// feature branch leave operators with a broken next-step on deploy
+// failure (the prompting case: 0071 cites a job path that exists only on
+// task/694-rotation-dedupe).
+//
+// Scope: only path-shaped tokens under `jobs/`, `scripts/`, `apps/`, or
+// `shared/` are checked. Prose-style references ("rotation-dedupe job"
+// with no `jobs/` prefix) are deliberately out of scope — tightening the
+// regex to match prose would inflate false positives, and the explicit-
+// path case is the higher-confidence signal anyway. Existence is the
+// bar; this check does not validate that the path is runnable.
+//
+// Suppressible per-migration with `-- @no-runbook-needed: <reason>` when
+// a path-shaped token isn't really a path (URLs, doc references).
+{
+  const RAISE_PATTERN = /RAISE\s+EXCEPTION\s+(['"])((?:[^'\\]|\\.)*?)\1/gi;
+  const PATH_PATTERN = /\b(?:jobs|scripts|apps|shared)\/[A-Za-z0-9_./-]+/g;
+  const SUPPRESS_PATTERN = /--\s*@no-runbook-needed\s*:/i;
+
+  const sqlFiles = readdirSync(migrationsDir)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
+
+  for (const file of sqlFiles) {
+    const sqlPath = join(migrationsDir, file);
+    const content = readFileSync(sqlPath, 'utf8');
+    if (SUPPRESS_PATTERN.test(content)) continue;
+
+    const seen = new Set();
+    let match;
+    while ((match = RAISE_PATTERN.exec(content)) !== null) {
+      const messageText = match[2];
+      const paths = messageText.match(PATH_PATTERN) ?? [];
+      for (const candidate of paths) {
+        // Strip trailing punctuation: 'See jobs/foo.' should resolve to
+        // 'jobs/foo' rather than miss because of the period.
+        const trimmed = candidate.replace(/[.,;:!?]+$/, '');
+        if (seen.has(trimmed)) continue;
+        seen.add(trimmed);
+        if (!existsSync(trimmed)) {
+          console.warn(
+            `WARN:  ${file} RAISE EXCEPTION cites '${trimmed}' which doesn't exist on main. ` +
+              `Either merge the runbook before this migration ships, rephrase the message, ` +
+              `or suppress with '-- @no-runbook-needed: <reason>'. ` +
+              `See WXYC/Backend-Service#727.`
+          );
+          warnings++;
+        }
+      }
+    }
   }
 }
 
