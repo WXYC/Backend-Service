@@ -17,11 +17,11 @@ import crypto from 'crypto';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import { styleText } from 'node:util';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import { migrate } from 'drizzle-orm/postgres-js/migrator';
+import { formatPgError } from './format-pg-error.mjs';
 
-const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -35,6 +35,13 @@ const dbConfig = {
   username: process.env.DB_USERNAME,
   password: process.env.DB_PASSWORD,
   max: 1,
+  // postgres-js dumps every NOTICE to stderr by default. Migrations like
+  // `DROP INDEX IF EXISTS` legitimately produce many ("index X does not
+  // exist, skipping"). On the success path that noise drowns the only
+  // line that matters ("All N migrations verified as applied"); on the
+  // failure path formatPgError() carries the error fields anyway. Drop
+  // notices here.
+  onnotice: () => {},
 };
 
 const sql = postgres(dbConfig);
@@ -88,25 +95,28 @@ async function installExtensions() {
 }
 
 /**
- * Run Drizzle migrations
+ * Run Drizzle migrations.
+ *
+ * Calls drizzle-orm's programmatic migrate() directly instead of shelling out
+ * to `drizzle-kit migrate`. The CLI buffers Postgres ERROR text behind a
+ * spinner, so on failure the deploy log shows only trailing NOTICE lines and
+ * the operator has to guess the cause (incidents #400, #550, run 25337297761).
+ * The library version surfaces the full error object — code, severity,
+ * message, where (PL/pgSQL stack frame), detail, hint, etc. — via
+ * formatPgError so the deploy log carries enough to act on.
  */
 async function runMigrations() {
   console.log(styleText(['bold'], '🔄 Running Drizzle migrations...'));
 
+  const migrationsDir = process.env.MIGRATION_LOC || join(__dirname, '..', 'shared/database/src/migrations');
+  const db = drizzle(sql);
+
   try {
-    const { stdout, stderr } = await execAsync('npm run drizzle:migrate', {
-      env: { ...process.env },
-      shell: '/bin/sh',
-    });
-
-    if (stdout) console.log(stdout);
-    if (stderr && !stderr.includes('No config path provided')) console.error(stderr);
-
+    await migrate(db, { migrationsFolder: migrationsDir });
     console.log('\nMigrations completed successfully!\n');
   } catch (error) {
-    console.error('Migration failed:', error.message);
-    if (error.stdout) console.error('stdout:', error.stdout);
-    if (error.stderr) console.error('stderr:', error.stderr);
+    process.stderr.write('\n');
+    process.stderr.write(formatPgError(error));
     throw error;
   }
 }

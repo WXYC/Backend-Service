@@ -12,8 +12,9 @@ RUN npm install --omit=dev
 ENV SCHEMA_LOC='/init/database'
 ENV MIGRATION_LOC='/init/database/migrations'
 
-# Copy init script
+# Copy init script and its helper modules
 COPY dev_env/init-db.mjs ./
+COPY dev_env/format-pg-error.mjs ./
 
 # Dummy .env file for compatibility
 RUN touch .env

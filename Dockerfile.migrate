@@ -21,6 +21,7 @@ COPY shared/database/src/schema.ts ./database/schema.ts
 COPY shared/database/src/migrations ./database/migrations
 COPY dev_env/install_extensions.sql ./install_extensions.sql
 COPY dev_env/init-db.mjs ./
+COPY dev_env/format-pg-error.mjs ./
 
 # Dummy .env file for compatibility
 RUN touch .env
