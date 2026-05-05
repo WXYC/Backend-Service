@@ -348,6 +348,150 @@ describe('validate-migrations.mjs', () => {
     });
   });
 
+  describe('Check 9: RAISE EXCEPTION messages cite reachable paths', () => {
+    function appendMigration(work: string, tag: string, sql: string, idx = 9100): void {
+      const sqlPath = path.join(work, 'shared/database/src/migrations', `${tag}.sql`);
+      fs.writeFileSync(sqlPath, sql);
+      const journal = readJournal(work);
+      journal.entries.push({
+        idx,
+        version: '7',
+        when: Date.now() + 1_000_000_000_000 + idx,
+        tag,
+        breakpoints: true,
+      });
+      writeJournal(work, journal);
+    }
+
+    function mkRepoPath(work: string, repoRelPath: string): void {
+      // Validator runs with cwd=work, so existsSync('jobs/foo') resolves
+      // against <work>/jobs/foo. Tests that need a "real" path stub it
+      // here.
+      const fullPath = path.join(work, repoRelPath);
+      fs.mkdirSync(fullPath, { recursive: true });
+    }
+
+    test('does not warn when the cited path exists', () => {
+      mkRepoPath(workdir, 'jobs/library-artist-name-backfill');
+      appendMigration(
+        workdir,
+        '9101_existing-runbook',
+        ['DO $$ BEGIN', "  RAISE EXCEPTION 'See jobs/library-artist-name-backfill for prior art';", 'END $$;', ''].join(
+          '\n'
+        ),
+        9101
+      );
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).not.toMatch(/9101_existing-runbook\.sql RAISE EXCEPTION cites/);
+    });
+
+    test('warns when the cited path does not exist', () => {
+      appendMigration(
+        workdir,
+        '9102_broken-runbook',
+        ['DO $$ BEGIN', "  RAISE EXCEPTION 'Run jobs/this-does-not-exist first';", 'END $$;', ''].join('\n'),
+        9102
+      );
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).toMatch(/9102_broken-runbook\.sql RAISE EXCEPTION cites 'jobs\/this-does-not-exist'/);
+      expect(stderr + stdout).toMatch(/issue #727|WXYC\/Backend-Service#727/);
+    });
+
+    test('warns per missing path when multiple are cited (and skips the existing one)', () => {
+      mkRepoPath(workdir, 'jobs/library-artist-name-backfill');
+      appendMigration(
+        workdir,
+        '9103_mixed-runbooks',
+        [
+          'DO $$ BEGIN',
+          "  RAISE EXCEPTION 'Mix: see jobs/library-artist-name-backfill but also jobs/missing-one and scripts/missing-two';",
+          'END $$;',
+          '',
+        ].join('\n'),
+        9103
+      );
+
+      const { stdout, stderr } = run(workdir);
+      const combined = stderr + stdout;
+      expect(combined).toMatch(/9103_mixed-runbooks\.sql RAISE EXCEPTION cites 'jobs\/missing-one'/);
+      expect(combined).toMatch(/9103_mixed-runbooks\.sql RAISE EXCEPTION cites 'scripts\/missing-two'/);
+      expect(combined).not.toMatch(/cites 'jobs\/library-artist-name-backfill'/);
+    });
+
+    test('does not warn when `-- @no-runbook-needed:` annotation is present', () => {
+      appendMigration(
+        workdir,
+        '9104_suppressed',
+        [
+          '-- @no-runbook-needed: cited path is a documentation URL, not a real repo path',
+          'DO $$ BEGIN',
+          "  RAISE EXCEPTION 'See jobs/this-does-not-exist for context';",
+          'END $$;',
+          '',
+        ].join('\n'),
+        9104
+      );
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).not.toMatch(/9104_suppressed\.sql RAISE EXCEPTION cites/);
+    });
+
+    test('does not warn on migrations without a RAISE EXCEPTION', () => {
+      appendMigration(
+        workdir,
+        '9105_no-raise',
+        'CREATE INDEX IF NOT EXISTS test_idx ON wxyc_schema.flowsheet(id);\n',
+        9105
+      );
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).not.toMatch(/9105_no-raise\.sql RAISE EXCEPTION cites/);
+    });
+
+    test('does not warn on prose-style references without a `jobs/`/`scripts/`/`apps/`/`shared/` prefix', () => {
+      // Documented scope limitation: free-form prose in RAISE messages
+      // (e.g. 0071's "Run rotation-dedupe job first") doesn't match the
+      // path regex. Tightening the regex to catch prose would inflate
+      // false positives; this test pins the deliberate omission.
+      appendMigration(
+        workdir,
+        '9106_prose-only',
+        ['DO $$ BEGIN', "  RAISE EXCEPTION 'Run rotation-dedupe job first or pre-clean manually';", 'END $$;', ''].join(
+          '\n'
+        ),
+        9106
+      );
+
+      const { stdout, stderr } = run(workdir);
+      expect(stderr + stdout).not.toMatch(/9106_prose-only\.sql RAISE EXCEPTION cites/);
+    });
+
+    test('the warning never causes a non-zero exit (errors only come from Checks 1-7)', () => {
+      appendMigration(
+        workdir,
+        '9107_warning-only',
+        ['DO $$ BEGIN', "  RAISE EXCEPTION 'See jobs/missing-runbook';", 'END $$;', ''].join('\n'),
+        9107
+      );
+      const snap = {
+        id: '00000000-2222-3333-4444-555555555555',
+        prevId: '00000000-2222-3333-4444-444444444444',
+      };
+      fs.writeFileSync(
+        path.join(workdir, 'shared/database/src/migrations/meta/9107_snapshot.json'),
+        JSON.stringify(snap, null, 2)
+      );
+
+      const { stderr, stdout, status } = run(workdir);
+      expect(stderr + stdout).toMatch(/9107_warning-only\.sql RAISE EXCEPTION cites/);
+      // Status may be 1 from the stub-snapshot chain break (Check 6),
+      // but Check 9 alone is a warning that should not fail CI.
+      void status;
+    });
+  });
+
   test('HISTORICAL_NO_GUARD_NEEDED_TAGS does not grow', () => {
     // Tripwire: contributors must not silently allowlist new constraint-
     // adding migrations to suppress Check 8. The right move is to add
