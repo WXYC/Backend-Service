@@ -17,6 +17,9 @@ import {
   uniqueIndex,
   customType,
   real,
+  uuid,
+  primaryKey,
+  check,
 } from 'drizzle-orm/pg-core';
 
 // PostgreSQL tsvector. Drizzle has no first-class tsvector type, but we only
@@ -991,3 +994,110 @@ export const anonymous_devices = pgTable(
 
 export type AnonymousDevice = InferSelectModel<typeof anonymous_devices>;
 export type NewAnonymousDevice = InferInsertModel<typeof anonymous_devices>;
+
+// Cross-cache-identity substrate (§3.2 of the library-hook-canonicalization
+// plan). Three empty tables behind `BS_USE_LIBRARY_IDENTITY=false`. No writers
+// or readers reference these in this PR — backfill (§4 step 2) and the
+// dual-table writer (§3.2.2.2) ship in follow-up PRs under epic E2-BS (#663).
+//
+// Naming convention:
+//   - `library_identity`         — main row, one per library row (denormalized convenience view)
+//   - `library_identity_source`  — sidecar, one row per (library_id, source) — per-source-of-truth detail
+//   - `library_identity_history` — supersedure log, one row per superseded decision
+//
+// The `library_identity.distinct_unresolved_sources` STORED generated column
+// is the audit-view helper described in §3.2; it counts how many of the eight
+// known sources are still NULL on this row.
+
+export const library_identity = wxyc_schema.table(
+  'library_identity',
+  {
+    library_id: integer('library_id')
+      .primaryKey()
+      .references(() => library.id),
+    discogs_master_id: integer('discogs_master_id'),
+    discogs_release_id: integer('discogs_release_id'),
+    musicbrainz_release_group_mbid: uuid('musicbrainz_release_group_mbid'),
+    musicbrainz_release_mbid: uuid('musicbrainz_release_mbid'),
+    musicbrainz_recording_mbid: uuid('musicbrainz_recording_mbid'),
+    wikidata_qid: text('wikidata_qid'),
+    spotify_id: text('spotify_id'),
+    apple_music_id: text('apple_music_id'),
+    last_verified_at: timestamp('last_verified_at', { withTimezone: true }).notNull(),
+    method: text('method').notNull(),
+    confidence: real('confidence').notNull(),
+    agreement_sources: text('agreement_sources'),
+    notes: text('notes'),
+    distinct_unresolved_sources: integer('distinct_unresolved_sources').generatedAlwaysAs(
+      sql`(
+        (CASE WHEN "discogs_master_id" IS NULL THEN 1 ELSE 0 END)
+      + (CASE WHEN "discogs_release_id" IS NULL THEN 1 ELSE 0 END)
+      + (CASE WHEN "musicbrainz_release_group_mbid" IS NULL THEN 1 ELSE 0 END)
+      + (CASE WHEN "musicbrainz_release_mbid" IS NULL THEN 1 ELSE 0 END)
+      + (CASE WHEN "musicbrainz_recording_mbid" IS NULL THEN 1 ELSE 0 END)
+      + (CASE WHEN "wikidata_qid" IS NULL THEN 1 ELSE 0 END)
+      + (CASE WHEN "spotify_id" IS NULL THEN 1 ELSE 0 END)
+      + (CASE WHEN "apple_music_id" IS NULL THEN 1 ELSE 0 END)
+      )`
+    ),
+  },
+  (table) => [
+    check('library_identity_confidence_range', sql`${table.confidence} BETWEEN 0 AND 1`),
+    index('library_identity_audit_idx').on(table.confidence, sql`${table.distinct_unresolved_sources} DESC`),
+  ]
+);
+
+export type LibraryIdentity = InferSelectModel<typeof library_identity>;
+export type NewLibraryIdentity = InferInsertModel<typeof library_identity>;
+
+export const library_identity_source = wxyc_schema.table(
+  'library_identity_source',
+  {
+    library_id: integer('library_id')
+      .notNull()
+      .references(() => library.id),
+    source: text('source').notNull(),
+    external_id: text('external_id').notNull(),
+    method: text('method').notNull(),
+    confidence: real('confidence').notNull(),
+    last_verified_at: timestamp('last_verified_at', { withTimezone: true }).notNull(),
+    boost_sources: text('boost_sources'),
+    notes: text('notes'),
+  },
+  (table) => [
+    primaryKey({ columns: [table.library_id, table.source] }),
+    check('library_identity_source_confidence_range', sql`${table.confidence} BETWEEN 0 AND 1`),
+  ]
+);
+
+export type LibraryIdentitySource = InferSelectModel<typeof library_identity_source>;
+export type NewLibraryIdentitySource = InferInsertModel<typeof library_identity_source>;
+
+export const library_identity_history = wxyc_schema.table('library_identity_history', {
+  history_id: serial('history_id').primaryKey(),
+  library_id: integer('library_id').notNull(),
+  // Snapshot of the per-row state at supersedure time. NOT FK-referenced to
+  // `library` because we may need the history row to outlive the library
+  // row's deletion for compliance / forensics.
+  discogs_master_id: integer('discogs_master_id'),
+  discogs_release_id: integer('discogs_release_id'),
+  musicbrainz_release_group_mbid: uuid('musicbrainz_release_group_mbid'),
+  musicbrainz_release_mbid: uuid('musicbrainz_release_mbid'),
+  musicbrainz_recording_mbid: uuid('musicbrainz_recording_mbid'),
+  wikidata_qid: text('wikidata_qid'),
+  spotify_id: text('spotify_id'),
+  apple_music_id: text('apple_music_id'),
+  last_verified_at: timestamp('last_verified_at', { withTimezone: true }),
+  method: text('method'),
+  confidence: real('confidence'),
+  agreement_sources: text('agreement_sources'),
+  notes: text('notes'),
+  // Supersedure metadata.
+  superseded_at: timestamp('superseded_at', { withTimezone: true }).notNull().defaultNow(),
+  superseded_reason: text('superseded_reason').notNull(),
+  reason_category: text('reason_category'),
+  archived_at: timestamp('archived_at', { withTimezone: true }),
+});
+
+export type LibraryIdentityHistory = InferSelectModel<typeof library_identity_history>;
+export type NewLibraryIdentityHistory = InferInsertModel<typeof library_identity_history>;
