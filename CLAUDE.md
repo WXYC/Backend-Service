@@ -488,6 +488,54 @@ The artist identity ETL (`jobs/artist-identity-etl/`) populates the six reconcil
 
 - `DATABASE_URL_DISCOGS` -- PostgreSQL URL for LML's discogs-cache database, where `entity.identity` lives. Required for the artist-identity ETL.
 
+### Cross-cache-identity feature flags (canonical inventory)
+
+This is the **single source of truth** for the cross-cache-identity project's feature flags (plan §4.2). Consumer repos cross-reference this section in their own `.env.example` / CLAUDE.md. When a flag is renamed or its default changes, both the canonical entry here AND the consumer repo's local doc must update in the same PR.
+
+The naming convention is asymmetric on purpose: `*_USE_NEW_HOOK_*` (LML, semantic-index, per-cache) toggles which `wxyc_library` hook table the consumer reads. `BS_USE_LIBRARY_IDENTITY*` (Backend, global) toggles whether Backend reads/writes the new `library_identity` table at all. A unified prefix would be misleading — the LML/SI flags pick a hook to read; the BS flags toggle a brand-new schema.
+
+**Cache repos do NOT use these flags.** `discogs-etl`, `musicbrainz-cache`, and `wikidata-cache` write to BOTH the legacy and new hook tables unconditionally during the dual-run window. Per §4.2: feature flags fit live request paths (LML, SI, Backend); cache loaders are batch ETLs and roll back via redeploy of the prior image. Cache repos therefore intentionally have no cross-cache-identity flags to document.
+
+| Flag                                 | Owning repo             | Scope     | Default | Set true when                                                                      |
+| ------------------------------------ | ----------------------- | --------- | ------- | ---------------------------------------------------------------------------------- |
+| `LML_USE_NEW_HOOK_DISCOGS`           | library-metadata-lookup | per-cache | `false` | Docker discogs cache parity-check passes 7 consecutive days                        |
+| `LML_USE_NEW_HOOK_DISCOGS_FULL`      | library-metadata-lookup | per-cache | `false` | Homebrew (full) discogs cache parity-check passes 7 consecutive days               |
+| `LML_USE_NEW_HOOK_MUSICBRAINZ`       | library-metadata-lookup | per-cache | `false` | musicbrainz cache parity-check passes 7 consecutive days                           |
+| `LML_USE_NEW_HOOK_WIKIDATA`          | library-metadata-lookup | per-cache | `false` | wikidata cache parity-check passes 7 consecutive days                              |
+| `SI_USE_NEW_HOOK_DISCOGS`            | semantic-index          | per-cache | `false` | LML cuts over for that cache + 7 days clean                                        |
+| `SI_USE_NEW_HOOK_MUSICBRAINZ`        | semantic-index          | per-cache | `false` | (same — per cache)                                                                 |
+| `SI_USE_NEW_HOOK_WIKIDATA`           | semantic-index          | per-cache | `false` | (same — per cache)                                                                 |
+| `BS_USE_LIBRARY_IDENTITY`            | Backend-Service         | global    | `false` | All four caches cut over (LML + semantic-index both on new hook)                   |
+| `BS_USE_LIBRARY_IDENTITY_WRITES`     | Backend-Service         | global    | `false` | After 30-day dual-run with `BS_USE_LIBRARY_IDENTITY=true` reads showing clean      |
+| `LML_MANUAL_OVERRIDE_CHECK_DISABLED` | library-metadata-lookup | global    | `false` | Emergency rollback only — disables the §3.2.2.1 manual-override skip endpoint call |
+
+**Backend phase state machine** (the two BS flags compose to define four behavioral states):
+
+| Phase                            | `BS_USE_LIBRARY_IDENTITY` | `BS_USE_LIBRARY_IDENTITY_WRITES` | Reads                                                  | Writes                                                    |
+| -------------------------------- | ------------------------- | -------------------------------- | ------------------------------------------------------ | --------------------------------------------------------- |
+| 1 — substrate landed, no use     | false                     | false                            | `canonical_entity_id` columns only                     | `canonical_entity_id` columns only (new writer gated off) |
+| 2 — read new, write legacy       | true                      | false                            | `library_identity` with `canonical_entity_id` fallback | `canonical_entity_id` columns only                        |
+| 3 — read new, write both         | true                      | true                             | (same as Phase 2)                                      | DUAL-WRITE in one DB transaction                          |
+| 4 — drop legacy (post §4 step 5) | true                      | true                             | `library_identity` only                                | `library_identity` only                                   |
+
+**Flag mechanism (locked):** all flags above are environment variables read via the standard per-language pattern (`process.env.X` in Node.js, `os.getenv()` in Python). No application-level config singleton or feature-flag service. Each repo's `.env.example` (or CLAUDE.md, where `.env.example` doesn't apply) documents the local flags.
+
+**Production locations and approval gates** (per §4.2 rollout checklist):
+
+| Flag                                 | Production location                                  | Updater                                                       | Approval gate                                                    |
+| ------------------------------------ | ---------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `LML_USE_NEW_HOOK_*`                 | Railway environment variables for the LML service    | Jake via Railway dashboard                                    | 7 consecutive days of clean parity-check audit (E5 daily report) |
+| `SI_USE_NEW_HOOK_*`                  | EC2 systemd unit env file                            | Jake via SSH + edit env file + restart                        | LML for that cache cut over for 7 days                           |
+| `BS_USE_LIBRARY_IDENTITY`            | EC2 backend container env (`.env` mounted at deploy) | Jake via SSH + edit `.env` + `docker compose restart backend` | All 4 caches cut over (LML + SI both on new hook for all caches) |
+| `BS_USE_LIBRARY_IDENTITY_WRITES`     | (same)                                               | (same)                                                        | 30-day clean dual-run with `BS_USE_LIBRARY_IDENTITY=true`        |
+| `LML_MANUAL_OVERRIDE_CHECK_DISABLED` | Railway environment variables                        | Jake via Railway dashboard                                    | Used only for emergency rollback (no scheduled flip)             |
+
+**No automation flips production flags.** The audit job (E5) reports when a gate's preconditions are met (e.g., `LML_USE_NEW_HOOK_DISCOGS eligible: 7 days clean since 2026-05-15`); Jake then chooses to flip. This matches the project's no-auto-default principle (§4 step 0).
+
+**Sync mechanism (CI grep-assert, per repo):** every repo that documents one or more flags ships a CI check that asserts (a) every flag named in this canonical table appears in the consumer's local doc, and (b) every flag named in the consumer's local doc appears here. The Backend-side script is `scripts/check-cross-cache-identity-flags.sh`; it runs in the existing CI pipeline (`.github/workflows/test.yml`) as a `Cross-cache-identity flag-doc consistency` job. A second-tier check (every flag named in code matches the doc) ships with the E2-BS substrate PR, since the code references don't exist yet at this PR's open time.
+
+**Audit (post-launch).** A quarterly task tracked under `cross-cache-identity-followup` diffs the canonical Backend list against actual code references in each consumer repo.
+
 ## Relationship to Other Repos
 
 - **[dj-site](https://github.com/WXYC/dj-site)** -- React frontend that consumes this API
