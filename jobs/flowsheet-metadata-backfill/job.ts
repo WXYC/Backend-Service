@@ -1,5 +1,5 @@
 /**
- * One-shot historical metadata drain (#638, A.1.a of #631).
+ * Recurring metadata drift-repair (#641 Phase 1, A.3 of #631).
  *
  * Iterates every `flowsheet` track row where the LML metadata enrichment
  * never ran (`metadata_attempt_at IS NULL`), calls LML's /lookup for each
@@ -8,16 +8,19 @@
  * WHERE filter alone — successful + no-match rows have the marker;
  * LML-throw rows don't and stay in the retry pool for the next sweep.
  *
- * Run procedure: build via `Manual Build & Deploy` with
- * `target=flowsheet-metadata-backfill`, then SSH to EC2 and
- * `docker run --rm --env-file .env <image> 2>&1 | tee log`. The job runs
- * during a low-traffic window — LML's Discogs rate budget (50 req/min) is
- * the limiting factor across all parallel partitions, not the database.
+ * Run procedure: registered as a cron job in EC2's crontab via
+ * `deploy-base.yml`'s job-type=cron pathway, schedule taken from
+ * package.json's `cron-schedule` (`0 6 * * *` UTC = 02:00 ET overnight).
+ * The container runs to completion or is killed by the next deploy / a
+ * manual `docker rm -f flowsheet-metadata-backfill-cron`. The orchestrator's
+ * cooperative pause (#735) defers each batch when DJ activity is observed
+ * on `flowsheet`, so the job is safe to run in the always-on WXYC booth.
  *
- * Recurring drift-repair flip is tracked at #639 Phase 2; that change
- * drops `"job-type": "one-shot"` from package.json and adds the EC2
- * cron entry. The orchestrator + enrich.ts shape is the same in both
- * modes — only the cadence changes.
+ * Throughput is bounded upstream by LML's Discogs rate budget
+ * (50 req/min global), not by the database — see #640 pilot data.
+ * `PARTITION_COUNT=1` is the chosen rollout shape (#641 body): adding a
+ * second partition saturated the same upstream gate without improving
+ * combined throughput.
  */
 
 import { closeDatabaseConnection } from '@wxyc/database';

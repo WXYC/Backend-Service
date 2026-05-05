@@ -1,8 +1,8 @@
 {
   "name": "@wxyc/flowsheet-metadata-backfill",
-  "job-type": "one-shot",
+  "cron-schedule": "0 6 * * *",
   "version": "1.0.0",
-  "description": "WXYC one-shot backfill: drain the historical flowsheet rows that never ran LML metadata enrichment (#631 / #638). Recurring drift-repair flip is tracked under #639 Phase 2.",
+  "description": "WXYC recurring metadata drift-repair: enrich flowsheet track rows where LML metadata enrichment never ran (#631 / #638 / #641). Runs once nightly at 06:00 UTC; orchestrator's cooperative pause defers when DJs are active.",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {
