@@ -273,6 +273,7 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 2. **lint-and-typecheck** -- `typecheck` + `lint` + `format:check` + `build`
 3. **unit-tests** -- Runs affected tests only (`--changedSince=origin/<base>` on PRs)
 4. **integration-tests** -- Only if apps/jobs/shared/tests change. Docker images cached by commit SHA in ECR.
+5. **migrate-dryrun** -- Only when `db-init` paths change (migrations, schema, `init-db.mjs`, etc.). Restores the most recent automated RDS snapshot to a sandbox DB instance, runs `node scripts/dryrun-migrate.mjs` against it, asserts exit 0, tears the sandbox down. Catches preconditions that depend on prod data shape (e.g. the `RAISE EXCEPTION` guards added per WXYC/Backend-Service#705) at PR-review time rather than at deploy time. The script reuses `dev_env/format-pg-error.mjs` (#725) so the underlying Postgres error fields surface in the CI log on failure. To re-test against a fresher snapshot, trigger an on-demand snapshot via the AWS RDS console and rerun the workflow. Provisioning prerequisites (ops, one-time): IAM policy attached to the existing `AWS_ACCESS_KEY_ID` user with `rds:DescribeDBSnapshots`, `rds:DescribeDBInstances`, `rds:RestoreDBInstanceFromDBSnapshot`, `rds:DeleteDBInstance`, `rds:AddTagsToResource`; security group `SG_DRYRUN_GHA` allowing port 5432 from GitHub Actions egress IPs only; repo secrets `PROD_DB_ID`, `PROD_DB_NAME`, `PROD_DB_USERNAME`, `PROD_DB_PASSWORD`, `SG_DRYRUN_GHA`. See WXYC/Backend-Service#726.
 
 ## Deployment
 
