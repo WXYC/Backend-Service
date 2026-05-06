@@ -199,13 +199,24 @@ async function verifyMigrations() {
 
   if (realMissing.length > 0) {
     console.error('MIGRATION VERIFICATION FAILED!');
-    console.error(`${realMissing.length} migration(s) were NOT applied:\n`);
+    console.error(`${realMissing.length} migration(s) have no matching hash in __drizzle_migrations:\n`);
     for (const m of realMissing) {
       console.error(`  - [idx ${m.idx}] ${m.tag} (when: ${m.when})`);
     }
-    console.error('\nThis likely indicates an out-of-order timestamp in _journal.json.');
-    console.error('The "when" timestamps MUST be monotonically increasing.');
-    console.error('See: https://github.com/WXYC/Backend-Service/issues/400\n');
+    console.error('\nTwo causes are possible — investigate in this order:\n');
+    console.error('  1. Hash drift on an applied migration. The .sql file was edited');
+    console.error('     after prod applied it (often a retroactive comment or guard');
+    console.error("     addition), so the file's SHA-256 no longer matches the row");
+    console.error('     prod stored. PR-time check `npm run lint:migrations` (Check 11)');
+    console.error('     catches this; if it slipped through, revert the offending edit');
+    console.error('     and move the documentation into');
+    console.error('     shared/database/src/migrations/PRECONDITION_NOTES.md.');
+    console.error('     See: WXYC/Backend-Service#705 follow-up.\n');
+    console.error("  2. Out-of-order `when` timestamp in _journal.json. Drizzle's");
+    console.error('     runtime migrator silently skips entries whose `when` is at or');
+    console.error('     below max(__drizzle_migrations.created_at). The recipe is to');
+    console.error('     bump the offending entry to (previous_entry.when + 1).');
+    console.error('     See: WXYC/Backend-Service#400, #550.\n');
     throw new Error(`Migration verification failed: ${realMissing.length} missing migration(s)`);
   }
 

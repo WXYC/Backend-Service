@@ -22,12 +22,6 @@
 -- which defeats the purpose of an incremental signal for an interactive
 -- search endpoint.
 
--- @no-precondition-needed: the UNIQUE INDEX is defined against the
--- materialized view's output, which is `GROUP BY album_id` — duplicate
--- album_id rows are mathematically impossible by construction. The MV
--- itself is created in this same migration, so there is no prior state
--- to validate.
-
 CREATE MATERIALIZED VIEW "wxyc_schema"."album_plays" AS
 SELECT
     "album_id",

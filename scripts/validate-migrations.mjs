@@ -56,6 +56,21 @@
  *     revert. The warning fires on the CREATE-side migration because
  *     that's the one whose precondition would fire on apply. See
  *     WXYC/Backend-Service#729.
+ * 11. ERROR — each .sql file's SHA-256 matches the entry in
+ *     `meta/applied-hashes.json`. Drizzle records the same hash in
+ *     prod's `drizzle.__drizzle_migrations.hash` column at apply time;
+ *     if the .sql bytes drift after apply, the deploy verifier
+ *     (`dev_env/init-db.mjs`) sees no matching row and aborts the
+ *     migrate step. This check catches that drift at PR time, before
+ *     the merge can wedge a deploy. Failure modes: a recorded tag
+ *     whose .sql hash differs (retroactive edit), or a .sql file that
+ *     has no recorded entry (author forgot
+ *     `npm run drizzle:freeze-hashes` after `drizzle:generate`). The
+ *     recorded entries are append-only — once prod has a hash, the
+ *     .sql file may not change. Documentation that postdates a
+ *     migration's apply belongs in
+ *     `shared/database/src/migrations/PRECONDITION_NOTES.md`, not in
+ *     the .sql file. See WXYC/Backend-Service#705 follow-up.
  *
  * See: WXYC/Backend-Service#400 (timestamp ordering),
  *      WXYC/Backend-Service#505 (metadata repair),
@@ -66,6 +81,7 @@
  *      WXYC/wxyc-shared#82 (Phase 4 epic).
  */
 
+import crypto from 'crypto';
 import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 
@@ -106,12 +122,19 @@ const HISTORICAL_MISSING_SNAPSHOT_IDXS = new Set([
 ]);
 
 // Tags that predate the precondition-guard rule (issue #705). Already
-// applied to prod; the rule was introduced 2026-05-01 and was retroactively
-// applied to the five most recent constraint-adding migrations as exemplars
-// (0034, 0048, 0059, 0067, 0071). Everything else in this set is grandfathered
-// and Check 8 ignores it. New tags must NOT be added here — Check 8 fires on
-// any future PR's migration that adds a constraint without a guard or a
-// `-- @no-precondition-needed:` annotation.
+// applied to prod and grandfathered out of Check 8. New tags must NOT be
+// added here — Check 8 fires on any future PR's migration that adds a
+// constraint without a guard or a `-- @no-precondition-needed:` annotation.
+//
+// 0034 / 0048 / 0059 / 0067 / 0071 originally carried inline
+// `-- @no-precondition-needed:` annotations retrofitted by 2710f2e (PR
+// #705). That commit changed the SHA-256 of each .sql file post-apply,
+// which tripped the deploy verifier (`dev_env/init-db.mjs`) and wedged
+// the chain. The annotations were reverted; the rationale lives in
+// `shared/database/src/migrations/PRECONDITION_NOTES.md` so future
+// retroactive documentation never touches the .sql bytes again. The
+// tags are listed here so Check 8 stays quiet — they are the same
+// kind of grandfathered-applied as everything else in this set.
 const HISTORICAL_NO_GUARD_NEEDED_TAGS = new Set([
   '0000_rare_prima',
   '0004_thin_alice',
@@ -130,8 +153,12 @@ const HISTORICAL_NO_GUARD_NEEDED_TAGS = new Set([
   '0030_labels_table',
   '0032_audit_f19_f20',
   '0033_crossreference_tables',
+  '0034_legacy_id_columns',
   '0037_etl-schema-sync',
   '0041_rotation_etl_support',
+  '0048_fix-fk-on-delete-set-null',
+  '0059_album-plays-materialized-view',
+  '0067_flowsheet-linkage-review',
 ]);
 
 const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
@@ -179,7 +206,14 @@ for (const entry of journal.entries) {
 
 // Check 4: Every meta/*.json file parses (catches merge-conflict markers)
 const snapshotsById = new Map();
-const metaFiles = readdirSync(metaDir).filter((f) => f.endsWith('.json') && f !== '_journal.json');
+// Snapshot files are named `<idx>_snapshot.json`. Other JSON in meta/
+// (the journal, the applied-hashes ledger added in #705 follow-up, any
+// future indexes) MUST NOT be swept in here — Check 6 picks the
+// alphabetically-last entry as "latest snapshot," and a non-snapshot
+// file named after letters (e.g. `applied-hashes.json`) sorts after
+// every numeric snapshot and silently becomes the cursor, which has no
+// prevId and so trivially "passes" the chain walk.
+const metaFiles = readdirSync(metaDir).filter((f) => /^\d+_snapshot\.json$/.test(f));
 for (const file of metaFiles) {
   const path = join(metaDir, file);
   let raw;
@@ -573,6 +607,75 @@ if (metaFiles.length > 0) {
         );
         warnings++;
         break; // only warn on the first create→drop pair per object
+      }
+    }
+  }
+}
+
+// Check 11: ERROR — each .sql file's SHA-256 matches its entry in
+// applied-hashes.json. See the docstring above for the rationale.
+{
+  const hashesPath = join(metaDir, 'applied-hashes.json');
+  if (!existsSync(hashesPath)) {
+    console.error(
+      `ERROR: ${hashesPath} is missing. Run \`npm run drizzle:freeze-hashes\` to ` +
+        `record the SHA-256 of every migration .sql file. This file is the contract ` +
+        `between PR-time validation and the deploy verifier; without it, retroactive ` +
+        `.sql edits can wedge a deploy.`
+    );
+    errors++;
+  } else {
+    const recorded = JSON.parse(readFileSync(hashesPath, 'utf8'));
+    const sqlFiles = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+
+    const seenTags = new Set();
+    for (const file of sqlFiles) {
+      const tag = file.replace(/\.sql$/, '');
+      seenTags.add(tag);
+      const content = readFileSync(join(migrationsDir, file), 'utf8');
+      const actualHash = crypto.createHash('sha256').update(content).digest('hex');
+      const expectedHash = recorded[tag];
+
+      if (expectedHash === undefined) {
+        console.error(
+          `ERROR: ${file} has no entry in applied-hashes.json. New migrations must ` +
+            `record their hash before merge. Run \`npm run drizzle:freeze-hashes\` and ` +
+            `commit the updated meta/applied-hashes.json.`
+        );
+        errors++;
+        continue;
+      }
+
+      if (expectedHash !== actualHash) {
+        console.error(
+          `ERROR: ${file} hash drift detected.\n` +
+            `       expected (recorded): ${expectedHash}\n` +
+            `       actual   (current):  ${actualHash}\n` +
+            `       The .sql file has been edited since prod applied it. Edits to applied\n` +
+            `       migrations break the deploy verifier (dev_env/init-db.mjs) — prod's\n` +
+            `       drizzle.__drizzle_migrations.hash row was computed from the original\n` +
+            `       bytes and no longer matches.\n` +
+            `       Documentation that postdates a migration's apply belongs in\n` +
+            `       shared/database/src/migrations/PRECONDITION_NOTES.md.\n` +
+            `       Schema corrections belong in a new migration (see the 0054→0065 and\n` +
+            `       0064→0066 replay pattern).`
+        );
+        errors++;
+      }
+    }
+
+    // Recorded entries that have no .sql file: stale entries from a deleted
+    // migration. Removing entries from applied-hashes.json is a deliberate
+    // ledger edit; flag it so the operator at least sees the diff in review.
+    for (const tag of Object.keys(recorded)) {
+      if (!seenTags.has(tag)) {
+        console.error(
+          `ERROR: applied-hashes.json records "${tag}" but no ${tag}.sql file exists. ` +
+            `Either restore the .sql file or remove the recorded entry deliberately.`
+        );
+        errors++;
       }
     }
   }
