@@ -879,11 +879,15 @@ async function listExistingSecrets() {
 
 async function setSecret(name, value) {
   if (FLAG.dryRun) {
-    console.log(`  ${c.dim('[dry-run]')} ${c.dim(`gh secret set ${name} --repo ${REPO} --body <hidden>`)}`);
+    console.log(`  ${c.dim('[dry-run]')} ${c.dim(`gh secret set ${name} --repo ${REPO}  (value via stdin)`)}`);
     return;
   }
   // Pipe via stdin to avoid the value appearing in argv / process listings.
-  run(['gh', 'secret', 'set', name, '--repo', REPO, '--body', '-'], { input: value });
+  // CRITICAL: do NOT pass `--body -` — gh treats that as "the body is the
+  // literal string `-`" and ignores stdin entirely. The flag's docs say
+  // "reads from standard input if not specified", so omit --body and
+  // pass the value via spawnSync's `input`.
+  run(['gh', 'secret', 'set', name, '--repo', REPO], { input: value });
 }
 
 async function repoSecrets(state) {
