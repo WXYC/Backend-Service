@@ -398,11 +398,16 @@ jobs:
 
       - name: Install minimal deps for dryrun script
         # postgres + drizzle-orm are the only runtime imports the script
-        # needs. Install them directly at the repo root rather than running
-        # the full `npm install` (which would build all workspaces). The
-        # script imports `../dev_env/format-pg-error.mjs` by relative path,
-        # so it doesn't need anything inside dev_env to be npm-installed.
-        run: npm install --no-save --no-package-lock --no-audit --no-fund postgres drizzle-orm
+        # needs. The `--workspaces=false` flag skips workspace resolution
+        # so npm doesn't try to fetch the `@wxyc/shared` workspace dep
+        # from GitHub Packages — that lookup needs NPM_TOKEN, and even
+        # with the token wired in, install + resolution costs ~30s of
+        # CI time we don't need here. The script imports
+        # `../dev_env/format-pg-error.mjs` by relative path, so it
+        # doesn't need anything inside dev_env to be npm-installed.
+        run: npm install --workspaces=false --no-save --no-package-lock --no-audit --no-fund postgres drizzle-orm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Configure AWS credentials
         # Long-lived AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY pattern
