@@ -374,13 +374,18 @@ jobs:
   #
   # Requires repo-level secrets (one-time ops setup):
   #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION — already present
-  #     for the deploy workflow; needs additional rds:* permissions.
+  #     for the deploy workflow; needs additional rds:* permissions plus
+  #     ec2:AuthorizeSecurityGroupIngress / ec2:RevokeSecurityGroupIngress
+  #     on SGs tagged Purpose=migrate-dryrun (#757).
   #   PROD_DB_ID — RDS instance identifier of the prod DB.
   #   PROD_DB_NAME, PROD_DB_USERNAME, PROD_DB_PASSWORD — match the source
   #     instance's master credentials (snapshots restore with the source's
   #     master user).
-  #   SG_DRYRUN_GHA — security group id allowing port 5432 from GitHub
-  #     Actions egress IPs only. See plan #726 §4 for provisioning.
+  #   SG_DRYRUN_GHA — security group id. Created tagged Purpose=migrate-dryrun
+  #     by scripts/provision-dryrun-aws.mjs. The job authorizes its
+  #     runner's /32 just-in-time and revokes it in always() teardown,
+  #     so the SG carries no persistent ingress rules between runs.
+  #     See WXYC/Backend-Service#726 (preflight) and #757 (JIT ingress).
   migrate-dryrun:
     name: Migration Dry-Run (prod-shaped data)
     needs: [detect-changes]
@@ -419,12 +424,42 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      - name: Authorize runner IP on SG_DRYRUN_GHA
+        # GitHub Actions runners pull from a pool of ~3000 egress CIDRs that
+        # rotate monthly (api.github.com/meta `.actions`). The default AWS
+        # SG rule limit is 60, so bulk-authorizing the entire pool is not
+        # an option. Instead, authorize just this run's runner IP /32 here
+        # and revoke it in the always() teardown step below. Net result:
+        # SG carries one transient rule per concurrent run; quota usage is
+        # bounded by run concurrency (db-init paths change rarely, so this
+        # stays well under 60 in practice).
+        run: |
+          set -euo pipefail
+          RUNNER_IP=$(curl -sS --max-time 10 https://checkip.amazonaws.com | tr -d '[:space:]')
+          if [[ ! "$RUNNER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "checkip.amazonaws.com returned unexpected payload: ${RUNNER_IP}" >&2
+            exit 1
+          fi
+          echo "RUNNER_IP=${RUNNER_IP}" >> "$GITHUB_ENV"
+          # Tolerate InvalidPermission.Duplicate so a re-run that hits the
+          # same runner is a no-op rather than a hard failure.
+          aws ec2 authorize-security-group-ingress \
+            --group-id "${{ secrets.SG_DRYRUN_GHA }}" \
+            --protocol tcp --port 5432 \
+            --cidr "${RUNNER_IP}/32" \
+            2> >(grep -v 'InvalidPermission.Duplicate' >&2) \
+            || aws ec2 describe-security-groups \
+              --group-ids "${{ secrets.SG_DRYRUN_GHA }}" \
+              --query "SecurityGroups[0].IpPermissions[?FromPort==\`5432\`].IpRanges[?CidrIp=='${RUNNER_IP}/32']" \
+              --output text | grep -q "${RUNNER_IP}"
+
       - name: Restore latest prod snapshot to ephemeral sandbox
         id: restore
         # Publicly accessible because GitHub-hosted runners have no VPC
-        # connectivity to the prod VPC. Ingress is gated by SG_DRYRUN_GHA,
-        # which allows port 5432 from GitHub's documented egress IP ranges
-        # only. The sandbox is torn down in the always-run step below.
+        # connectivity to the prod VPC. Ingress is gated by SG_DRYRUN_GHA;
+        # the JIT-authorize step above adds this runner's /32 just before
+        # the connection. The sandbox and the SG rule are both torn down
+        # in the always-run steps below.
         run: |
           set -euo pipefail
           SNAPSHOT_ID=$(aws rds describe-db-snapshots \
@@ -454,6 +489,21 @@ jobs:
           DB_USERNAME: ${{ secrets.PROD_DB_USERNAME }}
           DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
         run: node scripts/dryrun-migrate.mjs
+
+      - name: Revoke runner IP from SG_DRYRUN_GHA
+        # Always runs so a failure in any earlier step still cleans up the
+        # transient ingress rule. The guard on RUNNER_IP handles the case
+        # where the authorize step failed before the env var was written.
+        if: always()
+        run: |
+          if [ -n "${RUNNER_IP:-}" ]; then
+            aws ec2 revoke-security-group-ingress \
+              --group-id "${{ secrets.SG_DRYRUN_GHA }}" \
+              --protocol tcp --port 5432 \
+              --cidr "${RUNNER_IP}/32" \
+              2> >(grep -v 'InvalidPermission.NotFound' >&2) \
+              || true
+          fi
 
       - name: Tear down sandbox
         # The guard on SANDBOX_ID handles the case where restore failed
