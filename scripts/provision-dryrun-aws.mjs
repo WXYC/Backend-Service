@@ -163,9 +163,66 @@ function run(cmd, { mutating = false, input = null, hideEcho = false } = {}) {
   return (result.stdout || '').trim();
 }
 
-const aws = (args, opts) => run(['aws', ...args], opts);
+// Active AWS profile, set by preflight after we discover which (if any)
+// profile points at the WXYC prod account. All aws() calls thread it
+// through as --profile <name> so the operator doesn't have to remember
+// to export AWS_PROFILE in their shell.
+let activeAwsProfile = null;
+
+const aws = (args, opts) => {
+  const fullArgs = activeAwsProfile ? ['--profile', activeAwsProfile, ...args] : args;
+  return run(['aws', ...fullArgs], opts);
+};
 const awsJson = (args, opts) => JSON.parse(aws(args, opts) || 'null');
 const gh = (args, opts) => run(['gh', ...args], opts);
+
+/**
+ * Probe a specific AWS profile (or the default if name is null) and
+ * return its caller identity, or null if it errors. Doesn't mutate
+ * activeAwsProfile.
+ */
+function probeAwsProfile(name) {
+  const profileArgs = name ? ['--profile', name] : [];
+  try {
+    return JSON.parse(run(['aws', ...profileArgs, 'sts', 'get-caller-identity', '--output', 'json']));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Find a profile whose caller identity is in AWS_ACCOUNT. Tries the
+ * current default first (so users already pointed at prod don't get
+ * an extra prompt), then iterates through configured profiles.
+ *
+ * Returns { profile: string | null, identity: object } where profile=null
+ * means "use the default — it already points at prod." Returns null
+ * outright when nothing in the local config can reach prod.
+ */
+function findWxycProfile() {
+  // Default credentials: env-var, instance-profile, or default profile.
+  const defaultId = probeAwsProfile(null);
+  if (defaultId && defaultId.Account === AWS_ACCOUNT) {
+    return { profile: null, identity: defaultId };
+  }
+
+  // Enumerate profiles. Catches sso-only setups too — list-profiles
+  // surfaces them, sts probe will work if the SSO session is still
+  // valid (otherwise just falls through to the next profile).
+  let profiles;
+  try {
+    profiles = run(['aws', 'configure', 'list-profiles']).split('\n').filter(Boolean);
+  } catch {
+    profiles = [];
+  }
+
+  const matches = [];
+  for (const name of profiles) {
+    const id = probeAwsProfile(name);
+    if (id && id.Account === AWS_ACCOUNT) matches.push({ profile: name, identity: id });
+  }
+  return { matches, defaultIdentity: defaultId };
+}
 
 // ---- state persistence ----------------------------------------------------
 
@@ -288,20 +345,59 @@ async function preflight(state) {
     }
   }
 
-  let identity;
-  try {
-    identity = awsJson(['sts', 'get-caller-identity', '--output', 'json']);
-  } catch (e) {
-    fail(`aws sts get-caller-identity failed: ${e.stderr || e.message}`);
-    fail(`Configure AWS credentials (aws configure / SSO / env vars) and re-run.`);
+  // Find a credential set that points at the WXYC prod account. Tries
+  // the default first (so users already configured for prod don't get
+  // an extra prompt), then enumerates named profiles. This avoids the
+  // "switch your shell's AWS_PROFILE then re-run" friction — if the
+  // operator has the right profile configured, we just use it.
+  const probe = findWxycProfile();
+
+  let chosenProfile = null;
+  let identity = null;
+
+  if (probe.profile === null && probe.identity) {
+    chosenProfile = null;
+    identity = probe.identity;
+    ok(`AWS account ${AWS_ACCOUNT} via default credentials (caller: ${identity.Arn})`);
+  } else if (probe.matches && probe.matches.length === 1) {
+    chosenProfile = probe.matches[0].profile;
+    identity = probe.matches[0].identity;
+    ok(`Found WXYC prod profile "${chosenProfile}" (caller: ${identity.Arn})`);
+  } else if (probe.matches && probe.matches.length > 1) {
+    info(`Multiple profiles point at account ${AWS_ACCOUNT}. Pick one:`);
+    const choice = await askChoice(
+      'Which profile should this run use?',
+      probe.matches.map((m) => ({
+        label: `${m.profile} (${m.identity.Arn})`,
+        value: m.profile,
+        identity: m.identity,
+      }))
+    );
+    chosenProfile = choice.value;
+    identity = choice.identity;
+  } else {
+    // Nothing local reaches prod. Print actionable guidance.
+    fail(`No AWS profile found pointing at account ${AWS_ACCOUNT}.`);
+    if (probe.defaultIdentity) {
+      fail(`Default credentials are in account ${probe.defaultIdentity.Account} instead.`);
+    } else {
+      fail(`Default credentials are unset or expired.`);
+    }
+    fail(``);
+    fail(`Fix one of:`);
+    fail(`  1. Configure a new profile:  aws configure --profile wxyc`);
+    fail(`     then re-run this script.`);
+    fail(`  2. If you already have one under a different name:`);
+    fail(`        aws configure list-profiles`);
+    fail(`        aws sts get-caller-identity --profile <name>`);
+    fail(`     then re-run; the script will detect it automatically.`);
+    fail(`  3. SSO: refresh the session with  aws sso login --profile <name>`);
     exit(2);
   }
-  if (identity.Account !== AWS_ACCOUNT) {
-    fail(`AWS account mismatch: caller is in ${identity.Account}, expected ${AWS_ACCOUNT}.`);
-    fail(`This script ONLY runs against the WXYC prod account. Switch profile and re-run.`);
-    exit(2);
-  }
-  ok(`AWS account ${AWS_ACCOUNT} (caller: ${identity.Arn})`);
+
+  // Lock the profile in for the rest of the run. All subsequent aws()
+  // calls thread it through as --profile.
+  activeAwsProfile = chosenProfile;
 
   let ghStatus;
   try {
@@ -328,10 +424,22 @@ async function preflight(state) {
     completed_at: new Date().toISOString(),
     aws_account: identity.Account,
     aws_arn: identity.Arn,
+    aws_profile: chosenProfile, // null = default credentials
     aws_region: AWS_REGION,
     gh_status_excerpt: ghStatus.split('\n').slice(0, 3).join(' | '),
   };
   saveState(state);
+}
+
+/**
+ * On a resumed run we already passed preflight, but `activeAwsProfile`
+ * is module-local and got reset to null when the process restarted.
+ * Re-hydrate it from the state file before any phase calls aws().
+ */
+function rehydrateAwsProfile(state) {
+  if (state.phases.preflight && state.phases.preflight.aws_profile) {
+    activeAwsProfile = state.phases.preflight.aws_profile;
+  }
 }
 
 // ---- IAM ------------------------------------------------------------------
@@ -884,6 +992,11 @@ function statusOnly() {
   const state = loadState();
   console.log(`State file: ${STATE_FILE}`);
   console.log(`Started:    ${state.started_at}`);
+  if (state.phases.preflight) {
+    const profile = state.phases.preflight.aws_profile;
+    console.log(`AWS:        ${state.phases.preflight.aws_arn}`);
+    console.log(`Profile:    ${profile === null ? '(default credentials)' : profile}`);
+  }
   console.log('');
   for (const [name, phase] of Object.entries(state.phases)) {
     const at =
@@ -933,6 +1046,7 @@ async function main() {
 
   // Save state on Ctrl+C so resume works cleanly.
   let state = loadState();
+  rehydrateAwsProfile(state);
   const sigintHandler = () => {
     process.stdout.write('\n');
     warn(`Interrupted. State saved to ${STATE_FILE}; rerun the script to resume.`);
