@@ -115,7 +115,7 @@ export const auth = betterAuth({
 
   plugins: [
     admin(),
-    username(),
+    username({ minUsernameLength: 2 }),
     anonymous({
       emailDomainName: 'anonymous.wxyc.org',
     }),
