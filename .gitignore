@@ -9,3 +9,4 @@ mirror-logs
 *.tsbuildinfo
 .claude/worktrees/
 __pycache__
+.dryrun-provisioning-state.json
