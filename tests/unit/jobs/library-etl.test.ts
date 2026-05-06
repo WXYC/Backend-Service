@@ -64,12 +64,16 @@ jest.mock('@wxyc/database', () => {
   };
 });
 
-jest.mock('drizzle-orm', () => ({
-  eq: jest.fn((a: unknown, b: unknown) => ({ eq: [a, b] })),
-  and: jest.fn((...args: unknown[]) => ({ and: args })),
-  isNull: jest.fn((col: unknown) => ({ isNull: col })),
-  sql: jest.fn(),
-}));
+jest.mock('drizzle-orm', () => {
+  const sqlFn: jest.Mock & { raw?: jest.Mock } = jest.fn();
+  sqlFn.raw = jest.fn((fragment: string) => ({ raw: fragment }));
+  return {
+    eq: jest.fn((a: unknown, b: unknown) => ({ eq: [a, b] })),
+    and: jest.fn((...args: unknown[]) => ({ and: args })),
+    isNull: jest.fn((col: unknown) => ({ isNull: col })),
+    sql: sqlFn,
+  };
+});
 
 import {
   parseTabRow,
@@ -87,6 +91,7 @@ import {
   parseLegacyCompilationTrackRows,
   parseReleaseRows,
   buildArtistCacheKey,
+  buildLegacySourcedSetMap,
   buildAlbumCacheKey,
 } from '../../../jobs/library-etl/job';
 
@@ -548,6 +553,71 @@ describe('library-etl job helpers', () => {
 
     it('returns empty array for empty input', () => {
       expect(parseReleaseRows('', 17)).toEqual([]);
+    });
+  });
+
+  // The SET map keys are the contract for what the legacy_release_id ON CONFLICT
+  // path is allowed to overwrite. Pinning the keys prevents accidental drift —
+  // e.g. somebody adds artwork_url or canonical_entity_id to the upsert and
+  // clobbers LML-resolved data on every legacy edit. Acceptance criterion from
+  // #752: "the SET list updates only the columns the ETL is the source of
+  // truth for (don't clobber human-curated fields)."
+  describe('buildLegacySourcedSetMap', () => {
+    const expectedKeys = [
+      'artist_id',
+      'artist_name',
+      'genre_id',
+      'format_id',
+      'alternate_artist_name',
+      'album_artist',
+      'album_title',
+      'code_number',
+      'code_volume_letters',
+      'disc_quantity',
+      'add_date',
+      'last_modified',
+      'date_lost',
+      'date_found',
+      'on_streaming',
+    ].sort();
+
+    it('includes every legacy-sourced library column', () => {
+      const map = buildLegacySourcedSetMap();
+      expect(Object.keys(map).sort()).toEqual(expectedKeys);
+    });
+
+    it('excludes the conflict key itself and all PG-only / LML-resolved columns', () => {
+      const map = buildLegacySourcedSetMap();
+      // legacy_release_id is the conflict key — there's no point updating it
+      // to itself, and including it would shadow the partial-index uniqueness
+      // semantics in confusing ways.
+      expect(map).not.toHaveProperty('legacy_release_id');
+      // DB-managed surrogate / counters.
+      expect(map).not.toHaveProperty('id');
+      expect(map).not.toHaveProperty('plays');
+      // Human-curated / staff-assigned (label resolution is a separate path).
+      expect(map).not.toHaveProperty('label');
+      expect(map).not.toHaveProperty('label_id');
+      // LML-resolved (Epic B). The library-etl run must not stomp these on a
+      // legacy edit, since LML's resolution is independent of the legacy tuple.
+      expect(map).not.toHaveProperty('artwork_url');
+      expect(map).not.toHaveProperty('canonical_entity_id');
+      expect(map).not.toHaveProperty('canonical_entity_confidence');
+      expect(map).not.toHaveProperty('canonical_entity_resolved_at');
+      // Generated column.
+      expect(map).not.toHaveProperty('search_doc');
+    });
+
+    it('produces excluded.<column> SQL fragments for each key', () => {
+      const map = buildLegacySourcedSetMap();
+      // The mocked sql.raw returns { raw: <fragment> }, so we can read the
+      // fragment back out and assert it references the matching excluded
+      // column. This guards against e.g. all keys mapping to the same fragment
+      // by mistake (a refactor accidentally reusing one variable).
+      for (const key of expectedKeys) {
+        const fragment = (map as Record<string, { raw?: string }>)[key];
+        expect(fragment.raw).toBe(`excluded."${key}"`);
+      }
     });
   });
 });

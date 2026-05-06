@@ -839,6 +839,43 @@ const findExistingRelease = async (
   return response.length > 0 ? response[0] : null;
 };
 
+/**
+ * Columns the library-etl is the source of truth for — i.e. the columns it
+ * writes during INSERT and refreshes from `excluded.*` on a legacy_release_id
+ * conflict. Pinned by a unit test so PG-only / LML-resolved columns (`id`,
+ * `plays`, `label`, `label_id`, `artwork_url`, `canonical_entity_*`,
+ * `search_doc`) can't drift into the SET list and clobber human-curated or
+ * downstream-resolved fields. `legacy_release_id` is the conflict key itself
+ * and is intentionally excluded from the SET list.
+ */
+export const LEGACY_SOURCED_LIBRARY_COLUMNS = [
+  'artist_id',
+  'artist_name',
+  'genre_id',
+  'format_id',
+  'alternate_artist_name',
+  'album_artist',
+  'album_title',
+  'code_number',
+  'code_volume_letters',
+  'disc_quantity',
+  'add_date',
+  'last_modified',
+  'date_lost',
+  'date_found',
+  'on_streaming',
+] as const;
+
+type LegacySourcedColumn = (typeof LEGACY_SOURCED_LIBRARY_COLUMNS)[number];
+
+const buildLegacySourcedSetMap = (): Record<LegacySourcedColumn, ReturnType<typeof sql>> => {
+  const map = {} as Record<LegacySourcedColumn, ReturnType<typeof sql>>;
+  for (const column of LEGACY_SOURCED_LIBRARY_COLUMNS) {
+    map[column] = sql.raw(`excluded."${column}"`);
+  }
+  return map;
+};
+
 const run = async () => {
   try {
     const runStartedAt = new Date();
@@ -852,6 +889,7 @@ const run = async () => {
     }
 
     let insertedCount = 0;
+    let updatedFromLegacyConflictCount = 0;
     let skippedCount = 0;
 
     await db.transaction(async (tx) => {
@@ -976,21 +1014,36 @@ const run = async () => {
           continue;
         }
 
+        // Pre-flight by legacy_release_id so we can split the inserted vs
+        // conflict-updated counters in the final log line. The row landed in
+        // findExistingRelease's null branch, so the only way the upsert below
+        // hits the UPDATE path is via the unique index on legacy_release_id —
+        // i.e. an upstream edit since the last sync changed the canonical
+        // tuple while preserving the legacy id. Knowing which case fired is
+        // operationally useful (a sustained non-zero conflict count signals
+        // upstream churn worth investigating).
+        const conflictRows = await tx
+          .select({ id: library.id })
+          .from(library)
+          .where(eq(library.legacy_release_id, release.release_id))
+          .limit(1);
+        const willConflictOnLegacyId = conflictRows.length > 0;
+
         // Denormalize the canonical `artists.artist_name` onto `library.artist_name`
         // so the column the tsvector / trigram catalog search reads against
         // (`library.artist_name`) is populated at insert time. Omitting it lets
         // the row land NULL — invisible to search, and (pre-fix) tripping the
         // 503-on-any-NULL precondition in library-artist-name-assertion.service.
         //
-        // ON CONFLICT (legacy_release_id) DO UPDATE handles the case where the
-        // canonical-tuple lookup above missed (e.g. the legacy row's artist /
-        // code-letters / album-title was edited upstream since the last sync,
-        // so the tuple no longer matches the existing PG row) but a row with
-        // this `legacy_release_id` already exists. Without it, the INSERT
-        // violates `library_legacy_release_id_idx` and aborts the whole run on
-        // first conflict (see #752). The SET list mirrors the VALUES list:
-        // every column the ETL is the source of truth for gets refreshed,
-        // while PG-only columns (id, artwork_url, created_at) stay untouched.
+        // ON CONFLICT (legacy_release_id) DO UPDATE handles the case the
+        // pre-flight above identified: the canonical-tuple lookup missed but
+        // a row already exists with this legacy_release_id. Without it, the
+        // INSERT violates `library_legacy_release_id_idx` and aborts the
+        // whole run on first conflict (#752). The SET list is built from
+        // LEGACY_SOURCED_LIBRARY_COLUMNS, which is also exported and pinned
+        // by a unit test — so PG-only / LML-resolved columns (id, plays,
+        // label, label_id, artwork_url, canonical_entity_*, search_doc)
+        // can't drift into the SET list by accident.
         await tx
           .insert(library)
           .values({
@@ -1013,26 +1066,14 @@ const run = async () => {
           })
           .onConflictDoUpdate({
             target: library.legacy_release_id,
-            set: {
-              artist_id: sql`excluded.artist_id`,
-              artist_name: sql`excluded.artist_name`,
-              genre_id: sql`excluded.genre_id`,
-              format_id: sql`excluded.format_id`,
-              alternate_artist_name: sql`excluded.alternate_artist_name`,
-              album_artist: sql`excluded.album_artist`,
-              album_title: sql`excluded.album_title`,
-              code_number: sql`excluded.code_number`,
-              code_volume_letters: sql`excluded.code_volume_letters`,
-              disc_quantity: sql`excluded.disc_quantity`,
-              add_date: sql`excluded.add_date`,
-              last_modified: sql`excluded.last_modified`,
-              date_lost: sql`excluded.date_lost`,
-              date_found: sql`excluded.date_found`,
-              on_streaming: sql`excluded.on_streaming`,
-            },
+            set: buildLegacySourcedSetMap(),
           });
 
-        insertedCount += 1;
+        if (willConflictOnLegacyId) {
+          updatedFromLegacyConflictCount += 1;
+        } else {
+          insertedCount += 1;
+        }
       }
 
       // --- Cross-reference imports ---
@@ -1088,7 +1129,9 @@ const run = async () => {
       await updateLastRun(tx, JOB_NAME, runStartedAt);
     });
 
-    console.log(`[library-etl] Completed. Inserted ${insertedCount}, skipped ${skippedCount}.`);
+    console.log(
+      `[library-etl] Completed. Inserted ${insertedCount}, updated via legacy-id conflict ${updatedFromLegacyConflictCount}, skipped ${skippedCount}.`
+    );
   } finally {
     await closeDatabaseConnection();
     legacyDB.close();
@@ -1113,6 +1156,7 @@ export {
   parseReleaseRows,
   buildArtistCacheKey,
   buildAlbumCacheKey,
+  buildLegacySourcedSetMap,
 };
 
 run().catch((error) => {
