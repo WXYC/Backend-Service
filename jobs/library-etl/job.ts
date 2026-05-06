@@ -981,24 +981,56 @@ const run = async () => {
         // (`library.artist_name`) is populated at insert time. Omitting it lets
         // the row land NULL — invisible to search, and (pre-fix) tripping the
         // 503-on-any-NULL precondition in library-artist-name-assertion.service.
-        await tx.insert(library).values({
-          artist_id: artistId,
-          artist_name: canonicalArtistName,
-          genre_id: genreId,
-          format_id: formatId,
-          alternate_artist_name: release.release_alternate_artist_name,
-          album_artist: release.release_album_artist,
-          album_title: albumTitle,
-          code_number: release.release_call_numbers ?? 0,
-          code_volume_letters: codeVolumeLetters,
-          disc_quantity: formatParsed.discQuantity,
-          legacy_release_id: release.release_id,
-          add_date: toDateOrUndefined(release.release_time_created),
-          last_modified: toDateOrUndefined(release.release_last_modified),
-          date_lost: toDateOrUndefined(release.date_lost),
-          date_found: toDateOrUndefined(release.date_found),
-          on_streaming: release.release_on_streaming,
-        });
+        //
+        // ON CONFLICT (legacy_release_id) DO UPDATE handles the case where the
+        // canonical-tuple lookup above missed (e.g. the legacy row's artist /
+        // code-letters / album-title was edited upstream since the last sync,
+        // so the tuple no longer matches the existing PG row) but a row with
+        // this `legacy_release_id` already exists. Without it, the INSERT
+        // violates `library_legacy_release_id_idx` and aborts the whole run on
+        // first conflict (see #752). The SET list mirrors the VALUES list:
+        // every column the ETL is the source of truth for gets refreshed,
+        // while PG-only columns (id, artwork_url, created_at) stay untouched.
+        await tx
+          .insert(library)
+          .values({
+            artist_id: artistId,
+            artist_name: canonicalArtistName,
+            genre_id: genreId,
+            format_id: formatId,
+            alternate_artist_name: release.release_alternate_artist_name,
+            album_artist: release.release_album_artist,
+            album_title: albumTitle,
+            code_number: release.release_call_numbers ?? 0,
+            code_volume_letters: codeVolumeLetters,
+            disc_quantity: formatParsed.discQuantity,
+            legacy_release_id: release.release_id,
+            add_date: toDateOrUndefined(release.release_time_created),
+            last_modified: toDateOrUndefined(release.release_last_modified),
+            date_lost: toDateOrUndefined(release.date_lost),
+            date_found: toDateOrUndefined(release.date_found),
+            on_streaming: release.release_on_streaming,
+          })
+          .onConflictDoUpdate({
+            target: library.legacy_release_id,
+            set: {
+              artist_id: sql`excluded.artist_id`,
+              artist_name: sql`excluded.artist_name`,
+              genre_id: sql`excluded.genre_id`,
+              format_id: sql`excluded.format_id`,
+              alternate_artist_name: sql`excluded.alternate_artist_name`,
+              album_artist: sql`excluded.album_artist`,
+              album_title: sql`excluded.album_title`,
+              code_number: sql`excluded.code_number`,
+              code_volume_letters: sql`excluded.code_volume_letters`,
+              disc_quantity: sql`excluded.disc_quantity`,
+              add_date: sql`excluded.add_date`,
+              last_modified: sql`excluded.last_modified`,
+              date_lost: sql`excluded.date_lost`,
+              date_found: sql`excluded.date_found`,
+              on_streaming: sql`excluded.on_streaming`,
+            },
+          });
 
         insertedCount += 1;
       }
