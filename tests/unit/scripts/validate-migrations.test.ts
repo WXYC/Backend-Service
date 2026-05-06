@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { spawnSync } from 'child_process';
 
 const repoRoot = path.resolve(__dirname, '../../..');
@@ -661,6 +662,106 @@ describe('validate-migrations.mjs', () => {
     });
   });
 
+  describe('Check 11: applied-hashes.json drift detection', () => {
+    const hashesPath = (work: string) => path.join(work, 'shared/database/src/migrations/meta/applied-hashes.json');
+    const sqlPath = (work: string, tag: string) => path.join(work, 'shared/database/src/migrations', `${tag}.sql`);
+
+    test('passes against the unmodified fixture (sanity)', () => {
+      const { status, stdout, stderr } = run(workdir);
+      expect(stderr + stdout).not.toMatch(/hash drift detected/);
+      expect(stderr + stdout).not.toMatch(/has no entry in applied-hashes\.json/);
+      // The fixture is the live repo state; it MUST pass Check 11. If this
+      // ever fails it means somebody edited an applied .sql file without
+      // running `npm run drizzle:freeze-hashes`, which is exactly the
+      // wedge this check exists to prevent.
+      expect(status).toBe(0);
+    });
+
+    test('errors when an applied .sql file has been edited (hash drift)', () => {
+      // Append a comment to an already-recorded migration. The DDL is
+      // unchanged but the bytes differ, so the hash diverges from the
+      // recorded entry. This mirrors the 2710f2e wedge exactly.
+      const target = sqlPath(workdir, '0034_legacy_id_columns');
+      fs.appendFileSync(target, '\n-- harmless looking comment added long after apply\n');
+
+      const { status, stderr, stdout } = run(workdir);
+      expect(stderr + stdout).toMatch(/0034_legacy_id_columns\.sql hash drift detected/);
+      expect(stderr + stdout).toMatch(/expected \(recorded\):/);
+      expect(stderr + stdout).toMatch(/actual\s+\(current\):/);
+      expect(stderr + stdout).toMatch(/PRECONDITION_NOTES\.md/);
+      expect(status).not.toBe(0);
+    });
+
+    test('errors when a new .sql file has no entry in applied-hashes.json', () => {
+      // Add a new migration .sql + journal entry but skip the freeze step.
+      // The author-error case: forgot `npm run drizzle:freeze-hashes`.
+      fs.writeFileSync(sqlPath(workdir, '9101_new-without-hash'), 'SELECT 1;\n');
+      const journal = readJournal(workdir);
+      journal.entries.push({
+        idx: 9101,
+        version: '7',
+        when: Date.now() + 1_000_000_000_000 + 9101,
+        tag: '9101_new-without-hash',
+        breakpoints: true,
+      });
+      writeJournal(workdir, journal);
+
+      const { status, stderr, stdout } = run(workdir);
+      expect(stderr + stdout).toMatch(/9101_new-without-hash\.sql has no entry in applied-hashes\.json/);
+      expect(stderr + stdout).toMatch(/drizzle:freeze-hashes/);
+      expect(status).not.toBe(0);
+    });
+
+    test('errors when applied-hashes.json records a phantom tag (no .sql file)', () => {
+      const recorded = JSON.parse(fs.readFileSync(hashesPath(workdir), 'utf8'));
+      recorded['9999_phantom_tag'] = 'a'.repeat(64);
+      fs.writeFileSync(hashesPath(workdir), JSON.stringify(recorded, null, 2) + '\n');
+
+      const { status, stderr, stdout } = run(workdir);
+      expect(stderr + stdout).toMatch(/applied-hashes\.json records "9999_phantom_tag" but no .* file exists/);
+      expect(status).not.toBe(0);
+    });
+
+    test('errors when applied-hashes.json is missing entirely', () => {
+      fs.rmSync(hashesPath(workdir));
+
+      const { status, stderr, stdout } = run(workdir);
+      expect(stderr + stdout).toMatch(/applied-hashes\.json is missing/);
+      expect(stderr + stdout).toMatch(/drizzle:freeze-hashes/);
+      expect(status).not.toBe(0);
+    });
+
+    test('passes when a freshly added migration has its hash recorded', () => {
+      // The happy path: author adds a migration AND runs the freeze script.
+      const newTag = '9102_new-with-hash';
+      const newSql = 'SELECT 1; -- happy path test\n';
+      fs.writeFileSync(sqlPath(workdir, newTag), newSql);
+      const journal = readJournal(workdir);
+      journal.entries.push({
+        idx: 9102,
+        version: '7',
+        when: Date.now() + 1_000_000_000_000 + 9102,
+        tag: newTag,
+        breakpoints: true,
+      });
+      writeJournal(workdir, journal);
+
+      const recorded = JSON.parse(fs.readFileSync(hashesPath(workdir), 'utf8'));
+      const expected = crypto.createHash('sha256').update(newSql).digest('hex');
+      recorded[newTag] = expected;
+      // Re-sort to keep the file deterministic (matches freeze script output).
+      const sorted: Record<string, string> = {};
+      for (const k of Object.keys(recorded).sort()) sorted[k] = recorded[k];
+      fs.writeFileSync(hashesPath(workdir), JSON.stringify(sorted, null, 2) + '\n');
+
+      const { stderr, stdout } = run(workdir);
+      // Other checks (snapshot, etc.) may still flag the synthetic migration,
+      // but Check 11 specifically must not.
+      expect(stderr + stdout).not.toMatch(/9102_new-with-hash.*hash drift/);
+      expect(stderr + stdout).not.toMatch(/9102_new-with-hash.*has no entry in applied-hashes/);
+    });
+  });
+
   test('HISTORICAL_NO_GUARD_NEEDED_TAGS does not grow', () => {
     // Tripwire: contributors must not silently allowlist new constraint-
     // adding migrations to suppress Check 8. The right move is to add
@@ -694,8 +795,18 @@ describe('validate-migrations.mjs', () => {
       '0030_labels_table',
       '0032_audit_f19_f20',
       '0033_crossreference_tables',
+      // 0034 / 0048 / 0059 / 0067 originally carried inline
+      // `-- @no-precondition-needed:` annotations that 2710f2e (PR #705)
+      // retrofitted post-apply. The retrofit changed their SHA-256 and
+      // tripped the deploy verifier; the annotations were reverted and
+      // the rationale moved to PRECONDITION_NOTES.md. The tags belong
+      // here as grandfathered-applied, same as the rest of the set.
+      '0034_legacy_id_columns',
       '0037_etl-schema-sync',
       '0041_rotation_etl_support',
+      '0048_fix-fk-on-delete-set-null',
+      '0059_album-plays-materialized-view',
+      '0067_flowsheet-linkage-review',
     ]);
     for (const tag of tags) {
       expect(expected.has(tag)).toBe(true);
