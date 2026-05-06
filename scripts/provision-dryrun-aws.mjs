@@ -83,6 +83,30 @@ const IAM_POLICY_DOCUMENT = {
       Action: ['rds:DeleteDBInstance', 'rds:AddTagsToResource'],
       Resource: `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:db:dryrun-*`,
     },
+    {
+      // Per-run JIT ingress to the SG: the workflow authorizes the
+      // runner's /32 just before connecting and revokes it in the
+      // always-teardown step. Scoped via the `Purpose=migrate-dryrun`
+      // tag set at SG-create time (see `sgCreate` below) so this
+      // permission cannot touch any other security group.
+      Sid: 'JITIngressOnDryrunSG',
+      Effect: 'Allow',
+      Action: ['ec2:AuthorizeSecurityGroupIngress', 'ec2:RevokeSecurityGroupIngress'],
+      Resource: `arn:aws:ec2:${AWS_REGION}:${AWS_ACCOUNT}:security-group/*`,
+      Condition: {
+        StringEquals: {
+          'aws:ResourceTag/Purpose': 'migrate-dryrun',
+        },
+      },
+    },
+    {
+      // describe-security-groups is needed by the workflow's idempotent
+      // duplicate-rule check. Read-only and SG-only.
+      Sid: 'DescribeSecurityGroups',
+      Effect: 'Allow',
+      Action: 'ec2:DescribeSecurityGroups',
+      Resource: '*',
+    },
   ],
 };
 
@@ -727,6 +751,19 @@ async function sgCreate(state, vpcId) {
   if (existing.SecurityGroups.length > 0) {
     sgId = existing.SecurityGroups[0].GroupId;
     ok(`Found existing SG ${sgId}`);
+    // Backfill the Purpose tag on SGs created before #757. The IAM
+    // JITIngressOnDryrunSG statement scopes by this tag, so an
+    // un-tagged SG would silently AccessDenied during the workflow's
+    // authorize step.
+    const existingTags = existing.SecurityGroups[0].Tags || [];
+    const hasPurposeTag = existingTags.some((t) => t.Key === 'Purpose' && t.Value === 'migrate-dryrun');
+    if (!hasPurposeTag) {
+      info(`Backfilling Purpose=migrate-dryrun tag on existing SG`);
+      aws(['ec2', 'create-tags', '--resources', sgId, '--tags', 'Key=Purpose,Value=migrate-dryrun'], {
+        mutating: true,
+      });
+      ok(`Tagged ${sgId}`);
+    }
   } else {
     if (!FLAG.yes && !FLAG.dryRun) {
       info(`About to create SG "${SG_NAME}" in VPC ${vpcId}.`);
@@ -742,6 +779,12 @@ async function sgCreate(state, vpcId) {
         'Migrate-dryrun: GitHub Actions ingress to ephemeral RDS sandbox on 5432',
         '--vpc-id',
         vpcId,
+        // The Purpose=migrate-dryrun tag is load-bearing: the IAM
+        // policy's JITIngressOnDryrunSG statement scopes by this tag,
+        // so an SG without it cannot be authorized/revoked by the
+        // workflow's JIT ingress steps.
+        '--tag-specifications',
+        'ResourceType=security-group,Tags=[{Key=Purpose,Value=migrate-dryrun}]',
         '--output',
         'json',
       ],
