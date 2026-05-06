@@ -242,6 +242,11 @@ function loadState() {
 }
 
 function saveState(state) {
+  // Under --dry-run, never persist state. Otherwise the dry-run would
+  // record phases as "done" and a follow-up real run would skip the
+  // mutations it was supposed to apply. Dry-run is for previewing —
+  // it must leave no trace.
+  if (FLAG.dryRun) return;
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2) + '\n');
 }
 
@@ -253,7 +258,17 @@ function resetState() {
 
 const rl = createInterface({ input: stdin, output: stdout, terminal: stdout.isTTY });
 
-async function ask(question, { defaultValue = null } = {}) {
+async function ask(question, { defaultValue = null, secret = false } = {}) {
+  if (FLAG.yes) {
+    // --yes: auto-accept the default, even if the default is empty
+    // (downstream prompts handle empty values explicitly). For
+    // secrets, refuse to fabricate a value out of thin air.
+    if (secret && !defaultValue) {
+      fail(`--yes: secret prompt "${question}" has no default and cannot be auto-accepted.`);
+      throw new Error('secret prompt with no default under --yes');
+    }
+    return defaultValue || '';
+  }
   const prompt = defaultValue ? `${question} [${defaultValue}] ` : `${question} `;
   const answer = (await rl.question(prompt)).trim();
   return answer || defaultValue || '';
@@ -274,6 +289,10 @@ async function askChoice(question, choices, defaultIdx = 0) {
     console.log(`  ${marker} ${i + 1}. ${choice.label}`);
     if (choice.detail) console.log(`       ${c.dim(choice.detail)}`);
   });
+  if (FLAG.yes) {
+    info(`--yes: auto-selecting "${choices[defaultIdx].label}"`);
+    return choices[defaultIdx];
+  }
   while (true) {
     const answer = (await rl.question(`Choice [${defaultIdx + 1}]: `)).trim();
     if (!answer) return choices[defaultIdx];
@@ -912,7 +931,20 @@ async function repoSecrets(state) {
         setRecord[name] = 'kept';
         continue;
       }
-      value = await askSecret(`${name}:`);
+      if (FLAG.dryRun) {
+        // Under --dry-run we never call gh secret set, so we don't
+        // need a real password — just a placeholder for the printed
+        // command. Skip the prompt entirely (which would block
+        // --yes runs that have no TTY).
+        value = '<dry-run-placeholder>';
+      } else if (FLAG.yes) {
+        fail(
+          `--yes can't auto-fill PROD_DB_PASSWORD: it has no default. Run interactively or pre-set it via \`gh secret set PROD_DB_PASSWORD\`.`
+        );
+        throw new Error('PROD_DB_PASSWORD requires interactive input');
+      } else {
+        value = await askSecret(`${name}:`);
+      }
     } else {
       const def = defaults[name];
       value = await ask(`${name}${def ? '' : ' (no default — must enter)'}: `, { defaultValue: def });
