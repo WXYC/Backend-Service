@@ -377,8 +377,17 @@ jobs:
             echo "Running database migrations..."
             docker run --rm --env-file .env -e SKIP_SEED=true $IMAGE_URI
 
-            echo "Cleaning up migration image..."
-            docker rmi $IMAGE_URI || true
+            # Prune stale db-migrate images on the host. We keep the just-applied
+            # SHA tag for one cycle of rollback safety and remove everything else
+            # under the db-migrate repository, including stragglers left by prior
+            # failed deploys (migrate-step failures skip this block under set -e).
+            # The dangling-layer prune mops up any "<none>" artifacts from
+            # interrupted pulls. Failures here don't fail the deploy.
+            echo "Pruning stale db-migrate images (keeping $SHA_TAG)..."
+            docker images "$AWS_ECR_URI/db-migrate" --format '{{.Repository}}:{{.Tag}}' \
+              | grep -v ":$SHA_TAG\$" \
+              | xargs -r docker rmi -f 2>/dev/null || true
+            docker image prune -f 2>/dev/null || true
 
   deploy:
     needs: [setup, handle-git-tags, build, migrate]
