@@ -1,0 +1,55 @@
+name: Sync GHA prefix list
+
+# Sync the AWS managed prefix list `wxyc-gha-egress` against the
+# `.actions[]` IPv4 CIDRs from `api.github.com/meta`. The migrate-dryrun
+# workflow's security group `wxyc-dryrun-gha` references this prefix
+# list, so an out-of-date PL is the same failure mode as the inline
+# 50-CIDR allowlist that #756 replaced: runners egress from CIDRs not
+# in the allowlist and the dryrun job hits CONNECT_TIMEOUT.
+#
+# Cadence: weekly. GitHub publishes meta updates more often, but the
+# .actions[] set is fairly stable week-to-week. workflow_dispatch lets
+# operators force a sync on demand.
+#
+# Concurrency: only one sync at a time. The PL's modify-version cursor
+# will reject parallel runs anyway, but failing fast at the workflow
+# level produces a cleaner log.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Print diff without applying'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-gha-prefix-list
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync prefix list
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Sync prefix list against api.github.com/meta
+        run: |
+          if [ "${{ inputs.dry-run }}" = "true" ]; then
+            node scripts/sync-gha-prefix-list.mjs --dry-run
+          else
+            node scripts/sync-gha-prefix-list.mjs
+          fi

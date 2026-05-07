@@ -5,16 +5,26 @@
  *
  * The migrate-dryrun job in `.github/workflows/test.yml` restores the
  * latest prod RDS snapshot to an ephemeral sandbox, runs Drizzle's
- * migrate against it, then tears the sandbox down. It needs three
+ * migrate against it, then tears the sandbox down. It needs four
  * things provisioned out-of-band, all flagged in CLAUDE.md and called
- * out by WXYC/Backend-Service#726:
+ * out by WXYC/Backend-Service#726 / #756:
  *
- *   1. IAM policy granting the GHA user a narrow set of RDS actions.
- *   2. A security group allowing port 5432 ingress from GitHub Actions
- *      egress IPs to the ephemeral RDS sandbox.
- *   3. Five GitHub repo secrets the workflow reads.
+ *   1. IAM policy granting the GHA user a narrow set of RDS actions
+ *      plus prefix-list read/modify on PLs tagged
+ *      `wxyc:purpose=gha-egress`.
+ *   2. N managed prefix list shards (`wxyc-gha-egress-{1..N}`, default
+ *      N=5, each capacity 1000) populated with the GitHub Actions
+ *      egress IPv4 CIDRs from api.github.com/meta. Re-synced weekly
+ *      by sync-gha-prefix-list.yml. Sharding is required because AWS
+ *      hard-caps a single PL at 1000 entries while the aggregated GHA
+ *      IPv4 set is ~3300 entries (each PL ref counts as 1 SG rule, so
+ *      5 shards fits comfortably under the default 60-rule SG limit).
+ *   3. A security group with one tcp/5432 ingress rule per shard
+ *      (rather than inlining individual CIDRs, which can't fit in any
+ *      single PL — see #756 for the failure mode).
+ *   4. Five GitHub repo secrets the workflow reads.
  *
- * This script walks you through all three, idempotently. Every step
+ * This script walks you through all four, idempotently. Every step
  * checks whether the change already exists before applying it, and
  * persists progress to .dryrun-provisioning-state.json so an
  * interruption (Ctrl+C, network blip, AWS throttle, transient gh CLI
@@ -50,41 +60,64 @@ const AWS_ACCOUNT = '203767826763';
 const AWS_REGION = 'us-east-1';
 const POLICY_NAME = 'wxyc-gha-rds-dryrun';
 const SG_NAME = 'wxyc-dryrun-gha';
+const PREFIX_LIST_NAME_PREFIX = 'wxyc-gha-egress';
+const PREFIX_LIST_SHARDS = 5;
+const PREFIX_LIST_MAX_ENTRIES = 1000; // AWS hard cap per PL; we shard to fit ~3300 aggregated GHA IPv4 CIDRs.
+const PREFIX_LIST_TAG_KEY = 'wxyc:purpose';
+const PREFIX_LIST_TAG_VALUE = 'gha-egress';
+const PREFIX_LIST_NAMES = Array.from({ length: PREFIX_LIST_SHARDS }, (_, i) => `${PREFIX_LIST_NAME_PREFIX}-${i + 1}`);
 const REPO = 'WXYC/Backend-Service';
 const STATE_FILE = '.dryrun-provisioning-state.json';
 const SECRET_NAMES = ['PROD_DB_ID', 'PROD_DB_NAME', 'PROD_DB_USERNAME', 'PROD_DB_PASSWORD', 'SG_DRYRUN_GHA'];
-const DEFAULT_CIDR_SUBSET_SIZE = 50;
 
-// IAM policy as a JS object so we can stringify it deterministically.
-const IAM_POLICY_DOCUMENT = {
-  Version: '2012-10-17',
-  Statement: [
-    {
-      Sid: 'DescribeReadOnly',
-      Effect: 'Allow',
-      Action: ['rds:DescribeDBSnapshots', 'rds:DescribeDBInstances'],
-      Resource: '*',
-    },
-    {
-      Sid: 'RestoreFromProdSnapshot',
-      Effect: 'Allow',
-      Action: 'rds:RestoreDBInstanceFromDBSnapshot',
-      Resource: [
-        `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:db:dryrun-*`,
-        `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:snapshot:*`,
-        `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:subgrp:*`,
-        `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:pg:*`,
-        `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:og:*`,
-      ],
-    },
-    {
-      Sid: 'ManageSandboxOnly',
-      Effect: 'Allow',
-      Action: ['rds:DeleteDBInstance', 'rds:AddTagsToResource'],
-      Resource: `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:db:dryrun-*`,
-    },
-  ],
-};
+/**
+ * Build the IAM policy document. The EC2 prefix-list actions are
+ * scoped to PLs in this account+region tagged `wxyc:purpose=gha-egress`,
+ * which the provisioner stamps on every shard at create time. This
+ * covers all N shards in one statement without baking shard ARNs into
+ * the policy. Describe* APIs don't accept resource conditions, so
+ * DescribeManagedPrefixLists keeps Resource: "*".
+ */
+function buildIamPolicyDocument() {
+  return {
+    Version: '2012-10-17',
+    Statement: [
+      {
+        Sid: 'DescribeReadOnly',
+        Effect: 'Allow',
+        Action: ['rds:DescribeDBSnapshots', 'rds:DescribeDBInstances', 'ec2:DescribeManagedPrefixLists'],
+        Resource: '*',
+      },
+      {
+        Sid: 'RestoreFromProdSnapshot',
+        Effect: 'Allow',
+        Action: 'rds:RestoreDBInstanceFromDBSnapshot',
+        Resource: [
+          `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:db:dryrun-*`,
+          `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:snapshot:*`,
+          `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:subgrp:*`,
+          `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:pg:*`,
+          `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:og:*`,
+        ],
+      },
+      {
+        Sid: 'ManageSandboxOnly',
+        Effect: 'Allow',
+        Action: ['rds:DeleteDBInstance', 'rds:AddTagsToResource'],
+        Resource: `arn:aws:rds:${AWS_REGION}:${AWS_ACCOUNT}:db:dryrun-*`,
+      },
+      {
+        Sid: 'SyncGhaPrefixList',
+        Effect: 'Allow',
+        Action: ['ec2:GetManagedPrefixListEntries', 'ec2:ModifyManagedPrefixList'],
+        Resource: `arn:aws:ec2:${AWS_REGION}:${AWS_ACCOUNT}:prefix-list/*`,
+        Condition: {
+          StringEquals: { [`aws:ResourceTag/${PREFIX_LIST_TAG_KEY}`]: PREFIX_LIST_TAG_VALUE },
+        },
+      },
+    ],
+  };
+}
 
 // ---- args -----------------------------------------------------------------
 
@@ -492,13 +525,13 @@ async function iamDecision(state) {
 async function iamPolicy(state) {
   heading('IAM: create or look up wxyc-gha-rds-dryrun policy');
 
-  if (state.phases.iam_policy?.arn) {
-    skip(`policy already at ${state.phases.iam_policy.arn}`);
-    return state.phases.iam_policy.arn;
-  }
+  const desired = buildIamPolicyDocument();
+  const desiredJson = JSON.stringify(desired);
 
-  // Look up first; idempotent re-runs in fresh state files should still
-  // find the existing policy rather than fail with EntityAlreadyExists.
+  // Even when state says we've already created the policy in a prior
+  // run, re-check the document so subsequent runs that bumped the
+  // template (e.g. adding the prefix-list statement in #756) upgrade it
+  // in place rather than silently keeping the older version.
   const expectedArn = `arn:aws:iam::${AWS_ACCOUNT}:policy/${POLICY_NAME}`;
   let exists = false;
   try {
@@ -510,8 +543,6 @@ async function iamPolicy(state) {
 
   if (exists) {
     info(`Found existing policy at ${expectedArn}`);
-    // Verify the policy document matches what we expect. If it drifted,
-    // that's an operator decision — show the diff and prompt.
     const versions = awsJson(['iam', 'list-policy-versions', '--policy-arn', expectedArn, '--output', 'json']);
     const defaultVer = versions.Versions.find((v) => v.IsDefaultVersion);
     const live = awsJson([
@@ -525,18 +556,49 @@ async function iamPolicy(state) {
       'json',
     ]);
     const liveDoc = JSON.parse(decodeURIComponent(live.PolicyVersion.Document));
-    if (JSON.stringify(liveDoc) !== JSON.stringify(IAM_POLICY_DOCUMENT)) {
-      warn(`Existing policy document differs from this script's template.`);
-      warn(`Diff inspection is your call. Aborting to be safe — review and remove the existing`);
-      warn(`policy in IAM, or update the IAM_POLICY_DOCUMENT constant if drift is intentional.`);
-      throw new Error('IAM policy drift detected');
+    if (JSON.stringify(liveDoc) === desiredJson) {
+      ok(`Policy document matches template (version ${defaultVer.VersionId})`);
+    } else {
+      warn(`Existing policy document differs from desired template.`);
+      if (!FLAG.yes && !FLAG.dryRun) {
+        console.log(c.dim('Desired document:'));
+        console.log(c.dim(JSON.stringify(desired, null, 2)));
+        if (!(await askYesNo('Create a new default version with the desired document?'))) {
+          throw new Error('aborted by user (policy drift)');
+        }
+      }
+      // IAM caps a managed policy at 5 versions. If we're at the cap,
+      // delete the oldest non-default to make room.
+      const nondefault = versions.Versions.filter((v) => !v.IsDefaultVersion).sort(
+        (a, b) => new Date(a.CreateDate) - new Date(b.CreateDate)
+      );
+      if (versions.Versions.length >= 5 && nondefault.length) {
+        info(`Pruning oldest non-default version ${nondefault[0].VersionId} to make room`);
+        aws(['iam', 'delete-policy-version', '--policy-arn', expectedArn, '--version-id', nondefault[0].VersionId], {
+          mutating: true,
+        });
+      }
+      aws(
+        [
+          'iam',
+          'create-policy-version',
+          '--policy-arn',
+          expectedArn,
+          '--policy-document',
+          desiredJson,
+          '--set-as-default',
+          '--output',
+          'json',
+        ],
+        { mutating: true }
+      );
+      ok(`Policy upgraded to new default version`);
     }
-    ok(`Policy document matches template`);
   } else {
     info(`Creating policy ${POLICY_NAME}`);
     if (!FLAG.yes && !FLAG.dryRun) {
       console.log(c.dim('Policy document:'));
-      console.log(c.dim(JSON.stringify(IAM_POLICY_DOCUMENT, null, 2)));
+      console.log(c.dim(JSON.stringify(desired, null, 2)));
       if (!(await askYesNo('Create this policy?'))) throw new Error('aborted by user');
     }
     aws(
@@ -546,9 +608,9 @@ async function iamPolicy(state) {
         '--policy-name',
         POLICY_NAME,
         '--policy-document',
-        JSON.stringify(IAM_POLICY_DOCUMENT),
+        desiredJson,
         '--description',
-        'GitHub Actions migrate-dryrun: restore prod RDS snapshot to ephemeral sandbox',
+        'GitHub Actions migrate-dryrun: restore prod RDS snapshot to ephemeral sandbox; sync wxyc-gha-egress prefix list',
         '--output',
         'json',
       ],
@@ -649,6 +711,139 @@ async function iamAttach(state, username, policyArn) {
   }
 
   state.phases.iam_attach = { attached_at: new Date().toISOString(), policy_arn: policyArn, username };
+  saveState(state);
+}
+
+// ---- Managed prefix list -------------------------------------------------
+
+async function prefixListsCreate(state) {
+  heading(`Prefix lists: ensure ${PREFIX_LIST_SHARDS} shards exist`);
+
+  // Re-evaluate every run so missing shards get backfilled (e.g. someone
+  // deleted one out-of-band). Idempotent per-shard via name lookup.
+  const recorded = state.phases.prefix_lists_create?.shards || [];
+  const recordedById = new Map(recorded.map((s) => [s.name, s]));
+  const result = [];
+
+  for (const name of PREFIX_LIST_NAMES) {
+    const existing = awsJson([
+      'ec2',
+      'describe-managed-prefix-lists',
+      '--filters',
+      `Name=prefix-list-name,Values=${name}`,
+      '--output',
+      'json',
+    ]);
+    const customer = (existing.PrefixLists || []).filter((p) => p.OwnerId === AWS_ACCOUNT);
+
+    let pl;
+    if (customer.length === 1) {
+      pl = customer[0];
+      // Verify the wxyc:purpose tag is present. Without it, IAM scoping
+      // by tag won't grant the sync workflow access.
+      const tags = pl.Tags || [];
+      const hasTag = tags.some((t) => t.Key === PREFIX_LIST_TAG_KEY && t.Value === PREFIX_LIST_TAG_VALUE);
+      if (!hasTag) {
+        info(`Tagging existing ${name} (${pl.PrefixListId}) with ${PREFIX_LIST_TAG_KEY}=${PREFIX_LIST_TAG_VALUE}`);
+        aws(
+          [
+            'ec2',
+            'create-tags',
+            '--resources',
+            pl.PrefixListId,
+            '--tags',
+            `Key=${PREFIX_LIST_TAG_KEY},Value=${PREFIX_LIST_TAG_VALUE}`,
+            '--output',
+            'json',
+          ],
+          { mutating: true }
+        );
+      }
+      ok(`${name}: ${pl.PrefixListId} (max ${pl.MaxEntries}, ${pl.State})`);
+    } else if (customer.length > 1) {
+      fail(`Multiple customer-managed PLs named "${name}". Resolve manually.`);
+      throw new Error('ambiguous PL name');
+    } else {
+      if (!FLAG.yes && !FLAG.dryRun && !recordedById.has(name)) {
+        info(`About to create managed PL "${name}" (capacity ${PREFIX_LIST_MAX_ENTRIES}).`);
+      }
+      const created = awsJson(
+        [
+          'ec2',
+          'create-managed-prefix-list',
+          '--prefix-list-name',
+          name,
+          '--address-family',
+          'IPv4',
+          '--max-entries',
+          String(PREFIX_LIST_MAX_ENTRIES),
+          '--tag-specifications',
+          `ResourceType=prefix-list,Tags=[{Key=${PREFIX_LIST_TAG_KEY},Value=${PREFIX_LIST_TAG_VALUE}}]`,
+          '--output',
+          'json',
+        ],
+        { mutating: true }
+      );
+      pl = FLAG.dryRun
+        ? {
+            PrefixListId: `<dry-run-${name}>`,
+            PrefixListArn: `arn:aws:ec2:${AWS_REGION}:${AWS_ACCOUNT}:prefix-list/<dry-run>`,
+            MaxEntries: PREFIX_LIST_MAX_ENTRIES,
+            State: 'create-pending',
+          }
+        : created.PrefixList;
+      ok(`${name}: created ${pl.PrefixListId}`);
+    }
+
+    result.push({
+      name,
+      prefix_list_id: pl.PrefixListId,
+      prefix_list_arn: pl.PrefixListArn,
+      max_entries: pl.MaxEntries,
+    });
+  }
+
+  state.phases.prefix_lists_create = {
+    shards: result,
+    shard_count: PREFIX_LIST_SHARDS,
+    created_at: new Date().toISOString(),
+  };
+  saveState(state);
+  return result;
+}
+
+async function prefixListBootstrap(state) {
+  heading('Prefix lists: populate from api.github.com/meta');
+
+  if (FLAG.dryRun) {
+    skip(`--dry-run: would invoke scripts/sync-gha-prefix-list.mjs`);
+    return;
+  }
+
+  // Always run; sync script is idempotent (no-op when no diff). The
+  // recurring weekly workflow keeps it fresh after this bootstrap.
+  info(`Invoking scripts/sync-gha-prefix-list.mjs`);
+  const env = { ...process.env };
+  if (activeAwsProfile) env.AWS_PROFILE = activeAwsProfile;
+  const result = spawnSync(
+    process.execPath,
+    [
+      new URL('./sync-gha-prefix-list.mjs', import.meta.url).pathname,
+      '--name-prefix',
+      PREFIX_LIST_NAME_PREFIX,
+      '--shards',
+      String(PREFIX_LIST_SHARDS),
+    ],
+    { stdio: 'inherit', env }
+  );
+  if (result.status !== 0) {
+    throw new Error(`sync-gha-prefix-list.mjs exited ${result.status}`);
+  }
+  ok(`PLs populated from api.github.com/meta`);
+
+  state.phases.prefix_list_bootstrap = {
+    completed_at: new Date().toISOString(),
+  };
   saveState(state);
 }
 
@@ -761,103 +956,101 @@ async function sgCreate(state, vpcId) {
   return sgId;
 }
 
-async function sgIngress(state, sgId) {
-  heading(`Security Group: populate ingress rules from GitHub Actions egress IPs`);
+async function sgIngress(state, sgId, shards) {
+  heading(`Security Group: ingress rules reference ${shards.length} prefix list shard(s)`);
 
-  if (state.phases.sg_ingress?.completed) {
-    skip(`ingress rules already added (${state.phases.sg_ingress.cidrs_added.length} CIDRs)`);
-    return;
-  }
-
-  // Fetch GitHub's egress IP ranges. Filter to IPv4 (most AWS SGs are
-  // IPv4-only by default; adding IPv6 is a separate decision).
-  info(`Fetching GitHub Actions egress CIDRs from api.github.com/meta`);
-  const meta = JSON.parse(run(['curl', '-sS', 'https://api.github.com/meta']));
-  const allCidrs = (meta.actions || []).filter((c) => !c.includes(':'));
-  if (!allCidrs.length) {
-    fail(`api.github.com/meta returned no IPv4 .actions ranges. Aborting.`);
-    throw new Error('no GH Actions CIDRs');
-  }
-  ok(`Got ${allCidrs.length} IPv4 CIDR(s)`);
-
-  // AWS default SG rule limit is 60. Subset to a working size.
-  const sizeStr = await ask(
-    `How many CIDRs to add? Default ${DEFAULT_CIDR_SUBSET_SIZE} (max 60 unless you've raised the SG rule limit).`,
-    { defaultValue: String(DEFAULT_CIDR_SUBSET_SIZE) }
-  );
-  const size = Math.min(Math.max(parseInt(sizeStr, 10) || DEFAULT_CIDR_SUBSET_SIZE, 1), allCidrs.length);
-  const cidrs = allCidrs.slice(0, size);
-  warn(
-    `Taking the first ${cidrs.length} CIDRs. Runners on IPs outside this set ` +
-      `will fail to reach the sandbox; re-running CI usually picks a different runner.`
-  );
-
-  // Check current rules so we only add what's missing (idempotent).
+  // Inspect current rules on tcp/5432. Two things to do:
+  //  - Add a PrefixListIds rule per shard, if missing.
+  //  - Revoke any pre-existing inline CIDR rules left over from the
+  //    legacy 50-CIDR allowlist (issue #756). These coexist harmlessly,
+  //    but having both is misleading — the PLs are the source of truth.
   const current = awsJson(['ec2', 'describe-security-groups', '--group-ids', sgId, '--output', 'json']);
-  const existingCidrs = new Set();
-  for (const perm of current.SecurityGroups[0].IpPermissions || []) {
-    if (perm.IpProtocol === 'tcp' && perm.FromPort === 5432 && perm.ToPort === 5432) {
-      for (const range of perm.IpRanges || []) existingCidrs.add(range.CidrIp);
-    }
+  const perms = current.SecurityGroups[0].IpPermissions || [];
+
+  const presentPlIds = new Set();
+  const inlineCidrs = [];
+  for (const perm of perms) {
+    if (perm.IpProtocol !== 'tcp' || perm.FromPort !== 5432 || perm.ToPort !== 5432) continue;
+    for (const pl of perm.PrefixListIds || []) presentPlIds.add(pl.PrefixListId);
+    for (const range of perm.IpRanges || []) inlineCidrs.push(range.CidrIp);
   }
-  const toAdd = cidrs.filter((c) => !existingCidrs.has(c));
-  if (existingCidrs.size > 0) ok(`${existingCidrs.size} ingress rule(s) already on the SG`);
-  if (toAdd.length === 0) {
-    ok(`No new rules to add`);
+
+  const shardsToAdd = shards.filter((s) => !presentPlIds.has(s.prefix_list_id));
+  if (shardsToAdd.length === 0) {
+    ok(`All ${shards.length} shard PL rule(s) already present`);
   } else {
-    info(`Adding ${toAdd.length} new rule(s)`);
-    if (!FLAG.yes && !FLAG.dryRun && toAdd.length > 10) {
-      if (!(await askYesNo(`This adds ${toAdd.length} ingress rules. Continue?`))) {
-        throw new Error('aborted by user');
-      }
+    info(`Authorizing ingress on tcp/5432 for ${shardsToAdd.length} shard(s)`);
+    // Issue one authorize call covering every missing shard. AWS bundles
+    // them into per-shard rule entries server-side; the UI shows them
+    // as separate rules.
+    aws(
+      [
+        'ec2',
+        'authorize-security-group-ingress',
+        '--group-id',
+        sgId,
+        '--ip-permissions',
+        JSON.stringify([
+          {
+            IpProtocol: 'tcp',
+            FromPort: 5432,
+            ToPort: 5432,
+            PrefixListIds: shardsToAdd.map((s) => ({
+              PrefixListId: s.prefix_list_id,
+              Description: `GitHub Actions egress shard ${s.name}`,
+            })),
+          },
+        ]),
+        '--output',
+        'json',
+      ],
+      { mutating: true }
+    );
+    ok(`PL ingress rules added for ${shardsToAdd.length} shard(s)`);
+  }
+
+  if (inlineCidrs.length) {
+    warn(`Found ${inlineCidrs.length} legacy inline CIDR rule(s) on tcp/5432 (pre-#756 allowlist).`);
+    let proceed = FLAG.yes;
+    if (!FLAG.yes && !FLAG.dryRun) {
+      proceed = await askYesNo('Revoke them? The PL rule above already covers GHA runners.');
     }
-    // Authorize in batches via the --ip-permissions form so we make ~1
-    // API call per ~10 rules instead of 1 per rule. Cheap, but reduces
-    // throttling risk on large subsets.
-    const BATCH = 10;
-    for (let i = 0; i < toAdd.length; i += BATCH) {
-      const batch = toAdd.slice(i, i + BATCH);
-      const ipPermissions = [
-        {
-          IpProtocol: 'tcp',
-          FromPort: 5432,
-          ToPort: 5432,
-          IpRanges: batch.map((cidr) => ({
-            CidrIp: cidr,
-            Description: 'GitHub Actions egress (api.github.com/meta .actions)',
-          })),
-        },
-      ];
-      try {
+    if (proceed) {
+      info(`Revoking ${inlineCidrs.length} legacy CIDR(s) in batches of 50`);
+      const BATCH = 50;
+      for (let i = 0; i < inlineCidrs.length; i += BATCH) {
+        const batch = inlineCidrs.slice(i, i + BATCH);
         aws(
           [
             'ec2',
-            'authorize-security-group-ingress',
+            'revoke-security-group-ingress',
             '--group-id',
             sgId,
             '--ip-permissions',
-            JSON.stringify(ipPermissions),
+            JSON.stringify([
+              {
+                IpProtocol: 'tcp',
+                FromPort: 5432,
+                ToPort: 5432,
+                IpRanges: batch.map((cidr) => ({ CidrIp: cidr })),
+              },
+            ]),
             '--output',
             'json',
           ],
           { mutating: true }
         );
-        info(`Added batch ${Math.floor(i / BATCH) + 1}/${Math.ceil(toAdd.length / BATCH)}`);
-      } catch (e) {
-        if (/InvalidPermission\.Duplicate/.test(e.stderr)) {
-          warn(`Some rules in this batch were already present; continuing.`);
-        } else {
-          throw e;
-        }
       }
+      ok(`Legacy inline CIDRs revoked`);
+    } else {
+      warn(`Leaving inline CIDRs in place. They're ignored once the PL covers them; re-run to clean up later.`);
     }
-    ok(`Ingress rules added`);
   }
 
   state.phases.sg_ingress = {
     completed: true,
-    cidrs_added: cidrs,
-    cidrs_total_available: allCidrs.length,
+    prefix_list_ids: shards.map((s) => s.prefix_list_id),
+    legacy_cidrs_revoked: inlineCidrs.length,
     completed_at: new Date().toISOString(),
   };
   saveState(state);
@@ -979,11 +1172,21 @@ async function verifySummary(state) {
 
   console.log(`  IAM policy:      ${state.phases.iam_policy?.arn || '(skipped)'}`);
   console.log(`  Attached to:     ${state.phases.iam_attach?.username || '(skipped)'}`);
+  const shards = state.phases.prefix_lists_create?.shards || [];
+  console.log(
+    `  Prefix lists:    ${shards.length} shard(s): ${shards.map((s) => `${s.name}=${s.prefix_list_id}`).join(', ') || '(skipped)'}`
+  );
   console.log(
     `  Security group:  ${state.phases.sg_create?.sg_id || '(skipped)'} (${state.phases.sg_create?.sg_name || ''})`
   );
   console.log(`  VPC:             ${state.phases.sg_vpc?.vpc_id || '(skipped)'}`);
-  console.log(`  Ingress CIDRs:   ${state.phases.sg_ingress?.cidrs_added?.length ?? 0}`);
+  const ingressIds = state.phases.sg_ingress?.prefix_list_ids || [];
+  console.log(
+    `  Ingress:         ${ingressIds.length ? `${ingressIds.length} PL rule(s)` : '(skipped)'}` +
+      (state.phases.sg_ingress?.legacy_cidrs_revoked
+        ? ` (${state.phases.sg_ingress.legacy_cidrs_revoked} legacy CIDR(s) revoked)`
+        : '')
+  );
   console.log(
     `  Repo secrets:    ${Object.entries(state.phases.secrets_set?.set || {})
       .map(([k, v]) => `${k}=${v}`)
@@ -1094,12 +1297,14 @@ async function main() {
   try {
     await preflight(state);
     const userChoice = await iamDecision(state);
+    const shards = await prefixListsCreate(state);
     const policyArn = await iamPolicy(state);
     const username = await iamUser(state, userChoice);
     await iamAttach(state, username, policyArn);
     await sgFindVpc(state);
     const sgId = await sgCreate(state, state.phases.sg_vpc.vpc_id);
-    await sgIngress(state, sgId);
+    await prefixListBootstrap(state);
+    await sgIngress(state, sgId, shards);
     await repoSecrets(state);
     await verifySummary(state);
   } catch (e) {
