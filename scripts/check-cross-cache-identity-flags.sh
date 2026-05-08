@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Asserts that the cross-cache-identity feature flags documented in CLAUDE.md's
+# Asserts that the cross-cache-identity feature flags documented in the
 # canonical inventory match the Backend-owned flags listed in .env.example.
 #
 # Tier 1 (this PR, E2 step 0d): doc-vs-doc consistency only.
@@ -7,16 +7,18 @@
 #   doc; this script will be extended at that time.
 #
 # Plan reference: WXYC/wiki plans/library-hook-canonicalization-plan.md §4.2.
-# Canonical table: CLAUDE.md "Cross-cache-identity feature flags (canonical inventory)".
+# Canonical table lives in docs/env-vars.md "Cross-cache-identity feature
+# flags (canonical inventory)" — moved out of CLAUDE.md when the doc was
+# split into topic guides (#776). CLAUDE.md retains a pointer.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CLAUDE_MD="$REPO_ROOT/CLAUDE.md"
+CANONICAL_DOC="$REPO_ROOT/docs/env-vars.md"
 ENV_EXAMPLE="$REPO_ROOT/.env.example"
 
-if [[ ! -f "$CLAUDE_MD" ]]; then
-  echo "FAIL: $CLAUDE_MD not found." >&2
+if [[ ! -f "$CANONICAL_DOC" ]]; then
+  echo "FAIL: $CANONICAL_DOC not found." >&2
   exit 1
 fi
 
@@ -25,7 +27,7 @@ if [[ ! -f "$ENV_EXAMPLE" ]]; then
   exit 1
 fi
 
-# Extract the Backend-owned flags from the CLAUDE.md canonical table.
+# Extract the Backend-owned flags from the canonical table.
 # The table has rows of the form `| `FLAG_NAME` | Backend-Service | ... |`.
 # We extract the first cell (flag name) on rows where the second cell is
 # "Backend-Service".
@@ -36,11 +38,11 @@ canonical_backend_flags=$(
       gsub(/[` ]/, "", $2)
       print $2
     }
-  ' "$CLAUDE_MD" | sort -u
+  ' "$CANONICAL_DOC" | sort -u
 )
 
 if [[ -z "$canonical_backend_flags" ]]; then
-  echo "FAIL: no Backend-Service flags found in CLAUDE.md canonical table." >&2
+  echo "FAIL: no Backend-Service flags found in $CANONICAL_DOC canonical table." >&2
   echo "      Expected rows of the form '| \`FLAG_NAME\` | Backend-Service | ... |'." >&2
   exit 1
 fi
@@ -71,13 +73,13 @@ env_only=$(comm -13 <(printf '%s\n' "$canonical_backend_flags") <(printf '%s\n' 
 failed=0
 
 if [[ -n "$canonical_only" ]]; then
-  echo "FAIL: flags in CLAUDE.md canonical table (Backend-Service) missing from .env.example:" >&2
+  echo "FAIL: flags in canonical table (Backend-Service) missing from .env.example:" >&2
   echo "$canonical_only" | sed 's/^/  - /' >&2
   failed=1
 fi
 
 if [[ -n "$env_only" ]]; then
-  echo "FAIL: flags in .env.example missing from CLAUDE.md canonical table:" >&2
+  echo "FAIL: flags in .env.example missing from canonical table:" >&2
   echo "$env_only" | sed 's/^/  - /' >&2
   failed=1
 fi
@@ -85,9 +87,9 @@ fi
 if [[ "$failed" -ne 0 ]]; then
   echo "" >&2
   echo "Both files must list the same Backend-owned cross-cache-identity flags." >&2
-  echo "Canonical inventory: CLAUDE.md → 'Cross-cache-identity feature flags (canonical inventory)'." >&2
+  echo "Canonical inventory: docs/env-vars.md → 'Cross-cache-identity feature flags (canonical inventory)'." >&2
   exit 1
 fi
 
 count=$(printf '%s\n' "$canonical_backend_flags" | wc -l | tr -d ' ')
-echo "PASS: $count Backend-owned cross-cache-identity flag(s) consistent across CLAUDE.md and .env.example."
+echo "PASS: $count Backend-owned cross-cache-identity flag(s) consistent across docs/env-vars.md and .env.example."
