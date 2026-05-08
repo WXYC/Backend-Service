@@ -16,3 +16,5 @@ export const asc = jest.fn((col) => ({ asc: col }));
 export const inArray = jest.fn((col, values) => ({ inArray: [col, values] }));
 export const isNull = jest.fn((col) => ({ isNull: col }));
 export const isNotNull = jest.fn((col) => ({ isNotNull: col }));
+export const gte = jest.fn((a, b) => ({ gte: [a, b] }));
+export const lte = jest.fn((a, b) => ({ lte: [a, b] }));

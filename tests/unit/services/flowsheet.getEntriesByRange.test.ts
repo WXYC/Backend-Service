@@ -11,31 +11,50 @@
  * play_orders that are no longer globally comparable. The fix matches
  * the sibling `getEntriesByPage` function and orders by the globally
  * monotonic `flowsheet.id` instead.
+ *
+ * The test mocks the drizzle query chain and asserts the argument
+ * passed to `.orderBy(...)` resolves to `desc(flowsheet.id)`.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
-
-const servicePath = path.resolve(__dirname, '../../../apps/backend/services/flowsheet.service.ts');
-const serviceSource = fs.readFileSync(servicePath, 'utf-8');
-
-const extractGetEntriesByRangeBody = (): string => {
-  const match = serviceSource.match(/export const getEntriesByRange[\s\S]*?\n\};/);
-  if (!match) throw new Error('getEntriesByRange not found in flowsheet.service.ts');
-  return match[0];
-};
+import { jest } from '@jest/globals';
+import { db, flowsheet } from '@wxyc/database';
+import { desc } from 'drizzle-orm';
+import { getEntriesByRange } from '../../../apps/backend/services/flowsheet.service';
 
 describe('flowsheet.service', () => {
   describe('getEntriesByRange ordering (#714)', () => {
-    const body = extractGetEntriesByRangeBody();
+    const orderByMock = jest.fn().mockResolvedValue([]);
+    const whereMock = jest.fn().mockReturnValue({ orderBy: orderByMock });
+    const leftJoinMock2 = jest.fn().mockReturnValue({ where: whereMock });
+    const leftJoinMock1 = jest.fn().mockReturnValue({ leftJoin: leftJoinMock2 });
+    const fromMock = jest.fn().mockReturnValue({ leftJoin: leftJoinMock1 });
 
-    it('orders by flowsheet.id, not by play_order', () => {
-      // Post-#693 play_order is per-show, so ordering an id-range fetch
-      // (which can span shows) by play_order interleaves shows in a
-      // meaningless order. The id column is globally monotonic and
-      // matches the ordering used by `getEntriesByPage`.
-      expect(body).toMatch(/\.orderBy\(desc\(flowsheet\.id\)\)/);
-      expect(body).not.toMatch(/\.orderBy\(desc\(flowsheet\.play_order\)\)/);
+    beforeEach(() => {
+      orderByMock.mockReset();
+      orderByMock.mockResolvedValue([]);
+      whereMock.mockReset();
+      whereMock.mockReturnValue({ orderBy: orderByMock });
+      leftJoinMock1.mockReset();
+      leftJoinMock1.mockReturnValue({ leftJoin: leftJoinMock2 });
+      leftJoinMock2.mockReset();
+      leftJoinMock2.mockReturnValue({ where: whereMock });
+      fromMock.mockReset();
+      fromMock.mockReturnValue({ leftJoin: leftJoinMock1 });
+      (db as unknown as { select: jest.Mock }).select = jest.fn().mockReturnValue({ from: fromMock });
+    });
+
+    it('passes desc(flowsheet.id) to orderBy, not desc(flowsheet.play_order)', async () => {
+      await getEntriesByRange(1, 10);
+
+      expect(orderByMock).toHaveBeenCalledTimes(1);
+      const orderByArg = orderByMock.mock.calls[0][0];
+
+      // Under the global drizzle-orm mock (`tests/__mocks__/drizzle-orm.ts`),
+      // `desc(col)` returns `{ desc: col }`. With `flowsheet.id === 'id'`
+      // and `flowsheet.play_order === 'play_order'` from `database.mock.ts`,
+      // the two are easy to tell apart by deep equality.
+      expect(orderByArg).toEqual(desc(flowsheet.id));
+      expect(orderByArg).not.toEqual(desc(flowsheet.play_order));
     });
   });
 });
