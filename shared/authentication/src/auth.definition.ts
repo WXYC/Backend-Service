@@ -111,6 +111,19 @@ export const auth = betterAuth({
       sameSite: (process.env.COOKIE_SAME_SITE as 'lax' | 'strict' | 'none') || 'lax',
       secure: process.env.NODE_ENV === 'production',
     },
+    // better-auth's getIp reads the first matching header in
+    // `ipAddressHeaders` and trusts `value.split(',')[0].trim()` without
+    // consulting Express's `trust proxy`. The default (`x-forwarded-for`)
+    // is client-controlled — nginx appends to XFF rather than replacing
+    // it, so an external caller can spoof `127.0.0.1` into the first slot
+    // and share a rate-limit bucket with the auth healthcheck loopback.
+    // The production nginx config (api.wxyc.org server block) sets
+    // `X-Real-IP $remote_addr` authoritatively for /auth/* and /healthcheck,
+    // so reading from `x-real-ip` makes XFF irrelevant for IP determination.
+    // See WXYC/Backend-Service#774.
+    ipAddress: {
+      ipAddressHeaders: ['x-real-ip'],
+    },
   },
 
   plugins: [
