@@ -23,3 +23,11 @@ The `UNIQUE INDEX` is defined against the materialized view's output, which is `
 ## 0067_flowsheet-linkage-review
 
 Brand-new `CREATE TABLE`. The `UNIQUE` on `flowsheet_id`, the `NOT NULL` columns, and the FK to `flowsheet(id)` are all evaluated against zero rows at apply time — no existing data can violate them. Subsequent inserts are bounded by the constraints themselves.
+
+---
+
+## When to add a new entry
+
+If you're authoring a new migration that adds a constraint but provably doesn't need a runtime guard, prefer the inline `-- @no-precondition-needed: <reason>` annotation in the .sql file itself. The annotation is read at PR time by `scripts/validate-migrations.mjs` Check 8 and never has to change after apply.
+
+Add an entry to **this** file only when an already-applied migration needs its rationale captured retroactively. Editing the .sql file post-apply changes its hash and wedges the deploy verifier (Check 11). The corresponding tag must also be added to `HISTORICAL_NO_GUARD_NEEDED_TAGS` in `scripts/validate-migrations.mjs` so Check 8 stays quiet.
