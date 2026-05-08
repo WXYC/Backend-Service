@@ -1,0 +1,164 @@
+# Environment Variables
+
+Full reference. CLAUDE.md links here. Variables marked _required_ have no default; the service refuses to start without them.
+
+## Backend Service (`apps/backend`)
+
+- `PORT` (default `8080`)
+- `CI_PORT` (default `8081`)
+- `MUTATION_4XX_METRICS_DISABLED` (default unset / enabled) — Set to `true` to short-circuit the `apps/backend/middleware/responseMetrics.ts` middleware that emits the `WXYC/BackendService` `MutationClientError` CloudWatch metric for `POST/PATCH/DELETE /flowsheet/*` responses with `400 ≤ status < 500` (replacement signal post-#691, since Sentry no longer auto-captures 4xx). Disable in CI / local dev where AWS credentials aren't present so a noisy `PutMetricData` rejection doesn't pollute logs. The middleware is otherwise self-clamping (in-memory ring buffer flushed every 30s or every 10 errors, whichever comes first; `PutMetricData` failures are logged + swallowed and never block the response).
+
+## Database (`shared/database`)
+
+- `DB_HOST`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD` _required_
+- `DB_PORT` (default `5432`)
+- `CI_DB_PORT` (default `5433`)
+- `WXYC_SCHEMA_NAME` (default `wxyc_schema`)
+- `DB_STATEMENT_TIMEOUT_MS` (default `5000` / 5s) — Server-enforced per-statement timeout on every postgres-js connection. Backend and auth inherit the default — any HTTP-handler query that runs longer than 5s is by definition an orphan (Express's request timeout has already fired). ETLs override to `300000` (5 min) in their Dockerfiles because their bulk passes can legitimately take tens of seconds. Backfills override similarly. Set `0` to disable (use only for unit-test fixtures).
+- `DB_APPLICATION_NAME` (default `wxyc-backend`) — Sets `application_name` on the postgres connection so `pg_stat_activity` makes the source obvious during incident triage. Each Dockerfile overrides this with its own service name (`wxyc-backend`, `wxyc-auth`, `wxyc-flowsheet-etl`, etc.).
+- `DB_SYNCHRONOUS_COMMIT` (default `on`) — Per-connection `synchronous_commit` setting. Default `on` preserves Postgres's full durability guarantee for the API and ETLs. Bulk backfills set this to `off` in their Dockerfile so each per-batch COMMIT returns as soon as the WAL is in the OS buffer, rather than waiting for fsync. Safe because backfills are idempotent (`WHERE col IS NULL` filters naturally resume any work lost to an RDS crash). Accepted values: `on`, `off`, `local`, `remote_write`, `remote_apply`.
+- `BACKFILL_BATCH_SIZE` (default `5000`, used by `flowsheet-dj-name-backfill`) — Rows updated per individually-committed UPDATE inside the backfill loop. The default keeps each batch well under the per-statement timeout on a healthy host. Operators can pass e.g. `BACKFILL_BATCH_SIZE=20000` at `docker run -e ...` when the prod instance has IOPS headroom and async commit is in play — larger batches amortize per-tx overhead and reduce the number of trigger-firing dispatches.
+- `LIVE_ACTIVITY_LOOKBACK_SECONDS` (default `60`, used by `flowsheet-metadata-backfill`) — Cooperative-pause lookback for the `flowsheet` track-insert probe. Before each batch the orchestrator queries the partial index from migration 0050 (`add_time DESC WHERE entry_type='track'`) for any row added within this window; a hit means a DJ is actively managing the playout and the batch is deferred. Set `0` to disable the probe entirely (catch-up runs).
+- `LIVE_ACTIVITY_PAUSE_MS` (default `30000` / 30 s, used by `flowsheet-metadata-backfill`) — Sleep between cooperative-pause re-probes when activity is detected. There's no defer cap; the cron's outer `timeout` is the effective ceiling and the next run resumes via the `metadata_attempt_at IS NULL` predicate.
+- `ALBUM_PLAYS_REFRESH_INTERVAL_MS` (default `3600000` / 1 hour) — Cadence at which `apps/backend/services/album-plays-refresh.service.ts` rebuilds the `album_plays` materialized view that feeds the catalog search ranker.
+- `ALBUM_PLAYS_REFRESH_TIMEOUT_MS` (default `300000` / 5 min) — Per-statement timeout for the refresh's dedicated postgres-js client (`max: 1`, `application_name = wxyc-album-plays-refresh`). The API container's connection-level `DB_STATEMENT_TIMEOUT_MS=5000` is too tight for `REFRESH MATERIALIZED VIEW CONCURRENTLY` on prod, but loosening it globally would defeat the orphan-query protection it exists for. The dedicated client sidesteps that by carrying its own `statement_timeout` while the shared pool keeps the tight default. Set to a positive integer; non-numeric or non-positive values fall back to the default.
+
+## better-auth (`apps/auth`)
+
+- `BETTER_AUTH_URL` — e.g. `http://localhost:8082/auth`
+- `BETTER_AUTH_JWKS_URL` — e.g. `http://localhost:8082/auth/jwks`
+- `BETTER_AUTH_ISSUER` — e.g. `http://localhost:8082`
+- `BETTER_AUTH_AUDIENCE` — e.g. `http://localhost:8082`
+- `BETTER_AUTH_TRUSTED_ORIGINS` — Comma-separated CORS origins
+- `FRONTEND_SOURCE` — Frontend origin for CORS and redirects
+
+## Email (SES)
+
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`
+- `SES_FROM_EMAIL`
+- `PASSWORD_RESET_REDIRECT_URL`, `EMAIL_VERIFICATION_REDIRECT_URL`
+
+## Testing
+
+- `AUTH_BYPASS` — Set `true` to skip JWT verification in tests
+- `AUTH_USERNAME`, `AUTH_PASSWORD` — Test account credentials (when `AUTH_BYPASS=false`)
+- `TEST_HOST` — Test server host
+
+## Sentry
+
+- `SENTRY_DSN` — Sentry project DSN (required for error reporting). Without this, Sentry silently disables itself.
+- `SENTRY_RELEASE` — Set automatically by the deploy action to `<app>@<tag>`
+- `SENTRY_TRACES_SAMPLE_RATE` (default `0`, read by `jobs/flowsheet-etl/logger.ts` and `jobs/flowsheet-metadata-backfill/logger.ts`) — Per-job tracing sample rate. The job loggers default `tracesSampleRate` to 0 so steady-state runs don't pay the sampling overhead, and `@sentry/node` v10 itself defaults to 0 if the field is omitted (silently producing zero spans). Operators flip this to e.g. `1.0` on `docker run --env-file .env -e SENTRY_TRACES_SAMPLE_RATE=1.0 ...` for one-shot pilots that need span / trace data (see #640). Malformed or out-of-range values fall back to 0. The runtime API container at `apps/backend/instrument.ts` sets its own `tracesSampleRate: 1.0` directly and isn't affected by this knob.
+
+### Observability tags (Phase A contract)
+
+ETL/backfill jobs that opt into the Phase A observability contract emit JSON log lines on stdout (errors on stderr) and tag every Sentry event with the same four fields:
+
+| Tag      | Value                                                        |
+| -------- | ------------------------------------------------------------ |
+| `repo`   | `Backend-Service`                                            |
+| `tool`   | `<job-name> <subcommand>` (e.g. `flowsheet-etl incremental`) |
+| `step`   | Per-call: `started`, `bulk-load-shows`, `failed`, etc.       |
+| `run_id` | UUID generated at entrypoint init (one per process)          |
+
+The wireup is per-job: see `jobs/flowsheet-etl/logger.ts` for the canonical pattern (issue #538). The shared Rust/Python `wxyc_etl::logger` foundation lives in the `wxyc-etl` repo and targets non-Node ETLs; Backend-Service mirrors the same tag contract directly so the dashboards in Sentry / log queries are uniform across runtimes. `SENTRY_DSN` is still optional — when unset the SDK no-ops and JSON logging continues to work.
+
+> TODO (separate child task): provision `SENTRY_DSN` for the flowsheet-etl cron in EC2 / GitHub Actions secrets.
+
+## Legacy mirror queue (`apps/backend/middleware/legacy/commandqueue.mirror.ts`)
+
+Bounded ring-buffer reports written under `mirror-logs/`. Reports never include raw SQL — only length, sha256, and statement count.
+
+- `MIRROR_FATAL_REPORTS_MAX` (default `10`) — Number of ring slots for fatal reports. Total disk = max × `MIRROR_REPORT_MAX_BYTES`.
+- `MIRROR_FATAL_REPORTS_INTERVAL_MS` (default `900000` / 15 min) — Bucket width for the fatal ring index. Reports in the same bucket overwrite the same slot.
+- `MIRROR_SECONDARY_REPORTS_MAX` (default `10`) — Same scheme for first-failure secondary reports. Set to `0` to disable secondaries.
+- `MIRROR_SECONDARY_REPORTS_INTERVAL_MS` (default `600000` / 10 min) — Bucket width for secondary ring.
+- `MIRROR_SECONDARY_REPORT_ON_ATTEMPT` (default `1`) — Attempt number that triggers a secondary report.
+- `MIRROR_REPORT_MAX_BYTES` (default `65536` / 64 KiB) — Per-file JSON cap. Oversize payloads are replaced with a `truncated: true` summary.
+- `MIRROR_PENDING_QUEUE_SUMMARIES_MAX` (default `20`) — Max number of pending-queue summaries embedded in a fatal report.
+
+## Metadata Services
+
+- `LIBRARY_METADATA_URL` — library-metadata-lookup base URL (e.g. `http://localhost:8001`). Required for proxy endpoints, metadata enrichment, and track search. All Discogs access is routed through LML. Do not include the `/api/v1` path prefix; the LML client adds it automatically.
+- `LML_API_KEY` — Bearer token sent on every LML request. Must match LML's `LML_API_KEY`. Optional in dev; required in production once LML's `LML_REQUIRE_AUTH` is flipped to `true`. Injected at the single `lmlFetch` chokepoint in `apps/backend/services/lml/lml.client.ts`.
+- `DISCOGS_API_KEY`, `DISCOGS_API_SECRET` — Served to dj-site via `/config/secrets` endpoint. Not used by the backend itself (Discogs access goes through LML).
+- `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`
+
+## Slack
+
+- `SLACK_WXYC_REQUESTS_APP_ID`, `SLACK_WXYC_REQUESTS_CLIENT_ID`
+- `SLACK_WXYC_REQUESTS_CLIENT_SECRET`, `SLACK_WXYC_REQUESTS_SIGNING_SECRET`
+- `SLACK_WXYC_REQUESTS_WEBHOOK` — Webhook path (e.g. `/services/T00000/B00000/XXXX`)
+- `SLACK_WEBHOOK_URL` — Base URL override for Slack webhook (e.g. `http://mock-api:9090`). When set, uses `fetch()` instead of `https.request` to `hooks.slack.com`. Used in CI to route webhooks to the mock API server.
+
+## ETL Jobs
+
+The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the legacy MySQL database into PostgreSQL. The flowsheet ETL (`jobs/flowsheet-etl/`) syncs flowsheet entries and shows from tubafrenzy. The rotation ETL (`jobs/rotation-etl/`) syncs rotation releases from tubafrenzy. All three require the standard database variables above plus these for SSH tunneling to the legacy server:
+
+- `SSH_HOST` — Hostname of the legacy server
+- `SSH_USERNAME` — SSH login username
+- `SSH_PASSWORD` — SSH login password
+- `REMOTE_DB_HOST` — MySQL host on the legacy server (typically `localhost` from inside the tunnel)
+- `REMOTE_DB_USER` — MySQL username
+- `REMOTE_DB_PASSWORD` — MySQL password
+- `REMOTE_DB_NAME` — MySQL database name
+
+The flowsheet ETL supports two run modes: one-shot (`npm start`) for cron invocation, and continuous polling (`npm run start:poll` or `node dist/job.js --poll`) for real-time sync. In polling mode, it queries tubafrenzy every `ETL_POLL_INTERVAL_MS` (default 30 seconds) for new or modified entries and upserts them into PostgreSQL. After importing changes, it notifies the Backend-Service via `POST /internal/flowsheet-sync-notify` so connected dj-site clients receive an SSE refetch event.
+
+- `ETL_POLL_INTERVAL_MS` — Poll interval in milliseconds (default `30000`)
+- `BACKEND_SERVICE_URL` — Backend-Service URL for SSE notifications (default `http://localhost:8080`)
+- `ETL_NOTIFY_KEY` — Shared secret for internal endpoints: ETL sync notification and tubafrenzy webhook (required in production)
+
+The rotation ETL supports the same two run modes as the flowsheet ETL: one-shot (`npm start`) for cron invocation, and continuous polling (`npm run start:poll` or `node dist/job.js --poll`) for real-time sync. In polling mode, it queries tubafrenzy every `ETL_POLL_INTERVAL_MS` for new or modified rotation releases and upserts them into PostgreSQL. It uses the same SSH tunnel, `ETL_POLL_INTERVAL_MS`, `BACKEND_SERVICE_URL`, and `ETL_NOTIFY_KEY` variables as the flowsheet ETL. After importing changes, it notifies the Backend-Service via `POST /internal/rotation-sync-notify`.
+
+The artist identity ETL (`jobs/artist-identity-etl/`) populates the six reconciled-identity columns on `artists` (`discogs_artist_id`, `musicbrainz_artist_id`, `wikidata_qid`, `spotify_artist_id`, `apple_music_artist_id`, `bandcamp_id`) from library-metadata-lookup's `entity.identity` PostgreSQL table. Unlike the flowsheet/rotation ETLs, it does not use the SSH tunnel: it reads directly from the discogs-cache PostgreSQL database via `DATABASE_URL_DISCOGS`. Update strategy is null-fill only — existing non-null values are never overwritten, so any value entered by library staff wins over an LML-derived one. Conflicts (existing non-null differs from LML's value) are logged but skipped. Supports the same one-shot / `--poll` modes as the other ETLs.
+
+- `DATABASE_URL_DISCOGS` — PostgreSQL URL for LML's discogs-cache database, where `entity.identity` lives. Required for the artist-identity ETL.
+
+## Cross-cache-identity feature flags (canonical inventory)
+
+This is the **single source of truth** for the cross-cache-identity project's feature flags (plan §4.2). Consumer repos cross-reference this section in their own `.env.example` / CLAUDE.md. When a flag is renamed or its default changes, both the canonical entry here AND the consumer repo's local doc must update in the same PR.
+
+The naming convention is asymmetric on purpose: `*_USE_NEW_HOOK_*` (LML, semantic-index, per-cache) toggles which `wxyc_library` hook table the consumer reads. `BS_USE_LIBRARY_IDENTITY*` (Backend, global) toggles whether Backend reads/writes the new `library_identity` table at all. A unified prefix would be misleading — the LML/SI flags pick a hook to read; the BS flags toggle a brand-new schema.
+
+**Cache repos do NOT use these flags.** `discogs-etl`, `musicbrainz-cache`, and `wikidata-cache` write to BOTH the legacy and new hook tables unconditionally during the dual-run window. Per §4.2: feature flags fit live request paths (LML, SI, Backend); cache loaders are batch ETLs and roll back via redeploy of the prior image. Cache repos therefore intentionally have no cross-cache-identity flags to document.
+
+| Flag                                 | Owning repo             | Scope     | Default | Set true when                                                                      |
+| ------------------------------------ | ----------------------- | --------- | ------- | ---------------------------------------------------------------------------------- |
+| `LML_USE_NEW_HOOK_DISCOGS`           | library-metadata-lookup | per-cache | `false` | Docker discogs cache parity-check passes 7 consecutive days                        |
+| `LML_USE_NEW_HOOK_DISCOGS_FULL`      | library-metadata-lookup | per-cache | `false` | Homebrew (full) discogs cache parity-check passes 7 consecutive days               |
+| `LML_USE_NEW_HOOK_MUSICBRAINZ`       | library-metadata-lookup | per-cache | `false` | musicbrainz cache parity-check passes 7 consecutive days                           |
+| `LML_USE_NEW_HOOK_WIKIDATA`          | library-metadata-lookup | per-cache | `false` | wikidata cache parity-check passes 7 consecutive days                              |
+| `SI_USE_NEW_HOOK_DISCOGS`            | semantic-index          | per-cache | `false` | LML cuts over for that cache + 7 days clean                                        |
+| `SI_USE_NEW_HOOK_MUSICBRAINZ`        | semantic-index          | per-cache | `false` | (same — per cache)                                                                 |
+| `SI_USE_NEW_HOOK_WIKIDATA`           | semantic-index          | per-cache | `false` | (same — per cache)                                                                 |
+| `BS_USE_LIBRARY_IDENTITY`            | Backend-Service         | global    | `false` | All four caches cut over (LML + semantic-index both on new hook)                   |
+| `BS_USE_LIBRARY_IDENTITY_WRITES`     | Backend-Service         | global    | `false` | After 30-day dual-run with `BS_USE_LIBRARY_IDENTITY=true` reads showing clean      |
+| `LML_MANUAL_OVERRIDE_CHECK_DISABLED` | library-metadata-lookup | global    | `false` | Emergency rollback only — disables the §3.2.2.1 manual-override skip endpoint call |
+
+**Backend phase state machine** (the two BS flags compose to define four behavioral states):
+
+| Phase                            | `BS_USE_LIBRARY_IDENTITY` | `BS_USE_LIBRARY_IDENTITY_WRITES` | Reads                                                  | Writes                                                    |
+| -------------------------------- | ------------------------- | -------------------------------- | ------------------------------------------------------ | --------------------------------------------------------- |
+| 1 — substrate landed, no use     | false                     | false                            | `canonical_entity_id` columns only                     | `canonical_entity_id` columns only (new writer gated off) |
+| 2 — read new, write legacy       | true                      | false                            | `library_identity` with `canonical_entity_id` fallback | `canonical_entity_id` columns only                        |
+| 3 — read new, write both         | true                      | true                             | (same as Phase 2)                                      | DUAL-WRITE in one DB transaction                          |
+| 4 — drop legacy (post §4 step 5) | true                      | true                             | `library_identity` only                                | `library_identity` only                                   |
+
+**Flag mechanism (locked):** all flags above are environment variables read via the standard per-language pattern (`process.env.X` in Node.js, `os.getenv()` in Python). No application-level config singleton or feature-flag service. Each repo's `.env.example` (or CLAUDE.md, where `.env.example` doesn't apply) documents the local flags.
+
+**Production locations and approval gates** (per §4.2 rollout checklist):
+
+| Flag                                 | Production location                                  | Updater                                                       | Approval gate                                                    |
+| ------------------------------------ | ---------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `LML_USE_NEW_HOOK_*`                 | Railway environment variables for the LML service    | Jake via Railway dashboard                                    | 7 consecutive days of clean parity-check audit (E5 daily report) |
+| `SI_USE_NEW_HOOK_*`                  | EC2 systemd unit env file                            | Jake via SSH + edit env file + restart                        | LML for that cache cut over for 7 days                           |
+| `BS_USE_LIBRARY_IDENTITY`            | EC2 backend container env (`.env` mounted at deploy) | Jake via SSH + edit `.env` + `docker compose restart backend` | All 4 caches cut over (LML + SI both on new hook for all caches) |
+| `BS_USE_LIBRARY_IDENTITY_WRITES`     | (same)                                               | (same)                                                        | 30-day clean dual-run with `BS_USE_LIBRARY_IDENTITY=true`        |
+| `LML_MANUAL_OVERRIDE_CHECK_DISABLED` | Railway environment variables                        | Jake via Railway dashboard                                    | Used only for emergency rollback (no scheduled flip)             |
+
+**No automation flips production flags.** The audit job (E5) reports when a gate's preconditions are met (e.g., `LML_USE_NEW_HOOK_DISCOGS eligible: 7 days clean since 2026-05-15`); Jake then chooses to flip. This matches the project's no-auto-default principle (§4 step 0).
+
+**Sync mechanism (CI grep-assert, per repo):** every repo that documents one or more flags ships a CI check that asserts (a) every flag named in this canonical table appears in the consumer's local doc, and (b) every flag named in the consumer's local doc appears here. The Backend-side script is `scripts/check-cross-cache-identity-flags.sh`; it runs in the existing CI pipeline (`.github/workflows/test.yml`) as a `Cross-cache-identity flag-doc consistency` job. A second-tier check (every flag named in code matches the doc) ships with the E2-BS substrate PR, since the code references don't exist yet at this PR's open time.
+
+**Audit (post-launch).** A quarterly task tracked under `cross-cache-identity-followup` diffs the canonical Backend list against actual code references in each consumer repo.
