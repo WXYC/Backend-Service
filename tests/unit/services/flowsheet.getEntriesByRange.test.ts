@@ -1,20 +1,4 @@
-/**
- * Regression guard for `getEntriesByRange` in
- * `apps/backend/services/flowsheet.service.ts`.
- *
- * Background (#714):
- *
- * After #693 (`f71b3ef`) made `play_order` per-show, ordering the
- * result of an id-range fetch by `desc(flowsheet.play_order)` became
- * meaningless: the range filter is on `flowsheet.id`, which can span
- * multiple shows, so two rows in different shows are compared by
- * play_orders that are no longer globally comparable. The fix matches
- * the sibling `getEntriesByPage` function and orders by the globally
- * monotonic `flowsheet.id` instead.
- *
- * The test mocks the drizzle query chain and asserts the argument
- * passed to `.orderBy(...)` resolves to `desc(flowsheet.id)`.
- */
+// Regression guard for #714: post-#693 play_order is per-show, so an id-range fetch must order by flowsheet.id.
 
 import { jest } from '@jest/globals';
 import { db, flowsheet } from '@wxyc/database';
@@ -48,11 +32,6 @@ describe('flowsheet.service', () => {
 
       expect(orderByMock).toHaveBeenCalledTimes(1);
       const orderByArg = orderByMock.mock.calls[0][0];
-
-      // Under the global drizzle-orm mock (`tests/__mocks__/drizzle-orm.ts`),
-      // `desc(col)` returns `{ desc: col }`. With `flowsheet.id === 'id'`
-      // and `flowsheet.play_order === 'play_order'` from `database.mock.ts`,
-      // the two are easy to tell apart by deep equality.
       expect(orderByArg).toEqual(desc(flowsheet.id));
       expect(orderByArg).not.toEqual(desc(flowsheet.play_order));
     });

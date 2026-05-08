@@ -248,9 +248,7 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
 };
 
 export const getEntriesByRange = async (startId: number, endId: number): Promise<IFSEntry[]> => {
-  // Order by id, not play_order: post-#693 play_order is per-show, so
-  // an id-range fetch (which can span shows) needs a globally monotonic
-  // sort. Matches `getEntriesByPage`.
+  // play_order is per-show after #693; id is globally monotonic across shows.
   const raw = await db
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
