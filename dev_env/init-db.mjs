@@ -10,6 +10,9 @@
  * 4. Seeds the database ONLY if it's empty
  *
  * Safe to run multiple times (idempotent)
+ *
+ * Note: paths under dev_env/ are part of the db-init paths-filter that
+ * gates the migrate-dryrun CI job (see .github/workflows/test.yml).
  */
 
 import postgres from 'postgres';
