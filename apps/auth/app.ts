@@ -1,5 +1,7 @@
-// Auth service using Express
-import './instrument.js';
+// Auth service using Express.
+// `instrument.ts` is loaded via `node --import` (see package.json `start`
+// script), not statically imported here, so Sentry's auto-instrumentation
+// runs before `express` is loaded into the module graph.
 import * as Sentry from '@sentry/node';
 import { config } from 'dotenv';
 config();
