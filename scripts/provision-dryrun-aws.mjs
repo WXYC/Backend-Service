@@ -5,16 +5,18 @@
  *
  * The migrate-dryrun job in `.github/workflows/test.yml` restores the
  * latest prod RDS snapshot to an ephemeral sandbox, runs Drizzle's
- * migrate against it, then tears the sandbox down. It needs three
+ * migrate against it, then tears the sandbox down. It needs four
  * things provisioned out-of-band, all flagged in CLAUDE.md and called
  * out by WXYC/Backend-Service#726:
  *
  *   1. IAM policy granting the GHA user a narrow set of RDS actions.
  *   2. A security group allowing port 5432 ingress from GitHub Actions
  *      egress IPs to the ephemeral RDS sandbox.
- *   3. Five GitHub repo secrets the workflow reads.
+ *   3. A DB subnet group covering public subnets (so the sandbox lands
+ *      somewhere a GitHub-hosted runner can reach).
+ *   4. Five GitHub repo secrets the workflow reads.
  *
- * This script walks you through all three, idempotently. Every step
+ * This script walks you through all four, idempotently. Every step
  * checks whether the change already exists before applying it, and
  * persists progress to .dryrun-provisioning-state.json so an
  * interruption (Ctrl+C, network blip, AWS throttle, transient gh CLI
@@ -50,6 +52,7 @@ const AWS_ACCOUNT = '203767826763';
 const AWS_REGION = 'us-east-1';
 const POLICY_NAME = 'wxyc-gha-rds-dryrun';
 const SG_NAME = 'wxyc-dryrun-gha';
+const SUBNET_GROUP_NAME = 'wxyc-dryrun-public';
 const REPO = 'WXYC/Backend-Service';
 const STATE_FILE = '.dryrun-provisioning-state.json';
 const SECRET_NAMES = ['PROD_DB_ID', 'PROD_DB_NAME', 'PROD_DB_USERNAME', 'PROD_DB_PASSWORD', 'SG_DRYRUN_GHA'];
@@ -906,6 +909,142 @@ async function sgIngress(state, sgId) {
   saveState(state);
 }
 
+// ---- DB subnet group ------------------------------------------------------
+
+// Prod's subnet group is all-private. Restoring an ephemeral sandbox into it
+// silently strips public-IP assignment even with --publicly-accessible, so
+// GitHub-hosted runners can't reach the sandbox (CONNECT_TIMEOUT). The
+// dedicated public subnet group keeps prod's group untouched and gives the
+// sandbox a real public IP. RDS requires a DB subnet group to span ≥ 2 AZs,
+// so the discovery path picks one public subnet per AZ.
+async function subnetGroup(state, vpcId) {
+  heading(`DB Subnet Group: create or look up "${SUBNET_GROUP_NAME}"`);
+
+  if (state.phases.subnet_group?.completed) {
+    skip(`Subnet group already configured at ${state.phases.subnet_group.name}`);
+    return;
+  }
+
+  let existing = null;
+  try {
+    existing = awsJson([
+      'rds',
+      'describe-db-subnet-groups',
+      '--db-subnet-group-name',
+      SUBNET_GROUP_NAME,
+      '--output',
+      'json',
+    ]);
+  } catch (e) {
+    if (!/DBSubnetGroupNotFoundFault/.test(e.stderr || '')) throw e;
+  }
+
+  if (existing) {
+    const subnets = existing.DBSubnetGroups[0].Subnets.map((s) => s.SubnetIdentifier);
+    ok(`Found existing subnet group "${SUBNET_GROUP_NAME}" with ${subnets.length} subnet(s)`);
+    state.phases.subnet_group = {
+      name: SUBNET_GROUP_NAME,
+      subnet_ids: subnets,
+      completed: true,
+      completed_at: new Date().toISOString(),
+    };
+    saveState(state);
+    return;
+  }
+
+  info(`Discovering public subnets in VPC ${vpcId}`);
+  const subnetData = awsJson([
+    'ec2',
+    'describe-subnets',
+    '--filters',
+    `Name=vpc-id,Values=${vpcId}`,
+    '--output',
+    'json',
+  ]);
+  const routeTables = awsJson([
+    'ec2',
+    'describe-route-tables',
+    '--filters',
+    `Name=vpc-id,Values=${vpcId}`,
+    '--output',
+    'json',
+  ]);
+
+  // Map subnet → route table (explicit assoc), with main RT as the fallback
+  // for any subnet that has no explicit association.
+  const subnetToRouteTable = new Map();
+  let mainRouteTable = null;
+  for (const rt of routeTables.RouteTables) {
+    for (const assoc of rt.Associations || []) {
+      if (assoc.Main) mainRouteTable = rt;
+      if (assoc.SubnetId) subnetToRouteTable.set(assoc.SubnetId, rt);
+    }
+  }
+
+  const isPublic = (rt) =>
+    !!rt &&
+    (rt.Routes || []).some((r) => r.DestinationCidrBlock === '0.0.0.0/0' && (r.GatewayId || '').startsWith('igw-'));
+
+  const publicSubnets = subnetData.Subnets.filter((s) => {
+    const rt = subnetToRouteTable.get(s.SubnetId) || mainRouteTable;
+    return isPublic(rt);
+  });
+
+  // RDS requires the subnet group to span ≥ 2 AZs.
+  const oneSubnetPerAz = new Map();
+  for (const s of publicSubnets) {
+    if (!oneSubnetPerAz.has(s.AvailabilityZone)) oneSubnetPerAz.set(s.AvailabilityZone, s);
+  }
+
+  if (oneSubnetPerAz.size < 2) {
+    fail(
+      `Need ≥2 public subnets in different AZs to create a DB subnet group; found ${oneSubnetPerAz.size} (across ${publicSubnets.length} public subnet(s) total in VPC ${vpcId}).`
+    );
+    fail(
+      `Add public subnets manually (each with a 0.0.0.0/0 → igw-* route on its route table) and re-run the provisioner.`
+    );
+    throw new Error('insufficient public subnets across AZs');
+  }
+
+  const chosenSubnets = Array.from(oneSubnetPerAz.values()).map((s) => s.SubnetId);
+  ok(`Picked ${chosenSubnets.length} public subnet(s) across ${oneSubnetPerAz.size} AZ(s)`);
+
+  if (!FLAG.yes && !FLAG.dryRun) {
+    info(`Subnets: ${chosenSubnets.join(', ')}`);
+    if (!(await askYesNo('Create the subnet group with these subnets?'))) {
+      throw new Error('aborted by user');
+    }
+  }
+
+  aws(
+    [
+      'rds',
+      'create-db-subnet-group',
+      '--db-subnet-group-name',
+      SUBNET_GROUP_NAME,
+      '--db-subnet-group-description',
+      'Migrate-dryrun: public subnets so the ephemeral sandbox is reachable from GitHub-hosted runners',
+      '--subnet-ids',
+      ...chosenSubnets,
+      '--tags',
+      'Key=Purpose,Value=migrate-dryrun',
+      '--output',
+      'json',
+    ],
+    { mutating: true }
+  );
+
+  ok(`Created subnet group "${SUBNET_GROUP_NAME}"`);
+
+  state.phases.subnet_group = {
+    name: SUBNET_GROUP_NAME,
+    subnet_ids: chosenSubnets,
+    completed: true,
+    completed_at: new Date().toISOString(),
+  };
+  saveState(state);
+}
+
 // ---- Repo secrets --------------------------------------------------------
 
 async function listExistingSecrets() {
@@ -1028,6 +1167,9 @@ async function verifySummary(state) {
   console.log(`  VPC:             ${state.phases.sg_vpc?.vpc_id || '(skipped)'}`);
   console.log(`  Ingress CIDRs:   ${state.phases.sg_ingress?.cidrs_added?.length ?? 0}`);
   console.log(
+    `  Subnet group:    ${state.phases.subnet_group?.name || '(skipped)'} (${state.phases.subnet_group?.subnet_ids?.length ?? 0} subnet(s))`
+  );
+  console.log(
     `  Repo secrets:    ${Object.entries(state.phases.secrets_set?.set || {})
       .map(([k, v]) => `${k}=${v}`)
       .join(', ')}`
@@ -1050,6 +1192,9 @@ async function verifySummary(state) {
   console.log(`  - Revoke ingress: ${c.dim('aws ec2 revoke-security-group-ingress ...')}`);
   console.log(
     `  - Delete SG:      ${c.dim(`aws ec2 delete-security-group --group-id ${state.phases.sg_create?.sg_id || '<sg>'}`)}`
+  );
+  console.log(
+    `  - Delete subnet:  ${c.dim(`aws rds delete-db-subnet-group --db-subnet-group-name ${state.phases.subnet_group?.name || '<name>'}`)}`
   );
   console.log(
     `  - Detach policy:  ${c.dim(`aws iam detach-user-policy --user-name ${state.phases.iam_attach?.username || '<user>'} --policy-arn ${state.phases.iam_policy?.arn || '<arn>'}`)}`
@@ -1143,6 +1288,7 @@ async function main() {
     await sgFindVpc(state);
     const sgId = await sgCreate(state, state.phases.sg_vpc.vpc_id);
     await sgIngress(state, sgId);
+    await subnetGroup(state, state.phases.sg_vpc.vpc_id);
     await repoSecrets(state);
     await verifySummary(state);
   } catch (e) {
