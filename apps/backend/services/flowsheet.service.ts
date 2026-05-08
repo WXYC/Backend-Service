@@ -248,13 +248,16 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
 };
 
 export const getEntriesByRange = async (startId: number, endId: number): Promise<IFSEntry[]> => {
+  // Order by id, not play_order: post-#693 play_order is per-show, so
+  // an id-range fetch (which can span shows) needs a globally monotonic
+  // sort. Matches `getEntriesByPage`.
   const raw = await db
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
-    .orderBy(desc(flowsheet.play_order));
+    .orderBy(desc(flowsheet.id));
 
   return raw.map(transformToIFSEntry);
 };
