@@ -538,7 +538,10 @@ async function iamPolicy(state) {
   if (exists) {
     info(`Found existing policy at ${expectedArn}`);
     // Verify the policy document matches what we expect. If it drifted,
-    // that's an operator decision — show the diff and prompt.
+    // surface a Sid-level summary, prompt the operator, then upgrade by
+    // creating a new default policy version (pruning the oldest non-default
+    // first if the policy is at AWS's 5-version cap). --dry-run prints the
+    // planned upgrade without applying; --yes auto-confirms.
     const versions = awsJson(['iam', 'list-policy-versions', '--policy-arn', expectedArn, '--output', 'json']);
     const defaultVer = versions.Versions.find((v) => v.IsDefaultVersion);
     const live = awsJson([
@@ -554,11 +557,76 @@ async function iamPolicy(state) {
     const liveDoc = JSON.parse(decodeURIComponent(live.PolicyVersion.Document));
     if (JSON.stringify(liveDoc) !== JSON.stringify(IAM_POLICY_DOCUMENT)) {
       warn(`Existing policy document differs from this script's template.`);
-      warn(`Diff inspection is your call. Aborting to be safe — review and remove the existing`);
-      warn(`policy in IAM, or update the IAM_POLICY_DOCUMENT constant if drift is intentional.`);
-      throw new Error('IAM policy drift detected');
+
+      // Sid-level summary so the operator can spot the kind of drift at a
+      // glance before deciding whether to inspect the full diff.
+      const liveSids = (liveDoc.Statement || []).map((s) => s.Sid).filter(Boolean);
+      const desiredSids = IAM_POLICY_DOCUMENT.Statement.map((s) => s.Sid).filter(Boolean);
+      const addedSids = desiredSids.filter((s) => !liveSids.includes(s));
+      const removedSids = liveSids.filter((s) => !desiredSids.includes(s));
+      if (addedSids.length) info(`Statements to add: ${addedSids.join(', ')}`);
+      if (removedSids.length) info(`Statements to remove: ${removedSids.join(', ')}`);
+      if (!addedSids.length && !removedSids.length) {
+        info(`Same statement Sids; one or more statement bodies differ`);
+      }
+
+      if (FLAG.dryRun) {
+        info(`[dry-run] would create-policy-version with the desired document and --set-as-default`);
+        if (versions.Versions.length >= 5) {
+          info(`[dry-run] would first delete-policy-version on the oldest non-default (policy at 5-version cap)`);
+        }
+      } else {
+        if (!FLAG.yes) {
+          console.log(c.dim('Live policy document:'));
+          console.log(c.dim(JSON.stringify(liveDoc, null, 2)));
+          console.log(c.dim('Desired policy document:'));
+          console.log(c.dim(JSON.stringify(IAM_POLICY_DOCUMENT, null, 2)));
+          if (!(await askYesNo('Upgrade by creating a new default policy version?'))) {
+            throw new Error('IAM policy drift; operator declined upgrade');
+          }
+        }
+
+        // AWS caps managed policies at 5 versions. If we're at the cap,
+        // prune the oldest non-default version before creating a new one.
+        if (versions.Versions.length >= 5) {
+          const nonDefault = versions.Versions
+            .filter((v) => !v.IsDefaultVersion)
+            .sort((a, b) => new Date(a.CreateDate) - new Date(b.CreateDate));
+          if (nonDefault.length === 0) {
+            throw new Error(
+              'IAM policy at 5-version cap with no non-default versions to prune; investigate manually'
+            );
+          }
+          const victim = nonDefault[0];
+          info(
+            `Policy at 5-version cap; deleting oldest non-default version ${victim.VersionId} (created ${victim.CreateDate})`
+          );
+          aws(
+            ['iam', 'delete-policy-version', '--policy-arn', expectedArn, '--version-id', victim.VersionId],
+            { mutating: true }
+          );
+        }
+
+        info(`Creating new policy version and setting as default`);
+        aws(
+          [
+            'iam',
+            'create-policy-version',
+            '--policy-arn',
+            expectedArn,
+            '--policy-document',
+            JSON.stringify(IAM_POLICY_DOCUMENT),
+            '--set-as-default',
+            '--output',
+            'json',
+          ],
+          { mutating: true }
+        );
+        ok(`Policy upgraded to new default version`);
+      }
+    } else {
+      ok(`Policy document matches template`);
     }
-    ok(`Policy document matches template`);
   } else {
     info(`Creating policy ${POLICY_NAME}`);
     if (!FLAG.yes && !FLAG.dryRun) {
