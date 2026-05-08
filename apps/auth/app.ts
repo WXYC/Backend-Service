@@ -259,13 +259,16 @@ app.get('/healthcheck', async (req, res) => {
   const authServiceUrl = `http://localhost:${port}`; // Use the port the server is listening on
   try {
     // Make an internal HTTP request to the better-auth /ok endpoint.
-    // X-Forwarded-For is set to 127.0.0.1 because the loopback fetch has no
-    // real client. Without it, better-auth's getIp returns null and latches
-    // a one-shot "Rate limiting skipped: could not determine client IP"
+    // X-Real-IP is set to 127.0.0.1 because the loopback fetch has no real
+    // client. Without it, better-auth's getIp returns null and latches a
+    // one-shot "Rate limiting skipped: could not determine client IP"
     // warning, which silently disables its internal rate limiter for the
-    // rest of the process lifetime. See WXYC/Backend-Service#765.
+    // rest of the process lifetime. We pass X-Real-IP rather than XFF
+    // because `auth.definition.ts` configures `ipAddressHeaders: ['x-real-ip']`
+    // to ignore client-controlled XFF spoofing. See #765 (latch fix) and
+    // #774 (XFF -> X-Real-IP swap).
     const response = await fetch(`${authServiceUrl}/auth/ok`, {
-      headers: { 'X-Forwarded-For': '127.0.0.1' },
+      headers: { 'X-Real-IP': '127.0.0.1' },
     });
 
     // Forward the status and body from the /auth/ok response
