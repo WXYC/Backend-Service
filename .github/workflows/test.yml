@@ -461,11 +461,15 @@ jobs:
 
       - name: Restore latest prod snapshot to ephemeral sandbox
         id: restore
-        # Publicly accessible because GitHub-hosted runners have no VPC
-        # connectivity to the prod VPC. Ingress is gated by SG_DRYRUN_GHA;
-        # the JIT-authorize step above adds this runner's /32 just before
-        # the connection. The sandbox and the SG rule are both torn down
-        # in the always-run steps below.
+        # The sandbox lands in the dedicated `wxyc-dryrun-public` subnet
+        # group rather than inheriting prod's. Prod's subnet group is all
+        # private — `--publicly-accessible` is silently ineffective there
+        # (no IGW route, no public IP). The dedicated group covers public
+        # subnets so the sandbox gets a real public IP and the GHA runner
+        # can reach it. Ingress is gated by SG_DRYRUN_GHA; the JIT-authorize
+        # step above adds this runner's /32 just before the connection.
+        # The sandbox, the SG rule, and the subnet-group reference are
+        # all torn down in the always-run steps below.
         run: |
           set -euo pipefail
           SNAPSHOT_ID=$(aws rds describe-db-snapshots \
@@ -480,6 +484,7 @@ jobs:
             --db-snapshot-identifier "$SNAPSHOT_ID" \
             --db-instance-class db.t4g.micro \
             --publicly-accessible \
+            --db-subnet-group-name wxyc-dryrun-public \
             --vpc-security-group-ids "${{ secrets.SG_DRYRUN_GHA }}"
           aws rds wait db-instance-available --db-instance-identifier "$SANDBOX_ID"
           ENDPOINT=$(aws rds describe-db-instances \
