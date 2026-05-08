@@ -48,6 +48,11 @@ try {
   await migrate(db, {
     migrationsFolder: join(__dirname, '../shared/database/src/migrations'),
   });
+  // TEMP #757-validation: force failure to exercise the always() teardown.
+  // Will be reverted in the next commit on this branch.
+  if (process.env) {
+    throw new Error('test JIT teardown — synthetic failure for #757 validation');
+  }
   console.log('dryrun-migrate: ok');
 } catch (error) {
   process.stderr.write('\n');
