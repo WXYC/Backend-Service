@@ -19,13 +19,15 @@
  *     orchestrator catches and counts as `lml_error`, leaving
  *     `metadata_attempt_at` NULL so the row stays in the retry pool —
  *     same shape #639 codified for the runtime path.
- *
- * Note: this fetcher does NOT go through `apps/backend/services/lml/lml.client.ts`,
- * so the Sentry-span wrap from #646 doesn't apply. Trace propagation
- * relies on @sentry/node v10+ undici auto-instrumentation; verified in the
- * pilot run for #640. If propagation breaks, mirror #646's wrap inside
- * this client (see #638's implementation notes).
+ *   - Wraps the fetch in `Sentry.startSpan({name: 'lml.lookup', op: 'http.client'})`
+ *     so undici auto-instrumentation has a parent transaction context to
+ *     attach http.client spans to (#715). Without the wrap the job runs
+ *     outside a transaction and emits no spans, which prevents LML#229's
+ *     cache_stats projection from joining the trace. Mirrors #646's wrap
+ *     in `apps/backend/services/lml/lml.client.ts`.
  */
+
+import * as Sentry from '@sentry/node';
 
 import type { LmlLookupResponse } from './lml-types.js';
 
@@ -40,47 +42,76 @@ const baseUrl = (): string => {
 };
 
 export const lookupMetadata = async (artist: string, album?: string, track?: string): Promise<LmlLookupResponse> => {
-  // LML's /lookup contract requires `raw_message` even when artist/album/
-  // track are already structured. Synthesize "<artist> - <album> - <track>"
-  // — matches the shape the parser expects in LML's e2e fixtures.
-  const parts = [artist, album, track].filter((p): p is string => Boolean(p));
-  const rawMessage = parts.join(' - ');
+  // Wrap the call in a Sentry span so undici auto-instrumentation has a
+  // parent transaction to attach http.client spans to, and LML's
+  // cache_stats lands as attributes on the same trace (LML#229). Same
+  // contract as the backend client's #646 wrap.
+  return Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
+    // LML's /lookup contract requires `raw_message` even when artist/album/
+    // track are already structured. Synthesize "<artist> - <album> - <track>"
+    // — matches the shape the parser expects in LML's e2e fixtures.
+    const parts = [artist, album, track].filter((p): p is string => Boolean(p));
+    const rawMessage = parts.join(' - ');
 
-  const body: Record<string, string> = { artist, raw_message: rawMessage };
-  if (album) body.album = album;
-  if (track) body.track = track;
+    const body: Record<string, string> = { artist, raw_message: rawMessage };
+    if (album) body.album = album;
+    if (track) body.track = track;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-  // LML enforces auth in production (LML_REQUIRE_AUTH=true). Send the
-  // bearer header when LML_API_KEY is set; the backend's lml.client.ts
-  // does the same. Sending it before the flag flips is harmless.
-  const apiKey = process.env.LML_API_KEY;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) {
-    headers.Authorization = `Bearer ${apiKey}`;
-  }
-
-  try {
-    const response = await fetch(`${baseUrl()}/api/v1/lookup`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`LML responded ${response.status} ${response.statusText}`);
+    // LML enforces auth in production (LML_REQUIRE_AUTH=true). Send the
+    // bearer header when LML_API_KEY is set; the backend's lml.client.ts
+    // does the same. Sending it before the flag flips is harmless.
+    const apiKey = process.env.LML_API_KEY;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
     }
 
-    return (await response.json()) as LmlLookupResponse;
-  } catch (error) {
-    if ((error as Error).name === 'AbortError') {
-      throw new Error('LML request timed out', { cause: error });
+    try {
+      const response = await fetch(`${baseUrl()}/api/v1/lookup`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`LML responded ${response.status} ${response.statusText}`);
+      }
+
+      const parsed = (await response.json()) as LmlLookupResponse;
+
+      // cache_stats is freeform on the LML side (additionalProperties: true).
+      // Defensively narrow to a real plain object — Object.entries on
+      // an array would project junk attributes like lml.cache.0=...
+      const stats = (parsed as { cache_stats?: unknown }).cache_stats;
+      if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
+        const attrs: Record<string, number> = {};
+        for (const [key, value] of Object.entries(stats)) {
+          if (typeof value === 'number' && Number.isFinite(value)) {
+            attrs[`lml.cache.${key}`] = value;
+          }
+        }
+        if (Object.keys(attrs).length > 0) {
+          // Observability must never break the request path.
+          try {
+            span.setAttributes(attrs);
+          } catch (err) {
+            console.warn('lml-fetch: failed to project cache_stats onto span', err);
+          }
+        }
+      }
+
+      return parsed;
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        throw new Error('LML request timed out', { cause: error });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
+  });
 };
