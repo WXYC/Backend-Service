@@ -95,11 +95,11 @@ export const lookupMetadata = async (artist: string, album?: string, track?: str
           }
         }
         if (Object.keys(attrs).length > 0) {
-          // Observability must never break the request path.
+          // Observability must never break the lookup contract; swallow.
           try {
             span.setAttributes(attrs);
-          } catch (err) {
-            console.warn('lml-fetch: failed to project cache_stats onto span', err);
+          } catch {
+            /* swallowed */
           }
         }
       }
