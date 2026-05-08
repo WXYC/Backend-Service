@@ -18,6 +18,14 @@ const port = process.env.AUTH_PORT || '8082';
 
 const app = express();
 
+// Trust the reverse proxy (nginx / ALB) so req.ip resolves to the real
+// client IP from X-Forwarded-For. Without this, express-rate-limit warns
+// `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` and falls back to the direct socket
+// IP — which is the proxy itself, identical for every client. The /sign-in
+// rate limit (10 / 15 min) then becomes a single global bucket shared by
+// every caller. Mirrors the same line in apps/backend/app.ts.
+app.set('trust proxy', true);
+
 // Parse JSON bodies first (needed for auth endpoints)
 app.use(express.json());
 
