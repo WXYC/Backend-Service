@@ -115,6 +115,18 @@ The artist identity ETL (`jobs/artist-identity-etl/`) populates the six reconcil
 
 - `DATABASE_URL_DISCOGS` — PostgreSQL URL for LML's discogs-cache database, where `entity.identity` lives. Required for the artist-identity ETL.
 
+### One-shot backfill jobs
+
+One-shot backfill jobs under `jobs/*-backfill/` run via `Manual Build & Deploy` and `docker run`. They share a small set of operator knobs:
+
+- `BATCH_SIZE` — Rows fetched per SELECT cursor batch (default `500`). Used by `library-identity-backfill`. Other backfills accept the variant `BACKFILL_BATCH_SIZE` (`flowsheet-metadata-backfill`, `flowsheet-dj-name-backfill`); the existing variant is preserved in those jobs for log-tail compatibility.
+- `THROTTLE_MS` — Inter-row sleep, milliseconds (default `100`). Used by `library-identity-backfill`. The variant `BACKFILL_THROTTLE_MS` is what `flowsheet-metadata-backfill` accepts; same purpose.
+- `PARTITION_INDEX`, `PARTITION_COUNT` — N-container parallel deploy. Each partition processes rows where `id % PARTITION_COUNT = PARTITION_INDEX`. Default is `0/1` (single container, no-op). Used by `library-identity-backfill`, `library-canonical-entity-backfill`, `flowsheet-metadata-backfill`.
+- `DRY_RUN` — Locked truthy values: `true`, `1`, `TRUE`. When set, `library-identity-backfill` runs all SELECTs but skips both per-source INSERTs and main-row UPSERTs; emits a single JSON object on stdout with the locked schema documented in `jobs/library-identity-backfill/README.md`. Other backfills do not currently honor this flag.
+- `WXYC_SCHEMA_NAME` — PostgreSQL schema name (default `wxyc_schema`). Override only for parallel Jest workers / integration test harnesses; production sticks with the default.
+
+Job-specific backfill knobs are documented in each job's README.
+
 ## Cross-cache-identity feature flags (canonical inventory)
 
 This is the **single source of truth** for the cross-cache-identity project's feature flags (plan §4.2). Consumer repos cross-reference this section in their own `.env.example` / CLAUDE.md. When a flag is renamed or its default changes, both the canonical entry here AND the consumer repo's local doc must update in the same PR.

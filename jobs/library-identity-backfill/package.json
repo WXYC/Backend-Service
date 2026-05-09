@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/library-identity-backfill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot backfill: populate library_identity + library_identity_source from existing identity artifacts. Sub-PR 2.0 covers S1 (Backend canonical_entity_id).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_library_identity_backfill:ci -f ../../Dockerfile.library-identity-backfill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.52.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
