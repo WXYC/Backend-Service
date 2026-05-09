@@ -589,22 +589,19 @@ async function iamPolicy(state) {
         // AWS caps managed policies at 5 versions. If we're at the cap,
         // prune the oldest non-default version before creating a new one.
         if (versions.Versions.length >= 5) {
-          const nonDefault = versions.Versions
-            .filter((v) => !v.IsDefaultVersion)
-            .sort((a, b) => new Date(a.CreateDate) - new Date(b.CreateDate));
+          const nonDefault = versions.Versions.filter((v) => !v.IsDefaultVersion).sort(
+            (a, b) => new Date(a.CreateDate) - new Date(b.CreateDate)
+          );
           if (nonDefault.length === 0) {
-            throw new Error(
-              'IAM policy at 5-version cap with no non-default versions to prune; investigate manually'
-            );
+            throw new Error('IAM policy at 5-version cap with no non-default versions to prune; investigate manually');
           }
           const victim = nonDefault[0];
           info(
             `Policy at 5-version cap; deleting oldest non-default version ${victim.VersionId} (created ${victim.CreateDate})`
           );
-          aws(
-            ['iam', 'delete-policy-version', '--policy-arn', expectedArn, '--version-id', victim.VersionId],
-            { mutating: true }
-          );
+          aws(['iam', 'delete-policy-version', '--policy-arn', expectedArn, '--version-id', victim.VersionId], {
+            mutating: true,
+          });
         }
 
         info(`Creating new policy version and setting as default`);
