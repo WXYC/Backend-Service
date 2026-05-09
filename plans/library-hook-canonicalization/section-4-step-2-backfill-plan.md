@@ -81,19 +81,60 @@ The `skipped` breakdown keys are stable strings matching the orchestrator's filt
 
 **Estimated LOC:** ~600 (job + tests).
 
-### Sub-PR 2.1 — S2 (LML `entity.identity`)
+### Sub-PR 2.1 — S2 (LML `entity.identity` via Backend's mirrored `artists` columns)
 
-**Goal:** add the LML/discogs-cache PG leg as a second source. Triggers cross-source agreement detection (some library rows now have BOTH a discogs_release from S1 AND e.g. a discogs_artist + mb_artist from S2 → agreement → main row method becomes `cross_source_agreement` 0.95).
+**Goal:** add the LML-derived artist-level identity as a second source. Triggers within-row cross-source agreement detection — when an artist has ≥2 populated external IDs (discogs_artist + wikidata + mb_artist, etc.), those sources are corroborating per LML's matcher, so the main-row recompute applies §3.4.1.1 Rule 2 → `cross_source_agreement 0.95`.
 
-**Reader:** new module `jobs/library-identity-backfill/sources/lml-entity-identity.ts`. Connects to `DATABASE_URL_DISCOGS` (read-only). Bulk-reads `entity.identity` joined to a Backend-side mapping (`library.artist_id → artists.artist_name`). Each `entity.identity` row produces up to 6 per-source rows in `library_identity_source` (one per non-NULL external ID column).
+**Reader (single-DB, post-investigation):** Backend's `library × artists` JOIN supplies all six identity columns directly — `artists.discogs_artist_id`, `musicbrainz_artist_id`, `wikidata_qid`, `spotify_artist_id`, `apple_music_artist_id`, `bandcamp_id` are already populated by `jobs/artist-identity-etl/` (null-fill from LML's `entity.identity`). No cross-DB read is needed for the IDs themselves; the existing artist-identity ETL is the authority.
 
-**Granularity mismatch:** S2 is artist-level; the new schema is library-row-level (one row per pressing). Resolution: a library row with `artist_id=N` and any release_id receives the same six artist-level external IDs as every other library row with the same artist. Document this fanout in the resolver — it's correct because identity (Spotify ID, MB UUID) is artist-level, not release-level.
+**Provenance index (cross-DB, single bulk read at job start):** for honest per-row `(method, confidence)`, the reader bulk-loads LML's `entity.identity ⨝ entity.reconciliation_log` once at job start:
 
-**Confidence (locked, conservative interim):** `entity.identity` rows are populated by LML's `/api/v1/lookup` historical writes, which used various methods (exact_match, name_variation, member_group, alias_match). Without per-row provenance in `entity.identity`, we **cannot** assign `exact_match 1.00` honestly. Locked interim: `method='alias_match', confidence=0.85` for all six external-ID fields, tagged `notes='backfill:S2,trust=lml-aggregate'`. This places S2 above the 0.70 audit threshold but below `name_variation`'s 0.90+ floor — the right "trust the aggregate, do not promote to exact" tier. **Upside path:** once LML adds method+confidence columns to `entity.identity` (separate LML ticket; tracked at LML#TBD), a follow-up sub-PR re-derives S2 confidences per-row and supersedes the blanket 0.85 via §3.2.2 Rule 4 (existing < new → supersede). Until then, S2 contributes to cross-source agreement (which can boost main-row confidence to 0.95) but cannot itself drive a row above 0.85.
+```sql
+SELECT DISTINCT ON (l.identity_id, l.source)
+       i.library_name, l.source, l.method, l.confidence
+FROM entity.identity i
+JOIN entity.reconciliation_log l ON l.identity_id = i.id
+ORDER BY l.identity_id, l.source, l.created_at DESC
+```
 
-**Cross-source agreement:** the writer's main-row recomputation runs after both S1 and S2 are written; agreement detection (per §3.2.5 `cross_ref_present()`) fires when discogs_release_id (from S1) + discogs_artist_id (from S2) cross-reference, OR when discogs_artist_id + mb_artist_mbid + wikidata_qid cross-reference per Wikidata's `discogs_mapping`. The §3.2.5 `cross_ref_present()` function is on the implementation side of E2 — needs to be written here.
+This gives the latest reconciliation attempt per `(identity_id, source)` tuple — the actual method LML used (`exact_match`, `name_variation`, `member_group`, `alias_match`) and its confidence. Build an in-memory `Map<(library_name, source), {method, confidence}>`. Memory budget: ~24K identity rows × ≤6 sources × ~100 bytes = ~15 MB. Trivial.
 
-**Estimated LOC:** ~400 (reader + cross-ref function + tests).
+The LML reconciliation_log was discovered to already carry this provenance during 2.1 design prep; it superseded the original "locked at `alias_match 0.85`" interim. WXYC/library-metadata-lookup#270 (which proposed adding method+confidence to `entity.identity`) was closed because the data is already in `reconciliation_log`.
+
+**Granularity fanout:** a library row with `artist_id=N` and any release_id receives the same six artist-level external IDs as every other library row with the same artist. Document this fanout in the resolver — it's correct because identity (Spotify ID, MB UUID) is artist-level, not release-level. The per-source rows tagged with the artist-level source names (`discogs_artist`, `mb_artist`, etc.) — distinct from S1's `discogs_release` — so the writer's `ON CONFLICT (library_id, source)` PK never collides.
+
+**Confidence assignment (real, per-row):**
+
+- For each `(library_name, source)` pair found in the provenance index → use the real `(method, confidence)` from the latest reconciliation_log row.
+- Narrow fallback: when the provenance index has no entry for that pair (rare hand-edit case where artists.{column} is non-null but no reconciliation_log entry exists) → `method='alias_match', confidence=0.85`. Tag with `notes='backfill:S2,fallback=no-log'` so post-run audit can detect drift.
+- Per-source rows tagged `notes='backfill:S2'` for the normal case.
+
+**Within-row cross-source agreement:** when an `entity.identity` row has ≥2 non-null external IDs, those sources were resolved together by LML's matcher and refer to the same artist. The resolver returns `agreementSources = [list of populated sources]` to the writer; the §3.4.1.1 recompute applies Rule 2 → main-row method becomes `cross_source_agreement` with `confidence = MAX(0.95, MIN-of-corroborating-confidences)`.
+
+**S1 ↔ S2 cross-source agreement (deferred to follow-up):** S1 is release-level (`discogs_release_id`), S2 is artist-level (`discogs_artist_id`). They corroborate only via release → artist resolution, which requires either (a) Backend's existing `artists.discogs_artist_id` columns (the simpler path; works when the release's master/release was resolved by the same LML matcher that also resolved the artist), or (b) Wikidata's `discogs_mapping` table (the multi-cache pre-index from plan §5.2). Both are out of scope for sub-PR 2.1; documented as a follow-up. Within-row agreement is enough to land 2.1's gate-improving coverage.
+
+**Idempotency:** WHERE filter excludes `(library_id, source)` pairs already in `library_identity_source`. Distinct from 2.0's `library_id`-level filter — 2.1 reads every library row whose artist has any non-null identity column, even if 2.0 already wrote a `discogs_release` row for that library_id. The writer's `ON CONFLICT (library_id, source) DO UPDATE` plus the WHERE filter make rerun safe.
+
+**Job dispatch:** new env var `BACKFILL_LEG=S1|S2`, default `S1`. `job.ts` switches between `runBackfillS1` (existing) and `runBackfillS2` (new) at the top of `main()`. Future legs (2.2a, 2.2b, 2.3) extend this enum.
+
+**DRY_RUN report (locked schema for S2):**
+
+```json
+{
+  "source": "S2",
+  "scanned": 12345,
+  "would_write_sources": 24680,
+  "would_upsert_mains": 12100,
+  "skipped": {
+    "no_identity_columns": 200,
+    "all_sources_already_in_library_identity_source": 45
+  }
+}
+```
+
+`would_write_sources` exceeds `scanned` because each library row fans out to up to 6 per-source rows; `would_upsert_mains` is bounded by distinct library_ids touched.
+
+**Estimated LOC:** ~400 (provenance index reader + S2 resolver + orchestrator dispatch + tests).
 
 ### Sub-PR 2.2 — S3+S4 (discogs-cache `flowsheet_match` + `fuzzy_resolved`)
 
