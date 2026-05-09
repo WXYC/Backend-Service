@@ -90,8 +90,12 @@ export const resolvePartitionFilter = (
   if (count === 1) {
     return { sqlFragment: null, description: 'partition=none' };
   }
+  // Qualify the column reference against `library` so a future loadBatch
+  // change that introduces a JOIN doesn't trigger PG's "column reference
+  // ambiguous". Mirrors the fix in `library-canonical-entity-backfill/
+  // orchestrate.ts:71`.
   return {
-    sqlFragment: sql`AND ("id" % ${count}) = ${index}`,
+    sqlFragment: sql`AND (${LIBRARY_TABLE}."id" % ${count}) = ${index}`,
     description: `partition=${index}/${count}`,
   };
 };
@@ -142,17 +146,29 @@ export type RunResult = {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Per-batch row shape. In DRY_RUN mode the SELECT additionally surfaces an
+ * `already_in_library_identity` flag so the orchestrator can bin rows that
+ * would have been excluded by the real-run NOT EXISTS filter. In real-run
+ * mode the flag is always false (those rows are filtered out at the SQL
+ * layer and never reach this struct).
+ */
+type BatchRow = LibraryRow & { already_in_library_identity: boolean };
+
 const loadBatch = async (
   afterId: number,
   batchSize: number,
   partitionFilter: SQL | null,
   dryRun: boolean
-): Promise<LibraryRow[]> => {
+): Promise<BatchRow[]> => {
   const partitionClause = partitionFilter ?? sql``;
   // In real-run mode the WHERE filter does the heavy lifting (excludes rows
   // already in library_identity, NULLs, and non-discogs namespaces). DRY_RUN
-  // intentionally relaxes the second/third filters so the report can break
-  // out the skip categories.
+  // relaxes the second/third filters so the report can break out skip
+  // categories, and surfaces an `already_in_library_identity` flag (via
+  // EXISTS subselect) so the rerun-overlap count is honest. Without the
+  // flag, `would_write_sources` over-counts on any rerun where prior runs
+  // already wrote some rows.
   const filterClause = dryRun
     ? sql``
     : sql`AND "canonical_entity_id" IS NOT NULL
@@ -160,18 +176,25 @@ const loadBatch = async (
            AND NOT EXISTS (
              SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li WHERE li."library_id" = "id"
            )`;
+  const presenceFlag = dryRun
+    ? sql`,
+      EXISTS (
+        SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li WHERE li."library_id" = "id"
+      ) AS "already_in_library_identity"`
+    : sql`,
+      false AS "already_in_library_identity"`;
   const rows = (await db.execute(sql`
     SELECT
       "id",
       "canonical_entity_id",
-      "canonical_entity_resolved_at"
+      "canonical_entity_resolved_at"${presenceFlag}
     FROM ${LIBRARY_TABLE}
     WHERE "id" > ${afterId}
       ${filterClause}
       ${partitionClause}
     ORDER BY "id" ASC
     LIMIT ${batchSize}
-  `)) as unknown as LibraryRow[];
+  `)) as unknown as BatchRow[];
   return rows ?? [];
 };
 
@@ -229,11 +252,17 @@ export const runBackfill = async (opts: {
         totals.skipped_non_discogs_namespace += 1;
         continue;
       }
+      // DRY_RUN-only bucket: rows that have a discogs:<id> canonical but are
+      // already represented in library_identity. Real-run path filters these
+      // out at the SQL layer, so the flag is always false and the bucket
+      // stays at 0; in DRY_RUN the SELECT relaxes the filter and surfaces
+      // them so the report's would_write_sources is honest on rerun.
+      if (row.already_in_library_identity) {
+        totals.skipped_already_in_library_identity += 1;
+        continue;
+      }
 
-      if (dryRun) {
-        // No write side-effect; counters above are the report.
-        totals.wrote += 0;
-      } else {
+      if (!dryRun) {
         await opts.writeIdentity(row.id, outcome.sourceRows, []);
         totals.wrote += 1;
       }

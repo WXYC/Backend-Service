@@ -1,6 +1,9 @@
 {
   "testEnvironment": "node",
   "testMatch": ["**/tests/integration/?(*.)+(spec).js"],
+  "transform": {
+    "^.+\\.ts$": ["ts-jest", { "tsconfig": "<rootDir>/tests/tsconfig.json" }]
+  },
   "globalSetup": "./tests/setup/globalSetup.js",
   "setupFilesAfterEnv": ["./tests/setup/integration.setup.js"],
   "reporters": [
