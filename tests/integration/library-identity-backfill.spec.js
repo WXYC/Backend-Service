@@ -1,21 +1,41 @@
 const postgres = require('postgres');
 
 /**
- * Integration tests for library-identity-backfill (sub-PR 2.0). Two suites:
+ * Integration test for the SQL contract used by library-identity-backfill
+ * (sub-PR 2.0).
  *
- *   1. SQL contract suite — issues the exact UPSERT statements writer.ts
- *      uses against a real Postgres, validating substrate column shapes,
- *      ON CONFLICT semantics, and CHECK-constraint rollback. This catches
- *      schema drift between `shared/database/src/schema.ts` and the writer
- *      independently of the TS module path.
- *   2. TS modules suite — requires `writer.ts` and `orchestrate.ts` directly
- *      via the ts-jest transform (added to `jest.config.json` for the
- *      integration runner) and exercises the actual writer against an
- *      isolated test schema. Covers writer atomicity end-to-end, DRY_RUN
- *      no-write guarantee, and PARTITION_INDEX/COUNT disjointness.
+ * Issues the exact UPSERT statements writer.ts uses against a real Postgres,
+ * validating substrate column shapes, ON CONFLICT semantics, and
+ * CHECK-constraint rollback. Catches migration drift between
+ * `shared/database/src/schema.ts` and the writer at PR-review time.
  *
- * Both suites are scoped to isolated `wxyc_test_lib_id_*` schemas, dropped
- * in afterAll regardless of pass/fail.
+ *   - The substrate columns expected by writer.ts exist with the right
+ *     types (verified by issuing the exact UPSERT statements the writer
+ *     uses, then SELECTing back).
+ *   - The `ON CONFLICT (library_id, source) DO UPDATE` per-source UPSERT
+ *     and the `ON CONFLICT (library_id) DO UPDATE` main-row UPSERT are
+ *     idempotent.
+ *   - The CHECK constraints on `confidence` actually trip under bad input
+ *     and the surrounding transaction rolls back atomically.
+ *
+ * Coverage gap (deliberate, follow-up tracked):
+ *   We don't import `writer.ts` / `orchestrate.ts` directly from this
+ *   integration runner. The integration runner uses babel-jest without TS
+ *   support, and adding a ts-jest transform crashes drizzle-orm's
+ *   `extractTablesRelationalConfig` on `gin_trgm_ops` indexes (drizzle's
+ *   `JSON.parse(JSON.stringify(it.defaultConfig))` clone fails with
+ *   `defaultConfig === undefined` under that compilation path). The
+ *   writer's TS-level behavior (transaction shape, `ON CONFLICT` clauses,
+ *   recompute integration) is unit-tested against the @wxyc/database mock
+ *   in `tests/unit/jobs/library-identity-backfill/`. Restoring an
+ *   end-to-end TS-modules integration suite (DRY_RUN no-write guarantee
+ *   via the actual orchestrator, partition disjointness via the actual
+ *   resolvePartitionFilter SQL) is tracked at WXYC/Backend-Service#791 —
+ *   likely requires building writer/orchestrate as separate tsup entries
+ *   and requiring the dist/ output instead of source.
+ *
+ * Scoped to an isolated `wxyc_test_lib_id_<random>` schema; dropped in
+ * afterAll regardless of pass/fail.
  */
 describe('library-identity-backfill SQL contract (real DB)', () => {
   let sql;
@@ -261,267 +281,5 @@ describe('library-identity-backfill SQL contract (real DB)', () => {
       `SELECT source FROM "${schemaName}".library_identity_source WHERE library_id = 400 ORDER BY source`
     );
     expect(rows.map((r) => r.source)).toEqual(['discogs_release', 'wikidata']);
-  });
-});
-
-/**
- * Integration tests against the actual TS writer + orchestrator modules.
- *
- * Loaded via ts-jest (added to `jest.config.json` for the integration runner)
- * so the .spec.js can `require()` .ts directly. Each test sets
- * `WXYC_SCHEMA_NAME` and uses `jest.isolateModules()` to ensure the writer's
- * import-time `const SCHEMA = ...` capture lands on the isolated test schema.
- *
- * Covers the §4 acceptance criteria the SQL-only tests above do not:
- *   - writer.ts + recompute.ts atomicity end-to-end (§3.2.2.2).
- *   - DRY_RUN orchestrator path leaves library_identity* untouched (§4).
- *   - Partition disjointness across PARTITION_INDEX=0/1 (§4 acceptance).
- */
-describe('library-identity-backfill TS modules (real DB)', () => {
-  let sql;
-  let schemaName;
-  let originalSchemaEnv;
-
-  beforeAll(async () => {
-    schemaName = `wxyc_test_lib_id_ts_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`;
-    originalSchemaEnv = process.env.WXYC_SCHEMA_NAME;
-    process.env.WXYC_SCHEMA_NAME = schemaName;
-
-    sql = postgres({
-      host: process.env.DB_HOST || 'localhost',
-      port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
-      database: process.env.DB_NAME || 'wxyc_db',
-      user: process.env.DB_USERNAME || 'test-user',
-      password: process.env.DB_PASSWORD || 'test-pw',
-      onnotice: () => {},
-    });
-
-    await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
-    await sql.unsafe(`
-      CREATE TABLE "${schemaName}".library (
-        id serial PRIMARY KEY,
-        canonical_entity_id text,
-        canonical_entity_resolved_at timestamptz
-      )
-    `);
-    await sql.unsafe(`
-      CREATE TABLE "${schemaName}".library_identity (
-        library_id integer PRIMARY KEY,
-        discogs_master_id integer,
-        discogs_release_id integer,
-        musicbrainz_release_group_mbid uuid,
-        musicbrainz_release_mbid uuid,
-        musicbrainz_recording_mbid uuid,
-        wikidata_qid text,
-        spotify_id text,
-        apple_music_id text,
-        last_verified_at timestamptz NOT NULL,
-        method text NOT NULL,
-        confidence real NOT NULL CHECK (confidence BETWEEN 0 AND 1),
-        agreement_sources text,
-        notes text
-      )
-    `);
-    await sql.unsafe(`
-      CREATE TABLE "${schemaName}".library_identity_source (
-        library_id integer NOT NULL,
-        source text NOT NULL,
-        external_id text NOT NULL,
-        method text NOT NULL,
-        confidence real NOT NULL CHECK (confidence BETWEEN 0 AND 1),
-        last_verified_at timestamptz NOT NULL,
-        boost_sources text,
-        notes text,
-        PRIMARY KEY (library_id, source)
-      )
-    `);
-  });
-
-  afterAll(async () => {
-    if (sql) {
-      try {
-        await sql.unsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
-      } finally {
-        await sql.end();
-      }
-    }
-    if (originalSchemaEnv === undefined) {
-      delete process.env.WXYC_SCHEMA_NAME;
-    } else {
-      process.env.WXYC_SCHEMA_NAME = originalSchemaEnv;
-    }
-  });
-
-  beforeEach(async () => {
-    await sql.unsafe(
-      `TRUNCATE "${schemaName}".library_identity, "${schemaName}".library_identity_source RESTART IDENTITY CASCADE`
-    );
-    await sql.unsafe(`TRUNCATE "${schemaName}".library RESTART IDENTITY CASCADE`);
-  });
-
-  /**
-   * Load writer + orchestrator from a fresh module-graph so their import-time
-   * `process.env.WXYC_SCHEMA_NAME` capture honors the schema we just set.
-   */
-  const loadModules = () => {
-    let writer;
-    let orchestrator;
-    jest.isolateModules(() => {
-      writer = require('../../jobs/library-identity-backfill/writer');
-      orchestrator = require('../../jobs/library-identity-backfill/orchestrate');
-    });
-    return { writer, orchestrator };
-  };
-
-  test('writeIdentity inserts the per-source row and main row inside a single transaction', async () => {
-    const { writer } = loadModules();
-
-    await writer.writeIdentity(
-      100,
-      [
-        {
-          library_id: 100,
-          source: 'discogs_release',
-          external_id: '987654',
-          method: 'exact_match',
-          confidence: 1.0,
-          last_verified_at: new Date('2026-04-15T00:00:00Z'),
-          boost_sources: null,
-          notes: 'backfill:S1',
-        },
-      ],
-      []
-    );
-
-    const sourceRows = await sql.unsafe(`SELECT * FROM "${schemaName}".library_identity_source WHERE library_id = 100`);
-    expect(sourceRows).toHaveLength(1);
-    expect(sourceRows[0].external_id).toBe('987654');
-    expect(sourceRows[0].method).toBe('exact_match');
-    expect(sourceRows[0].notes).toBe('backfill:S1');
-
-    const mainRows = await sql.unsafe(`SELECT * FROM "${schemaName}".library_identity WHERE library_id = 100`);
-    expect(mainRows).toHaveLength(1);
-    expect(mainRows[0].discogs_release_id).toBe(987654);
-    expect(mainRows[0].method).toBe('exact_match');
-    expect(mainRows[0].confidence).toBeCloseTo(1.0);
-    expect(mainRows[0].agreement_sources).toBeNull();
-  });
-
-  test('writeIdentity rolls back atomically when the per-source CHECK constraint trips', async () => {
-    const { writer } = loadModules();
-
-    await expect(
-      writer.writeIdentity(
-        300,
-        [
-          {
-            library_id: 300,
-            source: 'discogs_release',
-            external_id: '222',
-            method: 'exact_match',
-            confidence: 1.7, // out of [0,1] — CHECK trips
-            last_verified_at: new Date(),
-            boost_sources: null,
-            notes: 'backfill:S1',
-          },
-        ],
-        []
-      )
-    ).rejects.toThrow();
-
-    const sourceRows = await sql.unsafe(`SELECT * FROM "${schemaName}".library_identity_source WHERE library_id = 300`);
-    expect(sourceRows).toHaveLength(0);
-    const mainRows = await sql.unsafe(`SELECT * FROM "${schemaName}".library_identity WHERE library_id = 300`);
-    expect(mainRows).toHaveLength(0);
-  });
-
-  test('runBackfill DRY_RUN leaves library_identity* untouched and reports honestly on rerun', async () => {
-    // Seed: 4 library rows. 2 are in library_identity already (rerun overlap),
-    // 1 has a fresh discogs match, 1 has a non-discogs namespace.
-    await sql.unsafe(
-      `INSERT INTO "${schemaName}".library (id, canonical_entity_id, canonical_entity_resolved_at) VALUES
-       (500, 'discogs:1', now()),
-       (501, 'discogs:2', now()),
-       (502, 'discogs:3', now()),
-       (503, 'mb:abc', now())`
-    );
-    // Pre-populate library_identity for 500 and 501 so the rerun-overlap
-    // bucket actually has rows to count.
-    await sql.unsafe(
-      `INSERT INTO "${schemaName}".library_identity
-       (library_id, discogs_release_id, last_verified_at, method, confidence)
-       VALUES
-       (500, 1, now(), 'exact_match', 1.0),
-       (501, 2, now(), 'exact_match', 1.0)`
-    );
-
-    const { orchestrator } = loadModules();
-    const writeIdentity = jest.fn(async () => {});
-    let capturedReport;
-    const result = await orchestrator.runBackfill({
-      writeIdentity,
-      throttleMs: 0,
-      batchSize: 500,
-      dryRun: true,
-      onDryRunReport: (r) => {
-        capturedReport = r;
-      },
-    });
-
-    expect(writeIdentity).not.toHaveBeenCalled();
-    expect(result.totals.wrote).toBe(0);
-    expect(capturedReport).toBeDefined();
-    expect(capturedReport.scanned).toBe(4);
-    expect(capturedReport.skipped.already_in_library_identity).toBe(2);
-    expect(capturedReport.skipped.non_discogs_namespace).toBe(1);
-    expect(capturedReport.skipped.no_canonical_entity_id).toBe(0);
-    expect(capturedReport.would_write_sources).toBe(1);
-
-    // Still only the 2 pre-seeded main rows; no per-source rows written.
-    const mainRows = await sql.unsafe(`SELECT library_id FROM "${schemaName}".library_identity ORDER BY library_id`);
-    expect(mainRows.map((r) => r.library_id)).toEqual([500, 501]);
-    const sourceRows = await sql.unsafe(`SELECT * FROM "${schemaName}".library_identity_source`);
-    expect(sourceRows).toHaveLength(0);
-  });
-
-  test('runBackfill partitions are disjoint and their union covers the full universe', async () => {
-    // Seed 6 rows. PARTITION_COUNT=2 splits by `id % 2`, so PARTITION_INDEX=0
-    // sees the even ids and INDEX=1 the odds. Neither sees both.
-    const tuples = [];
-    for (let i = 600; i < 606; i++) {
-      tuples.push(`(${i}, 'discogs:${i * 11}', now())`);
-    }
-    await sql.unsafe(
-      `INSERT INTO "${schemaName}".library (id, canonical_entity_id, canonical_entity_resolved_at) VALUES ${tuples.join(', ')}`
-    );
-
-    const { writer, orchestrator } = loadModules();
-    const seen0 = [];
-    const seen1 = [];
-
-    await orchestrator.runBackfill({
-      writeIdentity: async (libraryId, rows, agreement) => {
-        seen0.push(libraryId);
-        await writer.writeIdentity(libraryId, rows, agreement);
-      },
-      throttleMs: 0,
-      partition: orchestrator.resolvePartitionFilter('0', '2'),
-    });
-
-    await orchestrator.runBackfill({
-      writeIdentity: async (libraryId, rows, agreement) => {
-        seen1.push(libraryId);
-        await writer.writeIdentity(libraryId, rows, agreement);
-      },
-      throttleMs: 0,
-      partition: orchestrator.resolvePartitionFilter('1', '2'),
-    });
-
-    const intersection = seen0.filter((id) => seen1.includes(id));
-    expect(intersection).toEqual([]);
-    expect([...seen0, ...seen1].sort()).toEqual([600, 601, 602, 603, 604, 605]);
-
-    const mainRows = await sql.unsafe(`SELECT library_id FROM "${schemaName}".library_identity ORDER BY library_id`);
-    expect(mainRows.map((r) => r.library_id)).toEqual([600, 601, 602, 603, 604, 605]);
   });
 });
