@@ -72,8 +72,20 @@ describe('runBackfill — real run', () => {
     const writes: Array<{ libraryId: number; sourceCount: number }> = [];
     (db.execute as jest.Mock)
       .mockResolvedValueOnce([
-        { id: 100, canonical_entity_id: 'discogs:987654', canonical_entity_resolved_at: new Date() },
-        { id: 101, canonical_entity_id: 'discogs:111', canonical_entity_resolved_at: new Date() },
+        // Real-run rows: already_in_library_identity is always false because
+        // the SQL filter excludes those rows before they reach this struct.
+        {
+          id: 100,
+          canonical_entity_id: 'discogs:987654',
+          canonical_entity_resolved_at: new Date(),
+          already_in_library_identity: false,
+        },
+        {
+          id: 101,
+          canonical_entity_id: 'discogs:111',
+          canonical_entity_resolved_at: new Date(),
+          already_in_library_identity: false,
+        },
       ])
       .mockResolvedValue([]);
     const writeIdentity = jest.fn((libraryId: number, rows: Array<unknown>) => {
@@ -101,8 +113,18 @@ describe('runBackfill — real run', () => {
   it('counts non-discogs rows as skipped_non_discogs_namespace and does not write', async () => {
     (db.execute as jest.Mock)
       .mockResolvedValueOnce([
-        { id: 200, canonical_entity_id: 'mb:abc-123', canonical_entity_resolved_at: new Date() },
-        { id: 201, canonical_entity_id: 'discogs:bogus', canonical_entity_resolved_at: new Date() },
+        {
+          id: 200,
+          canonical_entity_id: 'mb:abc-123',
+          canonical_entity_resolved_at: new Date(),
+          already_in_library_identity: false,
+        },
+        {
+          id: 201,
+          canonical_entity_id: 'discogs:bogus',
+          canonical_entity_resolved_at: new Date(),
+          already_in_library_identity: false,
+        },
       ])
       .mockResolvedValue([]);
     const writeIdentity = jest.fn(async () => {});
@@ -132,9 +154,24 @@ describe('runBackfill — DRY_RUN', () => {
   it('emits a stable JSON object on stdout and never calls writeIdentity', async () => {
     (db.execute as jest.Mock)
       .mockResolvedValueOnce([
-        { id: 100, canonical_entity_id: 'discogs:987654', canonical_entity_resolved_at: new Date() },
-        { id: 101, canonical_entity_id: 'mb:other', canonical_entity_resolved_at: new Date() },
-        { id: 102, canonical_entity_id: null, canonical_entity_resolved_at: null },
+        {
+          id: 100,
+          canonical_entity_id: 'discogs:987654',
+          canonical_entity_resolved_at: new Date(),
+          already_in_library_identity: false,
+        },
+        {
+          id: 101,
+          canonical_entity_id: 'mb:other',
+          canonical_entity_resolved_at: new Date(),
+          already_in_library_identity: false,
+        },
+        {
+          id: 102,
+          canonical_entity_id: null,
+          canonical_entity_resolved_at: null,
+          already_in_library_identity: false,
+        },
       ])
       .mockResolvedValue([]);
     const writeIdentity = jest.fn(async () => {});
@@ -167,6 +204,55 @@ describe('runBackfill — DRY_RUN', () => {
       capturedReport.skipped.no_canonical_entity_id +
       capturedReport.skipped.non_discogs_namespace;
     expect(capturedReport.scanned).toBe(capturedReport.would_write_sources + skippedSum);
+  });
+
+  it('counts rerun-overlap rows as already_in_library_identity (regression)', async () => {
+    // Regression for the DRY_RUN over-count bug: in DRY_RUN the SQL filter
+    // is relaxed so the EXISTS subselect returns rows that the real run
+    // would have skipped via NOT EXISTS. Without the bucket, those rows
+    // counted as `would_write_sources` and the operator's prediction of the
+    // real run's writes was inflated.
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        {
+          id: 700,
+          canonical_entity_id: 'discogs:1',
+          canonical_entity_resolved_at: new Date(),
+          already_in_library_identity: true,
+        },
+        {
+          id: 701,
+          canonical_entity_id: 'discogs:2',
+          canonical_entity_resolved_at: new Date(),
+          already_in_library_identity: true,
+        },
+        {
+          id: 702,
+          canonical_entity_id: 'discogs:3',
+          canonical_entity_resolved_at: new Date(),
+          already_in_library_identity: false,
+        },
+      ])
+      .mockResolvedValue([]);
+    const writeIdentity = jest.fn(async () => {});
+
+    let capturedReport: DryRunReport | undefined;
+    await runBackfill({
+      writeIdentity,
+      throttleMs: 0,
+      batchSize: 500,
+      dryRun: true,
+      onDryRunReport: (r) => {
+        capturedReport = r;
+      },
+    });
+
+    if (!capturedReport) throw new Error('expected a dry-run report');
+    expect(capturedReport.scanned).toBe(3);
+    expect(capturedReport.skipped.already_in_library_identity).toBe(2);
+    expect(capturedReport.would_write_sources).toBe(1);
+    expect(capturedReport.would_upsert_mains).toBe(1);
+    expect(writeIdentity).not.toHaveBeenCalled();
   });
 
   it('preserves the locked dry-run JSON schema (stable keys)', async () => {

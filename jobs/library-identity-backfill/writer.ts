@@ -14,12 +14,13 @@
  *   5. UPSERT the main row into `library_identity` with
  *      `ON CONFLICT (library_id) DO UPDATE`.
  *
- * History (§5.1.1) — when the main row is superseded by a recompute, a
- * snapshot of the prior state moves to `library_identity_history` with
- * `superseded_reason='backfill_recompute'`. Sub-PR 2.0 only writes single-
- * source rows where no prior main row exists (idempotency WHERE filter),
- * so the history INSERT never fires from 2.0; the path is already wired so
- * 2.1+ supersedure cases are a single-line change in the orchestrator.
+ * History (§5.1.1) — when the main row is superseded by a recompute, the
+ * plan calls for a snapshot of the prior state to land in
+ * `library_identity_history` with `superseded_reason='backfill_recompute'`.
+ * Sub-PR 2.0 only writes single-source rows where no prior main row exists
+ * (idempotency WHERE filter), so no supersedure occurs. The history INSERT
+ * itself is NOT wired in this PR — sub-PR 2.1 (which is the first sub-PR
+ * where supersedure can actually happen) will add it.
  *
  * No `metadata_attempt_at`-style marker exists on `library_identity` — the
  * idempotency strategy is set-membership against `library_identity` itself
