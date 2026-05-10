@@ -197,6 +197,9 @@ jobs:
     runs-on: ubuntu-latest
     if: needs.setup.outputs.has_targets == 'true'
     strategy:
+      # Build all targets independently; one target's build failure shouldn't
+      # mask the rest, so we can ship working images for siblings.
+      fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.setup.outputs.targets) }}
 
@@ -394,6 +397,11 @@ jobs:
     runs-on: ubuntu-latest
     if: needs.setup.outputs.has_targets == 'true'
     strategy:
+      # One target's deploy failure must not cancel sibling deploys mid-flight.
+      # The deploy script does `docker stop && docker rm && docker run`, so a
+      # cancellation between stop and run leaves the service down — turning a
+      # transient ETL pull error into a public-facing outage.
+      fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.setup.outputs.targets) }}
     steps:
