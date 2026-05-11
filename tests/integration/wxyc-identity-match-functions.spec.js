@@ -30,7 +30,7 @@ const MIGRATION_PATH = path.join(
   'database',
   'src',
   'migrations',
-  '0076_wxyc-identity-match-functions.sql',
+  '0076_wxyc-identity-match-functions.sql'
 );
 
 function sha256(filePath) {
