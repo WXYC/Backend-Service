@@ -67,6 +67,8 @@ const main = async (): Promise<void> => {
         'consumer.rows_skipped.compilation': result.totals.rows_skipped.compilation,
         'consumer.rows_skipped.lml_error': result.totals.rows_skipped.lml_error,
         'consumer.rows_skipped.writer_error': result.totals.rows_skipped.writer_error,
+        'consumer.rows_skipped.lml_cardinality_mismatch': result.totals.rows_skipped.lml_cardinality_mismatch,
+        'consumer.source_rows_skipped_null_confidence': result.totals.source_rows_skipped_null_confidence,
         'consumer.lml_total_calls': result.totals.lml_total_calls,
         'consumer.lml_total_latency_ms': result.totals.lml_total_latency_ms,
       });

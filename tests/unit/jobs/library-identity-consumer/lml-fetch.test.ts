@@ -32,7 +32,7 @@ jest.mock('@sentry/node', () => ({
     mockStartSpan(opts, callback),
 }));
 
-import { bulkResolveLibraries } from '../../../../jobs/library-identity-consumer/lml-fetch';
+import { bulkResolveLibraries, LmlFetchError } from '../../../../jobs/library-identity-consumer/lml-fetch';
 
 describe('jobs/library-identity-consumer/lml-fetch', () => {
   const originalEnv = process.env;
@@ -174,32 +174,68 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
   });
 
   describe('Error paths', () => {
-    it('throws on non-2xx responses', async () => {
+    const expectLmlError = async (
+      promise: Promise<unknown>,
+      expected: { status: number | null; retryable: boolean; messageMatch: RegExp }
+    ): Promise<void> => {
+      try {
+        await promise;
+        throw new Error('expected LmlFetchError to be thrown');
+      } catch (caught) {
+        expect(caught).toBeInstanceOf(LmlFetchError);
+        const err = caught as LmlFetchError;
+        expect(err.status).toBe(expected.status);
+        expect(err.retryable).toBe(expected.retryable);
+        expect(err.message).toMatch(expected.messageMatch);
+      }
+    };
+
+    it('throws LmlFetchError(status=500, retryable=true) on 5xx', async () => {
       mockFetch.mockResolvedValue({
         ok: false,
         status: 500,
         statusText: 'Internal Server Error',
         json: () => Promise.resolve({}),
       } as unknown as globalThis.Response);
-      await expect(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }])).rejects.toThrow(
-        /500 Internal Server Error/
-      );
+      await expectLmlError(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]), {
+        status: 500,
+        retryable: true,
+        messageMatch: /500 Internal Server Error/,
+      });
     });
 
-    it('translates an AbortError into a clear timeout message', async () => {
+    it('throws LmlFetchError(status=400, retryable=false) on 4xx (non-retryable)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        json: () => Promise.resolve({}),
+      } as unknown as globalThis.Response);
+      await expectLmlError(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]), {
+        status: 400,
+        retryable: false,
+        messageMatch: /400 Bad Request/,
+      });
+    });
+
+    it('translates AbortError into LmlFetchError(status=null, retryable=true) with a timeout message', async () => {
       const abortError = new Error('aborted');
       abortError.name = 'AbortError';
       mockFetch.mockRejectedValue(abortError);
-      await expect(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }])).rejects.toThrow(
-        /timed out/
-      );
+      await expectLmlError(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]), {
+        status: null,
+        retryable: true,
+        messageMatch: /timed out/,
+      });
     });
 
-    it('rethrows non-abort network errors verbatim', async () => {
+    it('wraps non-abort network errors as LmlFetchError(status=null, retryable=true)', async () => {
       mockFetch.mockRejectedValue(new Error('ECONNREFUSED'));
-      await expect(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }])).rejects.toThrow(
-        /ECONNREFUSED/
-      );
+      await expectLmlError(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]), {
+        status: null,
+        retryable: true,
+        messageMatch: /network error.*ECONNREFUSED/,
+      });
     });
   });
 });

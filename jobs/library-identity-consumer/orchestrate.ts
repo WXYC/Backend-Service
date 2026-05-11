@@ -52,6 +52,20 @@ export type WriteSingleArtistFn = (
   result: Extract<BulkResolveResult, { kind: 'single_artist' }>
 ) => Promise<{ source_rows_written: number; source_rows_skipped_null_confidence: number }>;
 
+/**
+ * Aggregate counters. The unit is library_ids except where noted.
+ *
+ * - `scanned`, `rows_resolved`, `rows_unresolved`, and every `rows_skipped.*`
+ *   bucket count *library_ids* (one library_id contributes to exactly one of
+ *   resolved / unresolved / one skip bucket): `scanned == rows_resolved +
+ *   rows_unresolved + sum(rows_skipped.values())`.
+ * - `source_rows_skipped_null_confidence` counts *source rows*: provenance
+ *   entries whose `confidence` was null and therefore couldn't satisfy the
+ *   `library_identity_source.confidence BETWEEN 0 AND 1 NOT NULL`
+ *   constraint. Lives outside `rows_skipped` so the library_id-level
+ *   accounting stays clean — a resolved library_id can still contribute to
+ *   this counter.
+ */
 export type Totals = {
   scanned: number;
   rows_resolved: number;
@@ -60,8 +74,9 @@ export type Totals = {
     compilation: number;
     lml_error: number;
     writer_error: number;
-    null_confidence_provenance: number;
+    lml_cardinality_mismatch: number;
   };
+  source_rows_skipped_null_confidence: number;
   lml_total_calls: number;
   lml_total_latency_ms: number;
 };
@@ -75,7 +90,9 @@ export type DryRunReport = {
   would_skip: {
     compilation: number;
     lml_error: number;
+    lml_cardinality_mismatch: number;
   };
+  source_rows_skipped_null_confidence: number;
 };
 
 export type RunResult = {
@@ -93,8 +110,9 @@ const emptyTotals = (): Totals => ({
     compilation: 0,
     lml_error: 0,
     writer_error: 0,
-    null_confidence_provenance: 0,
+    lml_cardinality_mismatch: 0,
   },
+  source_rows_skipped_null_confidence: 0,
   lml_total_calls: 0,
   lml_total_latency_ms: 0,
 });
@@ -103,6 +121,8 @@ const formatTotals = (t: Totals): string =>
   `scanned=${t.scanned} resolved=${t.rows_resolved} unresolved=${t.rows_unresolved} ` +
   `skipped.compilation=${t.rows_skipped.compilation} skipped.lml_error=${t.rows_skipped.lml_error} ` +
   `skipped.writer_error=${t.rows_skipped.writer_error} ` +
+  `skipped.lml_cardinality_mismatch=${t.rows_skipped.lml_cardinality_mismatch} ` +
+  `source_rows_skipped_null_confidence=${t.source_rows_skipped_null_confidence} ` +
   `lml_calls=${t.lml_total_calls} lml_latency_ms=${t.lml_total_latency_ms}`;
 
 export const runConsumer = async (opts: {
@@ -162,6 +182,36 @@ export const runConsumer = async (opts: {
       continue;
     }
 
+    // Defensive cardinality check. api.yaml v1.2.0 says LML preserves order
+    // and returns one result per input, but doesn't guarantee 1:1 cardinality
+    // contractually. Without this check, a short response would silently
+    // under-report `scanned`.
+    if (response.results.length !== rows.length) {
+      const missing = rows.length - response.results.length;
+      log(
+        'warn',
+        'lml_cardinality_mismatch',
+        `LML returned ${response.results.length} results for ${rows.length} inputs in batch ${batchIndex}`,
+        {
+          batch_index: batchIndex,
+          inputs: rows.length,
+          results: response.results.length,
+          missing,
+        }
+      );
+      captureError(
+        new Error(`LML cardinality mismatch: ${response.results.length} of ${rows.length} inputs returned`),
+        'lml_cardinality_mismatch',
+        { batch_index: batchIndex, inputs: rows.length, results: response.results.length }
+      );
+      // Count the missing inputs as a distinct skip bucket so the operator
+      // sees this is upstream-protocol drift rather than a transport error.
+      if (missing > 0) {
+        totals.scanned += missing;
+        totals.rows_skipped.lml_cardinality_mismatch += missing;
+      }
+    }
+
     for (const result of response.results) {
       totals.scanned += 1;
       switch (result.kind) {
@@ -173,7 +223,7 @@ export const runConsumer = async (opts: {
           try {
             const outcome = await opts.writeSingleArtist(result);
             totals.rows_resolved += 1;
-            totals.rows_skipped.null_confidence_provenance += outcome.source_rows_skipped_null_confidence;
+            totals.source_rows_skipped_null_confidence += outcome.source_rows_skipped_null_confidence;
           } catch (error) {
             log('warn', 'writer_error', `writer failed for library_id=${result.library_id}`, {
               library_id: result.library_id,
@@ -215,7 +265,11 @@ export const runConsumer = async (opts: {
         would_skip: {
           compilation: totals.rows_skipped.compilation,
           lml_error: totals.rows_skipped.lml_error,
+          lml_cardinality_mismatch: totals.rows_skipped.lml_cardinality_mismatch,
         },
+        // Source-row unit, not library_id — kept outside `would_skip` so the
+        // library_id-level accounting stays clean.
+        source_rows_skipped_null_confidence: totals.source_rows_skipped_null_confidence,
       }
     : null;
 

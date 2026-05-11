@@ -51,7 +51,11 @@ export type IdentityMethod =
  * adds the columns.
  */
 export type ReconciledIdentity = {
-  discogs_artist_id?: string | null;
+  // Per api.yaml v1.2.0: discogs_artist_id is integer (Discogs's native int ID);
+  // the rest are strings (MB UUID, Wikidata QID, etc.). Keep these aligned with
+  // the OpenAPI schema — a mistype here will silently double-coerce once the
+  // follow-up migration adds main-row destinations for the artist-level IDs.
+  discogs_artist_id?: number | null;
   musicbrainz_artist_id?: string | null;
   wikidata_qid?: string | null;
   spotify_artist_id?: string | null;

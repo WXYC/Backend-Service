@@ -235,6 +235,115 @@ describe('runConsumer — LML error path', () => {
   });
 });
 
+describe('runConsumer — counter unit cleanliness', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('source_rows_skipped_null_confidence lives outside rows_skipped (library_id-level accounting stays clean)', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 1, artist_name: 'A', album_title: 'a' },
+        { id: 2, artist_name: 'B', album_title: 'b' },
+      ])
+      .mockResolvedValue([]);
+
+    const lmlResponse: BulkResolveResponse = {
+      results: [
+        {
+          kind: 'single_artist',
+          library_id: 1,
+          main: { wikidata_qid: 'Q-1' },
+          method: 'exact_match',
+          confidence: 1.0,
+          provenance: [{ source: 'wikidata', method: 'exact_match', confidence: 1.0, external_id: 'Q-1' }],
+        },
+        {
+          kind: 'single_artist',
+          library_id: 2,
+          main: { wikidata_qid: 'Q-2' },
+          method: 'exact_match',
+          confidence: 1.0,
+          provenance: [{ source: 'wikidata', method: 'exact_match', confidence: 1.0, external_id: 'Q-2' }],
+        },
+      ],
+    };
+    const bulkResolve = jest.fn<BulkResolveFn>().mockResolvedValue(lmlResponse);
+    // Both writes succeed, but each one's provenance has 2 null-confidence
+    // entries that the writer had to skip. The aggregate counter should be 4,
+    // and both library_ids should still count as `rows_resolved` — the
+    // library_id-level invariant (resolved + unresolved + sum(rows_skipped))
+    // does not include this source-row counter.
+    const writeSingleArtist = jest.fn<WriteSingleArtistFn>().mockResolvedValue({
+      source_rows_written: 1,
+      source_rows_skipped_null_confidence: 2,
+    });
+
+    const result = await runConsumer({
+      bulkResolve,
+      writeSingleArtist,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { sqlFragment: null, description: 'partition=none' },
+      dryRun: false,
+    });
+
+    expect(result.totals.rows_resolved).toBe(2);
+    expect(result.totals.source_rows_skipped_null_confidence).toBe(4);
+    const libraryIdLevelSkipSum =
+      result.totals.rows_skipped.compilation +
+      result.totals.rows_skipped.lml_error +
+      result.totals.rows_skipped.writer_error +
+      result.totals.rows_skipped.lml_cardinality_mismatch;
+    expect(
+      result.totals.scanned === result.totals.rows_resolved + result.totals.rows_unresolved + libraryIdLevelSkipSum
+    ).toBe(true);
+  });
+
+  it('counts under-cardinality LML responses as rows_skipped { lml_cardinality_mismatch }', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 1, artist_name: 'A', album_title: 'a' },
+        { id: 2, artist_name: 'B', album_title: 'b' },
+        { id: 3, artist_name: 'C', album_title: 'c' },
+      ])
+      .mockResolvedValue([]);
+
+    // Send 3 inputs, get back 2 results (under-cardinality).
+    const bulkResolve = jest.fn<BulkResolveFn>().mockResolvedValue({
+      results: [
+        { kind: 'unresolved', library_id: 1, provenance: [] },
+        { kind: 'unresolved', library_id: 2, provenance: [] },
+      ],
+    });
+    const writeSingleArtist = jest.fn<WriteSingleArtistFn>().mockResolvedValue({
+      source_rows_written: 0,
+      source_rows_skipped_null_confidence: 0,
+    });
+
+    const result = await runConsumer({
+      bulkResolve,
+      writeSingleArtist,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { sqlFragment: null, description: 'partition=none' },
+      dryRun: false,
+    });
+
+    expect(result.totals.scanned).toBe(3);
+    expect(result.totals.rows_unresolved).toBe(2);
+    expect(result.totals.rows_skipped.lml_cardinality_mismatch).toBe(1);
+  });
+});
+
 describe('runConsumer — DRY_RUN', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -295,14 +404,26 @@ describe('runConsumer — DRY_RUN', () => {
 
     if (!captured) throw new Error('expected a dry-run report');
     expect(Object.keys(captured).sort()).toEqual(
-      ['lml_total_calls', 'lml_total_latency_ms', 'scanned', 'would_resolve', 'would_skip', 'would_unresolved'].sort()
+      [
+        'lml_total_calls',
+        'lml_total_latency_ms',
+        'scanned',
+        'source_rows_skipped_null_confidence',
+        'would_resolve',
+        'would_skip',
+        'would_unresolved',
+      ].sort()
     );
-    expect(Object.keys(captured.would_skip).sort()).toEqual(['compilation', 'lml_error'].sort());
+    expect(Object.keys(captured.would_skip).sort()).toEqual(
+      ['compilation', 'lml_cardinality_mismatch', 'lml_error'].sort()
+    );
     expect(captured.scanned).toBe(3);
     expect(captured.would_resolve).toBe(1);
     expect(captured.would_unresolved).toBe(1);
     expect(captured.would_skip.compilation).toBe(1);
     expect(captured.would_skip.lml_error).toBe(0);
+    expect(captured.would_skip.lml_cardinality_mismatch).toBe(0);
+    expect(captured.source_rows_skipped_null_confidence).toBe(0);
     expect(captured.lml_total_calls).toBe(1);
   });
 
