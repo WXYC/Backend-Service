@@ -1,14 +1,15 @@
 /**
- * Observability for library-identity-backfill: Sentry init + JSON logs.
+ * Observability for library-identity-consumer: Sentry init + JSON logs.
  *
  * Phase A foundation contract (issue #538): every log line carries the four
  * tags `repo`, `tool`, `step`, `run_id`. Sentry stays inactive when
  * SENTRY_DSN is unset (the @sentry/node SDK silently no-ops in that case),
  * so this module is safe to call from any environment.
  *
- * Mirrors `jobs/flowsheet-metadata-backfill/logger.ts` verbatim — the
- * contract is identical, the duplication is to keep the one-shot job's build
- * graph independent of the long-running ETL package.
+ * Mirrors `jobs/flowsheet-metadata-backfill/logger.ts` and
+ * `jobs/library-identity-backfill/logger.ts` verbatim — the contract is
+ * identical, the duplication is to keep the one-shot job's build graph
+ * independent of the long-running ETL package.
  */
 
 import * as Sentry from '@sentry/node';

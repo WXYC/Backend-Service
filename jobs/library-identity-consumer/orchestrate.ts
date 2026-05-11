@@ -1,0 +1,229 @@
+/**
+ * Orchestrator for the library-identity-consumer job (BS#802).
+ *
+ * Post-#800 architecture: Backend is the thin writer; LML is sole composer
+ * of cross-cache identity. The orchestrator:
+ *
+ *   1. SELECTs libraries needing identity refresh (predicate in select.ts):
+ *      `library.canonical_entity_id IS NOT NULL OR library.id IN (
+ *        SELECT library_id FROM library_identity
+ *        WHERE last_verified_at < NOW() - interval '7 days'
+ *      )`
+ *      (BS#802's body used `last_refreshed_at` — the actual column is
+ *      `last_verified_at`; see the PR body's correction note.)
+ *   2. POSTs each batch (≤ 500 inputs, LML caps at 1000) to LML's
+ *      `/api/v1/identity/bulk-resolve-libraries`.
+ *   3. For each `BulkResolveResult`:
+ *        - `kind: 'single_artist'` → atomic write via `writeSingleArtist`,
+ *          counted as `rows_resolved`.
+ *        - `kind: 'unresolved'` → counted as `rows_unresolved`, no write.
+ *        - `kind: 'compilation'` → counted as `rows_skipped { compilation }`,
+ *          deferred to BS#801.
+ *   4. On per-batch LML error: the entire batch is counted as
+ *      `rows_skipped { lml_error: <count> }`; the loop continues. Because
+ *      the SELECT predicate keys off live data (a successful write moves a
+ *      row out of the "stale" bucket), retry on the next run is free.
+ *
+ * Sentry metrics are accumulated and emitted both as JSON log fields and
+ * as tags on the top-level run span.
+ *
+ * DRY_RUN: when set (locked truthy `true`/`1`/`TRUE`), the loop still calls
+ * LML so resolve/unresolved/error counts are honest, but suppresses every
+ * DB write. Emits a single JSON object on stdout with the locked schema
+ * documented in README.md.
+ *
+ * `bulkResolve` and `writer` are injected so unit tests can drive the
+ * orchestrator without exercising the network or the database. Production
+ * wires them to `lml-fetch.ts:bulkResolveLibraries` and
+ * `writer.ts:writeSingleArtist`.
+ */
+
+import type { SQL } from 'drizzle-orm';
+
+import { loadBatch, type LibraryRow } from './select.js';
+import type { BulkResolveInput, BulkResolveResponse, BulkResolveResult } from './lml-types.js';
+import { captureError, log } from './logger.js';
+
+const JOB_NAME = 'library-identity-consumer';
+
+export type BulkResolveFn = (inputs: BulkResolveInput[]) => Promise<BulkResolveResponse>;
+
+export type WriteSingleArtistFn = (
+  result: Extract<BulkResolveResult, { kind: 'single_artist' }>
+) => Promise<{ source_rows_written: number; source_rows_skipped_null_confidence: number }>;
+
+export type Totals = {
+  scanned: number;
+  rows_resolved: number;
+  rows_unresolved: number;
+  rows_skipped: {
+    compilation: number;
+    lml_error: number;
+    writer_error: number;
+    null_confidence_provenance: number;
+  };
+  lml_total_calls: number;
+  lml_total_latency_ms: number;
+};
+
+export type DryRunReport = {
+  scanned: number;
+  lml_total_calls: number;
+  lml_total_latency_ms: number;
+  would_resolve: number;
+  would_unresolved: number;
+  would_skip: {
+    compilation: number;
+    lml_error: number;
+  };
+};
+
+export type RunResult = {
+  totals: Totals;
+  dryRunReport: DryRunReport | null;
+};
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const emptyTotals = (): Totals => ({
+  scanned: 0,
+  rows_resolved: 0,
+  rows_unresolved: 0,
+  rows_skipped: {
+    compilation: 0,
+    lml_error: 0,
+    writer_error: 0,
+    null_confidence_provenance: 0,
+  },
+  lml_total_calls: 0,
+  lml_total_latency_ms: 0,
+});
+
+const formatTotals = (t: Totals): string =>
+  `scanned=${t.scanned} resolved=${t.rows_resolved} unresolved=${t.rows_unresolved} ` +
+  `skipped.compilation=${t.rows_skipped.compilation} skipped.lml_error=${t.rows_skipped.lml_error} ` +
+  `skipped.writer_error=${t.rows_skipped.writer_error} ` +
+  `lml_calls=${t.lml_total_calls} lml_latency_ms=${t.lml_total_latency_ms}`;
+
+export const runConsumer = async (opts: {
+  bulkResolve: BulkResolveFn;
+  writeSingleArtist: WriteSingleArtistFn;
+  batchSize: number;
+  throttleMs: number;
+  staleDays: number;
+  partition: { sqlFragment: SQL | null; description: string };
+  dryRun: boolean;
+  onDryRunReport?: (report: DryRunReport) => void;
+}): Promise<RunResult> => {
+  log('info', 'started', `${JOB_NAME} starting`, {
+    batch_size: opts.batchSize,
+    throttle_ms: opts.throttleMs,
+    stale_days: opts.staleDays,
+    partition: opts.partition.description,
+    dry_run: opts.dryRun,
+  });
+
+  const totals = emptyTotals();
+  let lastId = 0;
+  let batchIndex = 0;
+
+  while (true) {
+    const rows: LibraryRow[] = await loadBatch(lastId, opts.batchSize, opts.partition.sqlFragment, opts.staleDays);
+    if (rows.length === 0) break;
+    batchIndex += 1;
+
+    const inputs: BulkResolveInput[] = rows.map((r) => ({
+      library_id: r.id,
+      artist_name: r.artist_name,
+      album_title: r.album_title,
+    }));
+
+    let response: BulkResolveResponse;
+    const lmlStart = Date.now();
+    try {
+      response = await opts.bulkResolve(inputs);
+      totals.lml_total_calls += 1;
+      totals.lml_total_latency_ms += Date.now() - lmlStart;
+    } catch (error) {
+      totals.lml_total_calls += 1;
+      totals.lml_total_latency_ms += Date.now() - lmlStart;
+      log('warn', 'lml_error', `LML bulk-resolve failed for batch ${batchIndex}`, {
+        batch_index: batchIndex,
+        batch_size: rows.length,
+        error_message: (error as Error).message,
+      });
+      captureError(error, 'lml_error', { batch_index: batchIndex, batch_size: rows.length });
+      // Count every row in this batch as skipped (lml_error). The next run
+      // will re-pick them up via the SELECT predicate.
+      totals.scanned += rows.length;
+      totals.rows_skipped.lml_error += rows.length;
+      lastId = rows[rows.length - 1].id;
+      if (opts.throttleMs > 0) await sleep(opts.throttleMs);
+      continue;
+    }
+
+    for (const result of response.results) {
+      totals.scanned += 1;
+      switch (result.kind) {
+        case 'single_artist':
+          if (opts.dryRun) {
+            totals.rows_resolved += 1;
+            break;
+          }
+          try {
+            const outcome = await opts.writeSingleArtist(result);
+            totals.rows_resolved += 1;
+            totals.rows_skipped.null_confidence_provenance += outcome.source_rows_skipped_null_confidence;
+          } catch (error) {
+            log('warn', 'writer_error', `writer failed for library_id=${result.library_id}`, {
+              library_id: result.library_id,
+              error_message: (error as Error).message,
+            });
+            captureError(error, 'writer_error', { library_id: result.library_id });
+            totals.rows_skipped.writer_error += 1;
+          }
+          break;
+        case 'unresolved':
+          totals.rows_unresolved += 1;
+          break;
+        case 'compilation':
+          // BS#801 will handle compilation results via library_track_*
+          // tables. For BS#802 we count + skip.
+          totals.rows_skipped.compilation += 1;
+          break;
+      }
+    }
+
+    lastId = rows[rows.length - 1].id;
+
+    log('info', 'batch_done', `batch ${batchIndex} done`, {
+      batch_index: batchIndex,
+      last_id: lastId,
+      ...totals,
+    });
+
+    if (opts.throttleMs > 0) await sleep(opts.throttleMs);
+  }
+
+  const dryRunReport: DryRunReport | null = opts.dryRun
+    ? {
+        scanned: totals.scanned,
+        lml_total_calls: totals.lml_total_calls,
+        lml_total_latency_ms: totals.lml_total_latency_ms,
+        would_resolve: totals.rows_resolved,
+        would_unresolved: totals.rows_unresolved,
+        would_skip: {
+          compilation: totals.rows_skipped.compilation,
+          lml_error: totals.rows_skipped.lml_error,
+        },
+      }
+    : null;
+
+  if (dryRunReport) {
+    process.stdout.write(JSON.stringify(dryRunReport) + '\n');
+    if (opts.onDryRunReport) opts.onDryRunReport(dryRunReport);
+  }
+
+  log('info', 'finished', `${JOB_NAME} done. ${formatTotals(totals)}`, { ...totals });
+  return { totals, dryRunReport };
+};
