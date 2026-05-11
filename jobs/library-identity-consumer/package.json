@@ -1,15 +1,15 @@
 {
-  "name": "@wxyc/library-identity-backfill",
+  "name": "@wxyc/library-identity-consumer",
   "job-type": "one-shot",
   "version": "1.0.0",
-  "description": "WXYC one-shot backfill: populate library_identity + library_identity_source from existing identity artifacts. Sub-PR 2.0 covers S1 (Backend canonical_entity_id).",
+  "description": "WXYC one-shot ETL: consume LML's bulk-resolve-libraries endpoint and UPSERT verdicts into library_identity + library_identity_source (BS#802, post-#800 cross-cache-identity pivot — Backend is thin-writer, LML is sole composer).",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {
     "start": "node dist/job.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
-    "docker:build": "docker build -t wxyc_library_identity_backfill:ci -f ../../Dockerfile.library-identity-backfill ../../",
+    "docker:build": "docker build -t wxyc_library_identity_consumer:ci -f ../../Dockerfile.library-identity-consumer ../../",
     "dev": "tsup --watch"
   },
   "license": "MIT",
