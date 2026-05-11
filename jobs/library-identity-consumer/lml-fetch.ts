@@ -28,6 +28,26 @@ import type { BulkResolveInput, BulkResolveResponse } from './lml-types.js';
 
 const TIMEOUT_MS = 30000;
 
+/**
+ * Error variant for LML failures. Carries the HTTP status code (or null for
+ * network / abort failures) and a `retryable` hint based on whether the
+ * failure looked transient (network, timeout, 5xx) vs. permanent (4xx). The
+ * orchestrator counts every failure as `rows_skipped { lml_error }` today
+ * regardless of `retryable` — the flag is here for a future retry-with-
+ * backoff layer that needs to differentiate without parsing the message
+ * string.
+ */
+export class LmlFetchError extends Error {
+  readonly status: number | null;
+  readonly retryable: boolean;
+  constructor(message: string, opts: { status: number | null; retryable: boolean; cause?: unknown }) {
+    super(message, opts.cause === undefined ? undefined : { cause: opts.cause });
+    this.name = 'LmlFetchError';
+    this.status = opts.status;
+    this.retryable = opts.retryable;
+  }
+}
+
 const baseUrl = (): string => {
   const url = process.env.LIBRARY_METADATA_URL;
   if (!url) {
@@ -58,7 +78,10 @@ export const bulkResolveLibraries = async (inputs: BulkResolveInput[]): Promise<
       });
 
       if (!response.ok) {
-        throw new Error(`LML responded ${response.status} ${response.statusText}`);
+        throw new LmlFetchError(`LML responded ${response.status} ${response.statusText}`, {
+          status: response.status,
+          retryable: response.status >= 500,
+        });
       }
 
       const parsed = (await response.json()) as BulkResolveResponse;
@@ -86,9 +109,20 @@ export const bulkResolveLibraries = async (inputs: BulkResolveInput[]): Promise<
       return parsed;
     } catch (error) {
       if ((error as Error).name === 'AbortError') {
-        throw new Error('LML bulk-resolve request timed out', { cause: error });
+        throw new LmlFetchError('LML bulk-resolve request timed out', {
+          status: null,
+          retryable: true,
+          cause: error,
+        });
       }
-      throw error;
+      // Already-classified LML errors fly through; everything else is a
+      // network/transport failure — treat as retryable.
+      if (error instanceof LmlFetchError) throw error;
+      throw new LmlFetchError(`LML bulk-resolve network error: ${(error as Error).message}`, {
+        status: null,
+        retryable: true,
+        cause: error,
+      });
     } finally {
       clearTimeout(timeout);
     }

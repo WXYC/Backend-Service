@@ -77,7 +77,7 @@ const singleArtist = (
   kind: 'single_artist',
   library_id: 100,
   main: {
-    discogs_artist_id: 'D-1',
+    discogs_artist_id: 12345,
     musicbrainz_artist_id: 'mb-1',
     wikidata_qid: 'Q-1',
     spotify_artist_id: 'sp-1',
@@ -119,7 +119,7 @@ describe('projectMainRow', () => {
     // library_identity_source.external_id via provenance rows, but the
     // main row has no column for them yet.
     const main = projectMainRow({
-      discogs_artist_id: 'D-1',
+      discogs_artist_id: 12345,
       musicbrainz_artist_id: 'mb-1',
       bandcamp_id: 'bc-1',
     });
