@@ -1,3 +1,4 @@
+-- precondition-guard: not-required (function-deploy-only; no DDL touches library_identity* tables; the body-comment mention is a forward-reference to BS#663, not a column edit)
 -- Cross-cache-identity match form (wiki §3.3.5).
 --
 -- Deploys the four `wxyc_identity_match_*` plpgsql functions onto the Backend's
