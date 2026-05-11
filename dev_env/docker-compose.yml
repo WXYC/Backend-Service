@@ -12,6 +12,11 @@ services:
       - '${DB_PORT:-5432}:5432'
     volumes:
       - pg-data:/var/lib/postgresql/data
+      # Required by migration 0076: the wxyc_unaccent text-search dictionary
+      # loads its rules from $SHAREDIR/tsearch_data/. Vendored from
+      # WXYC/wxyc-etl@v0.4.0; SHA-pinned in wxyc-etl-pin.txt.
+      - ../vendor/wxyc-etl/wxyc_unaccent.rules:/usr/local/share/postgresql/tsearch_data/wxyc_unaccent.rules:ro
+      - ../vendor/wxyc-etl/wxyc_unaccent.version:/usr/local/share/postgresql/tsearch_data/wxyc_unaccent.version:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME} -d ${DB_NAME} || pg_isready']
       interval: 2s
@@ -56,6 +61,10 @@ services:
       - '${CI_DB_PORT:-5433}:5432'
     volumes:
       - ci-pg-data:/var/lib/postgresql/data
+      # Mirror of the `db` mounts so migration 0076 finds the wxyc_unaccent
+      # rules file inside the CI container too.
+      - ../vendor/wxyc-etl/wxyc_unaccent.rules:/usr/local/share/postgresql/tsearch_data/wxyc_unaccent.rules:ro
+      - ../vendor/wxyc-etl/wxyc_unaccent.version:/usr/local/share/postgresql/tsearch_data/wxyc_unaccent.version:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME} -d ${DB_NAME} || pg_isready']
       interval: 2s

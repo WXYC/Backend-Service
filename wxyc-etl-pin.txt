@@ -1,0 +1,18 @@
+# wxyc-etl postgres-analog vendor pin.
+#
+# Pins the canonical bytes from WXYC/wxyc-etl@v0.4.0 (`data/`), vendored here
+# under `vendor/wxyc-etl/`. Migration 0076 is a generated wrapper: setup
+# prelude + the canonical SQL inlined byte-for-byte (drizzle-kit applies plain
+# SQL files in a single transaction, so `\i` isn't available).
+#
+# Verify with:
+#   shasum -a 256 vendor/wxyc-etl/wxyc_unaccent.rules vendor/wxyc-etl/wxyc_identity_match_functions.sql
+# Refresh procedure: re-vendor from a new wxyc-etl tag, bump the SHAs +
+# version below, regenerate migration 0077 (or higher) with the new content,
+# rerun `tests/integration/db/wxycIdentityMatchFunctions.test.ts`.
+# See WXYC/wxyc-etl/docs/postgres-analog-vendoring.md.
+
+unaccent_rules_version = 0.1.0
+unaccent_rules_sha256  = fc51eceb722904fa0d80734d4b2f4bbcffb0fcfecc133450f774210a067b9d26
+functions_sql_sha256   = 4beb7db2b44d479a4878a386e4d1b626d26fd3738e34371b23abe1ab4ccdc21a
+wxyc_etl_version       = 0.4.0
