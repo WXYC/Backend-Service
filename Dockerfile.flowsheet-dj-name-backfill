@@ -1,5 +1,5 @@
 #Build stage
-FROM node:25-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /flowsheet-dj-name-backfill-builder
 
@@ -11,7 +11,7 @@ COPY ./jobs/flowsheet-dj-name-backfill ./jobs/flowsheet-dj-name-backfill
 RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-dj-name-backfill
 
 #Production stage
-FROM node:25-alpine AS prod
+FROM node:24-alpine AS prod
 
 WORKDIR /flowsheet-dj-name-backfill
 

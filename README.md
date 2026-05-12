@@ -19,7 +19,7 @@ Before you can start interacting with this codebase you will need to install the
 - `node & npm`:
   This application is based on the Node.js Javascript runtime so in order to get things running locally it will need to be installed.
 
-  Please navigate to the [Node.js installation documentation](https://nodejs.org/en/download/package-manager) and use your preferred method to install the current LTS version of the runtime (e.g. nvm, brew, chocolatey, graphical installer, etc). The linked page will walk you through it step-by-step.
+  Please navigate to the [Node.js installation documentation](https://nodejs.org/en/download/package-manager) and use your preferred method to install Node.js 24 (the current Active LTS, pinned in `.nvmrc` and `engines.node`). The linked page will walk you through it step-by-step.
 
 - `docker`: Docker is used extensively from the local and ci tests to our full on deployments.
   - macOS / Windows: Docker doesn't run natively on either of these operating systems and requires the `Docker Desktop` application to be installed in order to run properly (under the hood this application spins up a linux vm to actually run docker within). Docker Desktop can be installed here.
