@@ -1,5 +1,5 @@
 #Build stage
-FROM node:25-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /library-artwork-url-backfill-builder
 
@@ -11,7 +11,7 @@ COPY ./jobs/library-artwork-url-backfill ./jobs/library-artwork-url-backfill
 RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/library-artwork-url-backfill
 
 #Production stage
-FROM node:25-alpine AS prod
+FROM node:24-alpine AS prod
 
 WORKDIR /library-artwork-url-backfill
 

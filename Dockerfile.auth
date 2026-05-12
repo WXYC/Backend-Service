@@ -1,5 +1,5 @@
 #Build stage
-FROM node:25-alpine AS builder
+FROM node:24-alpine AS builder
 
 ARG NPM_TOKEN
 WORKDIR /auth-builder
@@ -13,7 +13,7 @@ COPY ./apps/auth ./apps/auth
 RUN npm ci && npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=@wxyc/auth-service
 
 #Production stage
-FROM node:25-alpine AS prod
+FROM node:24-alpine AS prod
 
 ARG NPM_TOKEN
 WORKDIR /auth-service

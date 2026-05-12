@@ -104,14 +104,14 @@ jobs:
       - name: Set Up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '25'
+          node-version: '24'
 
       - name: Cache node_modules
         id: cache-node-modules
         uses: actions/cache@v5
         with:
           path: node_modules
-          key: node-modules-${{ runner.os }}-node25-${{ hashFiles('package-lock.json') }}
+          key: node-modules-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
 
       - name: Validate cached node_modules
         id: validate-cache
@@ -180,14 +180,14 @@ jobs:
       - name: Set Up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '25'
+          node-version: '24'
 
       - name: Cache node_modules
         id: cache-node-modules
         uses: actions/cache@v5
         with:
           path: node_modules
-          key: node-modules-${{ runner.os }}-node25-${{ hashFiles('package-lock.json') }}
+          key: node-modules-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
 
       - name: Validate cached node_modules
         id: validate-cache
@@ -277,7 +277,7 @@ jobs:
         if: env.RUN_TESTS == 'true'
         uses: actions/setup-node@v6
         with:
-          node-version: '25'
+          node-version: '24'
 
       - name: Cache node_modules
         if: env.RUN_TESTS == 'true'
@@ -285,7 +285,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: node_modules
-          key: node-modules-${{ runner.os }}-node25-${{ hashFiles('package-lock.json') }}
+          key: node-modules-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
 
       - name: Validate cached node_modules
         id: validate-cache
@@ -399,12 +399,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '25'
+          node-version: '24'
           cache: 'npm'
 
       - name: Install minimal deps for dryrun script

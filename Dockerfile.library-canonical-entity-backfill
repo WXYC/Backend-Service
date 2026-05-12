@@ -1,5 +1,5 @@
 #Build stage
-FROM node:25-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /library-canonical-entity-backfill-builder
 
@@ -11,7 +11,7 @@ COPY ./jobs/library-canonical-entity-backfill ./jobs/library-canonical-entity-ba
 RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/library-canonical-entity-backfill
 
 #Production stage
-FROM node:25-alpine AS prod
+FROM node:24-alpine AS prod
 
 WORKDIR /library-canonical-entity-backfill
 

@@ -1,5 +1,5 @@
 #Build stage
-FROM node:25-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /rotation-etl-builder
 
@@ -11,7 +11,7 @@ COPY ./jobs/rotation-etl ./jobs/rotation-etl
 RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/rotation-etl
 
 #Production stage
-FROM node:25-alpine AS prod
+FROM node:24-alpine AS prod
 
 WORKDIR /rotation-etl
 

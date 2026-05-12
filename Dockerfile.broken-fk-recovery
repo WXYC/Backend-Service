@@ -1,5 +1,5 @@
 #Build stage
-FROM node:25-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /broken-fk-recovery-builder
 
@@ -11,7 +11,7 @@ COPY ./jobs/broken-fk-recovery ./jobs/broken-fk-recovery
 RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/broken-fk-recovery
 
 #Production stage
-FROM node:25-alpine AS prod
+FROM node:24-alpine AS prod
 
 WORKDIR /broken-fk-recovery
 

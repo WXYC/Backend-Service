@@ -243,7 +243,7 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
 ## Deployment
 
-Hosted on EC2; CI/CD via GitHub Actions (manual trigger). Docker images built with `node:25-alpine`, stored in ECR.
+Hosted on EC2; CI/CD via GitHub Actions (manual trigger). Docker images built with `node:24-alpine`, stored in ECR.
 
 **Cadence rule**: when a PR that touches `shared/database/src/migrations/**` merges, run Manual Build & Deploy within 24 hours. Long deploy gaps accumulate migration-chain risk. See [`docs/deploy.md`](docs/deploy.md) for the 2026-05-04 wedge case study and the project-#26 hardening defenses.
 
