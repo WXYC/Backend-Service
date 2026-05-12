@@ -293,8 +293,10 @@ describe('Metadata with Rotation Entries', () => {
 
 describe('Metadata Service Initialization', () => {
   test('Backend healthcheck passes (metadata service initialized)', async () => {
+    // Body conforms to HealthCheckResponse from @wxyc/shared (#804).
     const res = await request.get('/healthcheck').expect(200);
-    expect(res.body.message).toEqual('Healthy!');
+    expect(res.body.status).toEqual('healthy');
+    expect(res.body.services).toEqual({ database: 'ok' });
   });
 });
 

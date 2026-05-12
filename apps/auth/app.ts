@@ -13,6 +13,7 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { closeDatabaseConnection } from '@wxyc/database';
+import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { provisionUser, ProvisionError } from './provision-user';
 import { resolveOrganization } from './resolve-organization';
 
@@ -254,7 +255,15 @@ if (isTestEnv) {
   app.use('/auth', toNodeHandler(auth));
 }
 
-//endpoint for healthchecks
+// Liveness/readiness endpoint. Body conforms to HealthCheckResponse from
+// @wxyc/shared (api.yaml v1.3.0 / @wxyc/shared v0.13.0); the shape is the
+// cross-language contract owned by wxyc-fastapi and adopted here so every
+// WXYC service exposes the same status enum + per-dependency `services`
+// map. Status codes are preserved verbatim — the upstream /auth/ok status
+// is forwarded on the proxy-reachable branch and the catch branch keeps
+// 500 — only the body shape changes. wxyc-canary checks `r.ok` only, so
+// the body change is non-breaking for the alarm. See
+// WXYC/Backend-Service#804.
 app.get('/healthcheck', async (req, res) => {
   const authServiceUrl = `http://localhost:${port}`; // Use the port the server is listening on
   try {
@@ -271,13 +280,20 @@ app.get('/healthcheck', async (req, res) => {
       headers: { 'X-Real-IP': '127.0.0.1' },
     });
 
-    // Forward the status and body from the /auth/ok response
-    const data = (await response.json()) as Record<string, unknown>;
-    res.status(response.status).json(data);
+    // Forward the upstream status verbatim. Drain the body so the socket is
+    // freed but discard the legacy `{ ok: true }` payload — the response
+    // shape is the shared HealthCheckResponse, derived purely from
+    // response.ok rather than the upstream body.
+    await response.text().catch(() => undefined);
+    const body: HealthCheckResponse = response.ok
+      ? { status: 'healthy', services: { auth: 'ok' } }
+      : { status: 'unhealthy', services: { auth: 'unavailable' } };
+    res.status(response.status).json(body);
   } catch (error) {
     console.error('Error proxying /healthcheck to /auth/ok:', error);
     // If the internal call fails, it indicates a problem with the auth service itself
-    res.status(500).json({ message: 'Healthcheck failed: Could not reach internal /auth/ok endpoint' });
+    const body: HealthCheckResponse = { status: 'unhealthy', services: { auth: 'unavailable' } };
+    res.status(500).json(body);
   }
 });
 
