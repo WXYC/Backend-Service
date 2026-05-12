@@ -12,6 +12,12 @@ on:
         required: false
         type: string
 
+# Workflow-level GITHUB_TOKEN scope. Jobs in this file write back to the
+# repository (create tags / upload release assets / push commits) via
+# GITHUB_TOKEN, so contents:write is required.
+permissions:
+  contents: write
+
 jobs:
   validate_inputs:
     runs-on: ubuntu-latest
