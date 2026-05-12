@@ -30,6 +30,7 @@ import { responseMetricsMiddleware } from './middleware/responseMetrics.js';
 import { requirePermissions } from '@wxyc/authentication';
 import { closeDatabaseConnection, db } from '@wxyc/database';
 import { sql } from 'drizzle-orm';
+import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 
 const port = process.env.PORT || 8080;
 const app = express();
@@ -102,13 +103,20 @@ app.get('/testAuth', requirePermissions({ flowsheet: ['read'] }), async (req, re
   res.json({ message: 'Authenticated!' });
 });
 
-//endpoint for healthchecks
+// Liveness/readiness endpoint. Body conforms to HealthCheckResponse from
+// @wxyc/shared (api.yaml v1.3.0 / @wxyc/shared v0.13.0); the shape is the
+// cross-language contract owned by wxyc-fastapi and adopted here so every
+// WXYC service exposes the same status enum + per-dependency `services`
+// map. wxyc-canary checks `r.ok` only, so the body change is non-breaking
+// for the alarm. See WXYC/Backend-Service#804.
 app.get('/healthcheck', async (req, res) => {
   try {
     await db.execute(sql`SELECT 1`);
-    res.json({ message: 'Healthy!' });
+    const body: HealthCheckResponse = { status: 'healthy', services: { database: 'ok' } };
+    res.json(body);
   } catch {
-    res.status(503).json({ message: 'Database unreachable' });
+    const body: HealthCheckResponse = { status: 'unhealthy', services: { database: 'unavailable' } };
+    res.status(503).json(body);
   }
 });
 
