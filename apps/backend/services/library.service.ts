@@ -800,14 +800,30 @@ export async function searchLibrary(
 ): Promise<EnrichedLibraryResult[]> {
   await checkLibraryArtistNameHealth();
 
-  let results: LibraryArtistViewEntry[] = [];
-
   if (query) {
-    results = await searchLibraryBothMode(query, limit, on_streaming);
-  } else if (artist || title) {
-    results = await fuzzySearchLibrary(artist, title, limit, on_streaming);
+    const primary = await searchLibraryBothMode(query, limit, on_streaming);
+    if (primary.length > 0) {
+      return primary.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
+    }
+
+    // Catalog-track-search cascade (plan §4): when tsvector + trigram return
+    // 0 hits, probe CTA (Track 1), then LML /lookup (Track 2). Direct hits
+    // always outrank both fallback layers. Each layer is gated on its own
+    // env flag; defaults are off so out-of-the-box behavior is unchanged.
+    if (process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED === 'true') {
+      const ctaResults = await searchLibraryByCTA(query, limit, on_streaming);
+      if (ctaResults.length > 0) return ctaResults;
+    }
+
+    if (process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED === 'true') {
+      const trackResults = await searchLibraryByTrack(query, limit);
+      if (trackResults.length > 0) return trackResults;
+    }
+
+    return [];
   }
 
+  const results = artist || title ? await fuzzySearchLibrary(artist, title, limit, on_streaming) : [];
   return results.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
 }
 
