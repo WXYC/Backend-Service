@@ -272,7 +272,6 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
-      mockIsLmlConfigured.mockReturnValue(true);
     });
 
     it('returns enriched results with matched_via propagated from LML', async () => {
@@ -434,6 +433,40 @@ describe('library.service', () => {
       const results = await searchLibraryByTrack('Back, Baby', 10);
 
       expect(results.map((r) => r.id)).toEqual([202, 201]);
+    });
+
+    it('still returns up to `limit` after CTA exclusion (filter runs post-fetch)', async () => {
+      // LML returns 2 items; CTA covers the first. With limit=1, the caller
+      // must still get one non-CTA result — not an empty array, which would
+      // happen if .limit(1) ran at the DB and the surviving row was CTA-covered.
+      const ctaRow = { ...trackRow, id: 301, legacy_release_id: 777 };
+      const keepRow = { ...trackRow, id: 302, legacy_release_id: 555, album_title: 'Survives CTA' };
+      mockLookupBySong.mockResolvedValue({
+        results: [
+          { ...lookupItem, library_item: { ...lookupItem.library_item, id: 777 } },
+          { ...lookupItem, library_item: { ...lookupItem.library_item, id: 555 } },
+        ],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      const libraryChain = createMockQueryChain([ctaRow, keepRow]);
+      libraryChain.limit = jest.fn().mockResolvedValue([ctaRow, keepRow]);
+      const ctaChain = createMockQueryChain([{ library_id: 301 }]);
+      ctaChain.where = jest.fn().mockResolvedValue([{ library_id: 301 }]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? libraryChain : ctaChain;
+        callIndex += 1;
+        return chain;
+      });
+
+      const results = await searchLibraryByTrack('Back, Baby', 1);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(302);
     });
 
     it('skips library rows whose legacy_release_id is unknown to BS (not in JOIN result)', async () => {
