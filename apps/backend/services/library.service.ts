@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import type { ReconciledIdentity } from '@wxyc/shared/dtos';
+import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
 import {
@@ -1001,6 +1001,129 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
     .limit(limit)) as unknown as LibraryArtistViewEntry[];
 
   return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
+}
+
+/**
+ * Row shape returned by `searchLibraryByCTA`: the standard `LibraryArtistViewEntry`
+ * projection plus the matched track_title and artist_name from
+ * `compilation_track_artist`. One row per matched CTA entry; grouped to one
+ * EnrichedLibraryResult per library_id in TS.
+ */
+type CTASearchRow = LibraryArtistViewEntry & {
+  cta_track_title: string | null;
+  cta_artist_name: string;
+};
+
+/**
+ * Search the library for compilation tracks whose `track_title` or
+ * `artist_name` matches `query` via ILIKE. JOINs back to `library` (with the
+ * usual `artists` / `format` / `genres` / `genre_artist_crossreference` joins
+ * used by `library_artist_view`) and returns one enriched library row per
+ * matched release, with `matched_via` listing every matching CTA row.
+ *
+ * Confidence is hardcoded to 1.0 per the catalog-track-search plan's
+ * confidence-by-source table — the curated VA-disambiguation data in
+ * `compilation_track_artist` is treated as authoritative.
+ *
+ * Method is exported for E1-3 to wire into `searchLibraryBothMode`; it is
+ * not yet on the public search path.
+ *
+ * @param query - Free text query matched against `track_title` and `artist_name`
+ * @param limit - Maximum results to return (counts library rows, not CTA rows)
+ * @param on_streaming - Optional filter on `library.on_streaming`
+ * @returns Array of enriched library results with `matched_via` populated
+ */
+export async function searchLibraryByCTA(
+  query: string,
+  limit: number,
+  on_streaming?: boolean
+): Promise<EnrichedLibraryResult[]> {
+  const trimmed = query.trim();
+  if (trimmed.length === 0) return [];
+
+  await checkLibraryArtistNameHealth();
+
+  const likePattern = `%${trimmed}%`;
+  const matchPredicate = sql`(${compilation_track_artist.track_title} ILIKE ${likePattern} OR ${compilation_track_artist.artist_name} ILIKE ${likePattern})`;
+  const streamingPredicate = on_streaming !== undefined ? sql` AND ${library.on_streaming} = ${on_streaming}` : sql``;
+
+  // Raw SQL because we need both the library_artist_view projection and the
+  // matched-track columns from `compilation_track_artist` in a single row,
+  // which the chained `libraryViewQuery` shape can't express. `limit` is
+  // applied per-library-row (via the `DENSE_RANK` window) so that callers
+  // get N releases even when a single release contributes multiple hints.
+  const queryStmt = sql`
+    SELECT * FROM (
+      SELECT
+        ${library.id} AS id,
+        ${artists.code_letters} AS code_letters,
+        ${genre_artist_crossreference.artist_genre_code} AS code_artist_number,
+        ${library.code_number} AS code_number,
+        ${artists.artist_name} AS artist_name,
+        ${artists.alphabetical_name} AS alphabetical_name,
+        ${library.album_title} AS album_title,
+        ${format.format_name} AS format_name,
+        ${genres.genre_name} AS genre_name,
+        ${rotation.rotation_bin} AS rotation_bin,
+        ${library.add_date} AS add_date,
+        ${library.label} AS label,
+        ${library.label_id} AS label_id,
+        ${library.on_streaming} AS on_streaming,
+        ${library.album_artist} AS album_artist,
+        ${library.plays} AS plays,
+        ${library.artwork_url} AS artwork_url,
+        ${artists.discogs_artist_id} AS discogs_artist_id,
+        ${artists.musicbrainz_artist_id} AS musicbrainz_artist_id,
+        ${artists.wikidata_qid} AS wikidata_qid,
+        ${artists.spotify_artist_id} AS spotify_artist_id,
+        ${artists.apple_music_artist_id} AS apple_music_artist_id,
+        ${artists.bandcamp_id} AS bandcamp_id,
+        ${compilation_track_artist.track_title} AS cta_track_title,
+        ${compilation_track_artist.artist_name} AS cta_artist_name,
+        DENSE_RANK() OVER (ORDER BY ${library.id}) AS library_rank
+      FROM ${compilation_track_artist}
+      INNER JOIN ${library} ON ${library.id} = ${compilation_track_artist.library_id}
+      INNER JOIN ${artists} ON ${artists.id} = ${library.artist_id}
+      INNER JOIN ${format} ON ${format.id} = ${library.format_id}
+      INNER JOIN ${genres} ON ${genres.id} = ${library.genre_id}
+      INNER JOIN ${genre_artist_crossreference}
+        ON ${genre_artist_crossreference.artist_id} = ${library.artist_id}
+        AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
+      LEFT JOIN ${rotation}
+        ON ${rotation.album_id} = ${library.id}
+        AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)
+      WHERE ${matchPredicate}${streamingPredicate}
+    ) ranked
+    WHERE library_rank <= ${limit}
+    ORDER BY library_rank, cta_track_title
+  `;
+
+  const rows = (await db.execute(queryStmt)) as unknown as CTASearchRow[];
+  if (rows.length === 0) return [];
+
+  // Group CTA rows by library_id: one EnrichedLibraryResult per release with
+  // a `matched_via` hint per CTA row. Preserves the first-seen ordering so
+  // callers see the same DB sort.
+  const byLibraryId = new Map<number, { row: CTASearchRow; hints: TrackMatchHint[] }>();
+  for (const row of rows) {
+    const existing = byLibraryId.get(row.id);
+    const hint: TrackMatchHint = {
+      title: row.cta_track_title ?? '',
+      artist_credit: row.cta_artist_name,
+      source: 'cta',
+      confidence: 1.0,
+    };
+    if (existing) {
+      existing.hints.push(hint);
+    } else {
+      byLibraryId.set(row.id, { row, hints: [hint] });
+    }
+  }
+
+  return Array.from(byLibraryId.values()).map(({ row, hints }) => ({
+    ...enrichLibraryResult(viewRowToLibraryResult(row)),
+    matched_via: hints,
+  }));
 }
 
 /**
