@@ -944,6 +944,13 @@ describe('library.service', () => {
       expect(db.execute).not.toHaveBeenCalled();
     });
 
+    it('returns an empty array without a DB call for pure-punctuation queries', async () => {
+      const results = await searchLibraryByCTA('!!!', 5);
+
+      expect(results).toEqual([]);
+      expect(db.execute).not.toHaveBeenCalled();
+    });
+
     it('groups multiple CTA matches against the same library row into one result with multiple hints', async () => {
       const secondHintRow = {
         ...mockCTARow,

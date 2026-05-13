@@ -1039,7 +1039,9 @@ export async function searchLibraryByCTA(
   on_streaming?: boolean
 ): Promise<EnrichedLibraryResult[]> {
   const trimmed = query.trim();
-  if (trimmed.length === 0) return [];
+  // Mirror searchLibraryBothMode's guard: pure-punctuation queries (`!!!`,
+  // `---`) would otherwise run an unanchored ILIKE scan over every CTA row.
+  if (trimmed.length === 0 || !hasAlphanumeric(trimmed)) return [];
 
   await checkLibraryArtistNameHealth();
 
