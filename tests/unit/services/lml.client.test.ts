@@ -23,6 +23,7 @@ jest.mock('@sentry/node', () => ({
 
 import {
   lookupMetadata,
+  lookupBySong,
   getRelease,
   getArtistDetails,
   resolveEntity,
@@ -212,6 +213,65 @@ describe('lml.client', () => {
       const result = await lookupMetadata('Autechre', 'Confield');
 
       expect(result).toEqual(lookupResponse);
+    });
+  });
+
+  describe('lookupBySong', () => {
+    it('sends POST to /api/v1/lookup with only song + raw_message (artist omitted)', async () => {
+      // LML's SONG_AS_TRACK strategy is keyed off a song-only request; sending
+      // an empty-string artist would bias LML's parser away from the strategy.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupBySong('Back, Baby');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://lml.test:8000/api/v1/lookup',
+        expect.objectContaining({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ song: 'Back, Baby', raw_message: 'Back, Baby' }),
+        })
+      );
+    });
+
+    it('wraps the call in a Sentry span and projects cache_stats onto it', async () => {
+      const cache_stats = { memory_hits: 0, pg_hits: 2, pg_misses: 1, api_calls: 1 };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [],
+            search_type: 'none',
+            song_not_found: false,
+            found_on_compilation: false,
+            cache_stats,
+          }),
+      } as unknown as globalThis.Response);
+
+      await lookupBySong('Back, Baby');
+
+      expect(mockStartSpan).toHaveBeenCalledTimes(1);
+      expect(mockStartSpan.mock.calls[0][0]).toEqual({ name: 'lml.lookup', op: 'http.client' });
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+        'lml.cache.memory_hits': 0,
+        'lml.cache.pg_hits': 2,
+        'lml.cache.pg_misses': 1,
+        'lml.cache.api_calls': 1,
+      });
+    });
+
+    it('throws LmlClientError on non-2xx response', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+      } as unknown as globalThis.Response);
+
+      await expect(lookupBySong('Back, Baby')).rejects.toThrow(LmlClientError);
     });
   });
 

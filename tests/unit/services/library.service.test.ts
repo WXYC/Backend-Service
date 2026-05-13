@@ -2,10 +2,12 @@ import { jest } from '@jest/globals';
 import { db, createMockQueryChain, library, library_artist_view, album_plays } from '../../mocks/database.mock';
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
+const mockLookupBySong = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
 
 jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
   lookupMetadata: mockLookupMetadata,
+  lookupBySong: mockLookupBySong,
   isLmlConfigured: mockIsLmlConfigured,
 }));
 
@@ -15,6 +17,7 @@ import {
   searchLibrary,
   searchByArtist,
   searchAlbumsByTitle,
+  searchLibraryByTrack,
   getAlbumFromDB,
   markAlbumMissing,
   markAlbumFound,
@@ -224,6 +227,242 @@ describe('library.service', () => {
 
       expect(results).toHaveLength(1);
       expect(results[0]).toHaveProperty('codeArtistNumber', 3);
+    });
+  });
+
+  describe('searchLibraryByTrack', () => {
+    const trackRow = {
+      id: 101,
+      code_letters: 'PR',
+      code_artist_number: 1,
+      code_number: 2,
+      artist_name: 'Jessica Pratt',
+      alphabetical_name: 'Pratt, Jessica',
+      album_title: 'On Your Own Love Again',
+      format_name: 'CD',
+      genre_name: 'Rock',
+      rotation_bin: null,
+      add_date: new Date('2024-02-01'),
+      label: 'Drag City',
+      label_id: null,
+      on_streaming: true,
+      album_artist: null,
+      plays: 12,
+      artwork_url: null,
+      legacy_release_id: 555,
+    };
+
+    const lookupItem = {
+      library_item: {
+        id: 555,
+        title: 'On Your Own Love Again',
+        artist: 'Jessica Pratt',
+        call_number: 'Rock CD PR 1/2',
+        library_url: 'http://www.wxyc.info/wxycdb/libraryRelease?id=555',
+      },
+      matched_via: [
+        {
+          title: 'Back, Baby',
+          artist_credit: null,
+          confidence: 0.92,
+          source: 'discogs',
+        },
+      ],
+    };
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockIsLmlConfigured.mockReturnValue(true);
+    });
+
+    it('returns enriched results with matched_via propagated from LML', async () => {
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      // Library bridge query (first db.select()) reads library rows.
+      const libraryChain = createMockQueryChain([trackRow]);
+      libraryChain.limit = jest.fn().mockResolvedValue([trackRow]);
+      // CTA exclusion probe (second db.select() returning library_ids that ARE
+      // covered by CTA — empty here means no exclusions). The CTA query has
+      // no .limit(), so .where() must resolve to an array.
+      const ctaChain = createMockQueryChain([]);
+      ctaChain.where = jest.fn().mockResolvedValue([]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? libraryChain : ctaChain;
+        callIndex += 1;
+        return chain;
+      });
+
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(mockLookupBySong).toHaveBeenCalledTimes(1);
+      expect(mockLookupBySong).toHaveBeenCalledWith('Back, Baby');
+      // Bridge query reads from `library` (with joins) so the unique index
+      // on legacy_release_id is reachable.
+      expect(libraryChain.from).toHaveBeenCalledWith(library);
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(101);
+      expect(results[0].artist).toBe('Jessica Pratt');
+      expect(results[0].matched_via).toEqual([
+        { title: 'Back, Baby', artist_credit: null, confidence: 0.92, source: 'discogs' },
+      ]);
+    });
+
+    it('maps LML library.db.id to BS library.id via legacy_release_id', async () => {
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      const libraryChain = createMockQueryChain([trackRow]);
+      libraryChain.limit = jest.fn().mockResolvedValue([trackRow]);
+      const ctaChain = createMockQueryChain([]);
+      ctaChain.where = jest.fn().mockResolvedValue([]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? libraryChain : ctaChain;
+        callIndex += 1;
+        return chain;
+      });
+
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      // The library-bridge query predicate must reference legacy_release_id.
+      const whereArg = libraryChain.where.mock.calls[0]?.[0] as { inArray?: unknown[] };
+      expect(whereArg.inArray).toEqual([library.legacy_release_id, [555]]);
+      expect(results[0].id).toBe(101); // BS library.id, not LML's 555
+    });
+
+    it('returns empty array when LML returns no results (skips DB roundtrip)', async () => {
+      mockLookupBySong.mockResolvedValue({
+        results: [],
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      db.select.mockReset();
+
+      const results = await searchLibraryByTrack('Nonexistent Song', 10);
+
+      expect(results).toEqual([]);
+      expect(db.select).not.toHaveBeenCalled();
+    });
+
+    it('returns empty array and swallows LML errors (fallback strategy must degrade gracefully)', async () => {
+      mockLookupBySong.mockRejectedValue(new Error('LML 502 Bad Gateway'));
+      db.select.mockReset();
+
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(results).toEqual([]);
+      expect(db.select).not.toHaveBeenCalled();
+    });
+
+    it('excludes CTA-covered library rows for the same query (Track 1 will surface those)', async () => {
+      // Second LML result for a release that IS in compilation_track_artist
+      // with track_title ILIKE '%back, baby%'. Should be filtered out.
+      const ctaRow = {
+        ...trackRow,
+        id: 102,
+        album_title: 'Various - Drag City Sampler',
+        artist_name: 'Various',
+        legacy_release_id: 777,
+      };
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem, { ...lookupItem, library_item: { ...lookupItem.library_item, id: 777 } }],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      const libraryChain = createMockQueryChain([trackRow, ctaRow]);
+      libraryChain.limit = jest.fn().mockResolvedValue([trackRow, ctaRow]);
+      // CTA probe says library_id=102 is covered.
+      const ctaChain = createMockQueryChain([{ library_id: 102 }]);
+      ctaChain.where = jest.fn().mockResolvedValue([{ library_id: 102 }]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? libraryChain : ctaChain;
+        callIndex += 1;
+        return chain;
+      });
+
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(101);
+    });
+
+    it("preserves LML's response order (BS does not re-rank)", async () => {
+      // LML returns 777 first, 555 second. BS must emit the same order.
+      const trackRowA = { ...trackRow, id: 201, legacy_release_id: 555 };
+      const trackRowB = { ...trackRow, id: 202, legacy_release_id: 777, album_title: 'Album B' };
+      mockLookupBySong.mockResolvedValue({
+        results: [
+          { ...lookupItem, library_item: { ...lookupItem.library_item, id: 777 } },
+          { ...lookupItem, library_item: { ...lookupItem.library_item, id: 555 } },
+        ],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      // DB returns them in whatever order Postgres picks (here, the wrong one).
+      const libraryChain = createMockQueryChain([trackRowA, trackRowB]);
+      libraryChain.limit = jest.fn().mockResolvedValue([trackRowA, trackRowB]);
+      const ctaChain = createMockQueryChain([]);
+      ctaChain.where = jest.fn().mockResolvedValue([]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? libraryChain : ctaChain;
+        callIndex += 1;
+        return chain;
+      });
+
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(results.map((r) => r.id)).toEqual([202, 201]);
+    });
+
+    it('skips library rows whose legacy_release_id is unknown to BS (not in JOIN result)', async () => {
+      // LML returned 999, but BS has no library row with legacy_release_id=999.
+      // Drop it silently — the LML response is the source of truth on what
+      // matched, but the legacy bridge is the source of truth on what BS holds.
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem, { ...lookupItem, library_item: { ...lookupItem.library_item, id: 999 } }],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      const libraryChain = createMockQueryChain([trackRow]);
+      libraryChain.limit = jest.fn().mockResolvedValue([trackRow]);
+      const ctaChain = createMockQueryChain([]);
+      ctaChain.where = jest.fn().mockResolvedValue([]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? libraryChain : ctaChain;
+        callIndex += 1;
+        return chain;
+      });
+
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(101);
     });
   });
 
