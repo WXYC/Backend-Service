@@ -430,7 +430,7 @@ jobs:
         # Long-lived AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY pattern
         # already used by .github/workflows/deploy-base.yml (lines 246, 254,
         # 265, 329, 337, 363, 454). Migrating to OIDC is a separate concern.
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
