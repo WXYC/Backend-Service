@@ -934,7 +934,11 @@ export async function searchLibraryByTrack(query: string, limit: number): Promis
       sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
     )
     .where(inArray(library.legacy_release_id, legacyIds))
-    .limit(limit)) as unknown as Array<LibraryArtistViewEntry & { legacy_release_id: number | null }>;
+    // Bound by the LML response size (already capped server-side), not the
+    // caller's `limit`. CTA exclusion runs after this query, so a tight
+    // .limit(limit) would let CTA drops shrink the response below what the
+    // caller asked for. We trim to `limit` after exclusion + ordering.
+    .limit(legacyIds.length)) as unknown as Array<LibraryArtistViewEntry & { legacy_release_id: number | null }>;
 
   // CTA-covered library rows are Track 1's responsibility; filter them out so
   // the read layer doesn't double-surface compilations alongside curated CTA
@@ -976,6 +980,7 @@ export async function searchLibraryByTrack(query: string, limit: number): Promis
       enriched.matched_via = item.matched_via;
     }
     results.push(enriched);
+    if (results.length >= limit) break;
   }
   return results;
 }
