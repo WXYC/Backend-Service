@@ -17,6 +17,7 @@ import {
   searchLibrary,
   searchByArtist,
   searchAlbumsByTitle,
+  searchLibraryByCTA,
   searchLibraryByTrack,
   getAlbumFromDB,
   markAlbumMissing,
@@ -24,6 +25,28 @@ import {
   enrichWithArtwork,
   updateArtworkUrl,
 } from '../../../apps/backend/services/library.service';
+
+/**
+ * Recursively collect every scalar interpolation from a mock-`sql` tagged
+ * template (and any nested `sql` fragments inside its `values`). The
+ * drizzle-orm auto-mock returns `{ sql, values }` for each tag; the helper
+ * lets tests assert that a specific value landed somewhere in the SQL tree
+ * without caring which sub-fragment owns it.
+ */
+function flattenSqlValues(node: unknown): unknown[] {
+  if (!node || typeof node !== 'object') return [];
+  const values = (node as { values?: unknown[] }).values;
+  if (!Array.isArray(values)) return [];
+  const out: unknown[] = [];
+  for (const value of values) {
+    if (value && typeof value === 'object' && 'sql' in value) {
+      out.push(...flattenSqlValues(value));
+    } else {
+      out.push(value);
+    }
+  }
+  return out;
+}
 
 describe('library.service', () => {
   describe('fuzzySearchLibrary', () => {
@@ -831,8 +854,8 @@ describe('library.service', () => {
       mockLookupMetadata.mockResolvedValue({
         results: [],
         search_type: 'none',
-        song_not_found: false,
         found_on_compilation: false,
+        song_not_found: false,
       });
 
       const results = [{ id: 1, artist_name: 'Obscure Artist', album_title: 'Rare Album', artwork_url: null }];
@@ -841,6 +864,127 @@ describe('library.service', () => {
 
       expect(enriched[0].artwork_url).toBeNull();
       expect(db.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('searchLibraryByCTA', () => {
+    const mockCTARow = {
+      id: 11,
+      code_letters: 'VA',
+      code_artist_number: 1,
+      code_number: 5,
+      artist_name: 'Various Artists',
+      alphabetical_name: 'Various Artists',
+      album_title: 'Edits',
+      format_name: 'cd',
+      genre_name: 'Electronic',
+      rotation_bin: null,
+      add_date: new Date('2024-01-15'),
+      label: 'self-released',
+      label_id: null,
+      on_streaming: true,
+      album_artist: null,
+      plays: 0,
+      artwork_url: null,
+      discogs_artist_id: null,
+      musicbrainz_artist_id: null,
+      wikidata_qid: null,
+      spotify_artist_id: null,
+      apple_music_artist_id: null,
+      bandcamp_id: null,
+      cta_track_title: 'Call Your Name',
+      cta_artist_name: 'Chuquimamani-Condori',
+    };
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it('returns enriched results with a cta-source TrackMatchHint on track_title match', async () => {
+      db.execute.mockResolvedValue([mockCTARow]);
+
+      const results = await searchLibraryByCTA('Call Your Name', 5);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(11);
+      expect(results[0].artist).toBe('Various Artists');
+      expect(results[0].matched_via).toEqual([
+        {
+          title: 'Call Your Name',
+          artist_credit: 'Chuquimamani-Condori',
+          source: 'cta',
+          confidence: 1.0,
+        },
+      ]);
+    });
+
+    it('returns enriched results with a cta-source TrackMatchHint on artist_name match', async () => {
+      db.execute.mockResolvedValue([mockCTARow]);
+
+      const results = await searchLibraryByCTA('Chuquimamani', 5);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].matched_via?.[0].artist_credit).toBe('Chuquimamani-Condori');
+      expect(results[0].matched_via?.[0].source).toBe('cta');
+      expect(results[0].matched_via?.[0].confidence).toBe(1.0);
+    });
+
+    it('returns an empty array when no rows match', async () => {
+      db.execute.mockResolvedValue([]);
+
+      const results = await searchLibraryByCTA('zzz no match zzz', 5);
+
+      expect(results).toEqual([]);
+    });
+
+    it('returns an empty array without a DB call for an empty / whitespace-only query', async () => {
+      const results = await searchLibraryByCTA('   ', 5);
+
+      expect(results).toEqual([]);
+      expect(db.execute).not.toHaveBeenCalled();
+    });
+
+    it('groups multiple CTA matches against the same library row into one result with multiple hints', async () => {
+      const secondHintRow = {
+        ...mockCTARow,
+        cta_track_title: 'Another Track',
+        cta_artist_name: 'Chuquimamani-Condori',
+      };
+      db.execute.mockResolvedValue([mockCTARow, secondHintRow]);
+
+      const results = await searchLibraryByCTA('Chuquimamani', 5);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].matched_via).toHaveLength(2);
+      expect(results[0].matched_via?.map((h) => h.title)).toEqual(['Call Your Name', 'Another Track']);
+    });
+
+    it('threads on_streaming=true into the SQL predicate', async () => {
+      db.execute.mockResolvedValue([mockCTARow]);
+
+      await searchLibraryByCTA('Chuquimamani', 5, true);
+
+      expect(db.execute).toHaveBeenCalledTimes(1);
+      // The drizzle-orm auto-mock (tests/__mocks__/drizzle-orm.ts) makes each
+      // tagged-template `sql\`...\`` return `{ sql, values }`; nested sql
+      // fragments appear as objects inside the parent's `values` array.
+      // Flatten the tree before asserting on the interpolated `on_streaming`
+      // value.
+      const sqlArg = db.execute.mock.calls[0]?.[0];
+      expect(flattenSqlValues(sqlArg)).toContain(true);
+    });
+
+    it('omits the on_streaming filter when the arg is undefined', async () => {
+      db.execute.mockResolvedValue([mockCTARow]);
+
+      await searchLibraryByCTA('Chuquimamani', 5);
+
+      const sqlArg = db.execute.mock.calls[0]?.[0];
+      const flattened = flattenSqlValues(sqlArg);
+      // No streaming filter, so neither `true` nor `false` should appear
+      // in the SQL values.
+      expect(flattened).not.toContain(true);
+      expect(flattened).not.toContain(false);
     });
   });
 });
