@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { ReconciledIdentity } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
@@ -11,6 +11,7 @@ import {
   RotationRelease,
   album_plays,
   artists,
+  compilation_track_artist,
   genre_artist_crossreference,
   format,
   genres,
@@ -19,7 +20,7 @@ import {
   LibraryArtistViewEntry,
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
-import { lookupMetadata, isLmlConfigured, type LookupResponse } from './lml/lml.client.js';
+import { lookupBySong, lookupMetadata, isLmlConfigured, type LookupResponse } from './lml/lml.client.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
 
 /**
@@ -869,6 +870,114 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
     .limit(limit)) as unknown as LibraryArtistViewEntry[];
 
   return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
+}
+
+/**
+ * Search the library for releases that contain a track matching `query`.
+ *
+ * Thin BS-side proxy for LML's `/api/v1/lookup` `SONG_AS_TRACK` strategy
+ * (LML#301, catalog-track-search plan §4.2). LML cross-references the title
+ * against Discogs, validates the track-on-release server-side, and ranks the
+ * results; BS only:
+ *
+ *   1. Bridges each LML `library_item.id` (which equals BS
+ *      `library.legacy_release_id` — 99.88% populated) to a BS `library.id`
+ *      via the unique index `library_legacy_release_id_idx`.
+ *   2. Excludes library rows already covered by `compilation_track_artist`
+ *      for the same query — Track 1 (BS#817) surfaces those; this is the
+ *      fallback strategy and should not double-count.
+ *   3. Preserves LML's ordering. BS does not re-rank.
+ *
+ * Errors at the LML HTTP boundary degrade to an empty result. Catalog search
+ * is the only consumer today and treats Track 2 as best-effort.
+ *
+ * @param query - Track-title query
+ * @param limit - Maximum results to return
+ * @returns Array of enriched library results with `matched_via` populated
+ */
+export async function searchLibraryByTrack(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
+  let response: LookupResponse;
+  try {
+    response = await lookupBySong(query);
+  } catch (err) {
+    console.warn('[Library] searchLibraryByTrack: LML lookup failed, returning empty', err);
+    return [];
+  }
+
+  const items = response.results ?? [];
+  if (items.length === 0) return [];
+
+  // LML's library_item.id is the legacy MySQL surrogate; BS stores it as
+  // library.legacy_release_id. Bridge that to BS library.id so callers get
+  // the row id their controllers and dj-site links expect.
+  const legacyIds = items.map((item) => item.library_item?.id).filter((id): id is number => typeof id === 'number');
+  if (legacyIds.length === 0) return [];
+
+  // Read the view shape plus legacy_release_id so we can re-order BS rows in
+  // LML's response order below. legacy_release_id is not in
+  // LIBRARY_VIEW_PROJECTION because the public view doesn't expose it.
+  const rows = (await db
+    .select({ ...LIBRARY_VIEW_PROJECTION, legacy_release_id: library.legacy_release_id })
+    .from(library)
+    .innerJoin(artists, eq(artists.id, library.artist_id))
+    .innerJoin(format, eq(format.id, library.format_id))
+    .innerJoin(genres, eq(genres.id, library.genre_id))
+    .innerJoin(
+      genre_artist_crossreference,
+      and(
+        eq(genre_artist_crossreference.artist_id, library.artist_id),
+        eq(genre_artist_crossreference.genre_id, library.genre_id)
+      )
+    )
+    .leftJoin(
+      rotation,
+      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
+    )
+    .where(inArray(library.legacy_release_id, legacyIds))
+    .limit(limit)) as unknown as Array<LibraryArtistViewEntry & { legacy_release_id: number | null }>;
+
+  // CTA-covered library rows are Track 1's responsibility; filter them out so
+  // the read layer doesn't double-surface compilations alongside curated CTA
+  // hits.
+  const ctaRows =
+    rows.length === 0
+      ? []
+      : ((await db
+          .select({ library_id: compilation_track_artist.library_id })
+          .from(compilation_track_artist)
+          .where(
+            and(
+              inArray(
+                compilation_track_artist.library_id,
+                rows.map((r) => r.id)
+              ),
+              sql`${compilation_track_artist.track_title} ILIKE ${'%' + query + '%'}`
+            )
+          )) as Array<{ library_id: number }>);
+  const ctaCovered = new Set(ctaRows.map((r) => r.library_id));
+
+  // Index BS rows by legacy_release_id so we can emit them in LML's order.
+  const rowsByLegacyId = new Map<number, LibraryArtistViewEntry & { legacy_release_id: number | null }>();
+  for (const row of rows) {
+    if (row.legacy_release_id != null) {
+      rowsByLegacyId.set(row.legacy_release_id, row);
+    }
+  }
+
+  const results: EnrichedLibraryResult[] = [];
+  for (const item of items) {
+    const legacyId = item.library_item?.id;
+    if (legacyId == null) continue;
+    const row = rowsByLegacyId.get(legacyId);
+    if (!row) continue;
+    if (ctaCovered.has(row.id)) continue;
+    const enriched = enrichLibraryResult(viewRowToLibraryResult(row));
+    if (item.matched_via && item.matched_via.length > 0) {
+      enriched.matched_via = item.matched_via;
+    }
+    results.push(enriched);
+  }
+  return results;
 }
 
 /**

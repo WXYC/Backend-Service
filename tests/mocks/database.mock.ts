@@ -185,7 +185,13 @@ export const specialty_shows = {};
 export const schedule = {};
 export const artist_crossreference = {};
 export const artist_library_crossreference = {};
-export const compilation_track_artist = {};
+export const compilation_track_artist = {
+  id: 'id',
+  library_id: 'library_id',
+  artist_name: 'artist_name',
+  track_title: 'track_title',
+  track_position: 'track_position',
+};
 export const genre_artist_crossreference = {
   artist_id: 'artist_id',
   genre_id: 'genre_id',

@@ -114,21 +114,39 @@ async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
  * @returns Lookup results with library items and enriched artwork metadata
  */
 export async function lookupMetadata(artist: string, album?: string, song?: string): Promise<LookupResponse> {
-  // Wrap the call in a Sentry span so the LML response's cache_stats (memory
-  // hits / pg hits / pg misses / api calls / pg time / api time) lands as
-  // attributes on the BS transaction's trace. Filterable in Sentry's trace
-  // explorer (e.g. `lml.cache.api_calls > 0`) so per-callsite instrumentation
-  // isn't needed for the metadata-backfill pilot or the runtime hot path.
-  // Sibling LML-side projection at WXYC/library-metadata-lookup#213.
-  return Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
-    // LML's /lookup contract requires `raw_message` even when artist/album/song
-    // are already structured. Synthesize a free-form description that the LML
-    // parser would have produced — matches the e2e fixtures in LML's repo.
-    const rawMessage = [artist, album, song].filter(Boolean).join(' - ');
-    const body: Record<string, string> = { artist, raw_message: rawMessage };
-    if (album) body.album = album;
-    if (song) body.song = song;
+  // LML's /lookup contract requires `raw_message` even when artist/album/song
+  // are already structured. Synthesize a free-form description that the LML
+  // parser would have produced — matches the e2e fixtures in LML's repo.
+  const rawMessage = [artist, album, song].filter(Boolean).join(' - ');
+  const body: Record<string, string> = { artist, raw_message: rawMessage };
+  if (album) body.album = album;
+  if (song) body.song = song;
+  return postLookup(body);
+}
 
+/**
+ * Track-driven lookup: sends only `song` + `raw_message` (no artist field) so
+ * LML's parser routes the request to its `SONG_AS_TRACK` strategy (LML#301),
+ * which Discogs-cross-references the title and validates the track-on-release
+ * before returning library matches. Used by the catalog Track-2 path
+ * (BS#823) — Backend-Service is a thin proxy here; LML does all the ranking
+ * and the response's `matched_via` carries the per-result evidence.
+ */
+export async function lookupBySong(song: string): Promise<LookupResponse> {
+  return postLookup({ song, raw_message: song });
+}
+
+/**
+ * Shared chokepoint for POST /api/v1/lookup. Wraps the call in a Sentry span
+ * so the LML response's cache_stats (memory hits / pg hits / pg misses / api
+ * calls / pg time / api time) lands as attributes on the BS transaction's
+ * trace. Filterable in Sentry's trace explorer (e.g.
+ * `lml.cache.api_calls > 0`) so per-callsite instrumentation isn't needed for
+ * the metadata-backfill pilot or the runtime hot path. Sibling LML-side
+ * projection at WXYC/library-metadata-lookup#213.
+ */
+async function postLookup(body: Record<string, string>): Promise<LookupResponse> {
+  return Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
     const response = await lmlFetch('/api/v1/lookup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

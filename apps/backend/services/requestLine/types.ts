@@ -5,7 +5,7 @@
  * and adapted for TypeScript/Express.
  */
 
-import type { ReconciledIdentity } from '@wxyc/shared/dtos';
+import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 
 // =============================================================================
 // Message Parsing Types
@@ -84,6 +84,14 @@ export interface EnrichedLibraryResult extends LibraryResult {
   callNumber: string;
   /** URL to view this release in the WXYC library */
   libraryUrl: string;
+  /**
+   * Populated when a track-title match drove this release into the results
+   * (catalog-track-search plan §5.1). Sourced from LML's `LookupResultItem.matched_via`
+   * (Track 2 / BS#823) or from `compilation_track_artist` rows (Track 1 / BS#817).
+   * Empty or absent for releases that matched on artist / album normally.
+   * Backward-compatible — existing consumers ignore the field.
+   */
+  matched_via?: TrackMatchHint[];
 }
 
 /**
