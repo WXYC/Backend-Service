@@ -189,6 +189,272 @@ describe('library.service', () => {
     });
   });
 
+  /**
+   * Track-search cascade (E1-3 + E2-4): when the tsvector + trigram primary
+   * returns 0 hits, probe CTA (Track 1), then LML /lookup (Track 2). Each
+   * layer is gated by its own env flag; flags default false so out-of-the-box
+   * behavior is identical to today.
+   */
+  describe('searchLibrary cascade (CTA + LML fallback)', () => {
+    const ctaRow = {
+      id: 11,
+      code_letters: 'VA',
+      code_artist_number: 1,
+      code_number: 5,
+      artist_name: 'Various Artists',
+      alphabetical_name: 'Various Artists',
+      album_title: 'Edits',
+      format_name: 'cd',
+      genre_name: 'Electronic',
+      rotation_bin: null,
+      add_date: new Date('2024-01-15'),
+      label: 'self-released',
+      label_id: null,
+      on_streaming: true,
+      album_artist: null,
+      plays: 0,
+      artwork_url: null,
+      discogs_artist_id: null,
+      musicbrainz_artist_id: null,
+      wikidata_qid: null,
+      spotify_artist_id: null,
+      apple_music_artist_id: null,
+      bandcamp_id: null,
+      cta_track_title: 'Call Your Name',
+      cta_artist_name: 'Chuquimamani-Condori',
+    };
+
+    const trackRow = {
+      id: 101,
+      code_letters: 'PR',
+      code_artist_number: 1,
+      code_number: 2,
+      artist_name: 'Jessica Pratt',
+      alphabetical_name: 'Pratt, Jessica',
+      album_title: 'On Your Own Love Again',
+      format_name: 'CD',
+      genre_name: 'Rock',
+      rotation_bin: null,
+      add_date: new Date('2024-02-01'),
+      label: 'Drag City',
+      label_id: null,
+      on_streaming: true,
+      album_artist: null,
+      plays: 12,
+      artwork_url: null,
+      legacy_release_id: 555,
+    };
+
+    const lookupItem = {
+      library_item: {
+        id: 555,
+        title: 'On Your Own Love Again',
+        artist: 'Jessica Pratt',
+        call_number: 'Rock CD PR 1/2',
+        library_url: 'http://www.wxyc.info/wxycdb/libraryRelease?id=555',
+      },
+      matched_via: [{ title: 'Back, Baby', artist_credit: null, confidence: 0.92, source: 'discogs_release' }],
+    };
+
+    const originalCta = process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+    const originalDiscogs = process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+      delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+    });
+
+    afterAll(() => {
+      if (originalCta === undefined) delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+      else process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = originalCta;
+      if (originalDiscogs === undefined) delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+      else process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = originalDiscogs;
+    });
+
+    /**
+     * Tsvector returns 0; trigram returns whatever `trigramRows` says.
+     * Returns the recorded call counts so tests can assert the cascade order.
+     */
+    function setUpPrimarySearchMocks(trigramRows: object[] = []): void {
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      const trigramChain = createMockQueryChain(trigramRows);
+      trigramChain.limit = jest.fn().mockResolvedValue(trigramRows);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? tsvectorChain : trigramChain;
+        callIndex += 1;
+        return chain;
+      });
+    }
+
+    /**
+     * Add a third + fourth `db.select` chain for `searchLibraryByTrack`'s
+     * library-bridge + cta-exclusion queries on top of the primary mocks.
+     */
+    function setUpPrimaryAndTrackMocks(trackRows: object[], ctaCoveredIds: number[] = []): void {
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      const trigramChain = createMockQueryChain([]);
+      trigramChain.limit = jest.fn().mockResolvedValue([]);
+      const libraryChain = createMockQueryChain(trackRows);
+      libraryChain.limit = jest.fn().mockResolvedValue(trackRows);
+      const ctaChain = createMockQueryChain(ctaCoveredIds.map((id) => ({ library_id: id })));
+      ctaChain.where = jest.fn().mockResolvedValue(ctaCoveredIds.map((id) => ({ library_id: id })));
+      const chains = [tsvectorChain, trigramChain, libraryChain, ctaChain];
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = chains[Math.min(callIndex, chains.length - 1)];
+        callIndex += 1;
+        return chain;
+      });
+    }
+
+    it('flag-off baseline: tsvector+trigram return 0 and no fallback fires', async () => {
+      setUpPrimarySearchMocks();
+      db.execute.mockResolvedValue([]);
+
+      const results = await searchLibrary('nilufer yanya');
+
+      expect(results).toEqual([]);
+      expect(db.execute).not.toHaveBeenCalled();
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('flag-off: tsvector hit still returns primary results unchanged', async () => {
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+      db.execute.mockResolvedValue([]);
+
+      const results = await searchLibrary('Autechre');
+
+      expect(results).toHaveLength(1);
+      expect(results[0].matched_via).toBeUndefined();
+      expect(db.execute).not.toHaveBeenCalled();
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('CTA flag on, primary returns 0 → CTA fires and matched_via.source=cta', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      setUpPrimarySearchMocks();
+      db.execute.mockResolvedValue([ctaRow]);
+
+      const results = await searchLibrary('Call Your Name');
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(11);
+      expect(results[0].matched_via?.[0]).toMatchObject({ source: 'cta', title: 'Call Your Name', confidence: 1.0 });
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('CTA flag on, primary returns >0 → CTA NOT called (direct hits outrank fallback)', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+
+      const results = await searchLibrary('Autechre');
+
+      expect(results).toHaveLength(1);
+      expect(db.execute).not.toHaveBeenCalled();
+    });
+
+    it('Both flags on, primary 0 + CTA >0 → LML NOT called (CTA suppresses Track 2)', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      setUpPrimarySearchMocks();
+      db.execute.mockResolvedValue([ctaRow]);
+
+      const results = await searchLibrary('Call Your Name');
+
+      expect(results).toHaveLength(1);
+      expect(results[0].matched_via?.[0].source).toBe('cta');
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('Both flags on, primary 0 + CTA 0 → LML fires and matched_via propagates', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+      setUpPrimaryAndTrackMocks([trackRow]);
+      db.execute.mockResolvedValue([]);
+
+      const results = await searchLibrary('Back, Baby');
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(101);
+      expect(results[0].matched_via?.[0]).toMatchObject({ source: 'discogs_release', confidence: 0.92 });
+    });
+
+    it('LML flag on alone (CTA flag off), primary 0 → LML fires directly', async () => {
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+      setUpPrimaryAndTrackMocks([trackRow]);
+
+      const results = await searchLibrary('Back, Baby');
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(101);
+      // CTA flag was off; the CTA probe should not have been queried.
+      expect(db.execute).not.toHaveBeenCalled();
+    });
+
+    it('Both flags on, all three layers miss → empty array', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      setUpPrimarySearchMocks();
+      db.execute.mockResolvedValue([]);
+      mockLookupBySong.mockResolvedValue({
+        results: [],
+        search_type: 'none',
+        song_not_found: true,
+        found_on_compilation: false,
+      });
+
+      const results = await searchLibrary('xyzzy-unknown-track');
+
+      expect(results).toEqual([]);
+      expect(db.execute).toHaveBeenCalledTimes(1);
+      expect(mockLookupBySong).toHaveBeenCalledTimes(1);
+    });
+
+    it('CTA flag off, LML flag off: explicit "false" values keep cascade dormant', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'false';
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'false';
+      setUpPrimarySearchMocks();
+
+      await searchLibrary('Call Your Name');
+
+      expect(db.execute).not.toHaveBeenCalled();
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('threads on_streaming into the CTA fallback when flag is on', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      setUpPrimarySearchMocks();
+      db.execute.mockResolvedValue([ctaRow]);
+
+      await searchLibrary('Call Your Name', undefined, undefined, 5, true);
+
+      const sqlArg = db.execute.mock.calls[0]?.[0];
+      expect(flattenSqlValues(sqlArg)).toContain(true);
+    });
+  });
+
   describe('fuzzySearchLibrary Both-mode routing', () => {
     beforeEach(() => {
       jest.clearAllMocks();
