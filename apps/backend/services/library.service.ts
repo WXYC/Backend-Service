@@ -1,4 +1,6 @@
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { LRUCache } from 'lru-cache';
+import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
@@ -906,11 +908,16 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  * Errors at the LML HTTP boundary degrade to an empty result. Catalog search
  * is the only consumer today and treats Track 2 as best-effort.
  *
+ * Results are memoized in a process-local LRU (size 1000, TTL 10 minutes,
+ * keyed by lowercased+trimmed query plus a hash of the catalog-track-search
+ * flag state). A cache hit short-circuits both the LML round-trip and the BS
+ * PG JOIN — see {@link searchLibraryByTrack} for the wrapper.
+ *
  * @param query - Track-title query
  * @param limit - Maximum results to return
  * @returns Array of enriched library results with `matched_via` populated
  */
-export async function searchLibraryByTrack(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
+async function searchLibraryByTrackUncached(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
   let response: LookupResponse;
   try {
     response = await lookupBySong(query);
@@ -997,6 +1004,67 @@ export async function searchLibraryByTrack(query: string, limit: number): Promis
     results.push(enriched);
     if (results.length >= limit) break;
   }
+  return results;
+}
+
+// --- Track 2 result cache ---
+//
+// LML's /lookup is the slowest hop in the cascade (HTTP + 3-tier cache), and
+// the BS-side bridge query is a 5-way join. Memoizing the final mapped
+// EnrichedLibraryResult[] lets repeat searches skip both. Key includes a hash
+// of the catalog-track-search feature flags so a flag flip invalidates the
+// cache implicitly (the next call generates a new key prefix).
+//
+// Mirrors the LRUCache shape used in artworkCache (apps/backend/controllers/
+// proxy.controller.ts). Plan reference:
+// https://github.com/WXYC/wiki/blob/main/plans/catalog-track-search.md#103-latency--cache-budget
+
+const trackSearchCache = new LRUCache<string, EnrichedLibraryResult[]>({
+  max: 1000,
+  ttl: 1000 * 60 * 10, // 10 minutes
+});
+
+function getFlagStateHash(): string {
+  const c = getCatalogTrackSearchConfig();
+  return `${c.ctaEnabled ? '1' : '0'}${c.discogsEnabled ? '1' : '0'}`;
+}
+
+function trackSearchCacheKey(query: string, limit: number): string {
+  return `${query.toLowerCase().trim()}:${limit}:${getFlagStateHash()}`;
+}
+
+/**
+ * Test-only hook for clearing the Track 2 LRU between cases. Production code
+ * relies on TTL expiry + flag-state-hash invalidation; tests need a way to
+ * reset state between `beforeEach` runs.
+ */
+export function __resetTrackSearchCacheForTests(): void {
+  trackSearchCache.clear();
+}
+
+/**
+ * Memoized wrapper around {@link searchLibraryByTrackUncached}. Cache hits
+ * return the full `EnrichedLibraryResult[]` (mapped BS rows, `matched_via`,
+ * LML ordering) without touching LML or the BS PG JOIN.
+ *
+ * Emits a `track_search.cache_hit` attribute on the active Sentry span so the
+ * outer instrumentation (E2-8) can break down hit vs. miss latency without
+ * this layer creating its own span.
+ *
+ * @param query - Track-title query
+ * @param limit - Maximum results to return
+ * @returns Array of enriched library results with `matched_via` populated
+ */
+export async function searchLibraryByTrack(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
+  const key = trackSearchCacheKey(query, limit);
+  const cached = trackSearchCache.get(key);
+  if (cached !== undefined) {
+    Sentry.getActiveSpan()?.setAttribute('track_search.cache_hit', true);
+    return cached;
+  }
+  Sentry.getActiveSpan()?.setAttribute('track_search.cache_hit', false);
+  const results = await searchLibraryByTrackUncached(query, limit);
+  trackSearchCache.set(key, results);
   return results;
 }
 
