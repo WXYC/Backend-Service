@@ -1,6 +1,11 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { db, flowsheet } from '@wxyc/database';
-import { parseSearchQuery, type SearchCondition } from './search-parser.service.js';
+import {
+  parseSearchQuery,
+  FLOWSHEET_PARSER_CONFIG,
+  type FlowsheetField,
+  type SearchCondition,
+} from './search-parser.service.js';
 
 export type SearchParams = {
   q: string;
@@ -89,7 +94,7 @@ export async function searchFlowsheet(
   params: SearchParams
 ): Promise<{ results: SearchResult[]; total: number; nextCursor?: string }> {
   const { q, page, limit, sort, order, cursor } = params;
-  const conditions = parseSearchQuery(q);
+  const conditions = parseSearchQuery(q, FLOWSHEET_PARSER_CONFIG);
 
   const whereClause = buildWhereClause(conditions);
   const orderDirection = order === 'asc' ? sql`ASC` : sql`DESC`;
@@ -172,7 +177,7 @@ function transformRow(row: SearchResultRow): SearchResult {
   };
 }
 
-function buildWhereClause(conditions: SearchCondition[]): SQL | null {
+function buildWhereClause(conditions: SearchCondition<FlowsheetField>[]): SQL | null {
   if (conditions.length === 0) return null;
 
   const parts: { operator: 'AND' | 'OR'; fragment: SQL }[] = [];
@@ -199,7 +204,7 @@ function buildWhereClause(conditions: SearchCondition[]): SQL | null {
   return sql`(${result})`;
 }
 
-function buildConditionFragment(condition: SearchCondition): SQL | null {
+function buildConditionFragment(condition: SearchCondition<FlowsheetField>): SQL | null {
   const { field, value, exact, negated } = condition;
 
   let fragment: SQL;
