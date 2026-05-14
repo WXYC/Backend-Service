@@ -12,6 +12,8 @@ library_route.get('/search', requirePermissions({}), trackActivity, requestLineC
 
 library_route.get('/', requirePermissions({ catalog: ['read'] }), libraryController.searchForAlbum);
 
+library_route.get('/query', requirePermissions({ catalog: ['read'] }), libraryController.searchLibraryQueryEndpoint);
+
 library_route.post('/', requirePermissions({ catalog: ['write'] }), libraryController.addAlbum);
 
 library_route.get('/rotation', requirePermissions({ catalog: ['read'] }), libraryController.getRotation);

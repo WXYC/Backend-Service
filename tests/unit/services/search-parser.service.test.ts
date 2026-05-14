@@ -1,15 +1,23 @@
-import { parseSearchQuery } from '../../../apps/backend/services/search-parser.service';
+import {
+  parseSearchQuery,
+  FLOWSHEET_PARSER_CONFIG,
+  type FlowsheetField,
+  type ParserConfig,
+} from '../../../apps/backend/services/search-parser.service';
+
+const parse = (q: string, config: ParserConfig<FlowsheetField> = FLOWSHEET_PARSER_CONFIG) =>
+  parseSearchQuery(q, config);
 
 describe('parseSearchQuery', () => {
   describe('simple terms', () => {
     it('parses a bare term as all-field search', () => {
-      const result = parseSearchQuery('autechre');
+      const result = parse('autechre');
 
       expect(result).toEqual([{ operator: 'AND', field: 'all', value: 'autechre', exact: false, negated: false }]);
     });
 
     it('parses multiple bare terms as separate AND conditions', () => {
-      const result = parseSearchQuery('autechre confield');
+      const result = parse('autechre confield');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'all', value: 'autechre', exact: false, negated: false },
@@ -26,7 +34,7 @@ describe('parseSearchQuery', () => {
       ['label:warp', 'record_label', 'warp'],
       ['dj:jake', 'dj_name', 'jake'],
     ])('parses %s as field=%s value=%s', (input, expectedField, expectedValue) => {
-      const result = parseSearchQuery(input);
+      const result = parse(input);
 
       expect(result).toEqual([
         { operator: 'AND', field: expectedField, value: expectedValue, exact: false, negated: false },
@@ -36,7 +44,7 @@ describe('parseSearchQuery', () => {
 
   describe('operators', () => {
     it('parses AND between two field terms', () => {
-      const result = parseSearchQuery('artist:autechre AND album:confield');
+      const result = parse('artist:autechre AND album:confield');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'artist_name', value: 'autechre', exact: false, negated: false },
@@ -45,7 +53,7 @@ describe('parseSearchQuery', () => {
     });
 
     it('parses OR between two field terms', () => {
-      const result = parseSearchQuery('artist:autechre OR artist:stereolab');
+      const result = parse('artist:autechre OR artist:stereolab');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'artist_name', value: 'autechre', exact: false, negated: false },
@@ -54,7 +62,7 @@ describe('parseSearchQuery', () => {
     });
 
     it('parses NOT as negation on the following condition', () => {
-      const result = parseSearchQuery('NOT artist:autechre');
+      const result = parse('NOT artist:autechre');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'artist_name', value: 'autechre', exact: false, negated: true },
@@ -62,7 +70,7 @@ describe('parseSearchQuery', () => {
     });
 
     it('parses operator + NOT combination', () => {
-      const result = parseSearchQuery('artist:stereolab AND NOT artist:autechre');
+      const result = parse('artist:stereolab AND NOT artist:autechre');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'artist_name', value: 'stereolab', exact: false, negated: false },
@@ -73,7 +81,7 @@ describe('parseSearchQuery', () => {
 
   describe('exact match (quoted values)', () => {
     it('parses quoted value as exact match', () => {
-      const result = parseSearchQuery('artist:"Autechre"');
+      const result = parse('artist:"Autechre"');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'artist_name', value: 'Autechre', exact: true, negated: false },
@@ -81,7 +89,7 @@ describe('parseSearchQuery', () => {
     });
 
     it('parses quoted value with spaces', () => {
-      const result = parseSearchQuery('artist:"Cat Power"');
+      const result = parse('artist:"Cat Power"');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'artist_name', value: 'Cat Power', exact: true, negated: false },
@@ -89,13 +97,13 @@ describe('parseSearchQuery', () => {
     });
 
     it('parses bare quoted value as all-field exact match', () => {
-      const result = parseSearchQuery('"Juana Molina"');
+      const result = parse('"Juana Molina"');
 
       expect(result).toEqual([{ operator: 'AND', field: 'all', value: 'Juana Molina', exact: true, negated: false }]);
     });
 
     it('handles unmatched quote by treating rest of string as value', () => {
-      const result = parseSearchQuery('artist:"Autechre');
+      const result = parse('artist:"Autechre');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'artist_name', value: 'Autechre', exact: true, negated: false },
@@ -105,7 +113,7 @@ describe('parseSearchQuery', () => {
 
   describe('date and dateRange', () => {
     it('parses date prefix', () => {
-      const result = parseSearchQuery('date:2024-06-15');
+      const result = parse('date:2024-06-15');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'add_time', value: '2024-06-15', exact: false, negated: false },
@@ -113,7 +121,7 @@ describe('parseSearchQuery', () => {
     });
 
     it('parses dateRange prefix with .. separator', () => {
-      const result = parseSearchQuery('dateRange:2024-01-01..2024-12-31');
+      const result = parse('dateRange:2024-01-01..2024-12-31');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'add_time_range', value: '2024-01-01..2024-12-31', exact: false, negated: false },
@@ -123,7 +131,7 @@ describe('parseSearchQuery', () => {
 
   describe('complex queries', () => {
     it('parses mixed field and operator query', () => {
-      const result = parseSearchQuery('artist:autechre AND song:poise AND NOT label:warp');
+      const result = parse('artist:autechre AND song:poise AND NOT label:warp');
 
       expect(result).toHaveLength(3);
       expect(result[0]).toMatchObject({ field: 'artist_name', value: 'autechre', negated: false });
@@ -132,7 +140,7 @@ describe('parseSearchQuery', () => {
     });
 
     it('parses field prefix with simple query and OR', () => {
-      const result = parseSearchQuery('artist:autechre OR artist:"Cat Power"');
+      const result = parse('artist:autechre OR artist:"Cat Power"');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'artist_name', value: 'autechre', exact: false, negated: false },
@@ -143,7 +151,7 @@ describe('parseSearchQuery', () => {
 
   describe('date validation', () => {
     it.each(['2024-06-15', '2004-11-01', '2026-12-31'])('accepts valid date %s', (date) => {
-      const result = parseSearchQuery(`date:${date}`);
+      const result = parse(`date:${date}`);
 
       expect(result).toEqual([{ operator: 'AND', field: 'add_time', value: date, exact: false, negated: false }]);
     });
@@ -151,14 +159,14 @@ describe('parseSearchQuery', () => {
     it.each(['garbage', 'not-a-date', '2024/06/15', '15-06-2024', '2024-13-01', '2024-06-32'])(
       'rejects invalid date %s',
       (date) => {
-        const result = parseSearchQuery(`date:${date}`);
+        const result = parse(`date:${date}`);
 
         expect(result).toEqual([]);
       }
     );
 
     it('accepts valid dateRange', () => {
-      const result = parseSearchQuery('dateRange:2024-01-01..2024-12-31');
+      const result = parse('dateRange:2024-01-01..2024-12-31');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'add_time_range', value: '2024-01-01..2024-12-31', exact: false, negated: false },
@@ -168,7 +176,7 @@ describe('parseSearchQuery', () => {
     it.each(['garbage..also-garbage', '2024-01-01..not-a-date', 'not-a-date..2024-12-31'])(
       'rejects dateRange with invalid dates: %s',
       (range) => {
-        const result = parseSearchQuery(`dateRange:${range}`);
+        const result = parse(`dateRange:${range}`);
 
         expect(result).toEqual([]);
       }
@@ -177,21 +185,21 @@ describe('parseSearchQuery', () => {
 
   describe('edge cases', () => {
     it('returns empty array for empty string', () => {
-      expect(parseSearchQuery('')).toEqual([]);
+      expect(parse('')).toEqual([]);
     });
 
     it('returns empty array for whitespace-only string', () => {
-      expect(parseSearchQuery('   ')).toEqual([]);
+      expect(parse('   ')).toEqual([]);
     });
 
     it('ignores field prefix with no value', () => {
-      const result = parseSearchQuery('artist:');
+      const result = parse('artist:');
 
       expect(result).toEqual([]);
     });
 
     it('handles multiple spaces between tokens', () => {
-      const result = parseSearchQuery('artist:autechre   AND   album:confield');
+      const result = parse('artist:autechre   AND   album:confield');
 
       expect(result).toEqual([
         { operator: 'AND', field: 'artist_name', value: 'autechre', exact: false, negated: false },
