@@ -905,26 +905,23 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  *      fallback strategy and should not double-count.
  *   3. Preserves LML's ordering. BS does not re-rank.
  *
- * Errors at the LML HTTP boundary degrade to an empty result. Catalog search
- * is the only consumer today and treats Track 2 as best-effort.
+ * LML HTTP errors propagate; the wrapper translates them to an empty result
+ * for callers, but the throw lets the wrapper skip cache-poisoning. Catalog
+ * search is the only consumer today and treats Track 2 as best-effort.
  *
- * Results are memoized in a process-local LRU (size 1000, TTL 10 minutes,
- * keyed by lowercased+trimmed query plus a hash of the catalog-track-search
- * flag state). A cache hit short-circuits both the LML round-trip and the BS
- * PG JOIN — see {@link searchLibraryByTrack} for the wrapper.
+ * Results are memoized by the wrapper in a process-local LRU (size 1000, TTL
+ * 10 minutes, keyed by lowercased+trimmed query plus a hash of the
+ * catalog-track-search flag state); see {@link searchLibraryByTrack}.
  *
  * @param query - Track-title query
- * @param limit - Maximum results to return
+ * @param limit - Maximum results to return (pass `Infinity` to disable the
+ *                final-loop cap; the wrapper does this so the cache stores
+ *                un-sliced results and serves any smaller caller-`limit`).
  * @returns Array of enriched library results with `matched_via` populated
+ * @throws Whatever `lookupBySong` throws — the wrapper handles the boundary.
  */
-async function searchLibraryByTrackUncached(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
-  let response: LookupResponse;
-  try {
-    response = await lookupBySong(query);
-  } catch (err) {
-    console.warn('[Library] searchLibraryByTrack: LML lookup failed, returning empty', err);
-    return [];
-  }
+async function searchLibraryByTrackUncachedOrThrow(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
+  const response: LookupResponse = await lookupBySong(query);
 
   const items = response.results ?? [];
   if (items.length === 0) return [];
@@ -1015,6 +1012,12 @@ async function searchLibraryByTrackUncached(query: string, limit: number): Promi
 // of the catalog-track-search feature flags so a flag flip invalidates the
 // cache implicitly (the next call generates a new key prefix).
 //
+// `limit` is intentionally NOT part of the cache key. `searchLibraryByTrack`
+// stores the full LML-bounded result set (LML already caps server-side; the
+// BS JOIN binds to `legacyIds.length`) and slices to the caller's `limit` at
+// read time. This lets a `limit=10` miss serve a subsequent `limit=5` hit
+// without a second LML round-trip.
+//
 // Mirrors the LRUCache shape used in artworkCache (apps/backend/controllers/
 // proxy.controller.ts). Plan reference:
 // https://github.com/WXYC/wiki/blob/main/plans/catalog-track-search.md#103-latency--cache-budget
@@ -1029,43 +1032,68 @@ function getFlagStateHash(): string {
   return `${c.ctaEnabled ? '1' : '0'}${c.discogsEnabled ? '1' : '0'}`;
 }
 
-function trackSearchCacheKey(query: string, limit: number): string {
-  return `${query.toLowerCase().trim()}:${limit}:${getFlagStateHash()}`;
+function trackSearchCacheKey(query: string): string {
+  return `${query.toLowerCase().trim()}:${getFlagStateHash()}`;
 }
 
 /**
  * Test-only hook for clearing the Track 2 LRU between cases. Production code
  * relies on TTL expiry + flag-state-hash invalidation; tests need a way to
  * reset state between `beforeEach` runs.
+ *
+ * NOTE: this cache is module-scoped, so any test file that exercises the
+ * Track 2 cascade (directly or transitively) must call this in its own
+ * `beforeEach` — otherwise cache state leaks across files within the same
+ * Jest worker. The global unit setup (tests/setup/unit.setup.ts) deliberately
+ * stays free of service imports; per-file discipline is the contract.
  */
 export function __resetTrackSearchCacheForTests(): void {
   trackSearchCache.clear();
 }
 
 /**
- * Memoized wrapper around {@link searchLibraryByTrackUncached}. Cache hits
- * return the full `EnrichedLibraryResult[]` (mapped BS rows, `matched_via`,
- * LML ordering) without touching LML or the BS PG JOIN.
+ * Memoized wrapper around {@link searchLibraryByTrackUncachedOrThrow}. Cache hits
+ * return the mapped `EnrichedLibraryResult[]` (BS rows, `matched_via`, LML
+ * ordering) without touching LML or the BS PG JOIN.
  *
  * Emits a `track_search.cache_hit` attribute on the active Sentry span so the
  * outer instrumentation (E2-8) can break down hit vs. miss latency without
  * this layer creating its own span.
+ *
+ * LML failures are NOT cached: if `lookupBySong` rejects, the wrapper returns
+ * `[]` straight through without polluting the cache. A genuine empty LML
+ * response (no matching releases) IS cached — both because that's the
+ * expected steady-state for nonsense queries and because re-running the
+ * round-trip every time would defeat the cache's purpose.
+ *
+ * The returned array is a shallow copy of the cached entry, so callers can
+ * sort or mutate without bleeding into subsequent hits.
  *
  * @param query - Track-title query
  * @param limit - Maximum results to return
  * @returns Array of enriched library results with `matched_via` populated
  */
 export async function searchLibraryByTrack(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
-  const key = trackSearchCacheKey(query, limit);
+  const key = trackSearchCacheKey(query);
   const cached = trackSearchCache.get(key);
   if (cached !== undefined) {
     Sentry.getActiveSpan()?.setAttribute('track_search.cache_hit', true);
-    return cached;
+    return cached.slice(0, limit);
   }
   Sentry.getActiveSpan()?.setAttribute('track_search.cache_hit', false);
-  const results = await searchLibraryByTrackUncached(query, limit);
-  trackSearchCache.set(key, results);
-  return results;
+  // Fetch the full LML-bounded result; the cache stores the un-sliced array.
+  let results: EnrichedLibraryResult[];
+  let lmlSucceeded = true;
+  try {
+    results = await searchLibraryByTrackUncachedOrThrow(query, Number.POSITIVE_INFINITY);
+  } catch {
+    lmlSucceeded = false;
+    results = [];
+  }
+  if (lmlSucceeded) {
+    trackSearchCache.set(key, results);
+  }
+  return results.slice(0, limit);
 }
 
 /**
