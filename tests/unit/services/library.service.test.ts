@@ -19,6 +19,7 @@ import {
   searchAlbumsByTitle,
   searchLibraryByCTA,
   searchLibraryByTrack,
+  __resetTrackSearchCacheForTests,
   getAlbumFromDB,
   markAlbumMissing,
   markAlbumFound,
@@ -267,6 +268,9 @@ describe('library.service', () => {
       // Reset the lazy singleton so each test's per-case env mutations
       // (a few lines below) re-load through `loadConfig()`.
       resetCatalogTrackSearchConfig();
+      // Reset the Track 2 LRU so a hit from a previous test (same query +
+      // flag state) doesn't suppress the LML / DB call this test is asserting.
+      __resetTrackSearchCacheForTests();
     });
 
     afterAll(() => {
@@ -566,6 +570,7 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      __resetTrackSearchCacheForTests();
     });
 
     it('returns enriched results with matched_via propagated from LML', async () => {
@@ -790,6 +795,180 @@ describe('library.service', () => {
 
       expect(results).toHaveLength(1);
       expect(results[0].id).toBe(101);
+    });
+  });
+
+  /**
+   * Track 2 LRU cache (E2-7). Memoizes the final mapped EnrichedLibraryResult[]
+   * keyed by lowercased+trimmed query plus a hash of the catalog-track-search
+   * flag state, so hits skip both the LML round-trip and the BS PG JOIN.
+   */
+  describe('searchLibraryByTrack cache (LRU)', () => {
+    const trackRow = {
+      id: 101,
+      code_letters: 'PR',
+      code_artist_number: 1,
+      code_number: 2,
+      artist_name: 'Jessica Pratt',
+      alphabetical_name: 'Pratt, Jessica',
+      album_title: 'On Your Own Love Again',
+      format_name: 'CD',
+      genre_name: 'Rock',
+      rotation_bin: null,
+      add_date: new Date('2024-02-01'),
+      label: 'Drag City',
+      label_id: null,
+      on_streaming: true,
+      album_artist: null,
+      plays: 12,
+      artwork_url: null,
+      legacy_release_id: 555,
+    };
+
+    const lookupItem = {
+      library_item: {
+        id: 555,
+        title: 'On Your Own Love Again',
+        artist: 'Jessica Pratt',
+        call_number: 'Rock CD PR 1/2',
+        library_url: 'http://www.wxyc.info/wxycdb/libraryRelease?id=555',
+      },
+      matched_via: [{ title: 'Back, Baby', artist_credit: null, confidence: 0.92, source: 'discogs' }],
+    };
+
+    /**
+     * Configure mocks so the *first* call to `searchLibraryByTrack` hits LML +
+     * DB; subsequent calls without resetting the mocks return whatever the
+     * mock would return again (but we'll assert the cache short-circuits
+     * before that).
+     */
+    function primeMocks(): void {
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+      const libraryChain = createMockQueryChain([trackRow]);
+      libraryChain.limit = jest.fn().mockResolvedValue([trackRow]);
+      const ctaChain = createMockQueryChain([]);
+      ctaChain.where = jest.fn().mockResolvedValue([]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? libraryChain : ctaChain;
+        callIndex += 1;
+        return chain;
+      });
+    }
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+      delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+      resetCatalogTrackSearchConfig();
+      __resetTrackSearchCacheForTests();
+    });
+
+    afterAll(() => {
+      delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+      delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+      resetCatalogTrackSearchConfig();
+      __resetTrackSearchCacheForTests();
+    });
+
+    it('first call is a cache miss (invokes LML + DB)', async () => {
+      primeMocks();
+
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(mockLookupBySong).toHaveBeenCalledTimes(1);
+      expect(db.select).toHaveBeenCalled(); // PG JOIN ran
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(101);
+    });
+
+    it('second identical call is a cache hit (skips LML + DB)', async () => {
+      primeMocks();
+
+      const first = await searchLibraryByTrack('Back, Baby', 10);
+      const dbCallCountAfterMiss = db.select.mock.calls.length;
+      const lmlCallCountAfterMiss = mockLookupBySong.mock.calls.length;
+
+      const second = await searchLibraryByTrack('Back, Baby', 10);
+
+      // Neither LML nor any DB select fired on the second call.
+      expect(mockLookupBySong.mock.calls.length).toBe(lmlCallCountAfterMiss);
+      expect(db.select.mock.calls.length).toBe(dbCallCountAfterMiss);
+      // Result identity preserved (the cache stores the exact array reference).
+      expect(second).toBe(first);
+      expect(second[0].id).toBe(101);
+      expect(second[0].matched_via?.[0]).toMatchObject({ source: 'discogs', confidence: 0.92 });
+    });
+
+    it('different queries hit different cache entries (key isolation)', async () => {
+      // Each call needs its own library + CTA chain pair. Use a fresh primeMocks
+      // round per call so db.select has chains queued for both invocations.
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+      const libraryChainA = createMockQueryChain([trackRow]);
+      libraryChainA.limit = jest.fn().mockResolvedValue([trackRow]);
+      const ctaChainA = createMockQueryChain([]);
+      ctaChainA.where = jest.fn().mockResolvedValue([]);
+      const libraryChainB = createMockQueryChain([trackRow]);
+      libraryChainB.limit = jest.fn().mockResolvedValue([trackRow]);
+      const ctaChainB = createMockQueryChain([]);
+      ctaChainB.where = jest.fn().mockResolvedValue([]);
+      const chains = [libraryChainA, ctaChainA, libraryChainB, ctaChainB];
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => chains[Math.min(callIndex++, chains.length - 1)]);
+
+      await searchLibraryByTrack('Back, Baby', 10);
+      const callsAfterFirst = mockLookupBySong.mock.calls.length;
+
+      // A different query must re-invoke LML — caches by query, not globally.
+      await searchLibraryByTrack('Different Song', 10);
+
+      expect(mockLookupBySong.mock.calls.length).toBe(callsAfterFirst + 1);
+      expect(mockLookupBySong).toHaveBeenLastCalledWith('Different Song');
+    });
+
+    it('trim + lowercase: variations of the same query share one cache entry', async () => {
+      primeMocks();
+
+      await searchLibraryByTrack('  Back, Baby  ', 10);
+      const callsAfterFirst = mockLookupBySong.mock.calls.length;
+
+      // Normalized identical: lowercase + trim should collapse to the same key.
+      const cached = await searchLibraryByTrack('back, baby', 10);
+
+      expect(mockLookupBySong.mock.calls.length).toBe(callsAfterFirst);
+      expect(cached).toHaveLength(1);
+      expect(cached[0].id).toBe(101);
+    });
+
+    it('flag flip invalidates the cache (same query, different flagStateHash)', async () => {
+      // First call: both flags off (default).
+      primeMocks();
+      await searchLibraryByTrack('Back, Baby', 10);
+      const callsAfterFirst = mockLookupBySong.mock.calls.length;
+
+      // Flip the CTA flag and force a config reload. The flag-state hash
+      // changes, so the cached entry is keyed under the old hash and the new
+      // query must re-fetch from LML.
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      resetCatalogTrackSearchConfig();
+
+      // Re-prime the mocks so the second call has fresh chain state.
+      primeMocks();
+      await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(mockLookupBySong.mock.calls.length).toBe(callsAfterFirst + 1);
     });
   });
 
