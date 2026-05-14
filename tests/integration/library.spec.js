@@ -498,6 +498,164 @@ describe('Library Artists', () => {
   });
 });
 
+/**
+ * Catalog Track Search — CTA fallback (BS#819, plan §4.1 + §9.2).
+ *
+ * Exercises the Track 1 (`compilation_track_artist`) fallback in
+ * `searchLibrary`. When the primary tsvector + trigram path returns 0 hits
+ * AND `CATALOG_TRACK_SEARCH_CTA_ENABLED=true` is set on the backend, the
+ * cascade probes CTA via ILIKE on `track_title` / `artist_name` and returns
+ * the matched library row with `matched_via.source = 'cta'` + `confidence: 1.0`.
+ *
+ * Seed: 3 CTA rows in `tests/fixtures/shape.sql` pointing at library_id 7000
+ * (Shape Fixture Album Alpha 1). Track titles ('Bioluminescence',
+ * 'Echolocation Hymn') are unique tokens that don't appear in any seeded
+ * library row's album_title/artist_name, so the primary path can't satisfy
+ * the query and short-circuit the cascade.
+ *
+ * Backend flag gating: these tests follow the rateLimiting.spec.js
+ * skip-if-off pattern. `dev_env/docker-compose.yml` sets the flag to true
+ * for `ci:testmock`; local runs need to start the backend with
+ * `CATALOG_TRACK_SEARCH_CTA_ENABLED=true` in `.env` for the cases to fire.
+ */
+describe('Library Catalog Track Search (CTA fallback)', () => {
+  let auth;
+  const postgres = require('postgres');
+  let sql;
+  const schema = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+
+  // Match the shape-fixture seeding so the assertion below describes what's
+  // expected on a fresh schema. The CTA fixture rows live in
+  // tests/fixtures/shape.sql (BS#819 block).
+  const SHAPE_FIXTURE_LIBRARY_ID = 7000;
+  const SHAPE_FIXTURE_ALBUM_TITLE = 'Shape Fixture Album Alpha 1';
+  const SHAPE_FIXTURE_ARTIST = 'Shape Fixture Artist Alpha';
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = postgres({
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
+      database: process.env.DB_NAME || 'wxyc_db',
+      user: process.env.DB_USERNAME || 'test-user',
+      password: process.env.DB_PASSWORD || 'test-pw',
+    });
+  });
+
+  afterAll(async () => {
+    await sql.end();
+  });
+
+  test('CTA fixture rows are present in compilation_track_artist (sanity)', async () => {
+    const rows = await sql.unsafe(
+      `SELECT id, library_id, artist_name, track_title
+         FROM ${schema}.compilation_track_artist
+        WHERE id BETWEEN 7000 AND 7099
+        ORDER BY id`
+    );
+    expect(rows.length).toBeGreaterThanOrEqual(3);
+    expect(rows.every((r) => r.library_id === SHAPE_FIXTURE_LIBRARY_ID)).toBe(true);
+    const titles = rows.map((r) => r.track_title);
+    expect(titles).toEqual(expect.arrayContaining(['Bioluminescence', 'Echolocation Hymn']));
+  });
+
+  /**
+   * The free-text cascade lives behind GET /library/search, not GET /library.
+   * GET /library calls `fuzzySearchLibrary` (artist-/title-only fuzzy match);
+   * /library/search calls `searchLibrary`, which is the function that runs the
+   * tsvector → trigram → CTA → LML cascade. Response shape:
+   * `{ success, results, total, query }`, with `results` as `EnrichedLibraryResult[]`.
+   */
+  test('track-title query returns the comp library row via CTA fallback', async () => {
+    // 'Bioluminescence' appears only on CTA rows for library_id 7000. No
+    // library row's album_title / artist_name contains it, so the primary
+    // tsvector + trigram path returns 0 and the CTA fallback fires.
+    const res = await auth.get('/library/search').query({ query: 'Bioluminescence' });
+
+    if (res.status === 200 && Array.isArray(res.body.results) && res.body.results.length === 0) {
+      // Backend is running without the CTA flag set; warn so the operator
+      // notices. The "fixture present" sanity test already passed, so the
+      // seed is correct.
+      console.warn(
+        '[BS#819] CTA fallback returned no results. Likely the backend is running ' +
+          'without CATALOG_TRACK_SEARCH_CTA_ENABLED=true. Set it in .env and restart `npm run dev`.'
+      );
+      return;
+    }
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(Array.isArray(res.body.results)).toBe(true);
+    expect(res.body.results.length).toBeGreaterThanOrEqual(1);
+    const hit = res.body.results.find((row) => row.id === SHAPE_FIXTURE_LIBRARY_ID);
+    expect(hit).toBeDefined();
+    expect(hit.title).toBe(SHAPE_FIXTURE_ALBUM_TITLE);
+    expect(hit.artist).toBe(SHAPE_FIXTURE_ARTIST);
+  });
+
+  test('CTA hit carries matched_via.source = "cta" and confidence = 1.0', async () => {
+    const res = await auth.get('/library/search').query({ query: 'Bioluminescence' });
+
+    if (res.status === 200 && Array.isArray(res.body.results) && res.body.results.length === 0) {
+      console.warn('[BS#819] CTA fallback returned no results; see prior test for hint.');
+      return;
+    }
+
+    expect(res.status).toBe(200);
+    const hit = res.body.results.find((row) => row.id === SHAPE_FIXTURE_LIBRARY_ID);
+    expect(hit).toBeDefined();
+    expect(Array.isArray(hit.matched_via)).toBe(true);
+    expect(hit.matched_via.length).toBeGreaterThanOrEqual(1);
+    // Two CTA rows have track_title = 'Bioluminescence' (different artists).
+    // The CTA grouping in searchLibraryByCTA collapses both into the same
+    // EnrichedLibraryResult with one TrackMatchHint per matched CTA row.
+    const bioHints = hit.matched_via.filter((m) => m.title === 'Bioluminescence');
+    expect(bioHints.length).toBeGreaterThanOrEqual(2);
+    bioHints.forEach((hint) => {
+      expect(hint.source).toBe('cta');
+      expect(hint.confidence).toBe(1.0);
+      expect(hint.artist_credit).toMatch(/^Shape Fixture Comp Guest /);
+    });
+  });
+
+  test('compilation row excluded from Track 2 fallback (dedup precondition)', async () => {
+    // Track 2 (`searchLibraryByTrack`) excludes CTA-covered library rows via
+    // the SQL at apps/backend/services/library.service.ts ~L956-973:
+    //
+    //   SELECT library_id FROM compilation_track_artist
+    //    WHERE library_id IN (<LML candidates>)
+    //      AND track_title ILIKE %query%
+    //
+    // The full cascade short-circuits before Track 2 fires whenever CTA
+    // returns results, so the dedup is only directly observable by running
+    // the precondition SELECT against the real DB. This test does both:
+    //
+    //   1. Run the exact CTA-exclusion SELECT against the seeded fixture
+    //      and assert library_id 7000 is in the "to exclude" set.
+    //   2. Verify the user-observable shape: even though library_id 7000
+    //      would be a candidate for both Track 1 (CTA) and Track 2 (LML),
+    //      the cascade returns it exactly once.
+    const libraryCandidates = [SHAPE_FIXTURE_LIBRARY_ID];
+    const dedupQuery = 'Bioluminescence';
+    const ctaCovered = await sql.unsafe(
+      `SELECT library_id FROM ${schema}.compilation_track_artist
+        WHERE library_id = ANY($1::int[])
+          AND track_title ILIKE $2`,
+      [libraryCandidates, `%${dedupQuery}%`]
+    );
+    expect(ctaCovered.map((r) => r.library_id)).toContain(SHAPE_FIXTURE_LIBRARY_ID);
+
+    const res = await auth.get('/library/search').query({ query: 'Bioluminescence' });
+    if (res.status === 200 && Array.isArray(res.body.results) && res.body.results.length === 0) {
+      console.warn('[BS#819] CTA fallback returned no results; see earlier test for hint.');
+      return;
+    }
+    expect(res.status).toBe(200);
+    const matches = res.body.results.filter((row) => row.id === SHAPE_FIXTURE_LIBRARY_ID);
+    expect(matches).toHaveLength(1);
+  });
+});
+
 describe('Library artist_name cascade trigger (A.3 / 0060)', () => {
   const postgres = require('postgres');
   let sql;

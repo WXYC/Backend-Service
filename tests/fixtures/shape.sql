@@ -223,3 +223,27 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 SELECT setval('wxyc_schema.flowsheet_id_seq', 7099, true);
+
+-- ------------------------------------------------------------------------------
+-- compilation_track_artist (BS#819 — integration tests for CTA-based track search)
+--
+-- Test-only CTA rows pointing at an existing shape-fixture library row so
+-- track-title queries that miss the primary tsvector + trigram path fall
+-- through to `searchLibraryByCTA`. Per the catalog-track-search plan §9.1,
+-- these stay test-only (no wxyc-shared example data backflow) and reference
+-- already-seeded library rows.
+--
+-- Track titles ("Bioluminescence", "Echolocation Hymn") are intentionally
+-- unique tokens that don't appear in any seeded library row's album_title
+-- or artist_name, so the primary path can't accidentally satisfy the query
+-- and short-circuit the cascade before Track 1 runs.
+-- ------------------------------------------------------------------------------
+INSERT INTO wxyc_schema.compilation_track_artist
+  (id, library_id, artist_name, track_title, track_position)
+VALUES
+  (7000, 7000, 'Shape Fixture Comp Guest Alpha', 'Bioluminescence',   'A1'),
+  (7001, 7000, 'Shape Fixture Comp Guest Beta',  'Echolocation Hymn', 'A2'),
+  (7002, 7000, 'Shape Fixture Comp Guest Gamma', 'Bioluminescence',   'B1')
+ON CONFLICT (id) DO NOTHING;
+
+SELECT setval('wxyc_schema.compilation_track_artist_id_seq', 7099, true);
