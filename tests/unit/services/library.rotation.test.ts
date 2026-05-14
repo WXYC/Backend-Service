@@ -348,6 +348,9 @@ describe('library.service / getRotationFromDB', () => {
       const stringified = JSON.stringify(sqlArg);
       expect(stringified).toMatch(/hashtext/);
       expect(stringified).toMatch(/lower/);
+      // The expression must be evaluated in bigint to defuse the
+      // `-INT_MIN` int4 overflow Postgres would otherwise raise.
+      expect(stringified).toMatch(/::bigint/);
       // The pre-#862 `-rotation.id` partition trick should no longer
       // appear in the query.
       expect(stringified).not.toMatch(/-"rotation"\."id"/);
