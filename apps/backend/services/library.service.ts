@@ -913,14 +913,15 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  * 10 minutes, keyed by lowercased+trimmed query plus a hash of the
  * catalog-track-search flag state); see {@link searchLibraryByTrack}.
  *
+ * Always materializes the full LML-bounded result; the caller's `limit` is
+ * applied by the wrapper post-cache so a `limit=10` miss can serve a smaller
+ * `limit=5` hit without a second LML round-trip.
+ *
  * @param query - Track-title query
- * @param limit - Maximum results to return (pass `Infinity` to disable the
- *                final-loop cap; the wrapper does this so the cache stores
- *                un-sliced results and serves any smaller caller-`limit`).
  * @returns Array of enriched library results with `matched_via` populated
  * @throws Whatever `lookupBySong` throws — the wrapper handles the boundary.
  */
-async function searchLibraryByTrackUncachedOrThrow(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
+async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<EnrichedLibraryResult[]> {
   const response: LookupResponse = await lookupBySong(query);
 
   const items = response.results ?? [];
@@ -953,10 +954,9 @@ async function searchLibraryByTrackUncachedOrThrow(query: string, limit: number)
       sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
     )
     .where(inArray(library.legacy_release_id, legacyIds))
-    // Bound by the LML response size (already capped server-side), not the
-    // caller's `limit`. CTA exclusion runs after this query, so a tight
-    // .limit(limit) would let CTA drops shrink the response below what the
-    // caller asked for. We trim to `limit` after exclusion + ordering.
+    // Bound by the LML response size (already capped server-side). The
+    // wrapper trims to caller's `limit` post-cache so the cached entry can
+    // serve any smaller caller-`limit` from a single LML + JOIN round-trip.
     .limit(legacyIds.length)) as unknown as Array<LibraryArtistViewEntry & { legacy_release_id: number | null }>;
 
   // CTA-covered library rows are Track 1's responsibility; filter them out so
@@ -999,7 +999,6 @@ async function searchLibraryByTrackUncachedOrThrow(query: string, limit: number)
       enriched.matched_via = item.matched_via;
     }
     results.push(enriched);
-    if (results.length >= limit) break;
   }
   return results;
 }
@@ -1085,7 +1084,7 @@ export async function searchLibraryByTrack(query: string, limit: number): Promis
   let results: EnrichedLibraryResult[];
   let lmlSucceeded = true;
   try {
-    results = await searchLibraryByTrackUncachedOrThrow(query, Number.POSITIVE_INFINITY);
+    results = await searchLibraryByTrackUncachedOrThrow(query);
   } catch {
     lmlSucceeded = false;
     results = [];
