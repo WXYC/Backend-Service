@@ -656,6 +656,194 @@ describe('Library Catalog Track Search (CTA fallback)', () => {
   });
 });
 
+/**
+ * Catalog Track Search — Discogs cross-ref fallback (BS#825, plan §3.2 / §4.2).
+ *
+ * Exercises the Track 2 (`searchLibraryByTrack`) fallback in `searchLibrary`.
+ * When the primary tsvector + trigram path AND the Track 1 CTA fallback both
+ * return 0 hits, AND `CATALOG_TRACK_SEARCH_DISCOGS_ENABLED=true` is set on
+ * the backend, the cascade calls LML's `/api/v1/lookup` song-only path
+ * (`lookupBySong`) and bridges each `library_item.id` →
+ * `library.legacy_release_id` → BS `library.id`.
+ *
+ * Fixture wiring (shared with `tests/fixtures/track-search.fixture.ts`):
+ *  - Library rows seeded in `tests/fixtures/shape.sql` (Track 2 block) with
+ *    `legacy_release_id` ∈ {65880, 65881, 65882}.
+ *  - Mock LML's `songLookup` map in
+ *    `dev_env/mock-api-server/src/fixtures/lml.json` returns each
+ *    `library_item.id` with a per-source `matched_via` hint:
+ *      "vi scose poise"      → discogs_master (Confield, 65880, lib 7100)
+ *      "xqfp7k zelmpo b3nvh4" → discogs_release (synthetic, 65881, lib 7101)
+ *      "wbtr2x cmprs 9azn5"   → discogs_master (CTA collision, 65882, lib 7102)
+ *  - CTA seed in shape.sql also points at library 7102 for the CTA-collision
+ *    query, so Track 1 wins and Track 2's CTA-exclusion SELECT can be
+ *    asserted against the seeded data.
+ *
+ * Backend flag gating mirrors the BS#819 / CTA pattern:
+ * `dev_env/docker-compose.yml` sets `CATALOG_TRACK_SEARCH_DISCOGS_ENABLED=true`
+ * for the CI backend so `ci:testmock` exercises Track 2 end-to-end; local
+ * dev runs need the flag in `.env` for the cases to fire. Each test follows
+ * the skip-if-off pattern: when the cascade returns 0 hits (the flag-off
+ * shape), the test warns and short-circuits rather than fails.
+ */
+describe('Library Catalog Track Search (Discogs cross-ref fallback)', () => {
+  let auth;
+  const postgres = require('postgres');
+  let sql;
+  const schema = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+
+  // Mirror of tests/fixtures/track-search.fixture.ts. Constants are duplicated
+  // here because the integration suite is plain JS (no ts-jest transform on
+  // jest.config.json) and can't `require` a .ts file at runtime. The TS file
+  // is the documented source of truth; update both in lockstep.
+  const CONFIELD = {
+    libraryId: 7100,
+    legacyReleaseId: 65880,
+    albumTitle: 'Confield',
+    artistName: 'Autechre',
+  };
+  const DIRECT_RELEASE = {
+    libraryId: 7101,
+    legacyReleaseId: 65881,
+    albumTitle: 'Synth Bayou Quarterly',
+    artistName: 'Liminal Cartographer',
+  };
+  const CTA_COLLISION = {
+    libraryId: 7102,
+    legacyReleaseId: 65882,
+    albumTitle: 'Polychrome Aviary',
+  };
+  const QUERIES = {
+    CONFIELD_TRACK: 'vi scose poise',
+    DIRECT_RELEASE_TRACK: 'xqfp7k zelmpo b3nvh4',
+    CTA_COLLISION_TRACK: 'wbtr2x cmprs 9azn5',
+  };
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = postgres({
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
+      database: process.env.DB_NAME || 'wxyc_db',
+      user: process.env.DB_USERNAME || 'test-user',
+      password: process.env.DB_PASSWORD || 'test-pw',
+    });
+  });
+
+  afterAll(async () => {
+    await sql.end();
+  });
+
+  test('Track 2 fixture library rows are present and linked to the right legacy_release_ids (sanity)', async () => {
+    const rows = await sql.unsafe(
+      `SELECT id, legacy_release_id, album_title, artist_name
+         FROM ${schema}.library
+        WHERE id IN (${CONFIELD.libraryId}, ${DIRECT_RELEASE.libraryId}, ${CTA_COLLISION.libraryId})
+        ORDER BY id`
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => r.legacy_release_id)).toEqual([
+      CONFIELD.legacyReleaseId,
+      DIRECT_RELEASE.legacyReleaseId,
+      CTA_COLLISION.legacyReleaseId,
+    ]);
+    expect(rows.map((r) => r.album_title)).toEqual([
+      CONFIELD.albumTitle,
+      DIRECT_RELEASE.albumTitle,
+      CTA_COLLISION.albumTitle,
+    ]);
+  });
+
+  test('"vi scose poise" returns Confield via discogs_master Track 2 hit', async () => {
+    // No seeded library row's album_title or artist_name contains the phrase
+    // "vi scose poise", and no CTA row's track_title / artist_name does
+    // either, so the cascade must pass through Track 1 (CTA) and land on
+    // Track 2 (LML). The mock LML's songLookup map returns
+    // library_item.id=65880 with matched_via.source="discogs_master", which
+    // searchLibraryByTrack bridges back to BS library.id=7100.
+    const res = await auth.get('/library/search').query({ query: QUERIES.CONFIELD_TRACK });
+
+    if (res.status === 200 && Array.isArray(res.body.results) && res.body.results.length === 0) {
+      console.warn(
+        '[BS#825] Track 2 fallback returned no results. Likely the backend is running ' +
+          'without CATALOG_TRACK_SEARCH_DISCOGS_ENABLED=true. Set it in .env and restart `npm run dev`.'
+      );
+      return;
+    }
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(Array.isArray(res.body.results)).toBe(true);
+    const hit = res.body.results.find((row) => row.id === CONFIELD.libraryId);
+    expect(hit).toBeDefined();
+    expect(hit.title).toBe(CONFIELD.albumTitle);
+    expect(hit.artist).toBe(CONFIELD.artistName);
+    expect(Array.isArray(hit.matched_via)).toBe(true);
+    expect(hit.matched_via.length).toBeGreaterThanOrEqual(1);
+    expect(hit.matched_via[0].source).toBe('discogs_master');
+  });
+
+  test('direct-release CEI query carries matched_via.source = "discogs_release"', async () => {
+    // Synthetic query keyed to the mock LML's `songLookup` entry whose
+    // matched_via.source is discogs_release (vs discogs_master). Asserts
+    // BS forwards LML's matched_via verbatim — Backend does not rewrite the
+    // per-source provenance.
+    const res = await auth.get('/library/search').query({ query: QUERIES.DIRECT_RELEASE_TRACK });
+
+    if (res.status === 200 && Array.isArray(res.body.results) && res.body.results.length === 0) {
+      console.warn('[BS#825] Track 2 fallback returned no results; see prior test for hint.');
+      return;
+    }
+
+    expect(res.status).toBe(200);
+    const hit = res.body.results.find((row) => row.id === DIRECT_RELEASE.libraryId);
+    expect(hit).toBeDefined();
+    expect(hit.title).toBe(DIRECT_RELEASE.albumTitle);
+    expect(hit.artist).toBe(DIRECT_RELEASE.artistName);
+    expect(Array.isArray(hit.matched_via)).toBe(true);
+    expect(hit.matched_via.length).toBeGreaterThanOrEqual(1);
+    expect(hit.matched_via[0].source).toBe('discogs_release');
+  });
+
+  test('CTA-covered library row is not re-emitted via Track 2 (dedup precondition)', async () => {
+    // The CTA collision query matches both a CTA row (Track 1) and the mock
+    // LML's songLookup (Track 2) for library_id=7102. The cascade
+    // short-circuits at Track 1 whenever CTA returns results, so the
+    // user-observable shape is: exactly one result, sourced from CTA. The
+    // Track 2 exclusion SELECT in searchLibraryByTrack
+    // (apps/backend/services/library.service.ts) is the durable fix — this
+    // test exercises both the precondition SELECT and the user-facing
+    // behavior, mirroring the BS#819 / CTA dedup precondition test.
+    const dedupQuery = QUERIES.CTA_COLLISION_TRACK;
+    const ctaCovered = await sql.unsafe(
+      `SELECT library_id FROM ${schema}.compilation_track_artist
+        WHERE library_id = ANY($1::int[])
+          AND track_title ILIKE $2`,
+      [[CTA_COLLISION.libraryId], `%${dedupQuery}%`]
+    );
+    expect(ctaCovered.map((r) => r.library_id)).toContain(CTA_COLLISION.libraryId);
+
+    const res = await auth.get('/library/search').query({ query: dedupQuery });
+    if (res.status === 200 && Array.isArray(res.body.results) && res.body.results.length === 0) {
+      console.warn('[BS#825] Track 2 fallback returned no results; see earlier test for hint.');
+      return;
+    }
+    expect(res.status).toBe(200);
+    const matches = res.body.results.filter((row) => row.id === CTA_COLLISION.libraryId);
+    expect(matches).toHaveLength(1);
+    // The single hit must come from Track 1 (CTA) — Track 2 must not
+    // duplicate it. matched_via.source = 'cta' is the load-bearing
+    // observation: if Track 2 had emitted alongside, the hit's
+    // matched_via would also (or only) carry 'discogs_master' from the
+    // mock-LML response.
+    expect(Array.isArray(matches[0].matched_via)).toBe(true);
+    expect(matches[0].matched_via.length).toBeGreaterThanOrEqual(1);
+    matches[0].matched_via.forEach((hint) => {
+      expect(hint.source).toBe('cta');
+    });
+  });
+});
+
 describe('Library artist_name cascade trigger (A.3 / 0060)', () => {
   const postgres = require('postgres');
   let sql;

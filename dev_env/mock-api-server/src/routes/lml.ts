@@ -36,11 +36,43 @@ router.use((req: Request, res: Response, next) => {
   next();
 });
 
-/** POST /api/v1/lookup — wraps search fixtures into LookupResponse format. */
+/** POST /api/v1/lookup — wraps search fixtures into LookupResponse format.
+ *
+ * Two modes:
+ *
+ *  - Artist-driven (`artist` populated): looks up the `search` fixture keyed on
+ *    artist name and synthesizes library_item.id from the result index. Used
+ *    by the artist/album lookup path.
+ *  - Song-driven (`artist` absent, `song` populated): looks up the
+ *    `songLookup` fixture keyed on lowercased song title. Returns the fixture
+ *    response verbatim (library_item.id is real `library.legacy_release_id`,
+ *    not synthesized), so Backend-Service's `searchLibraryByTrack` can bridge
+ *    to the seeded library row. Used by the Track 2 catalog-track-search
+ *    cascade (BS#825 — lookupBySong sends only `song` + `raw_message`).
+ */
 router.post('/api/v1/lookup', (req: Request, res: Response) => {
-  const { artist, album, song } = req.body ?? {};
+  const { artist, song } = req.body ?? {};
+
+  // Song-only path: matches LML's SONG_AS_TRACK strategy entry shape.
   if (!artist) {
-    res.status(400).json({ error: 'artist is required' });
+    if (!song) {
+      res.status(400).json({ error: 'artist or song is required' });
+      return;
+    }
+    const songKey = (song as string).toLowerCase();
+    const songLookup = (fixtures.songLookup ?? {}) as Record<string, unknown>;
+    const songMatch = songLookup[songKey];
+    if (songMatch) {
+      res.json(songMatch);
+    } else {
+      res.json({
+        results: [],
+        search_type: 'none',
+        song_not_found: true,
+        found_on_compilation: false,
+        cache_stats: { memory_hits: 0, pg_hits: 0, pg_misses: 0, api_calls: 0, pg_time_ms: 0, api_time_ms: 0 },
+      });
+    }
     return;
   }
 

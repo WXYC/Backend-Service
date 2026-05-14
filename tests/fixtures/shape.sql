@@ -247,3 +247,74 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 SELECT setval('wxyc_schema.compilation_track_artist_id_seq', 7099, true);
+
+-- ------------------------------------------------------------------------------
+-- Track 2 (Discogs cross-ref via LML /lookup) fixture — BS#825
+--
+-- Seeds three library rows used by the Track 2 integration tests in
+-- tests/integration/library.spec.js (catalog-track-search plan §3.2). Each
+-- row's `legacy_release_id` matches the `library_item.id` the mock LML
+-- (`dev_env/mock-api-server/src/fixtures/lml.json` `songLookup` map) returns
+-- for the corresponding query.
+--
+-- Mapping summary (mock-LML query → library row):
+--   "vi scose poise"             → Confield        (legacy_release_id=65880)
+--   "xqfp7k zelmpo b3nvh4"       → DirectRelease   (legacy_release_id=65881)
+--   "wbtr2x cmprs 9azn5"         → CTA Collision   (legacy_release_id=65882)
+--
+-- Direct-release and CTA-collision queries are intentionally opaque nonce
+-- tokens that never appear in any seeded library row's album_title or
+-- artist_name (including those below), so the primary tsvector + trigram
+-- path on `library.search_doc` and `library.artist_name`/`album_title`
+-- returns 0 hits. The cascade is then forced into Track 1 (CTA) then
+-- Track 2 (LML) per `searchLibrary` order. The CTA collision row carries a
+-- matching CTA seed AND a mock-LML hit for the same query so Track 1 wins
+-- and Track 2's CTA-exclusion SELECT can be exercised against the seeded
+-- data. "vi scose poise" is the BS#825 acceptance-criteria query (verified
+-- against the real Confield album_title "Confield" which doesn't contain
+-- the phrase either).
+--
+-- TS companion: tests/fixtures/track-search.fixture.ts re-exports the same
+-- IDs / queries / titles as named constants. Update both in lockstep.
+-- ------------------------------------------------------------------------------
+INSERT INTO wxyc_schema.artists (id, artist_name, alphabetical_name, code_letters)
+VALUES
+  (7100, 'Autechre',                 'Autechre',                 'AT'),
+  (7101, 'Liminal Cartographer',     'Liminal Cartographer',     'LC'),
+  (7102, 'Plebs Of The Dawnchorus',  'Plebs Of The Dawnchorus',  'PD')
+ON CONFLICT (id) DO NOTHING;
+
+SELECT setval('wxyc_schema.artists_id_seq', 7199, true);
+
+INSERT INTO wxyc_schema.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+VALUES
+  (7100, 15, 710),
+  (7101, 11, 711),
+  (7102, 11, 712)
+ON CONFLICT (artist_id, genre_id) DO NOTHING;
+
+INSERT INTO wxyc_schema.library
+  (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, label, label_id,
+   legacy_release_id, canonical_entity_id, canonical_entity_confidence, canonical_entity_resolved_at)
+VALUES
+  (7100, 7100, 15, 1, 'Confield',                1, 'Autechre',                 'Warp Records', NULL,
+   65880, 'discogs:master:1374',     0.95, NOW()),
+  (7101, 7101, 11, 1, 'Synth Bayou Quarterly',   1, 'Liminal Cartographer',     NULL,           NULL,
+   65881, 'discogs:release:99887766', 0.88, NOW()),
+  (7102, 7102, 11, 1, 'Polychrome Aviary',       1, 'Plebs Of The Dawnchorus',  NULL,           NULL,
+   65882, 'discogs:master:7777',     0.90, NOW())
+ON CONFLICT (id) DO NOTHING;
+
+SELECT setval('wxyc_schema.library_id_seq', 7199, true);
+
+-- CTA row for the CTA-collision release. track_title carries the nonce
+-- query token so Track 1's ILIKE matches; library 7102's album_title and
+-- artist_name don't, so the primary path can't satisfy the query and the
+-- cascade falls through to Track 1 (CTA) first.
+INSERT INTO wxyc_schema.compilation_track_artist
+  (id, library_id, artist_name, track_title, track_position)
+VALUES
+  (7100, 7102, 'CTA Collision Comp Guest', 'Wbtr2x Cmprs 9azn5', 'B2')
+ON CONFLICT (id) DO NOTHING;
+
+SELECT setval('wxyc_schema.compilation_track_artist_id_seq', 7199, true);

@@ -234,5 +234,106 @@
       "total": 1,
       "cached": false
     }
+  },
+  "songLookup": {
+    "vi scose poise": {
+      "results": [
+        {
+          "library_item": {
+            "id": 65880,
+            "title": "Confield",
+            "artist": "Autechre",
+            "call_number": "Electronic CD AU 1374/1",
+            "library_url": "https://library.wxyc.org/release/65880"
+          },
+          "matched_via": [
+            {
+              "title": "VI Scose Poise",
+              "artist_credit": null,
+              "position": "1",
+              "confidence": 0.95,
+              "source": "discogs_master"
+            }
+          ]
+        }
+      ],
+      "search_type": "song_as_artist",
+      "song_not_found": false,
+      "found_on_compilation": false,
+      "cache_stats": {
+        "memory_hits": 1,
+        "pg_hits": 0,
+        "pg_misses": 0,
+        "api_calls": 0,
+        "pg_time_ms": 0,
+        "api_time_ms": 0
+      }
+    },
+    "xqfp7k zelmpo b3nvh4": {
+      "results": [
+        {
+          "library_item": {
+            "id": 65881,
+            "title": "Synth Bayou Quarterly",
+            "artist": "Liminal Cartographer",
+            "call_number": "Rock CD LC 9988/1",
+            "library_url": "https://library.wxyc.org/release/65881"
+          },
+          "matched_via": [
+            {
+              "title": "Xqfp7k Zelmpo B3nvh4",
+              "artist_credit": null,
+              "position": "A1",
+              "confidence": 0.88,
+              "source": "discogs_release"
+            }
+          ]
+        }
+      ],
+      "search_type": "direct",
+      "song_not_found": false,
+      "found_on_compilation": false,
+      "cache_stats": {
+        "memory_hits": 0,
+        "pg_hits": 1,
+        "pg_misses": 0,
+        "api_calls": 0,
+        "pg_time_ms": 3,
+        "api_time_ms": 0
+      }
+    },
+    "wbtr2x cmprs 9azn5": {
+      "results": [
+        {
+          "library_item": {
+            "id": 65882,
+            "title": "Polychrome Aviary",
+            "artist": "Plebs Of The Dawnchorus",
+            "call_number": "Rock CD PD 7777/1",
+            "library_url": "https://library.wxyc.org/release/65882"
+          },
+          "matched_via": [
+            {
+              "title": "Wbtr2x Cmprs 9azn5",
+              "artist_credit": null,
+              "position": "B2",
+              "confidence": 0.9,
+              "source": "discogs_master"
+            }
+          ]
+        }
+      ],
+      "search_type": "song_as_artist",
+      "song_not_found": false,
+      "found_on_compilation": false,
+      "cache_stats": {
+        "memory_hits": 0,
+        "pg_hits": 1,
+        "pg_misses": 0,
+        "api_calls": 0,
+        "pg_time_ms": 2,
+        "api_time_ms": 0
+      }
+    }
   }
 }
