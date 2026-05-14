@@ -922,7 +922,15 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  * @throws Whatever `lookupBySong` throws — the wrapper handles the boundary.
  */
 async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<EnrichedLibraryResult[]> {
+  const lookupStart = performance.now();
   const response: LookupResponse = await lookupBySong(query);
+  try {
+    Sentry.getActiveSpan()?.setAttributes({
+      'track_search.master_lookup_ms': performance.now() - lookupStart,
+    });
+  } catch (err) {
+    console.warn('[Library] searchLibraryByTrack: failed to project master_lookup_ms onto span', err);
+  }
 
   const items = response.results ?? [];
   if (items.length === 0) return [];
@@ -1055,9 +1063,14 @@ export function __resetTrackSearchCacheForTests(): void {
  * return the mapped `EnrichedLibraryResult[]` (BS rows, `matched_via`, LML
  * ordering) without touching LML or the BS PG JOIN.
  *
- * Emits a `track_search.cache_hit` attribute on the active Sentry span so the
- * outer instrumentation (E2-8) can break down hit vs. miss latency without
- * this layer creating its own span.
+ * **Telemetry (BS#828).** Wraps the call in a `catalog.track_search` Sentry
+ * span and projects three attributes onto it: `track_search.cache_hit` (true
+ * on hit, false on miss), `track_search.master_lookup_ms` (LML hop only —
+ * 0 on cache hit, set by the inner via the active span on miss), and
+ * `track_search.latency_ms` (total). Pattern: wrap-at-chokepoint +
+ * project-onto-span (sibling: LML#213 / BS#646 for LML cache_stats).
+ * Callers up the cascade in `searchLibrary` must not add their own
+ * instrumentation.
  *
  * LML failures are NOT cached: if `lookupBySong` rejects, the wrapper returns
  * `[]` straight through without polluting the cache. A genuine empty LML
@@ -1073,26 +1086,44 @@ export function __resetTrackSearchCacheForTests(): void {
  * @returns Array of enriched library results with `matched_via` populated
  */
 export async function searchLibraryByTrack(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
-  const key = trackSearchCacheKey(query);
-  const cached = trackSearchCache.get(key);
-  if (cached !== undefined) {
-    Sentry.getActiveSpan()?.setAttribute('track_search.cache_hit', true);
-    return cached.slice(0, limit);
-  }
-  Sentry.getActiveSpan()?.setAttribute('track_search.cache_hit', false);
-  // Fetch the full LML-bounded result; the cache stores the un-sliced array.
-  let results: EnrichedLibraryResult[];
-  let lmlSucceeded = true;
-  try {
-    results = await searchLibraryByTrackUncachedOrThrow(query);
-  } catch {
-    lmlSucceeded = false;
-    results = [];
-  }
-  if (lmlSucceeded) {
-    trackSearchCache.set(key, results);
-  }
-  return results.slice(0, limit);
+  return Sentry.startSpan({ name: 'searchLibraryByTrack', op: 'catalog.track_search' }, async (span) => {
+    const start = performance.now();
+    // master_lookup_ms is set by searchLibraryByTrackUncachedOrThrow on the
+    // miss path (via the active span). Default to 0 so cache hits and
+    // pre-LML failures still emit a numeric value — p95 dashboards then
+    // see one row per call without coalesce.
+    let lmlSucceeded = true;
+    let results: EnrichedLibraryResult[];
+
+    const key = trackSearchCacheKey(query);
+    const cached = trackSearchCache.get(key);
+    if (cached !== undefined) {
+      span.setAttribute('track_search.cache_hit', true);
+      results = cached.slice(0, limit);
+    } else {
+      span.setAttribute('track_search.cache_hit', false);
+      // Fetch the full LML-bounded result; the cache stores the un-sliced array.
+      try {
+        results = await searchLibraryByTrackUncachedOrThrow(query);
+      } catch {
+        lmlSucceeded = false;
+        results = [];
+      }
+      if (lmlSucceeded) {
+        trackSearchCache.set(key, results);
+      }
+      results = results.slice(0, limit);
+    }
+
+    // Observability must never break the request path. If the Sentry SDK
+    // (or a custom transport hook) throws, swallow the error and continue.
+    try {
+      span.setAttributes({ 'track_search.latency_ms': performance.now() - start });
+    } catch (err) {
+      console.warn('[Library] searchLibraryByTrack: failed to project latency onto span', err);
+    }
+    return results;
+  });
 }
 
 /**

@@ -11,6 +11,28 @@ jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
   isLmlConfigured: mockIsLmlConfigured,
 }));
 
+// Mock @sentry/node so we can assert that searchLibraryByTrack creates a
+// catalog.track_search span and projects per-search measurements onto it
+// without initializing Sentry. startSpan(opts, callback) wraps a span mock
+// and returns the callback's result — preserving the function's return
+// value and generic. getActiveSpan() returns the same span instance so
+// the inner method's `Sentry.getActiveSpan()?.setAttributes(...)` lands
+// on the outer span the test asserts against.
+const mockSpanSetAttribute = jest.fn();
+const mockSpanSetAttributes = jest.fn();
+type SpanLike = { setAttribute: typeof mockSpanSetAttribute; setAttributes: typeof mockSpanSetAttributes };
+const spanInstance: SpanLike = { setAttribute: mockSpanSetAttribute, setAttributes: mockSpanSetAttributes };
+const mockStartSpan = jest.fn(
+  <T>(_opts: { name: string; op: string }, callback: (span: SpanLike) => T | Promise<T>): Promise<T> =>
+    Promise.resolve(callback(spanInstance))
+);
+const mockGetActiveSpan = jest.fn(() => spanInstance);
+jest.mock('@sentry/node', () => ({
+  startSpan: <T>(opts: { name: string; op: string }, callback: (span: SpanLike) => T | Promise<T>): Promise<T> =>
+    mockStartSpan(opts, callback),
+  getActiveSpan: () => mockGetActiveSpan(),
+}));
+
 import {
   isISODate,
   fuzzySearchLibrary,
@@ -1047,6 +1069,145 @@ describe('library.service', () => {
       await searchLibraryByTrack('Back, Baby', 10);
 
       expect(mockLookupBySong.mock.calls.length).toBe(callsAfterFirst + 1);
+    });
+  });
+
+  describe('searchLibraryByTrack telemetry (Sentry span)', () => {
+    const trackRow = {
+      id: 101,
+      code_letters: 'PR',
+      code_artist_number: 1,
+      code_number: 2,
+      artist_name: 'Jessica Pratt',
+      alphabetical_name: 'Pratt, Jessica',
+      album_title: 'On Your Own Love Again',
+      format_name: 'CD',
+      genre_name: 'Rock',
+      rotation_bin: null,
+      add_date: new Date('2024-02-01'),
+      label: 'Drag City',
+      label_id: null,
+      on_streaming: true,
+      album_artist: null,
+      plays: 12,
+      artwork_url: null,
+      legacy_release_id: 555,
+    };
+    const lookupItem = {
+      library_item: {
+        id: 555,
+        title: 'On Your Own Love Again',
+        artist: 'Jessica Pratt',
+        call_number: 'Rock CD PR 1/2',
+        library_url: 'http://www.wxyc.info/wxycdb/libraryRelease?id=555',
+      },
+      matched_via: [{ title: 'Back, Baby', artist_credit: null, confidence: 0.92, source: 'discogs' }],
+    };
+
+    function primeMissPath(): void {
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+      const libraryChain = createMockQueryChain([trackRow]);
+      libraryChain.limit = jest.fn().mockResolvedValue([trackRow]);
+      const ctaChain = createMockQueryChain([]);
+      ctaChain.where = jest.fn().mockResolvedValue([]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? libraryChain : ctaChain;
+        callIndex += 1;
+        return chain;
+      });
+    }
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      __resetTrackSearchCacheForTests();
+      // Restore the default span instance so cross-test mockImplementation
+      // changes (e.g., the "setAttributes throws" test) don't bleed.
+      mockSpanSetAttributes.mockReset();
+      mockSpanSetAttribute.mockReset();
+    });
+
+    it('wraps the call in a catalog.track_search Sentry span on every invocation', async () => {
+      primeMissPath();
+
+      await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(mockStartSpan).toHaveBeenCalledTimes(1);
+      expect(mockStartSpan.mock.calls[0][0]).toEqual({
+        name: 'searchLibraryByTrack',
+        op: 'catalog.track_search',
+      });
+    });
+
+    it('projects cache_hit=false + master_lookup_ms + latency_ms on a cache miss (LML succeeded)', async () => {
+      primeMissPath();
+
+      await searchLibraryByTrack('Back, Baby', 10);
+
+      // cache_hit is emitted as a singular setAttribute call.
+      expect(mockSpanSetAttribute).toHaveBeenCalledWith('track_search.cache_hit', false);
+      // master_lookup_ms is projected by the inner method via the active span.
+      const setAttrsKeys = mockSpanSetAttributes.mock.calls.flatMap((c) => Object.keys(c[0] as object));
+      expect(setAttrsKeys).toContain('track_search.master_lookup_ms');
+      expect(setAttrsKeys).toContain('track_search.latency_ms');
+      // All emitted timing values are finite numbers.
+      for (const call of mockSpanSetAttributes.mock.calls) {
+        for (const value of Object.values(call[0] as Record<string, unknown>)) {
+          expect(typeof value).toBe('number');
+          expect(Number.isFinite(value as number)).toBe(true);
+        }
+      }
+    });
+
+    it('projects cache_hit=true + latency_ms on a cache hit (no LML call, no master_lookup_ms)', async () => {
+      primeMissPath();
+      // Warm the cache.
+      await searchLibraryByTrack('Back, Baby', 10);
+      mockSpanSetAttribute.mockReset();
+      mockSpanSetAttributes.mockReset();
+      mockStartSpan.mockClear();
+      mockLookupBySong.mockReset();
+
+      // Second call hits the cache.
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+      expect(results).toHaveLength(1);
+      expect(mockStartSpan).toHaveBeenCalledTimes(1);
+      expect(mockSpanSetAttribute).toHaveBeenCalledWith('track_search.cache_hit', true);
+      const setAttrsKeys = mockSpanSetAttributes.mock.calls.flatMap((c) => Object.keys(c[0] as object));
+      expect(setAttrsKeys).toContain('track_search.latency_ms');
+      // master_lookup_ms is not projected on hit — the inner method never runs.
+      expect(setAttrsKeys).not.toContain('track_search.master_lookup_ms');
+    });
+
+    it('still projects latency_ms when LML fails (degraded path is still observable)', async () => {
+      mockLookupBySong.mockRejectedValue(new Error('LML 502 Bad Gateway'));
+      db.select.mockReset();
+
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(results).toEqual([]);
+      const setAttrsKeys = mockSpanSetAttributes.mock.calls.flatMap((c) => Object.keys(c[0] as object));
+      expect(setAttrsKeys).toContain('track_search.latency_ms');
+    });
+
+    it('resolves successfully when span.setAttributes throws (observability must not break the request path)', async () => {
+      primeMissPath();
+      mockSpanSetAttributes.mockImplementation(() => {
+        throw new Error('sentry boom');
+      });
+
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(101);
     });
   });
 
