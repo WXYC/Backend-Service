@@ -22,6 +22,7 @@ import {
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
 import { lookupBySong, lookupMetadata, isLmlConfigured, type LookupResponse } from './lml/lml.client.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
+import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
 
 /**
  * Source columns on `artists` (and any joined / view-projected row) that
@@ -807,12 +808,13 @@ export async function searchLibrary(
     }
 
     // Both flags default off so behavior is unchanged until rollout (plan §4).
-    if (process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED === 'true') {
+    const flags = getCatalogTrackSearchConfig();
+    if (flags.ctaEnabled) {
       const ctaResults = await searchLibraryByCTA(query, limit, on_streaming);
       if (ctaResults.length > 0) return ctaResults;
     }
 
-    if (process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED === 'true') {
+    if (flags.discogsEnabled) {
       const trackResults = await searchLibraryByTrack(query, limit);
       if (trackResults.length > 0) return trackResults;
     }

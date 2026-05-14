@@ -84,6 +84,15 @@ Bounded ring-buffer reports written under `mirror-logs/`. Reports never include 
 - `DISCOGS_API_KEY`, `DISCOGS_API_SECRET` — Served to dj-site via `/config/secrets` endpoint. Not used by the backend itself (Discogs access goes through LML).
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`
 
+### Catalog track search
+
+Feature flags for the 0-hit fallback cascade in `searchLibrary` (`apps/backend/services/library.service.ts`). When the primary tsvector + trigram search returns no rows, each enabled layer runs in order and the first non-empty result wins. Both default `false` so production behavior is unchanged until an operator opts in. Loaded by `apps/backend/config/catalogTrackSearch.ts`. Plan: [catalog-track-search](https://github.com/WXYC/wiki/blob/main/plans/catalog-track-search.md).
+
+- `CATALOG_TRACK_SEARCH_CTA_ENABLED` (default `false`) — Track 1: probe the compilation-track-artist (CTA) fuzzy fallback so queries like `"Call Your Name"` match the track listed on a V/A compilation. Set `true` once Phase 1d audit shows healthy coverage.
+- `CATALOG_TRACK_SEARCH_DISCOGS_ENABLED` (default `false`) — Track 2: probe LML's Discogs `/lookup` endpoint and bridge any matched releases back to library rows the CTA layer didn't already cover. Set `true` after Track 1 has soaked.
+
+Strict-`true` gating: only the literal string `'true'` enables a layer. Any other value (including `1`, `TRUE`, missing) reads as `false`.
+
 ## Slack
 
 - `SLACK_WXYC_REQUESTS_APP_ID`, `SLACK_WXYC_REQUESTS_CLIENT_ID`

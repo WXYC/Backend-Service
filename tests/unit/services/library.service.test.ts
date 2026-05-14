@@ -25,6 +25,7 @@ import {
   enrichWithArtwork,
   updateArtworkUrl,
 } from '../../../apps/backend/services/library.service';
+import { resetConfig as resetCatalogTrackSearchConfig } from '../../../apps/backend/config/catalogTrackSearch';
 
 /**
  * Recursively collect every scalar interpolation from a mock-`sql` tagged
@@ -263,6 +264,9 @@ describe('library.service', () => {
       jest.clearAllMocks();
       delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
       delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+      // Reset the lazy singleton so each test's per-case env mutations
+      // (a few lines below) re-load through `loadConfig()`.
+      resetCatalogTrackSearchConfig();
     });
 
     afterAll(() => {
@@ -270,6 +274,7 @@ describe('library.service', () => {
       else process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = originalCta;
       if (originalDiscogs === undefined) delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
       else process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = originalDiscogs;
+      resetCatalogTrackSearchConfig();
     });
 
     /**
