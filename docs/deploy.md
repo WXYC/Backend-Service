@@ -25,3 +25,20 @@ The canonical recent example is the 2026-05-04 deploy wedge ([run 25337297761](h
 The other defenses in [Project #26 — Migration Deploy Hardening](https://github.com/orgs/WXYC/projects/26) (legible failure output, pre-flight dry-runs against prod-shaped data, validator checks for retroactive risk) reduce the cost of an individual wedge. This cadence note reduces the _likelihood_ by limiting how many migrations stack up between deploys.
 
 **Practical rule of thumb**: when a PR that touches `shared/database/src/migrations/**` merges, run Manual Build & Deploy within 24 hours. The rule is advisory — don't gate merges on cadence, since PR authors don't necessarily own deploys.
+
+## CI workflow pin maintenance
+
+Three classes of pin in `.github/workflows/*.yml` exist for supply-chain reasons (mirrors WXYC/request-o-matic#124's free-tier hardening; see WXYC/wiki#67 for the org-wide rollout). They will bit-rot and need occasional bumps:
+
+- **Workflow-level `permissions:`** scoped to the minimum each workflow needs. Four distinct profiles across the 8 workflows:
+  - `contents: read`: `test.yml`, `nightly-tests.yml`, `set-ec2-env-var.yml`. No GITHUB_TOKEN writes; all writes to external services use their own non-GITHUB_TOKEN secrets (`AWS_*`, `EC2_SSH_KEY`, etc.).
+  - `contents: write`: `deploy-base.yml` (the reusable workflow — pushes commits/tags as part of build artifacts) and its callers `deploy-auto.yml` + `deploy-manual.yml`. **Caller and callee must match** — when the callee escalates to `contents: write` and the callers stay at `contents: read`, the matrix run startup_failures with no jobs (the pattern documented in WXYC/Backend-Service#857 / PR #858 — silent for 10 commits across 2 days). When you change `deploy-base.yml`'s `permissions:`, audit `deploy-auto.yml` + `deploy-manual.yml` in the same PR.
+  - `contents: read` + `packages: read`: `charset-corpus-drift.yml` — the reusable workflow pulls `@wxyc/shared` from `npm.pkg.github.com`.
+  - `contents: read` + `pull-requests: write`: `schema-shape-report.yml` — comments on PRs.
+  General failure mode is silent — a job that needs a missing scope (e.g. `pull-requests: write`) fails its API call but the workflow stays green. When adding a step that needs to comment on PRs, push tags, mint releases, etc., explicitly grant the scope at the **job** level (or widen the workflow-level floor only if every job in the file needs it). Don't apply a permissions block to a caller that grants strictly less than the callee — see #857.
+- **Reusable-workflow refs pinned to `@gha/v1`**, not `@main` — `WXYC/wxyc-etl/.github/workflows/check-ci-marker-sync.yml@gha/v1` (in `test.yml`) and `WXYC/wxyc-shared/.github/workflows/check-charset-corpus-drift.yml@gha/v1` (in `charset-corpus-drift.yml`). The publishing repos treat `gha/v1` as a moving major tag — re-pointed forward on non-breaking changes, frozen on breaking changes (which get a fresh `gha/v2`). Don't downgrade either to `@main`; if a `gha/v2` migration arrives, follow the procedure at the top of the publishing repo's CLAUDE.md.
+- **Third-party action pins** — top-level (`@v4`, `@v6`, etc.). Not version-locked to a SHA today; bumps land via Dependabot as one PR per action (see recent commits `Bump aws-actions/configure-aws-credentials to v6`, `Bump actions/checkout from 4 to 6`). When adding a new third-party action, prefer a major-version tag from a published action (auditable maintainer, signed releases) over a SHA-pinned hack.
+
+Run `actionlint .github/workflows/*.yml` locally before pushing workflow changes; it validates `permissions:` syntax, action-version pins, and shell-script blocks (via shellcheck), and catches the silent-mistake class of errors above before CI does.
+
+Item 4 of #124 (pinning the Railway CLI) does not apply — Backend-Service deploys to EC2, not Railway.
