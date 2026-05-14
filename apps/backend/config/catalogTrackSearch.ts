@@ -32,14 +32,8 @@ export function loadConfig(): CatalogTrackSearchConfig {
   };
 }
 
-/**
- * Singleton config instance.
- */
 let _config: CatalogTrackSearchConfig | null = null;
 
-/**
- * Get the configuration, loading it from the environment on first call.
- */
 export function getConfig(): CatalogTrackSearchConfig {
   if (!_config) {
     _config = loadConfig();
