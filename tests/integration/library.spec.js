@@ -258,9 +258,10 @@ describe('Library Rotation', () => {
     test('surfaces rotation rows with NULL album_id using denormalized snapshot fields (#689)', async () => {
       const res = await auth.get('/library/rotation').expect(200);
 
-      // The shape fixture seeds 2 rotation rows with album_id IS NULL.
-      // They should appear with id=null and artist_name/album_title
-      // populated from rotation's denormalized columns.
+      // The shape fixture seeds NULL-album rotation rows that all start
+      // with 'Shape Fixture Orphan' in artist_name. After #862's hash-
+      // partitioned dedup, the two rows in Orphan One's (artist, album,
+      // bin) group collapse to one, leaving 2 distinct fixture orphans.
       const orphans = res.body.filter((r) => r.id === null);
       expect(orphans.length).toBeGreaterThanOrEqual(2);
 
@@ -284,6 +285,23 @@ describe('Library Rotation', () => {
         album_title: 'Shape Fixture Orphan Album Two',
         rotation_bin: 'M',
       });
+    });
+
+    test('collapses NULL-album rows sharing (artist, album, rotation_bin) to one (#862)', async () => {
+      // The shape fixture seeds two NULL-album_id rotation rows (ids
+      // 7007 and 7015) with identical artist/album/bin. The pre-#862
+      // partition key was `coalesce(album_id, -id)`, which was unique
+      // per row and let both survive DISTINCT ON; the hash partition
+      // key collapses them to a single row. Pick the most-recently
+      // added (rotation_add_date '2024-09-12' from row 7015) per the
+      // ORDER BY add_date DESC, id ASC.
+      const res = await auth.get('/library/rotation').expect(200);
+
+      const orphanOneRows = res.body.filter(
+        (r) => r.id === null && r.artist_name === 'Shape Fixture Orphan One' && r.rotation_bin === 'L'
+      );
+      expect(orphanOneRows).toHaveLength(1);
+      expect(orphanOneRows[0].rotation_add_date).toBe('2024-09-12');
     });
   });
 

@@ -179,25 +179,40 @@ type RotationRow = Omit<Rotation, 'reconciled_identity'> & ReconciledIdentitySou
  *   from rotation's denormalized snapshot columns when the library
  *   join is NULL.
  *
- * - **DISTINCT ON `(coalesce(album_id, -id), rotation_bin)` ORDER BY
- *   `coalesce(album_id, -id), rotation_bin, add_date DESC, id ASC`.**
+ * - **DISTINCT ON `(coalesce(album_id, -hashtext(lower(artist)||'|'||lower(album))::int), rotation_bin)`
+ *   ORDER BY same key, then `add_date DESC, id ASC`.**
  *   Tubafrenzy permits multiple active rows per
  *   `(album_id, rotation_bin)` over an album's lifecycle (re-bins,
  *   re-adds, label-driven re-promotes); we collapse those duplicates
  *   to one row per group on the way out, picking the most-recently
  *   added (tie-broken by lowest rotation id for deterministic output).
- *   The `coalesce(album_id, -id)` trick keeps NULL-album rows in
- *   separate groups (Postgres DISTINCT ON treats NULLs as equal
- *   without it, which would collapse the 147 NULL-album rows down
- *   to one).
+ *   When `album_id IS NULL` (151/310 active rows in the 2026-05-14
+ *   prod snapshot — tubafrenzy entries that never resolved to a
+ *   library row), we partition on a hash of the denormalized
+ *   `(artist_name, album_title)` snapshot columns instead. This both
+ *   keeps NULL-album rows in their own groups (Postgres DISTINCT ON
+ *   would otherwise treat NULLs as equal and collapse all 151 to one)
+ *   AND collapses unlinked dupes that share the same release — fixing
+ *   #862, where the dropdown surfaced the same release ×3 because the
+ *   prior `-id` trick was unique-per-row and never collapsed.
+ *   `hashtext` is deterministic and cheap; collisions at this row
+ *   count are negligible (birthday-bound ~32k for a 32-bit space and
+ *   we're at ~151).
  *
  * - **`kill_date IS NULL OR kill_date > CURRENT_DATE`.** Active rows
  *   only; the planner-stable predicate also excludes future-dated
  *   kills correctly.
  */
 export const getRotationFromDB = async (): Promise<Rotation[]> => {
+  // Stable partition key for the DISTINCT ON / ORDER BY: real album_id when
+  // present, else a hash of the (artist_name, album_title) snapshot so
+  // unlinked duplicates collapse together (#862).
+  const partitionKey = sql`COALESCE(
+    ${rotation.album_id},
+    -hashtext(lower(coalesce(${rotation.artist_name}, '')) || '|' || lower(coalesce(${rotation.album_title}, '')))::int
+  )`;
   const query = sql`
-    SELECT DISTINCT ON (COALESCE(${rotation.album_id}, -${rotation.id}), ${rotation.rotation_bin})
+    SELECT DISTINCT ON (${partitionKey}, ${rotation.rotation_bin})
       ${library.id} AS id,
       ${artists.code_letters} AS code_letters,
       ${genre_artist_crossreference.artist_genre_code} AS code_artist_number,
@@ -230,7 +245,7 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
       ON ${genre_artist_crossreference.artist_id} = ${library.artist_id}
       AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
     WHERE ${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL
-    ORDER BY COALESCE(${rotation.album_id}, -${rotation.id}),
+    ORDER BY ${partitionKey},
              ${rotation.rotation_bin},
              ${rotation.add_date} DESC,
              ${rotation.id} ASC
