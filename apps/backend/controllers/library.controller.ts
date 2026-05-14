@@ -12,7 +12,6 @@ import {
 import * as libraryService from '../services/library.service.js';
 import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
-import { UnknownEnumError } from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
 import { checkStreamingAvailability, lookupMetadata, isLmlConfigured } from '../services/lml/lml.client.js';
 import WxycError from '../utils/error.js';
@@ -417,31 +416,38 @@ const MAX_LIMIT = 100;
 
 export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown, LibraryQueryParams> = async (
   req,
-  res,
-  next
+  res
 ) => {
   const q = req.query.q ?? '';
 
   const page = parseInt(req.query.page ?? '0');
   if (isNaN(page) || page < 0) {
-    res.status(400).json({ message: 'page must be a non-negative integer' });
-    return;
+    throw new WxycError('page must be a non-negative integer', 400);
   }
 
   const limit = parseInt(req.query.limit ?? String(DEFAULT_LIMIT));
   if (isNaN(limit) || limit < 1) {
-    res.status(400).json({ message: 'limit must be a positive integer' });
-    return;
+    throw new WxycError('limit must be a positive integer', 400);
   }
   if (limit > MAX_LIMIT) {
-    res.status(400).json({ message: `limit must not exceed ${MAX_LIMIT}` });
-    return;
+    throw new WxycError(`limit must not exceed ${MAX_LIMIT}`, 400);
   }
 
-  const sort = (VALID_CATALOG_SORTS.includes(req.query.sort as CatalogSort) ? req.query.sort : 'album') as CatalogSort;
-  const order = (
-    VALID_CATALOG_ORDERS.includes(req.query.order as CatalogOrder) ? req.query.order : 'asc'
-  ) as CatalogOrder;
+  let sort: CatalogSort = 'album';
+  if (req.query.sort !== undefined) {
+    if (!VALID_CATALOG_SORTS.includes(req.query.sort as CatalogSort)) {
+      throw new WxycError(`sort must be one of: ${VALID_CATALOG_SORTS.join(', ')}`, 400);
+    }
+    sort = req.query.sort as CatalogSort;
+  }
+
+  let order: CatalogOrder = 'asc';
+  if (req.query.order !== undefined) {
+    if (!VALID_CATALOG_ORDERS.includes(req.query.order as CatalogOrder)) {
+      throw new WxycError(`order must be one of: ${VALID_CATALOG_ORDERS.join(', ')}`, 400);
+    }
+    order = req.query.order as CatalogOrder;
+  }
 
   const onStreamingRaw = req.query.on_streaming;
   let on_streaming: boolean | undefined;
@@ -449,32 +455,23 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
     if (onStreamingRaw === 'true') on_streaming = true;
     else if (onStreamingRaw === 'false') on_streaming = false;
     else {
-      res.status(400).json({ message: 'on_streaming must be "true" or "false"' });
-      return;
+      throw new WxycError('on_streaming must be "true" or "false"', 400);
     }
   }
 
   const genre = req.query.genre || undefined;
   const format = req.query.format || undefined;
 
-  try {
-    const { results, total } = await librarySearchService.searchLibrary({
-      q,
-      page,
-      limit,
-      sort,
-      order,
-      on_streaming,
-      genre,
-      format,
-    });
-    const totalPages = Math.ceil(total / limit);
-    res.status(200).json({ results, total, page, totalPages });
-  } catch (e) {
-    if (e instanceof UnknownEnumError) {
-      res.status(400).json({ message: e.message });
-      return;
-    }
-    next(e);
-  }
+  const { results, total } = await librarySearchService.searchLibrary({
+    q,
+    page,
+    limit,
+    sort,
+    order,
+    on_streaming,
+    genre,
+    format,
+  });
+  const totalPages = Math.ceil(total / limit);
+  res.status(200).json({ results, total, page, totalPages });
 };

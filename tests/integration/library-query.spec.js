@@ -139,4 +139,14 @@ describe('GET /library/query', () => {
   test('rejects malformed on_streaming with 400', async () => {
     await auth.get('/library/query').query({ on_streaming: 'maybe' }).expect(400);
   });
+
+  test('rejects unknown sort with 400', async () => {
+    const res = await auth.get('/library/query').query({ sort: 'banana' }).expect(400);
+    expect(res.body.message).toMatch(/sort/i);
+  });
+
+  test('rejects unknown order with 400', async () => {
+    const res = await auth.get('/library/query').query({ order: 'sideways' }).expect(400);
+    expect(res.body.message).toMatch(/order/i);
+  });
 });
