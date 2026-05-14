@@ -6,6 +6,7 @@ import {
   type CatalogField,
   type SearchCondition,
 } from './search-parser.service.js';
+import WxycError from '../utils/error.js';
 
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
 export type CatalogOrder = 'asc' | 'desc';
@@ -255,10 +256,9 @@ async function getFormatSet(): Promise<Set<string>> {
   return formatCache.values;
 }
 
-export class UnknownEnumError extends Error {
+export class UnknownEnumError extends WxycError {
   constructor(message: string) {
-    super(message);
-    this.name = 'UnknownEnumError';
+    super(message, 400, 'UnknownEnumError');
   }
 }
 
@@ -275,10 +275,4 @@ async function validateEnumFilters(genre?: string, format?: string): Promise<voi
       throw new UnknownEnumError(`Unknown format: ${format}`);
     }
   }
-}
-
-/** For tests: drop the cached enum values so the next call re-queries. */
-export function __resetEnumCachesForTests(): void {
-  genreCache = null;
-  formatCache = null;
 }
