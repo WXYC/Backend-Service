@@ -900,10 +900,88 @@ describe('library.service', () => {
       // Neither LML nor any DB select fired on the second call.
       expect(mockLookupBySong.mock.calls.length).toBe(lmlCallCountAfterMiss);
       expect(db.select.mock.calls.length).toBe(dbCallCountAfterMiss);
-      // Result identity preserved (the cache stores the exact array reference).
-      expect(second).toBe(first);
+      // Result equality preserved, but the wrapper hands out a shallow copy so
+      // caller-side sorts/mutations don't bleed into subsequent hits.
+      expect(second).toEqual(first);
+      expect(second).not.toBe(first);
       expect(second[0].id).toBe(101);
       expect(second[0].matched_via?.[0]).toMatchObject({ source: 'discogs', confidence: 0.92 });
+    });
+
+    it('does not cache LML failures (next call retries instead of returning poisoned empty)', async () => {
+      // First call: LML rejects. Wrapper degrades to [] but must NOT cache the
+      // empty result — otherwise a transient LML blip would persist for 10
+      // minutes, returning empty for every identical query.
+      mockLookupBySong.mockRejectedValueOnce(new Error('LML 502 Bad Gateway'));
+      db.select.mockReset();
+      const firstResults = await searchLibraryByTrack('Back, Baby', 10);
+      expect(firstResults).toEqual([]);
+      const lmlCallsAfterFailure = mockLookupBySong.mock.calls.length;
+
+      // Second call: LML recovers. The cache must NOT serve the empty result
+      // from the failed call — LML has to be invoked again.
+      primeMocks();
+      const recovered = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(mockLookupBySong.mock.calls.length).toBe(lmlCallsAfterFailure + 1);
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0].id).toBe(101);
+    });
+
+    it('larger limit miss serves smaller limit hit without re-fetching', async () => {
+      // The cache stores the un-sliced result. A miss at limit=10 plus a
+      // subsequent hit at limit=5 should not re-invoke LML — slicing happens
+      // on the read side.
+      mockLookupBySong.mockResolvedValue({
+        results: [
+          { ...lookupItem, library_item: { ...lookupItem.library_item, id: 555 } },
+          { ...lookupItem, library_item: { ...lookupItem.library_item, id: 556 } },
+          { ...lookupItem, library_item: { ...lookupItem.library_item, id: 557 } },
+        ],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+      const row555 = { ...trackRow, id: 201, legacy_release_id: 555 };
+      const row556 = { ...trackRow, id: 202, legacy_release_id: 556 };
+      const row557 = { ...trackRow, id: 203, legacy_release_id: 557 };
+      const libraryChain = createMockQueryChain([row555, row556, row557]);
+      libraryChain.limit = jest.fn().mockResolvedValue([row555, row556, row557]);
+      const ctaChain = createMockQueryChain([]);
+      ctaChain.where = jest.fn().mockResolvedValue([]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? libraryChain : ctaChain;
+        callIndex += 1;
+        return chain;
+      });
+
+      const big = await searchLibraryByTrack('Back, Baby', 10);
+      expect(big).toHaveLength(3);
+      const callsAfterBig = mockLookupBySong.mock.calls.length;
+
+      // Smaller limit on a primed cache — should hit, not re-fetch.
+      const small = await searchLibraryByTrack('Back, Baby', 2);
+
+      expect(mockLookupBySong.mock.calls.length).toBe(callsAfterBig);
+      expect(small).toHaveLength(2);
+      expect(small.map((r) => r.id)).toEqual([201, 202]);
+    });
+
+    it('returns a shallow copy so caller mutations do not bleed into the next hit', async () => {
+      primeMocks();
+
+      const first = await searchLibraryByTrack('Back, Baby', 10);
+      // Mutate the returned array in place.
+      first.length = 0;
+
+      const second = await searchLibraryByTrack('Back, Baby', 10);
+
+      // Second hit must still produce the cached result, undisturbed by the
+      // first caller's mutation.
+      expect(second).toHaveLength(1);
+      expect(second[0].id).toBe(101);
     });
 
     it('different queries hit different cache entries (key isolation)', async () => {
