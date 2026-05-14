@@ -196,13 +196,14 @@ services:
       - RATE_LIMIT_REGISTRATION_MAX=5
       - RATE_LIMIT_REQUEST_WINDOW_MS=2000
       - RATE_LIMIT_REQUEST_MAX=20
-      # Catalog Track Search: activate the CTA fallback for integration tests.
+      # Catalog Track Search: activate both fallbacks for integration tests.
       # Plan: WXYC/wiki plans/catalog-track-search.md §10.1. Defaults to off in
-      # prod; CI flips it on so tests/integration/library.spec.js exercises the
-      # cascade. The Discogs/LML fallback stays off — the mock LML server
-      # doesn't implement `lookupBySong`'s song-only request shape.
+      # prod; CI flips both flags on so tests/integration/library.spec.js
+      # exercises the full cascade (Track 1 = CTA, Track 2 = LML cross-ref).
+      # The mock LML server's POST /api/v1/lookup handles song-only requests
+      # via its `songLookup` fixture map (BS#825).
       - CATALOG_TRACK_SEARCH_CTA_ENABLED=${CATALOG_TRACK_SEARCH_CTA_ENABLED:-true}
-      - CATALOG_TRACK_SEARCH_DISCOGS_ENABLED=${CATALOG_TRACK_SEARCH_DISCOGS_ENABLED:-false}
+      - CATALOG_TRACK_SEARCH_DISCOGS_ENABLED=${CATALOG_TRACK_SEARCH_DISCOGS_ENABLED:-true}
     ports:
       - '${CI_PORT:-8081}:8080'
 
