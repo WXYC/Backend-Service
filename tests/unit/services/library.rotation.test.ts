@@ -290,5 +290,67 @@ describe('library.service / getRotationFromDB', () => {
 
       expect(result).toEqual([]);
     });
+
+    /**
+     * #862: NULL-album_id rows with the same (artist, album, bin) used
+     * to escape DISTINCT ON because the old partition key was
+     * `-rotation.id` (unique per row). The new key hashes the
+     * denormalized (artist_name, album_title) snapshot columns when
+     * album_id IS NULL, so unlinked dupes collapse. Postgres returns
+     * the post-collapse shape; we assert the serializer ships exactly
+     * one row through with the most-recent rotation_add_date (per
+     * ORDER BY add_date DESC).
+     */
+    it('passes through collapsed NULL-album duplicate groups as a single row (#862)', async () => {
+      const collapsed = orphanRow({
+        rotation_id: 7015,
+        artist_name: 'Shape Fixture Orphan One',
+        album_title: 'Shape Fixture Orphan Album One',
+        alphabetical_name: 'Shape Fixture Orphan One',
+        rotation_bin: 'L',
+        rotation_add_date: '2024-09-12',
+      });
+      db.execute.mockResolvedValueOnce([collapsed]);
+
+      const result = await getRotationFromDB();
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        id: null,
+        rotation_id: 7015,
+        artist_name: 'Shape Fixture Orphan One',
+        album_title: 'Shape Fixture Orphan Album One',
+        rotation_bin: 'L',
+        rotation_add_date: '2024-09-12',
+      });
+    });
+  });
+
+  /**
+   * SQL-shape contract: the rotation query has to use a hash-based
+   * partition key when album_id IS NULL (#862). The unit-level mock
+   * can't observe Postgres's DISTINCT ON behavior, so this test
+   * inspects the SQL template handed to `db.execute` to make sure the
+   * intended fragment is wired in. Integration coverage of the actual
+   * dedup against real rows lives in tests/integration/library.spec.js.
+   */
+  describe('SQL shape', () => {
+    it('uses hashtext on (artist_name, album_title) as the NULL-album partition key (#862)', async () => {
+      db.execute.mockResolvedValueOnce([]);
+
+      await getRotationFromDB();
+
+      expect(db.execute).toHaveBeenCalledTimes(1);
+      const sqlArg = db.execute.mock.calls[0][0];
+      // Drizzle SQL objects expose their literal text fragments via
+      // `queryChunks` (an array of StringChunk + Column objects).
+      // Stringify and assert the new partition key is present.
+      const stringified = JSON.stringify(sqlArg);
+      expect(stringified).toMatch(/hashtext/);
+      expect(stringified).toMatch(/lower/);
+      // The pre-#862 `-rotation.id` partition trick should no longer
+      // appear in the query.
+      expect(stringified).not.toMatch(/-"rotation"\."id"/);
+    });
   });
 });

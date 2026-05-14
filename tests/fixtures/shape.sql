@@ -107,6 +107,10 @@ SELECT setval('wxyc_schema.library_id_seq', 7099, true);
 --   * 2 NULL album_id rows (rotation.album_id is FK-ON-DELETE-CASCADE
 --     nullable). Real prod has these from tubafrenzy adds where the
 --     library row was later deleted.
+--   * 1 additional NULL album_id row matching Orphan One's
+--     (artist, album, bin) so the read collapses unlinked duplicates
+--     via the hash partition key (#862; 151/310 active rotation rows
+--     in the 2026-05-14 prod snapshot had album_id IS NULL).
 --   * 1 row with kill_date > CURRENT_DATE (the planner-stable predicate
 --     `kill_date IS NULL` does NOT exclude this row even though the
 --     semantically-richer "is active" predicate would).
@@ -127,6 +131,9 @@ VALUES
   -- 2 rows with NULL album_id (orphaned tubafrenzy rows)
   (7007, NULL, 'L', '2024-05-20', NULL, 'Shape Fixture Orphan One',   'Shape Fixture Orphan Album One', NULL,                70007),
   (7008, NULL, 'M', '2024-07-04', NULL, 'Shape Fixture Orphan Two',   'Shape Fixture Orphan Album Two', NULL,                70008),
+  -- Second NULL-album row matching Orphan One's (artist, album, bin) so the
+  -- hash partition key collapses unlinked duplicates (#862).
+  (7015, NULL, 'L', '2024-09-12', NULL, 'Shape Fixture Orphan One',   'Shape Fixture Orphan Album One', NULL,                70015),
   -- 1 row with kill_date > CURRENT_DATE (future-dated retirement).
   -- The planner-stable `WHERE kill_date IS NULL` predicate does NOT
   -- exclude this row, so a unique partial index over that predicate
