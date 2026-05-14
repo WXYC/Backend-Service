@@ -179,7 +179,7 @@ type RotationRow = Omit<Rotation, 'reconciled_identity'> & ReconciledIdentitySou
  *   from rotation's denormalized snapshot columns when the library
  *   join is NULL.
  *
- * - **DISTINCT ON `(coalesce(album_id::bigint, -(hashtext(lower(artist)||'|'||lower(album))::bigint) - 1), rotation_bin)`
+ * - **DISTINCT ON `(coalesce(album_id::bigint, -(abs(hashtext(lower(artist)||'|'||lower(album))::bigint) + 1)), rotation_bin)`
  *   ORDER BY same key, then `add_date DESC, id ASC`.**
  *   Tubafrenzy permits multiple active rows per
  *   `(album_id, rotation_bin)` over an album's lifecycle (re-bins,
@@ -197,10 +197,10 @@ type RotationRow = Omit<Rotation, 'reconciled_identity'> & ReconciledIdentitySou
  *   prior `-id` trick was unique-per-row and never collapsed.
  *   `hashtext` is deterministic and cheap; collisions at this row
  *   count are negligible (birthday-bound ~32k for a 32-bit space and
- *   we're at ~151). The cast to `bigint` before negating guards
- *   against the latent `integer out of range` Postgres raises when
- *   `-INT_MIN` would overflow int4; `- 1` keeps the negated key
- *   strictly negative so it can't collide with any positive album_id.
+ *   we're at ~151). `abs(hashtext::bigint) + 1` is always >= 1 (no
+ *   int4 overflow on `abs(INT_MIN)` because it widens to bigint
+ *   cleanly); negating gives a strictly negative key so it can never
+ *   collide with a positive `album_id`.
  *
  * - **`kill_date IS NULL OR kill_date > CURRENT_DATE`.** Active rows
  *   only; the planner-stable predicate also excludes future-dated
@@ -210,14 +210,18 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
   // Stable partition key for the DISTINCT ON / ORDER BY: real album_id when
   // present, else a hash of the (artist_name, album_title) snapshot so
   // unlinked duplicates collapse together (#862). The expression is computed
-  // entirely in bigint so it cannot overflow: `hashtext` returns int4, and
-  // negating `INT_MIN` would otherwise raise `integer out of range` on Postgres
-  // — vanishingly unlikely per row but a latent runtime error with no guard.
-  // Casting the hash to bigint first and shifting by -1 keeps the negated key
-  // strictly negative (so it can't collide with any positive `album_id`).
+  // entirely in bigint to defuse two latent failures:
+  //   1. `hashtext` returns int4; negating `INT_MIN` raises `integer out of
+  //      range` on Postgres rather than wrapping.
+  //   2. Naïvely negating a negative `hashtext` produces a positive value
+  //      that could collide with a real positive `album_id` in the COALESCE
+  //      and silently drop a real-album row from the output.
+  // `abs(hashtext::bigint) + 1` is always >= 1 (no overflow because
+  // `abs(INT_MIN)` widens to bigint cleanly); negating gives <= -1 — strictly
+  // negative, so it can never collide with a positive `album_id`.
   const partitionKey = sql`COALESCE(
     ${rotation.album_id}::bigint,
-    -(hashtext(lower(coalesce(${rotation.artist_name}, '')) || '|' || lower(coalesce(${rotation.album_title}, '')))::bigint) - 1
+    -(abs(hashtext(lower(coalesce(${rotation.artist_name}, '')) || '|' || lower(coalesce(${rotation.album_title}, '')))::bigint) + 1)
   )`;
   const query = sql`
     SELECT DISTINCT ON (${partitionKey}, ${rotation.rotation_bin})
