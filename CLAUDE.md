@@ -10,7 +10,7 @@ CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in
 - **[`docs/env-vars.md`](docs/env-vars.md)** — Full environment-variable reference (Backend, DB, Auth, Email, Sentry, Slack, ETL, mirror queue, cross-cache-identity flags)
 - **[`docs/replication.md`](docs/replication.md)** — Local PostgreSQL logical-replication setup and operation
 - **[`docs/cdc.md`](docs/cdc.md)** — CDC WebSocket endpoint, event format, reconciliation monitor
-- **[`docs/deploy.md`](docs/deploy.md)** — Deploy cadence, migration-chain risk, deploy-wedge anatomy
+- **[`docs/deploy.md`](docs/deploy.md)** — Deploy cadence, migration-chain risk, deploy-wedge anatomy, CI workflow pin maintenance (permissions, gha/v1 pins, caller-callee permissions trap from #857)
 
 Read the relevant topic doc before doing work in that area.
 
