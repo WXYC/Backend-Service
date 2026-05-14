@@ -806,10 +806,7 @@ export async function searchLibrary(
       return primary.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
     }
 
-    // Catalog-track-search cascade (plan §4): when tsvector + trigram return
-    // 0 hits, probe CTA (Track 1), then LML /lookup (Track 2). Direct hits
-    // always outrank both fallback layers. Each layer is gated on its own
-    // env flag; defaults are off so out-of-the-box behavior is unchanged.
+    // Both flags default off so behavior is unchanged until rollout (plan §4).
     if (process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED === 'true') {
       const ctaResults = await searchLibraryByCTA(query, limit, on_streaming);
       if (ctaResults.length > 0) return ctaResults;
