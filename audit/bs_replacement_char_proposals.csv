@@ -5,7 +5,7 @@ flowsheet,RELEASE_TITLE,,Rem�nytelen,2,Rem​é​nytelen,,,0.85,discogs-searc
 flowsheet,RELEASE_TITLE,,Ach Golgatha / Pour Que Les Fruits Mûrissent Cet �té,1,Ach Golgatha / Pour Que Les Fruits Mûrissent Cet Été,,,1.00,discogs-search
 flowsheet,RELEASE_TITLE,,Ahora M�s Que Nunca,1,Ahora Mas que Nunca,,,0.89,lml-fuzzy
 flowsheet,RELEASE_TITLE,,Eydie Gorm�,1,Eydie Gorme,Eydie Swings the blues,"Softly, As I leave you",0.91,lml-fuzzy
-flowsheet,RELEASE_TITLE,,L'�?il écoute / Dedans-Dehors,1,,,,0.00,unmatched
+flowsheet,RELEASE_TITLE,,L'�?il écoute / Dedans-Dehors,1,L'Œil Écoute / Dedans-Dehors,,,0.00,unmatched
 flowsheet,RELEASE_TITLE,,League of Legends � League Of Legends Worlds Anthems - Vol. 1: 2014-2023,1,League Of Legends Worlds Anthems - Vol. 1: 2014-2023,League Of Legends Worlds Anthems - Vol. 1: 2014-2023,League Of Legends Worlds Anthems - Vol. 1: 2014-2023,0.54,discogs-search
 flowsheet,RELEASE_TITLE,,Midnight Zone (Original Soundtrack to the Film by Julian Charri�re),1,Midnight Zone EP,Be Your Lover / Midnight Magic,Danger Zone,0.05,unmatched
 flowsheet,ARTIST_NAME,,Csillagrabl�k,2,Csillagrablók,,,1.00,discogs-search
@@ -19,16 +19,16 @@ flowsheet,RECORD_LABEL,,Infin� Editions,8,Infiné Éditions,Infinite Greyscale
 flowsheet,RECORD_LABEL,,U?ur Y�cel,1,Urban Decay (2),Uri Geller Records,Blanco Y Negro Urban,0.13,unmatched
 flowsheet,SONG_TITLE,,A Sua Divers�o,6,A Sua Diversão / Não Tem Nada Não,A Sua Diversão / Não Tem Nada Não,A Sua Diversão/ Não Tem Nada Não,0.18,unmatched
 flowsheet,SONG_TITLE,,Iris (N�dia Remix),3,Iris 1,Iris,Iris,0.06,unmatched
-flowsheet,SONG_TITLE,,Mallku Diabl�n,3,,,,0.26,unmatched
+flowsheet,SONG_TITLE,,Mallku Diabl�n,3,Mallku Diablón,,,0.26,unmatched
 flowsheet,SONG_TITLE,,N�o Tem Nada N�o,3,O Tempora! O Mores!,Ocupado Como Gado Com Nada Para Fazer,Visages Du Brésil,0.24,unmatched
 flowsheet,SONG_TITLE,,Arh�,2,,,,0.00,unmatched
 flowsheet,SONG_TITLE,,J'ai Oubli�,2,J'ai Tout Oublié,J'ai Oublié De Vivre,J'Ai Tout Oublié,0.41,unmatched
 flowsheet,SONG_TITLE,,Uno Es �rbol,2,Uno Esta EP,Uno Esta,Uno Esta,0.50,unmatched
 flowsheet,SONG_TITLE,,blade bird - Nick Le�n broward mix,2,In The Lab 2 The Real Mixtape Volume 2,Choke Enough : Expansion Pack,Choke Enough (Expansion Pack),0.17,unmatched
-flowsheet,SONG_TITLE,,Bliws Afon T�f,1,,,,0.00,unmatched
+flowsheet,SONG_TITLE,,Bliws Afon T�f,1,Bliws Afon Tâf,,,0.00,unmatched
 flowsheet,SONG_TITLE,,"COLORATURA, 24� 3' 27.0"" N, 123� 47' 7.5"" E",1,"Symphony No. 2 In E Minor, Op. 27",Golden-Age Coloratura,"Philharmonia Orchestra, Tullio Serafin, Orchestra Del Teatro Alla Scala Di Milano* - Lyric & Coloratura Arias",0.08,unmatched
-flowsheet,SONG_TITLE,,Ch'uwancha�a ~El Golpe Final~,1,,,,0.07,unmatched
-flowsheet,SONG_TITLE,,"Convocaci�n ""Banger/Diffusion""",1,,,,0.00,unmatched
+flowsheet,SONG_TITLE,,Ch'uwancha�a ~El Golpe Final~,1,Ch'uwanchaña ~El Golpe Final~,,,0.07,unmatched
+flowsheet,SONG_TITLE,,"Convocaci�n ""Banger/Diffusion""",1,"Convocación ""Banger/Diffusion""",,,0.00,unmatched
 flowsheet,SONG_TITLE,,Dod�i,1,Dođi,,,0.48,unmatched
 flowsheet,SONG_TITLE,,Do�a Justicia,1,La Justicia,Grupo La Justicia,Justicia,0.49,unmatched
 flowsheet,SONG_TITLE,,Festa Dos P�ssaros,1,Samba Dos Bons,Negrão Dos Oito Baixos,Esta Festa Das Cidades,0.29,unmatched
@@ -61,6 +61,6 @@ rotation,ARTIST_NAME,,Csillagrabl�k,1,Csillagrablók,,,1.00,discogs-search
 rotation,ARTIST_NAME,,Kai Alc�,1,Kai Alcé,,,1.00,discogs-search
 rotation,ARTIST_NAME,,N�dia & Valentina,1,Valentina,Meg & Dia,The E Street Band,0.27,unmatched
 rotation,ARTIST_NAME,,Sonido Due�ez,1,Sonido Dueñez,Sonido Solar,Luis Ortiz (4),0.90,discogs-search
-rotation,ARTIST_NAME,,}�{ (Louise Boghossian and Romain Vasset),1,,,,0.00,unmatched
+rotation,ARTIST_NAME,,}�{ (Louise Boghossian and Romain Vasset),1,}Ï{ (Louise Boghossian and Romain Vasset),,,0.00,unmatched
 rotation,RECORD_LABEL,,GER�USCHMANUFAKTUR,1,,,,0.00,unmatched
 rotation,RECORD_LABEL,,Infin� Editions,1,Infiné Éditions,Infinite Greyscale,Éditions Infini,0.93,discogs-search
