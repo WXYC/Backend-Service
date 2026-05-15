@@ -28,6 +28,7 @@ import type {
   LookupResponse,
 } from '../services/lml/lml.client.js';
 import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
+import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
@@ -203,15 +204,6 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
 };
 
 /**
- * Drop Discogs spacer.gif placeholders so the iOS client can draw its own
- * placeholder rather than rendering a broken/blank image. See #649.
- */
-function dropSpacerGif(url: string | null | undefined): string | undefined {
-  if (!url) return undefined;
-  return url.includes('spacer.gif') ? undefined : url;
-}
-
-/**
  * Populate metadata fields that come from the lookup response's artwork block
  * — release id/url, artwork URL, artist bio/wiki, streaming URLs. These are
  * present regardless of whether `extended=true` was requested.
@@ -219,7 +211,7 @@ function dropSpacerGif(url: string | null | undefined): string | undefined {
 function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork: DiscogsMatchResult): void {
   metadata.discogsReleaseId = artwork.release_id;
   metadata.discogsUrl = artwork.release_url;
-  metadata.artworkUrl = dropSpacerGif(artwork.artwork_url);
+  metadata.artworkUrl = filterSpacerGif(artwork.artwork_url);
 
   if (artwork.artist_bio) metadata.artistBio = artwork.artist_bio;
   if (artwork.wikipedia_url) metadata.artistWikipediaUrl = artwork.wikipedia_url;
@@ -272,7 +264,7 @@ function populateReleaseMetadata(
   // spacer.gif placeholders (see #649). On the extended path the values
   // are typically identical; on the legacy path the release fetch can
   // surface a higher-quality image.
-  const releaseArtwork = dropSpacerGif(release.artwork_url);
+  const releaseArtwork = filterSpacerGif(release.artwork_url);
   if (releaseArtwork) metadata.artworkUrl = releaseArtwork;
 }
 

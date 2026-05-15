@@ -7,6 +7,7 @@
 import { ArtworkProvider } from './base.js';
 import { ArtworkRequest, ArtworkSearchResult } from '../../requestLine/types.js';
 import { lookupMetadata, searchTrackReleases, validateTrackOnRelease, isLmlConfigured } from '../../lml/lml.client.js';
+import { filterSpacerGif } from '../../metadata/metadata.service.js';
 
 /**
  * Artwork provider backed by LML's Discogs endpoints.
@@ -39,12 +40,12 @@ export class DiscogsProvider implements ArtworkProvider {
     const results: ArtworkSearchResult[] = [];
     for (const item of lookupResponse.results ?? []) {
       const artwork = item.artwork;
-      if (!artwork?.artwork_url || artwork.artwork_url.includes('spacer.gif')) {
-        continue;
-      }
+      if (!artwork) continue;
+      const artworkUrl = filterSpacerGif(artwork.artwork_url);
+      if (!artworkUrl) continue;
 
       results.push({
-        artworkUrl: artwork.artwork_url,
+        artworkUrl,
         releaseUrl: artwork.release_url,
         album: artwork.album || '',
         artist: artwork.artist || '',

@@ -14,6 +14,7 @@ import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
 import { checkStreamingAvailability, lookupMetadata, isLmlConfigured } from '../services/lml/lml.client.js';
+import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
 
 type NewAlbumRequest = {
@@ -100,8 +101,8 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     }
 
     if (artworkResult.status === 'fulfilled') {
-      const artworkUrl = artworkResult.value.results?.[0]?.artwork?.artwork_url;
-      if (artworkUrl && !artworkUrl.includes('spacer.gif')) {
+      const artworkUrl = filterSpacerGif(artworkResult.value.results?.[0]?.artwork?.artwork_url);
+      if (artworkUrl) {
         try {
           await libraryService.updateArtworkUrl(inserted_album.id, artworkUrl);
           (inserted_album as Record<string, unknown>).artwork_url = artworkUrl;

@@ -91,8 +91,14 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
  * Filtering at this single chokepoint covers every caller of `fetchMetadata`
  * (runtime enrichment, iOS playcut detail, and the historical-drain job)
  * so callers don't have to remember. See #649.
+ *
+ * Exported as the canonical implementation of the filter (BS#890). All
+ * `apps/backend/**` consumers import this; the inline copy in
+ * `jobs/flowsheet-metadata-backfill/enrich.ts` is preserved for build-
+ * graph isolation but pinned to this canonical via parity test +
+ * `scripts/check-spacer-gif-callsites.sh` allowlist.
  */
-function filterSpacerGif(url: string | null | undefined): string | undefined {
+export function filterSpacerGif(url: string | null | undefined): string | undefined {
   if (!url) return undefined;
   return url.includes('spacer.gif') ? undefined : url;
 }

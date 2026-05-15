@@ -59,9 +59,18 @@ export const cleanDiscogsBio = (bio: string): string =>
     .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
 
 /**
- * Drop Discogs spacer.gif placeholder URLs. Inline guard until #649 lands.
+ * Drop Discogs spacer.gif placeholder URLs. Inline guard, duplicated for
+ * build-graph isolation from `apps/backend` (see file header). Must stay
+ * truthy/falsy-equivalent to the canonical
+ * `apps/backend/services/metadata/metadata.service.ts#filterSpacerGif`
+ * (BS#890). The job writes to DB columns that are nullable, so the inline
+ * copy returns `null` while the canonical returns `undefined`; the parity
+ * test at
+ * `tests/unit/jobs/flowsheet-metadata-backfill/filter-spacer-gif-parity.test.ts`
+ * pins truthy/falsy parity across the two for all the inputs the runtime
+ * exercises.
  */
-const filterSpacerGif = (url: string | null | undefined): string | null => {
+export const filterSpacerGif = (url: string | null | undefined): string | null => {
   if (!url) return null;
   if (url.includes('spacer.gif')) return null;
   return url;
