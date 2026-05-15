@@ -433,6 +433,13 @@ jobs:
 
       - name: Get Deploy Vars
         id: deploy_vars
+        env:
+          # Repository variable (Settings → Variables → Actions). Empty if
+          # unset, which makes resolve-cron-schedule.sh fall back to the
+          # package.json default. Override scope is narrow on purpose
+          # (BS#914): only the flowsheet-metadata-backfill job honors it,
+          # so a stale value can't fan out across the matrix.
+          BACKFILL_CRON_SCHEDULE: ${{ vars.BACKFILL_CRON_SCHEDULE }}
         run: |
           TARGET_APP=${{ matrix.target }}
           if [ -f "jobs/$TARGET_APP/package.json" ]; then
@@ -446,11 +453,10 @@ jobs:
               TARGET_TYPE="one-shot-job"
             elif [ "$JOB_TYPE" = "cron" ]; then
               TARGET_TYPE="job"
-              CRON_SCHEDULE=$(yq -r '.["cron-schedule"]' jobs/$TARGET_APP/package.json)
-              if [ -z "$CRON_SCHEDULE" ] || [ "$CRON_SCHEDULE" = "null" ]; then
-                echo "Missing cron-schedule in jobs/$TARGET_APP/package.json (job-type=cron)" >&2
-                exit 1
-              fi
+              # Use scripts/resolve-cron-schedule.sh so the env-override path
+              # (BACKFILL_CRON_SCHEDULE for flowsheet-metadata-backfill) lives
+              # in tested code rather than inline workflow yaml. See BS#914.
+              CRON_SCHEDULE=$(scripts/resolve-cron-schedule.sh "$TARGET_APP")
               echo "cron_schedule=$CRON_SCHEDULE" >> $GITHUB_OUTPUT
             else
               echo "Unknown job-type '$JOB_TYPE' in jobs/$TARGET_APP/package.json (expected 'cron' or 'one-shot')" >&2
