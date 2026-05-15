@@ -28,8 +28,15 @@ import type {
   LookupResponse,
 } from '../services/lml/lml.client.js';
 import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
+import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
+
+// Shared instance — stateless, safe to reuse across requests. Centralizes
+// fallback-URL synthesis so this controller, the runtime metadata service,
+// and the flowsheet-metadata-backfill job all produce identical URLs for
+// the same inputs (BS#889).
+const searchUrlProvider = new SearchUrlProvider();
 
 /**
  * Toggle the single-call /proxy/metadata/album path.
@@ -299,7 +306,6 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
 
   const useSingleLookup = singleLookupEnabled();
   const metadata: Record<string, unknown> = {};
-  const searchTerm = releaseTitle || trackTitle || '';
   let upstreamCalls = 0;
 
   let artwork: DiscogsMatchResult | undefined;
@@ -344,12 +350,18 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
     }
   }
 
-  // Fallback: construct search URLs for services without LML-provided URLs
-  const query = searchTerm ? `${artistName} ${searchTerm}` : artistName;
-  const encodedQuery = encodeURIComponent(query);
-  if (!metadata.youtubeMusicUrl) metadata.youtubeMusicUrl = `https://music.youtube.com/search?q=${encodedQuery}`;
-  if (!metadata.bandcampUrl) metadata.bandcampUrl = `https://bandcamp.com/search?q=${encodedQuery}`;
-  if (!metadata.soundcloudUrl) metadata.soundcloudUrl = `https://soundcloud.com/search?q=${encodedQuery}`;
+  // Fallback: construct search URLs for services without LML-provided URLs.
+  // Per-service semantics live in `SearchUrlProvider` (BS#889) — YouTube/
+  // Bandcamp/SoundCloud each use a different field-fallback order, so the
+  // three URLs are no longer guaranteed to share a query string. Old
+  // behavior was a single combined `${artistName} ${searchTerm}` for all
+  // three; the new behavior matches the runtime path and the recurring
+  // backfill so iOS gets identical search URLs regardless of which BS path
+  // produced them.
+  const fallbackUrls = searchUrlProvider.getAllSearchUrls(artistName, releaseTitle, trackTitle);
+  if (!metadata.youtubeMusicUrl) metadata.youtubeMusicUrl = fallbackUrls.youtubeMusicUrl;
+  if (!metadata.bandcampUrl) metadata.bandcampUrl = fallbackUrls.bandcampUrl;
+  if (!metadata.soundcloudUrl) metadata.soundcloudUrl = fallbackUrls.soundcloudUrl;
 
   // Project the upstream-call count + mode onto the active Sentry span so
   // we can split p50/p95 by cohort in the trace explorer. Wrap in a
