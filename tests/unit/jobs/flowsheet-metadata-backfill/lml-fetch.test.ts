@@ -107,4 +107,39 @@ describe('jobs/flowsheet-metadata-backfill/lml-fetch', () => {
       expect(result).toEqual(lookupResponse);
     });
   });
+
+  // Pin the wire-format field name so the silent drop documented in #888
+  // can't recur. LML's LookupRequest schema (wxyc-shared/api.yaml) names the
+  // field `song`; FastAPI/Pydantic silently drops unknown keys, so a typo
+  // here would degrade the backfill to artist+album-only without any error.
+  describe('LML LookupRequest wire shape (#888 regression)', () => {
+    it('sends the track title under body.song (not body.track)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [], search_type: 'none' }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield', 'VI Scose Poise');
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const init = mockFetch.mock.calls[0][1];
+      const body = JSON.parse(init?.body as string);
+      expect(body.song).toBe('VI Scose Poise');
+      expect(body).not.toHaveProperty('track');
+    });
+
+    it('omits the song field when no track is supplied', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [], search_type: 'none' }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield');
+
+      const init = mockFetch.mock.calls[0][1];
+      const body = JSON.parse(init?.body as string);
+      expect(body).not.toHaveProperty('song');
+      expect(body).not.toHaveProperty('track');
+    });
+  });
 });

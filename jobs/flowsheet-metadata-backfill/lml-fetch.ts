@@ -55,7 +55,7 @@ export const lookupMetadata = async (artist: string, album?: string, track?: str
 
     const body: Record<string, string> = { artist, raw_message: rawMessage };
     if (album) body.album = album;
-    if (track) body.track = track;
+    if (track) body.song = track;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
