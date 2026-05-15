@@ -319,6 +319,30 @@ describe('proxy.controller', () => {
       expect(result.soundcloudUrl).toContain('soundcloud.com');
     });
 
+    it('uses per-service fallback shape (YouTube + Bandcamp include album; SoundCloud does not)', async () => {
+      // Pins the BS#889 contract at the controller layer. Pre-BS#889 the
+      // three URLs shared a single combined `${artistName} ${searchTerm}`
+      // query, so all three contained the album when releaseTitle was set
+      // and trackTitle wasn't. The new SearchUrlProvider-backed behavior
+      // is asymmetric: SoundCloud falls back to artist-only without album
+      // because album-only SoundCloud queries return unrelated DJ mixes
+      // more often than the album. A future regression that re-introduces
+      // the combined-query pattern in the controller would fail this test
+      // even if the provider-level tests stay green.
+      mockLookupMetadata.mockRejectedValue(new Error('LML down'));
+
+      const req = { query: { artistName: 'Stereolab', releaseTitle: 'Dots and Loops' } } as unknown as Request;
+      const res = createMockRes();
+
+      await getAlbumMetadata(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const result = (res.json as jest.Mock).mock.calls[0][0];
+      expect(result.youtubeMusicUrl).toBe('https://music.youtube.com/search?q=Stereolab%20Dots%20and%20Loops');
+      expect(result.bandcampUrl).toBe('https://bandcamp.com/search?q=Stereolab%20Dots%20and%20Loops');
+      expect(result.soundcloudUrl).toBe('https://soundcloud.com/search?q=Stereolab');
+    });
+
     it('returns search-only metadata when release fetch fails', async () => {
       mockLookupMetadata.mockResolvedValue({
         results: [
