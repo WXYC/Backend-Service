@@ -456,6 +456,198 @@ describe('proxy.controller', () => {
       expect(result.soundcloudUrl).toContain('soundcloud.com');
       expect(mockGetRelease).not.toHaveBeenCalled();
     });
+
+    // --- Single-call path (PROXY_METADATA_SINGLE_LOOKUP=true) ---
+    //
+    // When the flag is on, `getAlbumMetadata` calls LML once with
+    // `extended: true` and reads the release-detail fields off the lookup
+    // response's `artwork` block. The follow-up `getRelease()` call goes
+    // away. These tests pin the new path's contract; the legacy path's
+    // tests above remain to cover the pre-cutover behavior.
+
+    describe('PROXY_METADATA_SINGLE_LOOKUP=true', () => {
+      const originalFlag = process.env.PROXY_METADATA_SINGLE_LOOKUP;
+
+      beforeEach(() => {
+        process.env.PROXY_METADATA_SINGLE_LOOKUP = 'true';
+      });
+
+      afterEach(() => {
+        if (originalFlag === undefined) delete process.env.PROXY_METADATA_SINGLE_LOOKUP;
+        else process.env.PROXY_METADATA_SINGLE_LOOKUP = originalFlag;
+      });
+
+      it('reads release-detail fields off the lookup artwork and skips getRelease', async () => {
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: {
+                id: 1,
+                title: 'Confield',
+                artist: 'Autechre',
+                call_number: 'Electronic CD AUT 1/1',
+                library_url: '',
+              },
+              artwork: {
+                release_id: 12345,
+                release_url: 'https://www.discogs.com/release/12345',
+                artwork_url: 'https://i.discogs.com/art.jpg',
+                album: 'Confield',
+                artist: 'Autechre',
+                confidence: 0.95,
+                release_year: 2001,
+                spotify_url: 'https://open.spotify.com/album/abc',
+                apple_music_url: 'https://music.apple.com/album/xyz',
+                youtube_music_url: 'https://music.youtube.com/search?q=Autechre+Confield',
+                bandcamp_url: 'https://bandcamp.com/search?q=Autechre+Confield',
+                soundcloud_url: 'https://soundcloud.com/search?q=Autechre+Confield',
+                // Extended-mode fields (new in @wxyc/shared 1.5.0)
+                discogs_artist_id: 3840,
+                tracklist: [
+                  { position: '1', title: 'VI Scose Poise', duration: '6:45' },
+                  { position: '2', title: 'Cfern', duration: '7:01' },
+                ],
+                genres: ['Electronic'],
+                styles: ['IDM', 'Abstract'],
+                label: 'Warp',
+                full_release_date: '2001-04-30',
+              },
+            },
+          ],
+          search_type: 'direct',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = {
+          query: { artistName: 'Autechre', releaseTitle: 'Confield' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        // Same iOS-facing contract as the legacy path.
+        expect(result.discogsReleaseId).toBe(12345);
+        expect(result.discogsUrl).toBe('https://www.discogs.com/release/12345');
+        expect(result.releaseYear).toBe(2001);
+        expect(result.artworkUrl).toBe('https://i.discogs.com/art.jpg');
+        expect(result.genres).toEqual(['Electronic']);
+        expect(result.styles).toEqual(['IDM', 'Abstract']);
+        expect(result.label).toBe('Warp');
+        expect(result.discogsArtistId).toBe(3840);
+        expect(result.fullReleaseDate).toBe('2001-04-30');
+        expect(result.tracklist).toEqual([
+          { position: '1', title: 'VI Scose Poise', duration: '6:45' },
+          { position: '2', title: 'Cfern', duration: '7:01' },
+        ]);
+        // Streaming URLs preserved.
+        expect(result.spotifyUrl).toBe('https://open.spotify.com/album/abc');
+        expect(result.appleMusicUrl).toBe('https://music.apple.com/album/xyz');
+
+        // The whole point of this PR: no follow-up LML call.
+        expect(mockGetRelease).not.toHaveBeenCalled();
+
+        // Lookup was called with `extended: true` so LML knows to populate
+        // the new fields.
+        expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
+          extended: true,
+        });
+      });
+
+      it('falls back to search URLs when LML lookup returns empty results', async () => {
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = {
+          query: { artistName: 'Obscure Artist', releaseTitle: 'Unknown Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.discogsReleaseId).toBeUndefined();
+        // Search URLs still constructed as fallback.
+        expect(result.youtubeMusicUrl).toContain('music.youtube.com');
+        expect(result.bandcampUrl).toContain('bandcamp.com');
+        expect(result.soundcloudUrl).toContain('soundcloud.com');
+        // No follow-up call even in the no-match case.
+        expect(mockGetRelease).not.toHaveBeenCalled();
+      });
+
+      it('falls back to search URLs when LML lookup throws', async () => {
+        mockLookupMetadata.mockRejectedValue(new Error('LML down'));
+
+        const req = {
+          query: { artistName: 'Test Artist', releaseTitle: 'Test Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.discogsReleaseId).toBeUndefined();
+        // Search URLs still constructed.
+        expect(result.youtubeMusicUrl).toContain('music.youtube.com');
+        expect(mockGetRelease).not.toHaveBeenCalled();
+      });
+
+      it('strips spacer.gif from artworkUrl on the single-call path (#649)', async () => {
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: {
+                id: 1,
+                title: 'On Your Own Love Again',
+                artist: 'Jessica Pratt',
+                call_number: 'Rock CD PRA 1/1',
+                library_url: '',
+              },
+              artwork: {
+                release_id: 7777,
+                release_url: 'https://www.discogs.com/release/7777',
+                artwork_url: 'https://s.discogs.com/images/spacer.gif',
+                album: 'On Your Own Love Again',
+                artist: 'Jessica Pratt',
+                confidence: 0.92,
+                release_year: 2015,
+                discogs_artist_id: 5555,
+                tracklist: [],
+                genres: ['Rock'],
+                styles: [],
+                label: 'Drag City',
+                full_release_date: '2015-02-03',
+              },
+            },
+          ],
+          search_type: 'direct',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = {
+          query: { artistName: 'Jessica Pratt', releaseTitle: 'On Your Own Love Again' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        // spacer.gif dropped so iOS draws its own placeholder.
+        expect(result.artworkUrl).toBeUndefined();
+        // Other release fields still preserved.
+        expect(result.discogsReleaseId).toBe(7777);
+        expect(result.label).toBe('Drag City');
+      });
+    });
   });
 
   // --- getArtistMetadata ---

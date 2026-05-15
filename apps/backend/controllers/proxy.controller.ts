@@ -10,6 +10,7 @@
  * `proxyRateLimit` middleware applied at the route level.
  */
 import { RequestHandler } from 'express';
+import * as Sentry from '@sentry/node';
 import { getArtworkFinder } from '../services/artwork/finder.js';
 import { classify as classifyNSFW } from '../services/artwork/nsfw.js';
 import {
@@ -19,8 +20,31 @@ import {
   resolveEntity as lmlResolveEntity,
   searchLibrary,
 } from '../services/lml/lml.client.js';
+import type { DiscogsMatchResult, LookupResponse } from '../services/lml/lml.client.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
+
+/**
+ * Toggle the single-call /proxy/metadata/album path.
+ *
+ * When `'true'`, we pass `extended: true` to LML's `/api/v1/lookup` and read
+ * the tracklist/genres/styles/label/full_release_date/discogs_artist_id off
+ * the lookup response's `artwork` block directly — no follow-up
+ * `/api/v1/discogs/release/{id}` call. Available since `@wxyc/shared@1.5.0`
+ * + LML#335.
+ *
+ * Defaults off so the flag can ship before production traffic is cut over.
+ * Flip in Railway env (`PROXY_METADATA_SINGLE_LOOKUP=true`) once staging
+ * smoke-tests confirm response parity. Matches the env-var pattern used
+ * for AUTH_BYPASS / TEST_RATE_LIMITING — there's no centralized
+ * feature-flag module in this repo.
+ *
+ * After the cutover is stable, the flag and the legacy two-call branch get
+ * deleted together (separate cleanup PR).
+ */
+function singleLookupEnabled(): boolean {
+  return process.env.PROXY_METADATA_SINGLE_LOOKUP === 'true';
+}
 
 /** Spotify OAuth2 token response. */
 interface SpotifyTokenResponse {
@@ -165,71 +189,151 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
 };
 
 /**
+ * Drop Discogs spacer.gif placeholders so the iOS client can draw its own
+ * placeholder rather than rendering a broken/blank image. See #649.
+ */
+function dropSpacerGif(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  return url.includes('spacer.gif') ? undefined : url;
+}
+
+/**
+ * Populate metadata fields that come from the lookup response's artwork block
+ * — release id/url, artwork URL, artist bio/wiki, streaming URLs. These are
+ * present regardless of whether `extended=true` was requested.
+ */
+function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork: DiscogsMatchResult): void {
+  metadata.discogsReleaseId = artwork.release_id;
+  metadata.discogsUrl = artwork.release_url;
+  metadata.artworkUrl = dropSpacerGif(artwork.artwork_url);
+
+  if (artwork.artist_bio) metadata.artistBio = artwork.artist_bio;
+  if (artwork.wikipedia_url) metadata.artistWikipediaUrl = artwork.wikipedia_url;
+
+  if (artwork.spotify_url) metadata.spotifyUrl = artwork.spotify_url;
+  if (artwork.apple_music_url) metadata.appleMusicUrl = artwork.apple_music_url;
+  if (artwork.youtube_music_url) metadata.youtubeMusicUrl = artwork.youtube_music_url;
+  if (artwork.bandcamp_url) metadata.bandcampUrl = artwork.bandcamp_url;
+  if (artwork.soundcloud_url) metadata.soundcloudUrl = artwork.soundcloud_url;
+}
+
+/**
+ * Populate the release-detail fields (tracklist, genres, styles, label,
+ * full release date, discogs artist id, release year). Source-agnostic:
+ * works the same on a `DiscogsMatchResult` with `extended=true` (new path)
+ * or on a `DiscogsReleaseMetadata` from a separate `getRelease()` call
+ * (legacy two-call path).
+ *
+ * On the extended path the release artwork URL is the same as the lookup
+ * artwork URL, so the `prefer release artwork over lookup` logic is a no-op
+ * but kept for symmetry with the legacy path.
+ */
+function populateReleaseMetadata(
+  metadata: Record<string, unknown>,
+  release: {
+    year?: number | null;
+    genres?: string[] | null;
+    styles?: string[] | null;
+    label?: string | null;
+    artist_id?: number | null;
+    released?: string | null;
+    tracklist?: Array<{ position: string; title: string; duration?: string | null }> | null;
+    artwork_url?: string | null;
+  }
+): void {
+  metadata.releaseYear = release.year ?? undefined;
+  metadata.genres = release.genres && release.genres.length > 0 ? release.genres : undefined;
+  metadata.styles = release.styles && release.styles.length > 0 ? release.styles : undefined;
+  metadata.label = release.label ?? undefined;
+  metadata.discogsArtistId = release.artist_id ?? null;
+  metadata.fullReleaseDate = release.released ?? undefined;
+  if (release.tracklist && release.tracklist.length > 0) {
+    metadata.tracklist = release.tracklist.map((t) => ({
+      position: t.position,
+      title: t.title,
+      duration: t.duration ?? undefined,
+    }));
+  }
+  // Prefer release artwork over lookup artwork — but still filter out
+  // spacer.gif placeholders (see #649). On the extended path the values
+  // are typically identical; on the legacy path the release fetch can
+  // surface a higher-quality image.
+  const releaseArtwork = dropSpacerGif(release.artwork_url);
+  if (releaseArtwork) metadata.artworkUrl = releaseArtwork;
+}
+
+/**
  * GET /proxy/metadata/album
  *
  * Fetches album metadata from LML. The LML search response already includes
  * enriched streaming URLs (Spotify, Apple Music, YouTube Music, Bandcamp,
  * SoundCloud), so no direct calls to those APIs are needed.
+ *
+ * Two code paths, selected by `PROXY_METADATA_SINGLE_LOOKUP`:
+ *
+ * - **Single-call** (flag on, future default): LML `/api/v1/lookup` with
+ *   `extended: true` returns release details inline on the top-1 artwork
+ *   block. One round-trip iOS → BS → LML; the LML pipeline runs its release
+ *   and artist fetches concurrently server-side. Subsecond p50 target.
+ *
+ * - **Legacy two-call** (flag off, current default): one lookup followed
+ *   by a separate `/api/v1/discogs/release/{id}` for the release details
+ *   we want to surface. Two LML round-trips, the second one re-fetching
+ *   release data LML already loaded ~100ms earlier during enrichment.
+ *
+ * Sentry annotates the active span with
+ * `proxy.metadata.album.upstream_calls` so the cutover can be graphed by
+ * cohort in the trace explorer.
  */
 export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMetadataQuery> = async (req, res) => {
   const { artistName, releaseTitle, trackTitle } = req.query;
 
   if (!artistName) throw new WxycError('artistName query parameter is required', 400);
 
+  const useSingleLookup = singleLookupEnabled();
   const metadata: Record<string, unknown> = {};
   const searchTerm = releaseTitle || trackTitle || '';
+  let upstreamCalls = 0;
 
-  let artwork;
+  let artwork: DiscogsMatchResult | undefined;
   try {
-    const lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle);
+    let lookupResponse: LookupResponse;
+    if (useSingleLookup) {
+      lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle, { extended: true });
+    } else {
+      lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle);
+    }
+    upstreamCalls += 1;
     artwork = lookupResponse.results?.[0]?.artwork;
   } catch (searchError) {
     console.warn('[ProxyController] LML lookup failed:', searchError);
   }
 
   if (artwork) {
-    metadata.discogsReleaseId = artwork.release_id;
-    metadata.discogsUrl = artwork.release_url;
-    // Drop Discogs spacer.gif placeholder so the iOS client knows to draw its
-    // own placeholder rather than rendering a broken/blank image. See #649
-    // for the full callsite audit.
-    metadata.artworkUrl =
-      artwork.artwork_url && !artwork.artwork_url.includes('spacer.gif') ? artwork.artwork_url : undefined;
+    populateCommonMetadataFields(metadata, artwork);
 
-    // Artist bio and Wikipedia from lookup result
-    if (artwork.artist_bio) metadata.artistBio = artwork.artist_bio;
-    if (artwork.wikipedia_url) metadata.artistWikipediaUrl = artwork.wikipedia_url;
-
-    // Streaming URLs from LML enrichment
-    if (artwork.spotify_url) metadata.spotifyUrl = artwork.spotify_url;
-    if (artwork.apple_music_url) metadata.appleMusicUrl = artwork.apple_music_url;
-    if (artwork.youtube_music_url) metadata.youtubeMusicUrl = artwork.youtube_music_url;
-    if (artwork.bandcamp_url) metadata.bandcampUrl = artwork.bandcamp_url;
-    if (artwork.soundcloud_url) metadata.soundcloudUrl = artwork.soundcloud_url;
-
-    // Fetch enriched release details (tracklist, genres, styles)
-    try {
-      const release = await getRelease(artwork.release_id);
-      metadata.releaseYear = release.year ?? undefined;
-      metadata.genres = release.genres.length > 0 ? release.genres : undefined;
-      metadata.styles = release.styles.length > 0 ? release.styles : undefined;
-      metadata.label = release.label ?? undefined;
-      metadata.discogsArtistId = release.artist_id ?? null;
-      metadata.fullReleaseDate = release.released ?? undefined;
-      if (release.tracklist.length > 0) {
-        metadata.tracklist = release.tracklist.map((t) => ({
-          position: t.position,
-          title: t.title,
-          duration: t.duration ?? undefined,
-        }));
+    if (useSingleLookup) {
+      // The lookup response already carries the release-detail fields
+      // (`extended: true`); no follow-up call needed.
+      populateReleaseMetadata(metadata, {
+        year: artwork.release_year,
+        genres: artwork.genres,
+        styles: artwork.styles,
+        label: artwork.label,
+        artist_id: artwork.discogs_artist_id,
+        released: artwork.full_release_date,
+        tracklist: artwork.tracklist,
+        artwork_url: artwork.artwork_url,
+      });
+    } else {
+      // Legacy path: fetch enriched release details with a second LML call.
+      try {
+        const release = await getRelease(artwork.release_id);
+        upstreamCalls += 1;
+        populateReleaseMetadata(metadata, release);
+      } catch (releaseError) {
+        console.warn('[ProxyController] Failed to fetch release details from LML:', releaseError);
       }
-      // Prefer release artwork over lookup artwork — but still filter out
-      // spacer.gif placeholders (see #649).
-      if (release.artwork_url && !release.artwork_url.includes('spacer.gif')) {
-        metadata.artworkUrl = release.artwork_url;
-      }
-    } catch (releaseError) {
-      console.warn('[ProxyController] Failed to fetch release details from LML:', releaseError);
     }
   }
 
@@ -239,6 +343,18 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   if (!metadata.youtubeMusicUrl) metadata.youtubeMusicUrl = `https://music.youtube.com/search?q=${encodedQuery}`;
   if (!metadata.bandcampUrl) metadata.bandcampUrl = `https://bandcamp.com/search?q=${encodedQuery}`;
   if (!metadata.soundcloudUrl) metadata.soundcloudUrl = `https://soundcloud.com/search?q=${encodedQuery}`;
+
+  // Project the upstream-call count + mode onto the active Sentry span so
+  // we can split p50/p95 by cohort in the trace explorer. Wrap in a
+  // try/except — observability must never break the request path.
+  try {
+    Sentry.getActiveSpan()?.setAttributes({
+      'proxy.metadata.album.upstream_calls': upstreamCalls,
+      'proxy.metadata.album.single_lookup': useSingleLookup,
+    });
+  } catch (err) {
+    console.warn('[ProxyController] failed to project Sentry attrs', err);
+  }
 
   res.set('Cache-Control', 'private, max-age=600');
   res.status(200).json(metadata);
