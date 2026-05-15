@@ -506,6 +506,21 @@ export const flowsheet = wxyc_schema.table(
     show_id: integer('show_id').references(() => shows.id, { onDelete: 'set null' }),
     album_id: integer('album_id').references(() => library.id, { onDelete: 'set null' }),
     rotation_id: integer('rotation_id').references(() => rotation.id, { onDelete: 'set null' }),
+    // Overloaded across three orthogonal uses with different correctness
+    // requirements (BS#908). Any new write site must register in
+    // scripts/check-legacy-entry-id-writes.mjs ALLOWLIST with a rationale:
+    //   1. Webhook upsert target — apps/backend/routes/internal.route.ts
+    //      uses `ON CONFLICT (legacy_entry_id) DO UPDATE` keyed on the
+    //      tubafrenzy-assigned entry ID.
+    //   2. Mirror loop-guard — apps/backend/middleware/legacy/flowsheet.mirror.ts
+    //      reads `legacy_entry_id != null` as a boolean meaning "this row
+    //      came from tubafrenzy, do not mirror back" (avoids an infinite
+    //      ETL → mirror → webhook → ETL loop).
+    //   3. ETL incremental sync key — jobs/flowsheet-etl/job.ts uses the
+    //      same `ON CONFLICT (legacy_entry_id)` shape as #1.
+    // A future change that populates legacy_entry_id to a placeholder for
+    // non-tubafrenzy rows would silently break use #2; the CI check at
+    // scripts/check-legacy-entry-id-writes.mjs is the guardrail.
     legacy_entry_id: integer('legacy_entry_id'),
     legacy_release_id: integer('legacy_release_id'),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed

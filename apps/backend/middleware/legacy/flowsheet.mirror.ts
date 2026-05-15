@@ -272,7 +272,14 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
 };
 
 export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) => {
-  // Loop guard: entry imported from tubafrenzy by ETL — don't mirror back
+  // Loop guard (use #2 of the legacy_entry_id three-use invariant, BS#908):
+  // `legacy_entry_id != null` is read as a boolean meaning "this row came
+  // from tubafrenzy via ETL or webhook, do not mirror back." Together with
+  // the matching guard in updateEntry below (line ~317) this prevents an
+  // infinite ETL → mirror → webhook → ETL cycle. The three orthogonal uses
+  // and their constraints are documented at `shared/database/src/schema.ts`
+  // on the column declaration; CI enforces no new write site appears
+  // without registering at `scripts/check-legacy-entry-id-writes.mjs`.
   if (entry.legacy_entry_id != null) return;
 
   // Resolve tubafrenzy show ID: (1) in-memory cache, (2) DB, (3) null (auto-resolve)
