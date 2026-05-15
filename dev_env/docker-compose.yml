@@ -187,6 +187,11 @@ services:
       # Mirror: route HTTP mirror through mock tubafrenzy
       - TUBAFRENZY_URL=http://mock-api:9090
       - MIRROR_API_KEY=ci-test-mirror-key
+      # Internal endpoints (ETL notify, tubafrenzy webhook). The
+      # authenticateInternal() check fails closed on an empty key, so the
+      # tubafrenzy-webhook integration spec needs this wired explicitly.
+      # Matches the test's fallback default.
+      - ETL_NOTIFY_KEY=${ETL_NOTIFY_KEY:-test-secret-key}
       # Rate limiting configuration
       # Set TEST_RATE_LIMITING=true to enable rate limiting in test mode
       # Use ci:env:full and ci:test:full npm scripts to run with rate limiting enabled
