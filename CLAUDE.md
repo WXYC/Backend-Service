@@ -63,7 +63,7 @@ Key middleware:
 - `anonymousAuth` — Validates better-auth session
 - `rateLimiting` — Rate limits on registration and song requests
 - `errorHandler` — Centralized error handling returning standardized responses
-- Legacy mirror middleware — Syncs flowsheet data to tubafrenzy. Show lifecycle (`startShow`, `endShow`) and entry CRUD (`addEntry`, `updateEntry`) use HTTP REST calls to tubafrenzy's mirror API. `deleteEntry` uses raw SQL via SSH. Show IDs are cached in-memory (`showIdMap`) and persisted to `shows.legacy_show_id` for restart resilience.
+- Legacy mirror middleware — Syncs flowsheet data to tubafrenzy. Show lifecycle (`startShow`, `endShow`) and entry CRUD (`addEntry`, `updateEntry`) use HTTP REST calls to tubafrenzy's mirror API. `deleteEntry` uses raw SQL via SSH. Show IDs live in two places: an in-memory `showIdMap` (process-local, populated lazily by `cacheShowId`, cleared on process exit) and the persisted `shows.legacy_show_id` column (written alongside the cache after `mirrorCreateShow`). On BS restart the map starts empty; read paths fall back to the persisted column, paying one extra DB round-trip on the first lookup per show.
 
 Server timeout is 5 seconds globally; SSE routes have no timeout. Swagger API docs are served at `/api-docs` from `app.yaml`.
 
