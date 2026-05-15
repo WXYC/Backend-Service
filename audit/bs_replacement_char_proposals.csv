@@ -10,9 +10,9 @@ flowsheet,RELEASE_TITLE,,League of Legends � League Of Legends Worlds Anthems 
 flowsheet,RELEASE_TITLE,,Midnight Zone (Original Soundtrack to the Film by Julian Charri�re),1,Midnight Zone EP,Be Your Lover / Midnight Magic,Danger Zone,0.05,unmatched
 flowsheet,ARTIST_NAME,,Csillagrabl�k,2,Csillagrablók,,,1.00,discogs-search
 flowsheet,ARTIST_NAME,,Sonido Due�ez,2,Sonido Dueñez,Sonido Solar,Luis Ortiz (4),0.90,discogs-search
-flowsheet,ARTIST_NAME,,Ana Mar�a Vahos,1,Ana Maria Velez,Ana Maria Simo,Ana Maria Vizcaino,0.63,lml-fuzzy
+flowsheet,ARTIST_NAME,,Ana Mar�a Vahos,1,,Ana Maria Simo,Ana Maria Vizcaino,0.63,lml-fuzzy
 flowsheet,ARTIST_NAME,,Eydie Gorm�,1,Eydie Gorme,,,0.91,lml-fuzzy
-flowsheet,ARTIST_NAME,,Mehmet G�reli,1,Mehmet Irdel,Mehmet Akatay,,0.69,lml-fuzzy
+flowsheet,ARTIST_NAME,,Mehmet G�reli,1,,Mehmet Akatay,,0.69,lml-fuzzy
 flowsheet,ARTIST_NAME,,U?ur Y�cel,1,Urba y Rome,Madame uR y sus HombreS,Enrique Urquijo Y Los Problemas,0.17,unmatched
 flowsheet,ARTIST_NAME,,p�r-no,1,R/no,DJ R-No,DJ R-No,0.27,unmatched
 flowsheet,RECORD_LABEL,,Infin� Editions,8,Infiné Éditions,Infinite Greyscale,Éditions Infini,0.93,discogs-search
@@ -37,7 +37,7 @@ flowsheet,SONG_TITLE,,Homage to �mer Hayyam,1,Homage To Charles Parker,Crossin
 flowsheet,SONG_TITLE,,Los D�as,1,Los Ronaldos,Los Destellos,Los Angeles,0.23,unmatched
 flowsheet,SONG_TITLE,,Mentiras Con Cari�o,1,Vamos A La Playa Con Caribe Mix,Vamos A La Playa Con Caribe Mix,Boleros Del Caribe Vol. 3,0.18,unmatched
 flowsheet,SONG_TITLE,,N�dalap�evad (Ines Daferrari Remix),1,Eolian Oms EP Side A | Byte Evaders EP Side B,Dalapop Exclusive Series Vol. 8,Dalapop Exclusive Series Vol. 8,0.14,unmatched
-flowsheet,SONG_TITLE,,Plastic 100�C,1,Plastic City 100,Plastic City 100,Plastic Beach,0.51,discogs-search
+flowsheet,SONG_TITLE,,Plastic 100�C,1,Plastic 100°C,Plastic City 100,Plastic Beach,0.51,discogs-search
 library,RELEASE_TITLE,,Ballet M�canique,1,Ballet Mécanique,,,1.00,lml-fuzzy
 library,RELEASE_TITLE,,Battles Ol�,1,Battles Olé,,,1.00,lml-fuzzy
 library,RELEASE_TITLE,,Chansons pour le corps; Et si tout enti�re maintenant,1,Chansons pour le corps; Et si tout entiére maintenant,,,1.00,lml-fuzzy

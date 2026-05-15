@@ -9,7 +9,7 @@
 -- MusicBrainz fallback for ARTIST_NAME rows; the resulting CSV
 -- was hand-curated by the music director.
 --
--- 36 UPDATE statements follow. Four rows were dropped
+-- 34 UPDATE statements follow. Four rows were dropped
 -- during curation because no canonical was recoverable.
 --
 -- Pattern: BEGIN; UPDATEs; COMMIT; then the post-amble verifies
@@ -30,7 +30,7 @@
 SELECT '=== V_BS_FFFD pre-amble: rows targeted per (table, column) ===' AS section;
 
 -- flowsheet.album_title: 8 lossy values, 20 rows total
--- flowsheet.artist_name: 5 lossy values, 7 rows total
+-- flowsheet.artist_name: 3 lossy values, 5 rows total
 -- flowsheet.record_label: 1 lossy values, 8 rows total
 -- flowsheet.track_title: 5 lossy values, 7 rows total
 -- library.album_title: 7 lossy values, 7 rows total
@@ -78,15 +78,13 @@ UPDATE wxyc_schema.flowsheet SET album_title = 'L''Œil Écoute / Dedans-Dehors'
 UPDATE wxyc_schema.flowsheet SET album_title = 'League Of Legends Worlds Anthems - Vol. 1: 2014-2023' WHERE album_title = 'League of Legends � League Of Legends Worlds Anthems - Vol. 1: 2014-2023';
 UPDATE wxyc_schema.flowsheet SET artist_name = 'Csillagrablók' WHERE artist_name = 'Csillagrabl�k';
 UPDATE wxyc_schema.flowsheet SET artist_name = 'Sonido Dueñez' WHERE artist_name = 'Sonido Due�ez';
-UPDATE wxyc_schema.flowsheet SET artist_name = 'Ana Maria Velez' WHERE artist_name = 'Ana Mar�a Vahos';
 UPDATE wxyc_schema.flowsheet SET artist_name = 'Eydie Gorme' WHERE artist_name = 'Eydie Gorm�';
-UPDATE wxyc_schema.flowsheet SET artist_name = 'Mehmet Irdel' WHERE artist_name = 'Mehmet G�reli';
 UPDATE wxyc_schema.flowsheet SET record_label = 'Infiné Éditions' WHERE record_label = 'Infin� Editions';
 UPDATE wxyc_schema.flowsheet SET track_title = 'Mallku Diablón' WHERE track_title = 'Mallku Diabl�n';
 UPDATE wxyc_schema.flowsheet SET track_title = 'Bliws Afon Tâf' WHERE track_title = 'Bliws Afon T�f';
 UPDATE wxyc_schema.flowsheet SET track_title = 'Ch''uwanchaña ~El Golpe Final~' WHERE track_title = 'Ch''uwancha�a ~El Golpe Final~';
 UPDATE wxyc_schema.flowsheet SET track_title = 'Convocación "Banger/Diffusion"' WHERE track_title = 'Convocaci�n "Banger/Diffusion"';
-UPDATE wxyc_schema.flowsheet SET track_title = 'Plastic City 100' WHERE track_title = 'Plastic 100�C';
+UPDATE wxyc_schema.flowsheet SET track_title = 'Plastic 100°C' WHERE track_title = 'Plastic 100�C';
 UPDATE wxyc_schema.library SET album_title = 'Ballet Mécanique' WHERE album_title = 'Ballet M�canique';
 UPDATE wxyc_schema.library SET album_title = 'Battles Olé' WHERE album_title = 'Battles Ol�';
 UPDATE wxyc_schema.library SET album_title = 'Chansons pour le corps; Et si tout entiére maintenant' WHERE album_title = 'Chansons pour le corps; Et si tout enti�re maintenant';
@@ -132,11 +130,7 @@ SELECT 'flowsheet' AS tbl, 'artist_name' AS col, 'Csillagrabl�k' AS lossy, (SE
 UNION ALL
 SELECT 'flowsheet' AS tbl, 'artist_name' AS col, 'Sonido Due�ez' AS lossy, (SELECT COUNT(*) FROM wxyc_schema.flowsheet WHERE artist_name = 'Sonido Due�ez') AS residual
 UNION ALL
-SELECT 'flowsheet' AS tbl, 'artist_name' AS col, 'Ana Mar�a Vahos' AS lossy, (SELECT COUNT(*) FROM wxyc_schema.flowsheet WHERE artist_name = 'Ana Mar�a Vahos') AS residual
-UNION ALL
 SELECT 'flowsheet' AS tbl, 'artist_name' AS col, 'Eydie Gorm�' AS lossy, (SELECT COUNT(*) FROM wxyc_schema.flowsheet WHERE artist_name = 'Eydie Gorm�') AS residual
-UNION ALL
-SELECT 'flowsheet' AS tbl, 'artist_name' AS col, 'Mehmet G�reli' AS lossy, (SELECT COUNT(*) FROM wxyc_schema.flowsheet WHERE artist_name = 'Mehmet G�reli') AS residual
 UNION ALL
 SELECT 'flowsheet' AS tbl, 'record_label' AS col, 'Infin� Editions' AS lossy, (SELECT COUNT(*) FROM wxyc_schema.flowsheet WHERE record_label = 'Infin� Editions') AS residual
 UNION ALL
