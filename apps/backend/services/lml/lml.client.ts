@@ -103,6 +103,36 @@ async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
 }
 
 /**
+ * Optional flags accepted by LML's `/api/v1/lookup` since `@wxyc/shared@1.5.0`.
+ *
+ * - `extended`: surfaces additional fields on the top-1 `DiscogsMatchResult`
+ *   (tracklist, genres, styles, label, full_release_date, discogs_artist_id,
+ *   artist_image_url, profile_tokens). Use on the read path that already
+ *   intends to consume those fields (e.g. the proxy/metadata/album collapse)
+ *   so a single lookup replaces the follow-up release+artist fetches.
+ *
+ * - `warm_cache`: on the LML side, schedules a fire-and-forget background
+ *   task that runs a deep async parse of the top-1 bio against the
+ *   API-capable resolver, populating the PG cache for referenced entities.
+ *   Use on the write path — DJ-flowsheet commit, rotation add — where a
+ *   subsequent read for the same artist will benefit. Read-path callers
+ *   leave this `false` to avoid amplifying Discogs API load.
+ */
+export interface LookupOptions {
+  extended?: boolean;
+  warm_cache?: boolean;
+}
+
+type LookupBody = {
+  artist?: string;
+  album?: string;
+  song?: string;
+  raw_message: string;
+  extended?: boolean;
+  warm_cache?: boolean;
+};
+
+/**
  * Look up a release in the library catalog via LML's full search pipeline.
  *
  * Provides artist correction, title normalization, fallback strategies,
@@ -111,16 +141,24 @@ async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
  * @param artist - Artist name
  * @param album - Album/release title
  * @param song - Song/track title
+ * @param options - Optional LML flags. See `LookupOptions`.
  * @returns Lookup results with library items and enriched artwork metadata
  */
-export async function lookupMetadata(artist: string, album?: string, song?: string): Promise<LookupResponse> {
+export async function lookupMetadata(
+  artist: string,
+  album?: string,
+  song?: string,
+  options?: LookupOptions
+): Promise<LookupResponse> {
   // LML's /lookup contract requires `raw_message` even when artist/album/song
   // are already structured. Synthesize a free-form description that the LML
   // parser would have produced — matches the e2e fixtures in LML's repo.
   const rawMessage = [artist, album, song].filter(Boolean).join(' - ');
-  const body: Record<string, string> = { artist, raw_message: rawMessage };
+  const body: LookupBody = { artist, raw_message: rawMessage };
   if (album) body.album = album;
   if (song) body.song = song;
+  if (options?.extended) body.extended = true;
+  if (options?.warm_cache) body.warm_cache = true;
   return postLookup(body);
 }
 
@@ -145,7 +183,7 @@ export async function lookupBySong(song: string): Promise<LookupResponse> {
  * the metadata-backfill pilot or the runtime hot path. Sibling LML-side
  * projection at WXYC/library-metadata-lookup#213.
  */
-async function postLookup(body: Record<string, string>): Promise<LookupResponse> {
+async function postLookup(body: LookupBody): Promise<LookupResponse> {
   return Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
     const response = await lmlFetch('/api/v1/lookup', {
       method: 'POST',

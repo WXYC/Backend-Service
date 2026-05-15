@@ -65,7 +65,17 @@ export async function runLmlLinkage(args: {
 
   let response;
   try {
-    response = await lookupMetadata(artistName, albumTitle ?? undefined);
+    // warm_cache=true: this is the write-path entry point for newly inserted
+    // flowsheet rows. LML schedules a fire-and-forget background task that
+    // deep-parses the top-1 artist's bio against the API-capable resolver,
+    // populating the discogs-cache for referenced entities (`[a…]`/`[r…]`/
+    // `[m…]`). Subsequent read-path lookups for the same artist (typically
+    // an iOS listener fetching playcut metadata seconds later) get richer
+    // profile_tokens for free, without adding latency to this write path.
+    // LML bounds concurrent warm tasks process-wide to cap Discogs amplification.
+    response = await lookupMetadata(artistName, albumTitle ?? undefined, undefined, {
+      warm_cache: true,
+    });
   } catch (error) {
     // The forward path is fire-and-forget — we own error reporting here so
     // the caller's `.catch` is only a safety net for unexpected bugs.
