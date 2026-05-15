@@ -99,6 +99,62 @@ describe('lml.client', () => {
       expect(callBody.raw_message).toBe('Autechre - Confield');
     });
 
+    it('forwards options.extended=true onto the request body', async () => {
+      // The /proxy/metadata/album single-call path depends on this flag
+      // making it onto the wire. Without it, LML's response would omit
+      // the new release-detail fields and BS would silently degrade to
+      // partial metadata.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield', undefined, { extended: true });
+
+      const callBody = JSON.parse(mockFetch.mock.calls[0][1]?.body as string);
+      expect(callBody.extended).toBe(true);
+      // warm_cache stays absent when not requested.
+      expect(callBody.warm_cache).toBeUndefined();
+    });
+
+    it('forwards options.warm_cache=true onto the request body', async () => {
+      // flowsheet-linkage.service.ts depends on this flag making it onto
+      // the wire so LML schedules the fire-and-forget bio warm. There's
+      // no read-side observability for the warm task — if the key never
+      // made it onto the body, the warm would silently never fire.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Stereolab', 'Aluminum Tunes', undefined, { warm_cache: true });
+
+      const callBody = JSON.parse(mockFetch.mock.calls[0][1]?.body as string);
+      expect(callBody.warm_cache).toBe(true);
+      // extended stays absent when not requested.
+      expect(callBody.extended).toBeUndefined();
+    });
+
+    it('omits both option flags from the body when no options are passed', async () => {
+      // Read-path callers (request-line, artwork fallback, library
+      // services) don't pass options. The body must stay byte-identical
+      // to the pre-1.5 shape so legacy LML deploys keep working during
+      // any rollback.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield');
+
+      const callBody = JSON.parse(mockFetch.mock.calls[0][1]?.body as string);
+      expect(callBody.extended).toBeUndefined();
+      expect(callBody.warm_cache).toBeUndefined();
+    });
+
     it('wraps the call in a Sentry span and projects cache_stats onto it', async () => {
       const cache_stats = {
         memory_hits: 1,
