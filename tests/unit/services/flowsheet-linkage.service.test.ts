@@ -63,7 +63,12 @@ describe('runLmlLinkage (B-2.1)', () => {
       albumTitle: 'DOGA',
     });
 
-    expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA');
+    // Forward-path linkage fires the LML write-path warm so the discogs-cache
+    // gets primed for any bio refs on the artist just played. The next iOS
+    // lookup for the same artist renders richer profile_tokens for free.
+    expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, {
+      warm_cache: true,
+    });
     expect(outcome).toEqual({
       status: 'linked',
       libraryId: 88,
