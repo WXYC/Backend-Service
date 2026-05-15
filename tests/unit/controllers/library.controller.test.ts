@@ -229,6 +229,44 @@ describe('library.controller', () => {
       }
     });
 
+    it('returns 400 when no query parameters are supplied', async () => {
+      const req = { query: {} } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(searchForAlbum(req, res, next)).rejects.toThrow('Missing query parameter');
+      expect(mockFuzzySearchLibrary).not.toHaveBeenCalled();
+    });
+
+    it('accepts on_streaming=false as a sufficient filter and returns 200', async () => {
+      const searchResults = [{ id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', on_streaming: false }];
+      mockFuzzySearchLibrary.mockResolvedValue(searchResults);
+      mockEnrichWithArtwork.mockResolvedValue(searchResults);
+
+      const req = { query: { on_streaming: 'false' } } as unknown as Request;
+      const res = mockResponse();
+
+      await searchForAlbum(req, res, next);
+
+      expect(mockFuzzySearchLibrary).toHaveBeenCalledWith(undefined, undefined, undefined, false);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(searchResults);
+    });
+
+    it('accepts on_streaming=true as a sufficient filter and returns 200', async () => {
+      const searchResults = [{ id: 2, artist_name: 'Stereolab', album_title: 'Aluminum Tunes', on_streaming: true }];
+      mockFuzzySearchLibrary.mockResolvedValue(searchResults);
+      mockEnrichWithArtwork.mockResolvedValue(searchResults);
+
+      const req = { query: { on_streaming: 'true' } } as unknown as Request;
+      const res = mockResponse();
+
+      await searchForAlbum(req, res, next);
+
+      expect(mockFuzzySearchLibrary).toHaveBeenCalledWith(undefined, undefined, undefined, true);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(searchResults);
+    });
+
     it('does not propagate enrichment errors as request failures', async () => {
       const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
       mockFuzzySearchLibrary.mockResolvedValue(searchResults);

@@ -158,13 +158,17 @@ type AlbumQueryParams = {
 
 export const searchForAlbum: RequestHandler = async (req: Request<object, object, object, AlbumQueryParams>, res) => {
   const { query } = req;
+  // `on_streaming` is sufficient on its own to scope the result set (used by
+  // dj-site Classic's "Browse Exclusive Albums" view, which surfaces all
+  // non-streaming releases without a text query). See #872.
   if (
     query.artist_name === undefined &&
     query.album_title === undefined &&
+    query.on_streaming === undefined &&
     (query.code_letters === undefined || query.code_artist_number === undefined)
   ) {
     throw new WxycError(
-      'Missing query parameter. Query must include: artist_name, album_title, or code_letters, code_artist_number, and code_number',
+      'Missing query parameter. Query must include: artist_name, album_title, on_streaming, or code_letters and code_artist_number',
       400
     );
   }
