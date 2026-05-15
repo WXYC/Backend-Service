@@ -169,6 +169,9 @@ jobs:
       - name: Migration guards (cross-cache-identity)
         run: scripts/check-precondition-guards.sh
 
+      - name: legacy_entry_id writes (three-use invariant)
+        run: node scripts/check-legacy-entry-id-writes.mjs
+
       - name: Build
         run: npm run build
 
