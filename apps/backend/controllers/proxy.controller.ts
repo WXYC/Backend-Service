@@ -19,8 +19,15 @@ import {
   getArtistDetails,
   resolveEntity as lmlResolveEntity,
   searchLibrary,
+  LmlClientError,
 } from '../services/lml/lml.client.js';
-import type { DiscogsMatchResult, DiscogsTrackItem, LookupResponse } from '../services/lml/lml.client.js';
+import type {
+  DiscogsMatchResult,
+  DiscogsReleaseMetadata,
+  DiscogsTrackItem,
+  LookupResponse,
+} from '../services/lml/lml.client.js';
+import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
 
@@ -507,4 +514,124 @@ export const librarySearch: RequestHandler<object, unknown, unknown, LibrarySear
 
   res.set('Cache-Control', 'private, max-age=60');
   res.status(200).json(results);
+};
+
+/**
+ * GET /proxy/library/:libraryId/tracks (E6-5 / BS#836)
+ *
+ * Returns the tracklist for a library release so the dj-site flowsheet
+ * picker can let DJs pick a track by position after selecting a release
+ * (catalog-track-search plan §4.3 / Track 3).
+ *
+ * Composition (BS-side; no new LML endpoint):
+ *   1. Map inbound `libraryId` (LML `library.db.id` = BS `library.legacy_release_id`)
+ *      → resolved Discogs release id via `library_identity`.
+ *   2. Fetch the tracklist from LML's `GET /api/v1/discogs/release/{id}`.
+ *
+ * Degrades gracefully — when no identity is resolved (typical for rows
+ * BS#802's backfill hasn't covered yet) or LML returns 404 on the release,
+ * the response is 200 with `tracks: []` and the picker falls back to
+ * free-text input. Only LML 5xx errors bubble up to the error handler.
+ *
+ * Each hit is cached BS-side by Discogs release id for 10 minutes — a thin
+ * deduplication layer on top of LML's own 3-tier cache.
+ */
+interface LibraryTrackEntry {
+  position: string;
+  title: string;
+  artist_credit: string;
+  duration_ms: number | null;
+}
+
+interface LibraryTracksResponse {
+  library_id: number;
+  discogs_release_id: number | null;
+  source: 'discogs' | null;
+  tracks: LibraryTrackEntry[];
+}
+
+const tracklistCache = new LRUCache<number, LibraryTrackEntry[]>({
+  max: 500,
+  ttl: 1000 * 60 * 10,
+});
+
+/** Test-only: drop cached entries between cases. */
+export function __resetLibraryTracksCacheForTests(): void {
+  tracklistCache.clear();
+}
+
+/**
+ * Parse a Discogs `duration` string ("M:SS", "H:MM:SS", or bare seconds)
+ * into milliseconds. Returns null for empty or unparseable values — Discogs
+ * sometimes leaves the field blank or stores freeform text.
+ */
+function parseDurationMs(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  const parts = raw.split(':').map((p) => p.trim());
+  if (parts.some((p) => !/^\d+$/.test(p))) return null;
+  const nums = parts.map(Number);
+  let seconds: number;
+  if (nums.length === 1) seconds = nums[0];
+  else if (nums.length === 2) seconds = nums[0] * 60 + nums[1];
+  else if (nums.length === 3) seconds = nums[0] * 3600 + nums[1] * 60 + nums[2];
+  else return null;
+  return seconds * 1000;
+}
+
+function buildArtistCredit(track: DiscogsTrackItem, releaseArtist: string): string {
+  if (track.artists && track.artists.length > 0) return track.artists.join(', ');
+  return releaseArtist;
+}
+
+function projectTracks(release: DiscogsReleaseMetadata): LibraryTrackEntry[] {
+  return release.tracklist.map((t) => ({
+    position: t.position,
+    title: t.title,
+    artist_credit: buildArtistCredit(t, release.artist),
+    duration_ms: parseDurationMs(t.duration),
+  }));
+}
+
+export const libraryTracks: RequestHandler<{ libraryId: string }> = async (req, res) => {
+  const libraryId = parseInt(req.params.libraryId, 10);
+  if (!Number.isInteger(libraryId) || libraryId <= 0) {
+    throw new WxycError('libraryId must be a positive integer', 400);
+  }
+
+  const discogsReleaseId = await getDiscogsReleaseIdByLegacyId(libraryId);
+  if (discogsReleaseId === null) {
+    const body: LibraryTracksResponse = {
+      library_id: libraryId,
+      discogs_release_id: null,
+      source: null,
+      tracks: [],
+    };
+    res.set('Cache-Control', 'private, max-age=600');
+    res.status(200).json(body);
+    return;
+  }
+
+  let tracks = tracklistCache.get(discogsReleaseId);
+  if (!tracks) {
+    try {
+      const release = await getRelease(discogsReleaseId);
+      tracks = projectTracks(release);
+      tracklistCache.set(discogsReleaseId, tracks);
+    } catch (err) {
+      if (err instanceof LmlClientError && err.statusCode === 404) {
+        tracks = [];
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  const body: LibraryTracksResponse = {
+    library_id: libraryId,
+    discogs_release_id: discogsReleaseId,
+    source: 'discogs',
+    tracks,
+  };
+  res.set('Cache-Control', 'private, max-age=600');
+  res.status(200).json(body);
 };

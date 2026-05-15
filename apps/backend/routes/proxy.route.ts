@@ -15,3 +15,4 @@ proxy_route.get('/metadata/artist', proxyController.getArtistMetadata);
 proxy_route.get('/entity/resolve', proxyController.resolveEntity);
 proxy_route.get('/spotify/track/:id', proxyController.getSpotifyTrack);
 proxy_route.get('/library/search', proxyController.librarySearch);
+proxy_route.get('/library/:libraryId/tracks', proxyController.libraryTracks);
