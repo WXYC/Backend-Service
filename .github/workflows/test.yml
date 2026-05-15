@@ -346,6 +346,11 @@ jobs:
           TUBAFRENZY_URL: http://localhost:9090
           MIRROR_API_KEY: ci-test-mirror-key
           MOCK_API_PORT: '9090'
+          # Internal endpoints (ETL notify, tubafrenzy webhook).
+          # authenticateInternal() fails closed on an empty key, so the
+          # tubafrenzy-webhook integration spec needs this wired explicitly.
+          # Matches the spec's INTERNAL_KEY fallback default.
+          ETL_NOTIFY_KEY: test-secret-key
         run: |
           node dev_env/mock-api-server/dist/server.js > /tmp/mock-api.log 2>&1 &
           node apps/auth/dist/app.js > /tmp/auth.log 2>&1 &
