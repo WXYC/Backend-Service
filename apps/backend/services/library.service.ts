@@ -24,6 +24,7 @@ import {
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
 import { lookupBySong, lookupMetadata, isLmlConfigured, type LookupResponse } from './lml/lml.client.js';
+import { filterSpacerGif } from './metadata/metadata.service.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
 
@@ -413,8 +414,8 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
   const settlements = await Promise.allSettled(
     uncached.map(async (row) => {
       const lookupResult = await lookupMetadata(row.artist_name, row.album_title);
-      const artworkUrl = lookupResult.results?.[0]?.artwork?.artwork_url;
-      if (!artworkUrl || artworkUrl.includes('spacer.gif')) return;
+      const artworkUrl = filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url);
+      if (!artworkUrl) return;
       row.artwork_url = artworkUrl;
       await updateArtworkUrl(row.id, artworkUrl);
     })

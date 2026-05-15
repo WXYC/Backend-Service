@@ -43,10 +43,15 @@ export type EnrichRow = {
 export type EnrichOutcome = 'enriched_match' | 'enriched_match_raced' | 'enriched_no_match';
 
 /**
- * Drop Discogs spacer.gif placeholder URLs. Inline guard mirroring the one in
- * `flowsheet-metadata-backfill/enrich.ts`.
+ * Drop Discogs spacer.gif placeholder URLs. Inline guard, duplicated for
+ * build-graph isolation from `apps/backend` (same pattern as
+ * `flowsheet-metadata-backfill/enrich.ts`). Must stay truthy/falsy-
+ * equivalent to the canonical
+ * `apps/backend/services/metadata/metadata.service.ts#filterSpacerGif`
+ * (BS#890). Pinned by parity test at
+ * `tests/unit/jobs/library-artwork-url-backfill/filter-spacer-gif-parity.test.ts`.
  */
-const filterSpacerGif = (url: string | null | undefined): string | null => {
+export const filterSpacerGif = (url: string | null | undefined): string | null => {
   if (!url) return null;
   if (url.includes('spacer.gif')) return null;
   return url;
