@@ -34,6 +34,13 @@ jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
   LmlClientError: MockLmlClientError,
 }));
 
+// library.service mock — only the helper libraryTracks consumes.
+const mockGetDiscogsReleaseIdByLegacyId = jest.fn<(legacyId: number) => Promise<number | null>>();
+
+jest.mock('../../../apps/backend/services/library.service', () => ({
+  getDiscogsReleaseIdByLegacyId: mockGetDiscogsReleaseIdByLegacyId,
+}));
+
 // Artwork finder mock (still used for Last.fm/iTunes fallback in searchArtwork)
 const mockFind = jest.fn<
   () => Promise<{
@@ -76,6 +83,8 @@ import {
   resolveEntity,
   getSpotifyTrack,
   librarySearch,
+  libraryTracks,
+  __resetLibraryTracksCacheForTests,
 } from '../../../apps/backend/controllers/proxy.controller';
 
 // --- Helpers ---
@@ -1038,6 +1047,191 @@ describe('proxy.controller', () => {
       const res = createMockRes();
 
       await expect(librarySearch(req, res as Response, mockNext)).rejects.toThrow(error);
+    });
+  });
+
+  // --- libraryTracks (E6-5 / BS#836) ---
+  //
+  // Composes BS `library_identity.discogs_release_id` (looked up by inbound
+  // LML library.db.id) → LML `GET /api/v1/discogs/release/{id}` for the
+  // tracklist. Returns an empty `tracks` array when identity is unresolved,
+  // so the dj-site flowsheet picker can degrade to free-text input.
+
+  describe('libraryTracks', () => {
+    beforeEach(() => {
+      __resetLibraryTracksCacheForTests();
+    });
+
+    it('throws WxycError 400 when libraryId is not a positive integer', async () => {
+      const req = { params: { libraryId: 'not-a-number' } } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(libraryTracks(req, res as Response, mockNext)).rejects.toThrow(
+        'libraryId must be a positive integer'
+      );
+    });
+
+    it('returns tracklist with mapped fields when identity is found and LML returns the release', async () => {
+      mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(42);
+      mockGetRelease.mockResolvedValue({
+        release_id: 42,
+        title: 'On Your Own Love Again',
+        artist: 'Jessica Pratt',
+        tracklist: [
+          { position: 'A1', title: 'Wrong Hand', duration: '3:42', artists: [] },
+          { position: 'A2', title: 'Game That I Play', duration: '4:01', artists: [] },
+          { position: 'B1', title: 'Back, Baby', duration: '4:38', artists: [] },
+        ],
+      });
+
+      const req = { params: { libraryId: '12345' } } as unknown as Request;
+      const res = createMockRes();
+
+      await libraryTracks(req, res as Response, mockNext);
+
+      expect(mockGetDiscogsReleaseIdByLegacyId).toHaveBeenCalledWith(12345);
+      expect(mockGetRelease).toHaveBeenCalledWith(42);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({
+        library_id: 12345,
+        discogs_release_id: 42,
+        source: 'discogs',
+        tracks: [
+          { position: 'A1', title: 'Wrong Hand', artist_credit: 'Jessica Pratt', duration_ms: 222000 },
+          { position: 'A2', title: 'Game That I Play', artist_credit: 'Jessica Pratt', duration_ms: 241000 },
+          { position: 'B1', title: 'Back, Baby', artist_credit: 'Jessica Pratt', duration_ms: 278000 },
+        ],
+      });
+      expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');
+    });
+
+    it('prefers per-track artist credits over release-level artist (compilation case)', async () => {
+      mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(99);
+      mockGetRelease.mockResolvedValue({
+        release_id: 99,
+        title: 'Edits',
+        artist: 'Various',
+        tracklist: [
+          {
+            position: '1',
+            title: 'Call Your Name',
+            duration: '5:23',
+            artists: ['Chuquimamani-Condori'],
+          },
+        ],
+      });
+
+      const req = { params: { libraryId: '777' } } as unknown as Request;
+      const res = createMockRes();
+
+      await libraryTracks(req, res as Response, mockNext);
+
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tracks: [
+            { position: '1', title: 'Call Your Name', artist_credit: 'Chuquimamani-Condori', duration_ms: 323000 },
+          ],
+        })
+      );
+    });
+
+    it('returns 200 + empty tracks when no identity is resolved', async () => {
+      mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(null);
+
+      const req = { params: { libraryId: '12345' } } as unknown as Request;
+      const res = createMockRes();
+
+      await libraryTracks(req, res as Response, mockNext);
+
+      expect(mockGetRelease).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({
+        library_id: 12345,
+        discogs_release_id: null,
+        source: null,
+        tracks: [],
+      });
+    });
+
+    it('returns 200 + empty tracks when LML 404s on the release id', async () => {
+      mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(42);
+      mockGetRelease.mockRejectedValue(new MockLmlClientError('LML responded with 404: Not Found', 404));
+
+      const req = { params: { libraryId: '12345' } } as unknown as Request;
+      const res = createMockRes();
+
+      await libraryTracks(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({
+        library_id: 12345,
+        discogs_release_id: 42,
+        source: 'discogs',
+        tracks: [],
+      });
+    });
+
+    it('rebubbles LML 5xx errors (handled by errorHandler)', async () => {
+      mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(42);
+      mockGetRelease.mockRejectedValue(new MockLmlClientError('LML responded with 503', 502));
+
+      const req = { params: { libraryId: '12345' } } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(libraryTracks(req, res as Response, mockNext)).rejects.toThrow('LML responded with 503');
+    });
+
+    it('serves a repeat lookup from the BS-side cache without hitting LML twice', async () => {
+      mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(42);
+      mockGetRelease.mockResolvedValue({
+        release_id: 42,
+        title: 'DOGA',
+        artist: 'Juana Molina',
+        tracklist: [{ position: '5', title: 'la paradoja', duration: '4:12', artists: [] }],
+      });
+
+      const req = { params: { libraryId: '12345' } } as unknown as Request;
+      await libraryTracks(req, createMockRes() as Response, mockNext);
+      await libraryTracks(req, createMockRes() as Response, mockNext);
+
+      expect(mockGetDiscogsReleaseIdByLegacyId).toHaveBeenCalledTimes(2);
+      expect(mockGetRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('treats H:MM:SS and bare seconds in duration strings; null when unparseable', async () => {
+      mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(42);
+      mockGetRelease.mockResolvedValue({
+        release_id: 42,
+        title: 'Live in Sentimental Mood',
+        artist: 'Duke Ellington & John Coltrane',
+        tracklist: [
+          { position: '1', title: 'Long Side', duration: '1:02:03', artists: [] },
+          { position: '2', title: 'Short', duration: '45', artists: [] },
+          { position: '3', title: 'Mystery', duration: '', artists: [] },
+          { position: '4', title: 'Garbage', duration: 'about five', artists: [] },
+        ],
+      });
+
+      const req = { params: { libraryId: '12345' } } as unknown as Request;
+      const res = createMockRes();
+
+      await libraryTracks(req, res as Response, mockNext);
+
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tracks: [
+            {
+              position: '1',
+              title: 'Long Side',
+              artist_credit: 'Duke Ellington & John Coltrane',
+              duration_ms: 3723000,
+            },
+            { position: '2', title: 'Short', artist_credit: 'Duke Ellington & John Coltrane', duration_ms: 45000 },
+            { position: '3', title: 'Mystery', artist_credit: 'Duke Ellington & John Coltrane', duration_ms: null },
+            { position: '4', title: 'Garbage', artist_credit: 'Duke Ellington & John Coltrane', duration_ms: null },
+          ],
+        })
+      );
     });
   });
 });

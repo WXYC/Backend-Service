@@ -18,6 +18,7 @@ import {
   format,
   genres,
   library,
+  library_identity,
   rotation,
   LibraryArtistViewEntry,
 } from '@wxyc/database';
@@ -287,6 +288,30 @@ export const insertAlbum = async (newAlbum: NewAlbum) => {
   const response = await db.insert(library).values(newAlbum).returning();
   return response[0];
 };
+
+/**
+ * Look up the resolved Discogs release id for a library row by its
+ * legacy id — the id the dj-site flowsheet picker carries (LML
+ * `library.db.id` = BS `library.legacy_release_id`). JOINs `library`
+ * to `library_identity` via that bridge in a single query.
+ *
+ * Returns null when any of these holds (the picker degrades to free-text):
+ *   - legacy id doesn't map to a BS library row,
+ *   - the row has no `library_identity` entry (not yet backfilled by BS#802), or
+ *   - the identity row has no resolved `discogs_release_id`.
+ *
+ * Used by `/proxy/library/{id}/tracks` (E6-5 / BS#836) to compose against
+ * LML's `/api/v1/discogs/release/{id}` for the tracklist.
+ */
+export async function getDiscogsReleaseIdByLegacyId(legacyId: number): Promise<number | null> {
+  const rows = await db
+    .select({ discogs_release_id: library_identity.discogs_release_id })
+    .from(library)
+    .innerJoin(library_identity, eq(library_identity.library_id, library.id))
+    .where(eq(library.legacy_release_id, legacyId))
+    .limit(1);
+  return rows[0]?.discogs_release_id ?? null;
+}
 
 export const updateOnStreaming = async (id: number, on_streaming: boolean | null) => {
   const response = await db.update(library).set({ on_streaming }).where(eq(library.id, id)).returning();
