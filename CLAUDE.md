@@ -12,6 +12,8 @@ CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in
 - **[`docs/cdc.md`](docs/cdc.md)** — CDC WebSocket endpoint, event format, reconciliation monitor
 - **[`docs/deploy.md`](docs/deploy.md)** — Deploy cadence, migration-chain risk, deploy-wedge anatomy, CI workflow pin maintenance (permissions, gha/v1 pins, caller-callee permissions trap from #857)
 
+For the org-wide cache-hierarchy reference (BS's `proxy.controller` LRUs in context with the upstream iOS caches and downstream LML caches), see [`WXYC/wiki/architecture/cache-hierarchy.md`](https://github.com/WXYC/wiki/blob/main/architecture/cache-hierarchy.md).
+
 Read the relevant topic doc before doing work in that area.
 
 ## Architecture
