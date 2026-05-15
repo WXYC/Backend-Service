@@ -221,6 +221,15 @@ export const resolveDjNameForShow = async (show: Show): Promise<string | null> =
  * `reltuples = -1` is the "never analyzed" sentinel; treat it as 0. The same
  * goes for a missing row (no permissions on `pg_class` would surface as an
  * error from the surrounding query, not as a missing row).
+ *
+ * Re-evaluation trigger: revisit when `flowsheet` exceeds ~5M rows (currently
+ * ~2.6M). At that scale the ±1% planner estimate drifts ±50k per page bucket
+ * and the UI's "Page X of N" starts skipping numbers visibly. Alternatives at
+ * that point, cheapest to costliest: (1) drop `totalPages` from the response
+ * and let clients infer "more pages?" from `results.length === limit`,
+ * (2) refresh a materialized count on a cron, (3) bump the RDS instance class
+ * so an exact `COUNT(*)` fits the 5s statement timeout. (Storage size bumps
+ * are not on the table — gp3 conversions are reversible, sizing up is not.)
  */
 export const getEntryCount = async (): Promise<number> => {
   const schema = process.env.WXYC_SCHEMA_NAME ?? 'wxyc_schema';
