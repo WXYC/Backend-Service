@@ -616,14 +616,16 @@ export const libraryTracks: RequestHandler<{ libraryId: string }> = async (req, 
     try {
       const release = await getRelease(discogsReleaseId);
       tracks = projectTracks(release);
-      tracklistCache.set(discogsReleaseId, tracks);
     } catch (err) {
       if (err instanceof LmlClientError && err.statusCode === 404) {
+        // Cache the empty result so repeat requests for a release LML
+        // doesn't know about don't re-hit LML for 10 minutes.
         tracks = [];
       } else {
         throw err;
       }
     }
+    tracklistCache.set(discogsReleaseId, tracks);
   }
 
   const body: LibraryTracksResponse = {

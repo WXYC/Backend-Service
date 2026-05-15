@@ -1171,6 +1171,18 @@ describe('proxy.controller', () => {
       });
     });
 
+    it('caches LML 404 results so repeat lookups do not re-hit LML', async () => {
+      mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(42);
+      mockGetRelease.mockRejectedValue(new MockLmlClientError('LML responded with 404: Not Found', 404));
+
+      const req = { params: { libraryId: '12345' } } as unknown as Request;
+      await libraryTracks(req, createMockRes() as Response, mockNext);
+      await libraryTracks(req, createMockRes() as Response, mockNext);
+
+      expect(mockGetDiscogsReleaseIdByLegacyId).toHaveBeenCalledTimes(2);
+      expect(mockGetRelease).toHaveBeenCalledTimes(1);
+    });
+
     it('rebubbles LML 5xx errors (handled by errorHandler)', async () => {
       mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(42);
       mockGetRelease.mockRejectedValue(new MockLmlClientError('LML responded with 503', 502));
