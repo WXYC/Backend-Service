@@ -20,7 +20,7 @@ import {
   resolveEntity as lmlResolveEntity,
   searchLibrary,
 } from '../services/lml/lml.client.js';
-import type { DiscogsMatchResult, LookupResponse } from '../services/lml/lml.client.js';
+import type { DiscogsMatchResult, DiscogsTrackItem, LookupResponse } from '../services/lml/lml.client.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
 
@@ -237,7 +237,7 @@ function populateReleaseMetadata(
     label?: string | null;
     artist_id?: number | null;
     released?: string | null;
-    tracklist?: Array<{ position: string; title: string; duration?: string | null }> | null;
+    tracklist?: DiscogsTrackItem[] | null;
     artwork_url?: string | null;
   }
 ): void {
