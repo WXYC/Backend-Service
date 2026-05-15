@@ -1,26 +1,26 @@
 table,column,primary_key,current,row_count,proposed_top1,proposed_top2,proposed_top3,confidence,evidence_source
 flowsheet,RELEASE_TITLE,,A Sua Divers�o / N�o Tem Nada N�o,9,,,,0.00,unmatched
-flowsheet,RELEASE_TITLE,,"Music from the Caucasus � The Archive of ORED Recordings, 2013�2023",4,,,,0.07,unmatched
-flowsheet,RELEASE_TITLE,,Rem�nytelen,2,,,,0.00,unmatched
+flowsheet,RELEASE_TITLE,,"Music from the Caucasus � The Archive of ORED Recordings, 2013�2023",4,Music From The Caucasus - The Archive Of ORED Recordings 2013-23,,,0.84,discogs-search
+flowsheet,RELEASE_TITLE,,Rem�nytelen,2,Rem​é​nytelen,,,0.85,discogs-search
 flowsheet,RELEASE_TITLE,,Ach Golgatha / Pour Que Les Fruits Mûrissent Cet �té,1,,,,0.00,unmatched
 flowsheet,RELEASE_TITLE,,Ahora M�s Que Nunca,1,Ahora Mas que Nunca,,,0.89,lml-fuzzy
 flowsheet,RELEASE_TITLE,,Eydie Gorm�,1,Eydie Gorme,Eydie Swings the blues,"Softly, As I leave you",0.91,lml-fuzzy
 flowsheet,RELEASE_TITLE,,L'�?il écoute / Dedans-Dehors,1,,,,0.00,unmatched
 flowsheet,RELEASE_TITLE,,League of Legends � League Of Legends Worlds Anthems - Vol. 1: 2014-2023,1,League Of Legends Worlds Anthems - Vol. 1: 2014-2023,League Of Legends Worlds Anthems - Vol. 1: 2014-2023,League Of Legends Worlds Anthems - Vol. 1: 2014-2023,0.54,discogs-search
 flowsheet,RELEASE_TITLE,,Midnight Zone (Original Soundtrack to the Film by Julian Charri�re),1,,,,0.11,unmatched
-flowsheet,ARTIST_NAME,,Csillagrabl�k,2,,,,0.15,unmatched
-flowsheet,ARTIST_NAME,,Sonido Due�ez,2,,,,0.00,unmatched
+flowsheet,ARTIST_NAME,,Csillagrabl�k,2,Csillagrablók,,,1.00,discogs-search
+flowsheet,ARTIST_NAME,,Sonido Due�ez,2,Sonido Dueñez,Sonido Solar,Luis Ortiz (4),0.90,discogs-search
 flowsheet,ARTIST_NAME,,Ana Mar�a Vahos,1,Ana Maria Velez,Ana Maria Simo,Ana Maria Vizcaino,0.63,lml-fuzzy
 flowsheet,ARTIST_NAME,,Eydie Gorm�,1,Eydie Gorme,,,0.91,lml-fuzzy
 flowsheet,ARTIST_NAME,,Mehmet G�reli,1,Mehmet Irdel,Mehmet Akatay,,0.69,lml-fuzzy
 flowsheet,ARTIST_NAME,,U?ur Y�cel,1,,,,0.00,unmatched
-flowsheet,ARTIST_NAME,,p�r-no,1,S.Pri Noir,,,0.11,unmatched
+flowsheet,ARTIST_NAME,,p�r-no,1,DJ R-No,,,0.24,unmatched
 flowsheet,RECORD_LABEL,,Infin� Editions,8,Infiné Éditions,Infinite Greyscale,Éditions Infini,0.93,discogs-search
 flowsheet,RECORD_LABEL,,U?ur Y�cel,1,,,,0.00,unmatched
-flowsheet,SONG_TITLE,,A Sua Divers�o,6,Quell'Uomo Diverso Da Me,,,0.16,unmatched
-flowsheet,SONG_TITLE,,Iris (N�dia Remix),3,,,,0.16,unmatched
+flowsheet,SONG_TITLE,,A Sua Divers�o,6,A Sua Diversão / Não Tem Nada Não,,,0.18,unmatched
+flowsheet,SONG_TITLE,,Iris (N�dia Remix),3,Big Shiny Tunes 3,,,0.08,unmatched
 flowsheet,SONG_TITLE,,Mallku Diabl�n,3,,,,0.26,unmatched
-flowsheet,SONG_TITLE,,N�o Tem Nada N�o,3,No Pintamos Nada,,,0.34,unmatched
+flowsheet,SONG_TITLE,,N�o Tem Nada N�o,3,O Tempora! O Mores!,,,0.24,unmatched
 flowsheet,SONG_TITLE,,Arh�,2,,,,0.00,unmatched
 flowsheet,SONG_TITLE,,J'ai Oubli�,2,J'ai Tout Oublié,,,0.41,unmatched
 flowsheet,SONG_TITLE,,Uno Es �rbol,2,Este àrbol que sembramos,,,0.11,unmatched
@@ -30,20 +30,20 @@ flowsheet,SONG_TITLE,,"COLORATURA, 24� 3' 27.0"" N, 123� 47' 7.5"" E",1,Lumi
 flowsheet,SONG_TITLE,,Ch'uwancha�a ~El Golpe Final~,1,,,,0.07,unmatched
 flowsheet,SONG_TITLE,,"Convocaci�n ""Banger/Diffusion""",1,,,,0.00,unmatched
 flowsheet,SONG_TITLE,,Dod�i,1,Dođi,,,0.48,unmatched
-flowsheet,SONG_TITLE,,Do�a Justicia,1,¡Viva Mi General Francisco Villa!,,,0.07,unmatched
+flowsheet,SONG_TITLE,,Do�a Justicia,1,La Justicia,,,0.49,unmatched
 flowsheet,SONG_TITLE,,Festa Dos P�ssaros,1,,,,0.07,unmatched
-flowsheet,SONG_TITLE,,Gabriel Gabriela Due�ez,1,,,,0.13,unmatched
+flowsheet,SONG_TITLE,,Gabriel Gabriela Due�ez,1,Obra Completa,,,0.12,unmatched
 flowsheet,SONG_TITLE,,Homage to �mer Hayyam,1,,,,0.10,unmatched
-flowsheet,SONG_TITLE,,Los D�as,1,Das Ist Los,,,0.20,unmatched
-flowsheet,SONG_TITLE,,Mentiras Con Cari�o,1,,,,0.28,unmatched
+flowsheet,SONG_TITLE,,Los D�as,1,Los Ronaldos,,,0.23,unmatched
+flowsheet,SONG_TITLE,,Mentiras Con Cari�o,1,Romanticos del caribe,,,0.19,unmatched
 flowsheet,SONG_TITLE,,N�dalap�evad (Ines Daferrari Remix),1,,,,0.00,unmatched
-flowsheet,SONG_TITLE,,Plastic 100�C,1,Plastic Fantastic,,,0.36,unmatched
+flowsheet,SONG_TITLE,,Plastic 100�C,1,Plastic City 100,Plastic City 100,Plastic Beach,0.51,discogs-search
 library,RELEASE_TITLE,,Ballet M�canique,1,Ballet Mécanique,,,1.00,lml-fuzzy
 library,RELEASE_TITLE,,Battles Ol�,1,Battles Olé,,,1.00,lml-fuzzy
 library,RELEASE_TITLE,,Chansons pour le corps; Et si tout enti�re maintenant,1,Chansons pour le corps; Et si tout entiére maintenant,,,1.00,lml-fuzzy
 library,RELEASE_TITLE,,"HACE/26,250'/11� 22.4'N 142� 35.5'E",1,"HACE/26,250'/11° 22.4'N 142° 35.5'E",,,1.00,lml-fuzzy
-library,RELEASE_TITLE,,La B�te,1,The Nuker,,,0.14,unmatched
-library,RELEASE_TITLE,,La For�t,1,Sexe Fort,,,0.40,unmatched
+library,RELEASE_TITLE,,La B�te,1,La Face B,,,0.31,unmatched
+library,RELEASE_TITLE,,La For�t,1,La Forêt,La Foret,Late For The Sky,0.80,discogs-search
 library,RELEASE_TITLE,,Mortelle Randonn�e (Extraits de la Bande Originale du Film),1,Mortelle Randonnée (Extraits De La Bande Originale Du Film),,,0.95,lml-fuzzy
 library,RELEASE_TITLE,,Rock en Espa�ol Vol. One,1,Rock en Español Vol. One,,,1.00,lml-fuzzy
 library,ARTIST_NAME,,�-Ziq [mu-Ziq],10,µ-Ziq,,,0.11,unmatched
@@ -52,15 +52,15 @@ library,ARTIST_NAME,,Damian Nisenson / Jean F�lix Mailloux / Pierre Tanguay,1,
 rotation,RELEASE_TITLE,,A Sua Divers�o / N�o Tem Nada N�o,1,,,,0.00,unmatched
 rotation,RELEASE_TITLE,,Amare Tour� 1973-1980,1,Archiv Produktion 1947-2013,,,0.23,unmatched
 rotation,RELEASE_TITLE,,Midnight Zone (Original Soundtrack to the Film by Julian Charri�re),1,,,,0.11,unmatched
-rotation,RELEASE_TITLE,,Rem�nytelen,1,,,,0.00,unmatched
+rotation,RELEASE_TITLE,,Rem�nytelen,1,Rem​é​nytelen,,,0.85,discogs-search
 rotation,RELEASE_TITLE,,���,1,,,,0.00,unmatched
 rotation,ARTIST_NAME,,Acc�sed,1,,,,0.00,unmatched
 rotation,ARTIST_NAME,,Amare Tour�,1,Amara Toure,,,0.82,lml-fuzzy
 rotation,ARTIST_NAME,,Civilistj�vel! & Mayssa Jallad,1,,,,0.00,unmatched
-rotation,ARTIST_NAME,,Csillagrabl�k,1,,,,0.15,unmatched
+rotation,ARTIST_NAME,,Csillagrabl�k,1,Csillagrablók,,,1.00,discogs-search
 rotation,ARTIST_NAME,,Kai Alc�,1,Kai Alcé,,,1.00,discogs-search
 rotation,ARTIST_NAME,,N�dia & Valentina,1,,,,0.44,unmatched
-rotation,ARTIST_NAME,,Sonido Due�ez,1,,,,0.00,unmatched
+rotation,ARTIST_NAME,,Sonido Due�ez,1,Sonido Dueñez,Sonido Solar,Luis Ortiz (4),0.90,discogs-search
 rotation,ARTIST_NAME,,}�{ (Louise Boghossian and Romain Vasset),1,,,,0.00,unmatched
 rotation,RECORD_LABEL,,GER�USCHMANUFAKTUR,1,,,,0.00,unmatched
 rotation,RECORD_LABEL,,Infin� Editions,1,Infiné Éditions,Infinite Greyscale,Éditions Infini,0.93,discogs-search
