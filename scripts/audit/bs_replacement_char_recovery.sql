@@ -1,5 +1,12 @@
 -- V_BS_FFFD: Lossy-recovery U+FFFD mojibake migration for #863.
 --
+-- The `V_BS_FFFD` prefix mirrors tubafrenzy's V015/V016 naming, but this is
+-- a HAND-APPLIED script, NOT a Drizzle/Flyway-tracked migration — there is
+-- no entry in shared/database/src/migrations/ and the version-control burden
+-- is just `git log -- scripts/audit/bs_replacement_char_recovery.sql`. The
+-- operator runs it via `psql -f` against prod RDS using the EC2-docker
+-- pattern in scripts/query-flowsheet.sh.
+--
 -- Phase 1 audit at scripts/audit/bs_replacement_char_audit.csv
 -- enumerated 65 distinct lossy values across 113 rows in three
 -- tables (rotation, library, flowsheet). Phase 2 proposals at
@@ -12,9 +19,25 @@
 -- 34 UPDATE statements follow. Four rows were dropped
 -- during curation because no canonical was recoverable.
 --
+-- Six of the 34 rows are CURATOR-EDITED canonicals (auto-pass returned
+-- empty proposed_top1; the music director filled in the canonical by
+-- hand). The generator's inclusion rule treats these as approved-for-
+-- migration because their proposed_top1 differs from the auto-pass
+-- output captured in git history (commit d1cb225 pre-curation snapshot).
+-- The curator-edited tuples are:
+--
+--   flowsheet.album_title  L'�?il écoute / Dedans-Dehors          → L'Œil Écoute / Dedans-Dehors
+--   flowsheet.track_title  Mallku Diabl�n                          → Mallku Diablón
+--   flowsheet.track_title  Bliws Afon T�f                          → Bliws Afon Tâf
+--   flowsheet.track_title  Ch'uwancha�a ~El Golpe Final~          → Ch'uwanchaña ~El Golpe Final~
+--   flowsheet.track_title  Convocaci�n "Banger/Diffusion"          → Convocación "Banger/Diffusion"
+--   rotation.artist_name   }�{ (Louise Boghossian and Romain Vasset) → }Ï{ (Louise Boghossian and Romain Vasset)
+--
 -- Pattern: BEGIN; UPDATEs; COMMIT; then the post-amble verifies
 -- that no targeted (table, column, current) tuple still matches
--- after the run (expected count: 0 for every row).
+-- after the run (expected count: 0 for every row). The pre-amble is
+-- a SPOT-CHECK (top-10 by row_count, eyeball before COMMIT); the
+-- post-amble is EXHAUSTIVE across all 34 targeted tuples.
 --
 -- NOT round-trippable: the original characters were already lost
 -- upstream when U+FFFD was written into the data. This migration
@@ -23,6 +46,11 @@
 --
 -- NFC-normalised and zero-width-char-stripped (U+200B/200C/200D/FEFF)
 -- before write to defend Lucene / trgm tokenization downstream.
+--
+-- Idempotency: a successful run leaves zero matching rows for every
+-- targeted lossy. Re-running this script after success is a no-op,
+-- but the pre-amble's BEFORE counts will all be zero — that's expected
+-- on re-runs, not a regression.
 
 -- ===========================================================
 -- Pre-amble audit: rows targeted by this run, by source group.
@@ -31,13 +59,13 @@ SELECT '=== V_BS_FFFD pre-amble: rows targeted per (table, column) ===' AS secti
 
 -- flowsheet.album_title: 8 lossy values, 20 rows total
 -- flowsheet.artist_name: 3 lossy values, 5 rows total
--- flowsheet.record_label: 1 lossy values, 8 rows total
+-- flowsheet.record_label: 1 lossy value, 8 rows total
 -- flowsheet.track_title: 5 lossy values, 7 rows total
 -- library.album_title: 7 lossy values, 7 rows total
 -- library.artist_name: 2 lossy values, 5 rows total
 -- rotation.album_title: 2 lossy values, 2 rows total
 -- rotation.artist_name: 5 lossy values, 5 rows total
--- rotation.record_label: 1 lossy values, 1 rows total
+-- rotation.record_label: 1 lossy value, 1 row total
 
 -- Spot-check the worst offenders to confirm the migration is
 -- about to touch real rows. Eyeball before COMMIT.
@@ -75,6 +103,9 @@ UPDATE wxyc_schema.flowsheet SET album_title = 'Ach Golgatha / Pour Que Les Frui
 UPDATE wxyc_schema.flowsheet SET album_title = 'Ahora Mas que Nunca' WHERE album_title = 'Ahora M�s Que Nunca';
 UPDATE wxyc_schema.flowsheet SET album_title = 'Eydie Gorme' WHERE album_title = 'Eydie Gorm�';
 UPDATE wxyc_schema.flowsheet SET album_title = 'L''Œil Écoute / Dedans-Dehors' WHERE album_title = 'L''�?il écoute / Dedans-Dehors';
+-- The original DJ entered "League of Legends [mojibaked-dash] League Of Legends Worlds Anthems...";
+-- the canonical drops the leading "League of Legends [dash]" prefix because the mojibaked dash
+-- was a stray "artist — album" concatenation, not part of the release title.
 UPDATE wxyc_schema.flowsheet SET album_title = 'League Of Legends Worlds Anthems - Vol. 1: 2014-2023' WHERE album_title = 'League of Legends � League Of Legends Worlds Anthems - Vol. 1: 2014-2023';
 UPDATE wxyc_schema.flowsheet SET artist_name = 'Csillagrablók' WHERE artist_name = 'Csillagrabl�k';
 UPDATE wxyc_schema.flowsheet SET artist_name = 'Sonido Dueñez' WHERE artist_name = 'Sonido Due�ez';
