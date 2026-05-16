@@ -72,5 +72,6 @@
   "0072_drop-rotation-active-album-bin-uniq": "0c2960c694f7ab4eec5ea9280064b2535c38736bb8714f80007690d673d6b791",
   "0073_flowsheet-play-order-idx": "c825132efd611b3d0d4f75488a7774121e4b343bbde4564aca16218403a92cdf",
   "0074_flowsheet-metadata-attempt-pending-covering-idx": "663b37f4c3d17f741a9d70dc9e4534e0f4941058785fec4faa98d01a6673e9e6",
-  "0075_library-identity-substrate": "49b9e4e2dcee9de2b57720efe29b40a9513bf74a7e397c24b0df8e927187cb6d"
+  "0075_library-identity-substrate": "49b9e4e2dcee9de2b57720efe29b40a9513bf74a7e397c24b0df8e927187cb6d",
+  "0076_flowsheet-track-position": "cd5ce9485dce54b87faaad778c06c41ccdf05708614d146dd5c2657a3602fc78"
 }

@@ -1,0 +1,26 @@
+-- BS#835 / E6-4: Add `track_position` column to flowsheet.
+--
+-- Background: the dj-site flowsheet picker (E6-6, downstream of BS#836) lets
+-- DJs select a specific track off a Discogs release when adding an entry.
+-- The selected track's Discogs `release_track.position` (e.g. "A1", "B3",
+-- "1-12") rides through this row so V2 reads can render it. Wire shape
+-- decided in WXYC/wxyc-shared#111 / #134: TEXT because Discogs positions
+-- are free-form strings (vinyl side, multi-disc prefix), not integers.
+--
+-- Nullable, no default, no constraint. NULL is the natural value for legacy
+-- rows, tubafrenzy mirror rows, and free-text DJ entries. The dj-site
+-- picker writes the column; transformToV2 in flowsheet.service.ts projects
+-- it onto the V2 read shape.
+--
+-- DDL-only — no backfill. ALTER TABLE ADD COLUMN of a nullable column is
+-- metadata-only and instant on PostgreSQL 11+, regardless of the 2.6M-row
+-- table size. Same pattern as 0069's metadata_attempt_at addition (see
+-- #511 for the historical lesson).
+--
+-- Project-32 compatibility: BS#891 (C1 metadata_status enum) and BS#897 (D1
+-- album_metadata table) also touch the flowsheet area but on different
+-- columns and different tables; no schema collision. D4's eventual drop of
+-- album-level metadata cols is at least a month out and does not include
+-- this per-entry column.
+
+ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "track_position" text;
