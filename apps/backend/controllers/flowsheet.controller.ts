@@ -231,7 +231,13 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     throw new WxycError('Bad Request, Missing query parameter: track_title', 400);
   }
 
-  if (body.album_id !== undefined) {
+  // Use `!= null` rather than `!== undefined` so an explicit `album_id: null`
+  // (sent by dj-site when the user picks a rotation row whose source has
+  // `album_id IS NULL` — BS#689 surfaced 147 such rows) falls through to the
+  // snapshot-fields branch below. The `!= null` predicate matches both `null`
+  // and `undefined`; only an actual library id enters the lookup branch.
+  // See BS#933.
+  if (body.album_id != null) {
     //backfill album info from library before adding to flowsheet
     const albumInfo = await flowsheet_service.getAlbumFromDB(body.album_id);
 

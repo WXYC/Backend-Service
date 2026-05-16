@@ -440,6 +440,59 @@ describe('flowsheet.controller', () => {
       });
     });
 
+    it('falls through to free-form path when album_id is explicitly null (BS#933)', async () => {
+      // BS#689 made the rotation dropdown LEFT JOIN library so unlinked
+      // rotation rows (album_id IS NULL) become selectable; their dropdown
+      // entries carry a NULL id. dj-site dispatches `album_id: null` along
+      // with the rotation snapshot fields (artist_name / album_title /
+      // record_label). Before the fix, the controller branched on
+      // `body.album_id !== undefined` — `null !== undefined` was true, so
+      // it called getAlbumFromDB(null), which returned undefined, and the
+      // next line TypeErrored when it tried to set record_label on it.
+      // The fix flips the predicate to `!= null` so null falls through to
+      // the snapshot-fields branch.
+      const completedEntry = {
+        id: 3,
+        show_id: activeShow.id,
+        artist_name: 'Coupé Cloué',
+        album_title: 'Maintenant ou Jamais',
+        track_title: 'Manman',
+        record_label: 'Mini Records',
+        album_id: null,
+        rotation_id: 99,
+        play_order: 3,
+        add_time: new Date(),
+      };
+      mockAddTrack.mockResolvedValue(completedEntry);
+
+      const req = createMockBodyReq({
+        artist_name: 'Coupé Cloué',
+        album_title: 'Maintenant ou Jamais',
+        track_title: 'Manman',
+        record_label: 'Mini Records',
+        album_id: null,
+        rotation_id: 99,
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      // getAlbumFromDB must not be invoked — null album_id is not a library lookup.
+      expect(mockGetAlbumFromDB).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(201);
+      expect(mockAddTrack).toHaveBeenCalledWith(
+        expect.objectContaining({
+          artist_name: 'Coupé Cloué',
+          album_title: 'Maintenant ou Jamais',
+          track_title: 'Manman',
+          record_label: 'Mini Records',
+          album_id: null,
+          rotation_id: 99,
+          show_id: activeShow.id,
+        })
+      );
+    });
+
     it('delegates metadata enrichment without artistId for free-form inserts (no album_id)', async () => {
       const completedEntry = {
         id: 2,

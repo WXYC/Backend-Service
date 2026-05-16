@@ -288,6 +288,33 @@ describe('Add to Flowsheet', () => {
     expect(res.body.track_title).toEqual('Carry the Zero');
   });
 
+  test('With album_id explicitly null + rotation snapshot fields (BS#933)', async () => {
+    // BS#689 made the rotation dropdown LEFT JOIN library so unlinked
+    // rotation rows (album_id IS NULL) become selectable. dj-site dispatches
+    // the chosen row with `album_id: null` and the rotation snapshot fields
+    // (artist_name, album_title, record_label). The controller must treat
+    // this as a free-form insert — not a library lookup — and return 201,
+    // not 500. Without the BS#933 fix the snapshot path crashed with a
+    // TypeError because `getAlbumFromDB(null)` returned undefined.
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Coupé Cloué',
+        album_title: 'Maintenant ou Jamais',
+        track_title: 'Manman',
+        record_label: 'Mini Records',
+      })
+      .expect(201);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.artist_name).toEqual('Coupé Cloué');
+    expect(res.body.album_title).toEqual('Maintenant ou Jamais');
+    expect(res.body.track_title).toEqual('Manman');
+    expect(res.body.record_label).toEqual('Mini Records');
+  });
+
   test('Flowsheet Message', async () => {
     const res = await request
       .post('/flowsheet')
