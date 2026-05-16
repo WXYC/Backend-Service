@@ -175,6 +175,9 @@ jobs:
       - name: spacer.gif callsites (filterSpacerGif unification)
         run: scripts/check-spacer-gif-callsites.sh
 
+      - name: Bulk UPDATE + ANALYZE pairing (BS#934)
+        run: node scripts/check-bulk-update-analyze.mjs --strict
+
       - name: Build
         run: npm run build
 
