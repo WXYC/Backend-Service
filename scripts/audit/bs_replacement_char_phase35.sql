@@ -90,3 +90,9 @@ SELECT 'flowsheet' AS tbl, 'album_title' AS col, (SELECT COUNT(*) FROM wxyc_sche
 UNION ALL
 SELECT 'flowsheet' AS tbl, 'record_label' AS col, (SELECT COUNT(*) FROM wxyc_schema.flowsheet WHERE record_label LIKE E'%\uFFFD%') AS remaining
 ORDER BY remaining DESC;
+
+-- See bs_replacement_char_recovery.sql for the ANALYZE rationale (BS#934).
+-- This phase touches flowsheet + rotation only; library wasn't part of the
+-- phase-3.5 curation pass.
+ANALYZE wxyc_schema.flowsheet;
+ANALYZE wxyc_schema.rotation;

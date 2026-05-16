@@ -78,3 +78,10 @@ SET album_id           = m.library_id,
 FROM unique_matches m
 WHERE f.id = m.flowsheet_id
   AND f.album_id IS NULL;
+
+-- See docs/bulk-update-playbook.md / BS#934 for the rationale. The
+-- linkage_source / linkage_confidence / linked_at columns aren't covered
+-- by GIN trigram indexes today, but album_id is referenced by partial
+-- indexes that depend on its stats. Refresh post-rewrite so future
+-- planner choices on linkage-aware queries stay sane.
+ANALYZE wxyc_schema.flowsheet;

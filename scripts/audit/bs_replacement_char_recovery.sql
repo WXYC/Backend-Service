@@ -235,3 +235,18 @@ SELECT 'flowsheet' AS tbl, 'album_title' AS col, (SELECT COUNT(*) FROM wxyc_sche
 UNION ALL
 SELECT 'flowsheet' AS tbl, 'record_label' AS col, (SELECT COUNT(*) FROM wxyc_schema.flowsheet WHERE record_label LIKE E'%\uFFFD%') AS remaining
 ORDER BY remaining DESC;
+
+-- Refresh planner stats on every UPDATEd table so the GIN trigram and
+-- btree indexes that `flowsheet.artist_name`, `flowsheet.track_title`,
+-- `library.artist_name`, etc. carry stay on the trigram path after the
+-- bulk rewrite. Without this, dj-site autocomplete (`/flowsheet/suggest/*`)
+-- can fall off the index and hit the Express 5 s timeout \u2014 the 2026-05-15
+-- regression this script caused (BS#934). ANALYZE cannot run inside a
+-- transaction, so it lives at the file's tail outside any BEGIN/COMMIT.
+-- `artists` is included because `library.artist_name` writes propagate to
+-- it via the cascade trigger from migration 0060.
+-- See docs/bulk-update-playbook.md for the full pattern.
+ANALYZE wxyc_schema.flowsheet;
+ANALYZE wxyc_schema.library;
+ANALYZE wxyc_schema.rotation;
+ANALYZE wxyc_schema.artists;
