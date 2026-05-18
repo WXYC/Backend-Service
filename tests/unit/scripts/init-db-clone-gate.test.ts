@@ -44,10 +44,12 @@ describe('init-db.mjs loadCloneFixture env-var gate (BS#951)', () => {
     // (which goes through docker-compose --profile dev) must keep loading
     // it. Pin that the dev-profile db-init container has the env var set.
     const dbInitBlock = extractServiceBlock('db-init');
-    expect(dbInitBlock).toMatch(/LOAD_CLONE_FIXTURE.*=.*true/i);
+    expect(dbInitBlock).toMatch(/LOAD_CLONE_FIXTURE\s*=\s*true/);
   });
 
   it('does NOT set LOAD_CLONE_FIXTURE for ci-db-init or e2e-db-init', () => {
+    // extractServiceBlock throws if a service header isn't found, so the
+    // negative-match below can't silently pass on a typo / regex break.
     expect(extractServiceBlock('ci-db-init')).not.toMatch(/LOAD_CLONE_FIXTURE/);
     expect(extractServiceBlock('e2e-db-init')).not.toMatch(/LOAD_CLONE_FIXTURE/);
   });
@@ -56,12 +58,21 @@ describe('init-db.mjs loadCloneFixture env-var gate (BS#951)', () => {
 /**
  * Extract a single docker-compose service block by its name. Matches the
  * `^  <name>:` line and everything up to (but not including) the next
- * top-level service header (`^  <ident>:`). Empty string if the service
- * isn't found — callers assert on the content to fail loudly.
+ * top-level service header (`^  <ident>:`). Throws if the service isn't
+ * found — silent fall-through to '' would let negative-match assertions
+ * (`expect(...).not.toMatch(...)`) trivially pass.
+ *
+ * The end-of-file anchor `(?![\s\S])` covers the case where the matched
+ * service is the last block in the file; without it the lookahead
+ * `(?=^\s{2}\w)` would fail and the match would return null.
  */
 function extractServiceBlock(name: string): string {
   const compose = fs.readFileSync(composePath, 'utf-8');
   const escaped = name.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
-  const pattern = new RegExp(`^\\s{2}${escaped}:[\\s\\S]*?(?=^\\s{2}\\w)`, 'm');
-  return compose.match(pattern)?.[0] ?? '';
+  const pattern = new RegExp(`^\\s{2}${escaped}:[\\s\\S]*?(?=^\\s{2}\\w|(?![\\s\\S]))`, 'm');
+  const block = compose.match(pattern)?.[0];
+  if (!block) {
+    throw new Error(`docker-compose service block not found: ${name}`);
+  }
+  return block;
 }
