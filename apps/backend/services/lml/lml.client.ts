@@ -77,7 +77,13 @@ function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  // Surface misconfigurations at startup so an operator who set `=0`
+  // intending to disable the limiter sees their value was rejected
+  // instead of silently falling back. A 0-permit semaphore would
+  // deadlock, which is why we don't accept it.
+  console.warn(`lml.client: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`);
+  return fallback;
 }
 
 /**
@@ -151,16 +157,23 @@ export class TokenBucket {
   }
 
   async consume(count = 1): Promise<void> {
-    this.refill();
-    if (this.tokens >= count) {
-      this.tokens -= count;
-      return;
+    // Loop the slow path. Without it, N callers can each compute the same
+    // waitMs from an empty bucket, sleep for the same interval, wake
+    // together, and all subtract `count` from the freshly refilled tokens
+    // — overshooting the configured rate by ~N×. The loop re-checks the
+    // bucket after each sleep so only the caller that finds enough tokens
+    // proceeds; the others sleep again. Paired with the upstream FIFO
+    // Semaphore, this preserves the configured rate under contention.
+    while (true) {
+      this.refill();
+      if (this.tokens >= count) {
+        this.tokens -= count;
+        return;
+      }
+      const deficit = count - this.tokens;
+      const waitMs = Math.max(1, Math.ceil(deficit / this.refillPerMs));
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
-    const deficit = count - this.tokens;
-    const waitMs = Math.max(1, Math.ceil(deficit / this.refillPerMs));
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
-    this.refill();
-    this.tokens = Math.max(0, this.tokens - count);
   }
 
   get availableTokens(): number {
