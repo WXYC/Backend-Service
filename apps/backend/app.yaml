@@ -37,6 +37,14 @@ components:
           type: string
         request_flag:
           type: boolean
+        track_position:
+          type: string
+          nullable: true
+          description: >
+            Discogs `release_track.position` (e.g. "A1", "B2") captured by the
+            dj-site flowsheet picker (E6-6, dj-site#501). Optional; `null` for
+            entries added without a position. Wired through POST /flowsheet and
+            PATCH /flowsheet by BS#943.
 
     FlowsheetEntryV2:
       type: object
@@ -442,6 +450,12 @@ paths:
                   type: string
                 track_title:
                   type: string
+                track_position:
+                  type: string
+                  nullable: true
+                  description: >
+                    Discogs `release_track.position`; pass `null` to clear.
+                    See FlowsheetEntry.track_position.
                 record_label:
                   type: string
                 request_flag:

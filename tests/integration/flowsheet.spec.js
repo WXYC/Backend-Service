@@ -371,6 +371,65 @@ describe('Add to Flowsheet', () => {
 });
 
 /*
+ * Update Flowsheet Entries
+ */
+describe('Update Flowsheet Entries', () => {
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('PATCH updates track_position end-to-end (BS#943)', async () => {
+    // The unit test for `updateEntry` mocks the service. This pins the
+    // actual UPDATE wire path through Postgres: a row with
+    // `track_position: 'A1'` posted, patched to 'B2', then cleared to null.
+    // Drizzle's `db.update(flowsheet).set(data).returning()` is the entire
+    // wiring on the service side; the PATCH response is the updated row,
+    // so we can read `track_position` directly off the response body.
+    const created = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1, // Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+        track_position: 'A1',
+      })
+      .expect(201);
+
+    expect(created.body.track_position).toEqual('A1');
+    const entry_id = created.body.id;
+    expect(entry_id).toBeDefined();
+
+    const patched = await request
+      .patch('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        entry_id,
+        data: { track_position: 'B2' },
+      })
+      .expect(200);
+
+    expect(patched.body.id).toEqual(entry_id);
+    expect(patched.body.track_position).toEqual('B2');
+
+    const cleared = await request
+      .patch('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        entry_id,
+        data: { track_position: null },
+      })
+      .expect(200);
+
+    expect(cleared.body.id).toEqual(entry_id);
+    expect(cleared.body.track_position).toBeNull();
+  });
+});
+
+/*
  * Retrieve Flowsheet Entries
  */
 describe('Retrieve Flowsheet Entries', () => {
