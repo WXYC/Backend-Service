@@ -16,10 +16,19 @@ jest.mock('../../../apps/backend/services/metadata/metadata.service', () => ({
 }));
 
 const mockCaptureException = jest.fn();
-jest.mock('@sentry/node', () => ({ captureException: mockCaptureException }));
+const mockCaptureMessage = jest.fn();
+jest.mock('@sentry/node', () => ({
+  captureException: mockCaptureException,
+  captureMessage: mockCaptureMessage,
+}));
 
 import { db } from '@wxyc/database';
-import { fireAndForgetMetadataForRow } from '../../../apps/backend/services/metadata/enrichment.service';
+import {
+  _resetInFlightEnrichmentsForTest,
+  drainInFlightEnrichments,
+  fireAndForgetMetadataForRow,
+  getInFlightEnrichmentCount,
+} from '../../../apps/backend/services/metadata/enrichment.service';
 
 /**
  * Render a drizzle `sql` template object to a string for substring assertions.
@@ -266,6 +275,15 @@ describe('fireAndForgetMetadataForRow', () => {
     expect(renderSql(lastWhereArg)).toMatch(/metadata_attempt_at.*IS\s+NULL/i);
   });
 
+  // Drain the registry between drain-suite tests so module-level state
+  // doesn't leak. Each test below either fires a resolving fetch (cleared
+  // by .finally) or explicitly drains. This is the safety net.
+  afterEach(async () => {
+    if (getInFlightEnrichmentCount() > 0) {
+      await drainInFlightEnrichments(1000);
+    }
+  });
+
   it('does not write linkage columns (album_id / linkage_source / linkage_confidence / linked_at)', async () => {
     // `apps/backend/services/flowsheet-linkage.service.ts::setFlowsheetLinkage`
     // owns these four columns. If a metadata UPDATE and a linkage UPDATE
@@ -295,5 +313,116 @@ describe('fireAndForgetMetadataForRow', () => {
     expect(setArgs).not.toHaveProperty('linkage_source');
     expect(setArgs).not.toHaveProperty('linkage_confidence');
     expect(setArgs).not.toHaveProperty('linked_at');
+  });
+});
+
+describe('in-flight enrichment registry + drain (BS#905)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // The earlier `fireAndForgetMetadataForRow` describe block fires
+    // never-resolving promises in a few tests (e.g., the synchronous-return
+    // test). Those entries persist in the module-level registry and would
+    // otherwise inflate this block's counts. Reset isolates the suite.
+    _resetInFlightEnrichmentsForTest();
+  });
+
+  // Belt-and-suspenders: ensure no test leaves residue in the module-level
+  // registry that would influence the next test's getInFlightEnrichmentCount().
+  afterEach(async () => {
+    if (getInFlightEnrichmentCount() > 0) {
+      await drainInFlightEnrichments(1000);
+    }
+  });
+
+  it('registers each fire-and-forget call and unregisters once the promise settles', async () => {
+    mockFetchMetadata.mockResolvedValue({
+      album: { artworkUrl: 'https://i.discogs.com/art.jpg' },
+    });
+
+    expect(getInFlightEnrichmentCount()).toBe(0);
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 1,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+    });
+
+    // Synchronous: the registry must show the entry before any microtasks run.
+    expect(getInFlightEnrichmentCount()).toBe(1);
+
+    // Drain the .then + .catch + .finally chain.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(getInFlightEnrichmentCount()).toBe(0);
+  });
+
+  it('unregisters even when fetchMetadata rejects (failure path still drains via .finally)', async () => {
+    mockFetchMetadata.mockRejectedValue(new Error('LML 502'));
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 2,
+      artistName: 'King Crimson',
+      albumTitle: 'Discipline',
+    });
+
+    expect(getInFlightEnrichmentCount()).toBe(1);
+
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(getInFlightEnrichmentCount()).toBe(0);
+  });
+
+  it('drainInFlightEnrichments returns 0 immediately when the registry is empty', async () => {
+    const remaining = await drainInFlightEnrichments(2000);
+    expect(remaining).toBe(0);
+  });
+
+  it('drainInFlightEnrichments awaits in-flight promises and returns 0 when they settle inside the deadline', async () => {
+    let resolveFetch: (value: unknown) => void = () => undefined;
+    mockFetchMetadata.mockReturnValue(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      })
+    );
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 3,
+      artistName: 'Stereolab',
+      albumTitle: 'Dots and Loops',
+    });
+
+    expect(getInFlightEnrichmentCount()).toBe(1);
+
+    // Resolve the pending fetch on the next tick — well within the deadline.
+    setImmediate(() => resolveFetch(null));
+
+    const remaining = await drainInFlightEnrichments(2000);
+    expect(remaining).toBe(0);
+  });
+
+  it('drainInFlightEnrichments returns the unsettled count after the deadline elapses (no leak past deadline)', async () => {
+    // Never-resolving fetch — a process exit that would have dropped this
+    // enrichment in prod is what the metric is measuring.
+    mockFetchMetadata.mockReturnValue(new Promise(() => undefined));
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 4,
+      artistName: 'Jessica Pratt',
+      albumTitle: 'On Your Own Love Again',
+    });
+    fireAndForgetMetadataForRow({
+      flowsheetId: 5,
+      artistName: 'Juana Molina',
+      albumTitle: 'DOGA',
+    });
+
+    expect(getInFlightEnrichmentCount()).toBe(2);
+
+    // 50 ms is the test's "you're done waiting" deadline. The drain returns
+    // the count of pending promises after the deadline, NOT throws.
+    const remaining = await drainInFlightEnrichments(50);
+    expect(remaining).toBe(2);
   });
 });

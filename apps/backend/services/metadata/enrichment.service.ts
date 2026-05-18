@@ -9,6 +9,13 @@
  * The promise is intentionally not awaited by callers — enrichment must
  * never block the HTTP response. Errors are logged and reported to Sentry
  * under `subsystem='metadata'`, never thrown.
+ *
+ * To make process exits observable (BS#905), each fire-and-forget promise
+ * registers itself in `inFlightEnrichments` and unregisters via `.finally`.
+ * `drainInFlightEnrichments` is called from the SIGTERM/SIGINT shutdown path
+ * in `apps/backend/app.ts` so an exiting BS gets a Sentry breadcrumb naming
+ * how many enrichments were abandoned mid-flight. Post-Epic C the runtime
+ * path is gone and this whole apparatus retires alongside it.
  */
 import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
@@ -26,8 +33,49 @@ export interface EnrichmentInput {
   trackTitle?: string | null;
 }
 
+const inFlightEnrichments = new Set<Promise<unknown>>();
+
+export function getInFlightEnrichmentCount(): number {
+  return inFlightEnrichments.size;
+}
+
+/**
+ * Test-only: clear the registry without awaiting any of the in-flight
+ * promises. Production code must never call this — drained enrichments
+ * still mutate the DB once their fetch resolves, so dropping them on the
+ * floor mid-flight is exactly the bug this module avoids. The leading
+ * underscore + Sentry-ignore convention keeps that intent loud.
+ */
+export function _resetInFlightEnrichmentsForTest(): void {
+  inFlightEnrichments.clear();
+}
+
+/**
+ * Wait up to `deadlineMs` for every in-flight enrichment to settle, then
+ * return the count still pending. Always returns — never throws or rejects
+ * for individual promise rejections (they're already handled via .catch).
+ * Returns 0 immediately when the registry is empty so a healthy shutdown
+ * pays no setTimeout cost.
+ */
+export async function drainInFlightEnrichments(deadlineMs: number): Promise<number> {
+  if (inFlightEnrichments.size === 0) return 0;
+  const snapshot = Array.from(inFlightEnrichments);
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(snapshot),
+      new Promise<void>((resolve) => {
+        timeoutId = setTimeout(resolve, deadlineMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+  return inFlightEnrichments.size;
+}
+
 export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
-  fetchMetadata({
+  const promise = fetchMetadata({
     albumId: input.albumId,
     artistId: input.artistId,
     artistName: input.artistName,
@@ -87,4 +135,13 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
         },
       });
     });
+
+  inFlightEnrichments.add(promise);
+  // .finally chains after the .catch above, so the registry always reaches
+  // size 0 whether the fetch resolved or rejected — drain accuracy depends
+  // on it. Failure to unregister would slow-leak the registry and inflate
+  // the shutdown-time "dropped" count.
+  void promise.finally(() => {
+    inFlightEnrichments.delete(promise);
+  });
 }
