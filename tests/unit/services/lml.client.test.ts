@@ -30,6 +30,10 @@ import {
   LmlClientError,
   checkStreamingAvailability,
   searchLibrary,
+  Semaphore,
+  TokenBucket,
+  getLmlQueueDepth,
+  _resetLmlClientLimitersForTest,
 } from '../../../apps/backend/services/lml/lml.client';
 
 describe('lml.client', () => {
@@ -194,7 +198,7 @@ describe('lml.client', () => {
       });
     });
 
-    it('does not call setAttributes when LML response omits cache_stats', async () => {
+    it('does not project lml.cache.* attributes when LML response omits cache_stats', async () => {
       mockFetch.mockResolvedValue({
         ok: true,
         json: () =>
@@ -204,10 +208,15 @@ describe('lml.client', () => {
       await lookupMetadata('Autechre');
 
       expect(mockStartSpan).toHaveBeenCalledTimes(1);
-      expect(mockSpanSetAttributes).not.toHaveBeenCalled();
+      // BS#906 adds `lml.queue_depth` to setAttributes for every /lookup;
+      // assertion narrows to "no lml.cache.* keys" rather than "never called".
+      const cacheCalls = mockSpanSetAttributes.mock.calls.filter((args) =>
+        Object.keys((args[0] ?? {}) as Record<string, unknown>).some((k) => k.startsWith('lml.cache.'))
+      );
+      expect(cacheCalls).toHaveLength(0);
     });
 
-    it('does not call setAttributes when cache_stats is an array (defensive narrowing)', async () => {
+    it('does not project lml.cache.* attributes when cache_stats is an array (defensive narrowing)', async () => {
       // Defensive narrowing: Object.entries([1, 2, 3]) yields [["0",1],["1",2],["2",3]],
       // which would otherwise project as junk attributes lml.cache.0=1, lml.cache.1=2, ...
       // Guard the projection to require a real plain object (not array, not scalar).
@@ -225,7 +234,10 @@ describe('lml.client', () => {
 
       await lookupMetadata('Autechre');
 
-      expect(mockSpanSetAttributes).not.toHaveBeenCalled();
+      const cacheCalls = mockSpanSetAttributes.mock.calls.filter((args) =>
+        Object.keys((args[0] ?? {}) as Record<string, unknown>).some((k) => k.startsWith('lml.cache.'))
+      );
+      expect(cacheCalls).toHaveLength(0);
     });
 
     it('resolves successfully when span.setAttributes throws (observability must not break the request path)', async () => {
@@ -614,5 +626,157 @@ describe('lml.client', () => {
       expect(calledUrl).not.toContain('artist=');
       expect(calledUrl).not.toContain('limit=');
     });
+  });
+});
+
+describe('Semaphore (BS#906)', () => {
+  it('admits up to N permits immediately; the (N+1)th call queues', async () => {
+    const sem = new Semaphore(2);
+
+    // Two immediate admits.
+    await sem.acquire();
+    await sem.acquire();
+    expect(sem.availablePermits).toBe(0);
+    expect(sem.queueDepth).toBe(0);
+
+    // The third call queues — does NOT resolve until a permit is released.
+    let thirdAcquired = false;
+    const thirdAcquirePromise = sem.acquire().then(() => {
+      thirdAcquired = true;
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(thirdAcquired).toBe(false);
+    expect(sem.queueDepth).toBe(1);
+
+    sem.release();
+    await thirdAcquirePromise;
+    expect(thirdAcquired).toBe(true);
+    expect(sem.queueDepth).toBe(0);
+  });
+
+  it('release before any waiter restores a permit (no negative permits)', async () => {
+    const sem = new Semaphore(2);
+    await sem.acquire();
+    sem.release();
+    sem.release(); // No-op once permits are full — must not exceed capacity.
+    expect(sem.availablePermits).toBe(2);
+  });
+
+  it('FIFO: queued waiters drain in the order they were enqueued', async () => {
+    const sem = new Semaphore(1);
+    await sem.acquire();
+
+    const order: number[] = [];
+    const first = sem.acquire().then(() => order.push(1));
+    const second = sem.acquire().then(() => order.push(2));
+    const third = sem.acquire().then(() => order.push(3));
+
+    expect(sem.queueDepth).toBe(3);
+
+    sem.release(); // first runs
+    await first;
+    expect(order).toEqual([1]);
+    sem.release(); // second runs
+    await second;
+    sem.release(); // third runs
+    await third;
+    expect(order).toEqual([1, 2, 3]);
+  });
+});
+
+describe('TokenBucket (BS#906)', () => {
+  it('admits up to capacity immediately, then waits for refill', async () => {
+    const bucket = new TokenBucket({ capacity: 3, refillPerMinute: 6_000 }); // 100/sec → 1 per 10ms
+
+    // Three immediate consumes succeed without blocking.
+    await bucket.consume(1);
+    await bucket.consume(1);
+    await bucket.consume(1);
+
+    // The 4th must wait for at least one refill (~10ms).
+    const start = Date.now();
+    await bucket.consume(1);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(5);
+  });
+
+  it('refill caps at capacity (no unbounded accumulation)', async () => {
+    const bucket = new TokenBucket({ capacity: 2, refillPerMinute: 60_000 }); // 1 per ms
+    await bucket.consume(1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // After 50 ms of refill, we'd have 50 tokens uncapped — must cap at 2.
+    expect(bucket.availableTokens).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('lml.client rate-aware /lookup wrapper (BS#906)', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env = {
+      ...originalEnv,
+      LIBRARY_METADATA_URL: 'http://lml.test:8000',
+      LML_CLIENT_MAX_CONCURRENT: '3',
+      LML_CLIENT_RATE_PER_MIN: '60000', // 1000/sec — effectively no rate cap in tests
+    };
+    _resetLmlClientLimitersForTest();
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+    _resetLmlClientLimitersForTest();
+  });
+
+  it('caps concurrent /lookup in-flight calls at LML_CLIENT_MAX_CONCURRENT', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let resolveBatch: (() => void) | undefined;
+    const batchReady = new Promise<void>((resolve) => {
+      resolveBatch = resolve;
+    });
+
+    mockFetch.mockImplementation(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await batchReady;
+      inFlight -= 1;
+      return {
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [],
+            search_type: 'none',
+            song_not_found: false,
+            found_on_compilation: false,
+          }),
+      } as unknown as globalThis.Response;
+    });
+
+    // Fire 5 concurrent lookups when MAX_CONCURRENT=3.
+    const calls = [
+      lookupMetadata('Stereolab', 'Dots and Loops'),
+      lookupMetadata('Cat Power', 'Moon Pix'),
+      lookupMetadata('Juana Molina', 'DOGA'),
+      lookupMetadata('Jessica Pratt', 'On Your Own Love Again'),
+      lookupMetadata('Chuquimamani-Condori', 'Edits'),
+    ];
+
+    // Let the first batch reach the fetch chokepoint.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // At most 3 should be in flight — the rest are queued in the semaphore.
+    expect(maxInFlight).toBeLessThanOrEqual(3);
+    expect(getLmlQueueDepth()).toBeGreaterThan(0);
+
+    // Release the batch and let everyone finish.
+    if (resolveBatch) resolveBatch();
+    await Promise.all(calls);
+
+    // After completion, all permits restored, queue empty.
+    expect(getLmlQueueDepth()).toBe(0);
   });
 });

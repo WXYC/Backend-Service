@@ -54,6 +54,148 @@ export { LmlClientError };
 
 const TIMEOUT_MS = 5000;
 
+/**
+ * Rate awareness of LML's Discogs ceilings (BS#906 / G4).
+ *
+ * LML's `/api/v1/lookup` fans out to Discogs on cache miss; its server-side
+ * config caps Discogs at `discogs_max_concurrent=5` + `discogs_rate_limit=
+ * 50/min`. When DJs add tracks in quick succession the BS fire-and-forget
+ * fan-out can outrun those ceilings and pile up inside LML. Mirror the
+ * ceilings on the client so the back-pressure shows up at our chokepoint,
+ * not LML's. Defaults match LML's config; env-overridable so prod can
+ * leave headroom for other LML callers (rom + tubafrenzy).
+ *
+ * Only the `/lookup` chokepoint is wrapped — the other LML endpoints
+ * (release, artist, entity, track-releases, streaming-check, library/search)
+ * are PG-cached and don't share the Discogs ceiling.
+ *
+ * When B4 (#887) extracts `@wxyc/lml-client`, this whole apparatus moves
+ * with the client and stays the chokepoint for every consumer.
+ */
+
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * FIFO permit semaphore. acquire() resolves when a permit is available;
+ * release() returns the permit to the next waiter (or restores it if no one
+ * is waiting). queueDepth/availablePermits are read-only for observability.
+ */
+export class Semaphore {
+  private permits: number;
+  private readonly capacity: number;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(permits: number) {
+    this.permits = permits;
+    this.capacity = permits;
+  }
+
+  async acquire(): Promise<void> {
+    if (this.permits > 0) {
+      this.permits -= 1;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.waiters.push(resolve);
+    });
+  }
+
+  release(): void {
+    const next = this.waiters.shift();
+    if (next) {
+      next();
+    } else if (this.permits < this.capacity) {
+      this.permits += 1;
+    }
+  }
+
+  get queueDepth(): number {
+    return this.waiters.length;
+  }
+
+  get availablePermits(): number {
+    return this.permits;
+  }
+}
+
+/**
+ * Continuous-refill token bucket. consume(n) resolves once n tokens have
+ * been earned; until then the call sleeps for the shortest interval that
+ * could earn the deficit. refillPerMinute matches LML's
+ * discogs_rate_limit=50/min nomenclature so the env var name reads cleanly.
+ */
+export class TokenBucket {
+  private tokens: number;
+  private readonly capacity: number;
+  private readonly refillPerMs: number;
+  private lastRefill: number;
+
+  constructor({ capacity, refillPerMinute }: { capacity: number; refillPerMinute: number }) {
+    this.capacity = capacity;
+    this.tokens = capacity;
+    this.refillPerMs = refillPerMinute / 60_000;
+    this.lastRefill = Date.now();
+  }
+
+  private refill(): void {
+    const now = Date.now();
+    const elapsed = now - this.lastRefill;
+    if (elapsed <= 0) return;
+    this.tokens = Math.min(this.capacity, this.tokens + elapsed * this.refillPerMs);
+    this.lastRefill = now;
+  }
+
+  async consume(count = 1): Promise<void> {
+    this.refill();
+    if (this.tokens >= count) {
+      this.tokens -= count;
+      return;
+    }
+    const deficit = count - this.tokens;
+    const waitMs = Math.max(1, Math.ceil(deficit / this.refillPerMs));
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    this.refill();
+    this.tokens = Math.max(0, this.tokens - count);
+  }
+
+  get availableTokens(): number {
+    this.refill();
+    return this.tokens;
+  }
+}
+
+let lookupSemaphore: Semaphore;
+let lookupTokenBucket: TokenBucket;
+
+function initLimiters(): void {
+  const maxConcurrent = envInt('LML_CLIENT_MAX_CONCURRENT', 5);
+  const ratePerMin = envInt('LML_CLIENT_RATE_PER_MIN', 50);
+  lookupSemaphore = new Semaphore(maxConcurrent);
+  lookupTokenBucket = new TokenBucket({ capacity: ratePerMin, refillPerMinute: ratePerMin });
+}
+
+initLimiters();
+
+/** Number of /lookup calls currently waiting for a permit. */
+export function getLmlQueueDepth(): number {
+  return lookupSemaphore.queueDepth;
+}
+
+/**
+ * Test-only: reinitialize the module-level Semaphore + TokenBucket against
+ * the current `process.env` so a test that mutates env can exercise its
+ * effect. Production code never calls this — the limiter is intentionally
+ * process-wide so concurrent /lookup calls share the same back-pressure.
+ */
+export function _resetLmlClientLimitersForTest(): void {
+  initLimiters();
+}
+
 function getBaseUrl(): string {
   const url = process.env.LIBRARY_METADATA_URL;
   if (!url) {
@@ -184,42 +326,56 @@ export async function lookupBySong(song: string): Promise<LookupResponse> {
  * projection at WXYC/library-metadata-lookup#213.
  */
 async function postLookup(body: LookupBody): Promise<LookupResponse> {
-  return Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
-    const response = await lmlFetch('/api/v1/lookup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+  // BS#906 / G4: Mirror LML's Discogs ceilings on the client so back-pressure
+  // surfaces at the BS chokepoint, not as queueing inside LML. Acquire BEFORE
+  // span start so queue-time isn't blamed on http.client duration.
+  await lookupSemaphore.acquire();
+  try {
+    await lookupTokenBucket.consume(1);
+    return await Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
+      try {
+        span.setAttributes({ 'lml.queue_depth': lookupSemaphore.queueDepth });
+      } catch (err) {
+        console.warn('lml.client: failed to project queue_depth onto span', err);
+      }
+      const response = await lmlFetch('/api/v1/lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const parsed = (await response.json()) as LookupResponse;
+
+      // cache_stats schema is freeform today (additionalProperties: true). Until
+      // wxyc-shared#86 tightens the type, treat it as a loose record and only
+      // forward numeric fields onto the span. Narrow defensively to a real plain
+      // object — Object.entries on a string/array would produce junk attributes
+      // like lml.cache.0=...
+      const stats = (parsed as { cache_stats?: unknown }).cache_stats;
+      if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
+        const attrs: Record<string, number> = {};
+        for (const [key, value] of Object.entries(stats)) {
+          if (typeof value === 'number' && Number.isFinite(value)) {
+            attrs[`lml.cache.${key}`] = value;
+          }
+        }
+        if (Object.keys(attrs).length > 0) {
+          // Observability must never break the request path. If the Sentry SDK
+          // (or a custom transport hook) throws, swallow the error and continue
+          // — the lookup result is what callers depend on.
+          try {
+            span.setAttributes(attrs);
+          } catch (err) {
+            console.warn('lml.client: failed to project cache_stats onto span', err);
+          }
+        }
+      }
+
+      return parsed;
     });
-
-    const parsed = (await response.json()) as LookupResponse;
-
-    // cache_stats schema is freeform today (additionalProperties: true). Until
-    // wxyc-shared#86 tightens the type, treat it as a loose record and only
-    // forward numeric fields onto the span. Narrow defensively to a real plain
-    // object — Object.entries on a string/array would produce junk attributes
-    // like lml.cache.0=...
-    const stats = (parsed as { cache_stats?: unknown }).cache_stats;
-    if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
-      const attrs: Record<string, number> = {};
-      for (const [key, value] of Object.entries(stats)) {
-        if (typeof value === 'number' && Number.isFinite(value)) {
-          attrs[`lml.cache.${key}`] = value;
-        }
-      }
-      if (Object.keys(attrs).length > 0) {
-        // Observability must never break the request path. If the Sentry SDK
-        // (or a custom transport hook) throws, swallow the error and continue
-        // — the lookup result is what callers depend on.
-        try {
-          span.setAttributes(attrs);
-        } catch (err) {
-          console.warn('lml.client: failed to project cache_stats onto span', err);
-        }
-      }
-    }
-
-    return parsed;
-  });
+  } finally {
+    lookupSemaphore.release();
+  }
 }
 
 /**
