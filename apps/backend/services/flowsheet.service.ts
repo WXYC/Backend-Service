@@ -417,6 +417,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
     entry_type: 'show_start',
+    dj_name: dj_info.djName || dj_info.name || null,
     play_order: await nextPlayOrder(new_show[0].id),
     message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString(
       'en-US',
@@ -469,18 +470,19 @@ export const addDJToShow = async (dj_id: string, current_show: Show): Promise<Sh
 };
 
 const createJoinNotification = async (id: string, show_id: number): Promise<FSEntry> => {
-  let dj_name = 'A DJ';
   const dj = (await db.select().from(user).where(eq(user.id, id)).limit(1))[0];
 
-  dj_name = dj?.djName || dj?.name || dj_name;
+  const persisted_dj_name = dj?.djName || dj?.name || null;
+  const display_dj_name = persisted_dj_name ?? 'A DJ';
 
-  const message = `${dj_name} joined the set!`;
+  const message = `${display_dj_name} joined the set!`;
 
   const notification = await db
     .insert(flowsheet)
     .values({
       show_id: show_id,
       entry_type: 'dj_join',
+      dj_name: persisted_dj_name,
       play_order: await nextPlayOrder(show_id),
       message: message,
     })
@@ -511,13 +513,15 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   );
 
   const dj_information = (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0];
-  const dj_name = dj_information?.djName || dj_information?.name || 'A DJ';
+  const persisted_dj_name = dj_information?.djName || dj_information?.name || null;
+  const display_dj_name = persisted_dj_name ?? 'A DJ';
 
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
     entry_type: 'show_end',
+    dj_name: persisted_dj_name,
     play_order: await nextPlayOrder(currentShow.id),
-    message: `End of Show: ${dj_name} left the set at ${new Date().toLocaleString('en-US', {
+    message: `End of Show: ${display_dj_name} left the set at ${new Date().toLocaleString('en-US', {
       timeZone: 'America/New_York',
     })}`,
   });
@@ -551,18 +555,19 @@ export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowD
 };
 
 const createLeaveNotification = async (dj_id: string, show_id: number): Promise<FSEntry> => {
-  let dj_name = 'A DJ';
   const dj = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
-  dj_name = dj?.djName || dj?.name || dj_name;
+  const persisted_dj_name = dj?.djName || dj?.name || null;
+  const display_dj_name = persisted_dj_name ?? 'A DJ';
 
-  const message = `${dj_name} left the set!`;
+  const message = `${display_dj_name} left the set!`;
 
   const notification = await db
     .insert(flowsheet)
     .values({
       show_id: show_id,
       entry_type: 'dj_leave',
+      dj_name: persisted_dj_name,
       play_order: await nextPlayOrder(show_id),
       message: message,
     })
@@ -754,11 +759,12 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
     entry_type: entry.entry_type,
   };
 
-  // dj_name is intentionally not propagated here. It is denormalized onto the
-  // flowsheet row purely to let the search service skip the shows -> auth_user
-  // join (steps 5b.1-5b.3); V2 API consumers should keep deriving the display
-  // name from the show metadata so this denormalization stays an internal
-  // implementation detail of the search path.
+  // For marker entry types (show_start, show_end, dj_join, dj_leave), dj_name is
+  // surfaced directly from the flowsheet.dj_name column — see the v2 contract in
+  // apps/backend/app.yaml. Track entries do not include dj_name in the v2 payload
+  // (the artist_name / album_title / track_title fields carry the relevant
+  // attribution); flowsheet.dj_name on track rows exists solely for the search
+  // service's hot path (search.service.ts, originally steps 5b.1-5b.3).
   switch (entry.entry_type) {
     case 'track':
       return {
@@ -789,58 +795,22 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
 
     case 'show_start':
     case 'show_end': {
-      // Parse DJ name and timestamp from message
-      // Format: "Start of Show: DJ {name} joined the set at {timestamp}"
-      // Format: "End of Show: {name} left the set at {timestamp}"
-      const message = entry.message || '';
-      let dj_name = '';
-      let timestamp = '';
-
-      if (entry.entry_type === 'show_start') {
-        const match = message.match(/^Start of Show: DJ (.+) joined the set at (.+)$/);
-        if (match) {
-          dj_name = match[1];
-          timestamp = match[2];
-        }
-      } else {
-        const match = message.match(/^End of Show: (.+) left the set at (.+)$/);
-        if (match) {
-          dj_name = match[1];
-          timestamp = match[2];
-        }
-      }
-
+      const timestamp = entry.add_time
+        ? entry.add_time.toLocaleString('en-US', { timeZone: 'America/New_York' })
+        : '';
       return {
         ...baseFields,
-        dj_name,
+        dj_name: entry.dj_name ?? '',
         timestamp,
       };
     }
 
     case 'dj_join':
-    case 'dj_leave': {
-      // Parse DJ name from message
-      // Format: "{name} joined the set!" or "{name} left the set!"
-      const message = entry.message || '';
-      let dj_name = '';
-
-      if (entry.entry_type === 'dj_join') {
-        const match = message.match(/^(.+) joined the set!$/);
-        if (match) {
-          dj_name = match[1];
-        }
-      } else {
-        const match = message.match(/^(.+) left the set!$/);
-        if (match) {
-          dj_name = match[1];
-        }
-      }
-
+    case 'dj_leave':
       return {
         ...baseFields,
-        dj_name,
+        dj_name: entry.dj_name ?? '',
       };
-    }
 
     case 'talkset':
     case 'message':
