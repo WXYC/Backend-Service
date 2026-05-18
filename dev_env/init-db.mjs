@@ -293,12 +293,23 @@ async function seedDatabase() {
 /**
  * Load the dev-only prod-clone fixture when present.
  *
- * The fixture lives at `/init/seed-clone.sql` and is mounted only into the
- * `db-init` container (not `ci-db-init`), so its presence is the gate — when
- * the file exists, we replace the small `seed_db.sql` fixture with a
- * pg_dump'd snapshot of prod's `artists / library / rotation / format /
- * genre_artist_crossreference`. CI never sees the file and continues to run
- * against the small seed and its fixed IDs.
+ * Two-part gate (BS#951):
+ *
+ *   1. `process.env.LOAD_CLONE_FIXTURE === 'true'` — explicit opt-in.
+ *      Set by the dev-profile `db-init` service in docker-compose.yml.
+ *      CI's bare `node dev_env/init-db.mjs` invocation never sets it.
+ *   2. `existsSync(clonePath)` — belt-and-suspenders for the dev path
+ *      (e.g. someone deletes seed-clone.sql locally before running
+ *      `npm run db:start`).
+ *
+ * The original BS#947 gate relied on docker-compose mounting the file
+ * only into `db-init` (not `ci-db-init`). That works when docker-compose
+ * is the entry point, but CI runs `node dev_env/init-db.mjs` *directly*
+ * on the GitHub Actions runner's filesystem, where the .sql file is
+ * checked into the repo — so `existsSync` always returned true and the
+ * clone leaked into CI's seed (#951). The explicit env-var gate makes
+ * the dev-vs-CI distinction unambiguous regardless of how init-db.mjs
+ * gets invoked.
  *
  * Shells out to `psql` rather than feeding the file through the postgres-js
  * driver because the dump uses `COPY ... FROM stdin` for compactness, which
@@ -306,9 +317,12 @@ async function seedDatabase() {
  * Dockerfile.init installs `postgresql-client` for this purpose. See BS#947.
  */
 async function loadCloneFixture() {
+  if (process.env.LOAD_CLONE_FIXTURE !== 'true') {
+    return; // CI / unscoped invocations skip the clone (BS#951).
+  }
   const clonePath = join(__dirname, './seed-clone.sql');
   if (!existsSync(clonePath)) {
-    return; // CI path — file isn't mounted there. Silent skip is correct.
+    return; // Dev path with the file removed — silent skip is correct.
   }
 
   console.log(styleText(['bold'], '🪞 Loading prod-clone fixture (dev only)...\n'));

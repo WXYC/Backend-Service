@@ -36,6 +36,12 @@ services:
       - DB_USERNAME=${DB_USERNAME}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
+      # Explicit opt-in (BS#951). The seed-clone.sql file is checked into
+      # the repo, so existsSync alone can't distinguish dev from CI when
+      # init-db.mjs is invoked directly (as CI does). Setting this env var
+      # only on the dev-profile container keeps the clone scoped to
+      # `npm run db:start` and not `node dev_env/init-db.mjs` in CI.
+      - LOAD_CLONE_FIXTURE=true
     restart: 'no' # Only run once
     volumes:
       - ../drizzle.config.ts:/init/drizzle.config.ts
