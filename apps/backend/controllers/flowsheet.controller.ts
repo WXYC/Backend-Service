@@ -186,6 +186,10 @@ export type FSEntryRequestBody = {
   artist_name: string;
   album_title: string;
   track_title: string;
+  // Discogs `release_track.position` for the chosen track when the dj-site
+  // flowsheet picker (E6-6) selected one off a release; NULL/undefined for
+  // free-text entries and message rows. Schema in BS#835 / migration 0076.
+  track_position?: string | null;
   album_id?: number;
   rotation_id?: number;
   record_label: string;
@@ -249,6 +253,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       album_id: body.album_id,
       ...albumInfo,
       track_title: body.track_title,
+      track_position: body.track_position ?? null,
       rotation_id: body.rotation_id,
       request_flag: body.request_flag,
       segue: body.segue ?? false,
@@ -289,6 +294,11 @@ export type UpdateRequestBody = {
   artist_name?: string;
   album_title?: string;
   track_title?: string;
+  // Discogs `release_track.position` updates when the picker is used in edit
+  // mode on an existing row. Service `updateEntry` does a passthrough
+  // `db.update(flowsheet).set(data)` so widening this type is the entire
+  // wiring. Schema in BS#835 / migration 0076.
+  track_position?: string | null;
   record_label?: string;
   label_id?: number;
   request_flag?: boolean;
