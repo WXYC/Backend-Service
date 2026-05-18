@@ -59,9 +59,9 @@ describe('flowsheet-dj-name-backfill: applyBatch', () => {
     expect(sqlText).toMatch(/COALESCE\(\s*u\."dj_name",\s*s\."legacy_dj_name",\s*u\."name"\s*\)/);
   });
 
-  it('restricts the UPDATE to track rows with NULL dj_name within a bounded batch', async () => {
+  it('restricts the UPDATE to track + marker rows with NULL dj_name within a bounded batch', async () => {
     // Three regression guards in one test:
-    //   - entry_type = 'track' filter (matches 0054's precondition guard)
+    //   - entry_type IN (...) covers track + four marker types (#952)
     //   - dj_name IS NULL (idempotency: re-run skips already-backfilled rows)
     //   - LIMIT in an inner SELECT (bounded batch — never an unbounded UPDATE)
     (db.execute as jest.Mock).mockResolvedValueOnce({ count: 5000 });
@@ -70,7 +70,12 @@ describe('flowsheet-dj-name-backfill: applyBatch', () => {
 
     const call = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet[\s\S]*dj_name/i);
     const sqlText = renderSql(call?.[0]);
-    expect(sqlText).toMatch(/entry_type"?\s*=\s*'track'/i);
+    expect(sqlText).toMatch(/entry_type"?\s+IN\s*\(/i);
+    expect(sqlText).toMatch(/'track'/);
+    expect(sqlText).toMatch(/'show_start'/);
+    expect(sqlText).toMatch(/'show_end'/);
+    expect(sqlText).toMatch(/'dj_join'/);
+    expect(sqlText).toMatch(/'dj_leave'/);
     expect(sqlText).toMatch(/dj_name"?\s+IS\s+NULL/i);
     expect(sqlText).toMatch(/LIMIT/i);
   });
@@ -189,18 +194,32 @@ describe('flowsheet-dj-name-backfill: verifyComplete', () => {
     jest.restoreAllMocks();
   });
 
-  it('passes when zero track rows have NULL dj_name', async () => {
+  it('passes when zero track + marker rows have NULL dj_name', async () => {
     (db.execute as jest.Mock).mockResolvedValueOnce([{ missing: 0 }]);
 
     await expect(verifyComplete()).resolves.toBeUndefined();
   });
 
-  it('throws with a remediation hint when track rows still have NULL dj_name', async () => {
+  it('checks all four marker types plus track in the verification query', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ missing: 0 }]);
+
+    await verifyComplete();
+
+    const sqlText = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(sqlText).toMatch(/entry_type"?\s+IN\s*\(/i);
+    expect(sqlText).toMatch(/'track'/);
+    expect(sqlText).toMatch(/'show_start'/);
+    expect(sqlText).toMatch(/'show_end'/);
+    expect(sqlText).toMatch(/'dj_join'/);
+    expect(sqlText).toMatch(/'dj_leave'/);
+  });
+
+  it('throws with a remediation hint when rows still have NULL dj_name', async () => {
     // mockResolvedValue (not Once) so both rejection assertions get the
     // same response — the second await re-invokes verifyComplete.
     (db.execute as jest.Mock).mockResolvedValue([{ missing: 137 }]);
 
-    await expect(verifyComplete()).rejects.toThrow(/137 track row\(s\)/);
+    await expect(verifyComplete()).rejects.toThrow(/137 row\(s\)/);
     await expect(verifyComplete()).rejects.toThrow(/idempotent/i);
   });
 });
