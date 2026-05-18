@@ -708,6 +708,34 @@ describe('TokenBucket (BS#906)', () => {
     // After 50 ms of refill, we'd have 50 tokens uncapped — must cap at 2.
     expect(bucket.availableTokens).toBeLessThanOrEqual(2);
   });
+
+  it('multi-consumer: concurrent consume() calls do not over-subtract from a shared refill', async () => {
+    // Regression: without the slow-path loop, N consumers that all
+    // sleep on the same `waitMs` from an empty bucket would each subtract
+    // `count` on wake — overshooting the rate by N×. With the loop,
+    // only the consumer that finds enough tokens after refill proceeds;
+    // the others sleep again. Net effect under contention is that the
+    // bucket never goes negative and total throughput stays at the
+    // configured rate.
+    const bucket = new TokenBucket({ capacity: 1, refillPerMinute: 6_000 }); // 100/sec
+    // Drain the initial capacity.
+    await bucket.consume(1);
+
+    // Now three consumers race for tokens; the bucket refills 1 every
+    // 10 ms. Without the fix, all three would resolve after the first
+    // shared sleep, leaving the bucket at -2. With the fix, they
+    // serialize at ~10 ms intervals.
+    const start = Date.now();
+    await Promise.all([bucket.consume(1), bucket.consume(1), bucket.consume(1)]);
+    const elapsed = Date.now() - start;
+
+    // 3 tokens × 10 ms each = ~30 ms minimum. Allow generous overhead
+    // for jest's timer scheduling on slower CI machines (typical drift
+    // 5-15 ms per setTimeout under load).
+    expect(elapsed).toBeGreaterThanOrEqual(20);
+    // And the bucket must not be negative — invariant: tokens >= 0.
+    expect(bucket.availableTokens).toBeGreaterThanOrEqual(0);
+  });
 });
 
 describe('lml.client rate-aware /lookup wrapper (BS#906)', () => {
@@ -763,13 +791,19 @@ describe('lml.client rate-aware /lookup wrapper (BS#906)', () => {
       lookupMetadata('Chuquimamani-Condori', 'Edits'),
     ];
 
-    // Let the first batch reach the fetch chokepoint.
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
+    // Poll until the first batch lands at fetch. Polling beats a magic
+    // setImmediate-flush count because the chain depth between
+    // `lookupMetadata` and `mockFetch` (semaphore acquire → token consume
+    // → Sentry.startSpan → lmlFetch → fetch) can change without warning.
+    // Cap at 200 ms so a real regression that never reaches fetch fails
+    // the test loudly rather than hanging.
+    const deadline = Date.now() + 200;
+    while (inFlight < 3 && Date.now() < deadline) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
 
     // At most 3 should be in flight — the rest are queued in the semaphore.
-    expect(maxInFlight).toBeLessThanOrEqual(3);
+    expect(maxInFlight).toBe(3);
     expect(getLmlQueueDepth()).toBeGreaterThan(0);
 
     // Release the batch and let everyone finish.
