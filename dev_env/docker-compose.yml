@@ -43,6 +43,10 @@ services:
       - ../shared/database/src/migrations:/init/database/migrations
       - ./install_extensions.sql:/init/install_extensions.sql
       - ./seed_db.sql:/init/seed_db.sql
+      # Dev-only prod-clone fixture (BS#947). Mounted here but NOT into
+      # ci-db-init, so CI keeps its small seed_db.sql fixture and existing
+      # integration tests' fixed-ID assumptions.
+      - ./seed-clone.sql:/init/seed-clone.sql
 
   ci-db:
     image: postgres:18.0-alpine

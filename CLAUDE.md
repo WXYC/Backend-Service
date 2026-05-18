@@ -150,7 +150,9 @@ npm run db:start         # Start PostgreSQL in Docker (port 5432)
 npm run dev              # Start auth (8082) + backend (8080) concurrently with hot reload
 ```
 
-Stop the database with `npm run db:stop`.
+Stop the database with `npm run db:stop` (this runs `docker compose down -v` — the `-v` drops the `pg-data` named volume, so the dev DB is recreated from scratch on the next `db:start`).
+
+**Dev DB fixture**: `db:start` seeds the dev DB from two files, in order: `dev_env/seed_db.sql` (auth fixtures, test users, genres/formats with fixed IDs — identical to CI) and `dev_env/seed-clone.sql` (a ~14 MB `pg_dump` snapshot of prod's `artists / library / rotation / format / genre_artist_crossreference`, taken via the staging postgres clone — TRUNCATEs the small fixtures from the first file in the same transaction before loading). The clone gives realistic data for UI/feature work; CI never mounts the clone (only `db-init` does) so integration tests keep running against the small seed and the fixed IDs they assume. To refresh the clone, follow the recipe in the comment at the top of `dev_env/seed-clone.sql`.
 
 ### One-time per-clone setup
 

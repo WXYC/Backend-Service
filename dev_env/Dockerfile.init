@@ -8,6 +8,14 @@ COPY dev_env/package.init.json ./package.json
 # Install minimal dependencies (postgres, drizzle-kit, drizzle-orm)
 RUN npm install --omit=dev
 
+# `psql` is needed for the optional clone fixture (dev_env/seed-clone.sql,
+# mounted only into db-init / not ci-db-init). The clone uses pg_dump's
+# `COPY ... FROM stdin` form which the postgres-js JS driver doesn't speak;
+# init-db.mjs shells out to psql when the file is present. See BS#947.
+# Placed after `npm install` so dependency-only Dockerfile edits don't
+# invalidate this layer (and vice versa).
+RUN apk add --no-cache postgresql-client
+
 # Set drizzle env vars for migration paths (matches docker-compose volume mounts)
 ENV SCHEMA_LOC='/init/database'
 ENV MIGRATION_LOC='/init/database/migrations'
