@@ -239,4 +239,61 @@ describe('fireAndForgetMetadataForRow', () => {
       },
     });
   });
+
+  it('UPDATE narrows on metadata_attempt_at IS NULL so a backfill ↔ runtime race cannot double-stamp', async () => {
+    // The drift-repair backfill (`jobs/flowsheet-metadata-backfill/enrich.ts`
+    // line 173) narrows its UPDATE by `WHERE id = $row.id AND
+    // metadata_attempt_at IS NULL`. The runtime path here must do the same
+    // so that a backfill UPDATE that landed first cannot be clobbered by
+    // a runtime UPDATE that races after it (or vice versa). At row-lock
+    // granularity in PG, the second writer's UPDATE then resolves to a
+    // 0-row effect — the stamp stays intact.
+    mockFetchMetadata.mockResolvedValue({
+      album: { artworkUrl: 'https://i.discogs.com/art.jpg' },
+    });
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 42,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const whereCalls = mockDb._chain.where.mock.calls;
+    expect(whereCalls.length).toBeGreaterThan(0);
+    const lastWhereArg = whereCalls[whereCalls.length - 1][0];
+    expect(renderSql(lastWhereArg)).toMatch(/metadata_attempt_at.*IS\s+NULL/i);
+  });
+
+  it('does not write linkage columns (album_id / linkage_source / linkage_confidence / linked_at)', async () => {
+    // `apps/backend/services/flowsheet-linkage.service.ts::setFlowsheetLinkage`
+    // owns these four columns. If a metadata UPDATE and a linkage UPDATE
+    // race on the same flowsheet row, they must touch disjoint columns so
+    // neither clobbers the other. This locks in the column boundary so a
+    // future refactor cannot quietly add e.g. `album_id` to the metadata
+    // set() block.
+    mockFetchMetadata.mockResolvedValue({
+      album: {
+        artworkUrl: 'https://i.discogs.com/art.jpg',
+        discogsUrl: 'https://www.discogs.com/release/12345',
+      },
+      artist: { wikipediaUrl: 'https://en.wikipedia.org/wiki/Autechre' },
+    });
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 42,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setArgs).toBeDefined();
+    expect(setArgs).not.toHaveProperty('album_id');
+    expect(setArgs).not.toHaveProperty('linkage_source');
+    expect(setArgs).not.toHaveProperty('linkage_confidence');
+    expect(setArgs).not.toHaveProperty('linked_at');
+  });
 });
