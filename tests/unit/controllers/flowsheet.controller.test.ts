@@ -15,6 +15,7 @@ const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
+const mockUpdateEntry = jest.fn<() => Promise<Record<string, unknown>>>();
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByPage: mockGetEntriesByPage,
@@ -26,6 +27,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLatestShow: mockGetLatestShow,
   getAlbumFromDB: mockGetAlbumFromDB,
   resolveDjNameForShow: mockResolveDjNameForShow,
+  updateEntry: mockUpdateEntry,
 }));
 
 const mockFetchMetadata = jest.fn<() => Promise<void>>();
@@ -35,7 +37,13 @@ jest.mock('../../../apps/backend/services/metadata/index', () => ({
   fireAndForgetMetadataForRow: mockFireAndForgetMetadataForRow,
 }));
 
-import { getEntries, getLatest, getShowInfo, addEntry } from '../../../apps/backend/controllers/flowsheet.controller';
+import {
+  getEntries,
+  getLatest,
+  getShowInfo,
+  addEntry,
+  updateEntry,
+} from '../../../apps/backend/controllers/flowsheet.controller';
 import WxycError from '../../../apps/backend/utils/error';
 
 // Helper to create mock Express req/res/next
@@ -612,6 +620,117 @@ describe('flowsheet.controller', () => {
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
+    it('forwards track_position into NewFSEntry for the album_id branch (BS#943)', async () => {
+      // The dj-site flowsheet picker (E6-6) calls /proxy/library/{id}/tracks
+      // after a release is selected, then submits the chosen track with the
+      // library `album_id` plus the Discogs `release_track.position` string
+      // (e.g. "A1"). Schema/projection landed in BS#835; this pins the
+      // controller wiring that lets the value reach the DB.
+      const albumInfo = {
+        artist_name: 'Autechre',
+        album_title: 'Confield',
+        record_label: 'Warp',
+        artist_id: 5,
+      };
+      mockGetAlbumFromDB.mockResolvedValue(albumInfo);
+      mockAddTrack.mockResolvedValue({
+        id: 1,
+        show_id: activeShow.id,
+        artist_name: 'Autechre',
+        album_title: 'Confield',
+        track_title: 'VI Scose Poise',
+        track_position: 'A1',
+        album_id: 10,
+        play_order: 1,
+        add_time: new Date(),
+      });
+
+      const req = createMockBodyReq({
+        track_title: 'VI Scose Poise',
+        track_position: 'A1',
+        album_id: 10,
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockAddTrack).toHaveBeenCalledWith(
+        expect.objectContaining({
+          album_id: 10,
+          track_title: 'VI Scose Poise',
+          track_position: 'A1',
+          show_id: activeShow.id,
+        })
+      );
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('forwards track_position into NewFSEntry for the free-form branch (BS#943)', async () => {
+      // Free-form fallback: dj-site sends snapshot fields without album_id but
+      // still carries a position the DJ entered or that survived from a
+      // rotation-snapshot pick.
+      mockAddTrack.mockResolvedValue({
+        id: 2,
+        show_id: activeShow.id,
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+        track_position: 'B2',
+        record_label: 'Sonamos',
+        album_id: null,
+        play_order: 2,
+        add_time: new Date(),
+      });
+
+      const req = createMockBodyReq({
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+        track_position: 'B2',
+        record_label: 'Sonamos',
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockGetAlbumFromDB).not.toHaveBeenCalled();
+      expect(mockAddTrack).toHaveBeenCalledWith(
+        expect.objectContaining({
+          artist_name: 'Juana Molina',
+          track_title: 'la paradoja',
+          track_position: 'B2',
+          show_id: activeShow.id,
+        })
+      );
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('does not forward track_position on the message-only branch (BS#943)', async () => {
+      // Talkset/breakpoint/PSA rows are entry_type != 'track'; the column is
+      // semantically track-only. Even if a malformed payload includes
+      // track_position on a message entry, the controller should not pass it
+      // through.
+      mockAddTrack.mockResolvedValue({
+        id: 3,
+        show_id: activeShow.id,
+        entry_type: 'talkset',
+        message: 'Talkset',
+        play_order: 3,
+        add_time: new Date(),
+      });
+
+      const req = createMockBodyReq({
+        message: 'Talkset',
+        track_position: 'A1',
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockAddTrack).toHaveBeenCalledWith(expect.not.objectContaining({ track_position: expect.anything() }));
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
     it('does not set entry_type to message for track entries', async () => {
       const trackBody = {
         artist_name: 'Autechre',
@@ -641,6 +760,40 @@ describe('flowsheet.controller', () => {
         })
       );
       expect(res.status).toHaveBeenCalledWith(201);
+    });
+  });
+
+  describe('updateEntry', () => {
+    it('forwards track_position from data into the service update payload (BS#943)', async () => {
+      // Picker edit flow: user changes the track on an existing entry; the
+      // PATCH body carries the new position. The service `updateEntry` does a
+      // straight `db.update(flowsheet).set(data)`, so the controller only
+      // needs the type widening — but we pin the contract here so a future
+      // regression that strips fields shows up loudly.
+      mockUpdateEntry.mockResolvedValue({
+        id: 99,
+        track_title: 'la paradoja',
+        track_position: 'A2',
+      });
+
+      const req = {
+        body: {
+          entry_id: 99,
+          data: {
+            track_title: 'la paradoja',
+            track_position: 'A2',
+          },
+        },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await updateEntry(req, res as Response, mockNext);
+
+      expect(mockUpdateEntry).toHaveBeenCalledWith(
+        99,
+        expect.objectContaining({ track_position: 'A2', track_title: 'la paradoja' })
+      );
+      expect(res.status).toHaveBeenCalledWith(200);
     });
   });
 });

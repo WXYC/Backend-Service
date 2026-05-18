@@ -315,6 +315,43 @@ describe('Add to Flowsheet', () => {
     expect(res.body.record_label).toEqual('Mini Records');
   });
 
+  test('With track_position (BS#943, album_id branch)', async () => {
+    // The dj-site flowsheet picker (E6-6) calls /proxy/library/{id}/tracks
+    // after a release pick, then submits the chosen track with the library
+    // `album_id` plus the Discogs `release_track.position` string (e.g. "A1").
+    // BS#835 shipped the column + read projection; this pins the controller
+    // forwarding it through to PG and the V2 read shape returning it.
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1, // Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+        track_position: 'A1',
+      })
+      .expect(201);
+
+    expect(res.body.track_title).toEqual('Carry the Zero');
+    expect(res.body.track_position).toEqual('A1');
+  });
+
+  test('With track_position (BS#943, free-form branch)', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+        track_position: 'B2',
+        record_label: 'Sonamos',
+      })
+      .expect(201);
+
+    expect(res.body.track_title).toEqual('la paradoja');
+    expect(res.body.track_position).toEqual('B2');
+  });
+
   test('Flowsheet Message', async () => {
     const res = await request
       .post('/flowsheet')
