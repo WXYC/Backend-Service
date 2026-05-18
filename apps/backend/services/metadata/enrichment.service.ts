@@ -51,11 +51,18 @@ export function _resetInFlightEnrichmentsForTest(): void {
 }
 
 /**
- * Wait up to `deadlineMs` for every in-flight enrichment to settle, then
- * return the count still pending. Always returns — never throws or rejects
- * for individual promise rejections (they're already handled via .catch).
- * Returns 0 immediately when the registry is empty so a healthy shutdown
- * pays no setTimeout cost.
+ * Wait up to `deadlineMs` for every enrichment in the snapshot taken at call
+ * time to settle, then return the *current registry size* — which may
+ * include promises added during the wait (a request that arrives between
+ * SIGTERM and `server.close()` completing its drain can still fire enrichment
+ * before the HTTP layer rejects it). The returned count is therefore a drop
+ * *estimate*, not a strict count of unsettled snapshot members. That's the
+ * right shape for a `level: 'warning'` Sentry signal; precision was never
+ * the point.
+ *
+ * Never throws or rejects for individual promise rejections (they're already
+ * handled via .catch). Returns 0 immediately when the registry is empty so
+ * a healthy shutdown pays no setTimeout cost.
  */
 export async function drainInFlightEnrichments(deadlineMs: number): Promise<number> {
   if (inFlightEnrichments.size === 0) return 0;

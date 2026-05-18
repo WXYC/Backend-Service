@@ -350,10 +350,11 @@ describe('in-flight enrichment registry + drain (BS#905)', () => {
     // Synchronous: the registry must show the entry before any microtasks run.
     expect(getInFlightEnrichmentCount()).toBe(1);
 
-    // Drain the .then + .catch + .finally chain.
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
+    // Use the drain instead of double-setImmediate so the assertion stays
+    // correct if the .then / .catch / .finally chain depth ever changes.
+    const remaining = await drainInFlightEnrichments(1000);
 
+    expect(remaining).toBe(0);
     expect(getInFlightEnrichmentCount()).toBe(0);
   });
 
@@ -368,9 +369,9 @@ describe('in-flight enrichment registry + drain (BS#905)', () => {
 
     expect(getInFlightEnrichmentCount()).toBe(1);
 
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
+    const remaining = await drainInFlightEnrichments(1000);
 
+    expect(remaining).toBe(0);
     expect(getInFlightEnrichmentCount()).toBe(0);
   });
 
