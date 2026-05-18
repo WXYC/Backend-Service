@@ -17,7 +17,8 @@
 
 import postgres from 'postgres';
 import crypto from 'crypto';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { styleText } from 'node:util';
@@ -290,6 +291,60 @@ async function seedDatabase() {
 }
 
 /**
+ * Load the dev-only prod-clone fixture when present.
+ *
+ * The fixture lives at `/init/seed-clone.sql` and is mounted only into the
+ * `db-init` container (not `ci-db-init`), so its presence is the gate — when
+ * the file exists, we replace the small `seed_db.sql` fixture with a
+ * pg_dump'd snapshot of prod's `artists / library / rotation / format /
+ * genre_artist_crossreference`. CI never sees the file and continues to run
+ * against the small seed and its fixed IDs.
+ *
+ * Shells out to `psql` rather than feeding the file through the postgres-js
+ * driver because the dump uses `COPY ... FROM stdin` for compactness, which
+ * postgres-js's simple-query path can't parse. `psql` handles it natively;
+ * Dockerfile.init installs `postgresql-client` for this purpose. See BS#947.
+ */
+async function loadCloneFixture() {
+  const clonePath = join(__dirname, './seed-clone.sql');
+  if (!existsSync(clonePath)) {
+    return; // CI path — file isn't mounted there. Silent skip is correct.
+  }
+
+  console.log(styleText(['bold'], '🪞 Loading prod-clone fixture (dev only)...\n'));
+
+  const args = [
+    '-h',
+    dbConfig.host,
+    '-p',
+    String(dbConfig.port),
+    '-U',
+    dbConfig.username,
+    '-d',
+    dbConfig.database,
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-f',
+    clonePath,
+    '-q', // quiet — suppress COPY-progress chatter; errors still print
+  ];
+
+  await new Promise((resolve, reject) => {
+    const child = spawn('psql', args, {
+      env: { ...process.env, PGPASSWORD: dbConfig.password },
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`psql exited with code ${code} loading seed-clone.sql`));
+    });
+  });
+
+  console.log('Clone fixture loaded successfully!\n');
+}
+
+/**
  * Verify that critical seed data was persisted.
  *
  * Catches silent failures where the seed appears to succeed but no rows
@@ -352,6 +407,12 @@ async function main() {
       } else {
         await seedDatabase();
         await verifySeedData();
+        // Dev-only: overlay the prod-clone fixture on top of the small seed
+        // (the clone TRUNCATEs the small artists/library/rotation/format/
+        // genre_artist_crossreference rows in the same transaction before
+        // loading the snapshot). File-existence gate keeps CI out — only
+        // db-init mounts seed-clone.sql.
+        await loadCloneFixture();
       }
     }
 
