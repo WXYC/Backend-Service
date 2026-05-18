@@ -11,7 +11,7 @@
  * under `subsystem='metadata'`, never thrown.
  */
 import * as Sentry from '@sentry/node';
-import { eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { db, flowsheet } from '@wxyc/database';
 import { fetchMetadata } from './metadata.service.js';
 
@@ -65,7 +65,16 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
           // recurring drift-repair sweep — see #639.
           metadata_attempt_at: sql`NOW()`,
         })
-        .where(eq(flowsheet.id, input.flowsheetId));
+        // Mirrors the backfill's idempotency guard in
+        // `jobs/flowsheet-metadata-backfill/enrich.ts` line 173. If a
+        // concurrent writer (drift-repair backfill, or — until C5 — a
+        // duplicate runtime call) already stamped this row, our UPDATE
+        // resolves to 0 rows at row-lock granularity and the prior
+        // stamp is preserved. Backfill semantics on no-match preserve
+        // prior values; the runtime nulls them — making the order of
+        // a race race-sensitive. The IS NULL gate ensures only one
+        // landing wins.
+        .where(sql`"id" = ${input.flowsheetId} AND "metadata_attempt_at" IS NULL`);
     })
     .catch((err) => {
       console.error('[Flowsheet] Metadata fetch failed:', err);
