@@ -3,8 +3,7 @@ import { addDJToShow, leaveShow } from '../../../apps/backend/services/flowsheet
 
 const makeAwaitablePlayOrderChain = (max: number) => {
   const chain = createMockQueryChain();
-  (chain as unknown as { then: (resolve: (v: unknown) => void) => void }).then = (resolve) =>
-    resolve([{ max }]);
+  (chain as unknown as { then: (resolve: (v: unknown) => void) => void }).then = (resolve) => resolve([{ max }]);
   return chain;
 };
 
@@ -97,9 +96,7 @@ describe('createLeaveNotification (via leaveShow service)', () => {
 
   it('persists dj_name (from user.djName) on the dj_leave flowsheet row', async () => {
     // show_djs update returning the updated row
-    db.update.mockReturnValueOnce(
-      createMockQueryChain([{ show_id: 42, dj_id: 'user-2', active: false }])
-    );
+    db.update.mockReturnValueOnce(createMockQueryChain([{ show_id: 42, dj_id: 'user-2', active: false }]));
 
     // user lookup
     const userSelect = createMockQueryChain();
@@ -125,9 +122,7 @@ describe('createLeaveNotification (via leaveShow service)', () => {
   });
 
   it('falls back to user.name when djName is null', async () => {
-    db.update.mockReturnValueOnce(
-      createMockQueryChain([{ show_id: 42, dj_id: 'user-2', active: false }])
-    );
+    db.update.mockReturnValueOnce(createMockQueryChain([{ show_id: 42, dj_id: 'user-2', active: false }]));
 
     const userSelect = createMockQueryChain();
     userSelect.limit.mockResolvedValue([{ djName: null, name: 'Josh Davis' }]);
