@@ -240,6 +240,49 @@ describe('lml.client', () => {
       expect(cacheCalls).toHaveLength(0);
     });
 
+    // E1 / BS#901: LML#354 added `pg_negative_hits` and `pg_negative_misses`
+    // to cache_stats. The existing projection iterates every numeric field,
+    // so these keys flow through with zero code change. This test pins that
+    // contract — if a future refactor narrows the projection (e.g., a hard-
+    // coded whitelist of known keys), the new keys would silently disappear
+    // from Sentry traces and we'd lose visibility into the negative-cache
+    // hit rate post-deploy. Companion to WXYC/library-metadata-lookup#341.
+    it('projects pg_negative_hits and pg_negative_misses onto the span (LML#341/A4 cache_stats)', async () => {
+      const cache_stats = {
+        memory_hits: 0,
+        pg_hits: 0,
+        pg_misses: 0,
+        pg_negative_hits: 5,
+        pg_negative_misses: 3,
+        api_calls: 0,
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [],
+            search_type: 'none',
+            song_not_found: false,
+            found_on_compilation: false,
+            cache_stats,
+          }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield');
+
+      // Both new keys must reach the span as lml.cache.<key>.
+      const projected = mockSpanSetAttributes.mock.calls
+        .map((args) => (args[0] ?? {}) as Record<string, unknown>)
+        .find((attrs) => 'lml.cache.pg_negative_hits' in attrs);
+      expect(projected).toBeDefined();
+      expect(projected).toEqual(
+        expect.objectContaining({
+          'lml.cache.pg_negative_hits': 5,
+          'lml.cache.pg_negative_misses': 3,
+        })
+      );
+    });
+
     it('resolves successfully when span.setAttributes throws (observability must not break the request path)', async () => {
       // Wrapping in try/catch keeps lookupMetadata's contract: a Sentry/SDK bug
       // in setAttributes must not surface as a failed metadata lookup.
