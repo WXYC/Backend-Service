@@ -526,14 +526,6 @@ export const flowsheet = wxyc_schema.table(
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
     track_title: varchar('track_title', { length: 128 }),
-    // Discogs `release_track.position` (vinyl side or multi-disc prefix like
-    // "A1", "B3", "1-12"). Written by the dj-site flowsheet picker (E6-6)
-    // when a user selects a specific track off a release; NULL for legacy
-    // rows, tubafrenzy mirror rows, and free-text entries. Wire shape decided
-    // in WXYC/wxyc-shared#111 / #134 — TEXT because Discogs positions are
-    // free-form strings, not integers. Projected onto V2 reads by
-    // `transformToV2`.
-    track_position: text('track_position'),
     album_title: varchar('album_title', { length: 128 }),
     artist_name: varchar('artist_name', { length: 128 }),
     record_label: varchar('record_label', { length: 128 }),

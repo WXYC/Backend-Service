@@ -29,7 +29,6 @@ const createBaseEntry = (overrides: Partial<IFSEntry & { metadata?: Partial<IFSE
     rotation_id: null,
     entry_type: 'track',
     track_title: null,
-    track_position: null,
     album_title: null,
     artist_name: null,
     record_label: null,
@@ -125,32 +124,6 @@ describe('flowsheet.service', () => {
         const result = transformToV2(entry);
 
         expect(result.rotation_bin).toBeNull();
-      });
-
-      it('includes track_position when set by the flowsheet picker', () => {
-        const entry = createBaseEntry({
-          entry_type: 'track',
-          artist_name: 'Autechre',
-          album_title: 'Confield',
-          track_title: 'VI Scose Poise',
-          track_position: 'A1',
-        });
-
-        const result = transformToV2(entry);
-
-        expect(result.track_position).toBe('A1');
-      });
-
-      it('includes track_position as null when unset (free-text or legacy row)', () => {
-        const entry = createBaseEntry({
-          entry_type: 'track',
-          artist_name: 'Juana Molina',
-          track_position: null,
-        });
-
-        const result = transformToV2(entry);
-
-        expect(result.track_position).toBeNull();
       });
 
       it('includes label_id in track entries', () => {
