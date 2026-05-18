@@ -71,8 +71,8 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
         // duplicate runtime call) already stamped this row, our UPDATE
         // resolves to 0 rows at row-lock granularity and the prior
         // stamp is preserved. Backfill semantics on no-match preserve
-        // prior values; the runtime nulls them — making the order of
-        // a race race-sensitive. The IS NULL gate ensures only one
+        // prior values; the runtime nulls them — so the race outcome
+        // is order-sensitive. The IS NULL gate ensures only one
         // landing wins.
         .where(sql`"id" = ${input.flowsheetId} AND "metadata_attempt_at" IS NULL`);
     })
