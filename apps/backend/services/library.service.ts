@@ -314,6 +314,31 @@ export async function getDiscogsReleaseIdByLegacyId(legacyId: number): Promise<n
   return rows[0]?.discogs_release_id ?? null;
 }
 
+/**
+ * Look up the resolved Discogs release id for a rotation row by its id.
+ * Joins `rotation` → `library_identity` via `rotation.album_id = library_identity.library_id`.
+ *
+ * Returns null when any of these holds (the picker degrades to free-text):
+ *   - rotation row doesn't exist,
+ *   - rotation row has `album_id IS NULL` (unlinked — ~49% of active prod rows),
+ *   - the album row has no `library_identity` entry (not yet backfilled by BS#802), or
+ *   - the identity row has no resolved `discogs_release_id`.
+ *
+ * Used by `/library/rotation/:rotation_id/tracks` (BS#940) to compose against
+ * LML's `/api/v1/discogs/release/{id}` for the rotation entry mode picker.
+ * Parallel to `getDiscogsReleaseIdByLegacyId` (BS#836), which the catalog-search
+ * picker uses via `legacy_release_id`.
+ */
+export async function getDiscogsReleaseIdByRotationId(rotationId: number): Promise<number | null> {
+  const rows = await db
+    .select({ discogs_release_id: library_identity.discogs_release_id })
+    .from(rotation)
+    .innerJoin(library_identity, eq(library_identity.library_id, rotation.album_id))
+    .where(eq(rotation.id, rotationId))
+    .limit(1);
+  return rows[0]?.discogs_release_id ?? null;
+}
+
 export const updateOnStreaming = async (id: number, on_streaming: boolean | null) => {
   const response = await db.update(library).set({ on_streaming }).where(eq(library.id, id)).returning();
   return response[0];
