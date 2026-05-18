@@ -795,9 +795,7 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
 
     case 'show_start':
     case 'show_end': {
-      const timestamp = entry.add_time
-        ? entry.add_time.toLocaleString('en-US', { timeZone: 'America/New_York' })
-        : '';
+      const timestamp = entry.add_time ? entry.add_time.toLocaleString('en-US', { timeZone: 'America/New_York' }) : '';
       return {
         ...baseFields,
         dj_name: entry.dj_name ?? '',

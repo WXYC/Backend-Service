@@ -3,8 +3,7 @@ import { endShow } from '../../../apps/backend/services/flowsheet.service';
 
 const makeAwaitablePlayOrderChain = (max: number) => {
   const chain = createMockQueryChain();
-  (chain as unknown as { then: (resolve: (v: unknown) => void) => void }).then = (resolve) =>
-    resolve([{ max }]);
+  (chain as unknown as { then: (resolve: (v: unknown) => void) => void }).then = (resolve) => resolve([{ max }]);
   return chain;
 };
 
