@@ -217,7 +217,7 @@ npm run test:integration
 - Location: `tests/integration/**/*.spec.js`
 - Setup: `tests/setup/integration.setup.js` with `tests/setup/globalSetup.js`
 - Tests run sequentially (`--runInBand`) because they share show state, DJ sessions, and flowsheet entries
-- 30-second timeout per test, bail on first failure
+- 30-second timeout per test
 - Generates HTML report at `tests/report/report.html`
 
 ### CI mock
