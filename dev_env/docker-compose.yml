@@ -185,6 +185,14 @@ services:
       - METADATA_ALBUM_CACHE_MAX_SIZE=${METADATA_ALBUM_CACHE_MAX_SIZE:-1000}
       - METADATA_ARTIST_CACHE_MAX_SIZE=${METADATA_ARTIST_CACHE_MAX_SIZE:-500}
       - METADATA_ROTATION_PRIORITY=${METADATA_ROTATION_PRIORITY:-2.0}
+      # LML client limiter: disable in CI. The integration suite runs hundreds
+      # of fire-and-forget /lookup calls across spec files under --runInBand;
+      # the module-level TokenBucket(50/min) would drain partway through and
+      # subsequent calls would queue ~1200ms each, timing out metadata-lml
+      # tests at 30s (BS#955). Mirrors the unit-test override convention at
+      # tests/unit/services/lml.client.test.ts:792-793.
+      - LML_CLIENT_MAX_CONCURRENT=10000
+      - LML_CLIENT_RATE_PER_MIN=60000
       - USE_MOCK_SERVICES=false
       # Anonymous device authentication
       - ANON_DEVICE_JWT_SECRET=${ANON_DEVICE_JWT_SECRET:-ci-test-secret-key-for-anonymous-devices}
