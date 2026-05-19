@@ -17,7 +17,8 @@
 
 import postgres from 'postgres';
 import crypto from 'crypto';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { styleText } from 'node:util';
@@ -290,6 +291,74 @@ async function seedDatabase() {
 }
 
 /**
+ * Load the dev-only prod-clone fixture when present.
+ *
+ * Two-part gate (BS#951):
+ *
+ *   1. `process.env.LOAD_CLONE_FIXTURE === 'true'` — explicit opt-in.
+ *      Set by the dev-profile `db-init` service in docker-compose.yml.
+ *      CI's bare `node dev_env/init-db.mjs` invocation never sets it.
+ *   2. `existsSync(clonePath)` — belt-and-suspenders for the dev path
+ *      (e.g. someone deletes seed-clone.sql locally before running
+ *      `npm run db:start`).
+ *
+ * The original BS#947 gate relied on docker-compose mounting the file
+ * only into `db-init` (not `ci-db-init`). That works when docker-compose
+ * is the entry point, but CI runs `node dev_env/init-db.mjs` *directly*
+ * on the GitHub Actions runner's filesystem, where the .sql file is
+ * checked into the repo — so `existsSync` always returned true and the
+ * clone leaked into CI's seed (#951). The explicit env-var gate makes
+ * the dev-vs-CI distinction unambiguous regardless of how init-db.mjs
+ * gets invoked.
+ *
+ * Shells out to `psql` rather than feeding the file through the postgres-js
+ * driver because the dump uses `COPY ... FROM stdin` for compactness, which
+ * postgres-js's simple-query path can't parse. `psql` handles it natively;
+ * Dockerfile.init installs `postgresql-client` for this purpose. See BS#947.
+ */
+async function loadCloneFixture() {
+  if (process.env.LOAD_CLONE_FIXTURE !== 'true') {
+    return; // CI / unscoped invocations skip the clone (BS#951).
+  }
+  const clonePath = join(__dirname, './seed-clone.sql');
+  if (!existsSync(clonePath)) {
+    return; // Dev path with the file removed — silent skip is correct.
+  }
+
+  console.log(styleText(['bold'], '🪞 Loading prod-clone fixture (dev only)...\n'));
+
+  const args = [
+    '-h',
+    dbConfig.host,
+    '-p',
+    String(dbConfig.port),
+    '-U',
+    dbConfig.username,
+    '-d',
+    dbConfig.database,
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-f',
+    clonePath,
+    '-q', // quiet — suppress COPY-progress chatter; errors still print
+  ];
+
+  await new Promise((resolve, reject) => {
+    const child = spawn('psql', args, {
+      env: { ...process.env, PGPASSWORD: dbConfig.password },
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`psql exited with code ${code} loading seed-clone.sql`));
+    });
+  });
+
+  console.log('Clone fixture loaded successfully!\n');
+}
+
+/**
  * Verify that critical seed data was persisted.
  *
  * Catches silent failures where the seed appears to succeed but no rows
@@ -352,6 +421,12 @@ async function main() {
       } else {
         await seedDatabase();
         await verifySeedData();
+        // Dev-only: overlay the prod-clone fixture on top of the small seed
+        // (the clone TRUNCATEs the small artists/library/rotation/format/
+        // genre_artist_crossreference rows in the same transaction before
+        // loading the snapshot). File-existence gate keeps CI out — only
+        // db-init mounts seed-clone.sql.
+        await loadCloneFixture();
       }
     }
 

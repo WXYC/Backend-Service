@@ -15,7 +15,16 @@ const MIRROR_API_KEY = process.env.MIRROR_API_KEY ?? '';
 /** In-memory map: Backend-Service play_order → tubafrenzy entry ID */
 const entryIdMap = new Map<number, number>();
 
-/** In-memory map: Backend-Service show ID → tubafrenzy show ID */
+/**
+ * In-memory map: Backend-Service show ID → tubafrenzy show ID.
+ *
+ * Process-local, non-durable. Populated lazily by `cacheShowId` after a
+ * successful `mirrorCreateShow`; cleared on process exit. On BS restart the
+ * map starts empty — restart resilience comes from `shows.legacy_show_id`
+ * (persisted by `flowsheet.mirror.ts:52` after the same `mirrorCreateShow`
+ * call) which the mirror read path falls back to when the cache misses
+ * (`flowsheet.mirror.ts:84`: `getCachedShowId(show.id) ?? show.legacy_show_id`).
+ */
 const showIdMap = new Map<number, number>();
 
 interface MirrorEntry {

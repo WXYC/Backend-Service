@@ -102,7 +102,15 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       const albumTitle = truncate(entry.releaseTitle, 128);
       const trackTitle = truncate(entry.songTitle, 128);
 
-      const upserted = await db
+      // INSERT ... ON CONFLICT DO NOTHING RETURNING { id }: either we win
+      // the insert and PG hands back exactly one row, or a concurrent
+      // INSERT / prior webhook delivery already claimed the
+      // `legacy_entry_id` and RETURNING is empty. The empty-RETURNING
+      // signal replaces the previous `(xmax = 0)` system-column trick
+      // (BS#909): same correctness, no MVCC-internal dependency, race-
+      // safe under concurrent webhook delivery (acceptance criterion (c)
+      // — exactly one delivery fires enrichment per legacy_entry_id).
+      const inserted = await db
         .insert(flowsheet)
         .values({
           legacy_entry_id: entry.id,
@@ -118,35 +126,42 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           play_order: entry.sequenceWithinShow ?? 0,
           add_time: entry.startTime ? new Date(entry.startTime) : new Date(),
         })
-        .onConflictDoUpdate({
-          target: flowsheet.legacy_entry_id,
-          set: {
-            artist_name: sql`excluded.artist_name`,
-            album_title: sql`excluded.album_title`,
-            track_title: sql`excluded.track_title`,
-            record_label: sql`excluded.record_label`,
-            message: sql`excluded.message`,
-            request_flag: sql`excluded.request_flag`,
-            entry_type: sql`excluded.entry_type`,
-          },
-        })
-        // `(xmax = 0)` distinguishes a fresh INSERT from an UPDATE branch:
-        // a row produced by INSERT has xmax=0 (no prior tx touched it),
-        // while the DO UPDATE branch sets xmax to the current tx id. We
-        // gate enrichment on this so benign retries / no-op updates from
-        // tubafrenzy don't re-fetch from LML and re-write the 10 metadata
-        // columns (each rewrite triggers CDC + search_doc tsvector regen
-        // + 6-index churn). Backfill is the safety net for rows whose
-        // first INSERT enrichment returned null.
-        .returning({ id: flowsheet.id, created: sql<boolean>`(xmax = 0)` });
+        .onConflictDoNothing()
+        .returning({ id: flowsheet.id });
+
+      let upsertedRow = inserted[0];
+      const created = !!upsertedRow;
+
+      if (!created) {
+        // Conflict path: refresh the mutable subset of fields on the row
+        // tubafrenzy is updating. Matches the original ON CONFLICT DO
+        // UPDATE set-list — show_id / play_order / segue / add_time stay
+        // anchored to the first INSERT's values, mutable metadata-ish
+        // fields move with the latest webhook payload.
+        const updated = await db
+          .update(flowsheet)
+          .set({
+            artist_name: artistName,
+            album_title: albumTitle,
+            track_title: trackTitle,
+            record_label: truncate(entry.labelName, 128),
+            message: isMsgType ? truncate(entry.artistName, 250) : null,
+            request_flag: !!entry.requestFlag,
+            entry_type: entryType,
+          })
+          .where(eq(flowsheet.legacy_entry_id, entry.id))
+          .returning({ id: flowsheet.id });
+        upsertedRow = updated[0];
+      }
 
       // Trigger LML metadata enrichment for tracks. Fire-and-forget: errors
       // are caught inside fireAndForgetMetadataForRow and reported to Sentry,
-      // never propagated. This is the only enrichment trigger for entries
-      // arriving via tubafrenzy — the dj-site addEntry controller has its
-      // own call site.
-      const upsertedRow = upserted[0];
-      if (upsertedRow?.created && entryType === 'track' && artistName) {
+      // never propagated. Only fires on the *fresh INSERT* branch so benign
+      // tubafrenzy retries don't trigger LML re-fetch + 10-column rewrite +
+      // CDC/index churn on every duplicate webhook delivery. The historical
+      // drain at jobs/flowsheet-metadata-backfill/ is the safety net for
+      // rows whose first INSERT enrichment returned null.
+      if (created && upsertedRow && entryType === 'track' && artistName) {
         fireAndForgetMetadataForRow({
           flowsheetId: upsertedRow.id,
           artistName,

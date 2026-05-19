@@ -506,11 +506,34 @@ export const flowsheet = wxyc_schema.table(
     show_id: integer('show_id').references(() => shows.id, { onDelete: 'set null' }),
     album_id: integer('album_id').references(() => library.id, { onDelete: 'set null' }),
     rotation_id: integer('rotation_id').references(() => rotation.id, { onDelete: 'set null' }),
+    // Overloaded across three orthogonal uses with different correctness
+    // requirements (BS#908). Any new write site must register in
+    // scripts/check-legacy-entry-id-writes.mjs ALLOWLIST with a rationale:
+    //   1. Webhook upsert target — apps/backend/routes/internal.route.ts
+    //      uses `ON CONFLICT (legacy_entry_id) DO UPDATE` keyed on the
+    //      tubafrenzy-assigned entry ID.
+    //   2. Mirror loop-guard — apps/backend/middleware/legacy/flowsheet.mirror.ts
+    //      reads `legacy_entry_id != null` as a boolean meaning "this row
+    //      came from tubafrenzy, do not mirror back" (avoids an infinite
+    //      ETL → mirror → webhook → ETL loop).
+    //   3. ETL incremental sync key — jobs/flowsheet-etl/job.ts uses the
+    //      same `ON CONFLICT (legacy_entry_id)` shape as #1.
+    // A future change that populates legacy_entry_id to a placeholder for
+    // non-tubafrenzy rows would silently break use #2; the CI check at
+    // scripts/check-legacy-entry-id-writes.mjs is the guardrail.
     legacy_entry_id: integer('legacy_entry_id'),
     legacy_release_id: integer('legacy_release_id'),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     entry_type: flowsheetEntryTypeEnum('entry_type').notNull().default('track'),
     track_title: varchar('track_title', { length: 128 }),
+    // Discogs `release_track.position` (vinyl side or multi-disc prefix like
+    // "A1", "B3", "1-12"). Written by the dj-site flowsheet picker (E6-6)
+    // when a user selects a specific track off a release; NULL for legacy
+    // rows, tubafrenzy mirror rows, and free-text entries. Wire shape decided
+    // in WXYC/wxyc-shared#111 / #134 — TEXT because Discogs positions are
+    // free-form strings, not integers. Projected onto V2 reads by
+    // `transformToV2`.
+    track_position: text('track_position'),
     album_title: varchar('album_title', { length: 128 }),
     artist_name: varchar('artist_name', { length: 128 }),
     record_label: varchar('record_label', { length: 128 }),

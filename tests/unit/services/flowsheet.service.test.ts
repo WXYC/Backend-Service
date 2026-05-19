@@ -29,6 +29,7 @@ const createBaseEntry = (overrides: Partial<IFSEntry & { metadata?: Partial<IFSE
     rotation_id: null,
     entry_type: 'track',
     track_title: null,
+    track_position: null,
     album_title: null,
     artist_name: null,
     record_label: null,
@@ -38,6 +39,7 @@ const createBaseEntry = (overrides: Partial<IFSEntry & { metadata?: Partial<IFSE
     segue: false,
     message: null,
     add_time: new Date('2024-01-15T12:00:00Z'),
+    dj_name: null,
     rotation_bin: null,
     on_streaming: null,
     metadata: {
@@ -124,6 +126,32 @@ describe('flowsheet.service', () => {
         const result = transformToV2(entry);
 
         expect(result.rotation_bin).toBeNull();
+      });
+
+      it('includes track_position when set by the flowsheet picker', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+          track_title: 'VI Scose Poise',
+          track_position: 'A1',
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.track_position).toBe('A1');
+      });
+
+      it('includes track_position as null when unset (free-text or legacy row)', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          artist_name: 'Juana Molina',
+          track_position: null,
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.track_position).toBeNull();
       });
 
       it('includes label_id in track entries', () => {
@@ -214,23 +242,27 @@ describe('flowsheet.service', () => {
     });
 
     describe('show_start entries', () => {
-      it('parses dj_name and timestamp from message', () => {
+      it('returns dj_name from the column (not regex-parsed from message)', () => {
         const entry = createBaseEntry({
           entry_type: 'show_start',
-          message: 'Start of Show: DJ Cool Cat joined the set at 1/15/2024, 7:00:00 PM',
+          dj_name: 'Cool Cat',
+          // Deliberately malformed message to prove the serializer no longer reads it
+          message: 'this is not the canonical format',
+          add_time: new Date('2024-01-16T00:00:00Z'),
         });
 
         const result = transformToV2(entry);
 
         expect(result.entry_type).toBe('show_start');
         expect(result.dj_name).toBe('Cool Cat');
+        // timestamp derived from add_time in en-US America/New_York locale
         expect(result.timestamp).toBe('1/15/2024, 7:00:00 PM');
       });
 
       it('excludes track-specific fields from show_start entries', () => {
         const entry = createBaseEntry({
           entry_type: 'show_start',
-          message: 'Start of Show: DJ Test joined the set at 1/15/2024, 7:00:00 PM',
+          dj_name: 'Test',
           artist_name: 'should not appear',
           album_title: 'should not appear',
         });
@@ -243,11 +275,15 @@ describe('flowsheet.service', () => {
         expect(result.rotation_bin).toBeUndefined();
       });
 
-      it('handles malformed show_start message gracefully', () => {
+      it('returns empty strings when dj_name is null and add_time is missing', () => {
         const entry = createBaseEntry({
           entry_type: 'show_start',
-          message: 'Some other message format',
+          dj_name: null,
         });
+        // The schema-inferred type marks add_time as non-null, but legacy rows
+        // can carry a null value through the read path. Force it via override
+        // to exercise the empty-string fallback.
+        (entry as { add_time: Date | null }).add_time = null;
 
         const result = transformToV2(entry);
 
@@ -258,10 +294,12 @@ describe('flowsheet.service', () => {
     });
 
     describe('show_end entries', () => {
-      it('parses dj_name and timestamp from message', () => {
+      it('returns dj_name from the column (not regex-parsed from message)', () => {
         const entry = createBaseEntry({
           entry_type: 'show_end',
-          message: 'End of Show: DJ Night Owl left the set at 1/15/2024, 10:00:00 PM',
+          dj_name: 'DJ Night Owl',
+          message: 'not the canonical format',
+          add_time: new Date('2024-01-16T03:00:00Z'),
         });
 
         const result = transformToV2(entry);
@@ -274,7 +312,7 @@ describe('flowsheet.service', () => {
       it('excludes track-specific fields from show_end entries', () => {
         const entry = createBaseEntry({
           entry_type: 'show_end',
-          message: 'End of Show: Test left the set at 1/15/2024, 10:00:00 PM',
+          dj_name: 'Test',
         });
 
         const result = transformToV2(entry);
@@ -286,10 +324,11 @@ describe('flowsheet.service', () => {
     });
 
     describe('dj_join entries', () => {
-      it('parses dj_name from message', () => {
+      it('returns dj_name from the column (not regex-parsed from message)', () => {
         const entry = createBaseEntry({
           entry_type: 'dj_join',
-          message: 'MC Hammer joined the set!',
+          dj_name: 'MC Hammer',
+          message: 'not the canonical format',
         });
 
         const result = transformToV2(entry);
@@ -301,7 +340,7 @@ describe('flowsheet.service', () => {
       it('excludes track and message fields', () => {
         const entry = createBaseEntry({
           entry_type: 'dj_join',
-          message: 'Test DJ joined the set!',
+          dj_name: 'Test DJ',
         });
 
         const result = transformToV2(entry);
@@ -310,10 +349,10 @@ describe('flowsheet.service', () => {
         expect(result.artist_name).toBeUndefined();
       });
 
-      it('handles malformed dj_join message gracefully', () => {
+      it('returns empty string when dj_name is null', () => {
         const entry = createBaseEntry({
           entry_type: 'dj_join',
-          message: 'Invalid format',
+          dj_name: null,
         });
 
         const result = transformToV2(entry);
@@ -323,10 +362,11 @@ describe('flowsheet.service', () => {
     });
 
     describe('dj_leave entries', () => {
-      it('parses dj_name from message', () => {
+      it('returns dj_name from the column (not regex-parsed from message)', () => {
         const entry = createBaseEntry({
           entry_type: 'dj_leave',
-          message: 'DJ Shadow left the set!',
+          dj_name: 'DJ Shadow',
+          message: 'not the canonical format',
         });
 
         const result = transformToV2(entry);
@@ -335,10 +375,10 @@ describe('flowsheet.service', () => {
         expect(result.dj_name).toBe('DJ Shadow');
       });
 
-      it('handles malformed dj_leave message gracefully', () => {
+      it('returns empty string when dj_name is null', () => {
         const entry = createBaseEntry({
           entry_type: 'dj_leave',
-          message: null,
+          dj_name: null,
         });
 
         const result = transformToV2(entry);
@@ -494,10 +534,10 @@ describe('flowsheet.service', () => {
         expect(result.show_id).toBeNull();
       });
 
-      it('handles special characters in DJ names', () => {
+      it('preserves special characters in DJ names', () => {
         const entry = createBaseEntry({
           entry_type: 'dj_join',
-          message: "DJ O'Brien & The Crew joined the set!",
+          dj_name: "DJ O'Brien & The Crew",
         });
 
         const result = transformToV2(entry);

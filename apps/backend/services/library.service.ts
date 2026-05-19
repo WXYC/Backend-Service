@@ -18,11 +18,13 @@ import {
   format,
   genres,
   library,
+  library_identity,
   rotation,
   LibraryArtistViewEntry,
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
 import { lookupBySong, lookupMetadata, isLmlConfigured, type LookupResponse } from './lml/lml.client.js';
+import { filterSpacerGif } from './metadata/metadata.service.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
 
@@ -288,6 +290,55 @@ export const insertAlbum = async (newAlbum: NewAlbum) => {
   return response[0];
 };
 
+/**
+ * Look up the resolved Discogs release id for a library row by its
+ * legacy id — the id the dj-site flowsheet picker carries (LML
+ * `library.db.id` = BS `library.legacy_release_id`). JOINs `library`
+ * to `library_identity` via that bridge in a single query.
+ *
+ * Returns null when any of these holds (the picker degrades to free-text):
+ *   - legacy id doesn't map to a BS library row,
+ *   - the row has no `library_identity` entry (not yet backfilled by BS#802), or
+ *   - the identity row has no resolved `discogs_release_id`.
+ *
+ * Used by `/proxy/library/{id}/tracks` (E6-5 / BS#836) to compose against
+ * LML's `/api/v1/discogs/release/{id}` for the tracklist.
+ */
+export async function getDiscogsReleaseIdByLegacyId(legacyId: number): Promise<number | null> {
+  const rows = await db
+    .select({ discogs_release_id: library_identity.discogs_release_id })
+    .from(library)
+    .innerJoin(library_identity, eq(library_identity.library_id, library.id))
+    .where(eq(library.legacy_release_id, legacyId))
+    .limit(1);
+  return rows[0]?.discogs_release_id ?? null;
+}
+
+/**
+ * Look up the resolved Discogs release id for a rotation row by its id.
+ * Joins `rotation` → `library_identity` via `rotation.album_id = library_identity.library_id`.
+ *
+ * Returns null when any of these holds (the picker degrades to free-text):
+ *   - rotation row doesn't exist,
+ *   - rotation row has `album_id IS NULL` (unlinked — ~49% of active prod rows),
+ *   - the album row has no `library_identity` entry (not yet backfilled by BS#802), or
+ *   - the identity row has no resolved `discogs_release_id`.
+ *
+ * Used by `/library/rotation/:rotation_id/tracks` (BS#940) to compose against
+ * LML's `/api/v1/discogs/release/{id}` for the rotation entry mode picker.
+ * Parallel to `getDiscogsReleaseIdByLegacyId` (BS#836), which the catalog-search
+ * picker uses via `legacy_release_id`.
+ */
+export async function getDiscogsReleaseIdByRotationId(rotationId: number): Promise<number | null> {
+  const rows = await db
+    .select({ discogs_release_id: library_identity.discogs_release_id })
+    .from(rotation)
+    .innerJoin(library_identity, eq(library_identity.library_id, rotation.album_id))
+    .where(eq(rotation.id, rotationId))
+    .limit(1);
+  return rows[0]?.discogs_release_id ?? null;
+}
+
 export const updateOnStreaming = async (id: number, on_streaming: boolean | null) => {
   const response = await db.update(library).set({ on_streaming }).where(eq(library.id, id)).returning();
   return response[0];
@@ -388,8 +439,8 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
   const settlements = await Promise.allSettled(
     uncached.map(async (row) => {
       const lookupResult = await lookupMetadata(row.artist_name, row.album_title);
-      const artworkUrl = lookupResult.results?.[0]?.artwork?.artwork_url;
-      if (!artworkUrl || artworkUrl.includes('spacer.gif')) return;
+      const artworkUrl = filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url);
+      if (!artworkUrl) return;
       row.artwork_url = artworkUrl;
       await updateArtworkUrl(row.id, artworkUrl);
     })

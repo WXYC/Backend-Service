@@ -59,9 +59,18 @@ export const cleanDiscogsBio = (bio: string): string =>
     .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
 
 /**
- * Drop Discogs spacer.gif placeholder URLs. Inline guard until #649 lands.
+ * Drop Discogs spacer.gif placeholder URLs. Inline guard, duplicated for
+ * build-graph isolation from `apps/backend` (see file header). Must stay
+ * truthy/falsy-equivalent to the canonical
+ * `apps/backend/services/metadata/metadata.service.ts#filterSpacerGif`
+ * (BS#890). The job writes to DB columns that are nullable, so the inline
+ * copy returns `null` while the canonical returns `undefined`; the parity
+ * test at
+ * `tests/unit/jobs/flowsheet-metadata-backfill/filter-spacer-gif-parity.test.ts`
+ * pins truthy/falsy parity across the two for all the inputs the runtime
+ * exercises.
  */
-const filterSpacerGif = (url: string | null | undefined): string | null => {
+export const filterSpacerGif = (url: string | null | undefined): string | null => {
   if (!url) return null;
   if (url.includes('spacer.gif')) return null;
   return url;
@@ -69,24 +78,34 @@ const filterSpacerGif = (url: string | null | undefined): string | null => {
 
 /**
  * Synthesize the three search URLs the runtime path falls back to on
- * no-match. Mirrors `apps/backend/services/metadata/providers/search-urls.provider.ts`
- * — duplicated inline for the same build-graph isolation reason as
- * `lml-fetch.ts`.
+ * no-match. Must match `apps/backend/services/metadata/providers/search-urls.provider.ts`
+ * exactly — the inline copy is duplicated rather than imported for the same
+ * build-graph isolation reason as `lml-fetch.ts`. The parity test at
+ * `tests/unit/jobs/flowsheet-metadata-backfill/synthesize-search-urls-parity.test.ts`
+ * pins the equivalence so the two cannot drift (BS#889).
+ *
+ * Per-service semantics (deliberately asymmetric):
+ *   - YouTube Music: trackTitle > albumTitle > artistName (3-tier).
+ *   - Bandcamp:      albumTitle > artistName (album-leaning).
+ *   - SoundCloud:    trackTitle > artistName (track-leaning, NO album
+ *                    fallback — album-only SoundCloud queries return
+ *                    unrelated DJ mixes more often than the album).
  */
-const synthesizeSearchUrls = (
+export const synthesizeSearchUrls = (
   row: EnrichRow
 ): { youtube_music_url: string; bandcamp_url: string; soundcloud_url: string } => {
   const artist = row.artist_name;
   const album = row.album_title ?? undefined;
   const track = row.track_title ?? undefined;
 
-  const trackQuery = track ? `${artist} ${track}` : album ? `${artist} ${album}` : artist;
-  const albumQuery = album ? `${artist} ${album}` : artist;
+  const youtubeQuery = track ? `${artist} ${track}` : album ? `${artist} ${album}` : artist;
+  const bandcampQuery = album ? `${artist} ${album}` : artist;
+  const soundcloudQuery = track ? `${artist} ${track}` : artist;
 
   return {
-    youtube_music_url: `https://music.youtube.com/search?q=${encodeURIComponent(trackQuery)}`,
-    bandcamp_url: `https://bandcamp.com/search?q=${encodeURIComponent(albumQuery)}`,
-    soundcloud_url: `https://soundcloud.com/search?q=${encodeURIComponent(trackQuery)}`,
+    youtube_music_url: `https://music.youtube.com/search?q=${encodeURIComponent(youtubeQuery)}`,
+    bandcamp_url: `https://bandcamp.com/search?q=${encodeURIComponent(bandcampQuery)}`,
+    soundcloud_url: `https://soundcloud.com/search?q=${encodeURIComponent(soundcloudQuery)}`,
   };
 };
 

@@ -35,14 +35,26 @@ process.env.ETL_NOTIFY_KEY = 'test-secret-key';
 import { internal_route } from '../../../apps/backend/routes/internal.route';
 
 // Make the DB mock chain's terminal methods resolve appropriately for the
-// webhook handler. `onConflictDoNothing` is terminal in the show-resolution
-// path (resolves to undefined). The flowsheet upsert is `onConflictDoUpdate`
-// followed by `.returning()`, so the chain stays open through the upsert and
-// the terminal `.returning` resolves to a row array.
+// webhook handler. Three chain shapes feed through `mockReturning`:
+//   1. Show resolution `select.from.where.limit` → returns [{ id }] or [].
+//   2. Flowsheet INSERT ... ON CONFLICT DO NOTHING RETURNING { id }
+//      → returns [{ id }] when a fresh row was inserted, [] on conflict.
+//   3. Flowsheet UPDATE ... WHERE ... RETURNING { id } (taken only after a
+//      conflict on the INSERT) → returns [{ id }].
+// Tests queue results with `mockReturning.mockResolvedValueOnce` in the order
+// the handler invokes them. After replacing the xmax = 0 trick (BS#909), the
+// `created` boolean comes from the INSERT's RETURNING shape: a single row
+// means we just inserted (fresh); an empty array means the row pre-existed
+// and we should fall through to the explicit UPDATE without firing enrichment.
 const mockDb = db as unknown as Record<string, jest.Mock>;
 const mockChain = mockDb.select();
-(mockChain as Record<string, jest.Mock>).limit = jest.fn().mockResolvedValue([]);
-(mockChain as Record<string, jest.Mock>).onConflictDoNothing = jest.fn().mockResolvedValue(undefined);
+// `mockChain.limit` and `mockChain.returning` are the two terminal points the
+// webhook handler awaits. Everything in between (`.from`, `.where`,
+// `.onConflictDoNothing`, etc.) keeps returning `mockChain` so the chain is
+// composable in any order. We override only the terminals so per-test
+// `mockResolvedValueOnce` queues control what each resolved branch sees.
+const mockLimit = jest.fn();
+(mockChain as Record<string, jest.Mock>).limit = mockLimit;
 const mockReturning = jest.fn();
 (mockChain as Record<string, jest.Mock>).returning = mockReturning;
 
@@ -105,11 +117,16 @@ describe('POST /internal/flowsheet-webhook', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     // jest.clearAllMocks() does not drain queued mockResolvedValueOnce
-    // values. Reset this mock fully so per-test queues don't bleed across
-    // tests. Default it to a created-row response; tests that need an
-    // update-branch response override with mockResolvedValueOnce.
+    // values. Reset both mocks fully so per-test queues don't bleed across
+    // tests. Default `mockReturning` to a fresh-INSERT response (one row);
+    // tests that need a conflict response queue `[]` first, then a
+    // separate update-branch row. `mockLimit` covers the show-resolution
+    // SELECT (returns [] = no existing show, fall through to the inline
+    // INSERT ... ON CONFLICT DO NOTHING + re-SELECT chain in resolveShowId).
     mockReturning.mockReset();
-    mockReturning.mockResolvedValue([{ id: 5555, created: true }]);
+    mockReturning.mockResolvedValue([{ id: 5555 }]);
+    mockLimit.mockReset();
+    mockLimit.mockResolvedValue([{ id: 9999 }]);
   });
 
   // -- Auth --
@@ -206,8 +223,12 @@ describe('POST /internal/flowsheet-webhook', () => {
   // The dj-site addEntry controller has its own call site; this is the
   // tubafrenzy → BS path.
 
-  it('fires metadata enrichment when a track INSERT lands (xmax=0 → created)', async () => {
-    mockReturning.mockResolvedValueOnce([{ id: 5555, created: true }]);
+  it('fires metadata enrichment on fresh INSERT (RETURNING returns one row)', async () => {
+    // Replaces the xmax = 0 trick (BS#909). The INSERT ... ON CONFLICT DO
+    // NOTHING RETURNING { id } either returns one row (we won the insert
+    // race and the row is fresh) or an empty array (someone else inserted
+    // first; we should UPDATE without firing enrichment).
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
 
     const res = await request(app)
       .post('/internal/flowsheet-webhook')
@@ -223,12 +244,14 @@ describe('POST /internal/flowsheet-webhook', () => {
     });
   });
 
-  it('does not fire enrichment when the upsert took the UPDATE branch (xmax≠0)', async () => {
-    // ON CONFLICT DO UPDATE on a re-sent legacy_entry_id sets xmax to the
-    // current tx id, so `created` is false. Skip enrichment here so benign
-    // tubafrenzy retries don't trigger LML re-fetch + 10-column rewrite +
-    // CDC/index churn on every duplicate webhook delivery.
-    mockReturning.mockResolvedValueOnce([{ id: 5555, created: false }]);
+  it('does not fire enrichment when the INSERT hits ON CONFLICT (RETURNING empty)', async () => {
+    // Conflict path: INSERT returns []; handler falls through to an explicit
+    // UPDATE that refreshes mutable fields. The UPDATE's RETURNING yields
+    // the row's id for the SSE broadcast, but enrichment must NOT fire — a
+    // benign tubafrenzy retry must not re-trigger the 10-column metadata
+    // rewrite + CDC/tsvector/index churn.
+    mockReturning.mockResolvedValueOnce([]); // INSERT conflict
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]); // UPDATE returning
 
     const res = await request(app)
       .post('/internal/flowsheet-webhook')
@@ -237,6 +260,36 @@ describe('POST /internal/flowsheet-webhook', () => {
 
     expect(res.status).toBe(200);
     expect(mockFireAndForgetMetadataForRow).not.toHaveBeenCalled();
+  });
+
+  it('handles the concurrent-INSERT race: only the winner fires enrichment', async () => {
+    // Issue #909 acceptance criterion (c): concurrent INSERT race. With
+    // ON CONFLICT DO NOTHING RETURNING, PG serializes the two INSERTs and
+    // exactly one returns a row (the winner). The loser's INSERT RETURNING
+    // is empty and the handler falls through to UPDATE without enrichment.
+    // We simulate the two webhook calls in the same describe block back-to-
+    // back: first call wins (RETURNING [row]), second call loses (RETURNING
+    // []), then sees the existing row and UPDATEs it.
+
+    // Winner: fresh INSERT, fires enrichment.
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+    const winnerRes = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry });
+    expect(winnerRes.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledTimes(1);
+
+    // Loser: same payload, INSERT conflicts, falls through to UPDATE.
+    mockReturning.mockResolvedValueOnce([]); // INSERT conflict
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]); // UPDATE returning
+    const loserRes = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry });
+    expect(loserRes.status).toBe(200);
+    // Enrichment count must still be 1 — the loser must not re-fire.
+    expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledTimes(1);
   });
 
   it('does not fire enrichment when entry_type is not track (talkset)', async () => {

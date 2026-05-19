@@ -288,6 +288,70 @@ describe('Add to Flowsheet', () => {
     expect(res.body.track_title).toEqual('Carry the Zero');
   });
 
+  test('With album_id explicitly null + rotation snapshot fields (BS#933)', async () => {
+    // BS#689 made the rotation dropdown LEFT JOIN library so unlinked
+    // rotation rows (album_id IS NULL) become selectable. dj-site dispatches
+    // the chosen row with `album_id: null` and the rotation snapshot fields
+    // (artist_name, album_title, record_label). The controller must treat
+    // this as a free-form insert — not a library lookup — and return 201,
+    // not 500. Without the BS#933 fix the snapshot path crashed with a
+    // TypeError because `getAlbumFromDB(null)` returned undefined.
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Coupé Cloué',
+        album_title: 'Maintenant ou Jamais',
+        track_title: 'Manman',
+        record_label: 'Mini Records',
+      })
+      .expect(201);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.artist_name).toEqual('Coupé Cloué');
+    expect(res.body.album_title).toEqual('Maintenant ou Jamais');
+    expect(res.body.track_title).toEqual('Manman');
+    expect(res.body.record_label).toEqual('Mini Records');
+  });
+
+  test('With track_position (BS#943, album_id branch)', async () => {
+    // The dj-site flowsheet picker (E6-6) calls /proxy/library/{id}/tracks
+    // after a release pick, then submits the chosen track with the library
+    // `album_id` plus the Discogs `release_track.position` string (e.g. "A1").
+    // BS#835 shipped the column + read projection; this pins the controller
+    // forwarding it through to PG and the V2 read shape returning it.
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1, // Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+        track_position: 'A1',
+      })
+      .expect(201);
+
+    expect(res.body.track_title).toEqual('Carry the Zero');
+    expect(res.body.track_position).toEqual('A1');
+  });
+
+  test('With track_position (BS#943, free-form branch)', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+        track_position: 'B2',
+        record_label: 'Sonamos',
+      })
+      .expect(201);
+
+    expect(res.body.track_title).toEqual('la paradoja');
+    expect(res.body.track_position).toEqual('B2');
+  });
+
   test('Flowsheet Message', async () => {
     const res = await request
       .post('/flowsheet')
@@ -303,6 +367,65 @@ describe('Add to Flowsheet', () => {
     // expect(res.body.artist_name).toBeNull();
     // expect(res.body.album_title).toBeNull();
     // expect(res.body.track_title).toBeNull();
+  });
+});
+
+/*
+ * Update Flowsheet Entries
+ */
+describe('Update Flowsheet Entries', () => {
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('PATCH updates track_position end-to-end (BS#943)', async () => {
+    // The unit test for `updateEntry` mocks the service. This pins the
+    // actual UPDATE wire path through Postgres: a row with
+    // `track_position: 'A1'` posted, patched to 'B2', then cleared to null.
+    // Drizzle's `db.update(flowsheet).set(data).returning()` is the entire
+    // wiring on the service side; the PATCH response is the updated row,
+    // so we can read `track_position` directly off the response body.
+    const created = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1, // Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+        track_position: 'A1',
+      })
+      .expect(201);
+
+    expect(created.body.track_position).toEqual('A1');
+    const entry_id = created.body.id;
+    expect(entry_id).toBeDefined();
+
+    const patched = await request
+      .patch('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        entry_id,
+        data: { track_position: 'B2' },
+      })
+      .expect(200);
+
+    expect(patched.body.id).toEqual(entry_id);
+    expect(patched.body.track_position).toEqual('B2');
+
+    const cleared = await request
+      .patch('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        entry_id,
+        data: { track_position: null },
+      })
+      .expect(200);
+
+    expect(cleared.body.id).toEqual(entry_id);
+    expect(cleared.body.track_position).toBeNull();
   });
 });
 

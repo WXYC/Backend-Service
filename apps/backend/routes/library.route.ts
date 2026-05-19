@@ -22,6 +22,12 @@ library_route.post('/rotation', requirePermissions({ catalog: ['write'] }), libr
 
 library_route.patch('/rotation', requirePermissions({ catalog: ['write'] }), libraryController.killRotation);
 
+library_route.get(
+  '/rotation/:rotation_id/tracks',
+  requirePermissions({ catalog: ['read'] }),
+  libraryController.getRotationTracks
+);
+
 library_route.post('/artists', requirePermissions({ catalog: ['write'] }), libraryController.addArtist);
 
 library_route.get('/artists/peek-code', requirePermissions({ catalog: ['write'] }), libraryController.peekArtistNumber);

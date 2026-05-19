@@ -13,7 +13,14 @@ import * as libraryService from '../services/library.service.js';
 import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
-import { checkStreamingAvailability, lookupMetadata, isLmlConfigured } from '../services/lml/lml.client.js';
+import {
+  checkStreamingAvailability,
+  lookupMetadata,
+  isLmlConfigured,
+  getRelease,
+  LmlClientError,
+} from '../services/lml/lml.client.js';
+import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
 
 type NewAlbumRequest = {
@@ -100,8 +107,8 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     }
 
     if (artworkResult.status === 'fulfilled') {
-      const artworkUrl = artworkResult.value.results?.[0]?.artwork?.artwork_url;
-      if (artworkUrl && !artworkUrl.includes('spacer.gif')) {
+      const artworkUrl = filterSpacerGif(artworkResult.value.results?.[0]?.artwork?.artwork_url);
+      if (artworkUrl) {
         try {
           await libraryService.updateArtworkUrl(inserted_album.id, artworkUrl);
           (inserted_album as Record<string, unknown>).artwork_url = artworkUrl;
@@ -158,13 +165,17 @@ type AlbumQueryParams = {
 
 export const searchForAlbum: RequestHandler = async (req: Request<object, object, object, AlbumQueryParams>, res) => {
   const { query } = req;
+  // `on_streaming` is sufficient on its own to scope the result set (used by
+  // dj-site Classic's "Browse Exclusive Albums" view, which surfaces all
+  // non-streaming releases without a text query). See #872.
   if (
     query.artist_name === undefined &&
     query.album_title === undefined &&
+    query.on_streaming === undefined &&
     (query.code_letters === undefined || query.code_artist_number === undefined)
   ) {
     throw new WxycError(
-      'Missing query parameter. Query must include: artist_name, album_title, or code_letters, code_artist_number, and code_number',
+      'Missing query parameter. Query must include: artist_name, album_title, on_streaming, or code_letters and code_artist_number',
       400
     );
   }
@@ -311,6 +322,76 @@ export const killRotation: RequestHandler<object, unknown, KillRotationRelease> 
   } else {
     throw new WxycError('Rotation entry not found', 400);
   }
+};
+
+/**
+ * Wire shape returned by `GET /library/rotation/:rotation_id/tracks`. The
+ * dj-site rotation entry picker (`useGetRotationTracksQuery`) consumes this
+ * directly — keep field names + types in lockstep with the dj-site
+ * `RotationTrack` type in `lib/features/rotation/api.ts`.
+ *
+ * Distinct from the `/proxy/library/:libraryId/tracks` shape
+ * (`{position, title, artist_credit, duration_ms}`) consumed by the
+ * catalog-search picker (BS#836 / dj-site#501). Same upstream data, two
+ * pickers with two pre-existing wire contracts.
+ */
+export interface RotationTrack {
+  position: string;
+  title: string;
+  duration: string | null;
+  artists: string[];
+}
+
+/**
+ * GET /library/rotation/:rotation_id/tracks (BS#940)
+ *
+ * Composition for the dj-site rotation entry mode track picker.
+ *   1. Resolve `rotation.album_id` → `library_identity.discogs_release_id`
+ *      via `getDiscogsReleaseIdByRotationId`.
+ *   2. Fetch the tracklist from LML's `GET /api/v1/discogs/release/{id}`.
+ *   3. Project Discogs's per-track `artists` onto the dj-site shape; fall
+ *      back to the release-level artist when a track has no per-track credits
+ *      (Discogs's normal shape for non-V/A releases).
+ *
+ * Degrades gracefully: returns 200 + `[]` when no identity resolves (no
+ * `album_id`, no `library_identity` row, or no `discogs_release_id`) or when
+ * LML 404s the release. Only LML 5xx bubbles up so transient upstream failures
+ * surface rather than silently hiding the dropdown.
+ *
+ * No BS-side cache here — LML's 3-tier cache already deduplicates by release id.
+ * If load justifies it, extract a shared LRU between this and the `/proxy`
+ * sibling.
+ */
+export const getRotationTracks: RequestHandler<{ rotation_id: string }> = async (req, res) => {
+  const rotationId = parseInt(req.params.rotation_id, 10);
+  if (!Number.isInteger(rotationId) || rotationId <= 0) {
+    throw new WxycError('rotation_id must be a positive integer', 400);
+  }
+
+  const discogsReleaseId = await libraryService.getDiscogsReleaseIdByRotationId(rotationId);
+  if (discogsReleaseId === null) {
+    res.status(200).json([]);
+    return;
+  }
+
+  let release;
+  try {
+    release = await getRelease(discogsReleaseId);
+  } catch (err) {
+    if (err instanceof LmlClientError && err.statusCode === 404) {
+      res.status(200).json([]);
+      return;
+    }
+    throw err;
+  }
+
+  const tracks: RotationTrack[] = release.tracklist.map((t) => ({
+    position: t.position,
+    title: t.title,
+    duration: t.duration ?? null,
+    artists: t.artists && t.artists.length > 0 ? t.artists : [release.artist],
+  }));
+  res.status(200).json(tracks);
 };
 
 export const getFormats: RequestHandler = async (req, res) => {

@@ -22,6 +22,7 @@ import { playlist_route } from './routes/playlist.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
 import { setupCdcWebSocket, shutdownCdcWebSocket } from './services/cdc/index.js';
+import { drainInFlightEnrichments } from './services/metadata/enrichment.service.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
 import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
@@ -148,11 +149,30 @@ memoryLogTimer.unref();
 
 // --- Graceful shutdown ---
 
+// 2 s matches the BS#905 proposal: bounded by the EC2 SIGTERM-to-SIGKILL
+// grace window (10 s total above; 5 s before forced socket close), and long
+// enough to let a healthy LML round-trip complete. Tuning this without also
+// reducing the 5 s force-close timer below would just push the floor lower.
+const ENRICHMENT_DRAIN_DEADLINE_MS = 2_000;
+
 function shutdown(signal: string): void {
   console.log(`[shutdown] Received ${signal}, shutting down...`);
   stopPlaylistProxy();
   stopAlbumPlaysRefresh();
   void shutdownCdcWebSocket();
+  // BS#905: observe enrichments abandoned mid-flight. Sentry captureMessage
+  // fires only when at least one promise is still pending after the deadline,
+  // so a clean shutdown stays silent. Drain happens in parallel with
+  // server.close() — they don't depend on each other.
+  void drainInFlightEnrichments(ENRICHMENT_DRAIN_DEADLINE_MS).then((remaining) => {
+    if (remaining > 0) {
+      Sentry.captureMessage(`Backend exiting with ${remaining} in-flight enrichment promise(s)`, {
+        level: 'warning',
+        tags: { subsystem: 'metadata', metric: 'in_flight_dropped' },
+        extra: { remaining, signal, deadline_ms: ENRICHMENT_DRAIN_DEADLINE_MS },
+      });
+    }
+  });
   server.close(() => {
     closeDatabaseConnection()
       .then(() => process.exit(0))

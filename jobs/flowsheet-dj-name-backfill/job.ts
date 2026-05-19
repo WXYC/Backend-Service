@@ -1,5 +1,5 @@
 /**
- * One-shot backfill: populate flowsheet.dj_name on legacy track rows.
+ * One-shot backfill: populate flowsheet.dj_name on legacy track + marker rows.
  *
  * Splits the large UPDATE that was originally embedded in migration 0053 into
  * batched, individually-committed UPDATEs so a long run cannot hold an
@@ -12,9 +12,15 @@
  * insert path, so every row carries the same resolved name regardless of
  * which subsystem populated it.
  *
- * Track-only filter: matches the precondition guard in migration 0054, which
- * only requires dj_name on track rows. Non-track entries (talkset, breakpoint,
- * show_start, etc.) keep dj_name NULL — search never reads them.
+ * Covered entry types (#952): track (search hot path) plus the four marker
+ * types — show_start, show_end, dj_join, dj_leave — which surface dj_name in
+ * the v2 /flowsheet API contract.
+ *
+ * Known limitation: dj_join / dj_leave rows for guest DJs join through
+ * shows.primary_dj_id, so the backfill writes the primary DJ's name, not the
+ * joining guest's. New rows from the live insert path are correct (they look
+ * up the joining DJ directly). Talkset / breakpoint / message rows still keep
+ * dj_name NULL — those aren't attributed to a specific DJ.
  *
  * Run procedure: see Backend-Service/CLAUDE.md and issue #511. Build via
  * `Manual Build & Deploy` with `target=flowsheet-dj-name-backfill`, then SSH
@@ -61,11 +67,11 @@ const applyBatch = async (batchSize: number): Promise<number> => {
     FROM "wxyc_schema"."shows" AS s
     LEFT JOIN "auth_user" AS u ON u."id" = s."primary_dj_id"
     WHERE f."show_id" = s."id"
-      AND f."entry_type" = 'track'
+      AND f."entry_type" IN ('track', 'show_start', 'show_end', 'dj_join', 'dj_leave')
       AND f."dj_name" IS NULL
       AND f."id" IN (
         SELECT "id" FROM "wxyc_schema"."flowsheet"
-        WHERE "entry_type" = 'track'
+        WHERE "entry_type" IN ('track', 'show_start', 'show_end', 'dj_join', 'dj_leave')
           AND "dj_name" IS NULL
         ORDER BY "id"
         LIMIT ${batchSize}
@@ -85,7 +91,7 @@ const formatDuration = (ms: number): string => {
 };
 
 const runBackfill = async () => {
-  console.log(`[${JOB_NAME}] Starting backfill of flowsheet.dj_name (track rows).`);
+  console.log(`[${JOB_NAME}] Starting backfill of flowsheet.dj_name (track + marker rows).`);
   console.log(`[${JOB_NAME}] Batch size: ${BATCH_SIZE}.`);
 
   const startedAt = Date.now();
@@ -134,16 +140,16 @@ const runBackfill = async () => {
  */
 const verifyComplete = async () => {
   const result = await db.execute(
-    sql`SELECT count(*)::int AS missing FROM "wxyc_schema"."flowsheet" WHERE entry_type = 'track' AND dj_name IS NULL`
+    sql`SELECT count(*)::int AS missing FROM "wxyc_schema"."flowsheet" WHERE entry_type IN ('track', 'show_start', 'show_end', 'dj_join', 'dj_leave') AND dj_name IS NULL`
   );
   const missing = Number((result as unknown as Array<{ missing: number }>)[0]?.missing ?? 0);
   if (missing > 0) {
     throw new Error(
-      `[${JOB_NAME}] Verification failed: ${missing} track row(s) still have dj_name IS NULL. ` +
+      `[${JOB_NAME}] Verification failed: ${missing} row(s) still have dj_name IS NULL. ` +
         `Re-run the backfill — it is idempotent and will pick up the remaining rows.`
     );
   }
-  console.log(`[${JOB_NAME}] Verification passed: 0 track rows with dj_name IS NULL.`);
+  console.log(`[${JOB_NAME}] Verification passed: 0 track + marker rows with dj_name IS NULL.`);
 };
 
 const main = async () => {
