@@ -242,11 +242,11 @@ function extractIntegrationTestsJobEnv(workflow: string): string[] {
   // it the LAST entry in the env block (today: BETTER_AUTH_SECRET) is
   // silently dropped.
   const boundedSlice = jobSlice.slice(0, stepsIdx + 1);
-  const envMatch = boundedSlice.match(/\n    env:\n((?:      [A-Z][A-Z0-9_]*:.*\n)+)/);
+  const envMatch = boundedSlice.match(/\n {4}env:\n((?: {6}[A-Z][A-Z0-9_]*:.*\n)+)/);
   if (!envMatch) {
     throw new Error('Integration-Tests job-level `env:` block not found');
   }
-  return [...envMatch[1].matchAll(/^      ([A-Z][A-Z0-9_]*):/gm)].map((m) => m[1]);
+  return [...envMatch[1].matchAll(/^ {6}([A-Z][A-Z0-9_]*):/gm)].map((m) => m[1]);
 }
 
 /**
