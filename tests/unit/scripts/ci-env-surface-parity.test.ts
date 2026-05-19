@@ -4,10 +4,12 @@
  *
  *   1. `dev_env/docker-compose.yml` — the `backend` service env, used by
  *      `npm run ci:testmock` (the local docker-based repro).
- *   2. `.github/workflows/test.yml` — the workflow-level `env:` block plus
- *      the `Start services` step `env:` block, used by GHA CI which runs
- *      the backend as a host node process and does NOT load env from
- *      docker-compose.
+ *   2. `.github/workflows/test.yml` — used by GHA CI, which runs the
+ *      backend as a host node process and does NOT load env from
+ *      docker-compose. The workflow surface is the union of three YAML
+ *      scopes the host-process backend inherits: the workflow-top-level
+ *      `env:`, the `Integration-Tests` job-level `env:`, and the
+ *      `Start services` step-level `env:`.
  *
  * Per BS#164, the host-process model on CI is intentional. But the two env
  * surfaces drift independently and a new var landing in one but not the
@@ -19,7 +21,8 @@
  * `Why:` line).
  *
  * Source-grep test (no docker, no PG). Same style as the adjacent
- * `lml-limiter-test-env.test.ts` and `docker-compose-db-port.test.ts`.
+ * `lml-limiter-test-env.test.ts` and the other guards in
+ * `tests/unit/scripts/`.
  *
  * # Updating the allowlist
  *
@@ -44,18 +47,11 @@ const composePath = path.join(repoRoot, 'dev_env/docker-compose.yml');
 const workflowPath = path.join(repoRoot, '.github/workflows/test.yml');
 
 /**
- * Keys present in the compose `backend` env block but NOT in the workflow
- * env surface (top-level + Start services). Each entry must be justified.
+ * Keys present in the compose `backend` env block but NOT anywhere in the
+ * workflow env surface (top-level + Integration-Tests job + Start services
+ * step). Each entry must be justified.
  */
 const EXPECTED_ONLY_IN_COMPOSE = [
-  // Why: BETTER_AUTH service URLs differ between the docker network (auth:8080)
-  // and host-process model (localhost:8083). The host-process path relies on
-  // backend defaults that match its localhost network; the compose path
-  // overrides for the docker hostname `auth`.
-  'BETTER_AUTH_AUDIENCE',
-  'BETTER_AUTH_ISSUER',
-  'BETTER_AUTH_JWKS_URL',
-
   // Why: backend-side feature flags that activate the full track-search
   // fallback cascade in `tests/integration/library.spec.js` (Track 1 = CTA,
   // Track 2 = LML cross-ref). The workflow path doesn't set these; whether
@@ -69,13 +65,6 @@ const EXPECTED_ONLY_IN_COMPOSE = [
   // host-process auth-bypass mode.
   'COGNITO_USERPOOL_ID',
   'DJ_APP_CLIENT_ID',
-
-  // Why: DB host/port. Compose uses the docker network hostname `ci-db` on
-  // in-container port `5432`; workflow uses backend defaults (`localhost`
-  // + `5432`) that match the host-process network. DB_PORT in compose is
-  // hardcoded `5432` after BS#959.
-  'DB_HOST',
-  'DB_PORT',
 
   // Why: metadata cache sizes. Compose substitutes from `.env` with
   // defaults that match prod; workflow relies on backend defaults.
@@ -102,6 +91,19 @@ const EXPECTED_ONLY_IN_WORKFLOW = [
   // Why: integration-test login credential. Read by the test harness (e.g.
   // `tests/integration/setup/login.js`), not by the backend process.
   'AUTH_PASSWORD',
+
+  // Why: auth-service host port (workflow's auth process binds on 8083).
+  // The backend doesn't consume it directly — it encodes the auth URL via
+  // BETTER_AUTH_URL (mirrored). Compose puts AUTH_PORT in the auth service
+  // env, not the backend env.
+  'AUTH_PORT',
+
+  // Why: better-auth JWT signing secret needed by the auth service host
+  // process. Compose's ci-profile auth container omits it and relies on
+  // better-auth's test-mode default; the workflow sets it explicitly. The
+  // backend doesn't sign JWTs (only the auth service does), so this is
+  // workflow-only without a real divergence in backend behavior.
+  'BETTER_AUTH_SECRET',
 
   // Why: CI-only auth URL alias used by the test harness when constructing
   // host-process URLs. Not read by the backend.
@@ -133,6 +135,12 @@ const EXPECTED_ONLY_IN_WORKFLOW = [
   // Why: workflow-level alias for CI_PORT used by certain non-test scripts
   // that read PORT (e.g. drizzle-kit migrations); harness-side.
   'PORT',
+
+  // Why: workflow-only gating var sourced from the `detect-changes` job's
+  // `run-integration` output. Drives `if:` conditions on every step in the
+  // `Integration-Tests` job; compose doesn't gate steps this way (compose
+  // runs everything unconditionally; profile selection is the gate).
+  'RUN_TESTS',
 
   // Why: backend-host URL for the integration test harness. Read by tests
   // when forming http requests; the backend itself doesn't bind based on
@@ -176,14 +184,76 @@ function extractComposeBackendEnvKeys(): Set<string> {
 function extractWorkflowEnvKeys(): Set<string> {
   const workflow = fs.readFileSync(workflowPath, 'utf-8');
 
-  // Top-level workflow env block (lines 15-28 today).
-  const topMatch = workflow.match(/^env:\n((?:\s+[A-Z][A-Z0-9_]*:.*\n)+)/m);
+  // The host-process backend in GHA CI inherits env from THREE YAML scopes
+  // (workflow → job → step). Miss any of them and the parity check produces
+  // false positives. Take the union of all three.
+  return new Set([
+    ...extractTopLevelEnv(workflow),
+    ...extractIntegrationTestsJobEnv(workflow),
+    ...extractStartServicesStepEnv(workflow),
+  ]);
+}
+
+/**
+ * Workflow-top-level `env:`, scoped to the region above `jobs:` so a
+ * job-level `env:` can't accidentally match first. Required keys live at
+ * column 2 (`^  KEY:`).
+ */
+function extractTopLevelEnv(workflow: string): string[] {
+  const jobsIdx = workflow.indexOf('\njobs:\n');
+  if (jobsIdx === -1) {
+    throw new Error('workflow has no top-level `jobs:` key');
+  }
+  const preJobs = workflow.slice(0, jobsIdx);
+  const topMatch = preJobs.match(/^env:\n((?:\s+[A-Z][A-Z0-9_]*:.*\n)+)/m);
   if (!topMatch) {
     throw new Error('workflow top-level `env:` block not found');
   }
-  const topKeys = [...topMatch[1].matchAll(/^\s+([A-Z][A-Z0-9_]*):/gm)].map((m) => m[1]);
+  return [...topMatch[1].matchAll(/^\s+([A-Z][A-Z0-9_]*):/gm)].map((m) => m[1]);
+}
 
-  // `Start services` step env block.
+/**
+ * Job-level `env:` under `Integration-Tests:`. This block (lines 266-281
+ * today) sets the host-process backend's DB_HOST / DB_PORT / BETTER_AUTH_*
+ * etc. — vars the docker-compose path sets in the backend service env
+ * block. Missing this scope causes false-positive "only in compose"
+ * entries.
+ *
+ * The 4-space `env:` anchor specifically discriminates job-level env from
+ * the `services.postgres.env:` block (8-space indent) immediately above it
+ * in the same job — that one populates the postgres SERVICE container's
+ * env, not the runner-process env, and shouldn't be merged in.
+ */
+function extractIntegrationTestsJobEnv(workflow: string): string[] {
+  const jobIdx = workflow.indexOf('\n  Integration-Tests:');
+  if (jobIdx === -1) {
+    throw new Error('workflow `Integration-Tests:` job not found');
+  }
+  const jobSlice = workflow.slice(jobIdx);
+  // Bound the slice at the next job (col 2) or `steps:` (col 4) so the
+  // regex doesn't run away into later jobs. `steps:` comes after the
+  // job-level env block.
+  const stepsIdx = jobSlice.indexOf('\n    steps:');
+  if (stepsIdx === -1) {
+    throw new Error('Integration-Tests job has no `steps:` key');
+  }
+  // `+1` includes the trailing newline of the last env line; the
+  // env-key regex requires each line to terminate with `\n`, so without
+  // it the LAST entry in the env block (today: BETTER_AUTH_SECRET) is
+  // silently dropped.
+  const boundedSlice = jobSlice.slice(0, stepsIdx + 1);
+  const envMatch = boundedSlice.match(/\n    env:\n((?:      [A-Z][A-Z0-9_]*:.*\n)+)/);
+  if (!envMatch) {
+    throw new Error('Integration-Tests job-level `env:` block not found');
+  }
+  return [...envMatch[1].matchAll(/^      ([A-Z][A-Z0-9_]*):/gm)].map((m) => m[1]);
+}
+
+/**
+ * `Start services` step `env:` — the innermost YAML scope, where the
+ * limiter overrides (BS#955) live today.
+ */
+function extractStartServicesStepEnv(workflow: string): string[] {
   const startIdx = workflow.indexOf('- name: Start services');
   if (startIdx === -1) {
     throw new Error('workflow step `Start services` not found');
@@ -194,7 +264,5 @@ function extractWorkflowEnvKeys(): Set<string> {
     throw new Error('workflow step `Start services` has no `run:` key');
   }
   const stepEnv = stepSlice.slice(0, runIdx);
-  const stepKeys = [...stepEnv.matchAll(/^\s+([A-Z][A-Z0-9_]*):/gm)].map((m) => m[1]);
-
-  return new Set([...topKeys, ...stepKeys]);
+  return [...stepEnv.matchAll(/^\s+([A-Z][A-Z0-9_]*):/gm)].map((m) => m[1]);
 }
