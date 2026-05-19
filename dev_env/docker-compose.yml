@@ -168,7 +168,11 @@ services:
     profiles: [ci]
     environment:
       - DB_HOST=ci-db
-      - DB_PORT=${DB_PORT:-5432}
+      # In-container port: hardcoded to match what postgres listens on
+      # inside the docker network. Host-side `DB_PORT` (e.g. the dev
+      # profile's `5436`) is the host-port mapping for `db`/`ci-db` and
+      # must not leak into consumer services — see BS#959 / BS#413.
+      - DB_PORT=5432
       - DB_USERNAME=${DB_USERNAME}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
