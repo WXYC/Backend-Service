@@ -36,6 +36,12 @@ services:
       - DB_USERNAME=${DB_USERNAME}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
+      # Explicit opt-in (BS#951). The seed-clone.sql file is checked into
+      # the repo, so existsSync alone can't distinguish dev from CI when
+      # init-db.mjs is invoked directly (as CI does). Setting this env var
+      # only on the dev-profile container keeps the clone scoped to
+      # `npm run db:start` and not `node dev_env/init-db.mjs` in CI.
+      - LOAD_CLONE_FIXTURE=true
     restart: 'no' # Only run once
     volumes:
       - ../drizzle.config.ts:/init/drizzle.config.ts
@@ -179,6 +185,14 @@ services:
       - METADATA_ALBUM_CACHE_MAX_SIZE=${METADATA_ALBUM_CACHE_MAX_SIZE:-1000}
       - METADATA_ARTIST_CACHE_MAX_SIZE=${METADATA_ARTIST_CACHE_MAX_SIZE:-500}
       - METADATA_ROTATION_PRIORITY=${METADATA_ROTATION_PRIORITY:-2.0}
+      # LML client limiter: disable in CI. The integration suite runs hundreds
+      # of fire-and-forget /lookup calls across spec files under --runInBand;
+      # the module-level TokenBucket(50/min) would drain partway through and
+      # subsequent calls would queue ~1200ms each, timing out metadata-lml
+      # tests at 30s (BS#955). Mirrors the unit-test override convention at
+      # tests/unit/services/lml.client.test.ts:792-793.
+      - LML_CLIENT_MAX_CONCURRENT=10000
+      - LML_CLIENT_RATE_PER_MIN=60000
       - USE_MOCK_SERVICES=false
       # Anonymous device authentication
       - ANON_DEVICE_JWT_SECRET=${ANON_DEVICE_JWT_SECRET:-ci-test-secret-key-for-anonymous-devices}

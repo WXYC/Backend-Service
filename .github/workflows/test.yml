@@ -357,6 +357,15 @@ jobs:
           # tubafrenzy-webhook integration spec needs this wired explicitly.
           # Matches the spec's INTERNAL_KEY fallback default.
           ETL_NOTIFY_KEY: test-secret-key
+          # LML client limiter: disable in CI. The integration suite runs
+          # hundreds of fire-and-forget /lookup calls across spec files under
+          # --runInBand; the module-level TokenBucket(50/min) would drain
+          # partway through and subsequent calls would queue ~1200ms each,
+          # timing out metadata-lml tests at 30s (BS#955). Mirrors the
+          # unit-test override convention at
+          # tests/unit/services/lml.client.test.ts:792-793.
+          LML_CLIENT_MAX_CONCURRENT: '10000'
+          LML_CLIENT_RATE_PER_MIN: '60000'
         run: |
           node dev_env/mock-api-server/dist/server.js > /tmp/mock-api.log 2>&1 &
           node apps/auth/dist/app.js > /tmp/auth.log 2>&1 &
