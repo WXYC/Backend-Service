@@ -18,7 +18,6 @@
   ],
   "maxWorkers": "50%",
   "testTimeout": 30000,
-  "bail": 1,
   "forceExit": true,
   "verbose": true
 }
