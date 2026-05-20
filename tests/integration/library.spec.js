@@ -862,6 +862,126 @@ describe('Library Catalog Track Search (Discogs cross-ref fallback)', () => {
   });
 });
 
+/**
+ * GET /library/ — catalog-route cascade (BS#972).
+ *
+ * `searchForAlbum` (mounted at `GET /library/`) is what dj-site's classic +
+ * modern catalog live-search and the iOS DJ tool both call. Today it
+ * shortcuts straight to `libraryService.fuzzySearchLibrary`, which tops out
+ * at tsvector + trigram — the CTA + LML `/lookup` cascade in
+ * `libraryService.searchLibrary` is unreachable from any catalog HTTP route.
+ * That makes `matched_via` empty on every wire response, so dj-site's
+ * MatchedTrackChips and iOS's MatchedTrackBadge stay dark even with both
+ * flags strict-`true`.
+ *
+ * These cases drive the same CTA + Track 2 fixtures as the `/library/search`
+ * suites above, but through the catalog route. They follow the
+ * skip-if-flag-off pattern: a 0-result response in CI means the flag isn't
+ * set; the test warns and short-circuits.
+ *
+ * dj-site sends the same string as both `artist_name` and `album_title`
+ * (both-mode) for its live search; that's the case wired here. Split-field
+ * queries stay on the legacy `fuzzySearchLibrary` path and don't run the
+ * cascade — out of scope for this ticket.
+ */
+describe('GET /library cascade — catalog route serves matched_via (BS#972)', () => {
+  let auth;
+  // CTA fixture (mirror of the BS#819 block above).
+  const CTA_LIBRARY_ID = 7000;
+  const CTA_ALBUM_TITLE = 'Shape Fixture Album Alpha 1';
+  const CTA_ARTIST = 'Shape Fixture Artist Alpha';
+  // Track 2 fixture (mirror of the BS#825 block above).
+  const CONFIELD_LIBRARY_ID = 7100;
+  const CONFIELD_ALBUM_TITLE = 'Confield';
+  const CONFIELD_TRACK_QUERY = 'vi scose poise';
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+  });
+
+  test('both-mode CTA query returns the comp library row with matched_via.source = "cta"', async () => {
+    const res = await auth
+      .get('/library')
+      .query({ artist_name: 'Bioluminescence', album_title: 'Bioluminescence', n: 10 })
+      .expect(200);
+
+    expectArray(res);
+    if (res.body.length === 0) {
+      console.warn(
+        '[BS#972] /library/ catalog cascade returned no results. Likely the backend is running ' +
+          'without CATALOG_TRACK_SEARCH_CTA_ENABLED=true. Set it in .env and restart `npm run dev`.'
+      );
+      return;
+    }
+
+    const hit = res.body.find((row) => row.id === CTA_LIBRARY_ID);
+    expect(hit).toBeDefined();
+    expect(hit.album_title).toBe(CTA_ALBUM_TITLE);
+    expect(hit.artist_name).toBe(CTA_ARTIST);
+    expect(Array.isArray(hit.matched_via)).toBe(true);
+    expect(hit.matched_via.length).toBeGreaterThanOrEqual(1);
+    const bioHints = hit.matched_via.filter((m) => m.title === 'Bioluminescence');
+    expect(bioHints.length).toBeGreaterThanOrEqual(1);
+    bioHints.forEach((hint) => {
+      expect(hint.source).toBe('cta');
+      expect(hint.confidence).toBe(1.0);
+    });
+  });
+
+  test('both-mode Track 2 query ("vi scose poise") returns Confield via LML fallback', async () => {
+    const res = await auth
+      .get('/library')
+      .query({ artist_name: CONFIELD_TRACK_QUERY, album_title: CONFIELD_TRACK_QUERY, n: 10 })
+      .expect(200);
+
+    expectArray(res);
+    if (res.body.length === 0) {
+      console.warn(
+        '[BS#972] /library/ catalog cascade returned no Track 2 results. Likely the backend is running ' +
+          'without CATALOG_TRACK_SEARCH_DISCOGS_ENABLED=true. Set it in .env and restart `npm run dev`.'
+      );
+      return;
+    }
+
+    const hit = res.body.find((row) => row.id === CONFIELD_LIBRARY_ID);
+    expect(hit).toBeDefined();
+    expect(hit.album_title).toBe(CONFIELD_ALBUM_TITLE);
+    expect(Array.isArray(hit.matched_via)).toBe(true);
+    expect(hit.matched_via.length).toBeGreaterThanOrEqual(1);
+    // Mock LML's songLookup map returns matched_via.source = 'discogs_master'
+    // for the Confield row; bridged via library.legacy_release_id back to BS.
+    expect(hit.matched_via.some((m) => m.source && m.source.startsWith('discogs'))).toBe(true);
+  });
+
+  test('direct tsvector hit never carries matched_via (cascade only fires on primary 0-hit)', async () => {
+    // 'Built to Spill' is in the seed fixture and matches tsvector cleanly;
+    // the cascade must NOT fire, so the response must not carry matched_via.
+    const res = await auth
+      .get('/library')
+      .query({ artist_name: 'Built to Spill', album_title: 'Built to Spill', n: 5 })
+      .expect(200);
+
+    expectArray(res);
+    expect(res.body.length).toBeGreaterThan(0);
+    res.body.forEach((row) => {
+      expect(row.matched_via).toBeUndefined();
+    });
+  });
+
+  test('split-field queries skip the cascade (not in scope for #972)', async () => {
+    // artist_name !== album_title routes through the legacy fuzzySearchLibrary
+    // path. With nonsense values for both fields, the response must be empty
+    // (no cascade backfill, no matched_via).
+    const res = await auth
+      .get('/library')
+      .query({ artist_name: 'xyznoartist', album_title: 'xyznoalbum', n: 5 })
+      .expect(200);
+
+    expectArray(res);
+    expect(res.body.length).toBe(0);
+  });
+});
+
 describe('Library artist_name cascade trigger (A.3 / 0060)', () => {
   const postgres = require('postgres');
   let sql;

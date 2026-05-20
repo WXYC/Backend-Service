@@ -516,6 +516,139 @@ describe('library.service', () => {
     });
   });
 
+  /**
+   * Both-mode catalog cascade reachable from fuzzySearchLibrary (BS#972).
+   *
+   * The catalog route GET /library/ calls fuzzySearchLibrary directly. With
+   * both fields equal (dj-site's live-search shape), the both-mode branch
+   * must run the same tsvector → trigram → CTA → LML cascade that
+   * searchLibrary already runs at /library/search. Without this, catalog
+   * clients never see matched_via even with the feature flags strict-`true`.
+   *
+   * These mirror the searchLibrary cascade cases — same mock chain shape —
+   * but drive fuzzySearchLibrary(query, query, ...) directly.
+   */
+  describe('fuzzySearchLibrary Both-mode cascade (BS#972)', () => {
+    const ctaRow = {
+      id: 11,
+      code_letters: 'VA',
+      code_artist_number: 1,
+      code_number: 5,
+      artist_name: 'Various Artists',
+      alphabetical_name: 'Various Artists',
+      album_title: 'Edits',
+      format_name: 'cd',
+      genre_name: 'Electronic',
+      rotation_bin: null,
+      add_date: new Date('2024-01-15'),
+      label: 'self-released',
+      label_id: null,
+      on_streaming: true,
+      album_artist: null,
+      plays: 0,
+      artwork_url: null,
+      discogs_artist_id: null,
+      musicbrainz_artist_id: null,
+      wikidata_qid: null,
+      spotify_artist_id: null,
+      apple_music_artist_id: null,
+      bandcamp_id: null,
+      cta_track_title: 'Call Your Name',
+      cta_artist_name: 'Chuquimamani-Condori',
+    };
+
+    const originalCta = process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+    const originalDiscogs = process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+      delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+      resetCatalogTrackSearchConfig();
+      __resetTrackSearchCacheForTests();
+    });
+
+    afterAll(() => {
+      if (originalCta === undefined) delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+      else process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = originalCta;
+      if (originalDiscogs === undefined) delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+      else process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = originalDiscogs;
+      resetCatalogTrackSearchConfig();
+    });
+
+    /** Tsvector returns 0 rows; trigram returns whatever caller provides. */
+    function setUpPrimarySearchMocks(trigramRows: object[] = []): void {
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      const trigramChain = createMockQueryChain(trigramRows);
+      trigramChain.limit = jest.fn().mockResolvedValue(trigramRows);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? tsvectorChain : trigramChain;
+        callIndex += 1;
+        return chain;
+      });
+    }
+
+    it('flag-off: tsvector hit returns plain row, no matched_via', async () => {
+      const chain = createMockQueryChain([mockViewRow]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+
+      const results = await fuzzySearchLibrary('Autechre', 'Autechre', 5);
+
+      expect(results).toHaveLength(1);
+      // matched_via must not be set on direct hits.
+      expect((results[0] as { matched_via?: unknown }).matched_via).toBeUndefined();
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('flag-off baseline: primary 0 → no LML, returns []', async () => {
+      setUpPrimarySearchMocks();
+      db.execute.mockResolvedValue([]);
+
+      const results = await fuzzySearchLibrary('nilufer yanya', 'nilufer yanya', 5);
+
+      expect(results).toEqual([]);
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('CTA flag on, primary 0 → CTA fires and matched_via.source=cta surfaces on the wire row', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      setUpPrimarySearchMocks();
+      db.execute.mockResolvedValue([ctaRow]);
+
+      const results = await fuzzySearchLibrary('Call Your Name', 'Call Your Name', 5);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(11);
+      // Preserves the LibraryArtistViewEntry shape (label, add_date, etc.)
+      // so the controller can serialize it as AlbumSearchResult.
+      expect(results[0]).toHaveProperty('label', 'self-released');
+      expect(results[0]).toHaveProperty('add_date');
+      const matchedVia = (results[0] as { matched_via?: Array<{ source: string; title: string }> }).matched_via;
+      expect(Array.isArray(matchedVia)).toBe(true);
+      expect(matchedVia?.[0]).toMatchObject({ source: 'cta', title: 'Call Your Name' });
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('split-field query (artist !== title) does NOT trigger cascade', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      const chain = createMockQueryChain([]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+
+      const results = await fuzzySearchLibrary('xyznoartist', 'xyznoalbum', 5);
+
+      expect(results).toEqual([]);
+      // Split-field path stays on the legacy fuzzy trigram path — no
+      // db.execute (CTA SQL) and no LML lookup.
+      expect(db.execute).not.toHaveBeenCalled();
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+  });
+
   describe('searchByArtist', () => {
     beforeEach(() => {
       jest.clearAllMocks();

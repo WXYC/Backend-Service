@@ -44,6 +44,15 @@ const RECONCILED_IDENTITY_KEYS = [
 
 type ReconciledIdentityKey = (typeof RECONCILED_IDENTITY_KEYS)[number];
 
+/**
+ * A library_artist_view row that may carry an attached `matched_via` hint when
+ * the cascade's CTA or LML `/lookup` fallback surfaced it (catalog-track-search
+ * plan §5.1). Wraps `LibraryArtistViewEntry` rather than replacing it so
+ * downstream functions (enrichWithArtwork, serializeReconciledIdentity) accept
+ * tagged rows without signature changes.
+ */
+export type TaggedLibraryViewEntry = LibraryArtistViewEntry & { matched_via?: TrackMatchHint[] };
+
 /** A row that carries the six external-ID fields (artist row, view row, or any join projection). */
 type ReconciledIdentitySource = {
   discogs_artist_id: number | null;
@@ -569,24 +578,48 @@ async function searchLibraryByTrigramBoth(
 }
 
 /**
- * Run the Both-mode search: tsvector first, trigram fallback only when
- * tsvector returns 0 rows. The fallback is gated on the query having at
- * least 2 characters and at least one alphanumeric character — pure
- * punctuation and 1-char queries return empty without a second roundtrip.
+ * Run the Both-mode search cascade: tsvector → trigram → CTA → LML `/lookup`.
+ *
+ * Stages 1-2 (tsvector, trigram) read `library` directly via the per-column
+ * GIN indexes. Stages 3-4 (CTA, LML) are the catalog-track-search cascade,
+ * gated on the `CATALOG_TRACK_SEARCH_*` feature flags (default off).
+ *
+ * Tsvector / trigram return plain `LibraryArtistViewEntry` rows; CTA / LML
+ * return the same shape with a `matched_via` field tagging the fallback
+ * source. The catalog read-path serializes the union via
+ * `serializeLibraryArtistViewEntry`, so `matched_via` rides through to the
+ * wire unchanged.
+ *
+ * Both feature flags default off, so for any deployment that hasn't opted in,
+ * behavior is byte-identical to the pre-#972 baseline (tsvector → trigram → []).
  */
 async function searchLibraryBothMode(
   query: string,
   n: number,
   on_streaming?: boolean
-): Promise<LibraryArtistViewEntry[]> {
+): Promise<TaggedLibraryViewEntry[]> {
   const trimmed = query.trim();
   if (trimmed.length === 0 || !hasAlphanumeric(trimmed)) return [];
 
   const tsvectorResults = await searchLibraryByTsvector(trimmed, n, on_streaming);
   if (tsvectorResults.length > 0) return tsvectorResults;
 
-  if (trimmed.length < 2) return [];
-  return searchLibraryByTrigramBoth(trimmed, n, on_streaming);
+  if (trimmed.length >= 2) {
+    const trigramResults = await searchLibraryByTrigramBoth(trimmed, n, on_streaming);
+    if (trigramResults.length > 0) return trigramResults;
+  }
+
+  const flags = getCatalogTrackSearchConfig();
+  if (flags.ctaEnabled) {
+    const ctaResults = await searchLibraryByCTARaw(trimmed, n, on_streaming);
+    if (ctaResults.length > 0) return ctaResults;
+  }
+  if (flags.discogsEnabled) {
+    const trackResults = await searchLibraryByTrackRaw(trimmed, n);
+    if (trackResults.length > 0) return trackResults;
+  }
+
+  return [];
 }
 
 export const fuzzySearchLibrary = async (
@@ -594,11 +627,12 @@ export const fuzzySearchLibrary = async (
   album_title?: string,
   n = 5,
   on_streaming?: boolean
-): Promise<LibraryArtistViewEntry[]> => {
+): Promise<TaggedLibraryViewEntry[]> => {
   await checkLibraryArtistNameHealth();
 
   // Both-mode default (dj-site sends the same string as artist and title).
-  // Route through tsvector + plays.
+  // Route through tsvector → trigram → CTA → LML cascade so catalog clients
+  // see `matched_via` for fallback-sourced hits (BS#972, plan §4.1 / §5.1).
   if (artist_name && album_title && artist_name === album_title) {
     return searchLibraryBothMode(artist_name, n, on_streaming);
   }
@@ -629,19 +663,23 @@ export const fuzzySearchLibrary = async (
 /**
  * Public wire-format for a library_artist_view row: the six flat external-ID
  * columns are stripped and replaced with a nested `reconciled_identity`.
+ * `matched_via` rides through when the row came from the catalog-track-search
+ * cascade (CTA / LML `/lookup` fallback), otherwise absent.
  */
 export type LibraryArtistViewResponse = Omit<LibraryArtistViewEntry, ReconciledIdentityKey> & {
   reconciled_identity: ReconciledIdentity | null;
+  matched_via?: TrackMatchHint[];
 };
 
 /**
  * Serialize a library_artist_view row for the wire (or any iterable of them).
  * Used at the read-endpoint boundary so the four `/library*` endpoints all
  * return the same nested-identity shape, regardless of whether they read the
- * view or join `artists` directly.
+ * view or join `artists` directly. Tagged rows (carrying `matched_via`)
+ * preserve the tag through serialization.
  */
-export function serializeLibraryArtistViewEntry(row: LibraryArtistViewEntry): LibraryArtistViewResponse {
-  return serializeReconciledIdentity(row);
+export function serializeLibraryArtistViewEntry(row: TaggedLibraryViewEntry): LibraryArtistViewResponse {
+  return serializeReconciledIdentity(row) as LibraryArtistViewResponse;
 }
 
 /**
@@ -881,29 +919,21 @@ export async function searchLibrary(
 ): Promise<EnrichedLibraryResult[]> {
   await checkLibraryArtistNameHealth();
 
-  if (query) {
-    const primary = await searchLibraryBothMode(query, limit, on_streaming);
-    if (primary.length > 0) {
-      return primary.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
-    }
+  // searchLibraryBothMode now owns the full cascade (tsvector → trigram → CTA
+  // → LML); BS#972 unified the cascade location so the catalog read-path at
+  // GET /library/ can reach it via fuzzySearchLibrary. Map view rows to
+  // EnrichedLibraryResult and carry `matched_via` through.
+  const rows = query
+    ? await searchLibraryBothMode(query, limit, on_streaming)
+    : artist || title
+      ? await fuzzySearchLibrary(artist, title, limit, on_streaming)
+      : [];
 
-    // Both flags default off so behavior is unchanged until rollout (plan §4).
-    const flags = getCatalogTrackSearchConfig();
-    if (flags.ctaEnabled) {
-      const ctaResults = await searchLibraryByCTA(query, limit, on_streaming);
-      if (ctaResults.length > 0) return ctaResults;
-    }
-
-    if (flags.discogsEnabled) {
-      const trackResults = await searchLibraryByTrack(query, limit);
-      if (trackResults.length > 0) return trackResults;
-    }
-
-    return [];
-  }
-
-  const results = artist || title ? await fuzzySearchLibrary(artist, title, limit, on_streaming) : [];
-  return results.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
+  return rows.map((row) => {
+    const enriched = enrichLibraryResult(viewRowToLibraryResult(row));
+    if (row.matched_via) enriched.matched_via = row.matched_via;
+    return enriched;
+  });
 }
 
 /**
@@ -999,7 +1029,7 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  * @returns Array of enriched library results with `matched_via` populated
  * @throws Whatever `lookupBySong` throws — the wrapper handles the boundary.
  */
-async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<EnrichedLibraryResult[]> {
+async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<TaggedLibraryViewEntry[]> {
   const lookupStart = performance.now();
   const response: LookupResponse = await lookupBySong(query);
   try {
@@ -1073,18 +1103,19 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Enric
     }
   }
 
-  const results: EnrichedLibraryResult[] = [];
+  const results: TaggedLibraryViewEntry[] = [];
   for (const item of items) {
     const legacyId = item.library_item?.id;
     if (legacyId == null) continue;
     const row = rowsByLegacyId.get(legacyId);
     if (!row) continue;
     if (ctaCovered.has(row.id)) continue;
-    const enriched = enrichLibraryResult(viewRowToLibraryResult(row));
+    const { legacy_release_id: _legacy, ...viewRow } = row;
+    const tagged: TaggedLibraryViewEntry = { ...viewRow };
     if (item.matched_via && item.matched_via.length > 0) {
-      enriched.matched_via = item.matched_via;
+      tagged.matched_via = item.matched_via;
     }
-    results.push(enriched);
+    results.push(tagged);
   }
   return results;
 }
@@ -1107,7 +1138,7 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Enric
 // proxy.controller.ts). Plan reference:
 // https://github.com/WXYC/wiki/blob/main/plans/catalog-track-search.md#103-latency--cache-budget
 
-const trackSearchCache = new LRUCache<string, EnrichedLibraryResult[]>({
+const trackSearchCache = new LRUCache<string, TaggedLibraryViewEntry[]>({
   max: 1000,
   ttl: 1000 * 60 * 10, // 10 minutes
 });
@@ -1163,7 +1194,7 @@ export function __resetTrackSearchCacheForTests(): void {
  * @param limit - Maximum results to return
  * @returns Array of enriched library results with `matched_via` populated
  */
-export async function searchLibraryByTrack(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
+export async function searchLibraryByTrackRaw(query: string, limit: number): Promise<TaggedLibraryViewEntry[]> {
   return Sentry.startSpan({ name: 'searchLibraryByTrack', op: 'catalog.track_search' }, async (span) => {
     const start = performance.now();
     // master_lookup_ms is set by searchLibraryByTrackUncachedOrThrow on the
@@ -1171,7 +1202,7 @@ export async function searchLibraryByTrack(query: string, limit: number): Promis
     // pre-LML failures still emit a numeric value — p95 dashboards then
     // see one row per call without coalesce.
     let lmlSucceeded = true;
-    let results: EnrichedLibraryResult[];
+    let results: TaggedLibraryViewEntry[];
 
     const key = trackSearchCacheKey(query);
     const cached = trackSearchCache.get(key);
@@ -1201,6 +1232,20 @@ export async function searchLibraryByTrack(query: string, limit: number): Promis
       console.warn('[Library] searchLibraryByTrack: failed to project latency onto span', err);
     }
     return results;
+  });
+}
+
+/**
+ * Enriched-shape wrapper around {@link searchLibraryByTrackRaw}. Returns
+ * `EnrichedLibraryResult[]` for request-line callers; catalog callers use the
+ * raw form via `searchLibraryBothMode`.
+ */
+export async function searchLibraryByTrack(query: string, limit: number): Promise<EnrichedLibraryResult[]> {
+  const rows = await searchLibraryByTrackRaw(query, limit);
+  return rows.map((row) => {
+    const enriched = enrichLibraryResult(viewRowToLibraryResult(row));
+    if (row.matched_via) enriched.matched_via = row.matched_via;
+    return enriched;
   });
 }
 
@@ -1235,28 +1280,26 @@ type CTASearchRow = LibraryArtistViewEntry & {
 
 /**
  * Search the library for compilation tracks whose `track_title` or
- * `artist_name` matches `query` via ILIKE. JOINs back to `library` (with the
- * usual `artists` / `format` / `genres` / `genre_artist_crossreference` joins
- * used by `library_artist_view`) and returns one enriched library row per
- * matched release, with `matched_via` listing every matching CTA row.
+ * `artist_name` matches `query` via ILIKE. Returns raw library_artist_view
+ * rows (one per matched release) with `matched_via` attached. Used by
+ * `searchLibraryBothMode` as the Track 1 (CTA) cascade layer; the enriched
+ * wrapper {@link searchLibraryByCTA} maps these to `EnrichedLibraryResult[]`
+ * for request-line callers.
  *
- * Confidence is hardcoded to 1.0 per the catalog-track-search plan's
- * confidence-by-source table — the curated VA-disambiguation data in
- * `compilation_track_artist` is treated as authoritative.
- *
- * Method is exported for E1-3 to wire into `searchLibraryBothMode`; it is
- * not yet on the public search path.
+ * Returning tagged view rows (rather than enriched results) lets catalog
+ * read-paths reuse the wire-shape serializer (`serializeLibraryArtistViewEntry`)
+ * without losing `add_date`, `label`, `artwork_url`, etc. (BS#972).
  *
  * @param query - Free text query matched against `track_title` and `artist_name`
  * @param limit - Maximum results to return (counts library rows, not CTA rows)
  * @param on_streaming - Optional filter on `library.on_streaming`
- * @returns Array of enriched library results with `matched_via` populated
+ * @returns Array of tagged view rows with `matched_via` populated
  */
-export async function searchLibraryByCTA(
+export async function searchLibraryByCTARaw(
   query: string,
   limit: number,
   on_streaming?: boolean
-): Promise<EnrichedLibraryResult[]> {
+): Promise<TaggedLibraryViewEntry[]> {
   const trimmed = query.trim();
   // Mirror searchLibraryBothMode's guard: pure-punctuation queries (`!!!`,
   // `---`) would otherwise run an unanchored ILIKE scan over every CTA row.
@@ -1341,10 +1384,31 @@ export async function searchLibraryByCTA(
     }
   }
 
-  return Array.from(byLibraryId.values()).map(({ row, hints }) => ({
-    ...enrichLibraryResult(viewRowToLibraryResult(row)),
-    matched_via: hints,
-  }));
+  return Array.from(byLibraryId.values()).map(({ row, hints }) => {
+    // Strip the CTA-only join columns so the returned row conforms to
+    // `LibraryArtistViewEntry`. The wire-shape serializer would otherwise
+    // emit `cta_track_title` / `cta_artist_name` next to `matched_via`.
+    const { cta_track_title: _t, cta_artist_name: _a, ...viewRow } = row;
+    return { ...viewRow, matched_via: hints } as TaggedLibraryViewEntry;
+  });
+}
+
+/**
+ * Enriched-shape wrapper around {@link searchLibraryByCTARaw}. Returns
+ * `EnrichedLibraryResult[]` for request-line callers that compose with the
+ * other search strategies (`searchAlbumsByTitle`, `searchByArtist`).
+ */
+export async function searchLibraryByCTA(
+  query: string,
+  limit: number,
+  on_streaming?: boolean
+): Promise<EnrichedLibraryResult[]> {
+  const rows = await searchLibraryByCTARaw(query, limit, on_streaming);
+  return rows.map((row) => {
+    const enriched = enrichLibraryResult(viewRowToLibraryResult(row));
+    if (row.matched_via) enriched.matched_via = row.matched_via;
+    return enriched;
+  });
 }
 
 /**
