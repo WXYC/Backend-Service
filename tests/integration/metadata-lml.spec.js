@@ -177,7 +177,7 @@ describe('Metadata via LML (Mock API)', () => {
   });
 
   describe('LML failure handling', () => {
-    test('LML 500 error: entry created, no metadata columns populated, no attempt stamp', async () => {
+    test('LML 500 error: entry created, synthesized search URLs populated, attempt stamp left NULL (BS#873)', async () => {
       if (!mockApiAvailable) return;
 
       // Wait for any in-flight fire-and-forget to settle, then reset + simulate
@@ -199,22 +199,33 @@ describe('Metadata via LML (Mock API)', () => {
       // doesn't depend on metadata enrichment.
       expect(addRes.body.id).toBeDefined();
 
-      // Per #639, fetchMetadata re-throws on LML failure. The .catch branch
-      // in enrichment.service.ts logs to Sentry and deliberately does not
-      // touch the row, so:
-      //   - metadata_attempt_at stays NULL (the row stays retryable by the
-      //     historical drain in #638 and the recurring drift-repair sweep);
-      //   - none of the metadata URL columns are populated, including the
-      //     synthesized search URLs (they used to be filled here, which
-      //     conflated tried-and-no-match with tried-and-LML-failed).
+      // BS#873: fetchMetadata re-throws on LML failure (per #639). The
+      // .catch branch in enrichment.service.ts now writes the three free
+      // synthesized YouTube/Bandcamp/SoundCloud search URLs so the listener
+      // isn't left with a fully blank row while the LML cascade recovers.
+      // Crucially, metadata_attempt_at stays NULL — the row remains
+      // eligible for the recurring drift-repair sweep so the real
+      // artwork/Discogs/Spotify/Apple match can land on a future attempt.
       // Give the fire-and-forget enough time to settle into the .catch.
       await new Promise((r) => setTimeout(r, 500));
       const res = await request.get('/flowsheet').query({ limit: 20 }).send();
       const entry = res.body.entries?.find((e) => e.id === addRes.body.id);
       expect(entry).toBeDefined();
-      expect(entry.youtube_music_url).toBeNull();
-      expect(entry.bandcamp_url).toBeNull();
-      expect(entry.soundcloud_url).toBeNull();
+      // Synthesized search URLs ARE populated on the catch path.
+      expect(entry.youtube_music_url).toContain('music.youtube.com');
+      expect(entry.bandcamp_url).toContain('bandcamp.com');
+      expect(entry.soundcloud_url).toContain('soundcloud.com');
+      // LML-dependent URLs remain NULL — they can't be synthesized client-side.
+      expect(entry.artwork_url).toBeNull();
+      expect(entry.discogs_url).toBeNull();
+      expect(entry.spotify_url).toBeNull();
+      expect(entry.apple_music_url).toBeNull();
+      expect(entry.artist_bio).toBeNull();
+      expect(entry.artist_wikipedia_url).toBeNull();
+      // The retryability invariant (`metadata_attempt_at IS NULL`) is asserted
+      // at the SQL chunk level by `tests/unit/services/metadata.enrichment.test.ts`
+      // — `flowsheet.controller.ts:40` deliberately omits the column from
+      // `IFSEntry` so we can't see it from the HTTP response.
     });
   });
 });
