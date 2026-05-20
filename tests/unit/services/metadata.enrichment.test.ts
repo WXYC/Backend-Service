@@ -178,8 +178,47 @@ describe('fireAndForgetMetadataForRow', () => {
     expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/NOW\(\)/i);
   });
 
-  it('does NOT stamp metadata_attempt_at when fetchMetadata throws', async () => {
+  it('on LML failure: writes synthesized search URLs without stamping metadata_attempt_at (BS#873)', async () => {
+    // When the LML lookup rejects (timeout, 502, etc.), the row should not be
+    // left fully empty. Synthesize the three free YouTube/Bandcamp/SoundCloud
+    // search URLs and write them. Crucially, do NOT stamp metadata_attempt_at
+    // — the row stays eligible for the recurring drift-repair sweep so the
+    // real artwork/Discogs match can still land on a future attempt.
     mockFetchMetadata.mockRejectedValue(new Error('LML responded with 502'));
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 44,
+      artistName: 'King Crimson',
+      albumTitle: 'Discipline',
+      trackTitle: 'Elephant Talk',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockDb.update).toHaveBeenCalled();
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setArgs).toBeDefined();
+    expect(setArgs).not.toHaveProperty('metadata_attempt_at');
+    expect(setArgs.youtube_music_url).toMatch(/^https:\/\/music\.youtube\.com\/search\?q=/);
+    expect(setArgs.bandcamp_url).toMatch(/^https:\/\/bandcamp\.com\/search\?q=/);
+    expect(setArgs.soundcloud_url).toMatch(/^https:\/\/soundcloud\.com\/search\?q=/);
+    // Discogs/Spotify/Apple/artist columns can't be synthesized without
+    // LML and must NOT be touched by the fallback path (a follow-up
+    // success on the backfill sweep needs to fill them).
+    expect(setArgs).not.toHaveProperty('artwork_url');
+    expect(setArgs).not.toHaveProperty('discogs_url');
+    expect(setArgs).not.toHaveProperty('spotify_url');
+    expect(setArgs).not.toHaveProperty('apple_music_url');
+    expect(setArgs).not.toHaveProperty('artist_bio');
+    expect(setArgs).not.toHaveProperty('artist_wikipedia_url');
+  });
+
+  it('on LML failure: UPDATE narrows on metadata_attempt_at IS NULL (idempotent with backfill, BS#873)', async () => {
+    // Mirror the success-path WHERE clause so a sweep UPDATE that already
+    // landed (real artwork + stamped attempt_at) cannot be clobbered by the
+    // catch-arm fallback. Row-lock granularity in PG means the second
+    // writer's UPDATE resolves to 0 rows, preserving the prior value.
+    mockFetchMetadata.mockRejectedValue(new Error('LML timed out'));
 
     fireAndForgetMetadataForRow({
       flowsheetId: 44,
@@ -189,8 +228,10 @@ describe('fireAndForgetMetadataForRow', () => {
 
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(mockDb.update).not.toHaveBeenCalled();
-    expect(mockDb._chain.set).not.toHaveBeenCalled();
+    const whereCalls = mockDb._chain.where.mock.calls;
+    expect(whereCalls.length).toBeGreaterThan(0);
+    const lastWhereArg = whereCalls[whereCalls.length - 1][0];
+    expect(renderSql(lastWhereArg)).toMatch(/metadata_attempt_at.*IS\s+NULL/i);
   });
 
   it('skips the DB update when fetchMetadata returns null', async () => {
