@@ -234,11 +234,19 @@ export const runConsumer = async (opts: {
             // psql repro.
             const err = error as { message?: string; cause?: unknown };
             const cause = err.cause as
-              | { message?: string; code?: string; detail?: string; constraint_name?: string; column_name?: string; table_name?: string; routine?: string }
+              | {
+                  message?: string;
+                  code?: string;
+                  detail?: string;
+                  constraint_name?: string;
+                  column_name?: string;
+                  table_name?: string;
+                  routine?: string;
+                }
               | undefined;
             log('warn', 'writer_error', `writer failed for library_id=${result.library_id}`, {
               library_id: result.library_id,
-              error_message: err.message,
+              error_message: err.message ?? String(error),
               pg_message: cause?.message,
               pg_code: cause?.code,
               pg_detail: cause?.detail,
