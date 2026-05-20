@@ -108,7 +108,17 @@ export const writeSingleArtist = async (
   result: Extract<BulkResolveResult, { kind: 'single_artist' }>
 ): Promise<WriteOutcome> => {
   const main = projectMainRow(result.main);
-  const lastVerifiedAt = new Date();
+  // ISO-8601 string, not a JS Date object. Drizzle's drizzle() factory
+  // overrides postgres-js's default date serializer (OIDs 1184/1082/1083/1114/1182/1185/1115/1231)
+  // with a passthrough — see node_modules/drizzle-orm/postgres-js/driver.js:19, citing
+  // https://github.com/porsager/postgres/discussions/761. The override is intended for
+  // *parsers* (so reads return raw text), but it also catches the *serializer* path —
+  // a JS Date passed via `${...}` in a `sql\`\`` template arrives at postgres-js's
+  // Bind() as a Date, the transparent serializer returns it unchanged, and the
+  // Buffer.byteLength() call inside b.str() throws ERR_INVALID_ARG_TYPE.
+  // Pre-stringifying defeats the override and gives PG a parseable timestamptz.
+  // 2026-05-20: every UPSERT of the first prod run (14,405/14,405) failed on this.
+  const lastVerifiedAt = new Date().toISOString();
 
   let sourceRowsWritten = 0;
   let sourceRowsSkippedNullConfidence = 0;
