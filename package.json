@@ -15,6 +15,7 @@
     "format": "prettier --cache --cache-location .cache/prettier/ --write .",
     "format:check": "prettier --cache --cache-location .cache/prettier/ --check .",
     "build": "npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/** --workspace=jobs/**",
+    "predev": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication",
     "dev": "dotenvx run -f .env -- concurrently \"npm:dev:auth\" \"npm:dev:backend\"",
     "dev:backend": "npm run dev --workspace=@wxyc/backend",
     "dev:auth": "npm run dev --workspace=@wxyc/auth-service",
