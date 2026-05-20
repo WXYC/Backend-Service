@@ -225,9 +225,27 @@ export const runConsumer = async (opts: {
             totals.rows_resolved += 1;
             totals.source_rows_skipped_null_confidence += outcome.source_rows_skipped_null_confidence;
           } catch (error) {
+            // Drizzle wraps every postgres-js failure in DrizzleQueryError, whose
+            // `.message` is hardcoded to "Failed query: <SQL>\nparams: <params>".
+            // The actual PG error (code, detail, constraint_name, column_name) lives
+            // on `.cause`. Logging only `.message` produced a fleet of identical
+            // "Failed query" log lines during the 2026-05-20 first run with no PG
+            // diagnostic — surfacing both makes failures debuggable without a manual
+            // psql repro.
+            const err = error as { message?: string; cause?: unknown };
+            const cause = err.cause as
+              | { message?: string; code?: string; detail?: string; constraint_name?: string; column_name?: string; table_name?: string; routine?: string }
+              | undefined;
             log('warn', 'writer_error', `writer failed for library_id=${result.library_id}`, {
               library_id: result.library_id,
-              error_message: (error as Error).message,
+              error_message: err.message,
+              pg_message: cause?.message,
+              pg_code: cause?.code,
+              pg_detail: cause?.detail,
+              pg_constraint: cause?.constraint_name,
+              pg_column: cause?.column_name,
+              pg_table: cause?.table_name,
+              pg_routine: cause?.routine,
             });
             captureError(error, 'writer_error', { library_id: result.library_id });
             totals.rows_skipped.writer_error += 1;
