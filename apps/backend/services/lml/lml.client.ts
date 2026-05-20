@@ -52,7 +52,18 @@ class LmlClientError extends Error {
 
 export { LmlClientError };
 
-const TIMEOUT_MS = 5000;
+// BS#873: matches `jobs/flowsheet-metadata-backfill/lml-fetch.ts` so the
+// runtime path tolerates the same cold-cache LML cascade the backfill
+// already accepts. Safe because every BS caller of /lookup runs
+// fire-and-forget after the HTTP response is sent — a 30 s budget holds
+// a Node promise + LML socket, not a user-visible request. Earlier 5 s
+// budget was set when LML comfortably fit inside it; cold-cache
+// compilations now land at 8-18 s (measured 2026-05-19, pre-A2/A3/A8
+// promotion). The catch arm in `services/metadata/enrichment.service.ts`
+// stamps the row with synthesized search URLs (sans
+// `metadata_attempt_at`) so even a 30 s timeout doesn't leave a fully
+// blank row for the listener.
+const TIMEOUT_MS = 30000;
 
 /**
  * Rate awareness of LML's Discogs ceilings (BS#906 / G4).

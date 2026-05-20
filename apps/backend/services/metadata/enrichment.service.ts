@@ -21,6 +21,9 @@ import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import { db, flowsheet } from '@wxyc/database';
 import { fetchMetadata } from './metadata.service.js';
+import { SearchUrlProvider } from './providers/search-urls.provider.js';
+
+const searchUrls = new SearchUrlProvider();
 
 export interface EnrichmentInput {
   flowsheetId: number;
@@ -131,7 +134,7 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
         // landing wins.
         .where(sql`"id" = ${input.flowsheetId} AND "metadata_attempt_at" IS NULL`);
     })
-    .catch((err) => {
+    .catch(async (err) => {
       console.error('[Flowsheet] Metadata fetch failed:', err);
       Sentry.captureException(err, {
         tags: { subsystem: 'metadata' },
@@ -141,6 +144,35 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
           albumTitle: input.albumTitle,
         },
       });
+      // BS#873: best-effort fallback — write the three synthesized search
+      // URLs so the iOS playlist isn't fully blank while the LML cascade
+      // recovers. Crucially, do NOT stamp metadata_attempt_at: the row
+      // must stay eligible for the recurring drift-repair sweep so the
+      // real artwork/Discogs/Spotify/Apple match can land on a future
+      // attempt. The IS NULL gate matches the success path's idempotency
+      // contract (`jobs/flowsheet-metadata-backfill/enrich.ts:173`) so a
+      // race between the backfill and this catch arm leaves whichever
+      // landed first intact.
+      const urls = searchUrls.getAllSearchUrls(
+        input.artistName,
+        input.albumTitle ?? undefined,
+        input.trackTitle ?? undefined
+      );
+      try {
+        await db
+          .update(flowsheet)
+          .set({
+            youtube_music_url: urls.youtubeMusicUrl,
+            bandcamp_url: urls.bandcampUrl,
+            soundcloud_url: urls.soundcloudUrl,
+          })
+          .where(sql`"id" = ${input.flowsheetId} AND "metadata_attempt_at" IS NULL`);
+      } catch (writeErr) {
+        // Observability path must never escalate a database failure on
+        // the fallback into an unhandled rejection — the original LML
+        // error has already reached Sentry; this is best-effort only.
+        console.error('[Flowsheet] Fallback URL write failed:', writeErr);
+      }
     });
 
   inFlightEnrichments.add(promise);
