@@ -49,6 +49,7 @@ import {
   enrichWithArtwork,
   updateArtworkUrl,
   getDiscogsReleaseIdByRotationId,
+  __resetRotationLmlLookupCacheForTests,
 } from '../../../apps/backend/services/library.service';
 import { resetConfig as resetCatalogTrackSearchConfig } from '../../../apps/backend/config/catalogTrackSearch';
 
@@ -2106,6 +2107,176 @@ describe('library.service', () => {
 
       const result = await getDiscogsReleaseIdByRotationId(404);
       expect(result).toBeNull();
+    });
+  });
+
+  describe('getDiscogsReleaseIdByRotationId — tier-3 LML fallback', () => {
+    // Tier 3 mirrors tubafrenzy's RotationTracklistCache parity (BS#986):
+    // when direct + fallback both miss, ask LML `POST /api/v1/lookup` to
+    // identify the release from (artist_name, album_title). Per-rotation_id
+    // LRU caches positive and negative results so the LML chokepoint isn't
+    // hammered on dropdown opens. These tests pin the fall-through, the
+    // cache behavior, the NULL bypasses, and the graceful-degradation
+    // contract (errors return null, don't bubble).
+
+    function mockRow(row: {
+      direct: number | null;
+      fallback: number | null;
+      artist_name: string | null;
+      album_title: string | null;
+    }): void {
+      const chain = createMockQueryChain();
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([row]);
+    }
+
+    beforeEach(() => {
+      __resetRotationLmlLookupCacheForTests();
+      mockLookupMetadata.mockReset();
+      mockIsLmlConfigured.mockReset();
+      mockIsLmlConfigured.mockReturnValue(true);
+    });
+
+    afterEach(() => {
+      db.select.mockReset();
+    });
+
+    it('falls through to LML and returns results[0].artwork.release_id', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      mockLookupMetadata.mockResolvedValue({
+        results: [{ artwork: { release_id: 4080 } }],
+        search_type: 'direct',
+      });
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+
+      expect(result).toBe(4080);
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield');
+    });
+
+    it('does not call LML when the direct column has a value', async () => {
+      mockRow({ direct: 12345, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+
+      expect(result).toBe(12345);
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
+    });
+
+    it('does not call LML when the fallback has a value', async () => {
+      mockRow({ direct: null, fallback: 99, artist_name: 'Autechre', album_title: 'Confield' });
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+
+      expect(result).toBe(99);
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
+    });
+
+    it('returns null and does not call LML when artist_name is NULL', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: null, album_title: 'Confield' });
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+
+      expect(result).toBeNull();
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
+    });
+
+    it('returns null and does not call LML when album_title is NULL', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: null });
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+
+      expect(result).toBeNull();
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
+    });
+
+    it('returns null and does not call LML when LIBRARY_METADATA_URL is unconfigured', async () => {
+      mockIsLmlConfigured.mockReturnValue(false);
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+
+      expect(result).toBeNull();
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
+    });
+
+    it('returns null and degrades silently when lookupMetadata throws', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      mockLookupMetadata.mockRejectedValue(new Error('LML 504'));
+      const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+
+      expect(result).toBeNull();
+      expect(consoleSpy).toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    it('returns null when LML returns an empty results array (search_type=none)', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Unknown' });
+      mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+
+      expect(result).toBeNull();
+    });
+
+    it('caches positive results so subsequent calls do not hit LML within TTL', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      mockLookupMetadata.mockResolvedValue({
+        results: [{ artwork: { release_id: 4080 } }],
+        search_type: 'direct',
+      });
+
+      const first = await getDiscogsReleaseIdByRotationId(42);
+      expect(first).toBe(4080);
+
+      // The DB read still happens on every call (this is by design — the LRU
+      // only short-circuits the LML query, which is the expensive bit). The
+      // second call reaches the resolver but hits the cache before LML.
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      const second = await getDiscogsReleaseIdByRotationId(42);
+      expect(second).toBe(4080);
+
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches negative results so an unresolvable row does not hammer LML', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Unknown' });
+      mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
+
+      const first = await getDiscogsReleaseIdByRotationId(42);
+      expect(first).toBeNull();
+
+      mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Unknown' });
+      const second = await getDiscogsReleaseIdByRotationId(42);
+      expect(second).toBeNull();
+
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not cache transient LML failures so the next call retries', async () => {
+      // A thrown LML error indicates an upstream blip (timeout, 5xx). Caching
+      // null in that case would lock the picker into degraded mode for the
+      // negative TTL window even after LML recovers. The implementation skips
+      // the cache write on the catch arm — pin that here.
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      mockLookupMetadata.mockRejectedValueOnce(new Error('LML timeout'));
+      const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      const first = await getDiscogsReleaseIdByRotationId(42);
+      expect(first).toBeNull();
+
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      mockLookupMetadata.mockResolvedValueOnce({
+        results: [{ artwork: { release_id: 4080 } }],
+        search_type: 'direct',
+      });
+      const second = await getDiscogsReleaseIdByRotationId(42);
+      expect(second).toBe(4080);
+
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+      consoleSpy.mockRestore();
     });
   });
 });

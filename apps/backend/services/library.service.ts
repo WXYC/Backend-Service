@@ -324,19 +324,67 @@ export async function getDiscogsReleaseIdByLegacyId(legacyId: number): Promise<n
 }
 
 /**
+ * Per-rotation_id LRU for the LML `POST /api/v1/lookup` fallback in
+ * `getDiscogsReleaseIdByRotationId`. The dj-site picker is opened many times
+ * per session against a handful of rotation rows; caching avoids restarting
+ * the LML query for each open. Mirrors tubafrenzy's `RotationTracklistCache`
+ * concept (process-local map keyed by rotation id), minus the warm-on-startup
+ * pass.
+ *
+ * Two caches — positive (resolved release id) and negative (LML returned
+ * nothing) — match the artwork/negativeCache pattern in
+ * `apps/backend/controllers/proxy.controller.ts`. lru-cache v11 constrains
+ * value types to non-nullable, so the negative cache stores `true` and uses
+ * key presence as the signal. Negative TTL is shorter so a row that becomes
+ * resolvable (LML catalog improvements, Discogs additions) recovers within
+ * minutes rather than waiting for the process to restart.
+ */
+const ROTATION_LML_LOOKUP_CACHE_MAX = 500;
+const ROTATION_LML_LOOKUP_TTL_POSITIVE_MS = 60 * 60 * 1000;
+const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 10 * 60 * 1000;
+
+const rotationLmlPositiveCache = new LRUCache<number, number>({
+  max: ROTATION_LML_LOOKUP_CACHE_MAX,
+  ttl: ROTATION_LML_LOOKUP_TTL_POSITIVE_MS,
+  ttlAutopurge: true,
+});
+
+const rotationLmlNegativeCache = new LRUCache<number, true>({
+  max: ROTATION_LML_LOOKUP_CACHE_MAX,
+  ttl: ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS,
+  ttlAutopurge: true,
+});
+
+export function __resetRotationLmlLookupCacheForTests(): void {
+  rotationLmlPositiveCache.clear();
+  rotationLmlNegativeCache.clear();
+}
+
+/**
  * Look up the resolved Discogs release id for a rotation row by its id.
  *
- * Reads `rotation.discogs_release_id` (mirrored from tubafrenzy
- * ROTATION_RELEASE.DISCOGS_RELEASE_ID by jobs/rotation-etl) and falls
- * back to `library_identity.discogs_release_id` via the album_id bridge
- * when the rotation row has no direct value. The fallback covers
- * post-tubafrenzy-turndown rows created via dj-site once BS#801 starts
- * populating release-level identity from LML.
+ * Three-tier resolution to match tubafrenzy's `RotationTracklistCache` parity
+ * (see BS#986):
  *
- * Returns null when neither source has a value: rotation row doesn't
- * exist, the rotation row's direct column is NULL and no library_identity
- * row backs the album, or both sources have NULL. The picker degrades to
- * free-text in any of these cases.
+ *   1. `rotation.discogs_release_id` (direct) — mirrored from tubafrenzy
+ *      `ROTATION_RELEASE.DISCOGS_RELEASE_ID` by `jobs/rotation-etl`. Populated
+ *      via the rotation-add form's paste-URL prefill flow. 0/21,563 rows
+ *      carry a value in prod as of 2026-05-21, so tier 1 is the rare path.
+ *   2. `library_identity.discogs_release_id` via the `album_id` bridge
+ *      (fallback) — written by `jobs/library-identity-consumer` (BS#802),
+ *      but the column is structurally NULL today until BS#801 extends LML's
+ *      `bulk-resolve-libraries` contract with release-level resolution.
+ *   3. LML `POST /api/v1/lookup` on `(rotation.artist_name, rotation.album_title)`
+ *      (runtime) — the same `(artist, title)` lookup tubafrenzy's
+ *      `RotationTracklistCache.fetchAndCache` uses. Per-`rotation_id` LRU
+ *      caches positive and negative results.
+ *
+ * Tier 3 keeps the picker working today; tiers 1 and 2 are the substrate
+ * we hand off to once upstreams catch up.
+ *
+ * Returns null when all three tiers miss: rotation row doesn't exist; the
+ * row has no `artist_name` or `album_title`; LML returns no results,
+ * isn't configured, or fails. The picker degrades to free-text.
  *
  * Used by `/library/rotation/:rotation_id/tracks` (BS#940) to compose
  * against LML's `/api/v1/discogs/release/{id}` for the rotation entry
@@ -348,13 +396,72 @@ export async function getDiscogsReleaseIdByRotationId(rotationId: number): Promi
     .select({
       direct: rotation.discogs_release_id,
       fallback: library_identity.discogs_release_id,
+      artist_name: rotation.artist_name,
+      album_title: rotation.album_title,
     })
     .from(rotation)
     .leftJoin(library_identity, eq(library_identity.library_id, rotation.album_id))
     .where(eq(rotation.id, rotationId))
     .limit(1);
   if (!rows[0]) return null;
-  return rows[0].direct ?? rows[0].fallback ?? null;
+
+  const stored = rows[0].direct ?? rows[0].fallback ?? null;
+  if (stored !== null) return stored;
+
+  return resolveRotationDiscogsReleaseViaLml(rotationId, rows[0].artist_name, rows[0].album_title);
+}
+
+/**
+ * Tier-3 of `getDiscogsReleaseIdByRotationId`. Asks LML to identify the
+ * Discogs release for a rotation row's `(artist_name, album_title)` when
+ * the direct column and `library_identity` fallback both miss. Mirrors
+ * tubafrenzy's `RotationTracklistCache.fetchAndCache`, which calls
+ * `LibrarySearchClient.searchDiscogsRelease` → `POST /api/v1/lookup`.
+ *
+ * Caches positive and negative results per `rotation_id`. The negative
+ * TTL is shorter so rows that become resolvable (LML catalog improvements,
+ * Discogs additions) recover within minutes rather than waiting for a
+ * process restart. No DB cache-through here — tubafrenzy's MySQL column
+ * isn't a write target on this path either, and a column-mix between
+ * paste-URL-prefilled and LML-resolved values would muddy provenance.
+ *
+ * Errors are swallowed: the picker should degrade to free-text rather
+ * than 500 the request. The error is logged for Sentry to pick up; the
+ * `lookupMetadata` chokepoint already wraps the call in a span carrying
+ * `lml.cache.*` attributes for trace-explorer drill-down.
+ */
+async function resolveRotationDiscogsReleaseViaLml(
+  rotationId: number,
+  artistName: string | null,
+  albumTitle: string | null
+): Promise<number | null> {
+  if (!artistName || !albumTitle) return null;
+  if (!isLmlConfigured()) return null;
+
+  const cachedPositive = rotationLmlPositiveCache.get(rotationId);
+  if (cachedPositive !== undefined) return cachedPositive;
+  if (rotationLmlNegativeCache.has(rotationId)) return null;
+
+  let releaseId: number | null;
+  try {
+    const response = await lookupMetadata(artistName, albumTitle);
+    releaseId = response.results?.[0]?.artwork?.release_id ?? null;
+  } catch (err) {
+    console.warn(
+      '[library.service] LML /lookup for rotation_id=%d failed; degrading picker to free-text: %s',
+      rotationId,
+      (err as Error).message
+    );
+    return null;
+  }
+
+  if (releaseId !== null) {
+    rotationLmlPositiveCache.set(rotationId, releaseId);
+  } else {
+    rotationLmlNegativeCache.set(rotationId, true);
+  }
+
+  return releaseId;
 }
 
 export const updateOnStreaming = async (id: number, on_streaming: boolean | null) => {
