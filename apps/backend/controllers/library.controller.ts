@@ -346,17 +346,21 @@ export interface RotationTrack {
  * GET /library/rotation/:rotation_id/tracks (BS#940)
  *
  * Composition for the dj-site rotation entry mode track picker.
- *   1. Resolve `rotation.album_id` → `library_identity.discogs_release_id`
- *      via `getDiscogsReleaseIdByRotationId`.
+ *   1. Resolve the Discogs release id via `getDiscogsReleaseIdByRotationId`,
+ *      which reads `rotation.discogs_release_id` (mirrored from tubafrenzy
+ *      by jobs/rotation-etl, migration 0077) and falls back to
+ *      `library_identity.discogs_release_id` via the `rotation.album_id`
+ *      bridge for post-tubafrenzy-turndown rows.
  *   2. Fetch the tracklist from LML's `GET /api/v1/discogs/release/{id}`.
  *   3. Project Discogs's per-track `artists` onto the dj-site shape; fall
  *      back to the release-level artist when a track has no per-track credits
  *      (Discogs's normal shape for non-V/A releases).
  *
- * Degrades gracefully: returns 200 + `[]` when no identity resolves (no
- * `album_id`, no `library_identity` row, or no `discogs_release_id`) or when
- * LML 404s the release. Only LML 5xx bubbles up so transient upstream failures
- * surface rather than silently hiding the dropdown.
+ * Degrades gracefully: returns 200 + `[]` when the rotation row doesn't exist
+ * or when neither the direct column nor the `library_identity` fallback
+ * resolves a release id, and when LML 404s the release. Only LML 5xx bubbles
+ * up so transient upstream failures surface rather than silently hiding the
+ * dropdown.
  *
  * No BS-side cache here — LML's 3-tier cache already deduplicates by release id.
  * If load justifies it, extract a shared LRU between this and the `/proxy`
