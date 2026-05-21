@@ -47,6 +47,7 @@ import {
   markAlbumFound,
   enrichWithArtwork,
   updateArtworkUrl,
+  getDiscogsReleaseIdByRotationId,
 } from '../../../apps/backend/services/library.service';
 import { resetConfig as resetCatalogTrackSearchConfig } from '../../../apps/backend/config/catalogTrackSearch';
 
@@ -1814,6 +1815,67 @@ describe('library.service', () => {
       // in the SQL values.
       expect(flattened).not.toContain(true);
       expect(flattened).not.toContain(false);
+    });
+  });
+
+  describe('getDiscogsReleaseIdByRotationId', () => {
+    // Pins the direct + fallback precedence of the simplified read path
+    // (post-tubafrenzy-parity migration 0077). The tubafrenzy-sourced
+    // `rotation.discogs_release_id` wins when present; the library_identity
+    // join is only consulted when the direct column is NULL. This guards
+    // against a future regression that re-introduces the JOIN-only path
+    // (which returned [] for ~100% of rotation rows during the 2026-05-20
+    // outage that motivated this work).
+    afterEach(() => {
+      db.select.mockReset();
+    });
+
+    it('returns the direct rotation.discogs_release_id when present', async () => {
+      const chain = createMockQueryChain();
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([{ direct: 12345, fallback: null }]);
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+      expect(result).toBe(12345);
+    });
+
+    it('falls back to library_identity.discogs_release_id when the direct column is NULL', async () => {
+      const chain = createMockQueryChain();
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([{ direct: null, fallback: 99 }]);
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+      expect(result).toBe(99);
+    });
+
+    it('prefers the direct column over the fallback when both are present', async () => {
+      // Direct (rotation row, sourced from tubafrenzy) is authoritative; the
+      // library_identity fallback exists for post-tubafrenzy-turndown rows
+      // that lack a direct value.
+      const chain = createMockQueryChain();
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([{ direct: 12345, fallback: 99 }]);
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+      expect(result).toBe(12345);
+    });
+
+    it('returns null when both sources are NULL', async () => {
+      const chain = createMockQueryChain();
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([{ direct: null, fallback: null }]);
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+      expect(result).toBeNull();
+    });
+
+    it('returns null when the rotation row does not exist', async () => {
+      const chain = createMockQueryChain();
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+
+      const result = await getDiscogsReleaseIdByRotationId(404);
+      expect(result).toBeNull();
     });
   });
 });

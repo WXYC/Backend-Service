@@ -18,8 +18,8 @@ jest.mock('@wxyc/database', () => ({
 import { parseRotationRows } from '../../../../jobs/rotation-etl/fetch-legacy';
 
 describe('parseRotationRows', () => {
-  it('parses a valid 9-column tab-separated row', () => {
-    const raw = '42\tAutechre\tConfield\tH\tWarp\t1706788800000\t0\t101\t1706800000000';
+  it('parses a valid 10-column tab-separated row', () => {
+    const raw = '42\tAutechre\tConfield\tH\tWarp\t1706788800000\t0\t101\t1706800000000\t12345';
     const rows = parseRotationRows(raw);
 
     expect(rows).toHaveLength(1);
@@ -33,6 +33,7 @@ describe('parseRotationRows', () => {
       killDate: 0,
       libraryReleaseId: 101,
       timeLastModified: 1706800000000,
+      discogsReleaseId: 12345,
     });
   });
 
@@ -42,21 +43,30 @@ describe('parseRotationRows', () => {
   });
 
   it('treats LIBRARY_RELEASE_ID of 0 as null', () => {
-    const raw = '42\tAutechre\tConfield\tH\tWarp\t1706788800000\t0\t0\t1706800000000';
+    const raw = '42\tAutechre\tConfield\tH\tWarp\t1706788800000\t0\t0\t1706800000000\t0';
     const rows = parseRotationRows(raw);
 
     expect(rows[0].libraryReleaseId).toBeNull();
   });
 
+  it('treats DISCOGS_RELEASE_ID of 0 as null', () => {
+    // The SQL emits IFNULL(DISCOGS_RELEASE_ID, 0), so a 0 column means
+    // the rotation row has no Discogs release captured (NULL in MySQL).
+    const raw = '42\tAutechre\tConfield\tH\tWarp\t1706788800000\t0\t101\t1706800000000\t0';
+    const rows = parseRotationRows(raw);
+
+    expect(rows[0].discogsReleaseId).toBeNull();
+  });
+
   it('treats empty artist name as null', () => {
-    const raw = '42\t\tConfield\tN\tWarp\t1706788800000\t0\t0\t1706800000000';
+    const raw = '42\t\tConfield\tN\tWarp\t1706788800000\t0\t0\t1706800000000\t0';
     const rows = parseRotationRows(raw);
 
     expect(rows[0].artistName).toBeNull();
   });
 
   it('treats NULL string values as null', () => {
-    const raw = '42\tNULL\tNULL\tN\tNULL\t1706788800000\t0\t0\t1706800000000';
+    const raw = '42\tNULL\tNULL\tN\tNULL\t1706788800000\t0\t0\t1706800000000\t0';
     const rows = parseRotationRows(raw);
 
     expect(rows[0].artistName).toBeNull();
@@ -77,21 +87,23 @@ describe('parseRotationRows', () => {
 
   it('parses multiple rows', () => {
     const raw = [
-      '42\tAutechre\tConfield\tH\tWarp\t1706788800000\t0\t101\t1706800000000',
-      '43\tStereolab\tAluminum Tunes\tM\tDuophonic\t1706788800000\t1707000000000\t0\t1707000000000',
+      '42\tAutechre\tConfield\tH\tWarp\t1706788800000\t0\t101\t1706800000000\t12345',
+      '43\tStereolab\tAluminum Tunes\tM\tDuophonic\t1706788800000\t1707000000000\t0\t1707000000000\t0',
     ].join('\n');
 
     const rows = parseRotationRows(raw);
 
     expect(rows).toHaveLength(2);
     expect(rows[0].id).toBe(42);
+    expect(rows[0].discogsReleaseId).toBe(12345);
     expect(rows[1].id).toBe(43);
     expect(rows[1].killDate).toBe(1707000000000);
     expect(rows[1].libraryReleaseId).toBeNull();
+    expect(rows[1].discogsReleaseId).toBeNull();
   });
 
   it('defaults empty rotationType to N', () => {
-    const raw = '42\tAutechre\tConfield\t\tWarp\t1706788800000\t0\t0\t1706800000000';
+    const raw = '42\tAutechre\tConfield\t\tWarp\t1706788800000\t0\t0\t1706800000000\t0';
     const rows = parseRotationRows(raw);
 
     expect(rows[0].rotationType).toBe('N');

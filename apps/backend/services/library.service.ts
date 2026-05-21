@@ -325,27 +325,36 @@ export async function getDiscogsReleaseIdByLegacyId(legacyId: number): Promise<n
 
 /**
  * Look up the resolved Discogs release id for a rotation row by its id.
- * Joins `rotation` → `library_identity` via `rotation.album_id = library_identity.library_id`.
  *
- * Returns null when any of these holds (the picker degrades to free-text):
- *   - rotation row doesn't exist,
- *   - rotation row has `album_id IS NULL` (unlinked — ~49% of active prod rows),
- *   - the album row has no `library_identity` entry (not yet backfilled by BS#802), or
- *   - the identity row has no resolved `discogs_release_id`.
+ * Reads `rotation.discogs_release_id` (mirrored from tubafrenzy
+ * ROTATION_RELEASE.DISCOGS_RELEASE_ID by jobs/rotation-etl) and falls
+ * back to `library_identity.discogs_release_id` via the album_id bridge
+ * when the rotation row has no direct value. The fallback covers
+ * post-tubafrenzy-turndown rows created via dj-site once BS#801 starts
+ * populating release-level identity from LML.
  *
- * Used by `/library/rotation/:rotation_id/tracks` (BS#940) to compose against
- * LML's `/api/v1/discogs/release/{id}` for the rotation entry mode picker.
- * Parallel to `getDiscogsReleaseIdByLegacyId` (BS#836), which the catalog-search
- * picker uses via `legacy_release_id`.
+ * Returns null when neither source has a value: rotation row doesn't
+ * exist, the rotation row's direct column is NULL and no library_identity
+ * row backs the album, or both sources have NULL. The picker degrades to
+ * free-text in any of these cases.
+ *
+ * Used by `/library/rotation/:rotation_id/tracks` (BS#940) to compose
+ * against LML's `/api/v1/discogs/release/{id}` for the rotation entry
+ * mode picker. Parallel to `getDiscogsReleaseIdByLegacyId` (BS#836)
+ * which the catalog-search picker uses via `legacy_release_id`.
  */
 export async function getDiscogsReleaseIdByRotationId(rotationId: number): Promise<number | null> {
   const rows = await db
-    .select({ discogs_release_id: library_identity.discogs_release_id })
+    .select({
+      direct: rotation.discogs_release_id,
+      fallback: library_identity.discogs_release_id,
+    })
     .from(rotation)
-    .innerJoin(library_identity, eq(library_identity.library_id, rotation.album_id))
+    .leftJoin(library_identity, eq(library_identity.library_id, rotation.album_id))
     .where(eq(rotation.id, rotationId))
     .limit(1);
-  return rows[0]?.discogs_release_id ?? null;
+  if (!rows[0]) return null;
+  return rows[0].direct ?? rows[0].fallback ?? null;
 }
 
 export const updateOnStreaming = async (id: number, on_streaming: boolean | null) => {

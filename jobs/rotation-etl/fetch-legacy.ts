@@ -18,6 +18,7 @@ export type LegacyRotationRow = {
   killDate: number;
   libraryReleaseId: number | null;
   timeLastModified: number;
+  discogsReleaseId: number | null;
 };
 
 /**
@@ -25,19 +26,20 @@ export type LegacyRotationRow = {
  *   0: ID, 1: ARTIST_PRESENTATION_NAME, 2: TITLE, 3: ROTATION_TYPE,
  *   4: LABEL_NAME (COALESCE of COMPANY.NAME and ALTERNATE_LABEL_NAME),
  *   5: ROTATION_ADD_DATE, 6: ROTATION_KILL_DATE, 7: LIBRARY_RELEASE_ID,
- *   8: TIME_LAST_MODIFIED
+ *   8: TIME_LAST_MODIFIED, 9: DISCOGS_RELEASE_ID
  */
 export const parseRotationRows = (raw: string): LegacyRotationRow[] => {
   if (raw.trim().length === 0) return [];
 
   const rows: LegacyRotationRow[] = [];
   for (const line of raw.trim().split('\n')) {
-    const cols = parseTabRow(line, 9);
+    const cols = parseTabRow(line, 10);
     if (!cols) {
       console.warn('[rotation-etl] Skipping malformed rotation row:', line);
       continue;
     }
     const rawLibraryId = Number(cols[7]) || 0;
+    const rawDiscogsId = Number(cols[9]) || 0;
     rows.push({
       id: Number(cols[0]),
       artistName: toNullable(cols[1]),
@@ -48,6 +50,7 @@ export const parseRotationRows = (raw: string): LegacyRotationRow[] => {
       killDate: Number(cols[6]) || 0,
       libraryReleaseId: rawLibraryId === 0 ? null : rawLibraryId,
       timeLastModified: Number(cols[8]) || 0,
+      discogsReleaseId: rawDiscogsId === 0 ? null : rawDiscogsId,
     });
   }
   return rows;
@@ -65,7 +68,8 @@ export const fetchLegacyRotation = async (sinceMs: number | null): Promise<Legac
       rr.ROTATION_ADD_DATE,
       rr.ROTATION_KILL_DATE,
       rr.LIBRARY_RELEASE_ID,
-      rr.TIME_LAST_MODIFIED
+      rr.TIME_LAST_MODIFIED,
+      IFNULL(rr.DISCOGS_RELEASE_ID, 0)
     FROM ROTATION_RELEASE rr
     LEFT JOIN COMPANY c ON rr.COMPANY_ID = c.ID AND c.NAME != ''
     ${filter}

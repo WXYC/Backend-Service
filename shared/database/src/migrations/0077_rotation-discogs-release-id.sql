@@ -1,0 +1,38 @@
+-- precondition-guard: not-required (touches only wxyc_schema.rotation; the
+--   library_identity references in the comment block below are informational
+--   context for the read-path fallback, not DDL on those tables)
+-- 0077: Add `discogs_release_id` to rotation.
+--
+-- Mirrored from tubafrenzy ROTATION_RELEASE.DISCOGS_RELEASE_ID by
+-- jobs/rotation-etl. Populated by the rotation form's paste-URL prefill
+-- in tubafrenzy; NULL when the music director added the release without
+-- pasting a Discogs URL.
+--
+-- Motivation: the dj-site rotation entry-mode picker (BS#940) and the
+-- /library/rotation/:id/tracks proxy need a release-level Discogs ID to
+-- compose against LML's /api/v1/discogs/release/{id}. Today the only
+-- source is library_identity, populated by jobs/library-identity-consumer
+-- (BS#802). That job only resolves artist-level identity from LML's
+-- bulk-resolve-libraries contract; the release-level
+-- library_identity.discogs_release_id column is structurally NULL for all
+-- ~14k rows it has written (see writer.ts projectMainRow). Until BS#801
+-- extends the LML contract with release-level resolution, the dj-site
+-- picker has no data to render — even though tubafrenzy already carries
+-- the canonical ID on every rotation row.
+--
+-- Sourcing it from the same upstream that already populates
+-- rotation.artist_name / album_title / record_label keeps the read path
+-- single-row and lets dj-site reach feature parity with the classic site
+-- ahead of the tubafrenzy turndown. After the turndown, post-turndown
+-- rows created via dj-site will populate this column directly (or read
+-- via the library_identity fallback when BS#801 lands).
+--
+-- DDL-only — no backfill. ALTER TABLE ADD COLUMN of a nullable column is
+-- metadata-only and instant on PostgreSQL 11+, regardless of the ~21k
+-- rotation rows. Same pattern as 0076 (flowsheet.track_position) and
+-- 0069 (flowsheet.metadata_attempt_at). The rotation-etl incremental
+-- sync backfills existing rows on its next pass; a one-shot full backfill
+-- (`LEGACY_SINCE_MS=0`) is recommended post-deploy to populate all rows
+-- at once rather than waiting for the modification-tracked drip.
+
+ALTER TABLE "wxyc_schema"."rotation" ADD COLUMN "discogs_release_id" integer;
