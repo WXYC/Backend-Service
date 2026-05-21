@@ -155,9 +155,10 @@ async function runCascade(params: LibraryQueryParams): Promise<AlbumSearchResult
   }
   if (cascade.length === 0) return [];
 
-  // The raw cascade primitives don't apply enum filters (genre/format) or
-  // honor `on_streaming` for the Track 2 path, so apply both in-memory over
-  // the bounded fallback list before serializing.
+  // Neither raw cascade primitive applies enum filters (genre/format), and
+  // `searchLibraryByTrackRaw` does not honor `on_streaming` (`searchLibraryByCTARaw`
+  // already does, but re-checking is a harmless no-op). Apply both filters
+  // in-memory over the bounded fallback list before serializing.
   const filtered = cascade.filter((row) => {
     if (params.on_streaming !== undefined && row.on_streaming !== params.on_streaming) return false;
     if (params.genre !== undefined && row.genre_name !== params.genre) return false;
