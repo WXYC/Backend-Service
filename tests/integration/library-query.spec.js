@@ -150,3 +150,132 @@ describe('GET /library/query', () => {
     expect(res.body.message).toMatch(/order/i);
   });
 });
+
+/**
+ * GET /library/query — catalog-track-search cascade (BS#977).
+ *
+ * `searchLibraryQueryEndpoint` is what dj-site's *modern* Card Catalog calls
+ * via `useCatalogQuerySearch`. Its underlying `librarySearchService.searchLibrary`
+ * has its own field-aware ILIKE-based primary path that doesn't reach the
+ * Track 1 (CTA) + Track 2 (LML `/lookup`) cascade owned by
+ * `libraryService.searchLibraryBothMode`. That left modern dj-site without
+ * `matched_via` chips even after BS#972 / #973 wired the cascade onto the
+ * classic-experience `GET /library/` route.
+ *
+ * These cases drive the same CTA + Track 2 fixtures as the cascade describes
+ * in library.spec.js, but through the `/library/query` envelope shape
+ * (`{ results, total, page, totalPages }`). They follow the
+ * skip-if-flag-off pattern: a 0-result response in CI means the flag isn't
+ * set; the test warns and short-circuits.
+ *
+ * Cascade trigger is the single-bareword case (no `artist:` / `album:` /
+ * `label:` qualifiers, no quoted exact, no NOT). Field-qualified queries
+ * skip the cascade even on a primary 0-hit (covered below).
+ */
+describe('GET /library/query cascade — modern Card Catalog serves matched_via (BS#977)', () => {
+  let auth;
+  // CTA fixture (mirror of the BS#972 + BS#819 blocks in library.spec.js).
+  const CTA_LIBRARY_ID = 7000;
+  const CTA_ALBUM_TITLE = 'Shape Fixture Album Alpha 1';
+  const CTA_ARTIST = 'Shape Fixture Artist Alpha';
+  // Track 2 fixture (mirror of the BS#972 + BS#825 blocks in library.spec.js).
+  const CONFIELD_LIBRARY_ID = 7100;
+  const CONFIELD_ALBUM_TITLE = 'Confield';
+  const CONFIELD_TRACK_QUERY = 'vi scose poise';
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+  });
+
+  test('single-bareword CTA query returns the comp library row with matched_via.source = "cta"', async () => {
+    const res = await auth.get('/library/query').query({ q: 'Bioluminescence', limit: 10 }).expect(200);
+
+    expect(res.body.results).toBeDefined();
+    expect(Array.isArray(res.body.results)).toBe(true);
+    if (res.body.results.length === 0) {
+      console.warn(
+        '[BS#977] /library/query cascade returned no results. Likely the backend is running ' +
+          'without CATALOG_TRACK_SEARCH_CTA_ENABLED=true. Set it in .env and restart `npm run dev`.'
+      );
+      return;
+    }
+
+    const hit = res.body.results.find((row) => row.id === CTA_LIBRARY_ID);
+    expect(hit).toBeDefined();
+    expect(hit.album_title).toBe(CTA_ALBUM_TITLE);
+    expect(hit.artist_name).toBe(CTA_ARTIST);
+    expect(Array.isArray(hit.matched_via)).toBe(true);
+    expect(hit.matched_via.length).toBeGreaterThanOrEqual(1);
+    const bioHints = hit.matched_via.filter((m) => m.title === 'Bioluminescence');
+    expect(bioHints.length).toBeGreaterThanOrEqual(1);
+    bioHints.forEach((hint) => {
+      expect(hint.source).toBe('cta');
+      expect(hint.confidence).toBe(1.0);
+    });
+    // Cascade-fallback envelope is single-page: total reflects cascade size,
+    // not the unrelated catalog total.
+    expect(res.body.total).toBe(res.body.results.length);
+    expect(res.body.page).toBe(0);
+    expect(res.body.totalPages).toBe(1);
+  });
+
+  test('single-bareword Track 2 query ("vi scose poise") returns Confield via LML fallback', async () => {
+    const res = await auth
+      .get('/library/query')
+      .query({ q: CONFIELD_TRACK_QUERY, sort: 'artist', order: 'asc', limit: 20 })
+      .expect(200);
+
+    expect(res.body.results).toBeDefined();
+    expect(Array.isArray(res.body.results)).toBe(true);
+    if (res.body.results.length === 0) {
+      console.warn(
+        '[BS#977] /library/query cascade returned no Track 2 results. Likely the backend is running ' +
+          'without CATALOG_TRACK_SEARCH_DISCOGS_ENABLED=true. Set it in .env and restart `npm run dev`.'
+      );
+      return;
+    }
+
+    const hit = res.body.results.find((row) => row.id === CONFIELD_LIBRARY_ID);
+    expect(hit).toBeDefined();
+    expect(hit.album_title).toBe(CONFIELD_ALBUM_TITLE);
+    expect(Array.isArray(hit.matched_via)).toBe(true);
+    expect(hit.matched_via.length).toBeGreaterThanOrEqual(1);
+    // Mock LML's songLookup map returns matched_via.source = 'discogs_master'
+    // for the Confield row; bridged via library.legacy_release_id back to BS.
+    expect(hit.matched_via.some((m) => m.source && m.source.startsWith('discogs'))).toBe(true);
+  });
+
+  test('primary tsvector/ILIKE hit never carries matched_via (cascade only fires on primary 0-hit)', async () => {
+    // 'Stereolab' is in the seed fixture and matches the primary ILIKE
+    // (artist/album/label) cleanly; the cascade must NOT fire, so no row
+    // can carry matched_via.
+    const res = await auth.get('/library/query').query({ q: 'Stereolab', limit: 10 }).expect(200);
+
+    expect(Array.isArray(res.body.results)).toBe(true);
+    expect(res.body.results.length).toBeGreaterThan(0);
+    res.body.results.forEach((row) => {
+      expect(row.matched_via).toBeUndefined();
+    });
+  });
+
+  test('field-qualified queries skip the cascade even on 0-hit', async () => {
+    // `artist:NonexistentArtistFoo` returns 0 primary rows; because the
+    // condition is field-qualified (not a single bareword), the cascade
+    // must NOT fire and the envelope must report no results.
+    const res = await auth.get('/library/query').query({ q: 'artist:NonexistentArtistFoo', limit: 10 }).expect(200);
+
+    expect(Array.isArray(res.body.results)).toBe(true);
+    expect(res.body.results.length).toBe(0);
+    expect(res.body.total).toBe(0);
+    expect(res.body.totalPages).toBe(0);
+  });
+
+  test('cascade pagination beyond page=0 returns empty results', async () => {
+    // Cascade fallback is single-page; page > 0 must be empty (no offset
+    // semantics over a bounded fallback list).
+    const res = await auth.get('/library/query').query({ q: CONFIELD_TRACK_QUERY, page: 1, limit: 20 }).expect(200);
+
+    expect(Array.isArray(res.body.results)).toBe(true);
+    expect(res.body.results.length).toBe(0);
+  });
+});
