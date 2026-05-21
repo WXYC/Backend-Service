@@ -188,6 +188,10 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
   });
 
   test('single-bareword CTA query returns the comp library row with matched_via.source = "cta"', async () => {
+    // 'Bioluminescence' is a CTA-fixture track title that matches no library
+    // artist/album/label by ILIKE, so the primary path returns 0 rows and the
+    // cascade fires; the CTA layer then maps the track back to its parent
+    // comp library row (CTA_LIBRARY_ID) via the curated track→album map.
     const res = await auth.get('/library/query').query({ q: 'Bioluminescence', limit: 10 }).expect(200);
 
     expect(res.body.results).toBeDefined();
