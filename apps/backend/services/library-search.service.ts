@@ -1,11 +1,14 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { db, library_artist_view, genres, format as formatTable } from '@wxyc/database';
+import type { TrackMatchHint } from '@wxyc/shared/dtos';
 import {
   parseSearchQuery,
   CATALOG_PARSER_CONFIG,
   type CatalogField,
   type SearchCondition,
 } from './search-parser.service.js';
+import { searchLibraryByCTARaw, searchLibraryByTrackRaw, type TaggedLibraryViewEntry } from './library.service.js';
+import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
 import WxycError from '../utils/error.js';
 
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
@@ -38,6 +41,7 @@ export type AlbumSearchResultRow = {
   plays: number | null;
   on_streaming: boolean | null;
   album_artist: string | null;
+  matched_via?: TrackMatchHint[];
 };
 
 const FIELD_COLUMNS: Record<CatalogField, SQL> = {
@@ -115,7 +119,112 @@ export async function searchLibrary(
   const results = (dataRows as unknown as RawRow[]).map(toAlbumSearchResultRow);
   const total = (countRows as unknown as { total: number }[])[0]?.total ?? 0;
 
-  return { results, total };
+  if (results.length > 0 || total > 0) return { results, total };
+
+  // Catalog-track-search cascade (BS#977). When the primary query returns no
+  // rows AND the user typed a single bareword (no field qualifiers, exact
+  // match, or negation), fall through to Track 1 (CTA) + Track 2 (LML
+  // `/lookup`). The cascade is single-page: pagination beyond page 0 stays
+  // empty so the client doesn't keep scrolling into a bounded fallback list.
+  if (params.page !== 0) return { results, total };
+  if (!isSingleBareword(conditions)) return { results, total };
+
+  const cascadeResults = await runCascade(params);
+  return { results: cascadeResults, total: cascadeResults.length };
+}
+
+function isSingleBareword(conditions: SearchCondition<CatalogField>[]): boolean {
+  if (conditions.length !== 1) return false;
+  const [c] = conditions;
+  return c.field === 'all' && !c.exact && !c.negated;
+}
+
+async function runCascade(params: LibraryQueryParams): Promise<AlbumSearchResultRow[]> {
+  const flags = getCatalogTrackSearchConfig();
+  if (!flags.ctaEnabled && !flags.discogsEnabled) return [];
+
+  const q = params.q.trim();
+  if (q.length === 0) return [];
+
+  let cascade: TaggedLibraryViewEntry[] = [];
+  if (flags.ctaEnabled) {
+    cascade = await searchLibraryByCTARaw(q, params.limit, params.on_streaming);
+  }
+  if (cascade.length === 0 && flags.discogsEnabled) {
+    cascade = await searchLibraryByTrackRaw(q, params.limit);
+  }
+  if (cascade.length === 0) return [];
+
+  // The raw cascade primitives don't apply enum filters (genre/format) or
+  // honor `on_streaming` for the Track 2 path, so apply both in-memory over
+  // the bounded fallback list before serializing.
+  const filtered = cascade.filter((row) => {
+    if (params.on_streaming !== undefined && row.on_streaming !== params.on_streaming) return false;
+    if (params.genre !== undefined && row.genre_name !== params.genre) return false;
+    if (params.format !== undefined && row.format_name !== params.format) return false;
+    return true;
+  });
+  if (filtered.length === 0) return [];
+
+  const projected = filtered.map(taggedRowToAlbumSearchResultRow);
+
+  const direction = params.order === 'asc' ? 1 : -1;
+  const primaryKey = SORT_KEYS[params.sort];
+  const secondaryKey = SECONDARY_SORT_KEYS[params.sort];
+  projected.sort((a, b) => {
+    const primary = compareSortable(a[primaryKey], b[primaryKey]) * direction;
+    if (primary !== 0) return primary;
+    const secondary = compareSortable(a[secondaryKey], b[secondaryKey]);
+    if (secondary !== 0) return secondary;
+    return a.id - b.id;
+  });
+  return projected;
+}
+
+type SortableKey = 'artist_name' | 'album_title' | 'plays' | 'add_date';
+
+const SORT_KEYS: Record<CatalogSort, SortableKey> = {
+  artist: 'artist_name',
+  album: 'album_title',
+  plays: 'plays',
+  date: 'add_date',
+};
+
+const SECONDARY_SORT_KEYS: Record<CatalogSort, SortableKey> = {
+  artist: 'album_title',
+  album: 'artist_name',
+  plays: 'artist_name',
+  date: 'artist_name',
+};
+
+function compareSortable(a: string | number | null, b: string | number | null): number {
+  if (a === b) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).localeCompare(String(b));
+}
+
+function taggedRowToAlbumSearchResultRow(row: TaggedLibraryViewEntry): AlbumSearchResultRow {
+  const projected: AlbumSearchResultRow = {
+    id: row.id,
+    add_date: row.add_date instanceof Date ? row.add_date.toISOString() : String(row.add_date ?? ''),
+    album_title: row.album_title,
+    artist_name: row.artist_name ?? '',
+    code_letters: row.code_letters,
+    code_number: row.code_number,
+    code_artist_number: row.code_artist_number,
+    format_name: row.format_name,
+    genre_name: row.genre_name,
+    label: row.label ?? '',
+    label_id: row.label_id,
+    rotation_bin: row.rotation_bin,
+    plays: row.plays,
+    on_streaming: row.on_streaming,
+    album_artist: row.album_artist,
+  };
+  if (row.matched_via) projected.matched_via = row.matched_via;
+  return projected;
 }
 
 type RawRow = {
