@@ -578,11 +578,45 @@ async function searchLibraryByTrigramBoth(
 }
 
 /**
+ * Catalog-track-search cascade: CTA (Track 1) → LML `/lookup` (Track 2),
+ * each layer gated by its own `CATALOG_TRACK_SEARCH_*` feature flag.
+ *
+ * Shared by `searchLibraryBothMode` (the `/library/` route) and
+ * `library-search.service.ts::runCascade` (the `/library/query` route) so
+ * the two callers can't drift on flag gating, layer order, or future
+ * per-layer concerns (telemetry, error isolation, cost guards).
+ *
+ * Returns raw `TaggedLibraryViewEntry[]`; callers handle their own
+ * post-cascade projection (the catalog read-path applies
+ * `serializeLibraryArtistViewEntry`; the query endpoint projects to
+ * `AlbumSearchResultRow` and re-applies enum filters in-memory).
+ */
+export async function runCatalogTrackSearchCascade(
+  query: string,
+  limit: number,
+  on_streaming?: boolean
+): Promise<TaggedLibraryViewEntry[]> {
+  const flags = getCatalogTrackSearchConfig();
+  if (!flags.ctaEnabled && !flags.discogsEnabled) return [];
+
+  if (flags.ctaEnabled) {
+    const ctaResults = await searchLibraryByCTARaw(query, limit, on_streaming);
+    if (ctaResults.length > 0) return ctaResults;
+  }
+  if (flags.discogsEnabled) {
+    const trackResults = await searchLibraryByTrackRaw(query, limit);
+    if (trackResults.length > 0) return trackResults;
+  }
+  return [];
+}
+
+/**
  * Run the Both-mode search cascade: tsvector → trigram → CTA → LML `/lookup`.
  *
  * Stages 1-2 (tsvector, trigram) read `library` directly via the per-column
  * GIN indexes. Stages 3-4 (CTA, LML) are the catalog-track-search cascade,
- * gated on the `CATALOG_TRACK_SEARCH_*` feature flags (default off).
+ * shared with `library-search.service.ts::runCascade` via
+ * {@link runCatalogTrackSearchCascade}.
  *
  * Tsvector / trigram return plain `LibraryArtistViewEntry` rows; CTA / LML
  * return the same shape with a `matched_via` field tagging the fallback
@@ -609,17 +643,7 @@ async function searchLibraryBothMode(
     if (trigramResults.length > 0) return trigramResults;
   }
 
-  const flags = getCatalogTrackSearchConfig();
-  if (flags.ctaEnabled) {
-    const ctaResults = await searchLibraryByCTARaw(trimmed, n, on_streaming);
-    if (ctaResults.length > 0) return ctaResults;
-  }
-  if (flags.discogsEnabled) {
-    const trackResults = await searchLibraryByTrackRaw(trimmed, n);
-    if (trackResults.length > 0) return trackResults;
-  }
-
-  return [];
+  return runCatalogTrackSearchCascade(trimmed, n, on_streaming);
 }
 
 export const fuzzySearchLibrary = async (

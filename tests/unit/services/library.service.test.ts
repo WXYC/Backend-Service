@@ -41,6 +41,7 @@ import {
   searchAlbumsByTitle,
   searchLibraryByCTA,
   searchLibraryByTrack,
+  runCatalogTrackSearchCascade,
   __resetTrackSearchCacheForTests,
   getAlbumFromDB,
   markAlbumMissing,
@@ -646,6 +647,235 @@ describe('library.service', () => {
       // db.execute (CTA SQL) and no LML lookup.
       expect(db.execute).not.toHaveBeenCalled();
       expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Shared CTA → LML cascade slice (BS#982). Extracted from
+   * `searchLibraryBothMode` and `library-search.service.ts::runCascade` so the
+   * two callers don't drift on flag gating, ordering, or per-layer telemetry.
+   *
+   * These tests exercise the helper directly to pin the orchestration contract:
+   *
+   * - Both flags off → returns [] without touching either primitive.
+   * - CTA-only → fires CTA; never falls through to Discogs.
+   * - Discogs-only → fires Discogs (CTA primitive not called).
+   * - Both on → CTA first; Discogs only when CTA returns 0.
+   *
+   * Mocks land at the same db / LML level as the existing cascade tests above,
+   * since the helper calls the primitives by local symbol resolution inside
+   * `library.service.ts`. The four flag combos are also covered end-to-end
+   * via `searchLibrary` and `fuzzySearchLibrary` above; these helper-direct
+   * tests are the new single source of truth that the refactor preserves.
+   */
+  describe('runCatalogTrackSearchCascade (BS#982)', () => {
+    const ctaRow = {
+      id: 11,
+      code_letters: 'VA',
+      code_artist_number: 1,
+      code_number: 5,
+      artist_name: 'Various Artists',
+      alphabetical_name: 'Various Artists',
+      album_title: 'Edits',
+      format_name: 'cd',
+      genre_name: 'Electronic',
+      rotation_bin: null,
+      add_date: new Date('2024-01-15'),
+      label: 'self-released',
+      label_id: null,
+      on_streaming: true,
+      album_artist: null,
+      plays: 0,
+      artwork_url: null,
+      discogs_artist_id: null,
+      musicbrainz_artist_id: null,
+      wikidata_qid: null,
+      spotify_artist_id: null,
+      apple_music_artist_id: null,
+      bandcamp_id: null,
+      cta_track_title: 'Call Your Name',
+      cta_artist_name: 'Chuquimamani-Condori',
+    };
+
+    const trackRow = {
+      id: 101,
+      code_letters: 'PR',
+      code_artist_number: 1,
+      code_number: 2,
+      artist_name: 'Jessica Pratt',
+      alphabetical_name: 'Pratt, Jessica',
+      album_title: 'On Your Own Love Again',
+      format_name: 'CD',
+      genre_name: 'Rock',
+      rotation_bin: null,
+      add_date: new Date('2024-02-01'),
+      label: 'Drag City',
+      label_id: null,
+      on_streaming: true,
+      album_artist: null,
+      plays: 12,
+      artwork_url: null,
+      legacy_release_id: 555,
+    };
+
+    const lookupItem = {
+      library_item: {
+        id: 555,
+        title: 'On Your Own Love Again',
+        artist: 'Jessica Pratt',
+        call_number: 'Rock CD PR 1/2',
+        library_url: 'http://www.wxyc.info/wxycdb/libraryRelease?id=555',
+      },
+      matched_via: [{ title: 'Back, Baby', artist_credit: null, confidence: 0.92, source: 'discogs_release' }],
+    };
+
+    const originalCta = process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+    const originalDiscogs = process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+      delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+      resetCatalogTrackSearchConfig();
+      __resetTrackSearchCacheForTests();
+    });
+
+    afterAll(() => {
+      if (originalCta === undefined) delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+      else process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = originalCta;
+      if (originalDiscogs === undefined) delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+      else process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = originalDiscogs;
+      resetCatalogTrackSearchConfig();
+    });
+
+    /** `searchLibraryByTrackRaw` issues two `db.select` calls (library bridge + cta exclusion). */
+    function setUpTrackMocks(trackRows: object[], ctaCoveredIds: number[] = []): void {
+      const libraryChain = createMockQueryChain(trackRows);
+      libraryChain.limit = jest.fn().mockResolvedValue(trackRows);
+      const ctaChain = createMockQueryChain(ctaCoveredIds.map((id) => ({ library_id: id })));
+      ctaChain.where = jest.fn().mockResolvedValue(ctaCoveredIds.map((id) => ({ library_id: id })));
+      const chains = [libraryChain, ctaChain];
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = chains[Math.min(callIndex, chains.length - 1)];
+        callIndex += 1;
+        return chain;
+      });
+    }
+
+    it('both flags off → returns [] without firing either primitive', async () => {
+      const results = await runCatalogTrackSearchCascade('Call Your Name', 5);
+
+      expect(results).toEqual([]);
+      expect(db.execute).not.toHaveBeenCalled();
+      expect(db.select).not.toHaveBeenCalled();
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('CTA only → CTA hits returns rows tagged matched_via.source=cta', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      db.execute.mockResolvedValue([ctaRow]);
+
+      const results = await runCatalogTrackSearchCascade('Call Your Name', 5);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(11);
+      expect(results[0].matched_via?.[0]).toMatchObject({ source: 'cta', title: 'Call Your Name' });
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('CTA only → CTA misses returns [] (no Discogs fallthrough when flag off)', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      db.execute.mockResolvedValue([]);
+
+      const results = await runCatalogTrackSearchCascade('xyzzy-unknown', 5);
+
+      expect(results).toEqual([]);
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('Discogs only → Discogs hits, CTA primitive is not queried', async () => {
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+      setUpTrackMocks([trackRow]);
+
+      const results = await runCatalogTrackSearchCascade('Back, Baby', 5);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(101);
+      expect(results[0].matched_via?.[0]).toMatchObject({ source: 'discogs_release', confidence: 0.92 });
+      // CTA SQL never ran.
+      expect(db.execute).not.toHaveBeenCalled();
+    });
+
+    it('both flags on → CTA hit suppresses Discogs lookup', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      db.execute.mockResolvedValue([ctaRow]);
+
+      const results = await runCatalogTrackSearchCascade('Call Your Name', 5);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].matched_via?.[0].source).toBe('cta');
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+    });
+
+    it('both flags on → CTA miss falls through to Discogs', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      db.execute.mockResolvedValue([]);
+      mockLookupBySong.mockResolvedValue({
+        results: [lookupItem],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+      setUpTrackMocks([trackRow]);
+
+      const results = await runCatalogTrackSearchCascade('Back, Baby', 5);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].matched_via?.[0].source).toBe('discogs_release');
+      expect(db.execute).toHaveBeenCalledTimes(1);
+    });
+
+    it('both flags on → both miss returns []', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      db.execute.mockResolvedValue([]);
+      mockLookupBySong.mockResolvedValue({
+        results: [],
+        search_type: 'none',
+        song_not_found: true,
+        found_on_compilation: false,
+      });
+
+      const results = await runCatalogTrackSearchCascade('xyzzy-unknown-track', 5);
+
+      expect(results).toEqual([]);
+      expect(db.execute).toHaveBeenCalledTimes(1);
+      expect(mockLookupBySong).toHaveBeenCalledTimes(1);
+    });
+
+    it('threads on_streaming into the CTA primitive', async () => {
+      process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
+      // searchLibraryByCTARaw is responsible for honoring on_streaming via its
+      // SQL; we assert here that the helper passes the third arg through by
+      // observing the SQL fragment carries the boolean.
+      db.execute.mockResolvedValue([]);
+
+      await runCatalogTrackSearchCascade('Call Your Name', 5, true);
+
+      expect(db.execute).toHaveBeenCalledTimes(1);
+      const sqlArg = db.execute.mock.calls[0]?.[0];
+      const flat = flattenSqlValues(sqlArg);
+      expect(flat).toContain(true);
     });
   });
 

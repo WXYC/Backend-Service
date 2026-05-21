@@ -7,8 +7,7 @@ import {
   type CatalogField,
   type SearchCondition,
 } from './search-parser.service.js';
-import { searchLibraryByCTARaw, searchLibraryByTrackRaw, type TaggedLibraryViewEntry } from './library.service.js';
-import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
+import { runCatalogTrackSearchCascade, type TaggedLibraryViewEntry } from './library.service.js';
 import WxycError from '../utils/error.js';
 
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
@@ -140,19 +139,10 @@ function isSingleBareword(conditions: SearchCondition<CatalogField>[]): boolean 
 }
 
 async function runCascade(params: LibraryQueryParams): Promise<AlbumSearchResultRow[]> {
-  const flags = getCatalogTrackSearchConfig();
-  if (!flags.ctaEnabled && !flags.discogsEnabled) return [];
-
   const q = params.q.trim();
   if (q.length === 0) return [];
 
-  let cascade: TaggedLibraryViewEntry[] = [];
-  if (flags.ctaEnabled) {
-    cascade = await searchLibraryByCTARaw(q, params.limit, params.on_streaming);
-  }
-  if (cascade.length === 0 && flags.discogsEnabled) {
-    cascade = await searchLibraryByTrackRaw(q, params.limit);
-  }
+  const cascade: TaggedLibraryViewEntry[] = await runCatalogTrackSearchCascade(q, params.limit, params.on_streaming);
   if (cascade.length === 0) return [];
 
   // Neither raw cascade primitive applies enum filters (genre/format), and
