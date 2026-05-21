@@ -455,6 +455,13 @@ export const rotation = wxyc_schema.table(
     artist_name: varchar('artist_name', { length: 128 }),
     album_title: varchar('album_title', { length: 128 }),
     record_label: varchar('record_label', { length: 128 }),
+    // Mirrored from tubafrenzy ROTATION_RELEASE.DISCOGS_RELEASE_ID by
+    // jobs/rotation-etl. Populated by the rotation form's paste-URL prefill
+    // in tubafrenzy. NULL when the music director added the release without
+    // a Discogs URL. Read path: getDiscogsReleaseIdByRotationId — reads
+    // here first, falls back to library_identity for post-tubafrenzy-turndown
+    // rows created via dj-site.
+    discogs_release_id: integer('discogs_release_id'),
   },
   (table) => {
     return {

@@ -94,6 +94,11 @@ export const rotation = {
   artist_name: 'artist_name',
   album_title: 'album_title',
   record_label: 'record_label',
+  discogs_release_id: 'discogs_release_id',
+};
+export const library_identity = {
+  library_id: 'library_id',
+  discogs_release_id: 'discogs_release_id',
 };
 export const library_artist_view = {
   on_streaming: 'on_streaming',

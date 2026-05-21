@@ -102,6 +102,7 @@ const runIncremental = async (): Promise<SyncResult> => {
         artist_name: albumId ? null : truncate(release.artistName, 128),
         album_title: albumId ? null : truncate(release.albumTitle, 128),
         record_label: albumId ? null : truncate(release.labelName, 128),
+        discogs_release_id: release.discogsReleaseId,
       })
       .onConflictDoUpdate({
         target: rotation.legacy_rotation_id,
@@ -113,6 +114,7 @@ const runIncremental = async (): Promise<SyncResult> => {
           artist_name: sql`excluded.artist_name`,
           album_title: sql`excluded.album_title`,
           record_label: sql`excluded.record_label`,
+          discogs_release_id: sql`excluded.discogs_release_id`,
         },
       });
 
