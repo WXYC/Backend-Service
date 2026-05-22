@@ -371,6 +371,20 @@ export function __resetRotationLmlLookupCacheForTests(): void {
 }
 
 /**
+ * Current sizes of the rotation LML LRUs. Used by the rotation-tracks
+ * cache-warm service (BS#998) to classify warm-pass outcomes per row
+ * (positive-cache-hit vs negative-cache-hit) without coupling to LRU
+ * internals. Underscored so it stays out of the public service surface —
+ * production callers should not depend on cache shape.
+ */
+export function __rotationLmlCacheSizesForWarm(): { positive: number; negative: number } {
+  return {
+    positive: rotationLmlPositiveCache.size,
+    negative: rotationLmlNegativeCache.size,
+  };
+}
+
+/**
  * Look up the resolved Discogs release id for a rotation row by its id.
  *
  * Three-tier resolution to match tubafrenzy's `RotationTracklistCache` parity
