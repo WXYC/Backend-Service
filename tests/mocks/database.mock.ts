@@ -143,6 +143,20 @@ export const flowsheet = {
   linked_at: 'linked_at',
   search_doc: 'search_doc',
 };
+export const album_metadata = {
+  album_id: 'album_id',
+  artwork_url: 'artwork_url',
+  discogs_url: 'discogs_url',
+  release_year: 'release_year',
+  spotify_url: 'spotify_url',
+  apple_music_url: 'apple_music_url',
+  youtube_music_url: 'youtube_music_url',
+  bandcamp_url: 'bandcamp_url',
+  soundcloud_url: 'soundcloud_url',
+  artist_bio: 'artist_bio',
+  artist_wikipedia_url: 'artist_wikipedia_url',
+  updated_at: 'updated_at',
+};
 export const flowsheet_linkage_review = {
   id: 'id',
   flowsheet_id: 'flowsheet_id',
