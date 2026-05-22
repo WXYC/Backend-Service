@@ -680,6 +680,57 @@ describe('proxy.controller', () => {
         expect(result.discogsReleaseId).toBe(7777);
         expect(result.label).toBe('Drag City');
       });
+
+      it('coerces Discogs release_year=0 sentinel to undefined (#1002)', async () => {
+        // Discogs returns 0 when a release has no verified year. The iOS
+        // playcut detail view renders this as "Release year: 0" if the
+        // proxy passes it through. Mirrors the chokepoint in
+        // `metadata.service.ts#extractAlbumMetadata`.
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: {
+                id: 1,
+                title: 'DOGA',
+                artist: 'Juana Molina',
+                call_number: 'Rock CD MOL 1/1',
+                library_url: '',
+              },
+              artwork: {
+                release_id: 8888,
+                release_url: 'https://www.discogs.com/release/8888',
+                artwork_url: 'https://i.discogs.com/art.jpg',
+                album: 'DOGA',
+                artist: 'Juana Molina',
+                confidence: 0.93,
+                release_year: 0,
+                discogs_artist_id: 4444,
+                tracklist: [],
+                genres: ['Rock'],
+                styles: [],
+                label: 'Sonamos',
+                full_release_date: null,
+              },
+            },
+          ],
+          search_type: 'direct',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = {
+          query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.releaseYear).toBeUndefined();
+        // Other release fields still preserved.
+        expect(result.discogsReleaseId).toBe(8888);
+        expect(result.label).toBe('Sonamos');
+      });
     });
   });
 
