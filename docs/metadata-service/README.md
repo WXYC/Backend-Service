@@ -27,7 +27,7 @@ graph TD
 | **Webhook Receiver** (`apps/backend/routes/internal.route.ts`)                  | Handles `POST /internal/flowsheet-webhook` from tubafrenzy; calls the shared enrichment helper on INSERT |
 | **Enrichment Service** (`apps/backend/services/metadata/enrichment.service.ts`) | Shared `fireAndForgetMetadataForRow` — fetches metadata and updates the flowsheet row                    |
 | **Metadata Service** (`apps/backend/services/metadata/metadata.service.ts`)     | `fetchMetadata` — calls LML's `/lookup` endpoint and shapes the response into the column-mapped result   |
-| **LML Client** (`apps/backend/services/lml/lml.client.ts`)                      | Single HTTP chokepoint with timeout + bearer auth header                                                 |
+| **LML Client** (`@wxyc/lml-client` — `shared/lml-client/src/index.ts`)          | Single HTTP chokepoint with timeout + bearer auth header                                                 |
 | **LML**                                                                         | External service: unified `/lookup` endpoint with 3-tier caching (memory + PostgreSQL + Discogs API)     |
 
 ### Metadata Fields on Flowsheet
