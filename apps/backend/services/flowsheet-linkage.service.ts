@@ -22,7 +22,7 @@
  */
 import { eq } from 'drizzle-orm';
 import { db, flowsheet, library, pickPrimaryLibraryRow } from '@wxyc/database';
-import { lookupMetadata } from './lml/lml.client.js';
+import { lookupMetadata } from '@wxyc/lml-client';
 import { mapLookupToCanonicalEntity } from './library.service.js';
 import { classifyLinkageError, incrementLinkageMetric, reportLinkageError } from './linkage-metrics.service.js';
 

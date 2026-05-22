@@ -6,7 +6,7 @@
 
 import { ArtworkProvider } from './base.js';
 import { ArtworkRequest, ArtworkSearchResult } from '../../requestLine/types.js';
-import { lookupMetadata, searchTrackReleases, validateTrackOnRelease, isLmlConfigured } from '../../lml/lml.client.js';
+import { lookupMetadata, searchTrackReleases, validateTrackOnRelease, isLmlConfigured } from '@wxyc/lml-client';
 import { filterSpacerGif } from '../../metadata/metadata.service.js';
 
 /**

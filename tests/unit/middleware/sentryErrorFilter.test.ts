@@ -1,5 +1,5 @@
 import { shouldCaptureExpressError } from '../../../apps/backend/middleware/sentryErrorFilter';
-import { LmlClientError } from '../../../apps/backend/services/lml/lml.client';
+import { LmlClientError } from '@wxyc/lml-client';
 import WxycError from '../../../apps/backend/utils/error';
 
 describe('shouldCaptureExpressError', () => {

@@ -1,0 +1,30 @@
+{
+  "name": "@wxyc/lml-client",
+  "version": "1.0.0",
+  "description": "Shared HTTP client for the library-metadata-lookup (LML) service. One chokepoint for every WXYC backend caller (Express app + cron jobs).",
+  "author": "WXYC",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sentry/node": "^10.52.0",
+    "@wxyc/shared": "^1.5.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3"
+  },
+  "types": "dist/index.d.ts"
+}

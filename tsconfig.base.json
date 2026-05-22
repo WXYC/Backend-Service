@@ -23,7 +23,8 @@
     "ignoreDeprecations": "6.0",
     "paths": {
       "@wxyc/authentication": ["shared/authentication/src"],
-      "@wxyc/database": ["shared/database/src"]
+      "@wxyc/database": ["shared/database/src"],
+      "@wxyc/lml-client": ["shared/lml-client/src"]
     }
   }
 }

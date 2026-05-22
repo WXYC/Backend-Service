@@ -12,13 +12,7 @@
  *   LIBRARY_METADATA_URL=http://localhost:8000 npx jest --config jest.e2e.config.ts tests/e2e/lml-connectivity.test.ts
  */
 
-import {
-  lookupMetadata,
-  getRelease,
-  getArtistDetails,
-  resolveEntity,
-  LmlClientError,
-} from '../../apps/backend/services/lml/lml.client';
+import { lookupMetadata, getRelease, getArtistDetails, resolveEntity, LmlClientError } from '@wxyc/lml-client';
 
 const LML_BASE_URL = process.env.LIBRARY_METADATA_URL || 'http://localhost:8000';
 

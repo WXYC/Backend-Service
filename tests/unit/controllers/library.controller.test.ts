@@ -60,7 +60,7 @@ const mockGetRelease = jest.fn<(releaseId: number) => Promise<unknown>>();
 
 // LmlClientError needs to be a real class so `err instanceof LmlClientError`
 // in the controller works after mocking. Mirrors the real shape in
-// apps/backend/services/lml/lml.client.ts.
+// shared/lml-client/src/index.ts (@wxyc/lml-client).
 class MockLmlClientError extends Error {
   statusCode: number;
   constructor(message: string, statusCode: number) {
@@ -70,7 +70,7 @@ class MockLmlClientError extends Error {
   }
 }
 
-jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+jest.mock('@wxyc/lml-client', () => ({
   checkStreamingAvailability: mockCheckStreamingAvailability,
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: mockIsLmlConfigured,

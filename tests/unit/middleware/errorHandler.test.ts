@@ -1,6 +1,6 @@
 import errorHandler from '../../../apps/backend/middleware/errorHandler';
 import WxycError from '../../../apps/backend/utils/error';
-import { LmlClientError } from '../../../apps/backend/services/lml/lml.client';
+import { LmlClientError } from '@wxyc/lml-client';
 import { Request, Response, NextFunction } from 'express';
 
 function mockResponse() {

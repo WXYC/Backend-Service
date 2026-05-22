@@ -18,6 +18,11 @@ const config: Config = {
     // Mock workspace packages
     '^@wxyc/database$': '<rootDir>/tests/mocks/database.mock.ts',
     '^@wxyc/authentication$': '<rootDir>/tests/mocks/authentication.mock.ts',
+    // @wxyc/lml-client: resolve to source so unit tests don't need a pre-built
+    // dist (CI's unit-tests job doesn't run lint:prebuild before tests). Real
+    // tests against the implementation use this; jest.mock(...) usages in
+    // consumer-controller tests still take precedence.
+    '^@wxyc/lml-client$': '<rootDir>/shared/lml-client/src/index.ts',
     // Mock database client for any path resolving to shared/database/src/client
     '^.*/shared/database/src/client(\\.js)?$': '<rootDir>/tests/mocks/database.mock.ts',
     // Mock better-auth modules (ESM-only, can't be transformed by ts-jest)

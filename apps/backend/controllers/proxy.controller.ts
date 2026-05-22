@@ -20,13 +20,8 @@ import {
   resolveEntity as lmlResolveEntity,
   searchLibrary,
   LmlClientError,
-} from '../services/lml/lml.client.js';
-import type {
-  DiscogsMatchResult,
-  DiscogsReleaseMetadata,
-  DiscogsTrackItem,
-  LookupResponse,
-} from '../services/lml/lml.client.js';
+} from '@wxyc/lml-client';
+import type { DiscogsMatchResult, DiscogsReleaseMetadata, DiscogsTrackItem, LookupResponse } from '@wxyc/lml-client';
 import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';

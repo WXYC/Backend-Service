@@ -13,7 +13,7 @@
  * need to override or the integration suite regresses.
  *
  * Why: G4 (PR #948 / BS#906) added a module-level `Semaphore(5)` +
- * `TokenBucket(50/min)` to `apps/backend/services/lml/lml.client.ts` as a
+ * `TokenBucket(50/min)` to `shared/lml-client/src/index.ts` (`@wxyc/lml-client`) as a
  * prod safety net mirroring LML's Discogs ceilings. In integration tests
  * (`--runInBand`), the bucket persists across spec files. The full
  * integration suite triggers > 50 fire-and-forget `/lookup` calls during

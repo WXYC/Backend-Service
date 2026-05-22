@@ -19,7 +19,7 @@ import {
   isLmlConfigured,
   getRelease,
   LmlClientError,
-} from '../services/lml/lml.client.js';
+} from '@wxyc/lml-client';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
 

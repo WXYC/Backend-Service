@@ -34,7 +34,7 @@ import {
   TokenBucket,
   getLmlQueueDepth,
   _resetLmlClientLimitersForTest,
-} from '../../../apps/backend/services/lml/lml.client';
+} from '@wxyc/lml-client';
 
 describe('lml.client', () => {
   const originalEnv = process.env;

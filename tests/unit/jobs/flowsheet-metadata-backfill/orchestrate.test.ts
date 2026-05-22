@@ -34,7 +34,7 @@ import {
   type EnrichFn,
   type LookupFn,
 } from '../../../../jobs/flowsheet-metadata-backfill/orchestrate';
-import type { LmlLookupResponse } from '../../../../jobs/flowsheet-metadata-backfill/lml-types';
+import type { LookupResponse } from '@wxyc/lml-client';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
 const renderSql = (value: unknown): string => {
@@ -55,12 +55,12 @@ const renderSql = (value: unknown): string => {
   return '';
 };
 
-const matchedResponse: LmlLookupResponse = {
+const matchedResponse: LookupResponse = {
   results: [{ library_item: { id: 1 }, artwork: { release_id: 100, release_url: 'x' } }],
   search_type: 'direct',
 };
 
-const noMatchResponse: LmlLookupResponse = {
+const noMatchResponse: LookupResponse = {
   results: [],
   search_type: 'none',
 };
