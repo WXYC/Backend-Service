@@ -6,9 +6,10 @@ WORKDIR /flowsheet-metadata-backfill-builder
 COPY ./package.json ./package-lock.json ./
 COPY ./tsconfig.base.json ./
 COPY ./shared/database ./shared/database
+COPY ./shared/lml-client ./shared/lml-client
 COPY ./jobs/flowsheet-metadata-backfill ./jobs/flowsheet-metadata-backfill
 
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-metadata-backfill
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/flowsheet-metadata-backfill
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -18,11 +19,13 @@ WORKDIR /flowsheet-metadata-backfill
 COPY ./package* ./
 COPY ./jobs/flowsheet-metadata-backfill/package* ./jobs/flowsheet-metadata-backfill/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
 
 RUN npm install --omit=dev
 
 COPY --from=builder ./flowsheet-metadata-backfill-builder/jobs/flowsheet-metadata-backfill/dist ./jobs/flowsheet-metadata-backfill/dist
 COPY --from=builder ./flowsheet-metadata-backfill-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./flowsheet-metadata-backfill-builder/shared/lml-client/dist ./shared/lml-client/dist
 
 # Long-running per-statement timeout: a per-row UPDATE over the 1.86M-row
 # tail can spend tens of seconds on the rare hot batch (search_doc tsvector
