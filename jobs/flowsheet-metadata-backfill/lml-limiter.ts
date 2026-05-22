@@ -2,9 +2,8 @@
  * Concurrency + rate-limit gate for the flowsheet-metadata-backfill cron's
  * LML calls (BS#995, sub-issue of BS#994).
  *
- * Layered Semaphore + TokenBucket, mirroring the runtime path's pattern from
- * `apps/backend/services/lml/lml.client.ts` but with stricter defaults
- * tuned for backfill traffic:
+ * Wraps `@wxyc/lml-client`'s shared `createLmlLimiter` factory with the
+ * backfill's stricter env-var defaults:
  *
  *   - BACKFILL_LML_MAX_CONCURRENT = 1  (vs runtime LML_CLIENT_MAX_CONCURRENT=5)
  *   - BACKFILL_LML_RATE_PER_MIN   = 20 (vs runtime LML_CLIENT_RATE_PER_MIN=50)
@@ -17,23 +16,24 @@
  * speed; the semaphore is belt-and-suspenders defense if the orchestrator
  * ever becomes concurrent.
  *
- * This is the floor of the BS#995 design. The adaptive ceiling (LML-health
- * circuit-breaker pausing the cron when LML p95 is elevated) needs an
- * LML-side health endpoint and lands separately.
- *
- * Duplicated from `apps/backend/services/lml/lml.client.ts` rather than
- * imported because that file pulls in app-only modules (Sentry instance,
- * posthog, etc.) — coupling the one-shot job's build graph to those would
- * force the container to ship the full backend tree. Same reasoning as the
- * `lml-fetch.ts` header.
+ * Primitives (`Semaphore`, `TokenBucket`, `LmlLimiter`, `createLmlLimiter`)
+ * live in `@wxyc/lml-client` post-BS#887 and are re-exported here so the
+ * backfill's existing tests + callsites keep their import path. The
+ * `defaultLmlLimiter` singleton is the backfill's instance — wired with
+ * BACKFILL_LML_* env defaults — and is passed to
+ * `@wxyc/lml-client.lookupMetadata({..., limiter})` from `lml-fetch.ts`.
  */
+
+import { type LmlLimiter, Semaphore, TokenBucket, createLmlLimiter as createSharedLmlLimiter } from '@wxyc/lml-client';
+
+export { type LmlLimiter, Semaphore, TokenBucket };
 
 const envInt = (name: string, fallback: number): number => {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
   // Number(raw) (not parseInt) so partial-parse strings like "20banana"
   // surface as NaN and get rejected, instead of silently coercing to 20.
-  // Matches the contract in apps/backend/services/lml/lml.client.ts.
+  // Matches the contract in `@wxyc/lml-client`.
   const parsed = Number(raw);
   if (Number.isFinite(parsed) && parsed > 0) return parsed;
   // Surface misconfigurations at startup so an operator who set `=0`
@@ -45,140 +45,16 @@ const envInt = (name: string, fallback: number): number => {
 };
 
 /**
- * FIFO permit semaphore. acquire() resolves when a permit is available;
- * release() returns the permit to the next waiter (or restores it if no one
- * is waiting). queueDepth/availablePermits are read-only for observability.
+ * Wraps `@wxyc/lml-client.createLmlLimiter` so callers can omit config and
+ * get the backfill's stricter BACKFILL_LML_* env-var defaults. Pass explicit
+ * config in tests; in production the singleton at the bottom of this file
+ * reads from env vars.
  */
-export class Semaphore {
-  private permits: number;
-  private readonly capacity: number;
-  private readonly waiters: Array<() => void> = [];
-
-  constructor(permits: number) {
-    this.permits = permits;
-    this.capacity = permits;
-  }
-
-  async acquire(): Promise<void> {
-    if (this.permits > 0) {
-      this.permits -= 1;
-      return;
-    }
-    return new Promise<void>((resolve) => {
-      this.waiters.push(resolve);
-    });
-  }
-
-  release(): void {
-    const next = this.waiters.shift();
-    if (next) {
-      next();
-    } else if (this.permits < this.capacity) {
-      this.permits += 1;
-    }
-  }
-
-  get queueDepth(): number {
-    return this.waiters.length;
-  }
-
-  get availablePermits(): number {
-    return this.permits;
-  }
-}
-
-/**
- * Continuous-refill token bucket. consume(n) resolves once n tokens have
- * been earned; until then the call sleeps for the shortest interval that
- * could earn the deficit.
- */
-export class TokenBucket {
-  private tokens: number;
-  private readonly capacity: number;
-  private readonly refillPerMs: number;
-  private lastRefill: number;
-
-  constructor({ capacity, refillPerMinute }: { capacity: number; refillPerMinute: number }) {
-    this.capacity = capacity;
-    this.tokens = capacity;
-    this.refillPerMs = refillPerMinute / 60_000;
-    this.lastRefill = Date.now();
-  }
-
-  private refill(): void {
-    const now = Date.now();
-    const elapsed = now - this.lastRefill;
-    if (elapsed <= 0) return;
-    this.tokens = Math.min(this.capacity, this.tokens + elapsed * this.refillPerMs);
-    this.lastRefill = now;
-  }
-
-  async consume(count = 1): Promise<void> {
-    // Loop the slow path. Without it, N callers can each compute the same
-    // waitMs from an empty bucket, sleep for the same interval, wake
-    // together, and all subtract `count` from the freshly refilled tokens
-    // — overshooting the configured rate by ~N×. The loop re-checks the
-    // bucket after each sleep so only the caller that finds enough tokens
-    // proceeds; the others sleep again. Paired with the upstream FIFO
-    // Semaphore, this preserves the configured rate under contention.
-    while (true) {
-      this.refill();
-      if (this.tokens >= count) {
-        this.tokens -= count;
-        return;
-      }
-      const deficit = count - this.tokens;
-      const waitMs = Math.max(1, Math.ceil(deficit / this.refillPerMs));
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-    }
-  }
-
-  get availableTokens(): number {
-    this.refill();
-    return this.tokens;
-  }
-}
-
-export interface LmlLimiter {
-  /** Acquire a permit + a token, run fn, release the permit in finally. */
-  run<T>(fn: () => Promise<T>): Promise<T>;
-  /** Snapshot for tests + future observability hooks. */
-  state(): { queueDepth: number; availablePermits: number; availableTokens: number };
-}
-
-/**
- * Compose a Semaphore + TokenBucket into a single `run`-style gate. Tokens
- * are consumed inside the permit (so wait time on the bucket also holds a
- * permit) and are NOT refunded on error — limiting attempted-call rate, not
- * successful-call rate. Matches `lml.client.ts:postLookup()`'s pattern.
- *
- * Pass explicit config in tests; in production the singleton at the bottom
- * of this file reads from env vars.
- */
-export const createLmlLimiter = (config?: { maxConcurrent?: number; ratePerMinute?: number }): LmlLimiter => {
-  const maxConcurrent = config?.maxConcurrent ?? envInt('BACKFILL_LML_MAX_CONCURRENT', 1);
-  const ratePerMinute = config?.ratePerMinute ?? envInt('BACKFILL_LML_RATE_PER_MIN', 20);
-  const semaphore = new Semaphore(maxConcurrent);
-  const tokenBucket = new TokenBucket({ capacity: ratePerMinute, refillPerMinute: ratePerMinute });
-  return {
-    async run<T>(fn: () => Promise<T>): Promise<T> {
-      await semaphore.acquire();
-      try {
-        await tokenBucket.consume(1);
-        return await fn();
-      } finally {
-        semaphore.release();
-      }
-    },
-    state() {
-      return {
-        queueDepth: semaphore.queueDepth,
-        availablePermits: semaphore.availablePermits,
-        availableTokens: tokenBucket.availableTokens,
-      };
-    },
-  };
-};
+export const createLmlLimiter = (config?: { maxConcurrent?: number; ratePerMinute?: number }): LmlLimiter =>
+  createSharedLmlLimiter({
+    maxConcurrent: config?.maxConcurrent ?? envInt('BACKFILL_LML_MAX_CONCURRENT', 1),
+    ratePerMinute: config?.ratePerMinute ?? envInt('BACKFILL_LML_RATE_PER_MIN', 20),
+  });
 
 /**
  * Module-level singleton used by `lml-fetch.ts`. Reads BACKFILL_LML_* from

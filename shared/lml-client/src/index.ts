@@ -193,31 +193,86 @@ export class TokenBucket {
   }
 }
 
-let lookupSemaphore: Semaphore;
-let lookupTokenBucket: TokenBucket;
-
-function initLimiters(): void {
-  const maxConcurrent = envInt('LML_CLIENT_MAX_CONCURRENT', 5);
-  const ratePerMin = envInt('LML_CLIENT_RATE_PER_MIN', 50);
-  lookupSemaphore = new Semaphore(maxConcurrent);
-  lookupTokenBucket = new TokenBucket({ capacity: ratePerMin, refillPerMinute: ratePerMin });
-}
-
-initLimiters();
-
-/** Number of /lookup calls currently waiting for a permit. */
-export function getLmlQueueDepth(): number {
-  return lookupSemaphore.queueDepth;
+/**
+ * Concurrency + rate-limit gate. Composes a `Semaphore` (max concurrent
+ * in-flight) and a `TokenBucket` (call-rate ceiling) into a single
+ * `run`-style chokepoint. Tokens are consumed inside the permit so wait time
+ * on the bucket also holds a permit; tokens are NOT refunded on error — the
+ * limiter caps attempted-call rate, not successful-call rate. Matches the
+ * pattern from `apps/backend/services/lml/lml.client.ts:postLookup()` before
+ * this package extraction, and is the same shape adopted by the backfill
+ * (jobs/flowsheet-metadata-backfill/lml-limiter.ts) for BS#995.
+ */
+export interface LmlLimiter {
+  /** Acquire a permit + a token, run fn, release the permit in finally. */
+  run<T>(fn: () => Promise<T>): Promise<T>;
+  /** Snapshot for tests + observability hooks (span attributes, metrics). */
+  state(): { queueDepth: number; availablePermits: number; availableTokens: number };
 }
 
 /**
- * Test-only: reinitialize the module-level Semaphore + TokenBucket against
- * the current `process.env` so a test that mutates env can exercise its
- * effect. Production code never calls this — the limiter is intentionally
+ * Compose a `Semaphore` + `TokenBucket` into a single `run`-style gate.
+ * Pass explicit config in tests; in production the runtime path's
+ * `defaultLimiter` reads from `LML_CLIENT_*` env vars, and per-surface
+ * limiters (e.g. the backfill's stricter `BACKFILL_LML_*` defaults) wire
+ * their own config at construction.
+ */
+export function createLmlLimiter(config: { maxConcurrent: number; ratePerMinute: number }): LmlLimiter {
+  const semaphore = new Semaphore(config.maxConcurrent);
+  const tokenBucket = new TokenBucket({ capacity: config.ratePerMinute, refillPerMinute: config.ratePerMinute });
+  return {
+    async run<T>(fn: () => Promise<T>): Promise<T> {
+      await semaphore.acquire();
+      try {
+        await tokenBucket.consume(1);
+        return await fn();
+      } finally {
+        semaphore.release();
+      }
+    },
+    state() {
+      return {
+        queueDepth: semaphore.queueDepth,
+        availablePermits: semaphore.availablePermits,
+        availableTokens: tokenBucket.availableTokens,
+      };
+    },
+  };
+}
+
+/**
+ * Runtime path's process-wide default limiter (BS#906 / G4). Reads
+ * `LML_CLIENT_MAX_CONCURRENT` (default 5, mirrors LML's
+ * `discogs_max_concurrent`) and `LML_CLIENT_RATE_PER_MIN` (default 50,
+ * mirrors LML's `discogs_rate_limit`) at module load. The flowsheet-
+ * metadata-backfill job constructs its own stricter limiter for BS#995 and
+ * passes it via `LookupOptions.limiter`; that surface never shares this
+ * default.
+ */
+let defaultLimiter: LmlLimiter;
+
+function initDefaultLimiter(): void {
+  defaultLimiter = createLmlLimiter({
+    maxConcurrent: envInt('LML_CLIENT_MAX_CONCURRENT', 5),
+    ratePerMinute: envInt('LML_CLIENT_RATE_PER_MIN', 50),
+  });
+}
+
+initDefaultLimiter();
+
+/** Number of /lookup calls currently waiting for a permit on the default limiter. */
+export function getLmlQueueDepth(): number {
+  return defaultLimiter.state().queueDepth;
+}
+
+/**
+ * Test-only: reinitialize the default limiter against the current
+ * `process.env` so a test that mutates env can exercise its effect.
+ * Production code never calls this — the default limiter is intentionally
  * process-wide so concurrent /lookup calls share the same back-pressure.
  */
 export function _resetLmlClientLimitersForTest(): void {
-  initLimiters();
+  initDefaultLimiter();
 }
 
 function getBaseUrl(): string {
@@ -302,6 +357,13 @@ export interface LookupOptions {
    * head-of-line blocking on the shared chokepoint (BS#906 / BS#992).
    */
   timeoutMs?: number;
+  /**
+   * Per-call override for the rate-limit gate. Defaults to the module-level
+   * runtime limiter (LML_CLIENT_MAX_CONCURRENT=5 / LML_CLIENT_RATE_PER_MIN=50).
+   * Pass a surface-specific limiter (e.g. the backfill's stricter BACKFILL_LML_*
+   * defaults from BS#995) to keep accounting separated and tunable per caller.
+   */
+  limiter?: LmlLimiter;
 }
 
 type LookupBody = {
@@ -340,7 +402,7 @@ export async function lookupMetadata(
   if (song) body.song = song;
   if (options?.extended) body.extended = true;
   if (options?.warm_cache) body.warm_cache = true;
-  return postLookup(body, options?.timeoutMs);
+  return postLookup(body, { timeoutMs: options?.timeoutMs, limiter: options?.limiter });
 }
 
 /**
@@ -351,8 +413,8 @@ export async function lookupMetadata(
  * (BS#823) — Backend-Service is a thin proxy here; LML does all the ranking
  * and the response's `matched_via` carries the per-result evidence.
  */
-export async function lookupBySong(song: string): Promise<LookupResponse> {
-  return postLookup({ song, raw_message: song });
+export async function lookupBySong(song: string, options?: Pick<LookupOptions, 'limiter'>): Promise<LookupResponse> {
+  return postLookup({ song, raw_message: song }, { limiter: options?.limiter });
 }
 
 /**
@@ -364,16 +426,20 @@ export async function lookupBySong(song: string): Promise<LookupResponse> {
  * the metadata-backfill pilot or the runtime hot path. Sibling LML-side
  * projection at WXYC/library-metadata-lookup#213.
  */
-async function postLookup(body: LookupBody, timeoutMs?: number): Promise<LookupResponse> {
+async function postLookup(
+  body: LookupBody,
+  options?: { timeoutMs?: number; limiter?: LmlLimiter }
+): Promise<LookupResponse> {
   // BS#906 / G4: Mirror LML's Discogs ceilings on the client so back-pressure
-  // surfaces at the BS chokepoint, not as queueing inside LML. Acquire BEFORE
-  // span start so queue-time isn't blamed on http.client duration.
-  await lookupSemaphore.acquire();
-  try {
-    await lookupTokenBucket.consume(1);
+  // surfaces at the BS chokepoint, not as queueing inside LML. The limiter
+  // (`fn` runs after `semaphore.acquire()` + `tokenBucket.consume(1)`) keeps
+  // queue-time outside the http.client span — span duration reflects fetch
+  // work only.
+  const activeLimiter = options?.limiter ?? defaultLimiter;
+  return activeLimiter.run(async () => {
     return await Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
       try {
-        span.setAttributes({ 'lml.queue_depth': lookupSemaphore.queueDepth });
+        span.setAttributes({ 'lml.queue_depth': activeLimiter.state().queueDepth });
       } catch (err) {
         console.warn('lml.client: failed to project queue_depth onto span', err);
       }
@@ -384,7 +450,7 @@ async function postLookup(body: LookupBody, timeoutMs?: number): Promise<LookupR
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         },
-        timeoutMs
+        options?.timeoutMs
       );
 
       const parsed = (await response.json()) as LookupResponse;
@@ -416,9 +482,7 @@ async function postLookup(body: LookupBody, timeoutMs?: number): Promise<LookupR
 
       return parsed;
     });
-  } finally {
-    lookupSemaphore.release();
-  }
+  });
 }
 
 /**
