@@ -16,6 +16,7 @@ import {
   show_djs,
   library_artist_view,
   specialty_shows,
+  album_metadata,
 } from '@wxyc/database';
 import { IFSEntry, ShowInfo, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
@@ -82,17 +83,24 @@ const FSEntryFieldsRaw = {
   linkage_source: flowsheet.linkage_source,
   linkage_confidence: flowsheet.linkage_confidence,
   linked_at: flowsheet.linked_at,
-  // Metadata (inline on flowsheet, will be nested in transform)
-  artwork_url: flowsheet.artwork_url,
-  discogs_url: flowsheet.discogs_url,
-  release_year: flowsheet.release_year,
-  spotify_url: flowsheet.spotify_url,
-  apple_music_url: flowsheet.apple_music_url,
-  youtube_music_url: flowsheet.youtube_music_url,
-  bandcamp_url: flowsheet.bandcamp_url,
-  soundcloud_url: flowsheet.soundcloud_url,
-  artist_bio: flowsheet.artist_bio,
-  artist_wikipedia_url: flowsheet.artist_wikipedia_url,
+  // Metadata: COALESCE album_metadata.col over flowsheet.col so the read
+  // path projects the per-album row when present (Epic D / BS#897). The
+  // inline columns on flowsheet stay populated through D3; once D4 drops
+  // them, the COALESCE collapses to the album_metadata side. Free-form
+  // entries (album_id IS NULL) miss the join and fall through to the
+  // inline flowsheet values.
+  artwork_url: sql<string | null>`coalesce(${album_metadata.artwork_url}, ${flowsheet.artwork_url})`,
+  discogs_url: sql<string | null>`coalesce(${album_metadata.discogs_url}, ${flowsheet.discogs_url})`,
+  release_year: sql<number | null>`coalesce(${album_metadata.release_year}, ${flowsheet.release_year})`,
+  spotify_url: sql<string | null>`coalesce(${album_metadata.spotify_url}, ${flowsheet.spotify_url})`,
+  apple_music_url: sql<string | null>`coalesce(${album_metadata.apple_music_url}, ${flowsheet.apple_music_url})`,
+  youtube_music_url: sql<string | null>`coalesce(${album_metadata.youtube_music_url}, ${flowsheet.youtube_music_url})`,
+  bandcamp_url: sql<string | null>`coalesce(${album_metadata.bandcamp_url}, ${flowsheet.bandcamp_url})`,
+  soundcloud_url: sql<string | null>`coalesce(${album_metadata.soundcloud_url}, ${flowsheet.soundcloud_url})`,
+  artist_bio: sql<string | null>`coalesce(${album_metadata.artist_bio}, ${flowsheet.artist_bio})`,
+  artist_wikipedia_url: sql<
+    string | null
+  >`coalesce(${album_metadata.artist_wikipedia_url}, ${flowsheet.artist_wikipedia_url})`,
   on_streaming: library.on_streaming,
   metadata_status: flowsheet.metadata_status,
   enriching_since: flowsheet.enriching_since,
@@ -259,6 +267,7 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
+    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
     .orderBy(desc(flowsheet.id))
     .offset(offset)
     .limit(limit);
@@ -272,6 +281,7 @@ export const getEntriesByRange = async (startId: number, endId: number): Promise
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
+    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
     .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
     .orderBy(desc(flowsheet.id));
 
@@ -286,6 +296,7 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
+    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
     .where(inArray(flowsheet.show_id, show_ids))
     .orderBy(desc(flowsheet.play_order));
 

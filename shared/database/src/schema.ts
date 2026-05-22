@@ -813,6 +813,39 @@ export const flowsheet_linkage_review = wxyc_schema.table(
   ]
 );
 
+export type NewAlbumMetadata = InferInsertModel<typeof album_metadata>;
+export type AlbumMetadata = InferSelectModel<typeof album_metadata>;
+/**
+ * Epic D / BS#897 — per-album extract of the 10 metadata columns currently
+ * inlined on `flowsheet`. The flowsheet write path keeps writing those 10
+ * columns; the V2 read path projects `COALESCE(album_metadata.col,
+ * flowsheet.col)` so writers and readers cut over independently. D2
+ * backfills historical rows; D3 reroutes the enrichment write path to
+ * upsert here keyed by `album_id`; D4 drops the inline columns after ≥1
+ * month of stabilization. See WXYC/Backend-Service#878 (epic), #897 (this
+ * child), and the original framing in #532.
+ *
+ * `album_id` is the PK and the FK to `library.id`. Free-form flowsheet
+ * entries (`album_id IS NULL`) don't reach this table — their metadata
+ * stays inline on `flowsheet` until linkage resolves.
+ */
+export const album_metadata = wxyc_schema.table('album_metadata', {
+  album_id: integer('album_id')
+    .primaryKey()
+    .references(() => library.id, { onDelete: 'cascade' }),
+  artwork_url: varchar('artwork_url', { length: 512 }),
+  discogs_url: varchar('discogs_url', { length: 512 }),
+  release_year: smallint('release_year'),
+  spotify_url: varchar('spotify_url', { length: 512 }),
+  apple_music_url: varchar('apple_music_url', { length: 512 }),
+  youtube_music_url: varchar('youtube_music_url', { length: 512 }),
+  bandcamp_url: varchar('bandcamp_url', { length: 512 }),
+  soundcloud_url: varchar('soundcloud_url', { length: 512 }),
+  artist_bio: text('artist_bio'),
+  artist_wikipedia_url: varchar('artist_wikipedia_url', { length: 512 }),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 export type NewGenre = InferInsertModel<typeof genres>;
 export type Genre = InferSelectModel<typeof genres>;
 export const genres = wxyc_schema.table('genres', {
