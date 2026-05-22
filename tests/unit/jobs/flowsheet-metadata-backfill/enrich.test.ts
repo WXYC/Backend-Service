@@ -23,7 +23,7 @@ import {
   extractArtwork,
   type EnrichRow,
 } from '../../../../jobs/flowsheet-metadata-backfill/enrich';
-import type { LmlLookupResponse } from '../../../../jobs/flowsheet-metadata-backfill/lml-types';
+import type { LookupResponse } from '@wxyc/lml-client';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
 const renderSql = (value: unknown): string => {
@@ -56,7 +56,7 @@ const baseRow: EnrichRow = {
   track_title: 'VI Scose Poise',
 };
 
-const matchedResponse: LmlLookupResponse = {
+const matchedResponse: LookupResponse = {
   results: [
     {
       library_item: { id: 1 },
@@ -79,13 +79,13 @@ const matchedResponse: LmlLookupResponse = {
   song_not_found: false,
 };
 
-const noMatchResponse: LmlLookupResponse = {
+const noMatchResponse: LookupResponse = {
   results: [],
   search_type: 'none',
   song_not_found: true,
 };
 
-const noArtworkResponse: LmlLookupResponse = {
+const noArtworkResponse: LookupResponse = {
   results: [{ library_item: { id: 1 }, artwork: null }],
   search_type: 'direct',
 };
@@ -150,7 +150,7 @@ describe('applyEnrichment', () => {
   });
 
   it('strips Discogs spacer.gif placeholder from artwork_url (#638 note 1, until #649 lands)', async () => {
-    const spacerResponse: LmlLookupResponse = {
+    const spacerResponse: LookupResponse = {
       ...matchedResponse,
       results: [
         {

@@ -32,7 +32,7 @@
 
 import { sql } from 'drizzle-orm';
 import { db, flowsheet } from '@wxyc/database';
-import type { LmlArtwork, LmlLookupResponse } from './lml-types.js';
+import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
 
 export type EnrichRow = {
   id: number;
@@ -117,7 +117,7 @@ export const synthesizeSearchUrls = (
  * field, or `artwork: null`. All three end up writing search URLs and
  * stamping the marker.
  */
-export const extractArtwork = (response: LmlLookupResponse): LmlArtwork | null => {
+export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | null => {
   const first = response.results?.[0];
   if (!first) return null;
   if (!first.artwork) return null;
@@ -139,7 +139,7 @@ export const extractArtwork = (response: LmlLookupResponse): LmlArtwork | null =
  * by *someone* during the run." The data outcome is identical either way
  * (both writers produce the same payload).
  */
-export const applyEnrichment = async (row: EnrichRow, response: LmlLookupResponse): Promise<EnrichOutcome> => {
+export const applyEnrichment = async (row: EnrichRow, response: LookupResponse): Promise<EnrichOutcome> => {
   const artwork = extractArtwork(response);
   const searchUrls = synthesizeSearchUrls(row);
 

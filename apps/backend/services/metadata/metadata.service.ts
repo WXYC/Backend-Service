@@ -7,8 +7,8 @@
  * artwork, streaming URLs, and artist metadata in a single call.
  */
 import { MetadataRequest, AlbumMetadataResult, ArtistMetadataResult, FlowsheetMetadata } from './metadata.types.js';
-import { lookupMetadata } from '../lml/lml.client.js';
-import type { DiscogsMatchResult } from '../lml/lml.client.js';
+import { lookupMetadata } from '@wxyc/lml-client';
+import type { DiscogsMatchResult } from '@wxyc/lml-client';
 import { SearchUrlProvider } from './providers/search-urls.provider.js';
 
 const searchUrls = new SearchUrlProvider();

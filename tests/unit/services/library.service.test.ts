@@ -5,7 +5,7 @@ const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockLookupBySong = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
 
-jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   lookupBySong: mockLookupBySong,
   isLmlConfigured: mockIsLmlConfigured,

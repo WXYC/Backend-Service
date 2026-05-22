@@ -12,7 +12,7 @@ import { db, createMockQueryChain, pickPrimaryLibraryRow } from '../../mocks/dat
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 
-jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: jest.fn().mockReturnValue(true),
 }));

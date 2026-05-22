@@ -1,4 +1,4 @@
-import { LmlClientError } from '../services/lml/lml.client.js';
+import { LmlClientError } from '@wxyc/lml-client';
 
 /**
  * Decides whether `Sentry.setupExpressErrorHandler` should auto-capture an

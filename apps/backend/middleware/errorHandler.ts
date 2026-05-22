@@ -1,5 +1,5 @@
 import WxycError from '../utils/error.js';
-import { LmlClientError } from '../services/lml/lml.client.js';
+import { LmlClientError } from '@wxyc/lml-client';
 import { Request, Response, NextFunction } from 'express';
 
 function hasStatusCode(error: Error): error is WxycError | LmlClientError {

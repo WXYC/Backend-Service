@@ -45,7 +45,7 @@
 
 import { sql, type SQL } from 'drizzle-orm';
 import { db } from '@wxyc/database';
-import type { LmlLookupResponse } from './lml-types.js';
+import type { LookupResponse } from '@wxyc/lml-client';
 import type { EnrichRow, EnrichOutcome } from './enrich.js';
 import { captureError, log } from './logger.js';
 
@@ -224,9 +224,9 @@ export const resolvePartitionFilter = (
   };
 };
 
-export type LookupFn = (artist: string, album?: string, track?: string) => Promise<LmlLookupResponse>;
+export type LookupFn = (artist: string, album?: string, track?: string) => Promise<LookupResponse>;
 
-export type EnrichFn = (row: EnrichRow, response: LmlLookupResponse) => Promise<EnrichOutcome>;
+export type EnrichFn = (row: EnrichRow, response: LookupResponse) => Promise<EnrichOutcome>;
 
 export type Totals = {
   scanned: number;
@@ -259,7 +259,7 @@ export const processRow = async (
   const album = row.album_title ?? undefined;
   const track = row.track_title ?? undefined;
 
-  let response: LmlLookupResponse;
+  let response: LookupResponse;
   try {
     response = await deps.lookup(artist, album, track);
   } catch (error) {

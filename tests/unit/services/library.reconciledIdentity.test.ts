@@ -17,7 +17,7 @@ jest.mock('@wxyc/database', () => ({
   rotation: {},
 }));
 
-jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: jest.fn(),
   isLmlConfigured: jest.fn().mockReturnValue(false),
 }));

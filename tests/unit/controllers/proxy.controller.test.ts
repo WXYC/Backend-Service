@@ -25,7 +25,7 @@ class MockLmlClientError extends Error {
   }
 }
 
-jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   getRelease: mockGetRelease,
   getArtistDetails: mockGetArtistDetails,
@@ -803,7 +803,7 @@ describe('proxy.controller', () => {
     });
 
     it('rejects with LmlClientError when LML returns 404', async () => {
-      const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
+      const { LmlClientError } = await import('@wxyc/lml-client');
       mockGetArtistDetails.mockRejectedValue(new LmlClientError('Not found', 404));
 
       const req = { query: { artistId: '99999' } } as unknown as Request;
@@ -813,7 +813,7 @@ describe('proxy.controller', () => {
     });
 
     it('rejects with LmlClientError when LML is unreachable', async () => {
-      const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
+      const { LmlClientError } = await import('@wxyc/lml-client');
       mockGetArtistDetails.mockRejectedValue(new LmlClientError('Connection refused', 502));
 
       const req = { query: { artistId: '3840' } } as unknown as Request;
@@ -888,7 +888,7 @@ describe('proxy.controller', () => {
     });
 
     it('rejects with LmlClientError when LML returns not found', async () => {
-      const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
+      const { LmlClientError } = await import('@wxyc/lml-client');
       mockResolveEntity.mockRejectedValue(new LmlClientError('Not found', 404));
 
       const req = { query: { type: 'artist', id: '99999' } } as unknown as Request;
@@ -898,7 +898,7 @@ describe('proxy.controller', () => {
     });
 
     it('rejects with LmlClientError when LML times out', async () => {
-      const { LmlClientError } = await import('../../../apps/backend/services/lml/lml.client');
+      const { LmlClientError } = await import('@wxyc/lml-client');
       mockResolveEntity.mockRejectedValue(new LmlClientError('LML request timed out', 504));
 
       const req = { query: { type: 'artist', id: '3840' } } as unknown as Request;

@@ -33,7 +33,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
 }));
 
 // Mock LML client
-jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+jest.mock('@wxyc/lml-client', () => ({
   searchTrackReleases: jest.fn(),
   validateTrackOnRelease: jest.fn(),
   isLmlConfigured: jest.fn().mockReturnValue(false),

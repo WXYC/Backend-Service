@@ -14,7 +14,7 @@ const mockCaptureException = jest.fn();
 jest.mock('@sentry/node', () => ({ captureException: mockCaptureException }));
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
-jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: jest.fn().mockReturnValue(true),
 }));

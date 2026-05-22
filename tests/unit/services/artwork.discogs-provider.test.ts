@@ -12,7 +12,7 @@ const mockSearchTrackReleases = jest.fn<() => Promise<unknown>>();
 const mockValidateTrackOnRelease = jest.fn<() => Promise<boolean>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
 
-jest.mock('../../../apps/backend/services/lml/lml.client', () => ({
+jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   searchTrackReleases: mockSearchTrackReleases,
   validateTrackOnRelease: mockValidateTrackOnRelease,
