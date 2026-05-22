@@ -81,7 +81,7 @@ Bounded ring-buffer reports written under `mirror-logs/`. Reports never include 
 ## Metadata Services
 
 - `LIBRARY_METADATA_URL` — library-metadata-lookup base URL (e.g. `http://localhost:8001`). Required for proxy endpoints, metadata enrichment, and track search. All Discogs access is routed through LML. Do not include the `/api/v1` path prefix; the LML client adds it automatically.
-- `LML_API_KEY` — Bearer token sent on every LML request. Must match LML's `LML_API_KEY`. Optional in dev; required in production once LML's `LML_REQUIRE_AUTH` is flipped to `true`. Injected at the single `lmlFetch` chokepoint in `apps/backend/services/lml/lml.client.ts`.
+- `LML_API_KEY` — Bearer token sent on every LML request. Must match LML's `LML_API_KEY`. Optional in dev; required in production once LML's `LML_REQUIRE_AUTH` is flipped to `true`. Injected at the single `lmlFetch` chokepoint in `@wxyc/lml-client` (`shared/lml-client/src/index.ts`).
 - `LML_CLIENT_MAX_CONCURRENT` — Maximum concurrent in-flight `/api/v1/lookup` calls; gates BS's fan-out at the chokepoint so back-pressure surfaces on the BS side instead of queueing inside LML. Mirrors LML's `discogs_max_concurrent` (default `5`). Set lower in production to leave headroom for other LML callers (request-o-matic, tubafrenzy).
 - `LML_CLIENT_RATE_PER_MIN` — Token-bucket refill rate (and capacity) for `/api/v1/lookup` calls per minute. Mirrors LML's `discogs_rate_limit` (default `50`). Tune downward in production to leave headroom for other LML callers.
 - `DISCOGS_API_KEY`, `DISCOGS_API_SECRET` — Served to dj-site via `/config/secrets` endpoint. Not used by the backend itself (Discogs access goes through LML).

@@ -142,9 +142,9 @@ const server = app.listen(port, () => {
 });
 
 // Strictly greater than the LML client's 30 s AbortController
-// (`services/lml/lml.client.ts:66`) so a slow LML lookup's catch path can
-// flush a 200-with-fallback response inside the window instead of racing
-// the socket teardown to a CORS-less 502.
+// (`@wxyc/lml-client`, `shared/lml-client/src/index.ts`) so a slow LML lookup's
+// catch path can flush a 200-with-fallback response inside the window instead
+// of racing the socket teardown to a CORS-less 502.
 server.setTimeout(35000);
 
 // --- Memory monitoring ---
