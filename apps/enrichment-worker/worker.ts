@@ -1,12 +1,10 @@
 /**
  * Enrichment worker entrypoint (BS#892 / Epic C C2).
  *
- * Long-running daemon that subscribes to BS's CDC stream and (eventually)
- * enriches every new flowsheet track row by calling LML. PR-1 ships in
- * log-only mode: dispatch + filter + console.log, no DB writes, no LML
- * calls. The intent is to verify in prod that the N×N CDC fan-out
- * works as designed (every worker instance receives every event)
- * before wiring the actual claim + LML + finalize sequence in PR-2.
+ * Long-running daemon that subscribes to BS's CDC stream and enriches every
+ * new flowsheet track row by calling LML. The N×N idempotent-claim pattern
+ * means every worker instance receives every event; the first to win the
+ * atomic claim does the work, the losers skip cleanly.
  *
  * Deployment shape (Option A from #892 body): runs as its own Docker
  * container alongside `backend` on the same EC2. Independent restart
@@ -16,12 +14,12 @@
  */
 
 import { closeDatabaseConnection, onCdcEvent, startCdcListener, stopCdcListener } from '@wxyc/database';
-import { makeLogOnlyHandler } from './cdc-subscriber.js';
+import { makeEnrichmentHandler } from './handler.js';
 
 const main = async (): Promise<void> => {
-  console.log('[enrichment-worker] starting (PR-1: log-only mode, no DB writes)');
+  console.log('[enrichment-worker] starting');
 
-  onCdcEvent(makeLogOnlyHandler());
+  onCdcEvent(makeEnrichmentHandler());
   await startCdcListener();
 
   console.log('[enrichment-worker] subscribed to CDC; awaiting events');
