@@ -830,8 +830,14 @@ export type AlbumMetadata = InferSelectModel<typeof album_metadata>;
  * stays inline on `flowsheet` until linkage resolves.
  */
 export const album_metadata = wxyc_schema.table('album_metadata', {
+  // `.notNull()` is redundant with `.primaryKey()` at the SQL level (PK
+  // implies NOT NULL), but Drizzle's `InferInsertModel` type derivation
+  // only marks the column required when `.notNull()` is explicit — without
+  // it, D3's writer (#899) could omit `album_id` and the TypeScript
+  // compiler would silently accept it.
   album_id: integer('album_id')
     .primaryKey()
+    .notNull()
     .references(() => library.id, { onDelete: 'cascade' }),
   artwork_url: varchar('artwork_url', { length: 512 }),
   discogs_url: varchar('discogs_url', { length: 512 }),

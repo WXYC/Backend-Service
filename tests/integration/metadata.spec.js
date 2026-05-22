@@ -1,5 +1,22 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
+const postgres = require('postgres');
 const fls_util = require('../utils/flowsheet_util');
+
+const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+
+// Per-spec sql client used by the BS#897 album_metadata projection block
+// below. Mirrors the construction in flowsheet.spec.js / migrations.spec.js.
+function makeSql() {
+  return postgres({
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
+    database: process.env.DB_NAME || 'wxyc_db',
+    user: process.env.DB_USERNAME || 'test-user',
+    password: process.env.DB_PASSWORD || 'test-pw',
+    onnotice: () => {},
+    max: 2,
+  });
+}
 
 /**
  * Metadata Integration Tests
@@ -288,6 +305,127 @@ describe('Metadata with Rotation Entries', () => {
     expect(rotationEntry).toBeDefined();
     expect(rotationEntry.rotation_id).toEqual(2);
     expect(rotationEntry.rotation_bin).toEqual('M'); // From seed data
+  });
+});
+
+describe('album_metadata COALESCE projection (BS#897)', () => {
+  // D1 ships an empty `album_metadata` table; production reads still see
+  // every metadata value via the flowsheet inline columns. This test
+  // verifies the projection contract that D2/D3 depend on: when an
+  // `album_metadata` row exists for the joined `album_id`, the V2 read
+  // path returns its values in preference to the flowsheet inline values.
+  // Using direct SQL to seed `album_metadata` (no HTTP write path exists
+  // until D3) and asserting on the HTTP V2 read.
+  //
+  // The fire-and-forget LML enrichment may race the GET and overwrite
+  // flowsheet's inline metadata after the POST resolves — irrelevant,
+  // because COALESCE prefers `album_metadata` so the assertion is
+  // race-free.
+
+  let sql;
+  const SENTINEL_ALBUM_ID = 5; // Sufjan-adjacent seed row used elsewhere
+  const SENTINEL = {
+    artwork_url: 'https://bs897.example.com/artwork.jpg',
+    discogs_url: 'https://bs897.example.com/discogs',
+    release_year: 1979,
+    spotify_url: 'https://bs897.example.com/spotify',
+    apple_music_url: 'https://bs897.example.com/apple',
+    youtube_music_url: 'https://bs897.example.com/youtube',
+    bandcamp_url: 'https://bs897.example.com/bandcamp',
+    soundcloud_url: 'https://bs897.example.com/soundcloud',
+    artist_bio: 'BS#897 sentinel bio',
+    artist_wikipedia_url: 'https://bs897.example.com/wiki',
+  };
+
+  beforeAll(() => {
+    sql = makeSql();
+  });
+
+  afterAll(async () => {
+    if (sql) await sql.end();
+  });
+
+  beforeEach(async () => {
+    // Ensure no stale row survives a prior run; FK ON DELETE CASCADE means
+    // the row is also auto-dropped if the library row ever goes away.
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
+    await fls_util.join_show(getTestDjId(), global.access_token);
+  });
+
+  afterEach(async () => {
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
+    await fls_util.leave_show(getTestDjId(), global.access_token);
+  });
+
+  test('V2 read returns album_metadata values when the row exists, regardless of flowsheet inline state', async () => {
+    // Pre-populate album_metadata for the sentinel album.
+    await sql`
+      INSERT INTO ${sql(`${SCHEMA}.album_metadata`)} (
+        album_id, artwork_url, discogs_url, release_year, spotify_url,
+        apple_music_url, youtube_music_url, bandcamp_url, soundcloud_url,
+        artist_bio, artist_wikipedia_url
+      ) VALUES (
+        ${SENTINEL_ALBUM_ID}, ${SENTINEL.artwork_url}, ${SENTINEL.discogs_url},
+        ${SENTINEL.release_year}, ${SENTINEL.spotify_url},
+        ${SENTINEL.apple_music_url}, ${SENTINEL.youtube_music_url},
+        ${SENTINEL.bandcamp_url}, ${SENTINEL.soundcloud_url},
+        ${SENTINEL.artist_bio}, ${SENTINEL.artist_wikipedia_url}
+      )
+    `;
+
+    // Add a flowsheet track linked to the sentinel album. The fire-and-
+    // forget enrichment may run and overwrite flowsheet's inline cols
+    // before the GET below, but COALESCE prefers album_metadata so the
+    // sentinel values still win.
+    const addRes = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: SENTINEL_ALBUM_ID,
+        track_title: 'BS897 projection test track',
+      })
+      .expect(201);
+
+    const getRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+    const entry = getRes.body.entries.find((e) => e.id === addRes.body.id);
+    expect(entry).toBeDefined();
+
+    expect(entry.artwork_url).toEqual(SENTINEL.artwork_url);
+    expect(entry.discogs_url).toEqual(SENTINEL.discogs_url);
+    expect(entry.release_year).toEqual(SENTINEL.release_year);
+    expect(entry.spotify_url).toEqual(SENTINEL.spotify_url);
+    expect(entry.apple_music_url).toEqual(SENTINEL.apple_music_url);
+    expect(entry.youtube_music_url).toEqual(SENTINEL.youtube_music_url);
+    expect(entry.bandcamp_url).toEqual(SENTINEL.bandcamp_url);
+    expect(entry.soundcloud_url).toEqual(SENTINEL.soundcloud_url);
+    expect(entry.artist_bio).toEqual(SENTINEL.artist_bio);
+    expect(entry.artist_wikipedia_url).toEqual(SENTINEL.artist_wikipedia_url);
+  });
+
+  test('V2 read falls through to flowsheet inline metadata when no album_metadata row exists', async () => {
+    // No album_metadata insert — the beforeEach already cleared the
+    // sentinel row, so the LEFT JOIN misses and COALESCE returns the
+    // flowsheet side. Whether that side is populated depends on the
+    // fire-and-forget LML enrichment, but the contract under test here
+    // is "projection doesn't synthesize values from thin air" — i.e.,
+    // the sentinel values from the previous test must NOT leak.
+    const addRes = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: SENTINEL_ALBUM_ID,
+        track_title: 'BS897 fallthrough test track',
+      })
+      .expect(201);
+
+    const getRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+    const entry = getRes.body.entries.find((e) => e.id === addRes.body.id);
+    expect(entry).toBeDefined();
+
+    // The sentinel strings from the prior test must not appear here.
+    expect(entry.artwork_url).not.toEqual(SENTINEL.artwork_url);
+    expect(entry.discogs_url).not.toEqual(SENTINEL.discogs_url);
+    expect(entry.artist_bio).not.toEqual(SENTINEL.artist_bio);
   });
 });
 
