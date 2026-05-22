@@ -25,7 +25,7 @@
 
 import { closeDatabaseConnection } from '@wxyc/database';
 import { runBackfill } from './orchestrate.js';
-import { lookupMetadata } from '@wxyc/lml-client';
+import { lookupMetadata } from './lml-fetch.js';
 import { applyEnrichment } from './enrich.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
