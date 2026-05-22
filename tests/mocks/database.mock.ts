@@ -138,6 +138,8 @@ export const flowsheet = {
   artist_bio: 'artist_bio',
   artist_wikipedia_url: 'artist_wikipedia_url',
   dj_name: 'dj_name',
+  metadata_status: 'metadata_status',
+  enriching_since: 'enriching_since',
   linkage_source: 'linkage_source',
   linkage_confidence: 'linkage_confidence',
   linked_at: 'linked_at',
