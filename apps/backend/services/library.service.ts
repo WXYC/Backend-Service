@@ -342,6 +342,16 @@ export async function getDiscogsReleaseIdByLegacyId(legacyId: number): Promise<n
 const ROTATION_LML_LOOKUP_CACHE_MAX = 500;
 const ROTATION_LML_LOOKUP_TTL_POSITIVE_MS = 60 * 60 * 1000;
 const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 10 * 60 * 1000;
+/**
+ * Per-call LML timeout for the picker's tier-3 lookup (BS#992). The default
+ * `TIMEOUT_MS` in the LML client is 30 s — appropriate for fire-and-forget
+ * enrichment paths but unacceptable for a user-visible dropdown that's
+ * already a degrades-to-free-text flow. The shorter budget also frees the
+ * shared LML semaphore permit ~6× sooner so other concurrent callers
+ * (`/proxy/metadata/album`, `/library/query`) aren't queued behind a
+ * single hung tier-3 lookup.
+ */
+const ROTATION_LML_LOOKUP_TIMEOUT_MS = 5000;
 
 const rotationLmlPositiveCache = new LRUCache<number, number>({
   max: ROTATION_LML_LOOKUP_CACHE_MAX,
@@ -425,10 +435,11 @@ export async function getDiscogsReleaseIdByRotationId(rotationId: number): Promi
  * isn't a write target on this path either, and a column-mix between
  * paste-URL-prefilled and LML-resolved values would muddy provenance.
  *
- * Errors are swallowed: the picker should degrade to free-text rather
- * than 500 the request. The error is logged for Sentry to pick up; the
- * `lookupMetadata` chokepoint already wraps the call in a span carrying
- * `lml.cache.*` attributes for trace-explorer drill-down.
+ * Bounded at `ROTATION_LML_LOOKUP_TIMEOUT_MS` (5 s) per call — fast-fail
+ * for the user-visible picker (BS#992). Caller errors are swallowed so
+ * the picker degrades to free-text rather than 500ing; the LML client
+ * already wraps the call in a Sentry span carrying `lml.cache.*` and
+ * `lml.queue_depth` attributes for trace-explorer drill-down.
  */
 async function resolveRotationDiscogsReleaseViaLml(
   rotationId: number,
@@ -444,7 +455,9 @@ async function resolveRotationDiscogsReleaseViaLml(
 
   let releaseId: number | null;
   try {
-    const response = await lookupMetadata(artistName, albumTitle);
+    const response = await lookupMetadata(artistName, albumTitle, undefined, {
+      timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
+    });
     releaseId = response.results?.[0]?.artwork?.release_id ?? null;
   } catch (err) {
     console.warn(

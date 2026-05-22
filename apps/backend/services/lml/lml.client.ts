@@ -228,10 +228,16 @@ function getBaseUrl(): string {
   return url.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
 }
 
-async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
+async function lmlFetch(path: string, init?: RequestInit, timeoutMs?: number): Promise<Response> {
   const url = `${getBaseUrl()}${path}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  // Per-call override lets user-visible read paths (e.g. the rotation tracks
+  // picker, BS#992) fast-fail at a tighter budget than the default 30 s,
+  // freeing the LML semaphore permit sooner so other concurrent callers
+  // don't queue behind a single hung Discogs round-trip. Defaults to
+  // TIMEOUT_MS so existing fire-and-forget callers are unchanged.
+  const effectiveTimeoutMs = timeoutMs ?? TIMEOUT_MS;
+  const timeout = setTimeout(() => controller.abort(), effectiveTimeoutMs);
 
   // Merge LML_API_KEY bearer header at the single chokepoint. LML rolls auth
   // out gradually (LML_REQUIRE_AUTH defaults false on the server), so sending
@@ -287,6 +293,15 @@ async function lmlFetch(path: string, init?: RequestInit): Promise<Response> {
 export interface LookupOptions {
   extended?: boolean;
   warm_cache?: boolean;
+  /**
+   * Per-call override for the LML fetch timeout (ms). Defaults to `TIMEOUT_MS`
+   * (30 s) — appropriate for fire-and-forget enrichment paths where
+   * thoroughness matters and a 30 s socket lifetime is cheap. Set lower for
+   * user-visible request paths where fast-fail beats thoroughness; the
+   * shorter budget also releases the LML semaphore permit sooner, reducing
+   * head-of-line blocking on the shared chokepoint (BS#906 / BS#992).
+   */
+  timeoutMs?: number;
 }
 
 type LookupBody = {
@@ -325,7 +340,7 @@ export async function lookupMetadata(
   if (song) body.song = song;
   if (options?.extended) body.extended = true;
   if (options?.warm_cache) body.warm_cache = true;
-  return postLookup(body);
+  return postLookup(body, options?.timeoutMs);
 }
 
 /**
@@ -349,7 +364,7 @@ export async function lookupBySong(song: string): Promise<LookupResponse> {
  * the metadata-backfill pilot or the runtime hot path. Sibling LML-side
  * projection at WXYC/library-metadata-lookup#213.
  */
-async function postLookup(body: LookupBody): Promise<LookupResponse> {
+async function postLookup(body: LookupBody, timeoutMs?: number): Promise<LookupResponse> {
   // BS#906 / G4: Mirror LML's Discogs ceilings on the client so back-pressure
   // surfaces at the BS chokepoint, not as queueing inside LML. Acquire BEFORE
   // span start so queue-time isn't blamed on http.client duration.
@@ -362,11 +377,15 @@ async function postLookup(body: LookupBody): Promise<LookupResponse> {
       } catch (err) {
         console.warn('lml.client: failed to project queue_depth onto span', err);
       }
-      const response = await lmlFetch('/api/v1/lookup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const response = await lmlFetch(
+        '/api/v1/lookup',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        timeoutMs
+      );
 
       const parsed = (await response.json()) as LookupResponse;
 
