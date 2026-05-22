@@ -22,6 +22,7 @@ import { playlist_route } from './routes/playlist.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
 import { setupCdcWebSocket, shutdownCdcWebSocket } from './services/cdc/index.js';
+import { startRotationTracksCacheWarm } from './services/rotation-tracks-cache-warm.service.js';
 import { drainInFlightEnrichments } from './services/metadata/enrichment.service.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
@@ -132,6 +133,12 @@ const server = app.listen(port, () => {
   startPlaylistProxy();
   startAlbumPlaysRefresh();
   void setupCdcWebSocket(server);
+  // One-shot warm of the rotation-tracks picker LRUs in
+  // `library.service.ts`. Fire-and-forget — the walk shares the LML
+  // semaphore with concurrent traffic, and the LRUs are process-local so
+  // the work would otherwise have to happen on the first picker open per
+  // row after every restart. See `services/rotation-tracks-cache-warm.service.ts`.
+  startRotationTracksCacheWarm();
 });
 
 // Strictly greater than the LML client's 30 s AbortController
