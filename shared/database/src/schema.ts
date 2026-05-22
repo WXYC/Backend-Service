@@ -749,7 +749,7 @@ export const flowsheet = wxyc_schema.table(
       ),
     // BS#891. Partial B-tree on (id) covering the `metadata_status = 'pending'`
     // slice. Replaces the `metadata_attempt_at IS NULL` partials above as the
-    // sweep predicate once Epic C C6 (#896) flips the cron to read this
+    // sweep predicate once Epic C C6 (#895) flips the cron to read this
     // column. Both partials coexist during the transition — drop the old
     // `*_metadata_attempt_pending_*` partials in the same PR that flips the
     // cron, not here. Same predicate shape as 0070: filter on the three
@@ -769,7 +769,7 @@ export const flowsheet = wxyc_schema.table(
         sql`${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL AND ${table.metadata_status} = 'pending'`
       ),
     // BS#891. Partial B-tree on `enriching_since` covering the stale-claim
-    // recovery sweep that Epic C C6 (#896) will run. Keyed on
+    // recovery sweep that Epic C C6 (#895) will run. Keyed on
     // `enriching_since` (not id) so the sweep can range-scan the slice
     // older than the TTL directly:
     //   UPDATE ... SET metadata_status='pending', enriching_since=NULL

@@ -1,26 +1,26 @@
 # flowsheet.metadata_status backfill (BS#891)
 
-Once [migration 0078](../shared/database/src/migrations/0078_flowsheet-metadata-status.sql) lands, every flowsheet row carries `metadata_status = 'pending'` by default. For rows that were already enriched before the column existed, that's wrong — once the Epic C cron flips its sweep predicate to `metadata_status = 'pending'` (BS#896), it would re-enrich the entire 2.6M-row table at LML's expense. This runbook resolves the existing state into the new column before the cron predicate flips.
+Once [migration 0078](../shared/database/src/migrations/0078_flowsheet-metadata-status.sql) lands, every flowsheet row carries `metadata_status = 'pending'` by default. For rows that were already enriched before the column existed, that's wrong — once the Epic C cron flips its sweep predicate to `metadata_status = 'pending'` (BS#895), it would re-enrich the entire 2.6M-row table at LML's expense. This runbook resolves the existing state into the new column before the cron predicate flips.
 
 ## When to run
 
-After the migration deploys and the CONCURRENTLY-built partial indexes are in place, and **before** [BS#896](https://github.com/WXYC/Backend-Service/issues/896) ships the cron predicate change. Order:
+After the migration deploys and the CONCURRENTLY-built partial indexes are in place, and **before** [BS#895](https://github.com/WXYC/Backend-Service/issues/895) ships the cron predicate change. Order:
 
 1. Build `flowsheet_metadata_status_pending_idx` CONCURRENTLY on prod (see `0078_flowsheet-metadata-status.sql` for the exact statement).
 2. Build `flowsheet_metadata_status_enriching_stale_idx` CONCURRENTLY on prod.
 3. Merge the migration. Its `IF NOT EXISTS` clauses make the apply a no-op.
 4. Run this backfill.
-5. Ship BS#896 (cron predicate change).
+5. Ship BS#895 (cron predicate change).
 
 ## The derivation
 
 Pre-#891, three implicit states existed:
 
-| `metadata_attempt_at` | `artwork_url` / `discogs_url` | New `metadata_status` |
-|---|---|---|
-| `NULL`                | any                            | `pending` (already correct via default) |
-| `NOT NULL`            | either populated               | `enriched_match` |
-| `NOT NULL`            | both `NULL`                    | `enriched_no_match` |
+| `metadata_attempt_at` | `artwork_url` / `discogs_url` | New `metadata_status`                   |
+| --------------------- | ----------------------------- | --------------------------------------- |
+| `NULL`                | any                           | `pending` (already correct via default) |
+| `NOT NULL`            | either populated              | `enriched_match`                        |
+| `NOT NULL`            | both `NULL`                   | `enriched_no_match`                     |
 
 `failed_no_retry` was not reachable from the implicit state machine — the historical drain retried every NULL row forever. Existing rows can't map to it.
 
@@ -103,7 +103,7 @@ ANALYZE wxyc_schema.flowsheet;
 
 ## Verification
 
-After the backfill, the residual `metadata_status = 'pending'` rows should be exactly the historical "never tried" set — every `metadata_attempt_at IS NULL` track row plus any pre-#891 holdouts that never enriched. The same query the Epic C C6 cron will use should match:
+After the backfill, the residual `metadata_status = 'pending'` rows should be exactly the historical "never tried" set — every `metadata_attempt_at IS NULL` track row plus any pre-#891 holdouts that never enriched. The same query the Epic C C6 (BS#895) cron will use should match:
 
 ```sql
 SELECT count(*)
@@ -131,6 +131,6 @@ ORDER BY metadata_status;
 ## Related
 
 - [BS#891](https://github.com/WXYC/Backend-Service/issues/891) — this work.
-- [BS#896](https://github.com/WXYC/Backend-Service/issues/896) — Epic C C6 cron predicate change; must wait for this backfill.
+- [BS#895](https://github.com/WXYC/Backend-Service/issues/895) — Epic C C6 cron predicate change; must wait for this backfill.
 - [`docs/bulk-update-playbook.md`](bulk-update-playbook.md) — the per-row cost story, the WHERE-IS-NULL infinite-loop pitfall, the `ANALYZE` rule.
 - [`docs/migrations.md`](migrations.md) — `@rule id=ddl-only` and `@rule id=post-bulk-update-analyze`.
