@@ -26,7 +26,7 @@
  * @see shared/database/src/migrations/0078_flowsheet-metadata-status.sql
  */
 
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db, flowsheet } from '@wxyc/database';
 
 export type ClaimResult = { claimed: true; id: number } | { claimed: false };
@@ -52,7 +52,7 @@ export async function claimRowForEnrichment(id: number): Promise<ClaimResult> {
       metadata_status: 'enriching',
       enriching_since: sql`now()`,
     })
-    .where(sql`"id" = ${id} AND "metadata_status" = 'pending'`)
+    .where(and(eq(flowsheet.id, id), eq(flowsheet.metadata_status, 'pending')))
     .returning({ id: flowsheet.id });
 
   if (updated.length === 0) return { claimed: false };
