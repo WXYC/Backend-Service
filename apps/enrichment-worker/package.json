@@ -1,0 +1,24 @@
+{
+  "name": "@wxyc/enrichment-worker",
+  "version": "1.0.0",
+  "description": "WXYC enrichment worker: CDC-driven consumer that enriches flowsheet track rows with LML metadata. Replaces the in-BS fire-and-forget enrichment pattern with an N×N idempotent-claim worker (Epic C C2 / BS#892).",
+  "type": "module",
+  "main": "./dist/worker.js",
+  "scripts": {
+    "start": "node dist/worker.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
