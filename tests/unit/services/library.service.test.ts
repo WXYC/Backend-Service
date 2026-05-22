@@ -2151,7 +2151,9 @@ describe('library.service', () => {
       const result = await getDiscogsReleaseIdByRotationId(42);
 
       expect(result).toBe(4080);
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield');
+      // The picker passes a 5 s budget so a hung LML call doesn't stall the
+      // dropdown for 30 s and tie up the shared LML semaphore permit (BS#992).
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, { timeoutMs: 5000 });
     });
 
     it('does not call LML when the direct column has a value', async () => {

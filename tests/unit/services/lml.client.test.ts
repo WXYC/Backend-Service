@@ -141,6 +141,46 @@ describe('lml.client', () => {
       expect(callBody.extended).toBeUndefined();
     });
 
+    it('uses the default 30 s LML timeout when options.timeoutMs is not set', async () => {
+      // The lmlFetch chokepoint sets up a setTimeout to abort the request
+      // after its budget. Spy on it instead of using fake timers — we only
+      // care that the right deadline was scheduled, not that it fires.
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield');
+
+      const lmlTimeoutCalls = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000);
+      expect(lmlTimeoutCalls).toHaveLength(1);
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('honors options.timeoutMs as a per-call override (picker fast-fail, BS#992)', async () => {
+      // The rotation tracks picker passes timeoutMs: 5000 so the user-visible
+      // dropdown doesn't burn 30 s on a hung LML call. Pin that the override
+      // reaches the AbortController setTimeout — without this, the option
+      // would silently no-op and tier-3 would inherit the 30 s budget.
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield', undefined, { timeoutMs: 5000 });
+
+      const lmlTimeoutCalls = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 5000);
+      expect(lmlTimeoutCalls).toHaveLength(1);
+      // Default 30 s timeout should NOT have been scheduled when the override is set.
+      const defaultCalls = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000);
+      expect(defaultCalls).toHaveLength(0);
+      setTimeoutSpy.mockRestore();
+    });
+
     it('omits both option flags from the body when no options are passed', async () => {
       // Read-path callers (request-line, artwork fallback, library
       // services) don't pass options. The body must stay byte-identical
