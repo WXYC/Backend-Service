@@ -242,7 +242,10 @@ function populateReleaseMetadata(
     artwork_url?: string | null;
   }
 ): void {
-  metadata.releaseYear = release.year ?? undefined;
+  // Discogs returns 0 as "year unknown"; coerce to undefined so it doesn't
+  // leak to iOS as a literal "0" on the playcut detail view. Mirrors the
+  // chokepoint in `metadata.service.ts#extractAlbumMetadata`. #1002.
+  metadata.releaseYear = release.year || undefined;
   metadata.genres = release.genres && release.genres.length > 0 ? release.genres : undefined;
   metadata.styles = release.styles && release.styles.length > 0 ? release.styles : undefined;
   metadata.label = release.label ?? undefined;
