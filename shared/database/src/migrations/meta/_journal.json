@@ -540,6 +540,13 @@
       "when": 1779856000010,
       "tag": "0078_flowsheet-metadata-status",
       "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1779856000011,
+      "tag": "0079_album-metadata-table",
+      "breakpoints": true
     }
   ]
 }

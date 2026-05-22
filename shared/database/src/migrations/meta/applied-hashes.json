@@ -75,5 +75,6 @@
   "0075_library-identity-substrate": "49b9e4e2dcee9de2b57720efe29b40a9513bf74a7e397c24b0df8e927187cb6d",
   "0076_flowsheet-track-position": "cd5ce9485dce54b87faaad778c06c41ccdf05708614d146dd5c2657a3602fc78",
   "0077_rotation-discogs-release-id": "f5853dae993603716eb13096ba001245295d0bbcc083d0cc8375bd47aa32f567",
-  "0078_flowsheet-metadata-status": "bc63008c207864429c5822ac832ae8fbfb70003183c05dedce17276258ef40a5"
+  "0078_flowsheet-metadata-status": "bc63008c207864429c5822ac832ae8fbfb70003183c05dedce17276258ef40a5",
+  "0079_album-metadata-table": "76f317f6dfa29b8dfdc472eef569a335722b54e2211c9cccf0da9b45391b9148"
 }
