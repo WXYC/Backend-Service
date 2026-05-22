@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/worker.js",
   "scripts": {
-    "start": "node dist/worker.js",
+    "start": "node --import ./dist/instrument.js dist/worker.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
     "dev": "tsup --watch",
@@ -13,7 +13,10 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@wxyc/database": "^1.0.0"
+    "@sentry/node": "^10.52.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0",
+    "dotenv": "^17.4.2"
   },
   "peerDependencies": {
     "drizzle-orm": "^0.45.0"

@@ -22,6 +22,7 @@ import { playlist_route } from './routes/playlist.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
 import { setupCdcWebSocket, shutdownCdcWebSocket } from './services/cdc/index.js';
+import { setupMetadataBroadcast } from './services/metadata-broadcast/index.js';
 import { startRotationTracksCacheWarm } from './services/rotation-tracks-cache-warm.service.js';
 import { drainInFlightEnrichments } from './services/metadata/enrichment.service.js';
 import { activeShow } from './middleware/checkActiveShow.js';
@@ -133,6 +134,12 @@ const server = app.listen(port, () => {
   startPlaylistProxy();
   startAlbumPlaysRefresh();
   void setupCdcWebSocket(server);
+  // Second CDC handler: rebroadcasts terminal metadata UPDATEs as SSE
+  // `liveFs:update` so dj-site stays in sync after the enrichment-worker
+  // (BS#892) finalizes a row. Closes BS#893 + BS#628. Registers a handler
+  // on the same per-process LISTEN connection — independent of the
+  // websocket handler, both fire on every event.
+  setupMetadataBroadcast();
   // One-shot warm of the rotation-tracks picker LRUs in
   // `library.service.ts`. Fire-and-forget — the walk shares the LML
   // semaphore with concurrent traffic, and the LRUs are process-local so

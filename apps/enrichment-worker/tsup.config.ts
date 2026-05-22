@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig((options) => ({
-  entry: ['worker.ts'],
+  entry: ['worker.ts', 'instrument.ts'],
   outDir: 'dist',
   format: ['esm'],
   platform: 'node',
@@ -9,6 +9,6 @@ export default defineConfig((options) => ({
   clean: true,
   sourcemap: true,
   splitting: false,
-  external: ['@wxyc/database', 'drizzle-orm', 'postgres'],
-  onSuccess: options.watch ? 'node ./dist/worker.js' : undefined,
+  external: ['@wxyc/database', 'drizzle-orm', 'postgres', '@sentry/node', '@wxyc/lml-client'],
+  onSuccess: options.watch ? 'node --import ./dist/instrument.js ./dist/worker.js' : undefined,
 }));
