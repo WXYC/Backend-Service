@@ -29,7 +29,13 @@ const main = async (): Promise<void> => {
   // Graceful shutdown: SIGTERM (docker stop) and SIGINT (Ctrl+C). The
   // LISTEN connection holds a pg socket open, so stopping cleanly avoids
   // a "connection terminated unexpectedly" log on the database side.
+  // The `shuttingDown` latch guards against concurrent SIGTERM+SIGINT
+  // (or a duplicate signal) racing through `stopCdcListener` +
+  // `closeDatabaseConnection`.
+  let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`[enrichment-worker] received ${signal}; shutting down`);
     try {
       await stopCdcListener();
