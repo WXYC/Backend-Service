@@ -30,7 +30,7 @@
 -- (sync_commit=off, batched). A 2.6M-row UPDATE inside this migration's
 -- transaction would block writes for the duration — see CLAUDE.md
 -- "Migrations are DDL-only" and project_bulk_update_playbook in memory.
--- Runbook: docs/runbooks/flowsheet-metadata-status-backfill.md.
+-- Runbook: docs/flowsheet-metadata-status-backfill.md.
 --
 -- Production ops for the partial indexes (same pattern as 0070, 0074):
 --
