@@ -28,11 +28,20 @@
  * `lml-fetch.ts` header.
  */
 
-const envInt = (name: string, defaultValue: number): number => {
+const envInt = (name: string, fallback: number): number => {
   const raw = process.env[name];
-  if (!raw) return defaultValue;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
+  if (raw === undefined || raw === '') return fallback;
+  // Number(raw) (not parseInt) so partial-parse strings like "20banana"
+  // surface as NaN and get rejected, instead of silently coercing to 20.
+  // Matches the contract in apps/backend/services/lml/lml.client.ts.
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  // Surface misconfigurations at startup so an operator who set `=0`
+  // intending to disable the limiter sees their value was rejected
+  // instead of silently falling back. A 0-permit semaphore would
+  // deadlock, which is why we don't accept it.
+  console.warn(`lml-limiter: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`);
+  return fallback;
 };
 
 /**
@@ -173,7 +182,9 @@ export const createLmlLimiter = (config?: { maxConcurrent?: number; ratePerMinut
 
 /**
  * Module-level singleton used by `lml-fetch.ts`. Reads BACKFILL_LML_* from
- * env at module load. Tests that need to exercise different limits should
- * call `createLmlLimiter()` directly.
+ * env at module load — mutating `process.env` after the first import of
+ * this module does NOT reconfigure the singleton. Tests that need to
+ * exercise different limits or env values must call `createLmlLimiter()`
+ * directly with explicit config.
  */
 export const defaultLmlLimiter: LmlLimiter = createLmlLimiter();
