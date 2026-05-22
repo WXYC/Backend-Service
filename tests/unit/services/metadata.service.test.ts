@@ -246,4 +246,21 @@ describe('metadata.service', () => {
 
     expect(result?.album?.artworkUrl).toBe('https://i.discogs.com/art.jpg');
   });
+
+  it('coerces Discogs release_year=0 sentinel to undefined (#1002)', async () => {
+    // Discogs returns 0 when a release has no verified year. Passing it through
+    // as a literal 0 leaks to the iOS playcut detail view as "Release year: 0"
+    // and persists as 0 in flowsheet.release_year. Year 0 has no real-world
+    // music-release meaning, so the chokepoint coerces it to undefined.
+    const responseYearZero = structuredClone(lookupResponseWithResults);
+    responseYearZero.results[0].artwork.release_year = 0;
+    mockLookupMetadata.mockResolvedValue(responseYearZero);
+
+    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
+
+    expect(result?.album?.releaseYear).toBeUndefined();
+    // Other album metadata is preserved — the coercion only nulls releaseYear.
+    expect(result?.album?.discogsReleaseId).toBe(12345);
+    expect(result?.album?.artworkUrl).toBe('https://i.discogs.com/art.jpg');
+  });
 });

@@ -111,7 +111,10 @@ function extractAlbumMetadata(artwork: DiscogsMatchResult): AlbumMetadataResult 
     discogsReleaseId: artwork.release_id,
     discogsUrl: artwork.release_url,
     artworkUrl: filterSpacerGif(artwork.artwork_url),
-    releaseYear: artwork.release_year ?? undefined,
+    // Discogs returns 0 as "year unknown"; coerce to undefined so it doesn't
+    // leak to iOS as a literal "0" or persist as 0 in flowsheet.release_year.
+    // #1002.
+    releaseYear: artwork.release_year || undefined,
     spotifyUrl: artwork.spotify_url ?? undefined,
     appleMusicUrl: artwork.apple_music_url ?? undefined,
     youtubeMusicUrl: artwork.youtube_music_url ?? undefined,

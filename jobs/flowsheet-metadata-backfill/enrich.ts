@@ -149,7 +149,11 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
       .set({
         artwork_url: filterSpacerGif(artwork.artwork_url),
         discogs_url: artwork.release_url ?? null,
-        release_year: artwork.release_year ?? null,
+        // Discogs returns 0 as "year unknown"; coerce to null so the column
+        // doesn't carry a sentinel that iOS renders as literal "0". Mirrors
+        // the runtime path in `metadata.service.ts#extractAlbumMetadata`.
+        // #1002.
+        release_year: artwork.release_year || null,
         spotify_url: artwork.spotify_url ?? null,
         apple_music_url: artwork.apple_music_url ?? null,
         // Streaming search URLs: prefer LML's, fall back to synthesized.
