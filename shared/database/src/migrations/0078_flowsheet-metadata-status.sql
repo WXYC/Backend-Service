@@ -1,0 +1,64 @@
+-- BS#891 — explicit `metadata_status` lifecycle for flowsheet track rows.
+--
+-- Replaces the implicit two-column state machine ({metadata_attempt_at,
+-- artwork_url/discogs_url}) with an explicit enum. The five states encode
+-- the full lifecycle:
+--   pending          — never tried OR transient failure (retry-eligible);
+--                      default on every new row.
+--   enriching        — a consumer instance has claimed this row and is
+--                      mid-LML-call (Epic C C2 #892's idempotent claim).
+--                      `enriching_since` carries the claim timestamp.
+--   enriched_match   — LML returned full Discogs metadata; populated
+--                      columns on the row are authoritative.
+--   enriched_no_match — LML succeeded with no Discogs match; only the
+--                      synthesized YouTube/Bandcamp/SoundCloud search URLs
+--                      are populated (post-#873 fallback path).
+--   failed_no_retry  — exceeded the retry budget; terminal.
+--
+-- @no-precondition-needed: the ADD COLUMN carries a constant default
+-- ('pending') and a NOT NULL constraint. On PG11+ a constant-default
+-- ADD COLUMN is metadata-only — pg_attribute records the default and
+-- existing rows have it computed virtually on read. No row rewrite,
+-- no AccessExclusiveLock window beyond the catalog update. The enum
+-- type itself is the only "constraint": values come from the type
+-- definition, every existing row gets 'pending' by construction, so no
+-- existing row can violate the type at apply time.
+--
+-- DDL-only. The CASE-derived backfill from {metadata_attempt_at,
+-- artwork_url, discogs_url} to {enriched_match, enriched_no_match} is
+-- a separate one-shot ops step gated by the bulk-update playbook
+-- (sync_commit=off, batched). A 2.6M-row UPDATE inside this migration's
+-- transaction would block writes for the duration — see CLAUDE.md
+-- "Migrations are DDL-only" and project_bulk_update_playbook in memory.
+-- Runbook: docs/runbooks/flowsheet-metadata-status-backfill.md.
+--
+-- Production ops for the partial indexes (same pattern as 0070, 0074):
+--
+--   1. Build CONCURRENTLY out-of-band on prod first via:
+--
+--        CREATE INDEX CONCURRENTLY "flowsheet_metadata_status_pending_idx"
+--          ON "wxyc_schema"."flowsheet" USING btree ("id")
+--          WHERE "entry_type" = 'track'
+--            AND "artist_name" IS NOT NULL
+--            AND "metadata_status" = 'pending';
+--
+--        CREATE INDEX CONCURRENTLY "flowsheet_metadata_status_enriching_stale_idx"
+--          ON "wxyc_schema"."flowsheet" USING btree ("enriching_since")
+--          WHERE "metadata_status" = 'enriching';
+--
+--   2. Then merge this PR. IF NOT EXISTS below makes the migration a
+--      no-op against the prod DB where the index already exists, while
+--      fresh dev databases pick it up on first migrate.
+--   3. Run `ANALYZE wxyc_schema.flowsheet;` afterwards so the planner
+--      routes the cron/sweep SELECTs through the new partials.
+--
+-- Drizzle wraps each migration in a transaction; CREATE INDEX
+-- CONCURRENTLY cannot run inside a transaction block. Same constraint
+-- as 0057, 0061, 0068, 0070, 0074 — hand-edited IF NOT EXISTS rather
+-- than CONCURRENTLY in this file.
+
+CREATE TYPE "wxyc_schema"."metadata_status_enum" AS ENUM('pending', 'enriching', 'enriched_match', 'enriched_no_match', 'failed_no_retry');--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "metadata_status" "wxyc_schema"."metadata_status_enum" DEFAULT 'pending' NOT NULL;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "enriching_since" timestamp with time zone;--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "flowsheet_metadata_status_pending_idx" ON "wxyc_schema"."flowsheet" USING btree ("id") WHERE "wxyc_schema"."flowsheet"."entry_type" = 'track' AND "wxyc_schema"."flowsheet"."artist_name" IS NOT NULL AND "wxyc_schema"."flowsheet"."metadata_status" = 'pending';--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "flowsheet_metadata_status_enriching_stale_idx" ON "wxyc_schema"."flowsheet" USING btree ("enriching_since") WHERE "wxyc_schema"."flowsheet"."metadata_status" = 'enriching';
