@@ -37,6 +37,10 @@ export interface IFSEntryMetadata {
 // `legacy_link_attempted_at` and `metadata_attempt_at` are job-internal
 // markers consumed only by the broken-FK recovery and metadata backfill
 // jobs respectively, so they're excluded from the controller-facing entry.
+//
+// `metadata_status` and `enriching_since` (BS#891) ARE surfaced to the
+// controller layer because the V2 wire format projects metadata_status onto
+// track rows for iOS branch logic (WXYC/wxyc-ios-64#270).
 export interface IFSEntry extends Omit<FSEntry, 'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at'> {
   label_id: number | null;
   rotation_bin: string | null;

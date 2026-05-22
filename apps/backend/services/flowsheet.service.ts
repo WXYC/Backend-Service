@@ -94,6 +94,8 @@ const FSEntryFieldsRaw = {
   artist_bio: flowsheet.artist_bio,
   artist_wikipedia_url: flowsheet.artist_wikipedia_url,
   on_streaming: library.on_streaming,
+  metadata_status: flowsheet.metadata_status,
+  enriching_since: flowsheet.enriching_since,
 };
 
 // Raw result type from SQL query
@@ -132,6 +134,8 @@ type FSEntryRaw = {
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
   on_streaming: boolean | null;
+  metadata_status: FSEntry['metadata_status'];
+  enriching_since: Date | null;
 };
 
 /** Transform flat SQL result to nested IFSEntry structure */
@@ -171,6 +175,8 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   artist_bio: raw.artist_bio,
   artist_wikipedia_url: raw.artist_wikipedia_url,
   on_streaming: raw.on_streaming ?? null,
+  metadata_status: raw.metadata_status,
+  enriching_since: raw.enriching_since,
   // Nested metadata view (used by transformToV2)
   metadata: {
     artwork_url: raw.artwork_url,
@@ -791,6 +797,11 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         artist_bio: entry.metadata?.artist_bio ?? null,
         artist_wikipedia_url: entry.metadata?.artist_wikipedia_url ?? null,
         on_streaming: entry.on_streaming ?? null,
+        // BS#891. iOS branches on this to decide whether to render inline
+        // metadata or fall back to the proxy-fetch path
+        // (WXYC/wxyc-ios-64#270). Always present on track rows once the
+        // column ships; `pending` is the default for newly-inserted rows.
+        metadata_status: entry.metadata_status,
       };
 
     case 'show_start':

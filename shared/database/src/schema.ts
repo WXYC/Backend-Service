@@ -419,6 +419,39 @@ export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
   'breakpoint',
   'message',
 ]);
+
+// Enrichment lifecycle for flowsheet track rows (BS#891). Replaces the
+// implicit two-column state machine ({metadata_attempt_at,
+// artwork_url/discogs_url}) with an explicit enum. Order is the lifecycle:
+// `pending` → `enriching` → terminal (`enriched_match`, `enriched_no_match`,
+// `failed_no_retry`).
+//
+//   pending           — never tried OR transient failure (retry-eligible).
+//                       Default on every new row; the cron / Epic C consumer
+//                       sweeps this slice.
+//   enriching         — a consumer instance has claimed this row and is
+//                       mid-LML-call. Set when the row flips from `pending`
+//                       to `enriching` via the idempotent claim in Epic C
+//                       C2 (#892). `enriching_since` carries the claim
+//                       timestamp so the recovery sweep can revert stuck
+//                       rows past a TTL (60 s in C6).
+//   enriched_match    — LML returned full Discogs metadata; the populated
+//                       columns on the row are authoritative.
+//   enriched_no_match — LML succeeded but found no Discogs match. Only the
+//                       synthesized YouTube/Bandcamp/SoundCloud search URLs
+//                       are populated (post-#873 fallback path).
+//   failed_no_retry   — exceeded the retry budget; terminal. The cron skips
+//                       these rows and they require manual triage.
+//
+// Wire-format definition for iOS lives at `Shared/Playlist/Sources/Playlist/V2/
+// MetadataStatus.swift` (raw values must stay in sync).
+export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
+  'pending',
+  'enriching',
+  'enriched_match',
+  'enriched_no_match',
+  'failed_no_retry',
+]);
 /**
  * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes
  * rotation rows in tubafrenzy; Backend-Service is downstream. Tubafrenzy
@@ -600,6 +633,26 @@ export const flowsheet = wxyc_schema.table(
     // without confusing tried-and-no-match for tried-and-LML-failed.
     // Stamped by `enrichment.service.ts` and #638's job.
     metadata_attempt_at: timestamp('metadata_attempt_at', { withTimezone: true }),
+    // Explicit enrichment lifecycle (BS#891). See `metadataStatusEnum` above
+    // for state semantics. Default `'pending'` covers every new row and every
+    // pre-#891 historical row (the migration adds the column with this
+    // constant default, which is a metadata-only ALTER on PG11+).
+    //
+    // The implicit state derived from {metadata_attempt_at, artwork_url,
+    // discogs_url} is what every previous-PR consumer reads. This column
+    // becomes the single source of truth once Epic C C2 (consumer) and C6
+    // (cron) ship; `metadata_attempt_at` is kept as a historical marker but
+    // is no longer used for control flow.
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    metadata_status: metadataStatusEnum('metadata_status').notNull().default('pending'),
+    // Claim timestamp set by Epic C C2's consumer when flipping a row from
+    // `pending` to `enriching`. NULL otherwise. C6's recovery sweep reads
+    // this to decide which `enriching` rows have gone stale:
+    //   UPDATE flowsheet SET metadata_status='pending', enriching_since=NULL
+    //   WHERE metadata_status='enriching' AND enriching_since < now() - interval '60 seconds';
+    // The `flowsheet_metadata_status_enriching_stale_idx` partial covers
+    // that query.
+    enriching_since: timestamp('enriching_since', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, track+dj=B, album=C, label=D). Managed by
     // migration 0054 (which extended the original 0052 expression to include
@@ -694,6 +747,40 @@ export const flowsheet = wxyc_schema.table(
       .where(
         sql`${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL AND ${table.metadata_attempt_at} IS NULL`
       ),
+    // BS#891. Partial B-tree on (id) covering the `metadata_status = 'pending'`
+    // slice. Replaces the `metadata_attempt_at IS NULL` partials above as the
+    // sweep predicate once Epic C C6 (#896) flips the cron to read this
+    // column. Both partials coexist during the transition — drop the old
+    // `*_metadata_attempt_pending_*` partials in the same PR that flips the
+    // cron, not here. Same predicate shape as 0070: filter on the three
+    // clauses the cron query carries (entry_type, artist_name, the
+    // lifecycle column itself).
+    //
+    // Built CONCURRENTLY out-of-band on prod first via:
+    //   CREATE INDEX CONCURRENTLY flowsheet_metadata_status_pending_idx
+    //     ON wxyc_schema.flowsheet (id)
+    //     WHERE entry_type = 'track' AND artist_name IS NOT NULL
+    //       AND metadata_status = 'pending';
+    // Migration SQL carries IF NOT EXISTS so the apply is a no-op against
+    // the prod DB where the index is already present.
+    index('flowsheet_metadata_status_pending_idx')
+      .on(table.id)
+      .where(
+        sql`${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL AND ${table.metadata_status} = 'pending'`
+      ),
+    // BS#891. Partial B-tree on `enriching_since` covering the stale-claim
+    // recovery sweep that Epic C C6 (#896) will run. Keyed on
+    // `enriching_since` (not id) so the sweep can range-scan the slice
+    // older than the TTL directly:
+    //   UPDATE ... SET metadata_status='pending', enriching_since=NULL
+    //   WHERE metadata_status='enriching' AND enriching_since < now() - interval '60s';
+    // No artist_name / entry_type guard — `enriching` is only reachable from
+    // `pending`, which the writer already gates on entry_type='track' AND
+    // artist_name IS NOT NULL. Keeping the partial predicate minimal lets
+    // the planner reach it from any future caller variant.
+    index('flowsheet_metadata_status_enriching_stale_idx')
+      .on(table.enriching_since)
+      .where(sql`${table.metadata_status} = 'enriching'`),
   ]
 );
 
