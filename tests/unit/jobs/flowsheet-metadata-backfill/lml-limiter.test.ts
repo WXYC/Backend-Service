@@ -128,12 +128,30 @@ describe('jobs/flowsheet-metadata-backfill/lml-limiter (BS#995)', () => {
       expect(s.availableTokens).toBeGreaterThanOrEqual(119.9);
     });
 
-    it('falls back to default on non-positive or unparseable env values', () => {
+    it('falls back to default on non-positive or unparseable env values, with a warn', () => {
       process.env = { ...originalEnv, BACKFILL_LML_MAX_CONCURRENT: '0', BACKFILL_LML_RATE_PER_MIN: 'banana' };
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
       const limiter = createLmlLimiter();
       expect(limiter.state().availablePermits).toBe(1);
       expect(limiter.state().availableTokens).toBeGreaterThanOrEqual(19.9);
+      // Surface misconfigurations: both bad values must warn.
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('BACKFILL_LML_MAX_CONCURRENT=0'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('BACKFILL_LML_RATE_PER_MIN=banana'));
+
+      warn.mockRestore();
+    });
+
+    it('rejects partial-parse strings like "20banana" (no silent coercion)', () => {
+      process.env = { ...originalEnv, BACKFILL_LML_MAX_CONCURRENT: '20banana' };
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const limiter = createLmlLimiter();
+      // 20banana → NaN under Number(), not 20 under parseInt; falls back.
+      expect(limiter.state().availablePermits).toBe(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('BACKFILL_LML_MAX_CONCURRENT=20banana'));
+
+      warn.mockRestore();
     });
 
     it('explicit config overrides env vars', () => {
