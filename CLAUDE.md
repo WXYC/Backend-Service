@@ -68,7 +68,7 @@ Key middleware:
 - `errorHandler` — Centralized error handling returning standardized responses
 - Legacy mirror middleware — Syncs flowsheet data to tubafrenzy. Show lifecycle (`startShow`, `endShow`) and entry CRUD (`addEntry`, `updateEntry`) use HTTP REST calls to tubafrenzy's mirror API. `deleteEntry` uses raw SQL via SSH. Show IDs live in two places: an in-memory `showIdMap` (process-local, populated lazily by `cacheShowId`, cleared on process exit) and the persisted `shows.legacy_show_id` column (written alongside the cache after `mirrorCreateShow`). On BS restart the map starts empty; read paths fall back to the persisted column, paying one extra DB round-trip on the first lookup per show.
 
-Server timeout is 5 seconds globally; SSE routes have no timeout. Swagger API docs are served at `/api-docs` from `app.yaml`.
+Server timeout is 35 seconds globally — strictly greater than the LML client's 30 s `AbortController` (`services/lml/lml.client.ts`) so a slow LML lookup's catch path can flush a 200-with-fallback response instead of racing the socket teardown to a CORS-less 502. SSE routes opt out via `res.setTimeout(0)`. Swagger API docs are served at `/api-docs` from `app.yaml`.
 
 ### Auth Server (`apps/auth`)
 
