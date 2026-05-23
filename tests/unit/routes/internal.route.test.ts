@@ -120,13 +120,26 @@ describe('POST /internal/flowsheet-webhook', () => {
     // values. Reset both mocks fully so per-test queues don't bleed across
     // tests. Default `mockReturning` to a fresh-INSERT response (one row);
     // tests that need a conflict response queue `[]` first, then a
-    // separate update-branch row. `mockLimit` covers the show-resolution
-    // SELECT (returns [] = no existing show, fall through to the inline
-    // INSERT ... ON CONFLICT DO NOTHING + re-SELECT chain in resolveShowId).
+    // separate update-branch row.
+    //
+    // Each webhook call issues two .limit(1) SELECTs:
+    //   1. resolveShowId — looks up the show by legacy_show_id; the queued
+    //      `[{ id: 9999 }]` short-circuits so we don't need to model the
+    //      INSERT-then-re-SELECT fallback.
+    //   2. resolveAlbumId — looks up library by legacy_release_id; default
+    //      queues empty so BS#1028's libraryReleaseId resolution returns
+    //      null and the row is treated as unlinked. Tests that want a
+    //      resolved album_id queue their own mockResolvedValueOnce values
+    //      before triggering the request.
+    // Trailing `mockResolvedValue([])` is the safety net once the
+    // per-call queue is drained.
     mockReturning.mockReset();
     mockReturning.mockResolvedValue([{ id: 5555 }]);
     mockLimit.mockReset();
-    mockLimit.mockResolvedValue([{ id: 9999 }]);
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999 }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([]);
   });
 
   // -- Auth --
@@ -228,6 +241,10 @@ describe('POST /internal/flowsheet-webhook', () => {
     // NOTHING RETURNING { id } either returns one row (we won the insert
     // race and the row is fresh) or an empty array (someone else inserted
     // first; we should UPDATE without firing enrichment).
+    //
+    // Default beforeEach queues an empty album lookup → albumId resolves to
+    // undefined here, exercising the unlinked branch. Linked-branch shape
+    // is covered by the BS#1028 tests below.
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
 
     const res = await request(app)
@@ -238,6 +255,7 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(res.status).toBe(200);
     expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
       flowsheetId: 5555,
+      albumId: undefined,
       artistName: 'Autechre',
       albumTitle: 'Confield',
       trackTitle: 'VI Scose Poise',
@@ -323,6 +341,90 @@ describe('POST /internal/flowsheet-webhook', () => {
 
     expect(res.status).toBe(200);
     expect(mockFireAndForgetMetadataForRow).not.toHaveBeenCalled();
+  });
+
+  // -- libraryReleaseId → album_id resolution (BS#1028) --
+  //
+  // The tubafrenzy webhook payload always carries `libraryReleaseId`
+  // (BackendServiceWebhookClient.buildPayload, tubafrenzy/libs/core/...).
+  // The handler resolves it to a Backend-Service `album_id` at INSERT time
+  // and forwards the resolved id to `fireAndForgetMetadataForRow` so D3's
+  // in-process writer takes the linked branch and UPSERTs `album_metadata`.
+  //
+  // Three cases:
+  //   1. libraryReleaseId resolves to a library row → albumId forwarded.
+  //   2. libraryReleaseId is 0 (sentinel for "no library link") → albumId
+  //      undefined; resolveAlbumId short-circuits without a SELECT.
+  //   3. libraryReleaseId is non-zero but no matching library row →
+  //      albumId undefined; row is unlinked until flowsheet-etl resolves
+  //      a future linkage (rare but possible if the library ETL hasn't
+  //      caught up to a brand-new release yet).
+
+  it('forwards the resolved album_id when libraryReleaseId matches a library row (BS#1028)', async () => {
+    // Override mockLimit queue: show lookup → 9999, album lookup → 7777
+    // (mirrors a tubafrenzy entry whose libraryReleaseId already corresponds
+    // to a library row).
+    mockLimit.mockReset();
+    mockLimit.mockResolvedValueOnce([{ id: 9999 }]).mockResolvedValueOnce([{ id: 7777 }]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
+      flowsheetId: 5555,
+      albumId: 7777,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+      trackTitle: 'VI Scose Poise',
+    });
+  });
+
+  it('forwards albumId: undefined when libraryReleaseId is 0 (no library link)', async () => {
+    // resolveAlbumId short-circuits on 0 — no album SELECT is issued. The
+    // beforeEach queue still satisfies the show lookup; the album lookup
+    // never fires, so the queue's empty-album slot goes unused.
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, libraryReleaseId: 0 } });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
+      flowsheetId: 5555,
+      albumId: undefined,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+      trackTitle: 'VI Scose Poise',
+    });
+  });
+
+  it('forwards albumId: undefined when libraryReleaseId does not match any library row', async () => {
+    // libraryReleaseId is non-zero but the library SELECT returns empty —
+    // e.g. a brand-new release the library ETL hasn't synced yet, or an
+    // orphaned legacy id. resolveAlbumId returns null; enrichment fires
+    // with albumId: undefined and D3 takes the unlinked-inline branch.
+    // Default beforeEach queue (album lookup → []) already models this.
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, libraryReleaseId: 999_999 } });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
+      flowsheetId: 5555,
+      albumId: undefined,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+      trackTitle: 'VI Scose Poise',
+    });
   });
 
   // -- Delete --
