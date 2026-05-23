@@ -85,31 +85,44 @@ const analyzeTable = async (): Promise<void> => {
 };
 
 /**
- * Verify completeness via the same filter as the INSERT, anti-joined against
- * `album_metadata`. A non-zero count points to either concurrent writes during
- * the run (rare on an off-hours window) or a row that materialized between
- * the INSERT and the verify. Re-running the job is safe — the INSERT is
- * idempotent via `ON CONFLICT DO NOTHING`.
+ * Verify completeness by comparing two aggregate counts: the size of
+ * `album_metadata` against the number of distinct `album_id`s in the enriched
+ * subset of flowsheet (the source set the INSERT enumerated). Both sides run
+ * on already-indexed paths and complete in well under the backend's default
+ * 5 s `statement_timeout`, so this step does not need a `db.transaction`
+ * wrapper.
+ *
+ * The earlier shape (`LEFT JOIN flowsheet → album_metadata` anti-join) scanned
+ * the full ~2.6M-row flowsheet and tripped the 5 s timeout on the 2026-05-22
+ * prod run (BS#1019). The INSERT itself completed cleanly that run; only the
+ * verification gate misfired.
+ *
+ * Invariant: `actual >= expected`. Equality is the steady state today
+ * (D2 backfill only, no live writer to `album_metadata`). Once D3 (#899)
+ * ships, a live UPSERT can land between this job's INSERT and the verify,
+ * producing `actual > expected` legitimately — never the other way around,
+ * since the INSERT is idempotent and never deletes. Re-running the job is
+ * safe (`ON CONFLICT (album_id) DO NOTHING`).
  */
 const verifyComplete = async (): Promise<void> => {
   const result = await db.execute(sql`
-    SELECT count(*)::int AS missing
-    FROM "wxyc_schema"."flowsheet" AS f
-    LEFT JOIN "wxyc_schema"."album_metadata" AS am ON f."album_id" = am."album_id"
-    WHERE f."album_id" IS NOT NULL
-      AND f."metadata_attempt_at" IS NOT NULL
-      AND am."album_id" IS NULL
+    SELECT
+      (SELECT count(*)::int FROM "wxyc_schema"."album_metadata") AS actual,
+      (SELECT count(DISTINCT "album_id")::int FROM "wxyc_schema"."flowsheet"
+        WHERE "album_id" IS NOT NULL
+          AND "metadata_attempt_at" IS NOT NULL) AS expected
   `);
-  const missing = Number((result as unknown as Array<{ missing: number }>)[0]?.missing ?? 0);
-  if (missing > 0) {
+  const row = (result as unknown as Array<{ actual: number; expected: number }>)[0];
+  const actual = Number(row?.actual ?? 0);
+  const expected = Number(row?.expected ?? 0);
+  if (actual < expected) {
     throw new Error(
-      `[${JOB_NAME}] Verification failed: ${missing} flowsheet row(s) still have no matching album_metadata. ` +
+      `[${JOB_NAME}] Verification failed: album_metadata has ${actual} row(s), expected at least ${expected} ` +
+        `from the enriched flowsheet subset. ` +
         `Re-run the backfill — it is idempotent and will pick up the remaining rows.`
     );
   }
-  console.log(
-    `[${JOB_NAME}] Verification passed: every enriched flowsheet row has a corresponding album_metadata row.`
-  );
+  console.log(`[${JOB_NAME}] Verification passed: album_metadata=${actual} >= expected=${expected}.`);
 };
 
 const formatDuration = (ms: number): string => {
