@@ -781,6 +781,30 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_metadata_status_enriching_stale_idx')
       .on(table.enriching_since)
       .where(sql`${table.metadata_status} = 'enriching'`),
+    // BS#1022. Complementary partial B-tree on (album_id) covering the
+    // `metadata_attempt_at IS NOT NULL` slice — the OPPOSITE partition from
+    // the `_pending_` indexes above. Required by album-metadata-backfill's
+    // `verifyComplete` (jobs/album-metadata-backfill/job.ts), which counts
+    // `count(DISTINCT album_id) FROM flowsheet WHERE album_id IS NOT NULL
+    // AND metadata_attempt_at IS NOT NULL`. Without it the planner falls
+    // back to a 2.6M-row heap walk and trips the 5s `DB_STATEMENT_TIMEOUT_MS`
+    // even after PR #1020 traded the LEFT JOIN for a dual-count. The same
+    // INSERT … SELECT statement higher in the job shares this WHERE clause,
+    // so the index also accelerates re-runs of the bulk move.
+    //
+    // Predicate matches the verify query verbatim — no `entry_type='track'`
+    // guard so the planner can pick this index up from the literal WHERE
+    // shape without requiring the verify query to be rewritten. (Non-track
+    // entries always have `album_id IS NULL`, so the predicate naturally
+    // restricts to track rows anyway.)
+    //
+    // Built CONCURRENTLY out-of-band on prod first; migration carries
+    // `IF NOT EXISTS` per the docs/migrations.md `if-not-exists-index`
+    // pattern. Expected size: ~50-100k entries (per BS#898's enriched-row
+    // count), well under a megabyte. Build window: a few seconds.
+    index('flowsheet_album_id_enriched_idx')
+      .on(table.album_id)
+      .where(sql`${table.album_id} IS NOT NULL AND ${table.metadata_attempt_at} IS NOT NULL`),
   ]
 );
 
