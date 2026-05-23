@@ -35,6 +35,20 @@ import { db, closeDatabaseConnection } from '@wxyc/database';
 
 const JOB_NAME = 'album-metadata-backfill';
 
+const VERIFY_TIMEOUT_MS_ENV = 'ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS';
+const VERIFY_TIMEOUT_MS_DEFAULT = 120_000;
+
+const parseVerifyTimeoutMs = (raw: string | undefined): number => {
+  if (raw === undefined || raw === '') return VERIFY_TIMEOUT_MS_DEFAULT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `[${JOB_NAME}] Invalid ${VERIFY_TIMEOUT_MS_ENV}=${raw}: must be a positive integer (milliseconds).`
+    );
+  }
+  return parsed;
+};
+
 /**
  * Run the INSERT inside a transaction so `SET LOCAL statement_timeout`
  * actually scopes. Outside a transaction the postgres-js driver auto-commits
@@ -87,15 +101,21 @@ const analyzeTable = async (): Promise<void> => {
 /**
  * Verify completeness by comparing two aggregate counts: the size of
  * `album_metadata` against the number of distinct `album_id`s in the enriched
- * subset of flowsheet (the source set the INSERT enumerated). Both sides run
- * on already-indexed paths and complete in well under the backend's default
- * 5 s `statement_timeout`, so this step does not need a `db.transaction`
- * wrapper.
+ * subset of flowsheet (the source set the INSERT enumerated).
  *
- * The earlier shape (`LEFT JOIN flowsheet → album_metadata` anti-join) scanned
- * the full ~2.6M-row flowsheet and tripped the 5 s timeout on the 2026-05-22
- * prod run (BS#1019). The INSERT itself completed cleanly that run; only the
- * verification gate misfired.
+ * Wrapped in `db.transaction` + `SET LOCAL statement_timeout` because the
+ * partial index from #660 (`idx_flowsheet_metadata_drain`) covers the
+ * `metadata_attempt_at IS NULL` partition (drain direction) only — this
+ * verify walks the opposite `IS NOT NULL` partition (~2.6M rows, no covering
+ * index) and would otherwise trip the backend's default 5 s `statement_timeout`
+ * (BS#1019 / BS#1022). `SET LOCAL` only scopes inside an explicit transaction
+ * with the postgres-js driver (auto-commit per `execute` otherwise), which is
+ * why both statements run on the closure-bound `tx` handle — running the
+ * second statement against the top-level `db` would silently drop them onto
+ * a different pooled connection and re-expose the 5 s default.
+ *
+ * The transaction wrapper sunsets naturally with D4 (#900) when the inline
+ * columns drop and the verify shape changes; remove it then, not before.
  *
  * Invariant: `actual >= expected`. Equality is the steady state today
  * (D2 backfill only, no live writer to `album_metadata`). Once D3 (#899)
@@ -105,24 +125,29 @@ const analyzeTable = async (): Promise<void> => {
  * safe (`ON CONFLICT (album_id) DO NOTHING`).
  */
 const verifyComplete = async (): Promise<void> => {
-  const result = await db.execute(sql`
-    SELECT
-      (SELECT count(*)::int FROM "wxyc_schema"."album_metadata") AS actual,
-      (SELECT count(DISTINCT "album_id")::int FROM "wxyc_schema"."flowsheet"
-        WHERE "album_id" IS NOT NULL
-          AND "metadata_attempt_at" IS NOT NULL) AS expected
-  `);
-  const row = (result as unknown as Array<{ actual: number; expected: number }>)[0];
-  const actual = Number(row?.actual ?? 0);
-  const expected = Number(row?.expected ?? 0);
-  if (actual < expected) {
-    throw new Error(
-      `[${JOB_NAME}] Verification failed: album_metadata has ${actual} row(s), expected at least ${expected} ` +
-        `from the enriched flowsheet subset. ` +
-        `Re-run the backfill — it is idempotent and will pick up the remaining rows.`
-    );
-  }
-  console.log(`[${JOB_NAME}] Verification passed: album_metadata=${actual} >= expected=${expected}.`);
+  const timeoutMs = parseVerifyTimeoutMs(process.env[VERIFY_TIMEOUT_MS_ENV]);
+
+  await db.transaction(async (tx) => {
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${timeoutMs}ms'`));
+    const result = await tx.execute(sql`
+      SELECT
+        (SELECT count(*)::int FROM "wxyc_schema"."album_metadata") AS actual,
+        (SELECT count(DISTINCT "album_id")::int FROM "wxyc_schema"."flowsheet"
+          WHERE "album_id" IS NOT NULL
+            AND "metadata_attempt_at" IS NOT NULL) AS expected
+    `);
+    const row = (result as unknown as Array<{ actual: number; expected: number }>)[0];
+    const actual = Number(row?.actual ?? 0);
+    const expected = Number(row?.expected ?? 0);
+    if (actual < expected) {
+      throw new Error(
+        `[${JOB_NAME}] Verification failed: album_metadata has ${actual} row(s), expected at least ${expected} ` +
+          `from the enriched flowsheet subset. ` +
+          `Re-run the backfill — it is idempotent and will pick up the remaining rows.`
+      );
+    }
+    console.log(`[${JOB_NAME}] Verification passed: album_metadata=${actual} >= expected=${expected}.`);
+  });
 };
 
 const formatDuration = (ms: number): string => {

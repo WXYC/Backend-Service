@@ -21,16 +21,22 @@ import {
   formatDuration,
 } from '../../../../jobs/album-metadata-backfill/job';
 
-type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
+type SqlLike = {
+  sql?: string | string[];
+  raw?: string;
+  queryChunks?: Array<string | { value?: string | string[]; raw?: string }>;
+};
 const renderSql = (value: unknown): string => {
   const obj = value as SqlLike | null | undefined;
   if (!obj) return '';
+  if (typeof obj.raw === 'string') return obj.raw;
   if (Array.isArray(obj.sql)) return obj.sql.join('');
   if (typeof obj.sql === 'string') return obj.sql;
   if (obj.queryChunks) {
     return obj.queryChunks
       .map((chunk) => {
         if (typeof chunk === 'string') return chunk;
+        if (typeof chunk.raw === 'string') return chunk.raw;
         if (Array.isArray(chunk.value)) return chunk.value.join('');
         if (typeof chunk.value === 'string') return chunk.value;
         return '';
@@ -190,17 +196,106 @@ describe('album-metadata-backfill: runBackfill query shape', () => {
 });
 
 describe('album-metadata-backfill: verifyComplete', () => {
+  const ORIGINAL_TIMEOUT_ENV = process.env.ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS;
+
+  // The verify scan walks the IS NOT NULL partition of flowsheet (~2.6M rows;
+  // partial index #660 covers IS NULL only). It must run inside `db.transaction`
+  // with a per-tx `SET LOCAL statement_timeout` lifted above the backend's 5 s
+  // default, because postgres-js auto-commits per `execute` otherwise — so
+  // both `SET LOCAL` and the dual-count `SELECT` have to land on the closure-
+  // bound `tx`, not the top-level `db`. The real failure mode the previous
+  // PR (#1020) missed wasn't call-ordering; it was the two statements running
+  // on different pooled connections. These tests pin the tx-binding by
+  // installing a fake `tx` per call and asserting `db.execute` stays untouched.
+  const installTx = (results: unknown[]): jest.Mock => {
+    const txExecute = jest.fn();
+    for (const r of results) {
+      txExecute.mockResolvedValueOnce(r);
+    }
+    (db.transaction as jest.Mock).mockImplementationOnce(async (fn: (tx: unknown) => Promise<unknown>) =>
+      fn({ execute: txExecute })
+    );
+    return txExecute;
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
     jest.spyOn(console, 'log').mockImplementation(() => {});
+    delete process.env.ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS;
+    // clearAllMocks resets call history but not queued mockImplementationOnce.
+    // If a verify test throws before consuming the transaction (e.g. on
+    // invalid-env tests), the unconsumed queued impl would bleed into the
+    // next test. Reset + restore the default tx === db pass-through.
+    (db.transaction as jest.Mock).mockReset();
+    (db.transaction as jest.Mock).mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(db));
   });
 
   afterEach(() => {
     jest.restoreAllMocks();
+    if (ORIGINAL_TIMEOUT_ENV === undefined) {
+      delete process.env.ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS;
+    } else {
+      process.env.ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS = ORIGINAL_TIMEOUT_ENV;
+    }
+  });
+
+  it('runs inside db.transaction with both statements on the closure-bound tx (not db.execute)', async () => {
+    const txExecute = installTx([undefined, [{ actual: 7101, expected: 7101 }]]);
+
+    await verifyComplete();
+
+    expect((db.transaction as jest.Mock).mock.calls.length).toBe(1);
+    expect(txExecute).toHaveBeenCalledTimes(2);
+    expect(db.execute).not.toHaveBeenCalled();
+  });
+
+  it('issues SET LOCAL statement_timeout as the first transaction statement, then the dual-count SELECT', async () => {
+    const txExecute = installTx([undefined, [{ actual: 0, expected: 0 }]]);
+
+    await verifyComplete();
+
+    const firstCall = txExecute.mock.calls[0]?.[0];
+    expect(renderSql(firstCall)).toMatch(/SET\s+LOCAL\s+statement_timeout/i);
+    const secondCall = txExecute.mock.calls[1]?.[0];
+    expect(renderSql(secondCall)).toMatch(/SELECT[\s\S]*count[\s\S]*album_metadata/i);
+  });
+
+  it('defaults the verify statement_timeout to 120000ms when ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS is unset', async () => {
+    const txExecute = installTx([undefined, [{ actual: 0, expected: 0 }]]);
+
+    await verifyComplete();
+
+    const setLocalSql = renderSql(txExecute.mock.calls[0]?.[0]);
+    expect(setLocalSql).toMatch(/120000\s*ms/i);
+  });
+
+  it('reads ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS to override the default timeout', async () => {
+    process.env.ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS = '90000';
+    const txExecute = installTx([undefined, [{ actual: 0, expected: 0 }]]);
+
+    await verifyComplete();
+
+    const setLocalSql = renderSql(txExecute.mock.calls[0]?.[0]);
+    expect(setLocalSql).toMatch(/90000\s*ms/i);
+    expect(setLocalSql).not.toMatch(/120000/);
+  });
+
+  it('throws on non-numeric ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS rather than silently defaulting', async () => {
+    process.env.ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS = 'not-a-number';
+    installTx([undefined, [{ actual: 0, expected: 0 }]]);
+
+    await expect(verifyComplete()).rejects.toThrow(/ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS/);
+  });
+
+  it('throws on non-positive ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS rather than silently defaulting', async () => {
+    process.env.ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS = '0';
+    installTx([undefined, [{ actual: 0, expected: 0 }]]);
+
+    await expect(verifyComplete()).rejects.toThrow(/ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS/);
   });
 
   it('passes when album_metadata count equals the enriched flowsheet album count', async () => {
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ actual: 7101, expected: 7101 }]);
+    installTx([undefined, [{ actual: 7101, expected: 7101 }]]);
 
     await expect(verifyComplete()).resolves.toBeUndefined();
   });
@@ -210,36 +305,37 @@ describe('album-metadata-backfill: verifyComplete', () => {
     // lands, a write that arrives between this job's INSERT and the verify
     // produces actual > expected without losing data. A strict equality check
     // would false-fail in that window; `>=` is the correct invariant.
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ actual: 7102, expected: 7101 }]);
+    installTx([undefined, [{ actual: 7102, expected: 7101 }]]);
 
     await expect(verifyComplete()).resolves.toBeUndefined();
   });
 
   it('throws with both counts and the idempotent re-run hint when album_metadata is short', async () => {
-    (db.execute as jest.Mock).mockResolvedValue([{ actual: 6964, expected: 7101 }]);
+    installTx([undefined, [{ actual: 6964, expected: 7101 }]]);
 
-    await expect(verifyComplete()).rejects.toThrow(/6964/);
-    await expect(verifyComplete()).rejects.toThrow(/7101/);
-    await expect(verifyComplete()).rejects.toThrow(/idempotent/i);
+    let caught: Error | undefined;
+    try {
+      await verifyComplete();
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.message).toMatch(/6964/);
+    expect(caught?.message).toMatch(/7101/);
+    expect(caught?.message).toMatch(/idempotent/i);
   });
 
-  it('uses a dual-count comparison instead of a LEFT JOIN over flowsheet (statement_timeout safe)', async () => {
-    // The previous LEFT JOIN over the 2.6M-row flowsheet timed out under the
-    // backend's default 5 s statement_timeout (BS#1019: prod run 2026-05-22).
-    // Two aggregate counts on already-indexed paths complete well under the
-    // budget, so the verify step doesn't need a db.transaction wrapper.
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ actual: 0, expected: 0 }]);
+  it('uses a dual-count comparison instead of a LEFT JOIN over flowsheet', async () => {
+    const txExecute = installTx([undefined, [{ actual: 0, expected: 0 }]]);
 
     await verifyComplete();
 
-    const call = findExecuteCallMatching(/SELECT[\s\S]*count[\s\S]*album_metadata/i);
-    expect(call).toBeDefined();
-    const sqlText = renderSql(call?.[0]);
-    expect(sqlText).not.toMatch(/LEFT\s+JOIN/i);
-    expect(sqlText).toMatch(/count\([\s\S]*\)[\s\S]*album_metadata/i);
-    expect(sqlText).toMatch(/count\(\s*DISTINCT[\s\S]*album_id[\s\S]*\)[\s\S]*flowsheet/i);
-    expect(sqlText).toMatch(/album_id"?\s+IS\s+NOT\s+NULL/i);
-    expect(sqlText).toMatch(/metadata_attempt_at"?\s+IS\s+NOT\s+NULL/i);
+    const selectSql = renderSql(txExecute.mock.calls[1]?.[0]);
+    expect(selectSql).not.toMatch(/LEFT\s+JOIN/i);
+    expect(selectSql).toMatch(/count\([\s\S]*\)[\s\S]*album_metadata/i);
+    expect(selectSql).toMatch(/count\(\s*DISTINCT[\s\S]*album_id[\s\S]*\)[\s\S]*flowsheet/i);
+    expect(selectSql).toMatch(/album_id"?\s+IS\s+NOT\s+NULL/i);
+    expect(selectSql).toMatch(/metadata_attempt_at"?\s+IS\s+NOT\s+NULL/i);
   });
 });
 
