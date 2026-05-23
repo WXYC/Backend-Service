@@ -1,6 +1,7 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const postgres = require('postgres');
 const fls_util = require('../utils/flowsheet_util');
+const { isMockApiAvailable, resetMockApi, simulateError } = require('../utils/mock_api');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
@@ -314,15 +315,16 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
   // verifies the projection contract that D2/D3 depend on: when an
   // `album_metadata` row exists for the joined `album_id`, the V2 read
   // path returns its values in preference to the flowsheet inline values.
-  // Using direct SQL to seed `album_metadata` (no HTTP write path exists
-  // until D3) and asserting on the HTTP V2 read.
   //
-  // The fire-and-forget LML enrichment may race the GET and overwrite
-  // flowsheet's inline metadata after the POST resolves — irrelevant,
-  // because COALESCE prefers `album_metadata` so the assertion is
-  // race-free.
+  // Post-D3 (BS#899), the runtime fire-and-forget enrichment also writes
+  // to album_metadata for linked rows. To exercise the COALESCE contract
+  // deterministically without racing the runtime writer's UPSERT, we
+  // force LML to return 500 — that hits enrichment.service.ts's catch
+  // arm, which uses `ON CONFLICT DO NOTHING` and so cannot clobber the
+  // pre-seeded sentinel row.
 
   let sql;
+  let mockApiAvailable = false;
   const SENTINEL_ALBUM_ID = 5; // Sufjan-adjacent seed row used elsewhere
   const SENTINEL = {
     artwork_url: 'https://bs897.example.com/artwork.jpg',
@@ -337,8 +339,9 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
     artist_wikipedia_url: 'https://bs897.example.com/wiki',
   };
 
-  beforeAll(() => {
+  beforeAll(async () => {
     sql = makeSql();
+    mockApiAvailable = await isMockApiAvailable();
   });
 
   afterAll(async () => {
@@ -349,15 +352,31 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
     // Ensure no stale row survives a prior run; FK ON DELETE CASCADE means
     // the row is also auto-dropped if the library row ever goes away.
     await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
+    if (mockApiAvailable) await resetMockApi();
     await fls_util.join_show(getTestDjId(), global.access_token);
   });
 
   afterEach(async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
+    if (mockApiAvailable) await resetMockApi();
     await fls_util.leave_show(getTestDjId(), global.access_token);
   });
 
   test('V2 read returns album_metadata values when the row exists, regardless of flowsheet inline state', async () => {
+    if (!mockApiAvailable) {
+      console.warn('Skipping: mock API server not available for LML failure simulation');
+      return;
+    }
+
+    // Force LML to fail so the fire-and-forget hits enrichment.service.ts's
+    // catch arm. With D3, that arm uses `INSERT ... ON CONFLICT DO NOTHING`
+    // for linked albums — guaranteeing the sentinel survives intact even
+    // though enrichment runs after the POST. (Pre-D3 the catch arm wrote
+    // to flowsheet's inline cols, also leaving album_metadata untouched.)
+    // This deliberately decouples the COALESCE projection test from the
+    // runtime UPSERT semantics tested in tests/integration/album-metadata-upsert.spec.js.
+    await simulateError('lml', '/api/v1/lookup', 500);
+
     // Pre-populate album_metadata for the sentinel album.
     await sql`
       INSERT INTO ${sql(`${SCHEMA}.album_metadata`)} (
@@ -374,9 +393,8 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
     `;
 
     // Add a flowsheet track linked to the sentinel album. The fire-and-
-    // forget enrichment may run and overwrite flowsheet's inline cols
-    // before the GET below, but COALESCE prefers album_metadata so the
-    // sentinel values still win.
+    // forget enrichment will hit LML 500 and fall through to the catch
+    // arm's ON CONFLICT DO NOTHING — sentinel survives intact.
     const addRes = await request
       .post('/flowsheet')
       .set('Authorization', global.access_token)
