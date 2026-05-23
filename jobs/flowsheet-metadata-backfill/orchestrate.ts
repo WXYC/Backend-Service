@@ -292,7 +292,8 @@ const loadBatch = async (afterId: number, batchSize: number, partitionFilter: SQ
       "id",
       "artist_name",
       "album_title",
-      "track_title"
+      "track_title",
+      "album_id"
     FROM ${FLOWSHEET_TABLE}
     WHERE "entry_type" = 'track'
       AND "artist_name" IS NOT NULL

@@ -16,7 +16,7 @@
  */
 import { jest } from '@jest/globals';
 
-import { db, flowsheet } from '@wxyc/database';
+import { album_metadata, db, flowsheet } from '@wxyc/database';
 import {
   applyEnrichment,
   cleanDiscogsBio,
@@ -45,8 +45,15 @@ const renderSql = (value: unknown): string => {
 };
 
 const mockDb = db as unknown as {
+  insert: jest.Mock;
   update: jest.Mock;
-  _chain: { set: jest.Mock; where: jest.Mock; returning: jest.Mock };
+  _chain: {
+    set: jest.Mock;
+    where: jest.Mock;
+    returning: jest.Mock;
+    values: jest.Mock;
+    onConflictDoUpdate: jest.Mock;
+  };
 };
 
 const baseRow: EnrichRow = {
@@ -54,7 +61,10 @@ const baseRow: EnrichRow = {
   artist_name: 'Autechre',
   album_title: 'Confield',
   track_title: 'VI Scose Poise',
+  album_id: null,
 };
+
+const linkedRow: EnrichRow = { ...baseRow, album_id: 5678 };
 
 const matchedResponse: LookupResponse = {
   results: [
@@ -198,6 +208,159 @@ describe('applyEnrichment', () => {
 
     const outcome = await applyEnrichment(baseRow, noMatchResponse);
     expect(outcome).toBe('enriched_no_match_raced');
+  });
+});
+
+/**
+ * Epic D / BS#1027 — when the backfill row is linked to a library album
+ * (`album_id !== null`), the 10-column metadata payload UPSERTs into
+ * `album_metadata` keyed by album_id, and the flowsheet UPDATE only stamps
+ * `metadata_attempt_at`. The race detector stays on the flowsheet UPDATE
+ * (marker IS NULL guard), and the album_metadata UPSERT carries a
+ * `updated_at < NOW()` setWhere so a delayed backfill cycle can't clobber
+ * a fresher runtime/worker enrichment. Mirrors the D3 worker pattern in
+ * `apps/enrichment-worker/enrich.ts` (BS#899).
+ *
+ * Critical contract difference from the worker: the backfill stamps
+ * `metadata_attempt_at` and guards on `metadata_attempt_at IS NULL`. The
+ * worker uses `metadata_status='enriching'`. The backfill operates on rows
+ * the consumer never claimed, so the marker is the right invariant.
+ */
+describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb._chain.returning.mockResolvedValue([{ id: linkedRow.id }]);
+  });
+
+  it('on match: UPSERTs the 10-column payload into album_metadata keyed by album_id', async () => {
+    const outcome = await applyEnrichment(linkedRow, matchedResponse);
+    expect(outcome).toBe('enriched_match');
+    expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.album_id).toBe(linkedRow.album_id);
+    expect(insertPayload.artwork_url).toBe('https://i.discogs.com/art.jpg');
+    expect(insertPayload.discogs_url).toBe('https://www.discogs.com/release/12345');
+    expect(insertPayload.release_year).toBe(2001);
+    expect(insertPayload.spotify_url).toBe('https://open.spotify.com/album/abc');
+    expect(insertPayload.apple_music_url).toBe('https://music.apple.com/album/xyz');
+    expect(insertPayload.youtube_music_url).toBe('https://music.youtube.com/album/aaa');
+    // bandcamp + soundcloud were null on LML → fall back to synthesized.
+    expect(insertPayload.bandcamp_url).toContain('bandcamp.com/search');
+    expect(insertPayload.soundcloud_url).toContain('soundcloud.com/search');
+    expect(insertPayload.artist_bio).toBe('Rob Brown and Sean Booth are Autechre.');
+    expect(insertPayload.artist_wikipedia_url).toBe('https://en.wikipedia.org/wiki/Autechre');
+    expect(insertPayload.updated_at).toBeDefined();
+  });
+
+  it('on match: onConflictDoUpdate carries all 10 columns + race guard setWhere(updated_at < NOW())', async () => {
+    await applyEnrichment(linkedRow, matchedResponse);
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as {
+      target: unknown;
+      set: Record<string, unknown>;
+      setWhere: unknown;
+    };
+    expect(conflictCfg).toBeDefined();
+    expect(conflictCfg.set.artwork_url).toBe('https://i.discogs.com/art.jpg');
+    expect(conflictCfg.set.artist_bio).toBe('Rob Brown and Sean Booth are Autechre.');
+    expect(conflictCfg.set.updated_at).toBeDefined();
+    // The race guard prevents stale backfill writes from clobbering a fresher
+    // runtime / worker enrichment of the same album_id.
+    expect(conflictCfg.setWhere).toBeDefined();
+    expect(renderSql(conflictCfg.setWhere)).toMatch(/<\s*NOW\(\)/i);
+  });
+
+  it('on match: flowsheet UPDATE stamps only metadata_attempt_at (no inline metadata columns)', async () => {
+    await applyEnrichment(linkedRow, matchedResponse);
+
+    expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/now\(\)/i);
+    // The 10 metadata columns must NOT appear on the flowsheet UPDATE — that's
+    // the whole point of the D3 dual-write split. The inline drift this fixes
+    // is exactly this previous behavior.
+    expect(setArgs).not.toHaveProperty('artwork_url');
+    expect(setArgs).not.toHaveProperty('discogs_url');
+    expect(setArgs).not.toHaveProperty('release_year');
+    expect(setArgs).not.toHaveProperty('spotify_url');
+    expect(setArgs).not.toHaveProperty('apple_music_url');
+    expect(setArgs).not.toHaveProperty('youtube_music_url');
+    expect(setArgs).not.toHaveProperty('bandcamp_url');
+    expect(setArgs).not.toHaveProperty('soundcloud_url');
+    expect(setArgs).not.toHaveProperty('artist_bio');
+    expect(setArgs).not.toHaveProperty('artist_wikipedia_url');
+  });
+
+  it('on match: flowsheet WHERE still uses the marker-IS-NULL race detector (one where call, non-empty predicate)', async () => {
+    // Linked path uses typed `and(eq(flowsheet.id, row.id), isNull(flowsheet.metadata_attempt_at))`
+    // builders. Column refs are compile-time checked against the schema; the
+    // race-detector behavior is covered by the _raced tests below.
+    await applyEnrichment(linkedRow, matchedResponse);
+    expect(mockDb._chain.where).toHaveBeenCalledTimes(1);
+    expect(mockDb._chain.where.mock.calls[0]?.[0]).toBeDefined();
+  });
+
+  it('on no-match: UPSERTs only the 3 search URLs into album_metadata', async () => {
+    const outcome = await applyEnrichment(linkedRow, noMatchResponse);
+    expect(outcome).toBe('enriched_no_match');
+    expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.album_id).toBe(linkedRow.album_id);
+    expect(insertPayload.youtube_music_url).toContain('music.youtube.com/search');
+    expect(insertPayload.bandcamp_url).toContain('bandcamp.com/search');
+    expect(insertPayload.soundcloud_url).toContain('soundcloud.com/search');
+    // 7 other metadata fields must NOT be in the insert payload — INSERT path
+    // leaves them NULL; UPDATE path leaves existing values untouched.
+    expect(insertPayload).not.toHaveProperty('artwork_url');
+    expect(insertPayload).not.toHaveProperty('discogs_url');
+    expect(insertPayload).not.toHaveProperty('release_year');
+    expect(insertPayload).not.toHaveProperty('spotify_url');
+    expect(insertPayload).not.toHaveProperty('apple_music_url');
+    expect(insertPayload).not.toHaveProperty('artist_bio');
+    expect(insertPayload).not.toHaveProperty('artist_wikipedia_url');
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as {
+      set: Record<string, unknown>;
+      setWhere: unknown;
+    };
+    expect(conflictCfg.set).not.toHaveProperty('artwork_url');
+    expect(conflictCfg.set).not.toHaveProperty('artist_bio');
+    expect(conflictCfg.set.youtube_music_url).toContain('music.youtube.com/search');
+    expect(conflictCfg.setWhere).toBeDefined();
+    expect(renderSql(conflictCfg.setWhere)).toMatch(/<\s*NOW\(\)/i);
+  });
+
+  it('on no-match: flowsheet UPDATE stamps only metadata_attempt_at (no inline URLs)', async () => {
+    await applyEnrichment(linkedRow, noMatchResponse);
+
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/now\(\)/i);
+    expect(setArgs).not.toHaveProperty('youtube_music_url');
+    expect(setArgs).not.toHaveProperty('bandcamp_url');
+    expect(setArgs).not.toHaveProperty('soundcloud_url');
+  });
+
+  it('on match: returns enriched_match_raced when the flowsheet UPDATE matches 0 rows', async () => {
+    // album_metadata UPSERT lands; flowsheet UPDATE races because the
+    // marker was already stamped by another writer (runtime/worker path) in
+    // the window between the orchestrator's SELECT and this UPDATE.
+    mockDb._chain.returning.mockResolvedValueOnce([]);
+
+    const outcome = await applyEnrichment(linkedRow, matchedResponse);
+    expect(outcome).toBe('enriched_match_raced');
+    // The album_metadata UPSERT still ran — same data outcome from the
+    // album's perspective; only the metric splits.
+    expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
+  });
+
+  it('on no-match: returns enriched_no_match_raced when the flowsheet UPDATE matches 0 rows', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([]);
+
+    const outcome = await applyEnrichment(linkedRow, noMatchResponse);
+    expect(outcome).toBe('enriched_no_match_raced');
+    expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
   });
 });
 

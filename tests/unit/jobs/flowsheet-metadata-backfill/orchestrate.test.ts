@@ -178,7 +178,13 @@ describe('processRow', () => {
     jest.clearAllMocks();
   });
 
-  const row = { id: 42, artist_name: 'Autechre', album_title: 'Confield', track_title: 'VI Scose Poise' };
+  const row = {
+    id: 42,
+    artist_name: 'Autechre',
+    album_title: 'Confield',
+    track_title: 'VI Scose Poise',
+    album_id: null,
+  };
 
   it('returns enriched_match and calls enrich on LML success-with-match', async () => {
     const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResponse);
@@ -217,7 +223,7 @@ describe('processRow', () => {
   it('forwards undefined for null album_title / track_title (matches lml-fetch.ts contract)', async () => {
     const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResponse);
     const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_no_match');
-    const sparseRow = { id: 1, artist_name: 'Lone Anonymous', album_title: null, track_title: null };
+    const sparseRow = { id: 1, artist_name: 'Lone Anonymous', album_title: null, track_title: null, album_id: null };
 
     await processRow(sparseRow, { lookup, enrich });
 
@@ -248,14 +254,18 @@ describe('runBackfill', () => {
     expect(sql).toMatch(/"id"\s*>/);
     expect(sql).toMatch(/ORDER BY\s+"id"\s+ASC/i);
     expect(sql).toMatch(/LIMIT/i);
+    // BS#1027: SELECT must project album_id so the enricher can branch on
+    // linked vs unlinked and UPSERT album_metadata instead of inline-writing
+    // to flowsheet.
+    expect(sql).toMatch(/"album_id"/);
   });
 
   it('advances the id-cursor across batches and terminates on empty', async () => {
     const batch1 = [
-      { id: 10, artist_name: 'a', album_title: null, track_title: null },
-      { id: 20, artist_name: 'b', album_title: null, track_title: null },
+      { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
+      { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
     ];
-    const batch2 = [{ id: 30, artist_name: 'c', album_title: null, track_title: null }];
+    const batch2 = [{ id: 30, artist_name: 'c', album_title: null, track_title: null, album_id: null }];
 
     (db.execute as jest.Mock).mockResolvedValueOnce(batch1).mockResolvedValueOnce(batch2).mockResolvedValueOnce([]);
 
@@ -282,9 +292,9 @@ describe('runBackfill', () => {
 
   it('counts lml_error when LML throws and continues processing', async () => {
     const batch = [
-      { id: 10, artist_name: 'a', album_title: null, track_title: null },
-      { id: 20, artist_name: 'b', album_title: null, track_title: null },
-      { id: 30, artist_name: 'c', album_title: null, track_title: null },
+      { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
+      { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
+      { id: 30, artist_name: 'c', album_title: null, track_title: null, album_id: null },
     ];
 
     (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
@@ -335,7 +345,7 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValue(false);
 
-    const batch = [{ id: 99, artist_name: 'a', album_title: null, track_title: null }];
+    const batch = [{ id: 99, artist_name: 'a', album_title: null, track_title: null, album_id: null }];
     (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
 
     const result = await runBackfill({
@@ -396,9 +406,9 @@ describe('runBackfill', () => {
     // *_raced variant when 0 rows updated. The orchestrator must bump
     // the matching counter rather than treating it as a regular match.
     const batch = [
-      { id: 10, artist_name: 'a', album_title: null, track_title: null },
-      { id: 20, artist_name: 'b', album_title: null, track_title: null },
-      { id: 30, artist_name: 'c', album_title: null, track_title: null },
+      { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
+      { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
+      { id: 30, artist_name: 'c', album_title: null, track_title: null, album_id: null },
     ];
 
     (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
