@@ -2,8 +2,8 @@
  * Unit tests for the playlist proxy service.
  *
  * Tests SSE event parsing, in-memory store management, and artwork
- * enrichment from the flowsheet table. The EventSource connection is mocked;
- * only the pure logic is exercised here.
+ * enrichment from album_metadata (joined via flowsheet.album_id). The
+ * EventSource connection is mocked; only the pure logic is exercised here.
  */
 import { jest } from '@jest/globals';
 
@@ -12,6 +12,7 @@ import { jest } from '@jest/globals';
 // Mock the database module
 const mockSelect = jest.fn();
 const mockFrom = jest.fn();
+const mockInnerJoin = jest.fn();
 const mockWhere = jest.fn();
 const mockGroupBy = jest.fn();
 const mockLimit = jest.fn();
@@ -19,12 +20,14 @@ const mockLimit = jest.fn();
 const mockDbChain = {
   select: mockSelect,
   from: mockFrom,
+  innerJoin: mockInnerJoin,
   where: mockWhere,
   groupBy: mockGroupBy,
   limit: mockLimit,
 };
 mockSelect.mockReturnValue(mockDbChain);
 mockFrom.mockReturnValue(mockDbChain);
+mockInnerJoin.mockReturnValue(mockDbChain);
 mockWhere.mockReturnValue(mockDbChain);
 mockGroupBy.mockResolvedValue([]);
 mockLimit.mockResolvedValue([]);
@@ -33,6 +36,7 @@ jest.mock('@wxyc/database', () => ({
   db: {
     select: (...args: unknown[]) => mockSelect(...args),
     from: (...args: unknown[]) => mockFrom(...args),
+    innerJoin: (...args: unknown[]) => mockInnerJoin(...args),
     where: (...args: unknown[]) => mockWhere(...args),
     groupBy: (...args: unknown[]) => mockGroupBy(...args),
     limit: (...args: unknown[]) => mockLimit(...args),
@@ -41,6 +45,11 @@ jest.mock('@wxyc/database', () => ({
     artist_name: 'artist_name',
     album_title: 'album_title',
     artwork_url: 'artwork_url',
+    album_id: 'album_id',
+  },
+  album_metadata: {
+    album_id: 'album_metadata.album_id',
+    artwork_url: 'album_metadata.artwork_url',
   },
 }));
 
@@ -49,6 +58,7 @@ jest.mock('drizzle-orm', () => ({
   inArray: jest.fn(),
   isNotNull: jest.fn(),
   and: jest.fn(),
+  eq: jest.fn(),
 }));
 
 // Mock EventSource — we do not want to open real SSE connections in tests.
@@ -147,6 +157,7 @@ describe('playlist-proxy.service', () => {
     // Reset the db chain mocks
     mockSelect.mockReturnValue(mockDbChain);
     mockFrom.mockReturnValue(mockDbChain);
+    mockInnerJoin.mockReturnValue(mockDbChain);
     mockWhere.mockReturnValue(mockDbChain);
     mockGroupBy.mockResolvedValue([]); // batch enrichment default
     mockLimit.mockResolvedValue([]); // single enrichment default
@@ -400,17 +411,18 @@ describe('playlist-proxy.service', () => {
     });
   });
 
-  describe('artwork query: partial-index alignment (regression for #511)', () => {
-    // The partial functional index `flowsheet_artwork_lookup_idx` (migration
-    // 0057) only covers rows where `artwork_url IS NOT NULL`. Without that
-    // filter on the query side, the planner falls back to a sequential scan
-    // of every flowsheet row — which times out at the 5s server-side
-    // statement_timeout and accumulates orphan queries (incident #511).
+  describe('artwork query: partial-index alignment (regression for #511, BS#1012)', () => {
+    // The post-D5 partial functional index `flowsheet_album_link_lookup_idx`
+    // (migration 0081) only covers rows where `album_id IS NOT NULL`. The
+    // playlist-proxy queries an INNER JOIN of flowsheet ⨝ album_metadata,
+    // which drops `flowsheet.album_id IS NULL` rows naturally and therefore
+    // matches the partial-index predicate so the lookup_key probe is an
+    // index scan instead of a 2.6M-row seq scan (incident #511).
     //
     // Source-grep over the deployed file is the right shape because the
-    // bug is a *missing* clause in the SQL builder. A behavioural test
+    // bug class is a *missing* clause in the SQL builder. A behavioural test
     // wouldn't catch a future regression where someone adds a new query
-    // path without the filter; the source-grep does.
+    // path without the join + filter; the source-grep does.
     const fs = jest.requireActual<typeof import('fs')>('fs');
     const path = jest.requireActual<typeof import('path')>('path');
 
@@ -419,24 +431,42 @@ describe('playlist-proxy.service', () => {
       'utf-8'
     );
 
-    it('imports `and` and `isNotNull` from drizzle-orm', () => {
+    it('imports `and`, `isNotNull`, and `eq` from drizzle-orm', () => {
       expect(proxySource).toMatch(/from\s+'drizzle-orm'/);
       expect(proxySource).toMatch(/\band\b/);
       expect(proxySource).toMatch(/\bisNotNull\b/);
+      expect(proxySource).toMatch(/\beq\b/);
     });
 
-    it('every flowsheet artwork SELECT filters on isNotNull(flowsheet.artwork_url)', () => {
+    it('imports album_metadata alongside flowsheet from @wxyc/database', () => {
+      expect(proxySource).toMatch(/from\s+'@wxyc\/database'/);
+      expect(proxySource).toMatch(/\balbum_metadata\b/);
+    });
+
+    it('every flowsheet artwork SELECT inner-joins album_metadata on album_id and filters isNotNull(album_metadata.artwork_url)', () => {
       // Find every WHERE that targets the flowsheetLookupKey-on-flowsheet
-      // pattern. Each must be combined with isNotNull(flowsheet.artwork_url).
-      // Two call sites exist today (enrichPlaycuts, enrichSinglePlaycut);
-      // any future addition should match the same shape so the partial
-      // index continues to fire.
-      const whereCalls = proxySource.match(/\.where\([\s\S]*?\)\s*(?:\.|;)/g) ?? [];
-      const artworkWhereCalls = whereCalls.filter((w) => /flowsheetLookupKey/.test(w));
-      expect(artworkWhereCalls.length).toBeGreaterThanOrEqual(2);
-      for (const call of artworkWhereCalls) {
-        expect(call).toMatch(/isNotNull\s*\(\s*flowsheet\.artwork_url\s*\)/);
+      // pattern. Each must be paired with an `.innerJoin(album_metadata, ...)`
+      // upstream in the same chain and combined with
+      // `isNotNull(album_metadata.artwork_url)` so the partial index fires.
+      // Two call sites exist today (enrichPlaycuts, enrichSinglePlaycut); any
+      // future addition should match the same shape.
+      const chains = proxySource.match(/db\s*\.\s*select[\s\S]*?\.\s*(?:groupBy|limit)\([\s\S]*?\)\s*;/g) ?? [];
+      const artworkChains = chains.filter((c) => /flowsheetLookupKey/.test(c));
+      expect(artworkChains.length).toBeGreaterThanOrEqual(2);
+      for (const chain of artworkChains) {
+        expect(chain).toMatch(
+          /\.innerJoin\(\s*album_metadata\s*,\s*eq\(\s*album_metadata\.album_id\s*,\s*flowsheet\.album_id\s*\)\s*\)/
+        );
+        expect(chain).toMatch(/isNotNull\s*\(\s*album_metadata\.artwork_url\s*\)/);
       }
+    });
+
+    it('does not read flowsheet.artwork_url (D4 column-drop safety)', () => {
+      // BS#1012 / D5 cut the proxy off `flowsheet.artwork_url` so D4 (#900)
+      // can drop the column. If someone re-adds a read of it, this test
+      // catches the regression at PR time before the next D4 attempt wedges
+      // on a missing column.
+      expect(proxySource).not.toMatch(/flowsheet\.artwork_url/);
     });
   });
 });

@@ -1,0 +1,44 @@
+-- BS#1012 (Epic D / D5). Partial functional index that supports the
+-- post-D5 playlist-proxy artwork lookup. Same expression as
+-- `flowsheet_artwork_lookup_idx` (migration 0057) but the WHERE predicate
+-- switches from `artwork_url IS NOT NULL` to `album_id IS NOT NULL` so the
+-- partial set survives D4 (#900) when `flowsheet.artwork_url` is dropped.
+--
+-- The post-D5 query in `apps/backend/services/playlist-proxy.service.ts`
+-- INNER JOINs `album_metadata` on `flowsheet.album_id` and reads
+-- `album_metadata.artwork_url`. An INNER JOIN to the album_metadata PK
+-- naturally drops `album_id IS NULL` rows, so the partial predicate here
+-- matches the planner's effective filter and the index fires.
+--
+-- Free-form rows (`album_id IS NULL`) are excluded from this index — they
+-- can't carry album-keyed artwork. That mirrors D4's accepted free-form
+-- tradeoff: inline artwork for unlinked entries disappears with D4 and is
+-- not re-introduced here.
+--
+-- `flowsheet_artwork_lookup_idx` is intentionally kept alive by this PR.
+-- It still services the pre-D5 query path during the dual-writer window,
+-- and D4 (#900) cascades its removal when it drops `flowsheet.artwork_url`
+-- (a partial-where index referencing the dropped column is auto-removed by
+-- DROP COLUMN). No separate DROP INDEX is required here.
+--
+-- Production ops:
+--   - This is NOT `CREATE INDEX CONCURRENTLY` because Drizzle wraps each
+--     migration file in a transaction and `CREATE INDEX CONCURRENTLY
+--     cannot run inside a transaction block` — same constraint as 0057,
+--     0061, 0068, 0070, 0074, 0078, 0080.
+--   - Build the index out-of-band on prod first via:
+--       CREATE INDEX CONCURRENTLY "flowsheet_album_link_lookup_idx"
+--         ON "wxyc_schema"."flowsheet"
+--         ((lower(trim("artist_name")) || '-' || lower(trim(coalesce("album_title", '')))))
+--         WHERE "album_id" IS NOT NULL;
+--     No AccessExclusiveLock, no INSERT pause.
+--   - Then merge this PR. `IF NOT EXISTS` makes the migration apply a
+--     no-op against the prod DB where the index is already present, while
+--     fresh dev databases pick it up on first migrate. Same shape as
+--     0068, 0070, 0074, 0080.
+--
+-- Expected size: similar order of magnitude to `flowsheet_artwork_lookup_idx`
+-- (~5-10% of rows had artwork; ~3-5% have album_id). Build window: a few
+-- seconds.
+
+CREATE INDEX IF NOT EXISTS "flowsheet_album_link_lookup_idx" ON "wxyc_schema"."flowsheet" USING btree ((lower(trim("artist_name")) || '-' || lower(trim(coalesce("album_title", ''))))) WHERE "wxyc_schema"."flowsheet"."album_id" IS NOT NULL;

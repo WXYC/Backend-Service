@@ -50,6 +50,8 @@ jest.mock('drizzle-orm', () => ({
   sql: Object.assign(jest.fn(), { raw: jest.fn() }),
   inArray: jest.fn(),
   isNotNull: jest.fn(),
+  and: jest.fn(),
+  eq: jest.fn(),
 }));
 
 // Suppress console output

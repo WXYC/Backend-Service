@@ -683,9 +683,32 @@ export const flowsheet = wxyc_schema.table(
     // apps/backend/services/playlist-proxy.service.ts. Partial because only
     // ~5-10% of rows have non-null artwork — the others would be index
     // dead weight.
+    //
+    // Slated for removal alongside D4 (#900) when `flowsheet.artwork_url`
+    // itself is dropped — DROP COLUMN cascades to the partial-where index.
+    // The post-D5 (#1012) query path no longer reads `flowsheet.artwork_url`
+    // and uses `flowsheet_album_link_lookup_idx` below instead.
     index('flowsheet_artwork_lookup_idx')
       .on(sql`(lower(trim(${table.artist_name})) || '-' || lower(trim(coalesce(${table.album_title}, ''))))`)
       .where(sql`${table.artwork_url} IS NOT NULL`),
+    // BS#1012 (Epic D / D5). Functional partial index that supports the
+    // post-D5 playlist-proxy artwork lookup. Same expression as
+    // `flowsheet_artwork_lookup_idx` above, but the WHERE predicate switches
+    // from `artwork_url IS NOT NULL` to `album_id IS NOT NULL` so the
+    // partial set survives D4's drop of `flowsheet.artwork_url`.
+    //
+    // The new query path JOINs `album_metadata` on `flowsheet.album_id` and
+    // reads `album_metadata.artwork_url`; an INNER JOIN to a PK column drops
+    // `album_id IS NULL` rows naturally, so the partial predicate matches the
+    // planner's effective filter and the index fires.
+    //
+    // Free-form (`album_id IS NULL`) rows are excluded from this index — they
+    // can't carry album-keyed artwork. That mirrors D4's accepted free-form
+    // tradeoff: inline artwork for unlinked entries disappears with D4 and is
+    // not re-introduced here.
+    index('flowsheet_album_link_lookup_idx')
+      .on(sql`(lower(trim(${table.artist_name})) || '-' || lower(trim(coalesce(${table.album_title}, ''))))`)
+      .where(sql`${table.album_id} IS NOT NULL`),
     // FK columns aren't auto-indexed by Postgres. Without this, the
     // /flowsheet `?shows_limit=N` listing endpoint sequentially scans the
     // 2.6M-row table on every dj-site poll. See migration 0068 + issue #511.
