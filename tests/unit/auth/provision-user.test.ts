@@ -40,6 +40,7 @@ const mockLinkAccount = jest.fn();
 const mockDeleteUser = jest.fn();
 const mockAdapterFindOne = jest.fn();
 const mockAdapterCreate = jest.fn();
+const mockAdapterUpdate = jest.fn();
 const mockPasswordHash = jest.fn();
 
 const mockAuthContext = {
@@ -52,6 +53,7 @@ const mockAuthContext = {
   adapter: {
     findOne: mockAdapterFindOne,
     create: mockAdapterCreate,
+    update: mockAdapterUpdate,
   },
   password: {
     hash: mockPasswordHash,
@@ -117,11 +119,21 @@ const fakeMember = {
 
 function setUpHappyPath() {
   mockFindUserByEmail.mockResolvedValue(null);
-  mockAdapterFindOne.mockResolvedValue(fakeOrg);
+  // adapter.findOne is called for both the org lookup and the upsert member
+  // lookup. Default: return the org for {model: 'organization'} and null for
+  // {model: 'member'} (i.e. no existing member row — fall into the insert
+  // branch). Individual tests can override to simulate an existing row from
+  // the databaseHooks.user.create.after auto-membership hook.
+  mockAdapterFindOne.mockImplementation((query: { model: string }) => {
+    if (query?.model === 'organization') return Promise.resolve(fakeOrg);
+    if (query?.model === 'member') return Promise.resolve(null);
+    return Promise.resolve(null);
+  });
   mockCreateUser.mockResolvedValue(fakeUser);
   mockPasswordHash.mockResolvedValue('hashed-password');
   mockLinkAccount.mockResolvedValue(undefined);
   mockAdapterCreate.mockResolvedValue(fakeMember);
+  mockAdapterUpdate.mockResolvedValue(undefined);
   mockDeleteUser.mockResolvedValue(undefined);
 }
 
@@ -194,6 +206,65 @@ describe('provisionUser()', () => {
           role: 'dj',
         }),
       });
+    });
+  });
+
+  describe('upsert against auto-created member row', () => {
+    // The databaseHooks.user.create.after hook in auth.definition.ts
+    // auto-creates a member row with role='member' for every non-anonymous
+    // user. provisionUser must detect this and update the role instead of
+    // attempting a second insert (which would fail on the unique
+    // (organization_id, user_id) constraint).
+    const autoCreatedMember = {
+      id: 'auto-member-id-001',
+      userId: fakeUser.id,
+      organizationId: fakeOrg.id,
+      role: 'member',
+    };
+
+    it('should update the existing member row to the requested role', async () => {
+      mockAdapterFindOne.mockImplementation((query: { model: string }) => {
+        if (query?.model === 'organization') return Promise.resolve(fakeOrg);
+        if (query?.model === 'member') return Promise.resolve(autoCreatedMember);
+        return Promise.resolve(null);
+      });
+
+      const result = await provisionUser({ ...validInput, role: 'musicDirector' });
+
+      expect(mockAdapterUpdate).toHaveBeenCalledWith({
+        model: 'member',
+        where: [{ field: 'id', value: autoCreatedMember.id }],
+        update: { role: 'musicDirector' },
+      });
+      expect(mockAdapterCreate).not.toHaveBeenCalledWith(expect.objectContaining({ model: 'member' }));
+      expect(result.member.role).toBe('musicDirector');
+    });
+
+    it('should skip the update when the auto-created role already matches', async () => {
+      mockAdapterFindOne.mockImplementation((query: { model: string }) => {
+        if (query?.model === 'organization') return Promise.resolve(fakeOrg);
+        if (query?.model === 'member') return Promise.resolve(autoCreatedMember);
+        return Promise.resolve(null);
+      });
+
+      const result = await provisionUser({ ...validInput, role: 'member' });
+
+      expect(mockAdapterUpdate).not.toHaveBeenCalled();
+      expect(mockAdapterCreate).not.toHaveBeenCalledWith(expect.objectContaining({ model: 'member' }));
+      expect(result.member.role).toBe('member');
+    });
+
+    it('should still sync user.role to admin when upserting to stationManager', async () => {
+      mockAdapterFindOne.mockImplementation((query: { model: string }) => {
+        if (query?.model === 'organization') return Promise.resolve(fakeOrg);
+        if (query?.model === 'member') return Promise.resolve(autoCreatedMember);
+        return Promise.resolve(null);
+      });
+
+      await provisionUser({ ...validInput, role: 'stationManager' });
+
+      expect(mockAdapterUpdate).toHaveBeenCalled();
+      expect(mockDbUpdate).toHaveBeenCalled();
     });
   });
 
