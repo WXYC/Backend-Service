@@ -199,34 +199,47 @@ describe('album-metadata-backfill: verifyComplete', () => {
     jest.restoreAllMocks();
   });
 
-  it('passes when zero enriched flowsheet rows are missing from album_metadata', async () => {
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ missing: 0 }]);
+  it('passes when album_metadata count equals the enriched flowsheet album count', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ actual: 7101, expected: 7101 }]);
 
     await expect(verifyComplete()).resolves.toBeUndefined();
   });
 
-  it('throws with a row count and remediation hint when rows are missing', async () => {
-    (db.execute as jest.Mock).mockResolvedValue([{ missing: 137 }]);
+  it('passes when actual > expected (a concurrent live write between INSERT and verify)', async () => {
+    // D3 (#899) will ship a live UPSERT writer into album_metadata. After it
+    // lands, a write that arrives between this job's INSERT and the verify
+    // produces actual > expected without losing data. A strict equality check
+    // would false-fail in that window; `>=` is the correct invariant.
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ actual: 7102, expected: 7101 }]);
 
-    await expect(verifyComplete()).rejects.toThrow(/137 flowsheet row\(s\)/);
+    await expect(verifyComplete()).resolves.toBeUndefined();
+  });
+
+  it('throws with both counts and the idempotent re-run hint when album_metadata is short', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([{ actual: 6964, expected: 7101 }]);
+
+    await expect(verifyComplete()).rejects.toThrow(/6964/);
+    await expect(verifyComplete()).rejects.toThrow(/7101/);
     await expect(verifyComplete()).rejects.toThrow(/idempotent/i);
   });
 
-  it('uses the same filter as the migration (LEFT JOIN to find the residual)', async () => {
-    // The verify query must enumerate the same set as the INSERT's SELECT but
-    // anti-joined against album_metadata. Drift here (e.g., dropping the
-    // metadata_attempt_at filter) would either always pass or always fail.
-    (db.execute as jest.Mock).mockResolvedValueOnce([{ missing: 0 }]);
+  it('uses a dual-count comparison instead of a LEFT JOIN over flowsheet (statement_timeout safe)', async () => {
+    // The previous LEFT JOIN over the 2.6M-row flowsheet timed out under the
+    // backend's default 5 s statement_timeout (BS#1019: prod run 2026-05-22).
+    // Two aggregate counts on already-indexed paths complete well under the
+    // budget, so the verify step doesn't need a db.transaction wrapper.
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ actual: 0, expected: 0 }]);
 
     await verifyComplete();
 
-    const call = findExecuteCallMatching(/SELECT[\s\S]*count[\s\S]*flowsheet/i);
+    const call = findExecuteCallMatching(/SELECT[\s\S]*count[\s\S]*album_metadata/i);
     expect(call).toBeDefined();
     const sqlText = renderSql(call?.[0]);
-    expect(sqlText).toMatch(/LEFT\s+JOIN[\s\S]*album_metadata/i);
-    expect(sqlText).toMatch(/f\."album_id"\s+IS\s+NOT\s+NULL/i);
-    expect(sqlText).toMatch(/f\."metadata_attempt_at"\s+IS\s+NOT\s+NULL/i);
-    expect(sqlText).toMatch(/am\."album_id"\s+IS\s+NULL/i);
+    expect(sqlText).not.toMatch(/LEFT\s+JOIN/i);
+    expect(sqlText).toMatch(/count\([\s\S]*\)[\s\S]*album_metadata/i);
+    expect(sqlText).toMatch(/count\(\s*DISTINCT[\s\S]*album_id[\s\S]*\)[\s\S]*flowsheet/i);
+    expect(sqlText).toMatch(/album_id"?\s+IS\s+NOT\s+NULL/i);
+    expect(sqlText).toMatch(/metadata_attempt_at"?\s+IS\s+NOT\s+NULL/i);
   });
 });
 
