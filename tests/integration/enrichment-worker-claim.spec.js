@@ -66,6 +66,10 @@ async function insertPendingRow(sql, suffix) {
   // `play_order` is NOT NULL on the schema; use a high constant so we don't
   // collide with rows from sibling specs. metadata_status defaults to
   // 'pending' (BS#891) but pass it explicitly for documentation.
+  // `show_id` is intentionally omitted — flowsheet permits NULL show_id for
+  // entries that pre-date a show / are orphaned from one (canonical
+  // upstream-permitted shape per `schema.ts:flowsheet`). If that ever
+  // gains NOT NULL, this spec breaks loudly.
   const rows = await sql`
     INSERT INTO ${sql(SCHEMA)}.flowsheet
       (play_order, entry_type, artist_name, album_title, track_title, metadata_status, request_flag, segue)
@@ -120,7 +124,14 @@ describe('enrichment-worker claim primitive (real PG)', () => {
     expect(after[0].enriching_since).not.toBeNull();
   });
 
-  test('N=10 concurrent claims on the same pending row: exactly one wins', async () => {
+  test('N=10 attempts (~5 in parallel via the pool + rest serialized): exactly one wins', async () => {
+    // The shared pool in tests/utils/db.js has `max: 5`, so only 5 of the
+    // 10 promises actually race against PG simultaneously; the remaining
+    // 5 execute as the first batch releases connections. The contract
+    // (exactly one wins) holds either way — the row-level lock on the
+    // UPDATE serializes claims regardless of how parallel the wire
+    // contention is. The test name makes the pool ceiling explicit so a
+    // future reader doesn't misread it as 10-way parallelism.
     const id = await insertPendingRow(sql, 'ten-concurrent');
     insertedIds.push(id);
 

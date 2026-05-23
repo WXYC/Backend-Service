@@ -1,3 +1,11 @@
+# Long-running CDC consumer (BS#892 / Epic C C2). Subscribes to BS's
+# `pg_notify('cdc')` channel and enriches every new flowsheet track row via
+# LML. Inbound concurrency is bounded by the shared `Semaphore(5)` +
+# `TokenBucket(50/min)` chokepoint in `@wxyc/lml-client`; per-row claim and
+# finalize UPDATEs are single-row PK lookups that finish in milliseconds.
+# Runs alongside `backend` + `auth` on the same EC2; independent restart
+# cycle per `--restart unless-stopped` in the deploy-service action.
+
 #Build stage
 FROM node:24-alpine AS builder
 
@@ -27,12 +35,9 @@ COPY --from=builder ./enrichment-worker-builder/apps/enrichment-worker/dist ./ap
 COPY --from=builder ./enrichment-worker-builder/shared/database/dist ./shared/database/dist
 COPY --from=builder ./enrichment-worker-builder/shared/lml-client/dist ./shared/lml-client/dist
 
-# Long-running CDC consumer (BS#892). The handler chain is bounded by the
-# shared LML Semaphore(5) + TokenBucket(50/min) chokepoint in
-# `@wxyc/lml-client`; individual claim/finalize UPDATEs are single-row PK
-# lookups that finish in milliseconds. Inherit the 5s default — anything
-# longer indicates a stuck connection or runaway query, neither of which
-# should wedge the consumer loop.
+# Inherit @wxyc/database's 5s statement timeout default — every query the
+# consumer issues is a single-row PK lookup; anything longer is a stuck
+# connection or runaway query, not normal load.
 ENV DB_APPLICATION_NAME=wxyc-enrichment-worker
 
 CMD ["npm", "start", "--workspace=@wxyc/enrichment-worker"]
