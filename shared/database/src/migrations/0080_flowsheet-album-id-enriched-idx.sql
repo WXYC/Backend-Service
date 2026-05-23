@@ -1,0 +1,43 @@
+-- BS#1022. Partial B-tree on flowsheet(album_id) covering the
+-- `metadata_attempt_at IS NOT NULL` slice — the opposite partition from
+-- the existing `_metadata_attempt_pending_*` partials.
+--
+-- Required by album-metadata-backfill's `verifyComplete`
+-- (jobs/album-metadata-backfill/job.ts), which counts:
+--
+--   SELECT count(DISTINCT album_id) FROM wxyc_schema.flowsheet
+--    WHERE album_id IS NOT NULL
+--      AND metadata_attempt_at IS NOT NULL
+--
+-- Without this index the planner falls back to a 2.6M-row heap walk and
+-- trips the 5s DB_STATEMENT_TIMEOUT_MS, even after PR #1020 traded the
+-- prior LEFT JOIN for the dual-count shape above (BS#1019 / BS#1022).
+-- The same WHERE clause appears in the job's bulk INSERT … SELECT, so the
+-- index also accelerates re-runs of the historical move.
+--
+-- Predicate matches the verify query verbatim — no `entry_type='track'`
+-- guard so the planner can pick this index up from the literal WHERE
+-- shape without requiring the verify query to be rewritten. Non-track
+-- entries always have `album_id IS NULL`, so the predicate naturally
+-- restricts to track rows anyway.
+--
+-- Expected size: ~50-100k entries (per BS#898's enriched-row count),
+-- well under a megabyte. Build window: a few seconds.
+--
+-- Production ops:
+--   - This is NOT `CREATE INDEX CONCURRENTLY` because Drizzle wraps each
+--     migration file in a transaction and `CREATE INDEX CONCURRENTLY
+--     cannot run inside a transaction block` — same constraint as 0057,
+--     0061, 0068, 0070, 0074, 0078.
+--   - Build the index out-of-band on prod first via:
+--       CREATE INDEX CONCURRENTLY "flowsheet_album_id_enriched_idx"
+--         ON "wxyc_schema"."flowsheet" USING btree ("album_id")
+--         WHERE "album_id" IS NOT NULL
+--           AND "metadata_attempt_at" IS NOT NULL;
+--     No AccessExclusiveLock, no INSERT pause.
+--   - Then merge this PR. `IF NOT EXISTS` makes the migration apply a
+--     no-op against the prod DB where the index is already present, while
+--     fresh dev databases pick it up on first migrate. Same shape as
+--     0068, 0070, 0074.
+
+CREATE INDEX IF NOT EXISTS "flowsheet_album_id_enriched_idx" ON "wxyc_schema"."flowsheet" USING btree ("album_id") WHERE "wxyc_schema"."flowsheet"."album_id" IS NOT NULL AND "wxyc_schema"."flowsheet"."metadata_attempt_at" IS NOT NULL;
