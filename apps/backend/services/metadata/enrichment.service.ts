@@ -19,7 +19,7 @@
  */
 import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
-import { db, flowsheet } from '@wxyc/database';
+import { album_metadata, db, flowsheet } from '@wxyc/database';
 import { fetchMetadata } from './metadata.service.js';
 import { SearchUrlProvider } from './providers/search-urls.provider.js';
 
@@ -94,6 +94,13 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
   })
     .then(async (metadata) => {
       if (!metadata) return;
+
+      // Epic D / BS#899: linked rows (album_id present) park the 10-column
+      // payload in `album_metadata`; the flowsheet UPDATE only stamps the
+      // historical `metadata_attempt_at` marker. Free-form rows
+      // (`albumId === undefined`) keep writing inline on flowsheet — they
+      // can't enrich into album_metadata until linkage resolves.
+      //
       // The `?? null` on the 7 non-search-URL columns nulls them on
       // no-match. Safe here because the runtime path runs at insert
       // time on fresh rows — there's nothing to overwrite. The
@@ -104,6 +111,42 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
       // if the runtime ever runs over rows with prior values
       // (e.g., a re-enrichment trigger), this side should adopt the
       // same preserve semantics.
+      if (input.albumId !== undefined) {
+        const payload = {
+          artwork_url: metadata.album?.artworkUrl ?? null,
+          discogs_url: metadata.album?.discogsUrl ?? null,
+          release_year: metadata.album?.releaseYear ?? null,
+          spotify_url: metadata.album?.spotifyUrl ?? null,
+          apple_music_url: metadata.album?.appleMusicUrl ?? null,
+          youtube_music_url: metadata.album?.youtubeMusicUrl ?? null,
+          bandcamp_url: metadata.album?.bandcampUrl ?? null,
+          soundcloud_url: metadata.album?.soundcloudUrl ?? null,
+          artist_bio: metadata.artist?.bio ?? null,
+          artist_wikipedia_url: metadata.artist?.wikipediaUrl ?? null,
+        };
+        // Race guard: only overwrite when our write is newer than the
+        // existing row. Prevents the drift-repair backfill from clobbering
+        // a fresh runtime enrichment and lets the in-process path + the
+        // worker (BS#892) converge under the dual-writer window before
+        // C5 (#894) deletes this callsite.
+        await db
+          .insert(album_metadata)
+          .values({ album_id: input.albumId, ...payload, updated_at: sql`NOW()` })
+          .onConflictDoUpdate({
+            target: album_metadata.album_id,
+            set: { ...payload, updated_at: sql`NOW()` },
+            setWhere: sql`${album_metadata.updated_at} < NOW()`,
+          });
+        // Stamp the historical marker so the drift-repair sweep skips the
+        // row. Same `IS NULL` guard as the unlinked branch below — the
+        // first writer to land wins.
+        await db
+          .update(flowsheet)
+          .set({ metadata_attempt_at: sql`NOW()` })
+          .where(sql`"id" = ${input.flowsheetId} AND "metadata_attempt_at" IS NULL`);
+        return;
+      }
+
       await db
         .update(flowsheet)
         .set({
@@ -159,6 +202,25 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
         input.trackTitle ?? undefined
       );
       try {
+        if (input.albumId !== undefined) {
+          // Linked + LML threw: write fallback URLs to album_metadata only
+          // when no row exists. `onConflictDoNothing` prevents clobbering
+          // a prior successful enrichment with fallback values. The
+          // matching unlinked branch below uses `metadata_attempt_at IS
+          // NULL` for the same purpose; album_metadata has no analogous
+          // marker so we encode "haven't enriched yet" as "no row yet."
+          await db
+            .insert(album_metadata)
+            .values({
+              album_id: input.albumId,
+              youtube_music_url: urls.youtubeMusicUrl,
+              bandcamp_url: urls.bandcampUrl,
+              soundcloud_url: urls.soundcloudUrl,
+              updated_at: sql`NOW()`,
+            })
+            .onConflictDoNothing();
+          return;
+        }
         await db
           .update(flowsheet)
           .set({
