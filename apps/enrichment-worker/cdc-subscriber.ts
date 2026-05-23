@@ -28,6 +28,12 @@ export type EnrichmentCandidate = {
   artist_name: string;
   album_title: string | null;
   track_title: string | null;
+  // Epic D / BS#899: when non-null, the consumer UPSERTs `album_metadata`
+  // (keyed by album_id) for the 10 metadata columns and only flips the
+  // flowsheet row's `metadata_status`. When null (free-form / unlinked
+  // entry), the consumer writes the 10 columns inline on flowsheet as
+  // before. The split is enforced in apps/enrichment-worker/enrich.ts.
+  album_id: number | null;
 };
 
 /**
@@ -66,6 +72,7 @@ export function filterForEnrichment(event: CdcEvent): EnrichmentCandidate | null
     artist_name: artist,
     album_title: typeof data.album_title === 'string' ? data.album_title : null,
     track_title: typeof data.track_title === 'string' ? data.track_title : null,
+    album_id: typeof data.album_id === 'number' ? data.album_id : null,
   };
 }
 

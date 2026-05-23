@@ -36,8 +36,8 @@
  * Also gated by scripts/check-spacer-gif-callsites.sh in CI.
  */
 
-import { and, eq } from 'drizzle-orm';
-import { db, flowsheet } from '@wxyc/database';
+import { and, eq, sql } from 'drizzle-orm';
+import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
 
 export type EnrichRow = {
@@ -45,6 +45,11 @@ export type EnrichRow = {
   artist_name: string;
   album_title: string | null;
   track_title: string | null;
+  // Epic D / BS#899: non-null → UPSERT album_metadata + flowsheet status
+  // flip only; null → write the 10 metadata columns inline on flowsheet
+  // (free-form entries, until their linkage resolves). Source: CDC payload
+  // via filterForEnrichment.
+  album_id: number | null;
 };
 
 export type FinalizeOutcome =
@@ -106,12 +111,21 @@ export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | n
  * Finalize an enriching row with LML's response.
  *
  * Returns the outcome so the dispatcher can count it. The `_raced` variants
- * fire when `.returning({ id })` is empty: the WHERE no longer matches
- * because something else (the C6 cron's stranded-claim sweep, a manual
- * triage operator, or a hypothetical out-of-band writer) flipped
- * `metadata_status` off `'enriching'` between claim and finalize. Same data
- * outcome from the row's perspective; the metric separates "this consumer
- * finalized it" from "the row was finalized by someone."
+ * fire when the flowsheet UPDATE's `.returning({ id })` is empty: the WHERE
+ * no longer matches because something else (the C6 cron's stranded-claim
+ * sweep, a manual triage operator, or a hypothetical out-of-band writer)
+ * flipped `metadata_status` off `'enriching'` between claim and finalize.
+ * Same data outcome from the row's perspective; the metric separates "this
+ * consumer finalized it" from "the row was finalized by someone."
+ *
+ * Linked vs unlinked (Epic D / BS#899): if `row.album_id` is non-null the
+ * 10-column metadata payload goes into `album_metadata` keyed by album_id
+ * (UPSERT), and the flowsheet UPDATE only flips `metadata_status`. If
+ * `album_id` is null (free-form entries), the 10 columns are written
+ * inline on `flowsheet` as before. The album_metadata UPSERT happens
+ * *before* the flowsheet status flip — if either write fails the C6 sweep
+ * recovers the stranded `enriching` row and a retry of the (idempotent)
+ * UPSERT + flowsheet UPDATE finishes the work.
  *
  * Errors propagate up — the dispatcher's catch arm decides whether to leave
  * the row stranded (transient LML failure → C6 sweep recovers) or to write
@@ -123,9 +137,13 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
   const searchUrls = synthesizeSearchUrls(row);
 
   if (artwork) {
-    const updated = await db
-      .update(flowsheet)
-      .set({
+    if (row.album_id !== null) {
+      // Linked + match: 10-col payload lands in album_metadata; flowsheet
+      // UPDATE only flips status. The album_metadata UPSERT is idempotent
+      // (same album_id → same row) and guarded by `updated_at < NOW()` so
+      // a concurrent stale write (e.g. delayed drift-repair backfill)
+      // can't overwrite a fresher enrichment.
+      const payload = {
         artwork_url: filterSpacerGif(artwork.artwork_url),
         discogs_url: artwork.release_url ?? null,
         // Discogs returns 0 as "year unknown"; coerce to null so iOS doesn't
@@ -134,6 +152,40 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
         spotify_url: artwork.spotify_url ?? null,
         apple_music_url: artwork.apple_music_url ?? null,
         // Prefer LML-supplied streaming URLs; fall back to synthesized.
+        youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
+        bandcamp_url: artwork.bandcamp_url ?? searchUrls.bandcamp_url,
+        soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,
+        artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
+        artist_wikipedia_url: artwork.wikipedia_url ?? null,
+      };
+      await db
+        .insert(album_metadata)
+        .values({ album_id: row.album_id, ...payload, updated_at: sql`NOW()` })
+        .onConflictDoUpdate({
+          target: album_metadata.album_id,
+          set: { ...payload, updated_at: sql`NOW()` },
+          setWhere: sql`${album_metadata.updated_at} < NOW()`,
+        });
+      const updated = await db
+        .update(flowsheet)
+        .set({ metadata_status: 'enriched_match' })
+        .where(and(eq(flowsheet.id, row.id), eq(flowsheet.metadata_status, 'enriching')))
+        .returning({ id: flowsheet.id });
+      return updated.length === 0 ? 'enriched_match_raced' : 'enriched_match';
+    }
+
+    // Unlinked + match: write the 10 columns inline on flowsheet, as before
+    // D3. These rows can't enrich into album_metadata until linkage
+    // resolves; D4's column-drop is gated on no unlinked enrichments
+    // remaining (see #1012 + the broader linkage-completion gate).
+    const updated = await db
+      .update(flowsheet)
+      .set({
+        artwork_url: filterSpacerGif(artwork.artwork_url),
+        discogs_url: artwork.release_url ?? null,
+        release_year: artwork.release_year || null,
+        spotify_url: artwork.spotify_url ?? null,
+        apple_music_url: artwork.apple_music_url ?? null,
         youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
         bandcamp_url: artwork.bandcamp_url ?? searchUrls.bandcamp_url,
         soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,
@@ -150,6 +202,38 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
   // left untouched — preserves any prior out-of-band values (e.g. recovery
   // writes from #686-era scripts). Mirrors the backfill's deliberate
   // divergence from the runtime path (see backfill enrich.ts header).
+  if (row.album_id !== null) {
+    // Linked + no-match: UPSERT just the 3 search URLs into album_metadata.
+    // INSERT path leaves the other 7 columns NULL (no LML match to fill
+    // them); UPDATE path leaves them untouched on existing rows (preserves
+    // any prior out-of-band values, same semantics as the unlinked path).
+    await db
+      .insert(album_metadata)
+      .values({
+        album_id: row.album_id,
+        youtube_music_url: searchUrls.youtube_music_url,
+        bandcamp_url: searchUrls.bandcamp_url,
+        soundcloud_url: searchUrls.soundcloud_url,
+        updated_at: sql`NOW()`,
+      })
+      .onConflictDoUpdate({
+        target: album_metadata.album_id,
+        set: {
+          youtube_music_url: searchUrls.youtube_music_url,
+          bandcamp_url: searchUrls.bandcamp_url,
+          soundcloud_url: searchUrls.soundcloud_url,
+          updated_at: sql`NOW()`,
+        },
+        setWhere: sql`${album_metadata.updated_at} < NOW()`,
+      });
+    const updated = await db
+      .update(flowsheet)
+      .set({ metadata_status: 'enriched_no_match' })
+      .where(and(eq(flowsheet.id, row.id), eq(flowsheet.metadata_status, 'enriching')))
+      .returning({ id: flowsheet.id });
+    return updated.length === 0 ? 'enriched_no_match_raced' : 'enriched_no_match';
+  }
+
   const updated = await db
     .update(flowsheet)
     .set({

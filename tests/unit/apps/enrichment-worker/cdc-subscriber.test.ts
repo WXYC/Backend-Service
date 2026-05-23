@@ -24,6 +24,7 @@ const flowsheetInsert = (overrides: Partial<Record<string, unknown>> = {}): CdcE
     artist_name: 'Juana Molina',
     album_title: 'DOGA',
     track_title: 'la paradoja',
+    album_id: 1234,
     ...overrides,
   },
   timestamp: 1779856000000,
@@ -39,7 +40,19 @@ describe('filterForEnrichment (BS#892)', () => {
       artist_name: 'Juana Molina',
       album_title: 'DOGA',
       track_title: 'la paradoja',
+      album_id: 1234,
     });
+  });
+
+  it('Epic D / BS#899: forwards album_id when linked, null when unlinked', () => {
+    // Linked: candidate carries the album_id so the worker can UPSERT
+    // album_metadata. Unlinked (free-form entries): null → worker writes
+    // inline on flowsheet as before.
+    expect(filterForEnrichment(flowsheetInsert({ album_id: 1234 }))?.album_id).toBe(1234);
+    expect(filterForEnrichment(flowsheetInsert({ album_id: null }))?.album_id).toBeNull();
+    expect(filterForEnrichment(flowsheetInsert({ album_id: undefined }))?.album_id).toBeNull();
+    // Defensive coercion: malformed CDC payload (string) → null, not a crash.
+    expect(filterForEnrichment(flowsheetInsert({ album_id: '1234' }))?.album_id).toBeNull();
   });
 
   it('skips events for tables other than flowsheet', () => {

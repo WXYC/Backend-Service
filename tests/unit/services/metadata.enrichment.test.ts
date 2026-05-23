@@ -22,7 +22,7 @@ jest.mock('@sentry/node', () => ({
   captureMessage: mockCaptureMessage,
 }));
 
-import { db } from '@wxyc/database';
+import { album_metadata, db, flowsheet } from '@wxyc/database';
 import {
   _resetInFlightEnrichmentsForTest,
   drainInFlightEnrichments,
@@ -57,8 +57,15 @@ const renderSql = (value: unknown): string => {
 };
 
 const mockDb = db as unknown as {
+  insert: jest.Mock;
   update: jest.Mock;
-  _chain: { set: jest.Mock; where: jest.Mock };
+  _chain: {
+    set: jest.Mock;
+    where: jest.Mock;
+    values: jest.Mock;
+    onConflictDoUpdate: jest.Mock;
+    onConflictDoNothing: jest.Mock;
+  };
 };
 
 describe('fireAndForgetMetadataForRow', () => {
@@ -354,6 +361,179 @@ describe('fireAndForgetMetadataForRow', () => {
     expect(setArgs).not.toHaveProperty('linkage_source');
     expect(setArgs).not.toHaveProperty('linkage_confidence');
     expect(setArgs).not.toHaveProperty('linked_at');
+  });
+});
+
+/**
+ * Epic D / BS#899 — when the caller passes `albumId`, the 10-column metadata
+ * payload UPSERTs into `album_metadata` keyed by album_id; the flowsheet
+ * UPDATE only stamps `metadata_attempt_at`. Free-form rows (`albumId`
+ * omitted) still write the 10 columns inline on flowsheet (covered by the
+ * earlier describe block).
+ *
+ * The catch-arm fallback (LML threw) uses `onConflictDoNothing` for the
+ * linked path: a prior successful enrichment must not be overwritten by
+ * synthetic search URLs. Unlinked path's `metadata_attempt_at IS NULL`
+ * gate is the analogous protection.
+ *
+ * D4 (#900) drops the 10 inline columns. Until then, these assertions pin
+ * the no-clobber boundary that makes dual-write semantics safe.
+ */
+describe('fireAndForgetMetadataForRow — BS#899 linked-row path (albumId set)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('on LML match: UPSERTs the 10-column payload into album_metadata keyed by album_id', async () => {
+    mockFetchMetadata.mockResolvedValue({
+      album: {
+        artworkUrl: 'https://i.discogs.com/art.jpg',
+        discogsUrl: 'https://www.discogs.com/release/12345',
+        releaseYear: 2001,
+        spotifyUrl: 'https://open.spotify.com/album/abc',
+        appleMusicUrl: 'https://music.apple.com/album/xyz',
+        youtubeMusicUrl: 'https://music.youtube.com/album/aaa',
+        bandcampUrl: 'https://bandcamp.com/album/bbb',
+        soundcloudUrl: 'https://soundcloud.com/album/ccc',
+      },
+      artist: {
+        bio: 'Rob Brown and Sean Booth are Autechre.',
+        wikipediaUrl: 'https://en.wikipedia.org/wiki/Autechre',
+      },
+    });
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 42,
+      albumId: 5678,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.album_id).toBe(5678);
+    expect(insertPayload.artwork_url).toBe('https://i.discogs.com/art.jpg');
+    expect(insertPayload.discogs_url).toBe('https://www.discogs.com/release/12345');
+    expect(insertPayload.release_year).toBe(2001);
+    expect(insertPayload.spotify_url).toBe('https://open.spotify.com/album/abc');
+    expect(insertPayload.apple_music_url).toBe('https://music.apple.com/album/xyz');
+    expect(insertPayload.youtube_music_url).toBe('https://music.youtube.com/album/aaa');
+    expect(insertPayload.bandcamp_url).toBe('https://bandcamp.com/album/bbb');
+    expect(insertPayload.soundcloud_url).toBe('https://soundcloud.com/album/ccc');
+    expect(insertPayload.artist_bio).toBe('Rob Brown and Sean Booth are Autechre.');
+    expect(insertPayload.artist_wikipedia_url).toBe('https://en.wikipedia.org/wiki/Autechre');
+    expect(insertPayload.updated_at).toBeDefined();
+  });
+
+  it('on LML match: configures onConflictDoUpdate with a race guard so stale writes do not clobber fresh', async () => {
+    mockFetchMetadata.mockResolvedValue({
+      album: { artworkUrl: 'https://i.discogs.com/art.jpg' },
+    });
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 42,
+      albumId: 5678,
+      artistName: 'Autechre',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as {
+      target: unknown;
+      set: Record<string, unknown>;
+      setWhere: unknown;
+    };
+    expect(conflictCfg).toBeDefined();
+    expect(conflictCfg.set.artwork_url).toBe('https://i.discogs.com/art.jpg');
+    expect(conflictCfg.set.updated_at).toBeDefined();
+    expect(conflictCfg.setWhere).toBeDefined();
+  });
+
+  it('on LML match: flowsheet UPDATE only stamps metadata_attempt_at (no metadata columns)', async () => {
+    mockFetchMetadata.mockResolvedValue({
+      album: { artworkUrl: 'https://i.discogs.com/art.jpg' },
+      artist: { wikipediaUrl: 'https://en.wikipedia.org/wiki/Autechre' },
+    });
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 42,
+      albumId: 5678,
+      artistName: 'Autechre',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/NOW\(\)/i);
+    // The 10 metadata columns must NOT appear on the flowsheet UPDATE.
+    // D4 eventually drops them; until then this guarantees no double-write
+    // and no clobber of D2's historical fill.
+    expect(setArgs).not.toHaveProperty('artwork_url');
+    expect(setArgs).not.toHaveProperty('discogs_url');
+    expect(setArgs).not.toHaveProperty('artist_bio');
+    expect(setArgs).not.toHaveProperty('artist_wikipedia_url');
+  });
+
+  it('on LML match: flowsheet UPDATE narrows on metadata_attempt_at IS NULL', async () => {
+    // The IS NULL gate is what makes the in-process path safe against the
+    // drift-repair backfill and (until C5) against duplicate runtime calls
+    // on the same row. Same predicate the unlinked branch uses.
+    mockFetchMetadata.mockResolvedValue({
+      album: { artworkUrl: 'https://i.discogs.com/art.jpg' },
+    });
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 42,
+      albumId: 5678,
+      artistName: 'Autechre',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const whereCalls = mockDb._chain.where.mock.calls;
+    expect(whereCalls.length).toBeGreaterThan(0);
+    const lastWhereArg = whereCalls[whereCalls.length - 1][0];
+    expect(renderSql(lastWhereArg)).toMatch(/metadata_attempt_at.*IS\s+NULL/i);
+  });
+
+  it('on LML failure: UPSERTs fallback search URLs into album_metadata via onConflictDoNothing', async () => {
+    // onConflictDoNothing (not onConflictDoUpdate) is intentional: a prior
+    // successful enrichment must not be clobbered by synthetic fallback
+    // URLs. The unlinked path achieves the same protection via the
+    // `metadata_attempt_at IS NULL` gate on flowsheet — album_metadata has
+    // no analogous marker so we encode "haven't enriched yet" as
+    // "no row yet" via the conflict-no-op.
+    mockFetchMetadata.mockRejectedValue(new Error('LML 502'));
+
+    fireAndForgetMetadataForRow({
+      flowsheetId: 44,
+      albumId: 5678,
+      artistName: 'King Crimson',
+      albumTitle: 'Discipline',
+      trackTitle: 'Elephant Talk',
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.album_id).toBe(5678);
+    expect(insertPayload.youtube_music_url).toMatch(/^https:\/\/music\.youtube\.com\/search\?q=/);
+    expect(insertPayload.bandcamp_url).toMatch(/^https:\/\/bandcamp\.com\/search\?q=/);
+    expect(insertPayload.soundcloud_url).toMatch(/^https:\/\/soundcloud\.com\/search\?q=/);
+    expect(insertPayload).not.toHaveProperty('artwork_url');
+    expect(insertPayload).not.toHaveProperty('discogs_url');
+    expect(insertPayload).not.toHaveProperty('artist_bio');
+    // Conflict policy: no-op. Never overwrite an existing album_metadata row.
+    expect(mockDb._chain.onConflictDoNothing).toHaveBeenCalled();
+    expect(mockDb._chain.onConflictDoUpdate).not.toHaveBeenCalled();
+    // Crucially, the flowsheet row must NOT be stamped — keeps it eligible
+    // for the drift-repair sweep so the real artwork can still land on a
+    // future attempt. Same semantics as the unlinked fallback path.
+    expect(mockDb.update).not.toHaveBeenCalled();
   });
 });
 
