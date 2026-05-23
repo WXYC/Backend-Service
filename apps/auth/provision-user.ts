@@ -116,16 +116,40 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
       userId: newUser.id,
     });
 
-    // 8. Create organization membership
-    const createdMember = await adapter.create({
+    // 8. Ensure organization membership exists with the requested role.
+    //    The `databaseHooks.user.create.after` hook in auth.definition.ts
+    //    auto-creates a member row with role='member' for every non-anonymous
+    //    user, so by the time we get here a row may already exist. Upsert
+    //    instead of insert so the caller still gets the role they asked for.
+    const existingMember = await adapter.findOne<{ id: string; userId: string; organizationId: string; role: string }>({
       model: 'member',
-      data: {
-        userId: newUser.id,
-        organizationId: org.id,
-        role,
-        createdAt: new Date(),
-      },
+      where: [
+        { field: 'userId', value: newUser.id },
+        { field: 'organizationId', value: org.id },
+      ],
     });
+
+    let createdMember: { id: string; organizationId: string; role: string; [key: string]: unknown };
+    if (existingMember) {
+      if (existingMember.role !== role) {
+        await adapter.update({
+          model: 'member',
+          where: [{ field: 'id', value: existingMember.id }],
+          update: { role },
+        });
+      }
+      createdMember = { ...existingMember, role };
+    } else {
+      createdMember = (await adapter.create({
+        model: 'member',
+        data: {
+          userId: newUser.id,
+          organizationId: org.id,
+          role,
+          createdAt: new Date(),
+        },
+      })) as typeof createdMember;
+    }
 
     // 9. Sync admin role for stationManager (replicates afterAddMember hook)
     if (ADMIN_SYNC_ROLES.includes(role)) {
@@ -145,7 +169,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
         console.error('[PROVISION USER] Failed to trigger setup email:', error);
       });
 
-    return { user: newUser, member: createdMember as ProvisionUserResult['member'] };
+    return { user: newUser, member: createdMember as unknown as ProvisionUserResult['member'] };
   } catch (error) {
     // Clean up: delete the orphaned user so we don't leave partial state
     try {

@@ -12,7 +12,8 @@ import {
   organization as organizationPlugin,
   username,
 } from 'better-auth/plugins';
-import { eq, sql } from 'drizzle-orm';
+import { generateId } from '@better-auth/core/utils/id';
+import { and, eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 import { rewriteUrlForFrontend } from './url-rewrite';
@@ -346,6 +347,66 @@ export const auth = betterAuth({
         console.error('Error auto-verifying admin-created user:', error);
       }
     }),
+  },
+
+  // Auto-add every newly created non-anonymous user to the default
+  // organization as a `member`. Acts as a safety net for any code path that
+  // creates users without going through `provisionUser` (e.g. better-auth's
+  // bare `POST /admin/create-user` admin endpoint). Without this, those
+  // users land in `auth_user` with no `auth_member` row, which breaks
+  // `organization.listMembers` (FORBIDDEN) for the affected user and any
+  // call that tries to promote them. provisionUser still sets the requested
+  // role; it now upserts on top of the row this hook auto-creates.
+  databaseHooks: {
+    user: {
+      create: {
+        after: async (createdUser) => {
+          const u = createdUser as { id: string; isAnonymous?: boolean | null };
+          // Anonymous-plugin users are per-device throwaways, not station members.
+          if (u.isAnonymous) return;
+
+          const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
+          if (!defaultOrgSlug) {
+            console.warn(`[user.create.after] DEFAULT_ORG_SLUG not set; skipping auto-membership for ${u.id}`);
+            return;
+          }
+
+          try {
+            const orgRows = await db
+              .select({ id: organization.id })
+              .from(organization)
+              .where(eq(organization.slug, defaultOrgSlug))
+              .limit(1);
+            if (orgRows.length === 0) {
+              console.warn(
+                `[user.create.after] No organization with slug "${defaultOrgSlug}"; skipping auto-membership for ${u.id}`
+              );
+              return;
+            }
+
+            const existing = await db
+              .select({ id: member.id })
+              .from(member)
+              .where(and(eq(member.userId, u.id), eq(member.organizationId, orgRows[0].id)))
+              .limit(1);
+            if (existing.length > 0) return;
+
+            await db.insert(member).values({
+              id: generateId(32),
+              userId: u.id,
+              organizationId: orgRows[0].id,
+              role: 'member',
+              createdAt: new Date(),
+            });
+          } catch (error) {
+            // Don't fail user creation just because the safety-net insert
+            // hit a race or transient error — the operator can backfill
+            // with scripts/backfill-missing-org-members.ts.
+            console.error('[user.create.after] Failed to auto-add member row:', error);
+          }
+        },
+      },
+    },
   },
 
   // Enable username-based login
