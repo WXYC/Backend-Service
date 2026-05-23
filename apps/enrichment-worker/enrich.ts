@@ -26,14 +26,14 @@
  * concern that doesn't apply to the live consumer path.
  *
  * Build-graph isolation: the search-URL synthesis, spacer.gif filter, and bio
- * cleaner are inlined rather than imported from `apps/backend` or
- * `jobs/flowsheet-metadata-backfill` to keep this package independent. The
- * canonical implementations are in
- * `apps/backend/services/metadata/metadata.service.ts` (runtime) and
- * `jobs/flowsheet-metadata-backfill/enrich.ts` (backfill); divergence here
- * would be a bug. Parity is not test-pinned yet (the backfill pins parity to
- * the runtime; this would be a transitive parity test). Track in a follow-up
- * if drift becomes a real concern.
+ * cleaner are inlined rather than imported from `apps/backend` so this package
+ * can bundle independently. The canonical implementations are in
+ * `apps/backend/services/metadata/metadata.service.ts` (spacer.gif filter) and
+ * `apps/backend/services/metadata/providers/search-urls.provider.ts` (search
+ * URLs); divergence here would be a bug. Pinned by parity tests:
+ *   - tests/unit/apps/enrichment-worker/filter-spacer-gif-parity.test.ts (BS#890)
+ *   - tests/unit/apps/enrichment-worker/synthesize-search-urls-parity.test.ts (BS#889)
+ * Also gated by scripts/check-spacer-gif-callsites.sh in CI.
  */
 
 import { and, eq } from 'drizzle-orm';
