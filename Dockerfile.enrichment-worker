@@ -9,8 +9,10 @@
 #Build stage
 FROM node:24-alpine AS builder
 
+ARG NPM_TOKEN
 WORKDIR /enrichment-worker-builder
 
+COPY ./.npmrc ./
 COPY ./package.json ./package-lock.json ./
 COPY ./tsconfig.base.json ./
 COPY ./shared/database ./shared/database
@@ -22,14 +24,20 @@ RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-cli
 #Production stage
 FROM node:24-alpine AS prod
 
+ARG NPM_TOKEN
 WORKDIR /enrichment-worker
 
+COPY ./.npmrc ./
 COPY ./package* ./
 COPY ./apps/enrichment-worker/package* ./apps/enrichment-worker/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/lml-client/package* ./shared/lml-client/
 
-RUN npm install --omit=dev
+# `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
+# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
+# .npmrc the prod stage's npm install 401s on @wxyc/shared. Mirrors the
+# pattern in Dockerfile.backend.
+RUN npm install --omit=dev && rm -f .npmrc
 
 COPY --from=builder ./enrichment-worker-builder/apps/enrichment-worker/dist ./apps/enrichment-worker/dist
 COPY --from=builder ./enrichment-worker-builder/shared/database/dist ./shared/database/dist
