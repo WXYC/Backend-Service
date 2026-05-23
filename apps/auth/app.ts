@@ -14,6 +14,7 @@ import type { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
+import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
 import { resolveOrganization } from './resolve-organization';
 
@@ -223,14 +224,35 @@ app.post('/auth/admin/provision-user', async (req, res) => {
   }
 });
 
+// Resolve a login identifier (username or email) to a verification email.
+// Public — rate-limited below alongside the other brute-force-sensitive
+// endpoints. The login UI accepts a single "Username or email" field and
+// calls this only when the identifier contains no '@'. Returning the email
+// for a known username is a mild enumeration vector that matches the
+// existing leak surface of /auth/sign-in/username (which already reveals
+// "user exists" via its error responses). Rate limiting bounds it.
+const lookupEmailHandler = async (req: Request, res: Response) => {
+  try {
+    const identifier = (req.body as { identifier?: unknown })?.identifier;
+    if (!identifier || typeof identifier !== 'string') {
+      return res.status(400).json({ error: 'identifier required' });
+    }
+
+    const email = await lookupEmailByIdentifier(identifier);
+    return res.json({ email });
+  } catch (error) {
+    console.error('[LOOKUP EMAIL] Unexpected error:', error);
+    Sentry.captureException(error, { tags: { subsystem: 'lookup-email' } });
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 // Disable rate limiting in test environments to avoid flaky integration tests.
 // This matches the pattern used by the backend's rateLimiting middleware.
 const isTestEnv =
   process.env.NODE_ENV === 'test' || process.env.USE_MOCK_SERVICES === 'true' || process.env.AUTH_BYPASS === 'true';
 
-if (isTestEnv) {
-  app.use('/auth', toNodeHandler(auth));
-} else {
+if (!isTestEnv) {
   // Strict limit for auth mutations vulnerable to brute-force attacks.
   // These are the only endpoints that need tight rate limiting.
   const authMutationRateLimit = rateLimit({
@@ -246,14 +268,16 @@ if (isTestEnv) {
     '/auth/sign-up',
     '/auth/email-otp/send-verification-otp',
     '/auth/forget-password',
+    '/auth/wxyc/lookup-email',
   ];
 
   for (const path of rateLimitedPaths) {
     app.use(path, authMutationRateLimit);
   }
-
-  app.use('/auth', toNodeHandler(auth));
 }
+
+app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
+app.use('/auth', toNodeHandler(auth));
 
 // Liveness/readiness endpoint. Body conforms to HealthCheckResponse from
 // @wxyc/shared (api.yaml v1.3.0 / @wxyc/shared v0.13.0); the shape is the
