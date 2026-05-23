@@ -1,37 +1,41 @@
 /**
- * Per-row enrichment: turn an LML response into the 10-column flowsheet
- * UPDATE that mirrors the runtime path (#658, `enrichment.service.ts`).
+ * Per-row enrichment: turn an LML response into either a flowsheet inline
+ * UPDATE (free-form / unlinked rows) or an `album_metadata` UPSERT plus a
+ * marker-only flowsheet UPDATE (linked rows). Mirrors the D3 worker pattern
+ * in `apps/enrichment-worker/enrich.ts` (BS#899) and closes the historical
+ * inline-only drain (BS#1027).
  *
- * Result shape (matches the runtime fire-and-forget):
- *   - On success-with-match: write the 10 metadata columns from artwork,
- *     stamping `metadata_attempt_at = now()` in the same .set() block.
- *   - On success-no-match: write synthesized search URLs into
- *     youtube_music_url / bandcamp_url / soundcloud_url, leave the rest
- *     as NULL, still stamp the marker.
+ * Result shape:
+ *   - Linked (album_id != null) + match: UPSERT `album_metadata` with the
+ *     10-column payload (race-guarded by `updated_at < NOW()`), then
+ *     UPDATE `flowsheet` to stamp `metadata_attempt_at = now()` only.
+ *   - Linked + no-match: UPSERT just the 3 synthesized search URLs into
+ *     `album_metadata`, then stamp the marker on `flowsheet`.
+ *   - Unlinked (album_id IS NULL) + match: write the 10 metadata columns
+ *     inline on `flowsheet`, stamping the marker in the same .set() block.
+ *   - Unlinked + no-match: write the 3 synthesized search URLs inline on
+ *     `flowsheet`, stamp the marker.
  *   - On LML throw: caller catches and DOES NOT call this. The row stays
  *     `metadata_attempt_at IS NULL` so the next sweep retries it.
  *
- * Idempotency: the WHERE narrows by `id = $row.id AND metadata_attempt_at
- * IS NULL`. A row that the runtime path stamped between the orchestrator's
- * SELECT and this UPDATE is left alone — both writers produce identical
- * data so this matters only as a guard against double-stamping a row
- * whose runtime stamp would otherwise be older. The benign race is
- * documented inline; no CAS pattern needed.
+ * Idempotency guard: the flowsheet WHERE narrows by `id = $row.id AND
+ * metadata_attempt_at IS NULL`. Critically different from the worker
+ * (`apps/enrichment-worker/enrich.ts`), which guards on
+ * `metadata_status='enriching'`: the backfill operates on rows the consumer
+ * never claimed (no `enriching` transition), so the marker is the right
+ * invariant. Borrow the album_metadata UPSERT shape from the worker; do
+ * NOT borrow its status-based guard.
  *
  * Spacer.gif filter: applied inline. Discogs occasionally returns
- * `spacer.gif` placeholder images; persisting them would pollute 1.86M rows
- * for the historical drain alone. The runtime path filters at the chokepoint
- * in `metadata.service.ts:extractAlbumMetadata` (#649); this job carries
- * its own copy because `lml-fetch.ts` deliberately does not go through the
- * backend service (build-graph isolation, see file header). Applied only
- * to `artwork_url` — the other URL columns in the same `.set()` block come
- * from the `streaming_links` table or LML-constructed search URLs, never
- * Discogs image responses (verified against `lookup/orchestrator.py:855-970`,
- * see #679).
+ * `spacer.gif` placeholder images; persisting them would pollute the
+ * historical drain. The runtime path filters at the chokepoint in
+ * `metadata.service.ts:extractAlbumMetadata` (#649); this job carries its
+ * own copy because `lml-fetch.ts` deliberately does not go through the
+ * backend service (build-graph isolation, see file header).
  */
 
-import { sql } from 'drizzle-orm';
-import { db, flowsheet } from '@wxyc/database';
+import { and, eq, isNull, sql } from 'drizzle-orm';
+import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
 
 export type EnrichRow = {
@@ -39,6 +43,11 @@ export type EnrichRow = {
   artist_name: string;
   album_title: string | null;
   track_title: string | null;
+  // BS#1027 / Epic D: non-null → UPSERT album_metadata + flowsheet marker
+  // stamp only; null → write the 10 metadata columns inline on flowsheet
+  // (free-form entries, until their linkage resolves). Sourced from the
+  // orchestrator's SELECT (`loadBatch` in orchestrate.ts).
+  album_id: number | null;
 };
 
 export type EnrichOutcome = 'enriched_match' | 'enriched_match_raced' | 'enriched_no_match' | 'enriched_no_match_raced';
@@ -143,60 +152,108 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
   const artwork = extractArtwork(response);
   const searchUrls = synthesizeSearchUrls(row);
 
+  // Marker-only flowsheet UPDATE used on the linked path. Stamp lives alone
+  // in the .set() because the 10 metadata columns landed in album_metadata
+  // a step earlier; the flowsheet write only records "we attempted this
+  // row" so the next sweep skips it.
+  const markerWhere = and(eq(flowsheet.id, row.id), isNull(flowsheet.metadata_attempt_at));
+
   if (artwork) {
+    const payload = {
+      artwork_url: filterSpacerGif(artwork.artwork_url),
+      discogs_url: artwork.release_url ?? null,
+      // Discogs returns 0 as "year unknown"; coerce to null so the column
+      // doesn't carry a sentinel that iOS renders as literal "0". Mirrors
+      // the runtime path in `metadata.service.ts#extractAlbumMetadata` (#1002).
+      release_year: artwork.release_year || null,
+      spotify_url: artwork.spotify_url ?? null,
+      apple_music_url: artwork.apple_music_url ?? null,
+      // Streaming search URLs: prefer LML's, fall back to synthesized.
+      youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
+      bandcamp_url: artwork.bandcamp_url ?? searchUrls.bandcamp_url,
+      soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,
+      artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
+      artist_wikipedia_url: artwork.wikipedia_url ?? null,
+    };
+
+    if (row.album_id !== null) {
+      // Linked + match: 10-col payload lands in album_metadata; flowsheet
+      // UPDATE only stamps the marker. The album_metadata UPSERT is
+      // idempotent (same album_id → same row) and guarded by
+      // `updated_at < NOW()` so a delayed backfill cycle can't overwrite
+      // a fresher runtime or worker enrichment of the same album_id.
+      await db
+        .insert(album_metadata)
+        .values({ album_id: row.album_id, ...payload, updated_at: sql`NOW()` })
+        .onConflictDoUpdate({
+          target: album_metadata.album_id,
+          set: { ...payload, updated_at: sql`NOW()` },
+          setWhere: sql`${album_metadata.updated_at} < NOW()`,
+        });
+      const updated = await db
+        .update(flowsheet)
+        .set({ metadata_attempt_at: sql`now()` })
+        .where(markerWhere)
+        .returning({ id: flowsheet.id });
+      return updated.length === 0 ? 'enriched_match_raced' : 'enriched_match';
+    }
+
+    // Unlinked + match: write the 10 columns inline on flowsheet — as
+    // before BS#1027. These rows can't enrich into album_metadata until
+    // linkage resolves; D4's column-drop is gated on no unlinked
+    // enrichments remaining.
     const updated = await db
       .update(flowsheet)
       .set({
-        artwork_url: filterSpacerGif(artwork.artwork_url),
-        discogs_url: artwork.release_url ?? null,
-        // Discogs returns 0 as "year unknown"; coerce to null so the column
-        // doesn't carry a sentinel that iOS renders as literal "0". Mirrors
-        // the runtime path in `metadata.service.ts#extractAlbumMetadata`.
-        // #1002.
-        release_year: artwork.release_year || null,
-        spotify_url: artwork.spotify_url ?? null,
-        apple_music_url: artwork.apple_music_url ?? null,
-        // Streaming search URLs: prefer LML's, fall back to synthesized.
-        // Matches the runtime path's behavior in `metadata.service.ts`.
-        youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
-        bandcamp_url: artwork.bandcamp_url ?? searchUrls.bandcamp_url,
-        soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,
-        artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
-        artist_wikipedia_url: artwork.wikipedia_url ?? null,
+        ...payload,
         // Stamp lives inside the same .set() so a partial UPDATE can't
         // mark a row as "attempted" without writing the data we just
-        // fetched. #639 codified the same single-block contract for the
-        // runtime path.
+        // fetched (#639 codified this single-block contract).
         metadata_attempt_at: sql`now()`,
       })
-      // Idempotency guard: the WHERE narrows by `metadata_attempt_at IS
-      // NULL`, so a row the runtime path stamped between the
-      // orchestrator's SELECT and this UPDATE matches 0 rows. The
-      // partial index from #659 makes the WHERE fast — the index is the
-      // performance enabler, the WHERE itself is what filters.
       .where(sql`"id" = ${row.id} AND "metadata_attempt_at" IS NULL`)
       .returning({ id: flowsheet.id });
     return updated.length === 0 ? 'enriched_match_raced' : 'enriched_match';
   }
 
-  // No-match: synthesize search URLs and stamp. Critically, the other 7
-  // metadata columns are NOT touched. This diverges from the runtime path
-  // (`apps/backend/services/metadata/enrichment.service.ts`) — the
-  // runtime nulls all 10 columns on no-match because it runs at insert
-  // time over fresh rows with nothing to lose.
-  //
-  // The backfill encounters rows that may already have prior values from
-  // out-of-band paths: the 2026-04-28 inline recovery
-  // (`scripts/backfill-metadata.ts`) wrote the full 10-column payload to
-  // ~618 rows pre-#658, so their `metadata_attempt_at` is NULL even
-  // though `artwork_url` / `discogs_url` / etc are populated. If LML now
-  // returns no-match for such a row, the recovery's prior data is the
-  // better signal and should be preserved. Nulling here would be silent
-  // data loss.
-  //
-  // The divergence is intentional, not a bug. Future: if the runtime
-  // path ever needs to run over rows with prior values (e.g., a
-  // re-enrichment trigger), it should adopt the same preserve semantics.
+  // No-match: synthesize search URLs and stamp. The other 7 metadata
+  // columns are NOT touched on either branch. The backfill encounters rows
+  // that may already have prior values from out-of-band paths (e.g. the
+  // 2026-04-28 inline recovery, `scripts/backfill-metadata.ts`), so nulling
+  // them on a no-match would be silent data loss.
+  if (row.album_id !== null) {
+    // Linked + no-match: UPSERT just the 3 search URLs into album_metadata.
+    // INSERT path leaves the other 7 columns NULL (no LML match to fill
+    // them); UPDATE path leaves them untouched on existing rows
+    // (preserves any prior out-of-band values, matching the unlinked
+    // path's deliberate non-clobbering on no-match).
+    await db
+      .insert(album_metadata)
+      .values({
+        album_id: row.album_id,
+        youtube_music_url: searchUrls.youtube_music_url,
+        bandcamp_url: searchUrls.bandcamp_url,
+        soundcloud_url: searchUrls.soundcloud_url,
+        updated_at: sql`NOW()`,
+      })
+      .onConflictDoUpdate({
+        target: album_metadata.album_id,
+        set: {
+          youtube_music_url: searchUrls.youtube_music_url,
+          bandcamp_url: searchUrls.bandcamp_url,
+          soundcloud_url: searchUrls.soundcloud_url,
+          updated_at: sql`NOW()`,
+        },
+        setWhere: sql`${album_metadata.updated_at} < NOW()`,
+      });
+    const updated = await db
+      .update(flowsheet)
+      .set({ metadata_attempt_at: sql`now()` })
+      .where(markerWhere)
+      .returning({ id: flowsheet.id });
+    return updated.length === 0 ? 'enriched_no_match_raced' : 'enriched_no_match';
+  }
+
   const updated = await db
     .update(flowsheet)
     .set({
