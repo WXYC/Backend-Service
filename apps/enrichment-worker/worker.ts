@@ -15,12 +15,21 @@
 
 import { closeDatabaseConnection, onCdcEvent, startCdcListener, stopCdcListener } from '@wxyc/database';
 import { makeEnrichmentHandler } from './handler.js';
+import { startHealthcheckServer, type HealthState } from './healthcheck.js';
 
 const main = async (): Promise<void> => {
   console.log('[enrichment-worker] starting');
 
+  // Healthcheck starts BEFORE the CDC listener so the deploy probe can hit
+  // `/healthcheck` immediately (returns 503 until cdcConnected flips true).
+  // A delayed start would leave the deploy seeing no listener and timing
+  // out on `--health-start-period`.
+  const healthState: HealthState = { cdcConnected: false };
+  const healthServer = startHealthcheckServer(healthState);
+
   onCdcEvent(makeEnrichmentHandler());
   await startCdcListener();
+  healthState.cdcConnected = true;
 
   console.log('[enrichment-worker] subscribed to CDC; awaiting events');
 
@@ -34,10 +43,12 @@ const main = async (): Promise<void> => {
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    healthState.cdcConnected = false;
     console.log(`[enrichment-worker] received ${signal}; shutting down`);
     try {
       await stopCdcListener();
       await closeDatabaseConnection();
+      await new Promise<void>((resolve) => healthServer.close(() => resolve()));
     } finally {
       process.exit(0);
     }
