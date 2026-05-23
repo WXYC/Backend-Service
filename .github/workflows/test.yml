@@ -366,6 +366,12 @@ jobs:
           # tests/unit/services/lml.client.test.ts:792-793.
           LML_CLIENT_MAX_CONCURRENT: '10000'
           LML_CLIENT_RATE_PER_MIN: '60000'
+          # Default org wiring: matches the slug seeded by dev_env/seed_db.sql.
+          # Consumed by the org-sync hooks and the user.create.after
+          # auto-membership hook in shared/authentication/src/auth.definition.ts.
+          # Without this, those hooks log a warning and no-op, which the
+          # auth-auto-membership integration spec specifically exercises.
+          DEFAULT_ORG_SLUG: test-org
         run: |
           node dev_env/mock-api-server/dist/server.js > /tmp/mock-api.log 2>&1 &
           node apps/auth/dist/app.js > /tmp/auth.log 2>&1 &
