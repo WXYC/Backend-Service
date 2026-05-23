@@ -13,7 +13,14 @@
  * @see docs/cdc.md
  */
 
-import { closeDatabaseConnection, onCdcEvent, startCdcListener, stopCdcListener } from '@wxyc/database';
+import {
+  closeDatabaseConnection,
+  enableLivenessProbe,
+  onCdcConnectionStateChange,
+  onCdcEvent,
+  startCdcListener,
+  stopCdcListener,
+} from '@wxyc/database';
 import { makeEnrichmentHandler } from './handler.js';
 import { startHealthcheckServer, type HealthState } from './healthcheck.js';
 
@@ -27,9 +34,23 @@ const main = async (): Promise<void> => {
   const healthState: HealthState = { cdcConnected: false };
   const healthServer = startHealthcheckServer(healthState);
 
+  // BS#1014: dispatched true on initial LISTEN + every postgres-js reconnect,
+  // dispatched false when the liveness probe observes a wedged LISTEN socket.
+  onCdcConnectionStateChange((connected) => {
+    healthState.cdcConnected = connected;
+    console.log(`[enrichment-worker] cdcConnected=${connected}`);
+  });
+
   onCdcEvent(makeEnrichmentHandler());
   await startCdcListener();
+  // Belt-and-suspenders: the onlisten hook should have already flipped this
+  // to true; re-assert in case a future cdc-listener change skips dispatch.
   healthState.cdcConnected = true;
+
+  // BS#1014: probe the LISTEN socket via a sibling NOTIFY/echo loop so a
+  // silent disconnect (PG restart without RST, NAT idle, idle-transport
+  // death) flips cdcConnected=false within ~one probe cycle.
+  await enableLivenessProbe();
 
   console.log('[enrichment-worker] subscribed to CDC; awaiting events');
 
