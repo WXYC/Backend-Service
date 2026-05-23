@@ -25,9 +25,11 @@
  *                      listener will continue receiving events; only this
  *                      one is lost. The C6 sweep is the safety net.
  *
- * The handler never throws upstream — the CDC listener is a single shared
- * subscriber across all CDC consumers in this process; a throw from this
- * handler could break other listeners. All failures are caught here.
+ * The handler never throws upstream. `cdc-listener.ts:54-58` already wraps
+ * each callback in try/catch and would log `[cdc-listener] Callback error`
+ * for an uncaught throw, but that log loses the row id and the LML/DB step
+ * context. Catching here keeps the failure attributed to a real Sentry
+ * event with the flowsheet_id + step tag instead of a noisy generic log.
  */
 
 import * as Sentry from '@sentry/node';
