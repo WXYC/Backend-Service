@@ -7,20 +7,25 @@
  * polls every 30s; an unhealthy container is restarted via
  * `--restart unless-stopped`.
  *
- * Scope: startup + shutdown probe only.
- *   - 200 OK + body `ok` after `startCdcListener()` resolved successfully.
- *   - 503 + body `cdc not connected` during startup (before the listener
- *     resolves) and during shutdown (after SIGTERM/SIGINT begins draining).
+ * Scope: full liveness (BS#1014).
+ *   - 200 OK + body `ok` while the CDC LISTEN connection is alive.
+ *   - 503 + body `cdc not connected` during startup (before
+ *     `startCdcListener()` resolves), during shutdown (after SIGTERM/SIGINT
+ *     begins draining), and after the liveness probe in `@wxyc/database`'s
+ *     `cdc-listener` observes a wedged LISTEN socket (silent PG restart,
+ *     NAT idle timeout, idle-transport death).
  *
- * What this probe does NOT detect: a mid-run LISTEN drop that
- * `@wxyc/database`'s cdc-listener doesn't surface back to its callers (PG
- * restart, network blip without RST, idle-transport death). The
- * `cdcConnected` flag only flips back to `false` in the shutdown path —
- * a silently-dead LISTEN connection will continue to report healthy here.
- * Real liveness detection requires a connection-lifecycle hook in
- * `@wxyc/database` (or a periodic NOTIFY-back probe); tracked at BS#1014.
- * In the meantime, the C6 stranded-claim sweep (#895) recovers any rows
- * lost to a wedged worker — a backstop, not a substitute.
+ * The mid-run failure path is driven by `onCdcConnectionStateChange` in
+ * `@wxyc/database`, which the worker subscribes to in `worker.ts`. When the
+ * periodic `cdc_health` NOTIFY/echo loop fails to round-trip within its
+ * echo-timeout window, the registered callback flips `cdcConnected=false`
+ * and this endpoint starts returning 503; the deploy framework's 30s
+ * `--health-cmd` poll then triggers `--restart unless-stopped`.
+ *
+ * The C6 stranded-claim sweep (#895) is still the backstop for rows missed
+ * during the disconnect-to-restart window (~probe-cycle + echo-timeout +
+ * health-poll). Liveness reduces that window from process lifetime to ~65s
+ * with the default probe sizing.
  *
  * The HTTP server is independently necessary: the deploy framework treats
  * apps/ packages as HTTP services. Without one the container is marked

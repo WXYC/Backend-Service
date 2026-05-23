@@ -1,20 +1,20 @@
 /**
- * Unit tests for enrichment-worker healthcheck.ts (BS#892 / PR-3).
+ * Unit tests for enrichment-worker healthcheck.ts (BS#892 / PR-3, BS#1014).
  *
  * The health server is what `--health-cmd="wget .../healthcheck"` polls
  * every 30s in the deploy. The contract is narrow but load-bearing:
- *   - 200 when the worker has finished startup (cdcConnected=true)
- *   - 503 when starting up or shutting down (cdcConnected=false)
+ *   - 200 when the worker has a live CDC connection (cdcConnected=true)
+ *   - 503 when starting up, shutting down, or after the liveness probe in
+ *     `@wxyc/database`'s `cdc-listener` flips `cdcConnected=false` on a
+ *     silent disconnect (cdcConnected=false)
  *   - 404 for any other path
  *   - URL with a query string still matches (cache-buster from
  *     canary/operator probes)
  *
- * Limitations the tests pin: this is a liveness probe scoped to startup +
- * shutdown. A silently-dead LISTEN connection is NOT detected — that's
- * BS#1014. A regression that flipped `cdcConnected` to false during normal
- * operation (e.g., from an unrelated code path) would surface as 503s
- * here; the unit test for that interaction lives wherever the flip would
- * be wired, not in this file.
+ * The mid-run disconnect path is driven from `worker.ts` via
+ * `onCdcConnectionStateChange` (the liveness machinery itself is tested in
+ * `tests/unit/shared/database/cdc-listener.test.ts`). This file pins the
+ * fact that the server faithfully observes mid-run flips in either direction.
  */
 
 import type { AddressInfo } from 'node:net';
@@ -70,6 +70,29 @@ describe('healthcheck server (BS#892 PR-3)', () => {
     expect((await getStatus(port)).status).toBe(200);
     state.cdcConnected = false;
     expect((await getStatus(port)).status).toBe(503);
+  });
+
+  it('BS#1014: a liveness-driven flip via state callback flows through to /healthcheck', async () => {
+    // Simulates the wiring in worker.ts: onCdcConnectionStateChange
+    // mutates state.cdcConnected, the server reads it on the next poll.
+    // The cdc-listener test pins WHEN the flip happens; this test pins
+    // that the server respects it.
+    const stateCallback = (connected: boolean): void => {
+      state.cdcConnected = connected;
+    };
+
+    stateCallback(true);
+    expect((await getStatus(port)).status).toBe(200);
+
+    // Liveness probe observes a wedged LISTEN
+    stateCallback(false);
+    const after = await getStatus(port);
+    expect(after.status).toBe(503);
+    expect(after.body).toBe('cdc not connected');
+
+    // Postgres-js auto-reconnect → onlisten → connected=true
+    stateCallback(true);
+    expect((await getStatus(port)).status).toBe(200);
   });
 
   it('returns 404 for unknown paths', async () => {
