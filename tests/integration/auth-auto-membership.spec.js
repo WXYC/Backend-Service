@@ -24,7 +24,10 @@
 
 const postgres = require('postgres');
 
-const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+// `auth_*` tables live in the default `public` schema (not the WXYC
+// `wxyc_schema` that holds the domain tables — see schema.ts where
+// `user`, `member`, `organization` are pgTable() without a wxyc_schema
+// prefix).
 const ORG_SLUG = process.env.DEFAULT_ORG_SLUG || 'test-org';
 
 function getAuthBaseUrl() {
@@ -95,7 +98,7 @@ describe('user.create.after auto-membership hook', () => {
     // FK on auth_member cascades to auth_user, so removing the user removes
     // the member row too. We use raw SQL rather than DELETE /admin/remove-user
     // to keep cleanup independent of the endpoint under test.
-    await sql.unsafe(`DELETE FROM ${SCHEMA}.auth_user WHERE id = ANY(${'$1'}::text[])`, [createdUserIds.splice(0)]);
+    await sql.unsafe(`DELETE FROM auth_user WHERE id = ANY(${'$1'}::text[])`, [createdUserIds.splice(0)]);
   });
 
   test('bare POST /admin/create-user auto-creates an auth_member row with role=member', async () => {
@@ -126,8 +129,8 @@ describe('user.create.after auto-membership hook', () => {
     // by the time the HTTP response returns the member row is committed.
     const memberRows = await sql.unsafe(
       `SELECT m.id, m.role, o.slug
-         FROM ${SCHEMA}.auth_member m
-         JOIN ${SCHEMA}.auth_organization o ON o.id = m.organization_id
+         FROM auth_member m
+         JOIN auth_organization o ON o.id = m.organization_id
         WHERE m.user_id = $1`,
       [userId]
     );
@@ -163,7 +166,7 @@ describe('user.create.after auto-membership hook', () => {
     // hook's default `member`. Confirms provisionUser's upsert overwrote
     // the row the hook auto-created (rather than racing and crashing on
     // the unique (organization_id, user_id) constraint).
-    const memberRows = await sql.unsafe(`SELECT role FROM ${SCHEMA}.auth_member WHERE user_id = $1`, [userId]);
+    const memberRows = await sql.unsafe(`SELECT role FROM auth_member WHERE user_id = $1`, [userId]);
     expect(memberRows).toHaveLength(1);
     expect(memberRows[0].role).toBe('dj');
   });
