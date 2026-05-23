@@ -323,32 +323,69 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     expect(fsRows[0].metadata_attempt_at).not.toBeNull();
   });
 
-  test('race guard: a delayed backfill upsert does NOT clobber a fresher album_metadata row', async () => {
+  test('race guard: a stale backfill upsert against a future-dated album_metadata row leaves it untouched', async () => {
     const albumId = await insertLibraryAlbum(sql, 'race-guard');
     insertedAlbumIds.push(albumId);
 
-    // Simulate the runtime/worker writing a fresh enrichment first.
-    await upsertLinkedMatch(sql, albumId, FULL_PAYLOAD);
+    // Simulate a fresher runtime/worker write whose updated_at is ahead of
+    // the current clock. NOW() in PG is statement_start, so consecutive
+    // statements naturally see a slightly larger NOW() value — without the
+    // future-dating below, a delayed backfill's NOW() would always satisfy
+    // `existing.updated_at < NOW()` and the guard would never fire. Setting
+    // updated_at to NOW() + INTERVAL '1 hour' explicitly models the
+    // semantics the guard protects against: a later writer that has
+    // already landed a fresher enrichment.
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, discogs_url, release_year, spotify_url, apple_music_url,
+         youtube_music_url, bandcamp_url, soundcloud_url, artist_bio, artist_wikipedia_url,
+         updated_at)
+      VALUES
+        (${albumId}, ${FULL_PAYLOAD.artwork_url}, ${FULL_PAYLOAD.discogs_url},
+         ${FULL_PAYLOAD.release_year}, ${FULL_PAYLOAD.spotify_url},
+         ${FULL_PAYLOAD.apple_music_url}, ${FULL_PAYLOAD.youtube_music_url},
+         ${FULL_PAYLOAD.bandcamp_url}, ${FULL_PAYLOAD.soundcloud_url},
+         ${FULL_PAYLOAD.artist_bio}, ${FULL_PAYLOAD.artist_wikipedia_url},
+         NOW() + INTERVAL '1 hour')
+    `;
     const before = await sql`
-      SELECT updated_at FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
+      SELECT artwork_url, updated_at FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
     `;
 
-    // Simulate a delayed backfill cycle attempting to clobber with stale data
-    // in the SAME statement. The `setWhere: updated_at < NOW()` in the same
-    // INSERT statement evaluates NOW() at statement_start: if the existing
-    // updated_at equals or exceeds that, the UPDATE arm short-circuits.
-    // Verify by issuing the same UPSERT again immediately (within the same
-    // statement timestamp, both values equal → < is false).
+    // Attempt the stale backfill UPSERT. The setWhere clause
+    // `album_metadata.updated_at < NOW()` evaluates the existing row's
+    // future updated_at against the current NOW() — false → UPDATE arm
+    // short-circuits, 'stale-clobber' never lands.
     await upsertLinkedMatch(sql, albumId, { ...FULL_PAYLOAD, artwork_url: 'stale-clobber' });
 
     const after = await sql`
       SELECT artwork_url, updated_at FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
     `;
-    // The race guard either kept the prior artwork_url or advanced — what
-    // matters: 'stale-clobber' never lands when guarded properly. The
-    // statement_start equality keeps the row unchanged.
     expect(after[0].artwork_url).toBe(FULL_PAYLOAD.artwork_url);
     expect(new Date(after[0].updated_at).getTime()).toBe(new Date(before[0].updated_at).getTime());
+  });
+
+  test('race guard: a backfill upsert against a stale album_metadata row DOES overwrite', async () => {
+    // The complement of the future-dated test: when the existing row is
+    // genuinely older than NOW(), the guard allows the UPDATE arm to land.
+    // Without this, the previous test could pass for the wrong reason
+    // (e.g. if the setWhere clause was mistakenly always-false).
+    const albumId = await insertLibraryAlbum(sql, 'race-guard-stale');
+    insertedAlbumIds.push(albumId);
+
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, updated_at)
+      VALUES
+        (${albumId}, 'old-artwork', NOW() - INTERVAL '1 hour')
+    `;
+
+    await upsertLinkedMatch(sql, albumId, FULL_PAYLOAD);
+
+    const after = await sql`
+      SELECT artwork_url FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
+    `;
+    expect(after[0].artwork_url).toBe(FULL_PAYLOAD.artwork_url);
   });
 
   test('marker idempotency: stamping an already-stamped flowsheet row returns 0 (raced outcome)', async () => {
