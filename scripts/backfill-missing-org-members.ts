@@ -1,0 +1,184 @@
+/**
+ * Backfill missing `auth_member` rows for users that exist in `auth_user`
+ * but have no membership in the default organization.
+ *
+ * Background: users created via the bare better-auth admin endpoint
+ * (`POST /auth/admin/create-user`) — as opposed to the atomic
+ * `provisionUser()` path — never got a corresponding `auth_member` row.
+ * This breaks `authClient.organization.listMembers` (403) for the affected
+ * users because better-auth's list-members endpoint gates on caller
+ * membership in the queried org, and breaks `updateMemberRole` against
+ * those users because there's no row to update.
+ *
+ * Mapping from `auth_user.role` to `auth_member.role`:
+ *   admin  -> stationManager   (matches systemRoleMap in auth.roles.ts)
+ *   dj     -> dj
+ *   user   -> member
+ *   null   -> member
+ *
+ * Defaults to a dry-run. Pass --apply to actually write.
+ *
+ * Usage:
+ *   ORG_SLUG=wxyc npx tsx scripts/backfill-missing-org-members.ts
+ *   ORG_SLUG=wxyc npx tsx scripts/backfill-missing-org-members.ts --apply
+ *
+ * Requires: DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD
+ */
+
+import { config } from 'dotenv';
+config();
+
+import { generateId } from '@better-auth/core/utils/id';
+// Import directly from sources to avoid pulling in @wxyc/database's legacy
+// tubafrenzy ETL utilities (which depend on node-ssh -> native cpu-features
+// and would block bundling for a standalone script run).
+import { db } from '../shared/database/src/client';
+import { member, organization, user } from '../shared/database/src/schema';
+import { eq, sql } from 'drizzle-orm';
+
+interface Args {
+  apply: boolean;
+}
+
+function parseArgs(argv: string[]): Args {
+  return { apply: argv.includes('--apply') };
+}
+
+const ADMIN_SYNC_ROLES = new Set(['stationManager', 'admin', 'owner']);
+
+function mapUserRoleToMemberRole(userRole: string | null): string {
+  if (userRole === 'admin') return 'stationManager';
+  if (userRole === 'dj') return 'dj';
+  if (userRole === 'musicDirector') return 'musicDirector';
+  if (userRole === 'stationManager') return 'stationManager';
+  return 'member';
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const orgSlug = process.env.ORG_SLUG;
+  if (!orgSlug) {
+    console.error('ORG_SLUG env var is required (e.g. ORG_SLUG=wxyc)');
+    process.exit(2);
+  }
+
+  console.log(
+    args.apply ? 'MODE: APPLY (writes will be committed)' : 'MODE: DRY RUN (no writes; pass --apply to commit)'
+  );
+  console.log(`ORG_SLUG: ${orgSlug}`);
+  console.log('');
+
+  const orgRows = await db
+    .select({ id: organization.id, slug: organization.slug, name: organization.name })
+    .from(organization)
+    .where(eq(organization.slug, orgSlug))
+    .limit(1);
+  if (orgRows.length === 0) {
+    console.error(`No organization found for slug "${orgSlug}".`);
+    process.exit(1);
+  }
+  const org = orgRows[0];
+  console.log(`Org: ${org.name}  id=${org.id}  slug=${org.slug}`);
+  console.log('');
+
+  // Find non-anonymous users with no member row.
+  const missing = await db
+    .select({
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      createdAt: user.createdAt,
+    })
+    .from(user)
+    .leftJoin(member, eq(member.userId, user.id))
+    .where(sql`${member.id} IS NULL AND COALESCE(${user.isAnonymous}, false) = false`)
+    .orderBy(user.createdAt);
+
+  if (missing.length === 0) {
+    console.log('Nothing to do: every non-anonymous user already has a member row.');
+    process.exit(0);
+  }
+
+  console.log(`Found ${missing.length} non-anonymous user(s) with no auth_member row:`);
+  const plan = missing.map((u) => ({
+    user: u,
+    memberRole: mapUserRoleToMemberRole(u.role),
+  }));
+  for (const { user: u, memberRole } of plan) {
+    console.log(
+      `  ${u.id}  ${u.email.padEnd(36)}  auth_user.role=${String(u.role).padEnd(16)}  -> auth_member.role=${memberRole}`
+    );
+  }
+  console.log('');
+
+  if (!args.apply) {
+    console.log('Dry run complete. Re-run with --apply to commit.');
+    process.exit(0);
+  }
+
+  let inserted = 0;
+  let userRoleUpdates = 0;
+  let skipped = 0;
+  const failures: { userId: string; email: string; error: string }[] = [];
+
+  for (const { user: u, memberRole } of plan) {
+    try {
+      // Re-check immediately before the insert in case another path created the
+      // member row between the SELECT above and this loop iteration. The unique
+      // index on (organization_id, user_id) would catch it anyway, but this
+      // gives a clearer log line for the common case.
+      const existingRows = await db
+        .select({ id: member.id })
+        .from(member)
+        .where(sql`${member.userId} = ${u.id} AND ${member.organizationId} = ${org.id}`)
+        .limit(1);
+      if (existingRows.length > 0) {
+        console.log(`  skip ${u.id}  ${u.email}  (member row already exists)`);
+        skipped++;
+        continue;
+      }
+
+      await db.transaction(async (tx) => {
+        // Match the better-auth ID format used elsewhere in auth_member:
+        // 32-char alphanumeric, generated by @better-auth/core's generateId.
+        const memberId = generateId(32);
+        await tx.insert(member).values({
+          id: memberId,
+          userId: u.id,
+          organizationId: org.id,
+          role: memberRole,
+          createdAt: new Date(),
+        });
+
+        // Mirror the afterAddMember hook in auth.definition.ts:
+        // sync global user.role -> 'admin' for stationManager/admin/owner.
+        if (ADMIN_SYNC_ROLES.has(memberRole) && u.role !== 'admin') {
+          await tx.update(user).set({ role: 'admin' }).where(eq(user.id, u.id));
+          userRoleUpdates++;
+        }
+      });
+
+      console.log(`  ok   ${u.id}  ${u.email}  -> ${memberRole}`);
+      inserted++;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push({ userId: u.id, email: u.email, error: message });
+      console.error(`  FAIL ${u.id}  ${u.email}  ${message}`);
+    }
+  }
+
+  console.log('');
+  console.log(`Inserted member rows:     ${inserted}`);
+  console.log(`User.role -> admin syncs: ${userRoleUpdates}`);
+  console.log(`Skipped (already exist):  ${skipped}`);
+  console.log(`Failed:                   ${failures.length}`);
+  if (failures.length > 0) {
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+main().catch((error) => {
+  console.error('Fatal error:', error);
+  process.exit(1);
+});
