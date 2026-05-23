@@ -127,7 +127,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           add_time: entry.startTime ? new Date(entry.startTime) : new Date(),
         })
         .onConflictDoNothing()
-        .returning({ id: flowsheet.id });
+        .returning({ id: flowsheet.id, album_id: flowsheet.album_id });
 
       let upsertedRow = inserted[0];
       const created = !!upsertedRow;
@@ -150,7 +150,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
             entry_type: entryType,
           })
           .where(eq(flowsheet.legacy_entry_id, entry.id))
-          .returning({ id: flowsheet.id });
+          .returning({ id: flowsheet.id, album_id: flowsheet.album_id });
         upsertedRow = updated[0];
       }
 
@@ -160,10 +160,13 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // tubafrenzy retries don't trigger LML re-fetch + 10-column rewrite +
       // CDC/index churn on every duplicate webhook delivery. The historical
       // drain at jobs/flowsheet-metadata-backfill/ is the safety net for
-      // rows whose first INSERT enrichment returned null.
+      // rows whose first INSERT enrichment returned null. Passing `albumId`
+      // when the row is library-linked routes D3's in-process writer through
+      // the linked-row branch that UPSERTs `album_metadata` (BS#1028).
       if (created && upsertedRow && entryType === 'track' && artistName) {
         fireAndForgetMetadataForRow({
           flowsheetId: upsertedRow.id,
+          albumId: upsertedRow.album_id ?? undefined,
           artistName,
           albumTitle,
           trackTitle,

@@ -225,10 +225,13 @@ describe('POST /internal/flowsheet-webhook', () => {
 
   it('fires metadata enrichment on fresh INSERT (RETURNING returns one row)', async () => {
     // Replaces the xmax = 0 trick (BS#909). The INSERT ... ON CONFLICT DO
-    // NOTHING RETURNING { id } either returns one row (we won the insert
-    // race and the row is fresh) or an empty array (someone else inserted
-    // first; we should UPDATE without firing enrichment).
-    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+    // NOTHING RETURNING { id, album_id } either returns one row (we won the
+    // insert race and the row is fresh) or an empty array (someone else
+    // inserted first; we should UPDATE without firing enrichment). When the
+    // inserted row's album_id is non-null, it MUST be passed through so D3's
+    // in-process writer takes the linked-row branch and UPSERTs
+    // album_metadata (BS#1028).
+    mockReturning.mockResolvedValueOnce([{ id: 5555, album_id: 7777 }]);
 
     const res = await request(app)
       .post('/internal/flowsheet-webhook')
@@ -238,6 +241,29 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(res.status).toBe(200);
     expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
       flowsheetId: 5555,
+      albumId: 7777,
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+      trackTitle: 'VI Scose Poise',
+    });
+  });
+
+  it('passes albumId: undefined when the inserted row has a null album_id', async () => {
+    // Unlinked rows (no library match) come back from RETURNING with
+    // album_id: null. The webhook handler must translate that to
+    // `albumId: undefined` so D3's writer routes through the unlinked-inline
+    // branch (BS#1028).
+    mockReturning.mockResolvedValueOnce([{ id: 5556, album_id: null }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry });
+
+    expect(res.status).toBe(200);
+    expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
+      flowsheetId: 5556,
+      albumId: undefined,
       artistName: 'Autechre',
       albumTitle: 'Confield',
       trackTitle: 'VI Scose Poise',
