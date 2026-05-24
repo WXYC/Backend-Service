@@ -65,16 +65,17 @@ docker start flowsheet-metadata-backfill-cron
 
 ## Env knobs
 
-| Variable                                    | Default            | Meaning                                                 |
-| ------------------------------------------- | ------------------ | ------------------------------------------------------- |
-| `BACKFILL_BULK_BATCH_SIZE`                  | `50`               | Items per LML bulk request. LML caps at 100.            |
-| `BACKFILL_BULK_RATE_PER_MIN`                | `1`                | Batches per minute. 1/min ≈ 50 items/min sustained.     |
-| `BACKFILL_BULK_BUDGET_MS`                   | `25000`            | Forwarded to LML as `X-Caller-Budget-Ms`.               |
-| `ALBUM_LEVEL_BACKFILL_POST_PASS_TIMEOUT_MS` | `14400000` (4h)    | `SET LOCAL statement_timeout` for the post-pass UPDATE. |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`            | `300`              | Cooperative-pause lookback window; `0` disables.        |
-| `LIBRARY_METADATA_URL`                      | (required)         | LML base URL.                                           |
-| `LML_API_KEY`                               | (required in prod) | LML bearer token.                                       |
-| `DATABASE_URL`                              | (required)         | Postgres connection string.                             |
+| Variable                                    | Default            | Meaning                                                                                |
+| ------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------- |
+| `BACKFILL_BULK_BATCH_SIZE`                  | `50`               | Items per LML bulk request. LML caps at 100.                                           |
+| `BACKFILL_BULK_RATE_PER_MIN`                | `1`                | Batches per minute. 1/min ≈ 50 items/min sustained.                                    |
+| `BACKFILL_BULK_BUDGET_MS`                   | `25000`            | Forwarded to LML as `X-Caller-Budget-Ms`.                                              |
+| `ALBUM_LEVEL_BACKFILL_POST_PASS_TIMEOUT_MS` | `14400000` (4h)    | `SET LOCAL statement_timeout` for the post-pass UPDATE.                                |
+| `ALBUM_LEVEL_BACKFILL_READ_TIMEOUT_MS`      | `300000` (5min)    | `SET LOCAL statement_timeout` for the enumerate scan + per-batch resolveAlbums lookup. |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`            | `300`              | Cooperative-pause lookback window; `0` disables.                                       |
+| `LIBRARY_METADATA_URL`                      | (required)         | LML base URL.                                                                          |
+| `LML_API_KEY`                               | (required in prod) | LML bearer token.                                                                      |
+| `DATABASE_URL`                              | (required)         | Postgres connection string.                                                            |
 
 ## Acceptance verification
 

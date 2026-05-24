@@ -44,6 +44,7 @@ import {
   BULK_BUDGET_MS_DEFAULT,
   POST_PASS_TIMEOUT_DEFAULT,
   POST_PASS_TIMEOUT_ENV,
+  READ_TIMEOUT_DEFAULT,
   LIVE_ACTIVITY_LOOKBACK_DEFAULT,
   LIVE_ACTIVITY_LOOKBACK_ENV,
   type ResolvedAlbum,
@@ -156,9 +157,10 @@ describe('enumeratePendingAlbumIds', () => {
 
     await enumeratePendingAlbumIds();
 
-    const call = (db.execute as jest.Mock).mock.calls[0];
+    // First mock call is `SET LOCAL statement_timeout`, second is the SELECT.
+    const call = findExecuteCallMatching(/SELECT\s+DISTINCT\s+"?album_id"?/i);
+    expect(call).toBeDefined();
     const text = renderSql(call?.[0]);
-    expect(text).toMatch(/SELECT\s+DISTINCT\s+"?album_id"?/i);
     expect(text).toMatch(/FROM\s+"?wxyc_schema"?\."?flowsheet"?/i);
     expect(text).toMatch(/"?entry_type"?\s*=\s*'track'/i);
     expect(text).toMatch(/"?artist_name"?\s+IS\s+NOT\s+NULL/i);
@@ -174,6 +176,17 @@ describe('enumeratePendingAlbumIds', () => {
 
     expect(ids).toEqual([101, 202]);
   });
+
+  it('wraps the SELECT in a transaction + SET LOCAL statement_timeout (BS#1041 dry-run regression)', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+
+    await enumeratePendingAlbumIds(123_456);
+
+    expect((db.transaction as jest.Mock).mock.calls.length).toBe(1);
+    const setLocalCall = findExecuteCallMatching(/SET\s+LOCAL\s+statement_timeout/i);
+    expect(setLocalCall).toBeDefined();
+    expect(renderSql(setLocalCall?.[0])).toMatch(/123456ms/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -185,6 +198,7 @@ describe('resolveAlbums', () => {
     const out = await resolveAlbums([]);
     expect(out).toEqual([]);
     expect(db.execute as jest.Mock).not.toHaveBeenCalled();
+    expect(db.transaction as jest.Mock).not.toHaveBeenCalled();
   });
 
   it('joins library + artists with COALESCE on artist_name and filters out null title', async () => {
@@ -192,12 +206,24 @@ describe('resolveAlbums', () => {
 
     await resolveAlbums([1]);
 
-    const text = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
-    expect(text).toMatch(/FROM\s+"?wxyc_schema"?\."?library"?/i);
+    const call = findExecuteCallMatching(/FROM\s+"?wxyc_schema"?\."?library"?/i);
+    expect(call).toBeDefined();
+    const text = renderSql(call?.[0]);
     expect(text).toMatch(/LEFT\s+JOIN\s+"?wxyc_schema"?\."?artists"?/i);
     expect(text).toMatch(/COALESCE\s*\(\s*a\."?artist_name"?\s*,\s*l\."?artist_name"?\s*\)/i);
     expect(text).toMatch(/l\."?title"?\s+IS\s+NOT\s+NULL/i);
     expect(text).toMatch(/=\s*ANY\(/i);
+  });
+
+  it('wraps the SELECT in a transaction + SET LOCAL statement_timeout (BS#1041 dry-run regression)', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+
+    await resolveAlbums([1], 90_000);
+
+    expect((db.transaction as jest.Mock).mock.calls.length).toBe(1);
+    const setLocalCall = findExecuteCallMatching(/SET\s+LOCAL\s+statement_timeout/i);
+    expect(setLocalCall).toBeDefined();
+    expect(renderSql(setLocalCall?.[0])).toMatch(/90000ms/);
   });
 });
 
@@ -479,7 +505,13 @@ describe('runBatch', () => {
   });
 
   it('short-circuits when resolveAlbums returns an empty set (e.g. orphaned album_ids)', async () => {
-    (db.execute as jest.Mock).mockResolvedValueOnce([]); // resolveAlbums → []
+    // resolveAlbums wraps in tx: tx.execute(SET LOCAL) then tx.execute(SELECT).
+    // We need both calls to resolve to [] so the second (the SELECT result)
+    // makes resolveAlbums return empty.
+    (db.execute as jest.Mock)
+      .mockReset()
+      .mockResolvedValueOnce([]) // SET LOCAL
+      .mockResolvedValueOnce([]); // SELECT
     const out = await runBatch([99999], { budgetMs: 25000, dryRun: false });
     expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
     expect(out).toMatchObject({ batchSize: 0, match: 0 });
@@ -502,6 +534,7 @@ describe('resolveOptions', () => {
     expect(opts.ratePerMin).toBe(BULK_RATE_PER_MIN_DEFAULT);
     expect(opts.budgetMs).toBe(BULK_BUDGET_MS_DEFAULT);
     expect(opts.postPassTimeoutMs).toBe(POST_PASS_TIMEOUT_DEFAULT);
+    expect(opts.readTimeoutMs).toBe(READ_TIMEOUT_DEFAULT);
     expect(opts.liveActivityLookbackSeconds).toBe(LIVE_ACTIVITY_LOOKBACK_DEFAULT);
     expect(opts.dryRun).toBe(false);
   });
@@ -542,6 +575,7 @@ const baseOptions = (over: Partial<BackfillOptions> = {}): BackfillOptions => ({
   ratePerMin: 600, // pacing sleep = 100ms; test inserts artificial timing
   budgetMs: 25000,
   postPassTimeoutMs: 60_000,
+  readTimeoutMs: 300_000,
   liveActivityLookbackSeconds: 0, // disable pause for tests
   liveActivityPauseMs: 1,
   dryRun: false,
@@ -549,8 +583,16 @@ const baseOptions = (over: Partial<BackfillOptions> = {}): BackfillOptions => ({
 });
 
 describe('runBackfill', () => {
+  // Each statement-timeout-wrapped function (enumerate, resolveAlbums,
+  // post-pass UPDATE) costs 2 mock values: one for `SET LOCAL` and one for
+  // the body SELECT/UPDATE. These helpers keep the queue declarations
+  // readable.
+  const wrappedSelect = (rows: unknown[]): [unknown, unknown] => [{}, rows];
+
   it('dry-run only enumerates and logs the planned batch count; no LML calls, no writes', async () => {
-    (db.execute as jest.Mock).mockResolvedValueOnce([1, 2, 3, 4, 5].map((album_id) => ({ album_id })));
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce([1, 2, 3, 4, 5].map((album_id) => ({ album_id })));
 
     const summary = await runBackfill(baseOptions({ dryRun: true, batchSize: 2 }));
 
@@ -568,20 +610,22 @@ describe('runBackfill', () => {
   });
 
   it('chunks the enumerated album_ids by batchSize', async () => {
-    // First execute = enumerate → 5 ids.
-    // Subsequent execute calls = resolveAlbums returning the same shape each.
+    // Queue: enumerate (SET LOCAL + SELECT) → 3× resolveAlbums (SET LOCAL +
+    // SELECT each) → post-pass (SET LOCAL + UPDATE).
     const resolved = [
       { album_id: 1, artist_name: 'A', album_title: 'X' },
       { album_id: 2, artist_name: 'B', album_title: 'Y' },
     ];
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce([1, 2, 3, 4, 5].map((album_id) => ({ album_id })))
-      // 3 resolves (3 batches), then post-pass calls (SET LOCAL + UPDATE)
-      .mockResolvedValueOnce(resolved)
-      .mockResolvedValueOnce(resolved)
-      .mockResolvedValueOnce(resolved)
-      .mockResolvedValueOnce({}) // SET LOCAL
-      .mockResolvedValueOnce([{ flipped: 0 }]);
+    const mock = db.execute as jest.Mock;
+    for (const v of [
+      ...wrappedSelect([1, 2, 3, 4, 5].map((album_id) => ({ album_id }))),
+      ...wrappedSelect(resolved),
+      ...wrappedSelect(resolved),
+      ...wrappedSelect(resolved),
+      ...wrappedSelect([{ flipped: 0 }]),
+    ]) {
+      mock.mockResolvedValueOnce(v);
+    }
 
     mockBulkLookupMetadata.mockResolvedValue({
       results: [
@@ -598,11 +642,14 @@ describe('runBackfill', () => {
 
   it('runs the post-pass UPDATE after the bulk pass and reports the flipped count', async () => {
     const resolved = [{ album_id: 1, artist_name: 'A', album_title: 'X' }];
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce([{ album_id: 1 }]) // enumerate
-      .mockResolvedValueOnce(resolved) // resolveAlbums
-      .mockResolvedValueOnce({}) // SET LOCAL
-      .mockResolvedValueOnce([{ flipped: 1234 }]); // post-pass UPDATE returning count
+    const mock = db.execute as jest.Mock;
+    for (const v of [
+      ...wrappedSelect([{ album_id: 1 }]),
+      ...wrappedSelect(resolved),
+      ...wrappedSelect([{ flipped: 1234 }]),
+    ]) {
+      mock.mockResolvedValueOnce(v);
+    }
 
     mockBulkLookupMetadata.mockResolvedValue({
       results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
@@ -611,17 +658,20 @@ describe('runBackfill', () => {
     const summary = await runBackfill(baseOptions({ batchSize: 1 }));
 
     expect(summary.flipped).toBe(1234);
-    // Transaction was opened for the post-pass UPDATE.
-    expect((db.transaction as jest.Mock).mock.calls.length).toBe(1);
+    // enumerate + resolveAlbums + post-pass each open a transaction.
+    expect((db.transaction as jest.Mock).mock.calls.length).toBe(3);
   });
 
   it('skips ANALYZE when no UPSERTs landed (avoid pointless table-wide stats refresh)', async () => {
     const resolved = [{ album_id: 1, artist_name: 'A', album_title: 'X' }];
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce([{ album_id: 1 }])
-      .mockResolvedValueOnce(resolved)
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce([{ flipped: 0 }]);
+    const mock = db.execute as jest.Mock;
+    for (const v of [
+      ...wrappedSelect([{ album_id: 1 }]),
+      ...wrappedSelect(resolved),
+      ...wrappedSelect([{ flipped: 0 }]),
+    ]) {
+      mock.mockResolvedValueOnce(v);
+    }
     mockBulkLookupMetadata.mockResolvedValue({
       results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
     });
@@ -634,12 +684,15 @@ describe('runBackfill', () => {
 
   it('runs ANALYZE when any UPSERT landed', async () => {
     const resolved = [{ album_id: 1, artist_name: 'A', album_title: 'X' }];
-    (db.execute as jest.Mock)
-      .mockResolvedValueOnce([{ album_id: 1 }])
-      .mockResolvedValueOnce(resolved)
-      .mockResolvedValueOnce({}) // ANALYZE
-      .mockResolvedValueOnce({}) // SET LOCAL
-      .mockResolvedValueOnce([{ flipped: 1 }]);
+    const mock = db.execute as jest.Mock;
+    for (const v of [
+      ...wrappedSelect([{ album_id: 1 }]),
+      ...wrappedSelect(resolved),
+      {}, // ANALYZE (not tx-wrapped)
+      ...wrappedSelect([{ flipped: 1 }]),
+    ]) {
+      mock.mockResolvedValueOnce(v);
+    }
     mockBulkLookupMetadata.mockResolvedValue({
       results: [{ index: 0, status: 'match', lookup: lookupWithArtwork() }],
     });

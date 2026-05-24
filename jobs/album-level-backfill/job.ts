@@ -67,6 +67,17 @@ export const BULK_BUDGET_MS_DEFAULT = 25_000;
 export const POST_PASS_TIMEOUT_ENV = 'ALBUM_LEVEL_BACKFILL_POST_PASS_TIMEOUT_MS';
 export const POST_PASS_TIMEOUT_DEFAULT = 4 * 60 * 60 * 1000;
 
+/** Statement timeout for the enumerate scan + the per-batch resolveAlbums
+ * lookup. The partial index `idx_flowsheet_metadata_drain` covers the
+ * `metadata_attempt_at IS NULL` partition; our predicate filters on
+ * `metadata_status = 'pending'` which isn't covered today, so the planner
+ * falls back to a seq scan + sort that exceeds the backend's default 5s
+ * (verified empirically on the 2026-05-24 prod dry-run). 5min covers
+ * observed runtime with comfortable margin. Mirrors
+ * `album-metadata-backfill#verifyComplete`. */
+export const READ_TIMEOUT_ENV = 'ALBUM_LEVEL_BACKFILL_READ_TIMEOUT_MS';
+export const READ_TIMEOUT_DEFAULT = 5 * 60 * 1000;
+
 /** Cooperative-pause lookback window. If the most recent flowsheet track
  * was added within this many seconds, defer. Default 300s (5 min) is
  * stricter than the per-row cron's 60s — this job's post-pass UPDATE
@@ -126,18 +137,30 @@ export const filterSpacerGif = (url: string | null | undefined): string | null =
 
 /** SELECT DISTINCT album_id of every pending track row with a non-null
  * album_id. The 35,692-uniques figure in the BS#1041 description is from
- * this query post-2026-05-23. */
-export const enumeratePendingAlbumIds = async (): Promise<number[]> => {
-  const rows = (await db.execute(sql`
-    SELECT DISTINCT "album_id"
-    FROM "wxyc_schema"."flowsheet"
-    WHERE "entry_type" = 'track'
-      AND "artist_name" IS NOT NULL
-      AND "metadata_status" = 'pending'
-      AND "album_id" IS NOT NULL
-    ORDER BY "album_id"
-  `)) as unknown as Array<{ album_id: number }>;
-  return rows.map((r) => Number(r.album_id));
+ * this query post-2026-05-23.
+ *
+ * Wrapped in `db.transaction` + `SET LOCAL statement_timeout` because the
+ * `metadata_status = 'pending'` predicate isn't covered by the partial
+ * index `idx_flowsheet_metadata_drain` (which covers
+ * `metadata_attempt_at IS NULL`); the planner falls back to a seq scan +
+ * sort that exceeds the backend's default 5s `statement_timeout`. `SET
+ * LOCAL` only scopes inside an explicit transaction with the postgres-js
+ * driver (auto-commits per execute otherwise). Mirrors
+ * `album-metadata-backfill#verifyComplete`. */
+export const enumeratePendingAlbumIds = async (timeoutMs: number = READ_TIMEOUT_DEFAULT): Promise<number[]> => {
+  return await db.transaction(async (tx) => {
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${timeoutMs}ms'`));
+    const rows = (await tx.execute(sql`
+      SELECT DISTINCT "album_id"
+      FROM "wxyc_schema"."flowsheet"
+      WHERE "entry_type" = 'track'
+        AND "artist_name" IS NOT NULL
+        AND "metadata_status" = 'pending'
+        AND "album_id" IS NOT NULL
+      ORDER BY "album_id"
+    `)) as unknown as Array<{ album_id: number }>;
+    return rows.map((r) => Number(r.album_id));
+  });
 };
 
 export interface ResolvedAlbum {
@@ -150,25 +173,34 @@ export interface ResolvedAlbum {
  * V/A and legacy rows where the `artists` join misses; rows whose final
  * artist_name or album_title is null are dropped (the post-pass UPDATE
  * will leave their flowsheet rows pending; the per-row drain cron will
- * re-attempt). */
-export const resolveAlbums = async (albumIds: number[]): Promise<ResolvedAlbum[]> => {
+ * re-attempt). Same statement-timeout wrapper as `enumeratePendingAlbumIds`
+ * — the `library` table is PK-lookup-shaped via `= ANY($1)` but the
+ * `artists` LEFT JOIN can be slow if the artist row count grows; the
+ * timeout caps the worst case. */
+export const resolveAlbums = async (
+  albumIds: number[],
+  timeoutMs: number = READ_TIMEOUT_DEFAULT
+): Promise<ResolvedAlbum[]> => {
   if (albumIds.length === 0) return [];
-  const rows = (await db.execute(sql`
-    SELECT
-      l."id" AS album_id,
-      COALESCE(a."artist_name", l."artist_name") AS artist_name,
-      l."title" AS album_title
-    FROM "wxyc_schema"."library" l
-    LEFT JOIN "wxyc_schema"."artists" a ON l."artist_id" = a."id"
-    WHERE l."id" = ANY(${albumIds}::int[])
-      AND COALESCE(a."artist_name", l."artist_name") IS NOT NULL
-      AND l."title" IS NOT NULL
-  `)) as unknown as Array<{ album_id: number; artist_name: string; album_title: string }>;
-  return rows.map((r) => ({
-    album_id: Number(r.album_id),
-    artist_name: String(r.artist_name),
-    album_title: String(r.album_title),
-  }));
+  return await db.transaction(async (tx) => {
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${timeoutMs}ms'`));
+    const rows = (await tx.execute(sql`
+      SELECT
+        l."id" AS album_id,
+        COALESCE(a."artist_name", l."artist_name") AS artist_name,
+        l."title" AS album_title
+      FROM "wxyc_schema"."library" l
+      LEFT JOIN "wxyc_schema"."artists" a ON l."artist_id" = a."id"
+      WHERE l."id" = ANY(${albumIds}::int[])
+        AND COALESCE(a."artist_name", l."artist_name") IS NOT NULL
+        AND l."title" IS NOT NULL
+    `)) as unknown as Array<{ album_id: number; artist_name: string; album_title: string }>;
+    return rows.map((r) => ({
+      album_id: Number(r.album_id),
+      artist_name: String(r.artist_name),
+      album_title: String(r.album_title),
+    }));
+  });
 };
 
 /** Map ResolvedAlbum into the per-item shape LML's bulk endpoint expects. */
@@ -318,9 +350,9 @@ export interface BatchResult {
  * cron will retry it on its next sweep. */
 export const runBatch = async (
   albumIds: number[],
-  options: { budgetMs: number; dryRun: boolean }
+  options: { budgetMs: number; dryRun: boolean; readTimeoutMs?: number }
 ): Promise<BatchResult> => {
-  const resolved = await resolveAlbums(albumIds);
+  const resolved = await resolveAlbums(albumIds, options.readTimeoutMs ?? READ_TIMEOUT_DEFAULT);
   const items = buildBulkItems(resolved);
 
   if (options.dryRun) {
@@ -378,6 +410,7 @@ export interface BackfillOptions {
   ratePerMin: number;
   budgetMs: number;
   postPassTimeoutMs: number;
+  readTimeoutMs: number;
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
   dryRun: boolean;
@@ -392,6 +425,7 @@ export const resolveOptions = (
     ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT),
     budgetMs: requirePositiveInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT),
     postPassTimeoutMs: requirePositiveInt(env[POST_PASS_TIMEOUT_ENV], POST_PASS_TIMEOUT_ENV, POST_PASS_TIMEOUT_DEFAULT),
+    readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT),
     liveActivityLookbackSeconds: requireNonNegativeInt(
       env[LIVE_ACTIVITY_LOOKBACK_ENV],
       LIVE_ACTIVITY_LOOKBACK_ENV,
@@ -413,7 +447,7 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
     `[${JOB_NAME}] start batchSize=${options.batchSize} ratePerMin=${options.ratePerMin} budgetMs=${options.budgetMs} dryRun=${options.dryRun}`
   );
 
-  const albumIds = await enumeratePendingAlbumIds();
+  const albumIds = await enumeratePendingAlbumIds(options.readTimeoutMs);
   console.log(`[${JOB_NAME}] enumerated scanned=${albumIds.length} unique album_ids`);
 
   if (options.dryRun) {
@@ -442,7 +476,11 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
     await awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs);
 
     const t0 = Date.now();
-    const result = await runBatch(batches[i], { budgetMs: options.budgetMs, dryRun: false });
+    const result = await runBatch(batches[i], {
+      budgetMs: options.budgetMs,
+      dryRun: false,
+      readTimeoutMs: options.readTimeoutMs,
+    });
     const elapsedMs = Date.now() - t0;
 
     totalMatch += result.match;
