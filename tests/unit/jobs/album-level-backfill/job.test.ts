@@ -204,7 +204,7 @@ describe('resolveAlbums', () => {
   it('joins library + artists with COALESCE on artist_name; selects album_title from library', async () => {
     (db.execute as jest.Mock).mockResolvedValue([{ album_id: 1, artist_name: 'Juana Molina', album_title: 'DOGA' }]);
 
-    await resolveAlbums([1]);
+    await resolveAlbums([1, 2, 3]);
 
     const call = findExecuteCallMatching(/FROM\s+"?wxyc_schema"?\."?library"?/i);
     expect(call).toBeDefined();
@@ -221,6 +221,19 @@ describe('resolveAlbums', () => {
     // not yet complete); without this filter, `String(null)` would produce
     // the literal `"null"` and we'd POST it to LML as the artist.
     expect(text).toMatch(/COALESCE\s*\(\s*a\."?artist_name"?\s*,\s*l\."?artist_name"?\s*\)\s+IS\s+NOT\s+NULL/i);
+
+    // BS#1068 regression pin: bind ids as a single PG-array-literal
+    // string (`'{1,2,3}'::int[]`), not as a splat tuple. The 2026-05-24
+    // prod canary failed with `cannot cast type record to integer[]`
+    // when the original SQL used `ANY(${albumIds}::int[])` and Drizzle
+    // expanded the primitive array into N positional placeholders.
+    // postgres-js's sql tag exposes bound params via `.values`.
+    const values = (call?.[0] as { values?: unknown[] } | undefined)?.values ?? [];
+    expect(values).toContain('{1,2,3}');
+    // Anti-assert the broken shape: no individual numeric param values from a splat.
+    expect(values).not.toContain(1);
+    expect(values).not.toContain(2);
+    expect(values).not.toContain(3);
   });
 
   it('wraps the SELECT in a transaction + SET LOCAL statement_timeout (BS#1041 dry-run regression)', async () => {
