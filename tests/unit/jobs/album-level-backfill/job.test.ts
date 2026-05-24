@@ -222,18 +222,18 @@ describe('resolveAlbums', () => {
     // the literal `"null"` and we'd POST it to LML as the artist.
     expect(text).toMatch(/COALESCE\s*\(\s*a\."?artist_name"?\s*,\s*l\."?artist_name"?\s*\)\s+IS\s+NOT\s+NULL/i);
 
-    // BS#1068 regression pin: bind ids as a single PG-array-literal
-    // string (`'{1,2,3}'::int[]`), not as a splat tuple. The 2026-05-24
-    // prod canary failed with `cannot cast type record to integer[]`
-    // when the original SQL used `ANY(${albumIds}::int[])` and Drizzle
-    // expanded the primitive array into N positional placeholders.
-    // postgres-js's sql tag exposes bound params via `.values`.
-    const values = (call?.[0] as { values?: unknown[] } | undefined)?.values ?? [];
-    expect(values).toContain('{1,2,3}');
-    // Anti-assert the broken shape: no individual numeric param values from a splat.
-    expect(values).not.toContain(1);
-    expect(values).not.toContain(2);
-    expect(values).not.toContain(3);
+    // BS#1068 regression pin: anti-assert the `::int[]` cast that
+    // triggered the prod canary's `cannot cast type record to integer[]`.
+    // Drizzle/postgres-js binds JS arrays natively; the explicit cast
+    // forces a text-protocol splat. Matches the safe-binding pattern in
+    // `shared/database/src/library-tiebreak.ts:47` (which has its own
+    // parameterization-pin test at `tests/unit/database/library-tiebreak.test.ts:128`).
+    expect(text).not.toMatch(/::int\[\]/i);
+    // Sanity: the IDs make it into the bound params (mirrors library-tiebreak's pin).
+    const serialized = JSON.stringify(call?.[0]);
+    expect(serialized).toContain('1');
+    expect(serialized).toContain('2');
+    expect(serialized).toContain('3');
   });
 
   it('wraps the SELECT in a transaction + SET LOCAL statement_timeout (BS#1041 dry-run regression)', async () => {
