@@ -96,26 +96,17 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       }
 
       const entryType = mapProdEntryType(entry.flowsheetEntryType ?? 0);
-      const showId = await resolveShowId(entry.radioShowId);
       const isMsgType = isMessageEntryType(entryType);
       const artistName = isMsgType ? null : truncate(entry.artistName, 128);
       const albumTitle = truncate(entry.releaseTitle, 128);
       const trackTitle = truncate(entry.songTitle, 128);
 
-      // Resolve tubafrenzy's libraryReleaseId to a Backend-Service album_id at
-      // INSERT time. The payload always carries this field (BackendServiceWebhookClient
-      // .buildPayload at tubafrenzy/libs/core/src/main/java/org/wxyc/flowsheet/
-      // BackendServiceWebhookClient.java); the BS handler used to ignore it,
-      // so tubafrenzy-driven rows arrived with album_id NULL and were linked
-      // later by jobs/flowsheet-etl's resolveAlbumIds (30-min cadence). That
-      // window was wide enough for D3's in-process writer to take the unlinked
-      // branch and write inline metadata that never reached album_metadata
-      // (BS#1028). Resolving here closes the window: enrichment fires in the
-      // same request as the link, so D3's linked branch UPSERTs album_metadata.
-      //
-      // Mirrors the sibling rotation-webhook resolution at line ~298.
+      // Resolve linkage at INSERT so enrichment fires with album_id already
+      // set; without this, D3's writer takes the unlinked branch and writes
+      // inline metadata that never reaches album_metadata until the next
+      // flowsheet-etl cycle (#1028).
       const rawLibraryId = entry.libraryReleaseId ?? 0;
-      const albumId = await resolveAlbumId(rawLibraryId);
+      const [showId, albumId] = await Promise.all([resolveShowId(entry.radioShowId), resolveAlbumId(rawLibraryId)]);
 
       // INSERT ... ON CONFLICT DO NOTHING RETURNING { id }: either we win
       // the insert and PG hands back exactly one row, or a concurrent
@@ -178,11 +169,6 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // CDC/index churn on every duplicate webhook delivery. The historical
       // drain at jobs/flowsheet-metadata-backfill/ is the safety net for
       // rows whose first INSERT enrichment returned null.
-      //
-      // `albumId` comes from the libraryReleaseId resolution above. When set,
-      // D3's writer (apps/backend/services/metadata/enrichment.service.ts)
-      // takes the linked branch and UPSERTs album_metadata; when null, it
-      // writes inline (preserves free-form / unresolved-link behavior).
       if (created && upsertedRow && entryType === 'track' && artistName) {
         fireAndForgetMetadataForRow({
           flowsheetId: upsertedRow.id,
