@@ -75,8 +75,6 @@ const EXPECTED_ONLY_IN_COMPOSE = [
   // Why: rate-limit gating. Compose exposes `TEST_RATE_LIMITING` so the
   // `ci:env:full` script can flip the cap on and exercise the rate-limit
   // middleware; the workflow doesn't run that variant.
-  'RATE_LIMIT_REGISTRATION_MAX',
-  'RATE_LIMIT_REGISTRATION_WINDOW_MS',
   'RATE_LIMIT_REQUEST_MAX',
   'RATE_LIMIT_REQUEST_WINDOW_MS',
   'SIMULATE_SLACK_FAILURE',

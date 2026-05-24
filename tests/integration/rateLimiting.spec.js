@@ -7,16 +7,12 @@
  *
  * Environment variables for testing:
  *   TEST_RATE_LIMITING=true
- *   RATE_LIMIT_REGISTRATION_WINDOW_MS=2000   (2 seconds)
- *   RATE_LIMIT_REGISTRATION_MAX=3
  *   RATE_LIMIT_REQUEST_WINDOW_MS=2000        (2 seconds)
  *   RATE_LIMIT_REQUEST_MAX=3
  *
  * Run with:
  *   TEST_RATE_LIMITING=true \
- *   RATE_LIMIT_REGISTRATION_MAX=3 \
  *   RATE_LIMIT_REQUEST_MAX=3 \
- *   RATE_LIMIT_REGISTRATION_WINDOW_MS=2000 \
  *   RATE_LIMIT_REQUEST_WINDOW_MS=2000 \
  *   npm test -- --testPathPattern=rateLimiting
  */
@@ -42,34 +38,8 @@ const waitForWindowReset = (windowMs = 2000) => {
 
 describeOrSkip('Rate Limiting', () => {
   // Get configured limits from environment (with defaults matching test recommendations)
-  const REGISTRATION_MAX = parseInt(process.env.RATE_LIMIT_REGISTRATION_MAX || '3', 10);
   const REQUEST_MAX = parseInt(process.env.RATE_LIMIT_REQUEST_MAX || '3', 10);
   const WINDOW_MS = parseInt(process.env.RATE_LIMIT_REQUEST_WINDOW_MS || '2000', 10);
-
-  describe('Registration Rate Limiting (Legacy Endpoint)', () => {
-    it('should rate limit the legacy registration endpoint by IP', async () => {
-      // Wait for any previous window to reset
-      await waitForWindowReset(WINDOW_MS);
-
-      // Make requests up to the limit
-      const responses = [];
-      for (let i = 0; i < REGISTRATION_MAX; i++) {
-        const response = await request.post('/request/register').send({});
-        responses.push(response);
-      }
-
-      // All requests within limit should return 301 (deprecated redirect)
-      responses.forEach((response) => {
-        expect(response.status).toBe(301);
-      });
-
-      // Next request should be rate limited
-      const limitedResponse = await request.post('/request/register').send({});
-
-      expect(limitedResponse.status).toBe(429);
-      expect(limitedResponse.body.message).toMatch(/too many/i);
-    });
-  });
 
   describe('Song Request Rate Limiting', () => {
     it('should allow requests up to the limit per user', async () => {
