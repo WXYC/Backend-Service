@@ -20,7 +20,7 @@ const mockLimit = jest.fn();
 const mockDbChain = {
   select: mockSelect,
   from: mockFrom,
-  leftJoin: mockInnerJoin,
+  innerJoin: mockInnerJoin,
   where: mockWhere,
   groupBy: mockGroupBy,
   limit: mockLimit,
@@ -36,7 +36,7 @@ jest.mock('@wxyc/database', () => ({
   db: {
     select: (...args: unknown[]) => mockSelect(...args),
     from: (...args: unknown[]) => mockFrom(...args),
-    leftJoin: (...args: unknown[]) => mockInnerJoin(...args),
+    innerJoin: (...args: unknown[]) => mockInnerJoin(...args),
     where: (...args: unknown[]) => mockWhere(...args),
     groupBy: (...args: unknown[]) => mockGroupBy(...args),
     limit: (...args: unknown[]) => mockLimit(...args),
@@ -411,19 +411,18 @@ describe('playlist-proxy.service', () => {
     });
   });
 
-  describe('artwork query: dual-source COALESCE + partial-index alignment (regression for #511, BS#1042)', () => {
-    // The playlist-proxy reads `COALESCE(album_metadata.artwork_url,
-    // flowsheet.artwork_url)` over a LEFT JOIN during the Epic D transition
-    // (BS#1042). The WHERE filter on `f.artwork_url IS NOT NULL` aligns with
-    // the OLD partial index `flowsheet_artwork_lookup_idx` (migration 0057)
-    // so the lookup-key probe is an index scan, not a 2.6M-row seq scan
-    // (incident #511). Once album_metadata reaches parity (BS#1042) the
-    // INNER-JOIN-only shape can return and D4 (#900) can drop the column;
-    // until then, the COALESCE preserves pre-D5 artwork coverage.
+  describe('artwork query: partial-index alignment (regression for #511, BS#1012)', () => {
+    // The post-D5 partial functional index `flowsheet_album_link_lookup_idx`
+    // (migration 0081) only covers rows where `album_id IS NOT NULL`. The
+    // playlist-proxy queries an INNER JOIN of flowsheet ⨝ album_metadata,
+    // which drops `flowsheet.album_id IS NULL` rows naturally and therefore
+    // matches the partial-index predicate so the lookup_key probe is an
+    // index scan instead of a 2.6M-row seq scan (incident #511).
     //
-    // Source-grep is the right shape: the bug class is a *missing* clause
-    // in the SQL builder, which behavioural tests wouldn't catch when a
-    // future change adds a new query path without the join + filter.
+    // Source-grep over the deployed file is the right shape because the
+    // bug class is a *missing* clause in the SQL builder. A behavioural test
+    // wouldn't catch a future regression where someone adds a new query
+    // path without the join + filter; the source-grep does.
     const fs = jest.requireActual<typeof import('fs')>('fs');
     const path = jest.requireActual<typeof import('path')>('path');
 
@@ -444,34 +443,30 @@ describe('playlist-proxy.service', () => {
       expect(proxySource).toMatch(/\balbum_metadata\b/);
     });
 
-    it('defines a COALESCE(album_metadata.artwork_url, flowsheet.artwork_url) expression', () => {
-      // The dual-source read MUST prefer album_metadata over the legacy
-      // flowsheet column — argument order in COALESCE is the contract.
-      // Flipping it would inverse the preference and stale album_metadata
-      // values would be hidden behind fresher inline writes.
-      expect(proxySource).toMatch(
-        /coalesce\(\s*\$\{album_metadata\.artwork_url\}\s*,\s*\$\{flowsheet\.artwork_url\}\s*\)/i
-      );
-    });
-
-    it('every flowsheet artwork SELECT left-joins album_metadata on album_id and filters isNotNull(flowsheet.artwork_url)', () => {
-      // Find every chain that targets the flowsheetLookupKey-on-flowsheet
-      // pattern. Each must:
-      //  - LEFT JOIN album_metadata on album_id (preserves rows where the
-      //    new table has no entry yet — BS#1042 coverage)
-      //  - filter on isNotNull(flowsheet.artwork_url) so the planner uses
-      //    `flowsheet_artwork_lookup_idx` (migration 0057), not a seq scan
-      // Two call sites exist today (enrichPlaycuts, enrichSinglePlaycut);
-      // any future addition should match the same shape.
+    it('every flowsheet artwork SELECT inner-joins album_metadata on album_id and filters isNotNull(album_metadata.artwork_url)', () => {
+      // Find every WHERE that targets the flowsheetLookupKey-on-flowsheet
+      // pattern. Each must be paired with an `.innerJoin(album_metadata, ...)`
+      // upstream in the same chain and combined with
+      // `isNotNull(album_metadata.artwork_url)` so the partial index fires.
+      // Two call sites exist today (enrichPlaycuts, enrichSinglePlaycut); any
+      // future addition should match the same shape.
       const chains = proxySource.match(/db\s*\.\s*select[\s\S]*?\.\s*(?:groupBy|limit)\([\s\S]*?\)\s*;/g) ?? [];
       const artworkChains = chains.filter((c) => /flowsheetLookupKey/.test(c));
       expect(artworkChains.length).toBeGreaterThanOrEqual(2);
       for (const chain of artworkChains) {
         expect(chain).toMatch(
-          /\.leftJoin\(\s*album_metadata\s*,\s*eq\(\s*album_metadata\.album_id\s*,\s*flowsheet\.album_id\s*\)\s*\)/
+          /\.innerJoin\(\s*album_metadata\s*,\s*eq\(\s*album_metadata\.album_id\s*,\s*flowsheet\.album_id\s*\)\s*\)/
         );
-        expect(chain).toMatch(/isNotNull\s*\(\s*flowsheet\.artwork_url\s*\)/);
+        expect(chain).toMatch(/isNotNull\s*\(\s*album_metadata\.artwork_url\s*\)/);
       }
+    });
+
+    it('does not read flowsheet.artwork_url (D4 column-drop safety)', () => {
+      // BS#1012 / D5 cut the proxy off `flowsheet.artwork_url` so D4 (#900)
+      // can drop the column. If someone re-adds a read of it, this test
+      // catches the regression at PR time before the next D4 attempt wedges
+      // on a missing column.
+      expect(proxySource).not.toMatch(/flowsheet\.artwork_url/);
     });
   });
 });
