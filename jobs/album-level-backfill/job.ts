@@ -190,16 +190,14 @@ export const resolveAlbums = async (
   timeoutMs: number = READ_TIMEOUT_DEFAULT
 ): Promise<ResolvedAlbum[]> => {
   if (albumIds.length === 0) return [];
-  // Bind as a single PG-array-literal string parameter (`'{1,2,3}'::int[]`)
-  // rather than interpolating `${albumIds}` directly. Drizzle's sql tag
-  // splats a primitive array into N positional placeholders — the result
-  // would be `ANY(($1, $2, …, $50)::int[])`, a tuple cast that PG rejects
-  // with `cannot cast type record to integer[]` (BS#1068, 2026-05-24 prod
-  // canary). Safe by construction: TypeScript types `albumIds: number[]`,
-  // so the join contains only numeric literals — no injection surface.
-  const idArrayLiteral = `{${albumIds.join(',')}}`;
   return await db.transaction(async (tx) => {
     await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${timeoutMs}ms'`));
+    // No `::int[]` cast on `${albumIds}` — postgres-js binds JS arrays
+    // natively to PG arrays, and the explicit cast forces a text-protocol
+    // splat (`ANY(($1, $2, …, $50)::int[])`) that PG rejects with
+    // `cannot cast type record to integer[]` (BS#1068, 2026-05-24 prod
+    // canary). Matches the pattern in `library-tiebreak.ts` and
+    // `flowsheet-etl/job.ts` that have run safely in prod for months.
     const rows = (await tx.execute(sql`
       SELECT
         l."id" AS album_id,
@@ -207,7 +205,7 @@ export const resolveAlbums = async (
         l."album_title" AS album_title
       FROM "wxyc_schema"."library" l
       LEFT JOIN "wxyc_schema"."artists" a ON l."artist_id" = a."id"
-      WHERE l."id" = ANY(${idArrayLiteral}::int[])
+      WHERE l."id" = ANY(${albumIds})
         AND COALESCE(a."artist_name", l."artist_name") IS NOT NULL
     `)) as unknown as Array<{ album_id: number; artist_name: string; album_title: string }>;
     return rows.map((r) => ({
