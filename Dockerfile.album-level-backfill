@@ -38,4 +38,11 @@ COPY --from=builder ./album-level-backfill-builder/shared/lml-client/dist ./shar
 # Identifies the connection in pg_stat_activity during incident triage.
 ENV DB_APPLICATION_NAME=wxyc-album-level-backfill
 
-CMD ["npm", "start", "--workspace=@wxyc/album-level-backfill"]
+# ENTRYPOINT + empty CMD so docker-level args (e.g. `--dry-run`) pass through
+# to the job rather than replacing the launcher. With `CMD ["npm", "start"]`,
+# `docker run <image> --dry-run` replaces the whole command and node tries to
+# parse `--dry-run` itself. ENTRYPOINT pins the launcher; any args after
+# `<image>` extend it. node resolves `@wxyc/database` etc. via the standard
+# walk up to /album-level-backfill/node_modules.
+ENTRYPOINT ["node", "/album-level-backfill/jobs/album-level-backfill/dist/job.js"]
+CMD []
