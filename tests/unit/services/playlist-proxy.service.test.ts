@@ -411,13 +411,13 @@ describe('playlist-proxy.service', () => {
     });
   });
 
-  describe('artwork query: dual-source COALESCE + partial-index alignment (regression for #511, BS#1038)', () => {
+  describe('artwork query: dual-source COALESCE + partial-index alignment (regression for #511, BS#1042)', () => {
     // The playlist-proxy reads `COALESCE(album_metadata.artwork_url,
     // flowsheet.artwork_url)` over a LEFT JOIN during the Epic D transition
-    // (BS#1038). The WHERE filter on `f.artwork_url IS NOT NULL` aligns with
+    // (BS#1042). The WHERE filter on `f.artwork_url IS NOT NULL` aligns with
     // the OLD partial index `flowsheet_artwork_lookup_idx` (migration 0057)
     // so the lookup-key probe is an index scan, not a 2.6M-row seq scan
-    // (incident #511). Once album_metadata reaches parity (BS#1038) the
+    // (incident #511). Once album_metadata reaches parity (BS#1042) the
     // INNER-JOIN-only shape can return and D4 (#900) can drop the column;
     // until then, the COALESCE preserves pre-D5 artwork coverage.
     //
@@ -458,7 +458,7 @@ describe('playlist-proxy.service', () => {
       // Find every chain that targets the flowsheetLookupKey-on-flowsheet
       // pattern. Each must:
       //  - LEFT JOIN album_metadata on album_id (preserves rows where the
-      //    new table has no entry yet — BS#1038 coverage)
+      //    new table has no entry yet — BS#1042 coverage)
       //  - filter on isNotNull(flowsheet.artwork_url) so the planner uses
       //    `flowsheet_artwork_lookup_idx` (migration 0057), not a seq scan
       // Two call sites exist today (enrichPlaycuts, enrichSinglePlaycut);
