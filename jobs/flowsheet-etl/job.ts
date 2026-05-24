@@ -338,6 +338,16 @@ export const runIncremental = async (): Promise<SyncResult> => {
           legacy_dj_name: sql`excluded.legacy_dj_name`,
           legacy_dj_id: sql`excluded.legacy_dj_id`,
         },
+        // Value-aware guard: skip the UPDATE when every set-column already
+        // matches the incoming excluded.* values. Lower volume than the
+        // flowsheet upsert below, but same dead-tuple amplification mechanic.
+        // See BS#1059 / #1058.
+        setWhere: sql`
+          ${shows.end_time} IS DISTINCT FROM excluded.end_time OR
+          ${shows.show_name} IS DISTINCT FROM excluded.show_name OR
+          ${shows.legacy_dj_name} IS DISTINCT FROM excluded.legacy_dj_name OR
+          ${shows.legacy_dj_id} IS DISTINCT FROM excluded.legacy_dj_id
+        `,
       });
     showsImported++;
   }
@@ -426,6 +436,26 @@ export const runIncremental = async (): Promise<SyncResult> => {
           show_id: sql`excluded.show_id`,
           play_order: sql`excluded.play_order`,
         },
+        // Value-aware guard: tubafrenzy bumps TIME_LAST_MODIFIED on adjacent
+        // rows during normal operation (flowsheet.mirror.ts close-prior-now-
+        // playing UPDATE), so most fetchLegacyEntries() rows arrive with
+        // identical display fields to what's already stored. Without this
+        // predicate every such row produced a dead tuple on every 30-min tick,
+        // defeating HOT (every set-list column is indexed) and exploding the
+        // index/heap ratio. See BS#1059 / #1058.
+        setWhere: sql`
+          ${flowsheet.artist_name} IS DISTINCT FROM excluded.artist_name OR
+          ${flowsheet.album_title} IS DISTINCT FROM excluded.album_title OR
+          ${flowsheet.track_title} IS DISTINCT FROM excluded.track_title OR
+          ${flowsheet.record_label} IS DISTINCT FROM excluded.record_label OR
+          ${flowsheet.message} IS DISTINCT FROM excluded.message OR
+          ${flowsheet.request_flag} IS DISTINCT FROM excluded.request_flag OR
+          ${flowsheet.segue} IS DISTINCT FROM excluded.segue OR
+          ${flowsheet.entry_type} IS DISTINCT FROM excluded.entry_type OR
+          ${flowsheet.add_time} IS DISTINCT FROM excluded.add_time OR
+          ${flowsheet.show_id} IS DISTINCT FROM excluded.show_id OR
+          ${flowsheet.play_order} IS DISTINCT FROM excluded.play_order
+        `,
       });
 
     if (existingIds.has(entry.id)) {
