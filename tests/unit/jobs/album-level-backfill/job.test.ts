@@ -540,6 +540,24 @@ describe('runBatch', () => {
     expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
     expect(out).toMatchObject({ batchSize: 0, match: 0 });
   });
+
+  it('BS#1076: HTTP-level bulkLookupMetadata throw is isolated; batch reports error=N and run continues', async () => {
+    // Reproduces the 2026-05-24 prod failure: batch 2 hit a 30s LML
+    // timeout (LmlClientError statusCode 504), which an uncaught throw
+    // would propagate up and abort the entire run mid-stream. With
+    // per-batch try/catch, the batch reports `error=N` and the loop
+    // continues. UPSERTs from prior successful batches stay intact
+    // (idempotent), and the per-row drain cron retries the failed
+    // album_ids on its next sweep.
+    mockBulkLookupMetadata.mockRejectedValueOnce(
+      Object.assign(new Error('LML request timed out'), { name: 'LmlClientError', statusCode: 504 })
+    );
+
+    const out = await runBatch([1, 2], { budgetMs: 25000, dryRun: false });
+
+    expect(out).toMatchObject({ batchSize: 2, match: 0, no_match: 0, error: 2, upserts: 0 });
+    expect(db.insert as jest.Mock).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
