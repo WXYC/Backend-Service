@@ -486,6 +486,135 @@ async function postLookup(
 }
 
 /**
+ * One item in a bulk-lookup request. Mirrors LML's per-item `LookupRequest`
+ * shape (artist/album/song optional + a synthesized `raw_message` required).
+ * The caller assembles items — `bulkLookupMetadata` doesn't synthesize
+ * `raw_message` itself because the album-level backfill (BS#1041) builds
+ * items from DB joins where the artist/album fields are already structured.
+ */
+export interface BulkLookupItem {
+  artist?: string;
+  album?: string;
+  song?: string;
+  raw_message: string;
+}
+
+/**
+ * Per-item verdict from the bulk-lookup endpoint (LML#368). Status is the
+ * fast signal: `match` (`lookup.results` non-empty), `no_match` (search ran,
+ * no rows), or `error` (per-item exception isolated from siblings).
+ * `lookup` is null on error; `message` carries the error class on error.
+ */
+export interface BulkLookupResultItem {
+  index: number;
+  status: 'match' | 'no_match' | 'error';
+  lookup: LookupResponse | null;
+  message?: string;
+}
+
+export interface BulkLookupResponse {
+  results: BulkLookupResultItem[];
+}
+
+/** LML's per-request hard cap on bulk items (kept in sync with `LML#368`). */
+const BULK_LOOKUP_INPUT_CAP = 100;
+
+/**
+ * Bulk variant of `/api/v1/lookup`. LML's handler runs `perform_lookup` for
+ * each item under a bounded asyncio Semaphore (`LML_BULK_MAX_CONCURRENT`,
+ * default 10) and returns one verdict per input in input order. Per-item
+ * failures land as `status: 'error'`; one item's failure can't poison the
+ * batch.
+ *
+ * Wiring decisions:
+ *
+ * - **One limiter token per batch, not per item.** The LML endpoint already
+ *   caps in-flight Discogs amplification internally; the BS-side limiter
+ *   exists to mirror that same Discogs ceiling. Token-per-batch keeps the
+ *   bulk caller from over-consuming the shared rate-limit pool.
+ * - **`X-Caller-Budget-Ms` forwarded when `budgetMs` is set.** The LML route
+ *   forwards the same value into each per-item `perform_lookup`'s
+ *   `caller_budget_ms` arg (LML#345). Pairs with BS#1053 / LML#370 once the
+ *   hard-cap follow-up lands — sending the header here is a no-op until then.
+ * - **Span op mirrors `postLookup`** (`http.client`); `lml.bulk.size` is a
+ *   bulk-specific attribute. `lml.cache.*` projection is byte-for-byte
+ *   identical so existing Sentry queries (`lml.cache.api_calls > 0`, etc.)
+ *   work without per-call refactors.
+ *
+ * Client-side validation rejects empty + oversize batches before the wire
+ * call — a 422/400 round-trip costs an LML deploy slot and a TCP RTT for
+ * no information gain.
+ */
+export async function bulkLookupMetadata(
+  items: BulkLookupItem[],
+  options?: { timeoutMs?: number; limiter?: LmlLimiter; budgetMs?: number }
+): Promise<BulkLookupResponse> {
+  if (items.length === 0) {
+    throw new LmlClientError('bulkLookupMetadata requires at least 1 item.', 400);
+  }
+  if (items.length > BULK_LOOKUP_INPUT_CAP) {
+    throw new LmlClientError(
+      `bulkLookupMetadata exceeded the cap of ${BULK_LOOKUP_INPUT_CAP} items (received ${items.length}).`,
+      400
+    );
+  }
+
+  const activeLimiter = options?.limiter ?? defaultLimiter;
+  return activeLimiter.run(async () => {
+    return await Sentry.startSpan({ name: 'lml.lookup.bulk', op: 'http.client' }, async (span) => {
+      try {
+        span.setAttributes({
+          'lml.queue_depth': activeLimiter.state().queueDepth,
+          'lml.bulk.size': items.length,
+        });
+      } catch (err) {
+        console.warn('lml.client: failed to project queue_depth + bulk.size onto span', err);
+      }
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (options?.budgetMs !== undefined) {
+        headers['X-Caller-Budget-Ms'] = String(options.budgetMs);
+      }
+
+      const response = await lmlFetch(
+        '/api/v1/lookup/bulk',
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ items }),
+        },
+        options?.timeoutMs
+      );
+
+      const parsed = (await response.json()) as BulkLookupResponse & { cache_stats?: unknown };
+
+      // Same defensive cache_stats projection as postLookup (line ~463).
+      // LML aggregates the in-process cache counters across the whole batch
+      // via a single `init_cache_stats()` at the route top, so one set of
+      // attributes per bulk call is correct.
+      const stats = parsed.cache_stats;
+      if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
+        const attrs: Record<string, number> = {};
+        for (const [key, value] of Object.entries(stats)) {
+          if (typeof value === 'number' && Number.isFinite(value)) {
+            attrs[`lml.cache.${key}`] = value;
+          }
+        }
+        if (Object.keys(attrs).length > 0) {
+          try {
+            span.setAttributes(attrs);
+          } catch (err) {
+            console.warn('lml.client: failed to project cache_stats onto bulk span', err);
+          }
+        }
+      }
+
+      return { results: parsed.results };
+    });
+  });
+}
+
+/**
  * Get full release metadata from LML.
  *
  * @param releaseId - Discogs release ID

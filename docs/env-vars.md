@@ -94,6 +94,15 @@ Stricter ceilings for the historical-drain cron, since one in-flight LML call he
 - `BACKFILL_LML_RATE_PER_MIN` (default `20`) — Token-bucket refill rate (and capacity) for backfill LML calls per minute. Tighter than runtime `LML_CLIENT_RATE_PER_MIN=50` to leave headroom for real-time traffic.
 - `BACKFILL_LML_PER_CALL_TIMEOUT_MS` (default `8000`) — Per-call abort budget. Tighter than `@wxyc/lml-client`'s 30 s runtime default because the cron's per-row hold time is what saturates LML's Discogs fan-out even at concurrency=1 (BS#994 follow-up, retro 2026-05-23). Cold-tail rows that exceed this stay `metadata_attempt_at IS NULL` and are retried on the next pass when LML's cache is warmer / once WXYC/library-metadata-lookup#338 lands. Mirrors BS#992's per-caller `timeoutMs` pattern for the rotation picker.
 
+### Bulk backfill (`jobs/album-level-backfill`)
+
+Knobs for the one-shot album-level historical backfill (BS#1041). Separate from `BACKFILL_LML_*` above because this job calls LML's bulk endpoint (`/api/v1/lookup/bulk`, LML#368), where the natural unit is the batch, not the row. Defaults are tuned to let this job run concurrently with the per-row drain cron without saturating LML's serial Discogs fan-out. All are positive integers; non-positive or unparseable values throw at job startup.
+
+- `BACKFILL_BULK_BATCH_SIZE` (default `50`) — Items per LML bulk-lookup request. LML's hard cap is 100 (LML#368). 50 is a conservative compromise between roundtrip amortization (one HTTP roundtrip per N items vs. N roundtrips) and per-batch blast radius if a single Discogs cascade goes pathological.
+- `BACKFILL_BULK_RATE_PER_MIN` (default `1`) — Batches per minute. At the default 50-item batch size this is 50 items/min sustained — comparable to the per-row cron's `BACKFILL_LML_RATE_PER_MIN=20` items/min plus headroom. The two jobs can run concurrently without contending on LML's serial Discogs fan-out (LML caps Discogs at 50/min globally). Raise to 2–4 for an overnight catch-up window when no other LML traffic is running.
+- `BACKFILL_BULK_BUDGET_MS` (default `25000`) — Forwarded to LML as `X-Caller-Budget-Ms`. LML's per-item `perform_lookup` uses this as `min(header, LML_SEARCH_BUDGET_MS)` (A8 / LML#345). 25 s leaves headroom under the 30 s lml-client `AbortController` timeout for HTTP overhead + JSON encode/decode of a 50-item batch.
+- `ALBUM_LEVEL_BACKFILL_POST_PASS_TIMEOUT_MS` (default `14400000` / 4 h) — `SET LOCAL statement_timeout` for the post-pass UPDATE that flips ~857k flowsheet rows from `metadata_status='pending'` to `enriched_match`. The 2026-05-23 drain-accel SQL flipped 309k rows in 80 min; 857k is ~3 h; 4 h gives a 30% margin. Scoped to the UPDATE's transaction only — does not affect any other statement on the same connection.
+
 - `DISCOGS_API_KEY`, `DISCOGS_API_SECRET` — Served to dj-site via `/config/secrets` endpoint. Not used by the backend itself (Discogs access goes through LML).
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`
 
