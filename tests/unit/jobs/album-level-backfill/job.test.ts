@@ -217,6 +217,10 @@ describe('resolveAlbums', () => {
     expect(text).toMatch(/l\."?album_title"?\s+AS\s+album_title/i);
     expect(text).not.toMatch(/l\."?title"?(?!_)/i); // l."title" not l."title_…"
     expect(text).toMatch(/=\s*ANY\(/i);
+    // `library.artist_name` is nullable (schema.ts:346, Epic A.1 backfill
+    // not yet complete); without this filter, `String(null)` would produce
+    // the literal `"null"` and we'd POST it to LML as the artist.
+    expect(text).toMatch(/COALESCE\s*\(\s*a\."?artist_name"?\s*,\s*l\."?artist_name"?\s*\)\s+IS\s+NOT\s+NULL/i);
   });
 
   it('wraps the SELECT in a transaction + SET LOCAL statement_timeout (BS#1041 dry-run regression)', async () => {
