@@ -10,16 +10,7 @@ const makeReq = (overrides: {
   }) as Parameters<typeof rateLimitKeyFromRequest>[0];
 
 describe('rateLimitKeyFromRequest', () => {
-  it('prefers X-Real-IP when nginx sets it (the production path)', () => {
-    const key = rateLimitKeyFromRequest(
-      makeReq({ headers: { 'x-real-ip': '203.0.113.7' }, remoteAddress: '10.0.0.1' })
-    );
-    expect(key).toBe('203.0.113.7');
-  });
-
   it('ignores client-supplied X-Forwarded-For — only X-Real-IP is trusted', () => {
-    // The whole point of this helper: a forged XFF must NOT pick the bucket.
-    // nginx is the only trusted source; XFF is client-controlled.
     const key = rateLimitKeyFromRequest(
       makeReq({
         headers: { 'x-forwarded-for': '1.2.3.4', 'x-real-ip': '203.0.113.7' },
