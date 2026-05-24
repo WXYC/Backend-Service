@@ -140,6 +140,42 @@ describe('sendEmail', () => {
       })
     );
   });
+
+  it('passes ConfigurationSetName when SES_CONFIGURATION_SET_NAME is set', async () => {
+    process.env.SES_CONFIGURATION_SET_NAME = 'my-first-configuration-set';
+    jest.resetModules();
+    const emailModule = await import('../../../shared/authentication/src/email');
+    const sesModule = await import('@aws-sdk/client-ses');
+    const FreshCommand = sesModule.SendEmailCommand as unknown as jest.Mock;
+
+    await emailModule.sendEmail({
+      type: 'passwordReset',
+      to: 'user@example.com',
+      url: 'https://example.com/reset',
+    });
+
+    expect(FreshCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ ConfigurationSetName: 'my-first-configuration-set' })
+    );
+    delete process.env.SES_CONFIGURATION_SET_NAME;
+  });
+
+  it('omits ConfigurationSetName when SES_CONFIGURATION_SET_NAME is unset (undefined, not the string "undefined")', async () => {
+    delete process.env.SES_CONFIGURATION_SET_NAME;
+    jest.resetModules();
+    const emailModule = await import('../../../shared/authentication/src/email');
+    const sesModule = await import('@aws-sdk/client-ses');
+    const FreshCommand = sesModule.SendEmailCommand as unknown as jest.Mock;
+
+    await emailModule.sendEmail({
+      type: 'passwordReset',
+      to: 'user@example.com',
+      url: 'https://example.com/reset',
+    });
+
+    const callArgs = FreshCommand.mock.calls[0][0] as { ConfigurationSetName?: unknown };
+    expect(callArgs.ConfigurationSetName).toBeUndefined();
+  });
 });
 
 // Test cases for new user detection logic (to be used in auth.definition)
