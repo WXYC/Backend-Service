@@ -9,6 +9,7 @@
   "scripts": {
     "typecheck": "npm run lint:prebuild && npm run typecheck --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
     "lint:prebuild": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication --workspace=@wxyc/lml-client",
+    "//lint": "8192 heap: eslint holds typed AST + program graph for every workspace; OOMs at node's default ~4GB ceiling on this monorepo.",
     "lint": "npm run lint:prebuild && NODE_OPTIONS=--max-old-space-size=8192 eslint --cache --cache-strategy content --cache-location .cache/eslint/ .",
     "lint:fix": "npm run lint:prebuild && NODE_OPTIONS=--max-old-space-size=8192 eslint --cache --cache-strategy content --cache-location .cache/eslint/ . --fix",
     "lint:env": "node scripts/lint-env.js",
