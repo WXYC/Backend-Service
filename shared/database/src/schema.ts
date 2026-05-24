@@ -678,19 +678,6 @@ export const flowsheet = wxyc_schema.table(
       .on(sql`${table.add_time} DESC`)
       .where(sql`${table.entry_type} = 'track'`),
     index('flowsheet_search_doc_idx').using('gin', sql`${table.search_doc}`),
-    // Functional partial index that supports the playlist-proxy artwork
-    // lookup. Mirrors `flowsheetLookupKey` in
-    // apps/backend/services/playlist-proxy.service.ts. Partial because only
-    // ~5-10% of rows have non-null artwork — the others would be index
-    // dead weight.
-    //
-    // Slated for removal alongside D4 (#900) when `flowsheet.artwork_url`
-    // itself is dropped — DROP COLUMN cascades to the partial-where index.
-    // The post-D5 (#1012) query path no longer reads `flowsheet.artwork_url`
-    // and uses `flowsheet_album_link_lookup_idx` below instead.
-    index('flowsheet_artwork_lookup_idx')
-      .on(sql`(lower(trim(${table.artist_name})) || '-' || lower(trim(coalesce(${table.album_title}, ''))))`)
-      .where(sql`${table.artwork_url} IS NOT NULL`),
     // BS#1012 (Epic D / D5). Functional partial index that supports the
     // post-D5 playlist-proxy artwork lookup. Same expression as
     // `flowsheet_artwork_lookup_idx` above, but the WHERE predicate switches

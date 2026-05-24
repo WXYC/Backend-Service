@@ -561,6 +561,13 @@
       "when": 1779856000013,
       "tag": "0081_flowsheet-album-link-lookup-idx",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1779856000014,
+      "tag": "0082_drop-flowsheet-artwork-lookup-idx",
+      "breakpoints": true
     }
   ]
 }
