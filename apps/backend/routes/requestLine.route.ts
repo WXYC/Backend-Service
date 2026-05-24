@@ -6,7 +6,6 @@ import { trackActivity } from '../middleware/trackActivity.js';
 
 export const request_line_route = Router();
 
-// Device registration - get token for anonymous requests
 request_line_route.post('/register', requestLineController.registerDevice);
 
 // Request Line - song requests from listeners (requires JWT auth)
