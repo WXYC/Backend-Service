@@ -8,7 +8,7 @@
  * LEFT JOIN — preferring the newer `album_metadata` table when populated,
  * falling back to the legacy inline column when it isn't. D4 (#900) will
  * drop the column and collapse the COALESCE; until then the dual-read
- * preserves the pre-D5 coverage. See BS#1012, BS#1038.
+ * preserves the pre-D5 coverage. See BS#1012, BS#1042.
  * Client requests are served instantly from memory via getRecentEntries().
  *
  * Exported API:
@@ -320,13 +320,13 @@ const coalescedArtworkUrl = sql<string>`coalesce(${album_metadata.artwork_url}, 
  *
  * Reads `COALESCE(album_metadata.artwork_url, flowsheet.artwork_url)` over a
  * LEFT JOIN — prefers the newer album_metadata source when populated, falls
- * back to flowsheet's inline column during the Epic D transition (BS#1038).
+ * back to flowsheet's inline column during the Epic D transition (BS#1042).
  *
  * The WHERE filters on `f.artwork_url IS NOT NULL` so the planner can use
  * the existing partial index `flowsheet_artwork_lookup_idx` (migration 0057)
  * for the lookup-key probe. That set is a strict subset of the OLD path's
  * coverage, so no pre-D5 keys are lost. Once album_metadata reaches parity
- * with flowsheet.artwork_url (BS#1038), D5's INNER-JOIN-only shape can
+ * with flowsheet.artwork_url (BS#1042), D5's INNER-JOIN-only shape can
  * return and D4 (#900) can drop the column.
  */
 async function enrichPlaycuts(): Promise<void> {
