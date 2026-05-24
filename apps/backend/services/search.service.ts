@@ -272,8 +272,11 @@ function buildDjNameMatch(value: string, exact: boolean): SQL {
   // The OR-decomposition this replaced (across user.djName, user.name, and
   // shows.legacy_dj_name) was a workaround for Postgres not pushing ILIKE
   // through the COALESCE display expression; with the resolved value stored
-  // on the row the predicate collapses to one column and one trigram index
-  // (flowsheet_dj_name_trgm_idx, migration 0054).
+  // on the row the predicate collapses to one column. ILIKE pattern matches
+  // here are served by flowsheet_search_doc_idx (the search_doc tsvector
+  // includes dj_name); the standalone flowsheet_dj_name_trgm_idx that
+  // originally backed this path was dropped in migration 0083 (#1060) after
+  // pg_stat_user_indexes showed it had zero scans across months in prod.
   if (exact) {
     return sql`${flowsheet.dj_name} = ${value}`;
   }

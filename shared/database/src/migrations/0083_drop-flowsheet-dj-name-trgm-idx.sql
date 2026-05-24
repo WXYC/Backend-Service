@@ -1,0 +1,31 @@
+-- BS#1060 (parent epic BS#1058). Drops `flowsheet_dj_name_trgm_idx`
+-- (migration 0054), a GIN trigram index on `flowsheet.dj_name` that was
+-- speculative when added and never wired up to a query path. Prod snapshot
+-- (2026-05-24): 0 scans across months of writes and 14 autovacuum cycles;
+-- index size 98 MB.
+--
+-- dj-name search continues to be served by `flowsheet_search_doc_idx`
+-- (the search_doc tsvector includes dj_name). No behavior change.
+--
+-- Why this matters beyond reclaiming 98 MB: every UPDATE that touches
+-- `flowsheet.dj_name` (every flowsheet-etl tick that fills dj_name on
+-- freshly-imported rows, every backfill cron, every controller-side
+-- update) currently pays the cost of maintaining a GIN trigram index
+-- that nothing reads. Dropping it removes one indexed column from the
+-- write path and contributes to the parent epic's HOT-update recovery.
+--
+-- Production ops:
+--   - `DROP INDEX` (without CONCURRENTLY) takes a brief AccessExclusiveLock
+--     on the table during the catalog update. The index isn't being used
+--     by any query path (idx_scan=0 in pg_stat_user_indexes), so there's
+--     no concurrent reader to deadlock with. Same pattern as 0082.
+--   - Drizzle wraps each migration in a transaction, which is why this
+--     uses bare `DROP INDEX` rather than `DROP INDEX CONCURRENTLY`
+--     (CONCURRENTLY cannot run inside a transaction). For larger or
+--     more-trafficked indexes the runbook would be to drop CONCURRENTLY
+--     out-of-band first and let the migration be a no-op against prod;
+--     the brief catalog lock is acceptable here.
+--   - `IF EXISTS` guards the case where the index has already been
+--     dropped out-of-band; safe to leave in.
+
+DROP INDEX IF EXISTS "wxyc_schema"."flowsheet_dj_name_trgm_idx";

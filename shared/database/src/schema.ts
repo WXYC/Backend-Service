@@ -673,7 +673,11 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_track_title_trgm_idx').using('gin', sql`${table.track_title} gin_trgm_ops`),
     index('flowsheet_album_title_trgm_idx').using('gin', sql`${table.album_title} gin_trgm_ops`),
     index('flowsheet_record_label_trgm_idx').using('gin', sql`${table.record_label} gin_trgm_ops`),
-    index('flowsheet_dj_name_trgm_idx').using('gin', sql`${table.dj_name} gin_trgm_ops`),
+    // `flowsheet_dj_name_trgm_idx` removed in migration 0083 (#1060). dj-name
+    // search is served by `flowsheet_search_doc_idx` (the search_doc tsvector
+    // includes dj_name); the standalone trigram on dj_name was unused
+    // (idx_scan=0 in prod over months of writes + 14 autovacuum cycles).
+    // See parent epic #1058 for the broader write-amplification context.
     index('flowsheet_track_add_time_idx')
       .on(sql`${table.add_time} DESC`)
       .where(sql`${table.entry_type} = 'track'`),
