@@ -3,7 +3,12 @@
  *
  * Subscribes to tubafrenzy's SSE stream at /playlists/recentStream, maintains
  * an in-memory copy of the current playlist, and enriches playcuts with
- * artwork URLs by joining flowsheet to album_metadata via flowsheet.album_id.
+ * artwork URLs. During Epic D's dual-source transition, the enrichment uses
+ * `COALESCE(album_metadata.artwork_url, flowsheet.artwork_url)` over a
+ * LEFT JOIN — preferring the newer `album_metadata` table when populated,
+ * falling back to the legacy inline column when it isn't. D4 (#900) will
+ * drop the column and collapse the COALESCE; until then the dual-read
+ * preserves the pre-D5 coverage. See BS#1012, BS#1038.
  * Client requests are served instantly from memory via getRecentEntries().
  *
  * Exported API:
@@ -307,9 +312,22 @@ export function processDeletedEvent(data: string): void {
 
 // --- Enrichment ---
 
+/** COALESCE(album_metadata.artwork_url, flowsheet.artwork_url) — Epic D dual-source read. */
+const coalescedArtworkUrl = sql<string>`coalesce(${album_metadata.artwork_url}, ${flowsheet.artwork_url})`;
+
 /**
- * Batch-enrich all playcut entries with artwork URLs from album_metadata,
- * joined via flowsheet.album_id (BS#1012 / D5).
+ * Batch-enrich all playcut entries with artwork URLs.
+ *
+ * Reads `COALESCE(album_metadata.artwork_url, flowsheet.artwork_url)` over a
+ * LEFT JOIN — prefers the newer album_metadata source when populated, falls
+ * back to flowsheet's inline column during the Epic D transition (BS#1038).
+ *
+ * The WHERE filters on `f.artwork_url IS NOT NULL` so the planner can use
+ * the existing partial index `flowsheet_artwork_lookup_idx` (migration 0057)
+ * for the lookup-key probe. That set is a strict subset of the OLD path's
+ * coverage, so no pre-D5 keys are lost. Once album_metadata reaches parity
+ * with flowsheet.artwork_url (BS#1038), D5's INNER-JOIN-only shape can
+ * return and D4 (#900) can drop the column.
  */
 async function enrichPlaycuts(): Promise<void> {
   const playcutEntries = entries.filter((e) => e.entryType === 'playcut' && e.playcut);
@@ -329,18 +347,12 @@ async function enrichPlaycuts(): Promise<void> {
     const rows = await db
       .select({
         key: flowsheetLookupKey,
-        artwork_url: album_metadata.artwork_url,
+        artwork_url: coalescedArtworkUrl,
       })
       .from(flowsheet)
-      // INNER JOIN to album_metadata drops `flowsheet.album_id IS NULL` rows
-      // naturally (the FK can't match NULL). That matches the partial-index
-      // predicate `flowsheet_album_link_lookup_idx ... WHERE album_id IS NOT
-      // NULL` (migration 0081) so the planner indexes the lookup_key probe
-      // instead of seq-scanning the 2.6M-row flowsheet table. See incident
-      // #511 for what happens when the planner falls off the index.
-      .innerJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-      .where(and(inArray(flowsheetLookupKey, keys), isNotNull(album_metadata.artwork_url)))
-      .groupBy(flowsheetLookupKey, album_metadata.artwork_url);
+      .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+      .where(and(inArray(flowsheetLookupKey, keys), isNotNull(flowsheet.artwork_url)))
+      .groupBy(flowsheetLookupKey, coalescedArtworkUrl);
 
     // Build new map and only swap on success — preserves existing artwork on DB failure
     const newMap = new Map<number, string>();
@@ -363,7 +375,8 @@ async function enrichPlaycuts(): Promise<void> {
 }
 
 /**
- * Enrich a single playcut entry with artwork from album_metadata (BS#1012 / D5).
+ * Enrich a single playcut entry with artwork. Same COALESCE + LEFT JOIN +
+ * partial-index alignment as enrichPlaycuts — see comment there.
  */
 async function enrichSinglePlaycut(entry: TubafrenzyEntry): Promise<void> {
   if (!entry.playcut) return;
@@ -372,11 +385,10 @@ async function enrichSinglePlaycut(entry: TubafrenzyEntry): Promise<void> {
 
   try {
     const rows = await db
-      .select({ artwork_url: album_metadata.artwork_url })
+      .select({ artwork_url: coalescedArtworkUrl })
       .from(flowsheet)
-      // Same JOIN + partial-index alignment as enrichPlaycuts — see comment there.
-      .innerJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-      .where(and(inArray(flowsheetLookupKey, [key]), isNotNull(album_metadata.artwork_url)))
+      .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+      .where(and(inArray(flowsheetLookupKey, [key]), isNotNull(flowsheet.artwork_url)))
       .limit(1);
 
     if (rows.length > 0 && rows[0].artwork_url) {
