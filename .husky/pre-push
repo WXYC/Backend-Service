@@ -1,13 +1,13 @@
 # Skip validation if every ref being pushed is a deletion. Git signals a
-# delete by sending all-zero `local_sha` on the line for that ref. Running
-# typecheck/lint on a delete-only push wastes ~80s and (when paired with
-# the eslint heap usage) can OOM the hook even though no code is changing.
+# delete by sending an all-zero `local_sha` (40 chars for SHA-1, 64 for
+# SHA-256); the `*[!0]*` glob matches any string containing a non-zero
+# character, so the case fires only for real pushes. Running typecheck/
+# lint on a delete-only push wastes ~80s and can OOM the hook.
 has_real_push=false
 while read local_ref local_sha remote_ref remote_sha; do
-  if [ "$local_sha" != "0000000000000000000000000000000000000000" ]; then
-    has_real_push=true
-    break
-  fi
+  case "$local_sha" in
+    *[!0]*) has_real_push=true; break ;;
+  esac
 done
 
 if [ "$has_real_push" = false ]; then
