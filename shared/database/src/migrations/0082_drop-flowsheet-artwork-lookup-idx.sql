@@ -1,0 +1,33 @@
+-- BS#900 partial scope. Drops `flowsheet_artwork_lookup_idx` (migration 0057),
+-- a functional partial index that was idle as of the PR#1047 deploy
+-- (2026-05-24, commit acd9c0c3). The playlist-proxy revert in #1047 removed
+-- the last query path that used this index — it now reads
+-- `album_metadata.artwork_url` exclusively via `flowsheet_album_link_lookup_idx`
+-- (migration 0081, WHERE `album_id IS NOT NULL`).
+--
+-- Carved out of #900's full 10-column drop because the full D4 still has to
+-- wait for D3 (#899)'s 30-day stabilization gate. The index is independent
+-- of the column-drop chain: it can come out now without dropping
+-- `flowsheet.artwork_url` itself. Removing it reclaims ~9 MB and ends the
+-- per-insert/UPDATE write-amplification that every row with non-null
+-- artwork_url currently pays to maintain a dead-weight index. See BS#1042
+-- (the bridge UPSERT that brought artwork parity to 20,371/20,371) and
+-- BS#1012/PR#1047 for the read-path migration that obsoleted this index.
+--
+-- The remaining 10-column DROP COLUMN work stays on #900 and remains gated
+-- on D3 stabilization + a backfill of the other 9 fields (245K+ row gaps
+-- per audit). This migration does NOT touch the `flowsheet.artwork_url`
+-- column itself, only the partial index over it.
+--
+-- Production ops:
+--   - `DROP INDEX` on a partial index takes a brief AccessExclusiveLock on
+--     the table during the catalog update. The index isn't being used by
+--     any query path (confirmed via the #1047 deploy a few hours ago), so
+--     there's no concurrent reader that could deadlock with the lock.
+--   - There is no `DROP INDEX CONCURRENTLY` equivalent issue here — we're
+--     dropping, not building. The lock is held for the catalog update only;
+--     no rebuild work.
+--   - `IF EXISTS` guards the case where the index has already been dropped
+--     out-of-band; safe to leave in.
+
+DROP INDEX IF EXISTS "wxyc_schema"."flowsheet_artwork_lookup_idx";
