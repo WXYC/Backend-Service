@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/album-level-backfill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot album-level historical backfill: enrich the 35,692 unique pending album_ids via LML's bulk endpoint and flip the corresponding ~857k flowsheet rows in a paired post-pass UPDATE (BS#1041 / LML#368).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_album_level_backfill:ci -f ../../Dockerfile.album-level-backfill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.52.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

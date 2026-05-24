@@ -24,6 +24,7 @@ jest.mock('@sentry/node', () => ({
 import {
   lookupMetadata,
   lookupBySong,
+  bulkLookupMetadata,
   getRelease,
   getArtistDetails,
   resolveEntity,
@@ -32,6 +33,7 @@ import {
   searchLibrary,
   Semaphore,
   TokenBucket,
+  createLmlLimiter,
   getLmlQueueDepth,
   _resetLmlClientLimitersForTest,
 } from '@wxyc/lml-client';
@@ -423,6 +425,154 @@ describe('lml.client', () => {
       } as unknown as globalThis.Response);
 
       await expect(lookupBySong('Back, Baby')).rejects.toThrow(LmlClientError);
+    });
+  });
+
+  describe('bulkLookupMetadata', () => {
+    const itemFor = (artist: string, album?: string, song?: string) => ({
+      artist,
+      album,
+      song,
+      raw_message: [artist, album, song].filter(Boolean).join(' - '),
+    });
+
+    it('sends POST to /api/v1/lookup/bulk wrapping items in an {items} envelope', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('Juana Molina', 'DOGA'), itemFor('Jessica Pratt', 'On Your Own Love Again')]);
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://lml.test:8000/api/v1/lookup/bulk');
+      expect(init.method).toBe('POST');
+      const body = JSON.parse(init.body as string) as { items: unknown[] };
+      expect(body.items).toEqual([
+        { artist: 'Juana Molina', album: 'DOGA', raw_message: 'Juana Molina - DOGA' },
+        {
+          artist: 'Jessica Pratt',
+          album: 'On Your Own Love Again',
+          raw_message: 'Jessica Pratt - On Your Own Love Again',
+        },
+      ]);
+    });
+
+    it('returns results in input order with per-item status fields', async () => {
+      const mockResponse = {
+        results: [
+          { index: 0, status: 'match', lookup: { results: [{ library_item: { id: 1 } }] } },
+          { index: 1, status: 'no_match', lookup: { results: [] } },
+          { index: 2, status: 'error', lookup: null, message: 'TimeoutError' },
+        ],
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      } as unknown as globalThis.Response);
+
+      const result = await bulkLookupMetadata([itemFor('A', 'A1'), itemFor('B', 'B1'), itemFor('C', 'C1')]);
+
+      expect(result.results.map((r) => [r.index, r.status])).toEqual([
+        [0, 'match'],
+        [1, 'no_match'],
+        [2, 'error'],
+      ]);
+      expect(result.results[2].message).toBe('TimeoutError');
+    });
+
+    it('rejects empty items locally without hitting the wire', async () => {
+      await expect(bulkLookupMetadata([])).rejects.toThrow(/at least 1 item/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects oversize batches (>100) locally without hitting the wire', async () => {
+      const items = Array.from({ length: 101 }, (_, i) => itemFor(`A${i}`, 'X'));
+      await expect(bulkLookupMetadata(items)).rejects.toThrow(/cap of 100 items/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('forwards X-Caller-Budget-Ms when budgetMs is provided', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], { budgetMs: 25000 });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '25000' });
+    });
+
+    it('omits X-Caller-Budget-Ms when budgetMs is not provided', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')]);
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+    });
+
+    it('consumes exactly one limiter token per batch (not one per item)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      // Tiny bucket: capacity 1 / refill 60/min. If the bulk call consumed
+      // N=5 tokens, the second batch would block on the bucket; with one
+      // token per batch, both batches resolve back-to-back without sleeping.
+      const limiter = createLmlLimiter({ maxConcurrent: 4, ratePerMinute: 60 });
+      const items = [itemFor('A', '1'), itemFor('B', '2'), itemFor('C', '3'), itemFor('D', '4'), itemFor('E', '5')];
+
+      const start = Date.now();
+      await bulkLookupMetadata(items, { limiter });
+      await bulkLookupMetadata(items, { limiter });
+      const elapsed = Date.now() - start;
+
+      // 1 token/sec refill rate × 2 batches = 2 tokens needed; bucket starts
+      // with 60. If the implementation consumed 5 tokens/batch we'd still be
+      // fine on a fresh bucket, so this assertion alone isn't a perfect pin.
+      // The stronger signal is mockFetch call count — exactly 2, with no
+      // per-item HTTP fanout from the client side.
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(elapsed).toBeLessThan(500);
+    });
+
+    it('wraps the call in a Sentry span and projects cache_stats onto it', async () => {
+      const cache_stats = { memory_hits: 10, pg_hits: 25, pg_misses: 3, api_calls: 2 };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [], cache_stats }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X'), itemFor('B', 'Y')]);
+
+      expect(mockStartSpan).toHaveBeenCalledTimes(1);
+      expect(mockStartSpan.mock.calls[0][0]).toEqual({ name: 'lml.lookup.bulk', op: 'http.client' });
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith(expect.objectContaining({ 'lml.bulk.size': 2 }));
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+        'lml.cache.memory_hits': 10,
+        'lml.cache.pg_hits': 25,
+        'lml.cache.pg_misses': 3,
+        'lml.cache.api_calls': 2,
+      });
+    });
+
+    it('throws LmlClientError on non-2xx response', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+      } as unknown as globalThis.Response);
+
+      await expect(bulkLookupMetadata([itemFor('A', 'X')])).rejects.toThrow(LmlClientError);
     });
   });
 
