@@ -201,7 +201,7 @@ describe('resolveAlbums', () => {
     expect(db.transaction as jest.Mock).not.toHaveBeenCalled();
   });
 
-  it('joins library + artists with COALESCE on artist_name and filters out null title', async () => {
+  it('joins library + artists with COALESCE on artist_name; selects album_title from library', async () => {
     (db.execute as jest.Mock).mockResolvedValue([{ album_id: 1, artist_name: 'Juana Molina', album_title: 'DOGA' }]);
 
     await resolveAlbums([1]);
@@ -211,7 +211,11 @@ describe('resolveAlbums', () => {
     const text = renderSql(call?.[0]);
     expect(text).toMatch(/LEFT\s+JOIN\s+"?wxyc_schema"?\."?artists"?/i);
     expect(text).toMatch(/COALESCE\s*\(\s*a\."?artist_name"?\s*,\s*l\."?artist_name"?\s*\)/i);
-    expect(text).toMatch(/l\."?title"?\s+IS\s+NOT\s+NULL/i);
+    // BS#1065 regression pin: `library.album_title` is the canonical column,
+    // not `library.title`. The 2026-05-24 prod canary failed with
+    // `column l.title does not exist` because the original SQL used `l.title`.
+    expect(text).toMatch(/l\."?album_title"?\s+AS\s+album_title/i);
+    expect(text).not.toMatch(/l\."?title"?(?!_)/i); // l."title" not l."title_…"
     expect(text).toMatch(/=\s*ANY\(/i);
   });
 

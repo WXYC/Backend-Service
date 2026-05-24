@@ -169,14 +169,16 @@ export interface ResolvedAlbum {
   album_title: string;
 }
 
-/** Resolve a chunk of album_ids to LML lookup keys. COALESCE preserves
- * V/A and legacy rows where the `artists` join misses; rows whose final
- * artist_name or album_title is null are dropped (the post-pass UPDATE
- * will leave their flowsheet rows pending; the per-row drain cron will
- * re-attempt). Same statement-timeout wrapper as `enumeratePendingAlbumIds`
- * — the `library` table is PK-lookup-shaped via `= ANY($1)` but the
- * `artists` LEFT JOIN can be slow if the artist row count grows; the
- * timeout caps the worst case. */
+/** Resolve a chunk of album_ids to LML lookup keys. `library.album_title`
+ * and `library.artist_name` are both NOT NULL per `shared/database/src/
+ * schema.ts`; the `artists` LEFT JOIN is preferred when present (canonical
+ * normalized form via the tubafrenzy ETL) and we COALESCE down to
+ * `library.artist_name` for the legacy / V/A rows the join can miss.
+ *
+ * Same statement-timeout wrapper as `enumeratePendingAlbumIds` — the
+ * `library` table is PK-lookup-shaped via `= ANY($1)` but the `artists`
+ * LEFT JOIN can be slow if the artist row count grows; the timeout caps
+ * the worst case. */
 export const resolveAlbums = async (
   albumIds: number[],
   timeoutMs: number = READ_TIMEOUT_DEFAULT
@@ -188,12 +190,10 @@ export const resolveAlbums = async (
       SELECT
         l."id" AS album_id,
         COALESCE(a."artist_name", l."artist_name") AS artist_name,
-        l."title" AS album_title
+        l."album_title" AS album_title
       FROM "wxyc_schema"."library" l
       LEFT JOIN "wxyc_schema"."artists" a ON l."artist_id" = a."id"
       WHERE l."id" = ANY(${albumIds}::int[])
-        AND COALESCE(a."artist_name", l."artist_name") IS NOT NULL
-        AND l."title" IS NOT NULL
     `)) as unknown as Array<{ album_id: number; artist_name: string; album_title: string }>;
     return rows.map((r) => ({
       album_id: Number(r.album_id),
