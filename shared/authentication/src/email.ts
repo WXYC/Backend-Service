@@ -113,6 +113,24 @@ const buildEmailHtml = ({ title, intro, actionText, actionUrl, footer }: Omit<Em
 `.trim();
 
 /**
+ * SES picks the most-specific identity for an outbound `From:`. Because
+ * `no-reply@wxyc.org` is verified as an email-level identity, sends from
+ * that address use the email-level identity even though `wxyc.org` (the
+ * domain) has `my-first-configuration-set` set as its default. The
+ * email-level identity has no `ConfigurationSetName` attached, so without
+ * passing it explicitly here the EventDestination on the config set never
+ * sees the OTP / verification / reset traffic (BS#1070).
+ *
+ * `SES_CONFIGURATION_SET_NAME` is optional: when unset, no config set is
+ * passed and behavior matches pre-#1070 — useful locally, where there is
+ * no SES at all.
+ */
+function getConfigurationSetName(): string | undefined {
+  const name = process.env.SES_CONFIGURATION_SET_NAME?.trim();
+  return name && name.length > 0 ? name : undefined;
+}
+
+/**
  * Send a transactional email using the unified email system
  */
 export async function sendEmail(email: WXYCEmail): Promise<void> {
@@ -137,6 +155,7 @@ export async function sendEmail(email: WXYCEmail): Promise<void> {
         Html: { Data: htmlBody },
       },
     },
+    ConfigurationSetName: getConfigurationSetName(),
   });
 
   const client = getSesClient();
@@ -241,6 +260,7 @@ export const sendOTPEmail = async ({ to, otp, type }: OTPEmailInput) => {
         Html: { Data: htmlBody },
       },
     },
+    ConfigurationSetName: getConfigurationSetName(),
   });
 
   const client = getSesClient();

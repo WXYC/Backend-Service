@@ -38,6 +38,7 @@ Full reference. CLAUDE.md links here. Variables marked _required_ have no defaul
 
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`
 - `SES_FROM_EMAIL`
+- `SES_CONFIGURATION_SET_NAME` — Configuration set passed on every `SendEmailCommand`. Optional. Required in production for the event-destination on `my-first-configuration-set` to actually capture transactional sends — SES picks the most-specific identity for `From:`, and the `no-reply@wxyc.org` email-level identity has no config set attached, so the domain-level default never applies. Passing this explicitly bypasses the identity-precedence trap. Production value: `my-first-configuration-set`.
 - `PASSWORD_RESET_REDIRECT_URL`, `EMAIL_VERIFICATION_REDIRECT_URL`
 
 ### SES delivery events (`POST /internal/ses-events`)
