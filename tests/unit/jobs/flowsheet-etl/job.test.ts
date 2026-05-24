@@ -155,4 +155,24 @@ describe('runIncremental', () => {
     expect(result.entriesImported).toBe(1);
     expect(result.entriesUpdated).toBe(1);
   });
+
+  // BS#1059: pin the value-aware guard's presence on both upsert call sites.
+  // The PG-semantic check (does the predicate actually skip no-op UPDATEs?)
+  // lives in tests/integration/flowsheet-etl-setwhere.spec.js — the runner
+  // there can hit a real Postgres. This is the cheap shape-check that fires
+  // first in CI if the setWhere is ever dropped from job.ts.
+  it('passes setWhere on every onConflictDoUpdate call to skip no-op UPDATEs', async () => {
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([makeEntry()]);
+
+    await runIncremental();
+
+    const calls = chain.onConflictDoUpdate.mock.calls;
+    // Two upserts in runIncremental: one for shows, one for flowsheet entries.
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    for (const [arg] of calls) {
+      expect(arg).toHaveProperty('setWhere');
+      expect(arg.setWhere).toBeDefined();
+    }
+  });
 });
