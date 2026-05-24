@@ -38,6 +38,7 @@ ALLOWED=(
   "apps/backend/services/metadata/metadata.service.ts"
   "jobs/flowsheet-metadata-backfill/enrich.ts"
   "jobs/library-artwork-url-backfill/enrich.ts"
+  "jobs/album-level-backfill/job.ts"
   "apps/enrichment-worker/enrich.ts"
 )
 
