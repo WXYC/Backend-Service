@@ -170,10 +170,16 @@ export interface ResolvedAlbum {
 }
 
 /** Resolve a chunk of album_ids to LML lookup keys. `library.album_title`
- * and `library.artist_name` are both NOT NULL per `shared/database/src/
- * schema.ts`; the `artists` LEFT JOIN is preferred when present (canonical
- * normalized form via the tubafrenzy ETL) and we COALESCE down to
- * `library.artist_name` for the legacy / V/A rows the join can miss.
+ * is NOT NULL per `shared/database/src/schema.ts:324`; `library.artist_name`
+ * is *nullable* (line 346, "Denormalized from artists.artist_name (Epic
+ * A.1). Nullable until A.2 backfill / A.3 live-cascade has run") with an
+ * explicit "code paths reading `artist_name` must tolerate NULL" warning
+ * on line 290. The `artists` LEFT JOIN is preferred when present (canonical
+ * normalized form via the tubafrenzy ETL); we COALESCE down to
+ * `library.artist_name`, and the `COALESCE(...) IS NOT NULL` predicate
+ * drops the legacy-and-unbackfilled rows where both sides are NULL —
+ * without it, `String(null)` would become the literal `"null"` and we'd
+ * POST it to LML as the artist name.
  *
  * Same statement-timeout wrapper as `enumeratePendingAlbumIds` — the
  * `library` table is PK-lookup-shaped via `= ANY($1)` but the `artists`
@@ -194,6 +200,7 @@ export const resolveAlbums = async (
       FROM "wxyc_schema"."library" l
       LEFT JOIN "wxyc_schema"."artists" a ON l."artist_id" = a."id"
       WHERE l."id" = ANY(${albumIds}::int[])
+        AND COALESCE(a."artist_name", l."artist_name") IS NOT NULL
     `)) as unknown as Array<{ album_id: number; artist_name: string; album_title: string }>;
     return rows.map((r) => ({
       album_id: Number(r.album_id),
