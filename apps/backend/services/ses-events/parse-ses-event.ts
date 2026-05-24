@@ -81,11 +81,11 @@ function parseDelivery(payload: Record<string, unknown>, messageId: string, send
     throw new Error('SES Delivery event missing delivery.processingTimeMillis');
   }
   const recipients = delivery['recipients'];
-  const recipient = Array.isArray(recipients) && typeof recipients[0] === 'string' ? (recipients[0]) : '';
+  const recipient = Array.isArray(recipients) && typeof recipients[0] === 'string' ? recipients[0] : '';
   if (recipient === '') {
     throw new Error('SES Delivery event missing delivery.recipients[0]');
   }
-  const smtpResponse = typeof delivery['smtpResponse'] === 'string' ? (delivery['smtpResponse']) : '';
+  const smtpResponse = typeof delivery['smtpResponse'] === 'string' ? delivery['smtpResponse'] : '';
   return {
     kind: 'Delivery',
     messageId,
@@ -102,8 +102,8 @@ function parseBounce(payload: Record<string, unknown>, messageId: string, sendTi
   if (!isPlainObject(bounce)) {
     throw new Error('SES Bounce event missing bounce object');
   }
-  const bounceType = typeof bounce['bounceType'] === 'string' ? (bounce['bounceType']) : 'Unknown';
-  const bounceSubType = typeof bounce['bounceSubType'] === 'string' ? (bounce['bounceSubType']) : 'Unknown';
+  const bounceType = typeof bounce['bounceType'] === 'string' ? bounce['bounceType'] : 'Unknown';
+  const bounceSubType = typeof bounce['bounceSubType'] === 'string' ? bounce['bounceSubType'] : 'Unknown';
   const bouncedRecipients = bounce['bouncedRecipients'];
   const recipient = extractFirstRecipientAddress(bouncedRecipients);
   if (recipient === '') {
@@ -129,7 +129,7 @@ function parseReject(payload: Record<string, unknown>, messageId: string, sendTi
   if (!isPlainObject(reject)) {
     throw new Error('SES Reject event missing reject object');
   }
-  const reason = typeof reject['reason'] === 'string' ? (reject['reason']) : 'Unknown';
+  const reason = typeof reject['reason'] === 'string' ? reject['reason'] : 'Unknown';
   return { kind: 'Reject', messageId, sendTimestamp, reason };
 }
 
@@ -142,7 +142,7 @@ function parseDeliveryDelay(
   if (!isPlainObject(deliveryDelay)) {
     throw new Error('SES DeliveryDelay event missing deliveryDelay object');
   }
-  const delayType = typeof deliveryDelay['delayType'] === 'string' ? (deliveryDelay['delayType']) : 'Unknown';
+  const delayType = typeof deliveryDelay['delayType'] === 'string' ? deliveryDelay['delayType'] : 'Unknown';
   const expirationTimeRaw = deliveryDelay['expirationTime'];
   const expirationTime = typeof expirationTimeRaw === 'string' ? parseTimestampOrNull(expirationTimeRaw) : null;
   const recipient = extractFirstRecipientAddress(deliveryDelay['delayedRecipients']);
