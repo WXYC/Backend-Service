@@ -79,10 +79,16 @@ export function requirePermissions(required: RequiredPermissions) {
       // If the token is not a valid JWT (e.g. integration tests pass a raw
       // user ID), fall back to using the token value as the user ID directly.
       try {
-        const payload = decodeJwt(token) as WXYCAuthJwtPayload;
+        const payload = decodeJwt(token);
         const userId = payload.id || payload.sub;
         if (userId) {
-          req.auth = { ...payload, id: userId };
+          // Cast mirrors the catch branch below: `email` is required on
+          // WXYCAuthJwtPayload but `decodeJwt`'s `JWTPayload` doesn't carry
+          // it as a known field. Dep churn (added @sentry/node 2026-05-24
+          // BS#1070) tightened type inference enough that the dts build
+          // now refuses the implicit spread; the cast makes the existing
+          // intent explicit without changing runtime behavior.
+          req.auth = { ...payload, id: userId } as WXYCAuthJwtPayload;
         }
       } catch {
         req.auth = { id: token } as WXYCAuthJwtPayload;

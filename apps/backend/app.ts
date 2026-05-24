@@ -17,6 +17,7 @@ import { events_route } from './routes/events.route.js';
 import { request_line_route } from './routes/requestLine.route.js';
 import { config_route } from './routes/config.route.js';
 import { internal_route } from './routes/internal.route.js';
+import { ses_events_route } from './routes/ses-events.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
@@ -122,6 +123,12 @@ app.get('/healthcheck', async (req, res) => {
     res.status(503).json(body);
   }
 });
+
+// SNS subscriber for SES Configuration Set events (`ses-delivery-events-prod`
+// topic). Auth is the SNS X.509 signature + pinned TopicArn; no shared key.
+// Mounted before /internal so its route-scoped `express.text()` body parser
+// owns these requests (SNS sends Content-Type: text/plain).
+app.use('/internal/ses-events', ses_events_route);
 
 // Internal endpoints (ETL sync notifications, key-authenticated)
 app.use('/internal', internal_route);

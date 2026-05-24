@@ -40,6 +40,12 @@ Full reference. CLAUDE.md links here. Variables marked _required_ have no defaul
 - `SES_FROM_EMAIL`
 - `PASSWORD_RESET_REDIRECT_URL`, `EMAIL_VERIFICATION_REDIRECT_URL`
 
+### SES delivery events (`POST /internal/ses-events`)
+
+- `SES_EVENTS_SNS_TOPIC_ARN` — ARN of the SNS topic that the `wxyc.org` SES Configuration Set publishes Send/Delivery/Bounce/Complaint/Reject/DeliveryDelay events to. The receiving route pins this ARN and rejects messages whose `TopicArn` does not match (signature validation also checks the AWS X.509 cert chain). Production value: `arn:aws:sns:us-east-1:203767826763:ses-delivery-events-prod`. Leave unset locally — the route returns 400 for every POST when the env var is missing, by design, so a missing config is observable rather than a startup crash.
+
+The Backend container does not call SES, so no additional AWS credentials are needed for this route — SNS signature validation only requires the public cert fetched from SNS's `SigningCertURL`.
+
 ## Testing
 
 - `AUTH_BYPASS` — Set `true` to skip JWT verification in tests

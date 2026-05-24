@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/node';
 import { account, db, invitation, jwks, member, organization, session, user, verification } from '@wxyc/database';
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
@@ -318,7 +319,12 @@ export const auth = betterAuth({
     emailOTP({
       async sendVerificationOTP({ email, otp, type }) {
         void sendOTPEmail({ to: email, otp, type }).catch((error) => {
+          // Pre-2026-05-24 this was console.error only, so SES errors were
+          // invisible to Sentry / oncall. The OTP path is the loudest
+          // user-visible email; the other three callers in this file still
+          // use console.error and can be migrated as a follow-up.
           console.error('Error sending OTP email:', error);
+          Sentry.captureException(error, { tags: { subsystem: 'auth-otp', email_type: type } });
         });
       },
       otpLength: 6,
