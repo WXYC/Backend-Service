@@ -12,6 +12,7 @@ import cors from 'cors';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
+import { rateLimitKeyFromRequest } from './rate-limit-key';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { lookupEmailByIdentifier } from './lookup-email';
@@ -22,12 +23,12 @@ const port = process.env.AUTH_PORT || '8082';
 
 const app = express();
 
-// Trust the reverse proxy (nginx / ALB) so req.ip resolves to the real
-// client IP from X-Forwarded-For. Without this, express-rate-limit warns
-// `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` and falls back to the direct socket
-// IP — which is the proxy itself, identical for every client. The /sign-in
-// rate limit (10 / 15 min) then becomes a single global bucket shared by
-// every caller. Mirrors the same line in apps/backend/app.ts.
+// Trust the reverse proxy so `req.ip` resolves from `X-Forwarded-For` for
+// non-rate-limit consumers (Sentry's request integration, request logging).
+// The Express rate limiter does NOT read `req.ip` — it uses an explicit
+// `keyGenerator` keyed on the nginx-set `X-Real-IP`, so XFF spoofing
+// cannot influence rate-limit bucketing (see ./rate-limit-key.ts and
+// BS#1048). Mirrors the same line in apps/backend/app.ts.
 app.set('trust proxy', true);
 
 // Parse JSON bodies first (needed for auth endpoints)
@@ -261,6 +262,11 @@ if (!isTestEnv) {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     message: { error: 'Too many requests, please try again later.' },
+    // Key by the nginx-set X-Real-IP rather than req.ip. req.ip honors the
+    // client-controlled X-Forwarded-For under `trust proxy = true`, which
+    // lets a caller rotate forged XFFs to defeat the limit and triggers
+    // express-rate-limit's ERR_ERL_PERMISSIVE_TRUST_PROXY validator. BS#1048.
+    keyGenerator: rateLimitKeyFromRequest,
   });
 
   const rateLimitedPaths = [
