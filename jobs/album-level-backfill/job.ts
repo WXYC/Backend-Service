@@ -389,7 +389,23 @@ export const runBatch = async (
     return { batchSize: 0, match: 0, no_match: 0, error: 0, upserts: 0 };
   }
 
-  const response = await bulkLookupMetadata(items, { budgetMs: options.budgetMs });
+  // Isolate HTTP-level failures (timeout, 5xx, network) so a single bad
+  // batch can't abort the whole run. LML's bulk endpoint already
+  // isolates per-item failures via `status: 'error'` in its response —
+  // but if the HTTP call itself throws (LmlClientError on 30s timeout,
+  // BS#1076), the loop dies without try/catch. Treat a thrown batch as
+  // "all N items errored"; the per-row drain cron picks those album_ids
+  // up on its next sweep. Idempotency holds: nothing was UPSERTed.
+  let response;
+  try {
+    response = await bulkLookupMetadata(items, { budgetMs: options.budgetMs });
+  } catch (err) {
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    console.warn(
+      `[${JOB_NAME}] lml.batch_failed size=${items.length} first_album_id=${resolved[0]?.album_id ?? '?'} last_album_id=${resolved[resolved.length - 1]?.album_id ?? '?'} error=${JSON.stringify(msg)}`
+    );
+    return { batchSize: items.length, match: 0, no_match: 0, error: items.length, upserts: 0 };
+  }
   // resolved[i] corresponds to items[i] which corresponds to response.results[i].
   // LML guarantees input-order results.
   let match = 0;
