@@ -59,8 +59,13 @@ psql "$DATABASE_URL" -c "
   WHERE entry_type='track' AND metadata_status='pending' AND album_id IS NOT NULL;
 "
 
-# 7. Restart the per-row drain cron to handle the album_id IS NULL residual
-docker start flowsheet-metadata-backfill-cron
+# 7. Do NOT restart the per-row drain cron yet. The 2026-05-24 firing
+#    showed a 21% LML timeout rate (~2,200 of 10,500 rows). Investigation
+#    in BS#1064 must finish before resuming the cron — otherwise it will
+#    burn LML quota at a steady error rate for no net progress. The 744k
+#    `album_id IS NULL` residual stays pending until then.
+#
+# docker start flowsheet-metadata-backfill-cron
 ```
 
 ## Env knobs
