@@ -1,10 +1,18 @@
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const MessageValidator = require('sns-validator') as new () => {
+// `sns-validator` is AWS-published CJS-only (`module.exports = MessageValidator`).
+// Node ESM's CJS-default interop maps that to a default import; tsup keeps the
+// import external (see apps/backend/tsup.config.ts) so the bundle does not
+// re-emit a dynamic `require()` that would fail at runtime under ESM.
+// @ts-expect-error — package ships no .d.ts; the constructor + validate shape
+// below describes the surface we actually call.
+import MessageValidatorCtor from 'sns-validator';
+
+type MessageValidatorInstance = {
   validate: (
     message: Record<string, unknown>,
     callback: (err: Error | null, message: Record<string, unknown>) => void
   ) => void;
 };
+const MessageValidator = MessageValidatorCtor as new () => MessageValidatorInstance;
 
 /**
  * Shape of a validated SNS HTTP/HTTPS message. SNS sends three kinds:

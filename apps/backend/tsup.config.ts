@@ -19,7 +19,10 @@ export default defineConfig((options) => ({
   clean: true,
   sourcemap: true,
   splitting: false,
-  external: ['@sentry/node', 'ws'],
+  // `sns-validator` is CJS-only; bundling it into ESM produces a `Dynamic
+  // require of "sns-validator" is not supported` at runtime. Mark external
+  // so Node's CJS↔ESM interop resolves it through node_modules.
+  external: ['@sentry/node', 'ws', 'sns-validator'],
   onSuccess: options.watch ? 'node --import ./dist/instrument.js ./dist/app.js' : undefined,
   minify: !options.watch,
 
