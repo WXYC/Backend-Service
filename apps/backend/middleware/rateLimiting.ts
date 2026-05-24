@@ -6,8 +6,6 @@ const isTestEnv = process.env.NODE_ENV === 'test' || process.env.USE_MOCK_SERVIC
 const enableRateLimitInTest = process.env.TEST_RATE_LIMITING === 'true';
 
 // Configurable limits via environment variables (useful for testing)
-const REGISTRATION_WINDOW_MS = parseInt(process.env.RATE_LIMIT_REGISTRATION_WINDOW_MS || '3600000', 10); // 1 hour default
-const REGISTRATION_MAX = parseInt(process.env.RATE_LIMIT_REGISTRATION_MAX || '5', 10);
 const REQUEST_WINDOW_MS = parseInt(process.env.RATE_LIMIT_REQUEST_WINDOW_MS || '900000', 10); // 15 min default
 const REQUEST_MAX = parseInt(process.env.RATE_LIMIT_REQUEST_MAX || '10', 10);
 
@@ -15,7 +13,6 @@ const PROXY_WINDOW_MS = parseInt(process.env.RATE_LIMIT_PROXY_WINDOW_MS || '6000
 const PROXY_MAX = parseInt(process.env.RATE_LIMIT_PROXY_MAX || '120', 10);
 
 // Shared stores so we can reset them in tests
-const registrationStore = new MemoryStore();
 const songRequestStore = new MemoryStore();
 const proxyStore = new MemoryStore();
 
@@ -25,7 +22,6 @@ const proxyStore = new MemoryStore();
  */
 export const resetRateLimitStores = (): void => {
   if (isTestEnv) {
-    void registrationStore.resetAll();
     void songRequestStore.resetAll();
     void proxyStore.resetAll();
   }
@@ -36,32 +32,6 @@ const passThrough = (_req: Request, _res: Response, next: NextFunction) => next(
 
 // Determine if rate limiting should be active
 const shouldEnableRateLimiting = !isTestEnv || enableRateLimitInTest;
-
-/**
- * Rate limiter for device registration endpoint.
- * Limits registrations per IP address.
- *
- * Configurable via environment:
- * - RATE_LIMIT_REGISTRATION_WINDOW_MS (default: 3600000 = 1 hour)
- * - RATE_LIMIT_REGISTRATION_MAX (default: 5)
- *
- * Disabled in test environment unless TEST_RATE_LIMITING=true
- */
-export const registrationRateLimit = shouldEnableRateLimiting
-  ? rateLimit({
-      windowMs: REGISTRATION_WINDOW_MS,
-      max: REGISTRATION_MAX,
-      standardHeaders: true,
-      legacyHeaders: false,
-      store: registrationStore,
-      handler: (_req: Request, res: Response) => {
-        res.status(429).json({
-          message: 'Too many registration attempts. Please try again later.',
-          retryAfter: Math.ceil(REGISTRATION_WINDOW_MS / 1000),
-        });
-      },
-    })
-  : passThrough;
 
 /**
  * Rate limiter for song request endpoint.
