@@ -69,6 +69,6 @@ export async function validateSnsMessage(payload: unknown): Promise<ValidatedSns
     TopicArn: topicArn,
     Timestamp: String(validated['Timestamp'] ?? ''),
     Message: String(validated['Message'] ?? ''),
-    SubscribeURL: typeof validated['SubscribeURL'] === 'string' ? (validated['SubscribeURL']) : undefined,
+    SubscribeURL: typeof validated['SubscribeURL'] === 'string' ? validated['SubscribeURL'] : undefined,
   };
 }
