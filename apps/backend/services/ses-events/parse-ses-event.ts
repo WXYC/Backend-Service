@@ -65,6 +65,13 @@ function parseSend(
   messageId: string,
   sendTimestamp: Date
 ): SesSendEvent {
+  // Send is emitted when SES accepts the API call, before the message is
+  // bound to a specific delivery attempt — `mail.destination` is always
+  // populated by SES in practice, but a missing/empty value is not a parser
+  // error here the way it is for Delivery/Bounce/Complaint/DeliveryDelay
+  // (each of which carries its own recipient list tied to a *delivery*).
+  // emit-span.ts falls back to `email.recipient_domain = 'unknown'` if the
+  // Send slipped through with no destination; that asymmetry is intentional.
   const destination = mail['destination'];
   const recipients = Array.isArray(destination) ? destination.filter((d): d is string => typeof d === 'string') : [];
   return { kind: 'Send', messageId, sendTimestamp, recipients };

@@ -22,8 +22,10 @@ import {
  * is the trust root.
  *
  * Body parser: SNS sends `Content-Type: text/plain` (AWS historical choice),
- * so we attach a route-scoped `express.text({ type: 'wildcard' })`. The
- * global `app.use(express.json())` only handles `application/json` and never
+ * so we attach a route-scoped `express.text({ type: STAR-SLASH-STAR })`
+ * (the literal MIME wildcard — not quoted here verbatim because the
+ * two-char sequence would close this block comment early). The global
+ * `app.use(express.json())` only handles `application/json` and never
  * touches these bodies, so mount order is irrelevant.
  */
 export const ses_events_route = Router();
