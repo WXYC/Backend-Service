@@ -262,10 +262,6 @@ if (!isTestEnv) {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     message: { error: 'Too many requests, please try again later.' },
-    // Key by the nginx-set X-Real-IP rather than req.ip. req.ip honors the
-    // client-controlled X-Forwarded-For under `trust proxy = true`, which
-    // lets a caller rotate forged XFFs to defeat the limit and triggers
-    // express-rate-limit's ERR_ERL_PERMISSIVE_TRUST_PROXY validator. BS#1048.
     keyGenerator: rateLimitKeyFromRequest,
   });
 
