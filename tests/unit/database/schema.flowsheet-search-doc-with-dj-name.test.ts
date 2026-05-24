@@ -62,6 +62,22 @@ describe('schema: search_doc augmented with dj_name + dropped trgm indexes (step
     expect(has54).toBe(true);
   });
 
+  it('migration 0083 drops the flowsheet_dj_name_trgm_idx that 0054 added', () => {
+    // The trigram index 0054 added on flowsheet.dj_name was retired in 0083
+    // (#1060, parent epic #1058) after prod pg_stat_user_indexes showed it
+    // had idx_scan=0 across months of writes — dj-name search is served by
+    // flowsheet_search_doc_idx (the search_doc tsvector includes dj_name).
+    // Schema declaration was removed from `shared/database/src/schema.ts`
+    // in the same change; assert both sides so the schema/migration pair
+    // stays consistent.
+    const dropPath = path.join(migrationsDir, '0083_drop-flowsheet-dj-name-trgm-idx.sql');
+    expect(fs.existsSync(dropPath)).toBe(true);
+    const dropSql = fs.readFileSync(dropPath, 'utf-8');
+    expect(dropSql).toMatch(/DROP INDEX[^;]*"flowsheet_dj_name_trgm_idx"/i);
+
+    expect(schemaSource).not.toMatch(/index\(['"]flowsheet_dj_name_trgm_idx['"]\)/);
+  });
+
   it('migration 0054 applies unconditionally — no precondition guard', () => {
     // Originally 0054 had a precondition block that aborted the migration if
     // any track row still had dj_name IS NULL (i.e. the backfill hadn't run

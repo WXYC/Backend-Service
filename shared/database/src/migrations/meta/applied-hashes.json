@@ -79,5 +79,6 @@
   "0079_album-metadata-table": "76f317f6dfa29b8dfdc472eef569a335722b54e2211c9cccf0da9b45391b9148",
   "0080_flowsheet-album-id-enriched-idx": "cb94bdd5c4e033fb819da3e5e3962337069537bcf75128855ca2e8175b90708c",
   "0081_flowsheet-album-link-lookup-idx": "de71df66220f140601312711e74ed3e14219b6ab49519e79857726a2d3a87d71",
-  "0082_drop-flowsheet-artwork-lookup-idx": "ec2c124cba2e31a7a280ad33b59e447c8de5d8f25bb64abf08c48156214efbe1"
+  "0082_drop-flowsheet-artwork-lookup-idx": "ec2c124cba2e31a7a280ad33b59e447c8de5d8f25bb64abf08c48156214efbe1",
+  "0083_drop-flowsheet-dj-name-trgm-idx": "8a5ab046cbe6179d61c8de292ff4e5c11f4ba497399c709dcc28233aaa801f11"
 }

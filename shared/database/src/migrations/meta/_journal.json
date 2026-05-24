@@ -568,6 +568,13 @@
       "when": 1779856000014,
       "tag": "0082_drop-flowsheet-artwork-lookup-idx",
       "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1779856000015,
+      "tag": "0083_drop-flowsheet-dj-name-trgm-idx",
+      "breakpoints": true
     }
   ]
 }
