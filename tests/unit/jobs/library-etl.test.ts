@@ -65,8 +65,9 @@ jest.mock('@wxyc/database', () => {
 });
 
 jest.mock('drizzle-orm', () => {
-  const sqlFn: jest.Mock & { raw?: jest.Mock } = jest.fn();
+  const sqlFn: jest.Mock & { raw?: jest.Mock; join?: jest.Mock } = jest.fn();
   sqlFn.raw = jest.fn((fragment: string) => ({ raw: fragment }));
+  sqlFn.join = jest.fn((clauses: unknown[], separator: unknown) => ({ join: clauses, separator }));
   return {
     eq: jest.fn((a: unknown, b: unknown) => ({ eq: [a, b] })),
     and: jest.fn((...args: unknown[]) => ({ and: args })),
@@ -92,6 +93,7 @@ import {
   parseReleaseRows,
   buildArtistCacheKey,
   buildLegacySourcedSetMap,
+  buildLegacySourcedSetWhere,
   buildAlbumCacheKey,
 } from '../../../jobs/library-etl/job';
 
@@ -618,6 +620,57 @@ describe('library-etl job helpers', () => {
         const fragment = (map as Record<string, { raw?: string }>)[key];
         expect(fragment.raw).toBe(`excluded."${key}"`);
       }
+    });
+  });
+
+  // The conflict-WHERE predicate must match the SET map 1:1 so PG skips the
+  // UPDATE when every excluded.* value already equals the existing row.
+  // If the SET map and the WHERE drift, PG resumes blind-writing dead tuples
+  // (BS#1063). Pinned via the same LEGACY_SOURCED_LIBRARY_COLUMNS list both
+  // helpers iterate.
+  describe('buildLegacySourcedSetWhere', () => {
+    const expectedKeys = [
+      'artist_id',
+      'artist_name',
+      'genre_id',
+      'format_id',
+      'alternate_artist_name',
+      'album_artist',
+      'album_title',
+      'code_number',
+      'code_volume_letters',
+      'disc_quantity',
+      'add_date',
+      'last_modified',
+      'date_lost',
+      'date_found',
+      'on_streaming',
+    ];
+
+    it('emits one IS DISTINCT FROM clause per legacy-sourced column joined by OR', () => {
+      // Mocked sql.join returns { join: clauses, separator: { raw: ' OR ' } }
+      // so we can read the per-column fragments back out and assert each one
+      // references the matching column on both sides.
+      const where = buildLegacySourcedSetWhere() as unknown as {
+        join: Array<{ raw: string }>;
+        separator: { raw: string };
+      };
+      expect(where.separator.raw).toBe(' OR ');
+      expect(where.join).toHaveLength(expectedKeys.length);
+      const fragments = where.join.map((c) => c.raw);
+      for (const key of expectedKeys) {
+        expect(fragments).toContain(`"library"."${key}" IS DISTINCT FROM excluded."${key}"`);
+      }
+    });
+
+    it('matches the SET map keys exactly (no SET-vs-WHERE drift)', () => {
+      const setKeys = Object.keys(buildLegacySourcedSetMap()).sort();
+      const where = buildLegacySourcedSetWhere() as unknown as { join: Array<{ raw: string }> };
+      const whereKeys = where.join
+        .map((c) => c.raw.match(/^"library"\."([^"]+)"/)?.[1])
+        .filter((k): k is string => Boolean(k))
+        .sort();
+      expect(whereKeys).toEqual(setKeys);
     });
   });
 });

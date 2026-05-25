@@ -116,6 +116,19 @@ const runIncremental = async (): Promise<SyncResult> => {
           record_label: sql`excluded.record_label`,
           discogs_release_id: sql`excluded.discogs_release_id`,
         },
+        // BS#1059 mechanic applied to rotation per BS#1063: skip the UPDATE
+        // when every excluded.* value already matches. The 30-min cron was
+        // rewriting most rows every cycle even when nothing changed.
+        setWhere: sql`
+          ${rotation.album_id} IS DISTINCT FROM excluded.album_id OR
+          ${rotation.legacy_library_release_id} IS DISTINCT FROM excluded.legacy_library_release_id OR
+          ${rotation.rotation_bin} IS DISTINCT FROM excluded.rotation_bin OR
+          ${rotation.kill_date} IS DISTINCT FROM excluded.kill_date OR
+          ${rotation.artist_name} IS DISTINCT FROM excluded.artist_name OR
+          ${rotation.album_title} IS DISTINCT FROM excluded.album_title OR
+          ${rotation.record_label} IS DISTINCT FROM excluded.record_label OR
+          ${rotation.discogs_release_id} IS DISTINCT FROM excluded.discogs_release_id
+        `,
       });
 
     if (existing) {
