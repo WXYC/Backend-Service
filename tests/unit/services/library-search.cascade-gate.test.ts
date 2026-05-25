@@ -1,5 +1,10 @@
 import { parseSearchQuery, CATALOG_PARSER_CONFIG } from '../../../apps/backend/services/search-parser.service';
-import { isPlainTextQuery, MAX_CASCADE_CONDITIONS } from '../../../apps/backend/services/library-search.service';
+import {
+  isPlainTextQuery,
+  passesCascadeGate,
+  MAX_CASCADE_CONDITIONS,
+  MIN_CASCADE_QUERY_LENGTH,
+} from '../../../apps/backend/services/library-search.service';
 
 const parse = (q: string) => parseSearchQuery(q, CATALOG_PARSER_CONFIG);
 
@@ -52,5 +57,29 @@ describe('isPlainTextQuery (catalog cascade gate)', () => {
       const atCap = Array.from({ length: MAX_CASCADE_CONDITIONS }, (_, i) => `w${i}`).join(' ');
       expect(isPlainTextQuery(parse(atCap))).toBe(true);
     });
+  });
+});
+
+describe('passesCascadeGate (catalog cascade entry predicate)', () => {
+  it('rejects queries shorter than MIN_CASCADE_QUERY_LENGTH', () => {
+    const short = 'a'.repeat(MIN_CASCADE_QUERY_LENGTH - 1);
+    expect(passesCascadeGate(short, parse(short))).toBe(false);
+  });
+
+  it('accepts queries at exactly MIN_CASCADE_QUERY_LENGTH with plain text', () => {
+    const atFloor = 'a'.repeat(MIN_CASCADE_QUERY_LENGTH);
+    expect(passesCascadeGate(atFloor, parse(atFloor))).toBe(true);
+  });
+
+  it('accepts multi-word plain text above the floor (the bug fix case)', () => {
+    expect(passesCascadeGate('vi scose poise', parse('vi scose poise'))).toBe(true);
+  });
+
+  it('rejects long queries with field qualifiers (gate composition)', () => {
+    expect(passesCascadeGate('artist:autechre', parse('artist:autechre'))).toBe(false);
+  });
+
+  it('rejects an empty trimmed query', () => {
+    expect(passesCascadeGate('', parse(''))).toBe(false);
   });
 });

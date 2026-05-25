@@ -72,6 +72,11 @@ export function isPlainTextQuery(conditions: SearchCondition<CatalogField>[]): b
   return conditions.every((c) => c.field === 'all' && !c.exact && !c.negated && c.operator === 'AND');
 }
 
+export function passesCascadeGate(trimmedQ: string, conditions: SearchCondition<CatalogField>[]): boolean {
+  if (trimmedQ.length < MIN_CASCADE_QUERY_LENGTH) return false;
+  return isPlainTextQuery(conditions);
+}
+
 /**
  * Search the catalog with parsed query conditions, enum filters, sort,
  * and offset pagination. Reads `library_artist_view` so callers get the
@@ -135,8 +140,7 @@ export async function searchLibrary(
   // page 0 stays empty so clients don't scroll a bounded fallback list.
   if (params.page !== 0) return { results, total };
   const trimmed = params.q.trim();
-  if (trimmed.length < MIN_CASCADE_QUERY_LENGTH) return { results, total };
-  if (!isPlainTextQuery(conditions)) return { results, total };
+  if (!passesCascadeGate(trimmed, conditions)) return { results, total };
 
   // Attribute set at startSpan creation so Sentry indexes it numerically
   // (avoids the BS#1081 string-typing trap that breaks avg/p50/p90).
