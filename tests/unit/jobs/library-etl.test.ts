@@ -623,11 +623,6 @@ describe('library-etl job helpers', () => {
     });
   });
 
-  // The conflict-WHERE predicate must match the SET map 1:1 so PG skips the
-  // UPDATE when every excluded.* value already equals the existing row.
-  // If the SET map and the WHERE drift, PG resumes blind-writing dead tuples
-  // (BS#1063). Pinned via the same LEGACY_SOURCED_LIBRARY_COLUMNS list both
-  // helpers iterate.
   describe('buildLegacySourcedSetWhere', () => {
     const expectedKeys = [
       'artist_id',
