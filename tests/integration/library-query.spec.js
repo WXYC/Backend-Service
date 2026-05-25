@@ -223,7 +223,11 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     expect(res.body.totalPages).toBe(1);
   });
 
-  test('single-bareword Track 2 query ("vi scose poise") returns Confield via LML fallback', async () => {
+  test('multi-word Track 2 query ("vi scose poise") returns Confield via LML fallback', async () => {
+    // CONFIELD_TRACK_QUERY tokenizes into 3 plain-text conditions. The cascade
+    // gate accepts AND-only plain-text queries of any length (BS#1146); pre-fix
+    // the gate rejected anything where `conditions.length !== 1`, so this
+    // assertion path was silently warn-skipping.
     const res = await auth
       .get('/library/query')
       .query({ q: CONFIELD_TRACK_QUERY, sort: 'artist', order: 'asc', limit: 20 })
@@ -233,7 +237,7 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     expect(Array.isArray(res.body.results)).toBe(true);
     if (res.body.results.length === 0) {
       console.warn(
-        '[BS#977] /library/query cascade returned no Track 2 results. Likely the backend is running ' +
+        '[BS#977/#1146] /library/query cascade returned no Track 2 results. Likely the backend is running ' +
           'without CATALOG_TRACK_SEARCH_DISCOGS_ENABLED=true. Set it in .env and restart `npm run dev`.'
       );
       return;
@@ -247,6 +251,21 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     // Mock LML's songLookup map returns matched_via.source = 'discogs_master'
     // for the Confield row; bridged via library.legacy_release_id back to BS.
     expect(hit.matched_via.some((m) => m.source && m.source.startsWith('discogs'))).toBe(true);
+  });
+
+  test('multi-word query mixed with field qualifier skips the cascade', async () => {
+    // 'vi scose artist:NonexistentArtistFoo' parses to 2 bareword + 1
+    // field-qualified condition. Even with the relaxed multi-word gate
+    // (BS#1146), the presence of a field-qualified condition disqualifies the
+    // query from cascade entry. Primary returns 0 → no cascade → no results.
+    const res = await auth
+      .get('/library/query')
+      .query({ q: 'vi scose artist:NonexistentArtistFoo', limit: 10 })
+      .expect(200);
+
+    expect(Array.isArray(res.body.results)).toBe(true);
+    expect(res.body.results.length).toBe(0);
+    expect(res.body.total).toBe(0);
   });
 
   test('primary tsvector/ILIKE hit never carries matched_via (cascade only fires on primary 0-hit)', async () => {
