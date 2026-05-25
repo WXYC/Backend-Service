@@ -64,6 +64,14 @@ const SECONDARY_SORT: Record<CatalogSort, SQL> = {
   date: sql`${library_artist_view.artist_name}`,
 };
 
+export const MIN_CASCADE_QUERY_LENGTH = 4;
+export const MAX_CASCADE_CONDITIONS = 6;
+
+export function isPlainTextQuery(conditions: SearchCondition<CatalogField>[]): boolean {
+  if (conditions.length === 0 || conditions.length > MAX_CASCADE_CONDITIONS) return false;
+  return conditions.every((c) => c.field === 'all' && !c.exact && !c.negated && c.operator === 'AND');
+}
+
 /**
  * Search the catalog with parsed query conditions, enum filters, sort,
  * and offset pagination. Reads `library_artist_view` so callers get the
@@ -121,60 +129,29 @@ export async function searchLibrary(
 
   if (results.length > 0 || total > 0) return { results, total };
 
-  // Catalog-track-search cascade (BS#977, multi-word relaxation BS#1146). When
-  // the primary query returns no rows AND the user typed plain text (no field
-  // qualifiers, exact match, NOT, or OR), fall through to Track 1 (CTA) +
-  // Track 2 (LML `/lookup`). The cascade is single-page: pagination beyond
-  // page 0 stays empty so the client doesn't keep scrolling into a bounded
-  // fallback list.
-  //
-  // Two cheap defensive guards keep cascade-entry traffic bounded against
-  // typo storms and pathological inputs: `MIN_CASCADE_QUERY_LENGTH` rules out
-  // 1-3-char-per-word noise; the conditions cap inside `isPlainTextQuery`
-  // rules out long pasted lyrics / query-builder abuse. The downstream LML
-  // chokepoint (`Semaphore(5) + TokenBucket(50/min)` in `@wxyc/lml-client`)
-  // is the hard cap on fan-out; these guards just trim the worst inputs
-  // before they reach it.
+  // Catalog-track-search cascade (BS#977, multi-word relaxation BS#1146).
+  // Guards trim worst-case inputs (typo storms, query-builder abuse) before
+  // LML's `Semaphore(5) + TokenBucket(50/min)` chokepoint; pagination beyond
+  // page 0 stays empty so clients don't scroll a bounded fallback list.
   if (params.page !== 0) return { results, total };
-  if (params.q.trim().length < MIN_CASCADE_QUERY_LENGTH) return { results, total };
+  const trimmed = params.q.trim();
+  if (trimmed.length < MIN_CASCADE_QUERY_LENGTH) return { results, total };
   if (!isPlainTextQuery(conditions)) return { results, total };
 
-  const cascadeResults = await runCascade(params, conditions.length);
-  return { results: cascadeResults, total: cascadeResults.length };
-}
-
-export const MIN_CASCADE_QUERY_LENGTH = 4;
-export const MAX_CASCADE_CONDITIONS = 6;
-
-export function isPlainTextQuery(conditions: SearchCondition<CatalogField>[]): boolean {
-  if (conditions.length === 0 || conditions.length > MAX_CASCADE_CONDITIONS) return false;
-  return conditions.every((c) => c.field === 'all' && !c.exact && !c.negated && c.operator === 'AND');
-}
-
-/**
- * Wraps the cascade in a `catalog.cascade` span that carries the numeric
- * `cascade.query_word_count` attribute set at creation time — pass attrs at
- * `startSpan` rather than `setAttribute(name, number)` after creation so Sentry
- * indexes the value as numeric and not as a string (the avg/p50/p90
- * aggregation trap from BS#1081). Lets post-deploy dashboards split widened
- * traffic (≥2 conditions) from baseline (1 condition) without renaming any
- * existing `track_search.*` attributes.
- */
-async function runCascade(params: LibraryQueryParams, conditionCount: number): Promise<AlbumSearchResultRow[]> {
-  return Sentry.startSpan(
+  // Attribute set at startSpan creation so Sentry indexes it numerically
+  // (avoids the BS#1081 string-typing trap that breaks avg/p50/p90).
+  const cascadeResults = await Sentry.startSpan(
     {
       name: 'catalog.cascade',
       op: 'catalog.cascade',
-      attributes: { 'cascade.query_word_count': conditionCount },
+      attributes: { 'cascade.query_word_count': conditions.length },
     },
-    () => runCascadeUnwrapped(params)
+    () => runCascade(params, trimmed)
   );
+  return { results: cascadeResults, total: cascadeResults.length };
 }
 
-async function runCascadeUnwrapped(params: LibraryQueryParams): Promise<AlbumSearchResultRow[]> {
-  const q = params.q.trim();
-  if (q.length === 0) return [];
-
+async function runCascade(params: LibraryQueryParams, q: string): Promise<AlbumSearchResultRow[]> {
   const cascade: TaggedLibraryViewEntry[] = await runCatalogTrackSearchCascade(q, params.limit, params.on_streaming);
   if (cascade.length === 0) return [];
 
