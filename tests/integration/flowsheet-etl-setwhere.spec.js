@@ -1,44 +1,18 @@
 /**
- * Integration test for `jobs/flowsheet-etl/job.ts` value-aware setWhere
- * predicate on `runIncremental`'s `onConflictDoUpdate` (BS#1059 / parent
- * BS#1058).
+ * PG-semantics pin for the value-aware setWhere on `runIncremental`'s
+ * onConflictDoUpdate (BS#1059). Mirrors the SQL shape at
+ * `jobs/flowsheet-etl/job.ts:397-458` by hand because the integration
+ * runner is babel-jest and can't import the ETL's drizzle-orm code (see
+ * `flowsheet-etl-cdc-delivery.spec.js` header for the same constraint).
  *
- * Background: tubafrenzy's mirror code bumps `TIME_LAST_MODIFIED` on adjacent
- * rows during normal operation (flowsheet.mirror.ts close-prior-now-playing
- * UPDATE). `fetchLegacyEntries(sinceMs)` therefore re-emits rows whose
- * display fields haven't actually changed. Without value-aware setWhere,
- * the upsert generated a dead tuple on every such re-emit — defeating HOT
- * (every set-list column is indexed) and exploding the index/heap ratio.
- *
- * This spec pins the PG-side semantics: an upsert whose `excluded.*` values
- * all match the existing row produces ZERO heap writes. The spec uses a
- * `xmin`-on-row signal — `xmin` is the inserting transaction id and changes
- * iff the row was UPDATEd (HOT or not). It does NOT depend on the lagging
- * `pg_stat_user_tables.n_tup_upd` counter (which the ticket suggested but
- * which lags via the stats collector); xmin is row-local and immediate.
- *
- * The companion unit test at
- * `tests/unit/jobs/flowsheet-etl/job.test.ts` (`passes setWhere on every
- * onConflictDoUpdate call`) pins the shape — that the ETL passes `setWhere`
- * on every conflict path. This spec pins the wire semantics — that the
- * predicate actually behaves as expected against real Postgres.
- *
- * Pure SQL — does NOT import the ETL code (the integration runner is
- * babel-jest with no TS support; see `flowsheet-etl-cdc-delivery.spec.js`
- * header for the drizzle-orm + ts-jest incompatibility). The SQL shape
- * mirrors `jobs/flowsheet-etl/job.ts:397-444`; if it drifts the unit test
- * fires first.
+ * Uses xmin rather than `pg_stat_user_tables.n_tup_upd` because xmin is
+ * row-local and immediate; n_tup_upd lags via the stats collector.
  */
 
 const { getTestDb } = require('../utils/db');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
-/**
- * Emit the ETL-shape upsert with the value-aware setWhere predicate.
- * Mirrors `jobs/flowsheet-etl/job.ts:397-444`. Returns the affected row count
- * (postgres-js exposes this on the result object).
- */
 async function upsertEtlShape(sql, row) {
   return sql`
     INSERT INTO ${sql(SCHEMA)}.flowsheet
@@ -90,7 +64,6 @@ describe('flowsheet-etl value-aware setWhere (BS#1059)', () => {
   });
 
   test('re-upserting an identical row produces no UPDATE (xmin unchanged)', async () => {
-    // Insert a fresh row, capture its xmin (the inserting xact id).
     const legacyId = 2000001059;
     insertedLegacyIds.push(legacyId);
     const row = {
@@ -114,9 +87,6 @@ describe('flowsheet-etl value-aware setWhere (BS#1059)', () => {
     `;
     expect(before.length).toBe(1);
 
-    // Re-emit the SAME row. With the setWhere predicate, every IS DISTINCT
-    // FROM evaluates to FALSE, the UPDATE branch is skipped, and the heap
-    // tuple is not rewritten. xmin therefore stays at the insert's xid.
     await upsertEtlShape(sql, row);
     const after = await sql`
       SELECT xmin::text AS xmin
@@ -127,9 +97,6 @@ describe('flowsheet-etl value-aware setWhere (BS#1059)', () => {
   });
 
   test('re-upserting with one changed field produces an UPDATE (xmin changes)', async () => {
-    // Independent row from the previous test so the suite stays order-
-    // independent. (Jest --runInBand runs in declared order locally but the
-    // CI runner shouldn't have to know that.)
     const legacyId = 2000001060;
     insertedLegacyIds.push(legacyId);
     const row = {
@@ -152,8 +119,6 @@ describe('flowsheet-etl value-aware setWhere (BS#1059)', () => {
       WHERE legacy_entry_id = ${legacyId}
     `;
 
-    // Re-emit with album_title changed. The setWhere predicate's
-    // album_title-leg matches, the UPDATE fires, xmin advances.
     await upsertEtlShape(sql, { ...row, album_title: 'On Your Own Love Again (Remastered)' });
     const after = await sql`
       SELECT xmin::text AS xmin, album_title
