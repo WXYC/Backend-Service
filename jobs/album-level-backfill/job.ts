@@ -411,14 +411,22 @@ export const runBatch = async (
   let match = 0;
   let no_match = 0;
   let error = 0;
-  let upserts = 0;
+
+  // Parallelize the UPSERTs via Promise.all instead of awaiting each in turn.
+  // The sequential `for...await` paid one network round-trip per match
+  // (BATCH_SIZE × tunnel/RDS latency); Promise.all lets postgres-js pipeline
+  // them on the single connection. Measured against prod via SSH tunnel
+  // during the BS#1041 drain: ~4-5s shaved per 50-item batch (≈ 25% wall),
+  // shifting the per-batch bottleneck from BS-side serialization to LML's
+  // own cascade-strategy tail. Idempotency unchanged — `upsertAlbumMatch`
+  // is race-guarded by `updated_at < NOW()`, so ordering does not matter.
+  const upsertPromises: Array<Promise<boolean>> = [];
   for (const result of response.results) {
     if (result.status === 'match' && result.lookup) {
       match += 1;
       const album = resolved[result.index];
       if (!album) continue; // shouldn't happen given input-order guarantee
-      const wrote = await upsertAlbumMatch(album.album_id, result.lookup);
-      if (wrote) upserts += 1;
+      upsertPromises.push(upsertAlbumMatch(album.album_id, result.lookup));
     } else if (result.status === 'no_match') {
       no_match += 1;
     } else {
@@ -429,6 +437,7 @@ export const runBatch = async (
       );
     }
   }
+  const upserts = (await Promise.all(upsertPromises)).filter(Boolean).length;
   return { batchSize: items.length, match, no_match, error, upserts };
 };
 
