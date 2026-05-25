@@ -338,10 +338,8 @@ export const runIncremental = async (): Promise<SyncResult> => {
           legacy_dj_name: sql`excluded.legacy_dj_name`,
           legacy_dj_id: sql`excluded.legacy_dj_id`,
         },
-        // Value-aware guard: skip the UPDATE when every set-column already
-        // matches the incoming excluded.* values. Lower volume than the
-        // flowsheet upsert below, but same dead-tuple amplification mechanic.
-        // See BS#1059 / #1058.
+        // Same dead-tuple amplification mechanic as the flowsheet upsert
+        // below, lower volume. See BS#1059.
         setWhere: sql`
           ${shows.end_time} IS DISTINCT FROM excluded.end_time OR
           ${shows.show_name} IS DISTINCT FROM excluded.show_name OR
@@ -436,13 +434,12 @@ export const runIncremental = async (): Promise<SyncResult> => {
           show_id: sql`excluded.show_id`,
           play_order: sql`excluded.play_order`,
         },
-        // Value-aware guard: tubafrenzy bumps TIME_LAST_MODIFIED on adjacent
-        // rows during normal operation (flowsheet.mirror.ts close-prior-now-
-        // playing UPDATE), so most fetchLegacyEntries() rows arrive with
-        // identical display fields to what's already stored. Without this
-        // predicate every such row produced a dead tuple on every 30-min tick,
-        // defeating HOT (every set-list column is indexed) and exploding the
-        // index/heap ratio. See BS#1059 / #1058.
+        // tubafrenzy bumps TIME_LAST_MODIFIED on adjacent rows during normal
+        // operation (flowsheet.mirror.ts close-prior-now-playing UPDATE), so
+        // fetchLegacyEntries() re-emits rows whose display fields haven't
+        // actually changed. Every set-list column below is indexed, so a
+        // blind UPDATE generates a non-HOT dead tuple per row per tick and
+        // explodes the index/heap ratio. See BS#1059.
         setWhere: sql`
           ${flowsheet.artist_name} IS DISTINCT FROM excluded.artist_name OR
           ${flowsheet.album_title} IS DISTINCT FROM excluded.album_title OR
