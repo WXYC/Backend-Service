@@ -54,7 +54,7 @@ const resolveAlbumIds = async (): Promise<number> => {
 
 // ---- Incremental Sync Mode ----
 
-type SyncResult = { imported: number; updated: number };
+type SyncResult = { imported: number; matched: number };
 
 const runIncremental = async (): Promise<SyncResult> => {
   const runStartedAt = new Date();
@@ -63,7 +63,9 @@ const runIncremental = async (): Promise<SyncResult> => {
   const legacyReleases = await fetchLegacyRotation(lastRunMs);
 
   let imported = 0;
-  let updated = 0;
+  // Rows whose legacy_rotation_id already existed in PG. Not necessarily
+  // updated — setWhere skips the UPDATE when every excluded.* value matches.
+  let matched = 0;
 
   for (const release of legacyReleases) {
     if (!Number.isFinite(release.id)) continue;
@@ -116,9 +118,7 @@ const runIncremental = async (): Promise<SyncResult> => {
           record_label: sql`excluded.record_label`,
           discogs_release_id: sql`excluded.discogs_release_id`,
         },
-        // BS#1059 mechanic applied to rotation per BS#1063: skip the UPDATE
-        // when every excluded.* value already matches. The 30-min cron was
-        // rewriting most rows every cycle even when nothing changed.
+        // BS#1059 mechanic; the 30-min cron was rewriting most rows every cycle.
         setWhere: sql`
           ${rotation.album_id} IS DISTINCT FROM excluded.album_id OR
           ${rotation.legacy_library_release_id} IS DISTINCT FROM excluded.legacy_library_release_id OR
@@ -132,7 +132,7 @@ const runIncremental = async (): Promise<SyncResult> => {
       });
 
     if (existing) {
-      updated++;
+      matched++;
     } else {
       imported++;
     }
@@ -143,10 +143,10 @@ const runIncremental = async (): Promise<SyncResult> => {
 
   await updateLastRun(JOB_NAME, runStartedAt);
   const parts = [`${imported} new releases`];
-  if (updated > 0) parts.push(`${updated} updated releases`);
+  if (matched > 0) parts.push(`${matched} matched releases`);
   console.log(`[rotation-etl] Incremental sync: ${parts.join(', ')}.`);
 
-  return { imported, updated };
+  return { imported, matched };
 };
 
 // ---- Main ----
@@ -158,7 +158,7 @@ const run = async () => {
       await runPollingLoop(
         async () => {
           const result = await runIncremental();
-          return { hasChanges: result.imported > 0 || result.updated > 0 };
+          return { hasChanges: result.imported > 0 || result.matched > 0 };
         },
         { jobName: JOB_NAME, notifyPath: '/internal/rotation-sync-notify' }
       );

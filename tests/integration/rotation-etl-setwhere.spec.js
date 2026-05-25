@@ -1,13 +1,7 @@
 /**
- * PG-semantics pin for the value-aware setWhere on the rotation-etl
- * onConflictDoUpdate (BS#1063). Same hand-written-SQL / xmin shape as
- * flowsheet-etl-setwhere.spec.js — the integration runner is babel-jest
- * and can't import the ETL's drizzle-orm code.
- *
- * Mirrors the SQL the ETL emits at jobs/rotation-etl/job.ts:107-130. The
- * 8-column SET map covers every field tubafrenzy mirrors; the conflict-WHERE
- * predicate skips the UPDATE when every excluded.* value matches the
- * existing row.
+ * PG-semantics pin for the rotation-etl setWhere (BS#1063). Hand-written
+ * SQL mirrors jobs/rotation-etl/job.ts; the integration runner is
+ * babel-jest and can't import drizzle-orm code.
  */
 
 const { getTestDb } = require('../utils/db');
@@ -103,7 +97,7 @@ describe('rotation-etl value-aware setWhere (BS#1063)', () => {
       legacy_rotation_id: ROTATION_LEGACY_ID,
       legacy_library_release_id: 5550001,
       album_id: null,
-      rotation_bin: 'H', // changed from M to H
+      rotation_bin: 'H',
       add_date: '2026-05-24',
       kill_date: null,
       artist_name: 'Jessica Pratt',

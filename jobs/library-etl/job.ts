@@ -251,9 +251,6 @@ const syncFormats = async (tx: DbTransaction, canonicalFormatNames: string[]) =>
 };
 
 const updateLastRun = async (dbClient: DbClient, jobName: string, lastRun: Date) => {
-  // No setWhere: advancing last_run on every call is the entire purpose
-  // of this UPSERT, so a value-aware guard would defeat it. Volume is one
-  // row per ETL run.
   await dbClient
     .insert(cronjob_runs)
     .values({ job_name: jobName, last_run: lastRun })
@@ -447,8 +444,7 @@ const ensureGenreArtistCrossref = async (
     .onConflictDoUpdate({
       target: [genre_artist_crossreference.artist_id, genre_artist_crossreference.genre_id],
       set: { artist_genre_code: sql`excluded.artist_genre_code` },
-      // Same dead-tuple amplification mechanic as the flowsheet upsert
-      // in BS#1059 (skip UPDATE when the incoming value matches).
+      // BS#1059 mechanic.
       setWhere: sql`${genre_artist_crossreference.artist_genre_code} IS DISTINCT FROM excluded.artist_genre_code`,
     });
 };
@@ -657,8 +653,7 @@ const importArtistCrossRefs = async (
       .onConflictDoUpdate({
         target: [artist_crossreference.source_artist_id, artist_crossreference.target_artist_id],
         set: { comment: sql`excluded.comment` },
-        // BS#1059 mechanic; IS DISTINCT FROM is required for the nullable
-        // `comment` column (NULL → NULL must no-op).
+        // BS#1059 mechanic; nullable column needs IS DISTINCT FROM.
         setWhere: sql`${artist_crossreference.comment} IS DISTINCT FROM excluded.comment`,
       });
 
@@ -799,7 +794,7 @@ const importReleaseCrossRefs = async (
       .onConflictDoUpdate({
         target: [artist_library_crossreference.artist_id, artist_library_crossreference.library_id],
         set: { comment: sql`excluded.comment` },
-        // See artist_crossreference upsert above; same shape.
+        // BS#1059 mechanic; nullable column needs IS DISTINCT FROM.
         setWhere: sql`${artist_library_crossreference.comment} IS DISTINCT FROM excluded.comment`,
       });
 
@@ -887,22 +882,17 @@ const buildLegacySourcedSetMap = (): Record<LegacySourcedColumn, ReturnType<type
   return map;
 };
 
-/**
- * IS DISTINCT FROM predicate derived from the same column list as
- * buildLegacySourcedSetMap, so the SET clause and the conflict-WHERE clause
- * cannot drift. PG skips the UPDATE branch when every excluded.* value
- * already matches the existing row — eliminating the dead-tuple writes that
- * tubafrenzy's TIME_LAST_MODIFIED bumps would otherwise trigger on rows
- * whose content didn't change (BS#1059 mechanic, applied to library per
- * BS#1063).
- *
- * Pinned by a unit test against the LEGACY_SOURCED_LIBRARY_COLUMNS list.
- */
+/** Conflict-WHERE paired with buildLegacySourcedSetMap (BS#1063). Pinned by unit test. */
 const buildLegacySourcedSetWhere = () =>
   sql.join(
     LEGACY_SOURCED_LIBRARY_COLUMNS.map((col) => sql.raw(`"library"."${col}" IS DISTINCT FROM excluded."${col}"`)),
     sql.raw(' OR ')
   );
+
+// Cached once at module load; the helpers above are pure functions of the
+// column list, so per-row recomputation in the upsert loop is pure waste.
+const LEGACY_SOURCED_SET_MAP = buildLegacySourcedSetMap();
+const LEGACY_SOURCED_SET_WHERE = buildLegacySourcedSetWhere();
 
 const run = async () => {
   try {
@@ -1094,8 +1084,8 @@ const run = async () => {
           })
           .onConflictDoUpdate({
             target: library.legacy_release_id,
-            set: buildLegacySourcedSetMap(),
-            setWhere: buildLegacySourcedSetWhere(),
+            set: LEGACY_SOURCED_SET_MAP,
+            setWhere: LEGACY_SOURCED_SET_WHERE,
           });
 
         if (willConflictOnLegacyId) {
