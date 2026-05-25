@@ -16,7 +16,7 @@
   "author": "Jackson Meade",
   "license": "MIT",
   "dependencies": {
-    "@sentry/node": "^10.52.0",
+    "@sentry/node": "^10.53.1",
     "@wxyc/authentication": "^1.0.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/shared": "^1.5.0",
@@ -24,7 +24,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "express-rate-limit": "^8.5.1"
+    "express-rate-limit": "^8.5.2"
   },
   "peerDependencies": {
     "drizzle-orm": "^0.45.0"
