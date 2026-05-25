@@ -106,5 +106,8 @@
     "@sentry/node": "^10.53.1",
     "eventsource": "^4.1.0",
     "jose": "^6.2.3"
+  },
+  "overrides": {
+    "esbuild": "^0.25.0"
   }
 }
