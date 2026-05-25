@@ -297,11 +297,14 @@ describe('library.controller', () => {
       // Reject *after* the budget would naturally fire — the budget should win
       // and the rejection should be swallowed.
       mockEnrichWithArtwork.mockReturnValue(
-        new Promise<unknown[]>((_, reject) => setTimeout(() => reject(enrichError), 50))
+        new Promise<unknown[]>((_, reject) => setTimeout(() => reject(enrichError), 500))
       );
 
       const previous = process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
-      process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = '5';
+      // Budget << reject delay; 50/500/750ms gives ~10x headroom over the
+      // previous 5/50/75ms shape so CI runners under load don't race-invert
+      // and resolve the rejection before the budget fires.
+      process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = '50';
       jest.resetModules();
       const { searchForAlbum: searchWithTightBudget } =
         await import('../../../apps/backend/controllers/library.controller');
@@ -315,7 +318,7 @@ describe('library.controller', () => {
         expect(res.json).toHaveBeenCalledWith(searchResults);
         // Give the late rejection time to settle into the catch handler so the
         // assertion below isn't subject to a process-level unhandledRejection.
-        await new Promise((resolve) => setTimeout(resolve, 75));
+        await new Promise((resolve) => setTimeout(resolve, 750));
       } finally {
         if (previous === undefined) delete process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
         else process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = previous;
