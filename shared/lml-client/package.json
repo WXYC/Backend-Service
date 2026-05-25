@@ -19,7 +19,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sentry/node": "^10.52.0",
+    "@sentry/node": "^10.53.1",
     "@wxyc/shared": "^1.5.0"
   },
   "devDependencies": {
