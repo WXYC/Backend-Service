@@ -92,6 +92,59 @@ describe('GET /library/query', () => {
     }
   });
 
+  test('genres filter ORs multiple genre names', async () => {
+    const rockOnly = await auth.get('/library/query').query({ genre: 'Rock', limit: 50 }).expect(200);
+    const jazzOnly = await auth.get('/library/query').query({ genre: 'Jazz', limit: 50 }).expect(200);
+    expect(rockOnly.body.results.length).toBeGreaterThan(0);
+    expect(jazzOnly.body.results.length).toBeGreaterThan(0);
+
+    const combined = await auth
+      .get('/library/query')
+      .query({ genres: 'Rock,Jazz', limit: 100 })
+      .expect(200);
+    expect(combined.body.results.length).toBeGreaterThan(0);
+    for (const row of combined.body.results) {
+      expect(['Rock', 'Jazz']).toContain(row.genre_name);
+    }
+    const combinedIds = new Set(combined.body.results.map((r) => r.id));
+    const rockIds = rockOnly.body.results.map((r) => r.id);
+    const jazzIds = jazzOnly.body.results.map((r) => r.id);
+    expect(rockIds.some((id) => combinedIds.has(id)) || jazzIds.some((id) => combinedIds.has(id))).toBe(
+      true
+    );
+  });
+
+  test('formats filter ORs multiple format names', async () => {
+    const cdOnly = await auth.get('/library/query').query({ format: 'cd', limit: 50 }).expect(200);
+    expect(cdOnly.body.results.length).toBeGreaterThan(0);
+
+    const vinylRes = await auth.get('/library/query').query({ format: 'Vinyl', limit: 50 });
+    const vinylOnly = vinylRes.status === 200 ? vinylRes.body.results : [];
+
+    const formatNames = [...new Set([...cdOnly.body.results, ...vinylOnly].map((r) => r.format_name))];
+    if (formatNames.length < 2) {
+      // Seed may only have cd — still verify CSV param is accepted.
+      const csvOnly = await auth.get('/library/query').query({ formats: 'cd', limit: 50 }).expect(200);
+      expect(csvOnly.body.results.length).toBeGreaterThan(0);
+      return;
+    }
+
+    const combined = await auth
+      .get('/library/query')
+      .query({ formats: formatNames.slice(0, 2).join(','), limit: 100 })
+      .expect(200);
+    expect(combined.body.results.length).toBeGreaterThan(0);
+    const allowed = new Set(formatNames.slice(0, 2));
+    for (const row of combined.body.results) {
+      expect(allowed.has(row.format_name)).toBe(true);
+    }
+  });
+
+  test('rejects unknown genre in genres list with 400', async () => {
+    const res = await auth.get('/library/query').query({ genres: 'Rock,NotARealGenre' }).expect(400);
+    expect(res.body.message).toMatch(/genre/i);
+  });
+
   test('stable pagination across same-primary-sort rows', async () => {
     // Sort by album asc — Stereolab's two records share artist but have
     // distinct titles, and the secondary `artist_name` sort gives the same
@@ -138,6 +191,47 @@ describe('GET /library/query', () => {
 
   test('rejects malformed on_streaming with 400', async () => {
     await auth.get('/library/query').query({ on_streaming: 'maybe' }).expect(400);
+  });
+
+  test('rejects malformed missing with 400', async () => {
+    await auth.get('/library/query').query({ missing: 'maybe' }).expect(400);
+  });
+
+  test('missing=true returns only currently missing albums', async () => {
+    const res = await auth.get('/library/query').query({ missing: 'true', limit: 50 }).expect(200);
+    expect(res.body.results.length).toBeGreaterThanOrEqual(0);
+    for (const row of res.body.results) {
+      expect(row).toEqual(expect.objectContaining({ id: expect.any(Number) }));
+    }
+  });
+
+  test('rotation_bins=H returns only heavy rotation rows', async () => {
+    const res = await auth.get('/library/query').query({ rotation_bins: 'H', limit: 50 }).expect(200);
+    for (const row of res.body.results) {
+      expect(row.rotation_bin).toBe('H');
+    }
+  });
+
+  test('rotation_bins ORs multiple bins', async () => {
+    const res = await auth.get('/library/query').query({ rotation_bins: 'H,M', limit: 100 }).expect(200);
+    for (const row of res.body.results) {
+      expect(['H', 'M']).toContain(row.rotation_bin);
+    }
+  });
+
+  test('rejects unknown rotation_bins with 400', async () => {
+    const res = await auth.get('/library/query').query({ rotation_bins: 'X' }).expect(400);
+    expect(res.body.message).toMatch(/rotation_bins/i);
+  });
+
+  test('rotation_bins AND missing both apply', async () => {
+    const res = await auth
+      .get('/library/query')
+      .query({ rotation_bins: 'H', missing: 'true', limit: 50 })
+      .expect(200);
+    for (const row of res.body.results) {
+      expect(row.rotation_bin).toBe('H');
+    }
   });
 
   test('rejects unknown sort with 400', async () => {

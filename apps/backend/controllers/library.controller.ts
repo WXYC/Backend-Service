@@ -263,6 +263,33 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   });
 };
 
+type SearchArtistsInGenreQuery = {
+  genre_id?: string;
+  q?: string;
+  limit?: string;
+};
+
+export const searchArtistsInGenre: RequestHandler = async (
+  req: Request<object, object, object, SearchArtistsInGenreQuery>,
+  res
+) => {
+  const genreId = Number(req.query.genre_id);
+  if (!Number.isInteger(genreId) || genreId < 1) {
+    throw new WxycError('Invalid genre_id: must be a positive integer', 400);
+  }
+
+  const q = (req.query.q ?? '').trim();
+  if (q.length < 2) {
+    throw new WxycError('Missing or invalid q: must be at least 2 characters', 400);
+  }
+
+  const limitRaw = req.query.limit !== undefined ? Number(req.query.limit) : 10;
+  const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? limitRaw : 10;
+
+  const artists = await libraryService.searchArtistsInGenre(genreId, q, limit);
+  res.status(200).json({ artists });
+};
+
 type ArtistNumberPeekQuery = {
   code_letters?: string;
   genre_id?: string;
@@ -461,6 +488,69 @@ const parseAlbumId = (rawId: string): number => {
   return albumId;
 };
 
+type UpdateAlbumRequest = {
+  album_title: string;
+  label: string;
+  label_id?: number;
+  genre_id: number;
+  format_id: number;
+  artist_id: number;
+  alternate_artist_name?: string;
+  disc_quantity?: number;
+};
+
+export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumRequest> = async (req, res) => {
+  const albumId = parseAlbumId(req.params.id);
+  const { body } = req;
+
+  if (
+    body.album_title === undefined ||
+    body.label === undefined ||
+    body.genre_id === undefined ||
+    body.format_id === undefined ||
+    body.artist_id === undefined
+  ) {
+    throw new WxycError('Missing Parameters: album_title, label, genre_id, format_id, or artist_id', 400);
+  }
+
+  const canonical_artist_name = await libraryService.getArtistNameById(body.artist_id);
+  if (!canonical_artist_name) {
+    throw new WxycError('Artist not found', 404);
+  }
+
+  const inGenre = await libraryService.artistExistsInGenre(body.artist_id, body.genre_id);
+  if (!inGenre) {
+    throw new WxycError('Artist is not catalogued in the selected genre', 400);
+  }
+
+  let label_id = body.label_id;
+  if (label_id === undefined && body.label) {
+    const resolvedLabel = await labelsService.createLabel(body.label);
+    label_id = resolvedLabel.id;
+  }
+
+  const disc_quantity = body.disc_quantity !== undefined ? Math.max(1, body.disc_quantity) : 1;
+
+  const updated = await libraryService.updateAlbumInDB(albumId, {
+    album_title: body.album_title.trim(),
+    label: body.label.trim(),
+    label_id,
+    genre_id: body.genre_id,
+    format_id: body.format_id,
+    artist_id: body.artist_id,
+    artist_name: canonical_artist_name,
+    alternate_artist_name: body.alternate_artist_name?.trim() || null,
+    disc_quantity,
+  });
+
+  if (!updated) {
+    throw new WxycError('Album not found', 404);
+  }
+
+  const album = await libraryService.getAlbumFromDB(albumId);
+  res.status(200).json(album);
+};
+
 export const markMissing: RequestHandler<{ id: string }> = async (req, res) => {
   const albumId = parseAlbumId(req.params.id);
 
@@ -492,8 +582,12 @@ type LibraryQueryParams = {
   sort?: string;
   order?: string;
   on_streaming?: string;
+  missing?: string;
   genre?: string;
+  genres?: string;
   format?: string;
+  formats?: string;
+  rotation_bins?: string;
 };
 
 const VALID_CATALOG_SORTS: CatalogSort[] = ['artist', 'album', 'plays', 'date'];
@@ -546,8 +640,19 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
     }
   }
 
-  const genre = req.query.genre || undefined;
-  const format = req.query.format || undefined;
+  const missingRaw = req.query.missing;
+  let missing: boolean | undefined;
+  if (missingRaw !== undefined) {
+    if (missingRaw === 'true') missing = true;
+    else if (missingRaw === 'false') missing = false;
+    else {
+      throw new WxycError('missing must be "true" or "false"', 400);
+    }
+  }
+
+  const genres = librarySearchService.parseEnumQueryList(req.query.genres, req.query.genre);
+  const formats = librarySearchService.parseEnumQueryList(req.query.formats, req.query.format);
+  const rotation_bins = librarySearchService.parseRotationBinsQueryList(req.query.rotation_bins);
 
   const { results, total } = await librarySearchService.searchLibrary({
     q,
@@ -556,8 +661,10 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
     sort,
     order,
     on_streaming,
-    genre,
-    format,
+    missing,
+    genres,
+    formats,
+    rotation_bins,
   });
   const totalPages = Math.ceil(total / limit);
   res.status(200).json({ results, total, page, totalPages });
