@@ -32,9 +32,14 @@ export const conditionalGet: RequestHandler = async (
   if (sinceStr) {
     const clientTime = new Date(sinceStr);
     // HTTP Date format only has second precision, so compare at second
-    // granularity. The DB trigger gives ms precision; both sides floor to
-    // whole seconds before the inequality so a write within the same wall-
-    // clock second as the client's last poll still produces a 304.
+    // granularity. The DB trigger floors progress to whole seconds too
+    // (`GREATEST(now(), last_modified_at + interval '1 second')` in
+    // migration 0084) — any mutation advances the watermark by at least
+    // one full second relative to its prior value. Without that floor,
+    // two mutations inside the same wall-clock second would leave the
+    // second-granularity inequality unable to observe progress, and a
+    // polling client's prior `If-Modified-Since` would 304 against a
+    // stale baseline.
     const clientSeconds = Math.floor(clientTime.getTime() / 1000);
     const serverSeconds = Math.floor(lastModified.getTime() / 1000);
     if (!isNaN(clientSeconds) && clientSeconds >= serverSeconds) {

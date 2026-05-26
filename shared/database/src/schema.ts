@@ -587,17 +587,21 @@ export const flowsheet = wxyc_schema.table(
     message: varchar('message', { length: 250 }),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
-    // BS#902 (Epic F / F1). Row-level watermark for the conditional-GET
-    // middleware (`apps/backend/middleware/conditionalGet.ts`). Replaces the
-    // process-local `lastModifiedAt: Date` module-state that broke under
-    // multi-instance BS — each pod kept its own watermark, so iOS polling
-    // across pods would either get a stale 304 against a stranger's
-    // watermark or 200-with-redundant-data after pod swap. Now sourced from
-    // `SELECT MAX(updated_at) FROM flowsheet` on every conditional GET; the
-    // BEFORE UPDATE trigger (`bump_flowsheet_updated_at`) keeps the column
-    // current on every UPDATE, including the enrichment-worker UPDATE that
-    // BS#628 reported never surfaced to a polling iOS client. The
-    // `flowsheet_updated_at_idx` partial covers the MAX read.
+    // BS#902 (Epic F / F1). Per-row mutation timestamp. Bumped by the
+    // BEFORE INSERT OR UPDATE trigger (`bump_flowsheet_updated_at`,
+    // migration 0084), so every write — including the enrichment-worker
+    // UPDATE that BS#628 reported never surfaced to a polling iOS client
+    // — refreshes the row's stamp. The conditional-GET middleware
+    // (`apps/backend/middleware/conditionalGet.ts`) does NOT read from
+    // this column; it reads from the single-row `flowsheet_watermark`
+    // sibling table, which the AFTER STATEMENT trigger advances on every
+    // mutation including DELETE. A `MAX(updated_at)` read would retreat
+    // when the row holding the peak is DELETEd and would cause polling
+    // clients to 304 against a stale baseline — the sibling-table shape
+    // sidesteps that. This column exists for future row-level callers
+    // (ETag derivation, per-row staleness queries); the
+    // `flowsheet_updated_at_idx` DESC index supports any such future
+    // MAX/range scan.
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
     // Metadata (fetched from LML on insert, stored inline)
