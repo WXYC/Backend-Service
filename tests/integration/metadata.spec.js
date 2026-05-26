@@ -571,8 +571,35 @@ describe('Flowsheet Cache Behavior', () => {
 });
 
 describe('Conditional GET (304 Not Modified)', () => {
+  // BS#902: the conditional-GET watermark now advances on every flowsheet
+  // mutation, including the fire-and-forget metadata/linkage UPDATEs that
+  // run AFTER the addEntry HTTP response returns. Tests in earlier describe
+  // blocks (and the join_show in this beforeEach) can leave such writes in
+  // flight. If the first GET captures Last-Modified while a background
+  // UPDATE is still racing, the second GET sees a higher watermark and
+  // returns 200 instead of the expected 304.
+  //
+  // Pre-BS#902 the in-memory watermark intentionally ignored those
+  // enrichment UPDATEs (that was the BS#628 bug the F1 charter explicitly
+  // closes). Now they correctly bump Last-Modified, so the tests must poll
+  // until the watermark settles before capturing the baseline.
+  async function settleWatermark() {
+    let previous = '';
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const res = await request.get('/flowsheet').query({ limit: 1 }).send().expect(200);
+      const current = res.headers['last-modified'] || '';
+      if (current && current === previous) return current;
+      previous = current;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return previous;
+  }
+
   beforeEach(async () => {
     await fls_util.join_show(getTestDjId(), global.secondary_access_token);
+    // Drain any pending fire-and-forget enrichment UPDATEs left over from
+    // earlier describe blocks before the test takes its baseline.
+    await settleWatermark();
   });
 
   afterEach(async () => {
@@ -608,11 +635,12 @@ describe('Conditional GET (304 Not Modified)', () => {
 
   describe('If-Modified-Since header', () => {
     test('Returns 304 when If-Modified-Since is current', async () => {
-      // First request to get the Last-Modified timestamp
-      const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
-      const lastModified = initialRes.headers['last-modified'];
+      // settleWatermark() polls until the watermark stops moving; using it
+      // as the baseline avoids capturing a Last-Modified that's about to
+      // be invalidated by a still-pending fire-and-forget enrichment from
+      // earlier work (BS#902).
+      const lastModified = await settleWatermark();
 
-      // Second request with If-Modified-Since header
       const cachedRes = await request
         .get('/flowsheet')
         .query({ limit: 10 })
@@ -664,9 +692,9 @@ describe('Conditional GET (304 Not Modified)', () => {
         })
         .expect(201);
 
-      // First request to get timestamp
-      const initialRes = await request.get('/flowsheet/latest').expect(200);
-      const lastModified = initialRes.headers['last-modified'];
+      // Settle the watermark after the POST's fire-and-forget enrichment
+      // completes (BS#902) before capturing the baseline.
+      const lastModified = await settleWatermark();
 
       // Second request should return 304
       await request.get('/flowsheet/latest').set('If-Modified-Since', lastModified).send().expect(304);
@@ -686,11 +714,10 @@ describe('Conditional GET (304 Not Modified)', () => {
 
   describe('since query parameter', () => {
     test('Returns 304 when since param is current', async () => {
-      // First request to get the Last-Modified timestamp
-      const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
-      const lastModified = initialRes.headers['last-modified'];
+      // settleWatermark() avoids racing pending fire-and-forget writes from
+      // earlier work (BS#902).
+      const lastModified = await settleWatermark();
 
-      // Second request with since query param
       const cachedRes = await request.get('/flowsheet').query({ limit: 10, since: lastModified }).send().expect(304);
 
       expect(cachedRes.body).toEqual({});
@@ -724,9 +751,8 @@ describe('Conditional GET (304 Not Modified)', () => {
     });
 
     test('since query param takes precedence over If-Modified-Since header', async () => {
-      // First request to get the Last-Modified timestamp
-      const initialRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
-      const lastModified = initialRes.headers['last-modified'];
+      // Stale baseline pre-mutation.
+      const lastModified = await settleWatermark();
 
       // Add a track to modify the flowsheet (uses album 4 to avoid conflicts)
       await request
@@ -738,12 +764,11 @@ describe('Conditional GET (304 Not Modified)', () => {
         })
         .expect(201);
 
-      // Get the new Last-Modified
-      const updatedRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
-      const newLastModified = updatedRes.headers['last-modified'];
+      // Settle after the POST + its fire-and-forget enrichment (BS#902).
+      const newLastModified = await settleWatermark();
 
-      // Request with current since param but old header - should return 304
-      // (since param takes precedence, and it's current)
+      // Request with current since param but stale header - should return 304
+      // (since param takes precedence, and it's current).
       await request
         .get('/flowsheet')
         .query({ limit: 10, since: newLastModified })
@@ -763,9 +788,8 @@ describe('Conditional GET (304 Not Modified)', () => {
         })
         .expect(201);
 
-      // First request to get timestamp
-      const initialRes = await request.get('/flowsheet/latest').expect(200);
-      const lastModified = initialRes.headers['last-modified'];
+      // Settle after the POST's fire-and-forget enrichment (BS#902).
+      const lastModified = await settleWatermark();
 
       // Second request with since param should return 304
       await request.get('/flowsheet/latest').query({ since: lastModified }).send().expect(304);
