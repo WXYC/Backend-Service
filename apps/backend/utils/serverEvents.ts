@@ -1,5 +1,6 @@
 import WxycError from '../utils/error.js';
 import { Response } from 'express';
+import { recordBroadcast, recordBroadcastFailure } from '../services/sse/sse-metrics.js';
 
 export const Topics = {
   test: 'test-topic', // just for POC testing.
@@ -214,6 +215,11 @@ export class ServerEventsManager {
 
     const message = `data: ${JSON.stringify(data)}\n\n`;
 
+    // CloudWatch: one EventsBroadcast tick per logical broadcast — counting
+    // before the per-client write loop so the gauge is not skewed by a topic
+    // with zero subscribers.
+    recordBroadcast(topicId);
+
     clientIds.forEach((clientId) => {
       const client = this.clients.get(clientId);
       if (client) {
@@ -221,6 +227,7 @@ export class ServerEventsManager {
           client.res.write(message);
           this.resetTimeout(clientId);
         } catch (error) {
+          recordBroadcastFailure(topicId);
           this.unsubAll(client.id);
         }
       }
@@ -245,6 +252,7 @@ export class ServerEventsManager {
         client.res.write(message);
         this.resetTimeout(clientId);
       } catch (error) {
+        recordBroadcastFailure(topicId);
         this.unsubAll(client.id);
       }
     }
@@ -278,6 +286,23 @@ export class ServerEventsManager {
 
   getSubs = (clientId: string) => {
     return [...(this.clientTopics.get(clientId) || [])];
+  };
+
+  /**
+   * Snapshot of subscribed-client count keyed by topic. Used by the CloudWatch
+   * `SSE/ClientCount` gauge in `apps/backend/services/sse/sse-metrics.ts`.
+   *
+   * Reports only topics with at least one client — the metrics layer adds the
+   * dimensionless companion (`Dimensions: []`) for the alarm input, so the
+   * absence of a per-topic point is the right shape here. Topics that have
+   * never had a subscriber don't show up.
+   */
+  getClientCountByTopic = (): Map<string, number> => {
+    const out = new Map<string, number>();
+    for (const [topic, clients] of this.topicClients) {
+      if (clients.size > 0) out.set(topic, clients.size);
+    }
+    return out;
   };
 }
 

@@ -1,5 +1,14 @@
 import { EventEmitter } from 'events';
+
+// Mock the metrics module so the ServerEventsManager → sse-metrics hooks
+// don't try to talk to CloudWatch (no `SSE_METRICS_DISABLED` env in tests).
+jest.mock('../../../apps/backend/services/sse/sse-metrics', () => ({
+  recordBroadcast: jest.fn(),
+  recordBroadcastFailure: jest.fn(),
+}));
+
 import { ServerEventsManager } from '../../../apps/backend/utils/serverEvents';
+import { recordBroadcast, recordBroadcastFailure } from '../../../apps/backend/services/sse/sse-metrics';
 import { Response } from 'express';
 
 function createMockResponse(): Response {
@@ -84,6 +93,113 @@ describe('ServerEventsManager', () => {
       jest.advanceTimersByTime(5 * 60 * 1000);
 
       expect(res.end).toHaveBeenCalled();
+    });
+  });
+
+  describe('CloudWatch metrics hooks (BS-3)', () => {
+    beforeEach(() => {
+      (recordBroadcast as jest.Mock).mockClear();
+      (recordBroadcastFailure as jest.Mock).mockClear();
+    });
+
+    it('records one broadcast per call to broadcast(), regardless of subscriber count', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      const r1 = createMockResponse();
+      const r2 = createMockResponse();
+      const c1 = mgr.registerClient(r1);
+      const c2 = mgr.registerClient(r2);
+      mgr.subscribe(['topic-a'], c1.id);
+      mgr.subscribe(['topic-a'], c2.id);
+
+      mgr.broadcast('topic-a', { type: 'update', payload: {} });
+      mgr.broadcast('topic-a', { type: 'update', payload: {} });
+
+      // 2 broadcasts × 2 subscribers = 4 writes, but only 2 recordBroadcast calls.
+      expect(recordBroadcast).toHaveBeenCalledTimes(2);
+      expect(recordBroadcast).toHaveBeenCalledWith('topic-a');
+      expect(recordBroadcastFailure).not.toHaveBeenCalled();
+    });
+
+    it('records a broadcast even when the topic has zero subscribers', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      mgr.broadcast('topic-a', { type: 'update', payload: {} });
+      expect(recordBroadcast).toHaveBeenCalledTimes(1);
+    });
+
+    it('records one failure per per-client write failure inside broadcast()', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      const r1 = createMockResponse();
+      const r2 = createMockResponse();
+      const c1 = mgr.registerClient(r1);
+      const c2 = mgr.registerClient(r2);
+      mgr.subscribe(['topic-a'], c1.id);
+      mgr.subscribe(['topic-a'], c2.id);
+
+      // r1 writes throw; r2 succeeds.
+      (r1.write as jest.Mock).mockImplementation(() => {
+        throw new Error('socket closed');
+      });
+
+      mgr.broadcast('topic-a', { type: 'update', payload: {} });
+
+      expect(recordBroadcastFailure).toHaveBeenCalledTimes(1);
+      expect(recordBroadcastFailure).toHaveBeenCalledWith('topic-a');
+    });
+
+    it('records a failure when dispatch() hits a write error', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      const res = createMockResponse();
+      const client = mgr.registerClient(res);
+      mgr.subscribe(['topic-a'], client.id);
+
+      // Reset the broadcast counter (subscribe does not broadcast — confirm).
+      (recordBroadcast as jest.Mock).mockClear();
+
+      (res.write as jest.Mock).mockImplementation(() => {
+        throw new Error('socket closed');
+      });
+
+      mgr.dispatch('topic-a', client.id, { type: 'ping', payload: {} });
+
+      expect(recordBroadcastFailure).toHaveBeenCalledTimes(1);
+      expect(recordBroadcastFailure).toHaveBeenCalledWith('topic-a');
+      // dispatch() is single-client; it does not count as an EventsBroadcast.
+      expect(recordBroadcast).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getClientCountByTopic', () => {
+    it('returns a count of subscribed clients per topic', () => {
+      const mgr = new ServerEventsManager('topic-a', 'topic-b');
+      const r1 = createMockResponse();
+      const r2 = createMockResponse();
+      const r3 = createMockResponse();
+      const c1 = mgr.registerClient(r1);
+      const c2 = mgr.registerClient(r2);
+      const c3 = mgr.registerClient(r3);
+      mgr.subscribe(['topic-a'], c1.id);
+      mgr.subscribe(['topic-a', 'topic-b'], c2.id);
+      mgr.subscribe(['topic-b'], c3.id);
+
+      const counts = mgr.getClientCountByTopic();
+      expect(counts.get('topic-a')).toBe(2);
+      expect(counts.get('topic-b')).toBe(2);
+    });
+
+    it('omits topics with zero subscribers (the dimensionless companion carries the alarm input)', () => {
+      const mgr = new ServerEventsManager('topic-a', 'topic-b');
+      const res = createMockResponse();
+      const c = mgr.registerClient(res);
+      mgr.subscribe(['topic-a'], c.id);
+
+      const counts = mgr.getClientCountByTopic();
+      expect(counts.has('topic-a')).toBe(true);
+      expect(counts.has('topic-b')).toBe(false);
+    });
+
+    it('returns an empty map when no clients are connected', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      expect(mgr.getClientCountByTopic().size).toBe(0);
     });
   });
 });
