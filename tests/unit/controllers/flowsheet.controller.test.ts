@@ -16,6 +16,10 @@ const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
 const mockUpdateEntry = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockStartShow = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockAddDJToShow = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockEndShow = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockServiceLeaveShow = jest.fn<() => Promise<Record<string, unknown>>>();
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByPage: mockGetEntriesByPage,
@@ -28,6 +32,10 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
   resolveDjNameForShow: mockResolveDjNameForShow,
   updateEntry: mockUpdateEntry,
+  startShow: mockStartShow,
+  addDJToShow: mockAddDJToShow,
+  endShow: mockEndShow,
+  leaveShow: mockServiceLeaveShow,
 }));
 
 const mockFetchMetadata = jest.fn<() => Promise<void>>();
@@ -43,6 +51,8 @@ import {
   getShowInfo,
   addEntry,
   updateEntry,
+  joinShow,
+  leaveShow,
 } from '../../../apps/backend/controllers/flowsheet.controller';
 import WxycError from '../../../apps/backend/utils/error';
 
@@ -973,6 +983,129 @@ describe('flowsheet.controller', () => {
         expect(passedEntry).not.toHaveProperty(internalKey);
       }
       expect(res.status).toHaveBeenCalledWith(201);
+    });
+  });
+
+  describe('joinShow (BS#1098)', () => {
+    it('rejects when body.dj_id does not match the authenticated user', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'victim-dj', show_name: 'taking over your show' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      expect(mockStartShow).not.toHaveBeenCalled();
+      expect(mockAddDJToShow).not.toHaveBeenCalled();
+    });
+
+    it('starts a new show when body.dj_id matches the caller and there is no active show', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', show_name: 'My Show', specialty_id: 7 },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', 'My Show', 7);
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('adds the caller to the active show as a co-host', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null });
+      mockAddDJToShow.mockResolvedValue({ id: 99, dj_id: 'caller-dj' });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockAddDJToShow).toHaveBeenCalledWith('caller-dj', expect.objectContaining({ id: 1 }));
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('rejects when req.auth.id is missing entirely', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+
+      const req = {
+        body: { dj_id: 'some-dj' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      expect(mockStartShow).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('leaveShow (BS#1102)', () => {
+    it('rejects when body.dj_id does not match the authenticated user', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null, primary_dj_id: 'victim-primary' });
+
+      const req = {
+        auth: { id: 'guest-dj' },
+        body: { dj_id: 'victim-primary' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(leaveShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      expect(mockEndShow).not.toHaveBeenCalled();
+      expect(mockServiceLeaveShow).not.toHaveBeenCalled();
+    });
+
+    it('rejects when a guest tries to kick a co-host (body.dj_id = other co-host)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null, primary_dj_id: 'primary-dj' });
+
+      const req = {
+        auth: { id: 'guest-dj' },
+        body: { dj_id: 'other-cohost' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(leaveShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      expect(mockServiceLeaveShow).not.toHaveBeenCalled();
+    });
+
+    it('ends the show when the caller is the primary DJ leaving', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null, primary_dj_id: 'primary-dj' });
+      mockEndShow.mockResolvedValue({ id: 1, end_time: new Date() });
+
+      const req = {
+        auth: { id: 'primary-dj' },
+        body: { dj_id: 'primary-dj' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await leaveShow(req, res as Response, mockNext);
+
+      expect(mockEndShow).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }));
+      expect(mockServiceLeaveShow).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('removes a guest DJ when the caller is the guest leaving themselves', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null, primary_dj_id: 'primary-dj' });
+      mockServiceLeaveShow.mockResolvedValue({ id: 99, dj_id: 'guest-dj' });
+
+      const req = {
+        auth: { id: 'guest-dj' },
+        body: { dj_id: 'guest-dj' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await leaveShow(req, res as Response, mockNext);
+
+      expect(mockServiceLeaveShow).toHaveBeenCalledWith('guest-dj', expect.objectContaining({ id: 1 }));
+      expect(mockEndShow).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
     });
   });
 });

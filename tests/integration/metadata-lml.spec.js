@@ -45,12 +45,12 @@ describe('Metadata via LML (Mock API)', () => {
   beforeEach(async () => {
     if (!mockApiAvailable) return;
     await resetMockApi();
-    await fls_util.join_show(getTestDjId(), global.access_token);
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
   });
 
   afterEach(async () => {
     if (!mockApiAvailable) return;
-    await fls_util.leave_show(getTestDjId(), global.access_token);
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
   });
 
   describe('Fire-and-forget LML calls on flowsheet insert', () => {

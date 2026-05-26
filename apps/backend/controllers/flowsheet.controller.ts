@@ -376,6 +376,14 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     throw new WxycError('Bad Request, Must include a dj_id to join show', 400);
   }
 
+  // Cross-check body.dj_id against the authenticated user (BS#1098). Pre-fix
+  // any flowsheet:write caller could pass another DJ's id and start a show
+  // attributed to the victim in shows.primary_dj_id, show_start flowsheet
+  // messages, DJ stats, and every legacy mirror push.
+  if (!req.auth?.id || req.body.dj_id !== req.auth.id) {
+    throw new WxycError('Forbidden: dj_id must match the authenticated user', 403);
+  }
+
   if (current_show?.end_time !== null) {
     const show_session: Show = await flowsheet_service.startShow(
       req.body.dj_id,
@@ -390,11 +398,18 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   }
 };
 
-//TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
 export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = async (req, res) => {
   const currentShow = await flowsheet_service.getLatestShow();
   if (currentShow?.end_time !== null) {
     throw new WxycError('Bad Request: No active show session found.', 400);
+  }
+
+  // Cross-check body.dj_id against the authenticated user (BS#1102). Pre-fix
+  // showMemberMiddleware only checked the caller was in the show — never
+  // that body.dj_id matched. A guest DJ could end the entire show
+  // (body.dj_id = primary_dj_id) or kick a co-host (body.dj_id = co-host id).
+  if (!req.auth?.id || req.body.dj_id !== req.auth.id) {
+    throw new WxycError('Forbidden: dj_id must match the authenticated user', 403);
   }
 
   // Show membership is verified by showMemberMiddleware on the route
