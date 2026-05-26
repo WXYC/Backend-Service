@@ -215,9 +215,8 @@ export class ServerEventsManager {
 
     const message = `data: ${JSON.stringify(data)}\n\n`;
 
-    // CloudWatch: one EventsBroadcast tick per logical broadcast — counting
-    // before the per-client write loop so the gauge is not skewed by a topic
-    // with zero subscribers.
+    // One EventsBroadcast count per logical broadcast (not per fan-out write),
+    // so zero-subscriber topics still register as activity.
     recordBroadcast(topicId);
 
     clientIds.forEach((clientId) => {

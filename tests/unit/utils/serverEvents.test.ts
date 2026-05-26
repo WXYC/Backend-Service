@@ -96,7 +96,7 @@ describe('ServerEventsManager', () => {
     });
   });
 
-  describe('CloudWatch metrics hooks (BS-3)', () => {
+  describe('CloudWatch metrics hooks', () => {
     beforeEach(() => {
       (recordBroadcast as jest.Mock).mockClear();
       (recordBroadcastFailure as jest.Mock).mockClear();
