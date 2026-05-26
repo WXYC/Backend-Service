@@ -411,14 +411,17 @@ export const runBatch = async (
   let match = 0;
   let no_match = 0;
   let error = 0;
-  let upserts = 0;
+
+  // `upsertAlbumMatch` is race-guarded by `updated_at < NOW()` and
+  // `enumeratePendingAlbumIds` returns distinct album_ids per batch, so
+  // ordering within a batch is irrelevant — safe to issue concurrently.
+  const upsertPromises: Array<Promise<boolean>> = [];
   for (const result of response.results) {
     if (result.status === 'match' && result.lookup) {
       match += 1;
       const album = resolved[result.index];
       if (!album) continue; // shouldn't happen given input-order guarantee
-      const wrote = await upsertAlbumMatch(album.album_id, result.lookup);
-      if (wrote) upserts += 1;
+      upsertPromises.push(upsertAlbumMatch(album.album_id, result.lookup));
     } else if (result.status === 'no_match') {
       no_match += 1;
     } else {
@@ -429,6 +432,7 @@ export const runBatch = async (
       );
     }
   }
+  const upserts = (await Promise.all(upsertPromises)).filter(Boolean).length;
   return { batchSize: items.length, match, no_match, error, upserts };
 };
 
