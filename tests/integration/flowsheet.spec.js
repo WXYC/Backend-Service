@@ -153,7 +153,8 @@ describe('Leave Show', () => {
         dj_id: 1000,
       })
       .expect(403);
-    expect(res.body.error).toBeDefined();
+    // WxycError serializes as `{ message }` (see middleware/errorHandler.ts).
+    expect(res.body.message).toBeDefined();
   });
 
   test('No Active Show Session', async () => {
