@@ -2,7 +2,13 @@ import { RequestHandler } from 'express';
 import { getDJsInCurrentShow } from '../services/flowsheet.service.js';
 
 export const showMemberMiddleware: RequestHandler = async (req, res, next) => {
-  if (process.env.AUTH_BYPASS === 'true') {
+  // Positive-list gate (BS#1097): bypass requires explicit dev/test NODE_ENV.
+  // Previously this middleware had no NODE_ENV gate at all, so a stray
+  // `AUTH_BYPASS=true` in any environment would skip show-membership checks.
+  if (
+    process.env.AUTH_BYPASS === 'true' &&
+    (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test')
+  ) {
     return next();
   }
 

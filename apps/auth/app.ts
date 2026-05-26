@@ -45,9 +45,11 @@ app.use(
   })
 );
 
-// Test helper endpoints (must be registered BEFORE Better Auth handler)
-// Disabled in production
-if (process.env.NODE_ENV !== 'production') {
+// Test helper endpoints (must be registered BEFORE Better Auth handler).
+// Positive-list gate (BS#1097): enable only in explicit dev/test. A negative
+// check (`!== 'production'`) exposed these to staging or any host where
+// NODE_ENV happened to be unset.
+if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') {
   // Get verification token for testing password reset flow
   // Better Auth stores password reset tokens with:
   //   identifier: "reset-password:<token>" or "email-verification:<token>"
@@ -250,8 +252,13 @@ const lookupEmailHandler = async (req: Request, res: Response) => {
 
 // Disable rate limiting in test environments to avoid flaky integration tests.
 // This matches the pattern used by the backend's rateLimiting middleware.
+// Positive-list gate (BS#1097): the AUTH_BYPASS / USE_MOCK_SERVICES escape
+// hatches are honored only when NODE_ENV is explicitly development or test.
+// In any other environment (production, staging, or unset) rate limits hold.
+const isDevOrTest = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
 const isTestEnv =
-  process.env.NODE_ENV === 'test' || process.env.USE_MOCK_SERVICES === 'true' || process.env.AUTH_BYPASS === 'true';
+  process.env.NODE_ENV === 'test' ||
+  (isDevOrTest && (process.env.USE_MOCK_SERVICES === 'true' || process.env.AUTH_BYPASS === 'true'));
 
 if (!isTestEnv) {
   // Strict limit for auth mutations vulnerable to brute-force attacks.

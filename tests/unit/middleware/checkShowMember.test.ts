@@ -29,15 +29,77 @@ function createMockReqResNext(userId: string) {
 
 describe('showMemberMiddleware', () => {
   const originalAuthBypass = process.env.AUTH_BYPASS;
+  const originalNodeEnv = process.env.NODE_ENV;
 
   beforeEach(() => {
     delete process.env.AUTH_BYPASS;
+    delete process.env.NODE_ENV;
   });
 
   afterAll(() => {
     if (originalAuthBypass !== undefined) {
       process.env.AUTH_BYPASS = originalAuthBypass;
+    } else {
+      delete process.env.AUTH_BYPASS;
     }
+    if (originalNodeEnv !== undefined) {
+      process.env.NODE_ENV = originalNodeEnv;
+    } else {
+      delete process.env.NODE_ENV;
+    }
+  });
+
+  describe('AUTH_BYPASS gating (BS#1097)', () => {
+    it('does NOT short-circuit when AUTH_BYPASS=true but NODE_ENV is unset', async () => {
+      process.env.AUTH_BYPASS = 'true';
+      delete process.env.NODE_ENV;
+      mockGetDJsInCurrentShow.mockResolvedValue([{ id: 'dj-alice' }]);
+
+      const { req, res, next, statusMock } = createMockReqResNext('dj-charlie');
+
+      await showMemberMiddleware(req, res, next);
+
+      // Bypass must not engage outside dev/test — the real authz check runs.
+      expect(statusMock).toHaveBeenCalledWith(400);
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it('does NOT short-circuit when AUTH_BYPASS=true and NODE_ENV=production', async () => {
+      process.env.AUTH_BYPASS = 'true';
+      process.env.NODE_ENV = 'production';
+      mockGetDJsInCurrentShow.mockResolvedValue([{ id: 'dj-alice' }]);
+
+      const { req, res, next, statusMock } = createMockReqResNext('dj-charlie');
+
+      await showMemberMiddleware(req, res, next);
+
+      expect(statusMock).toHaveBeenCalledWith(400);
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it('short-circuits when AUTH_BYPASS=true and NODE_ENV=test', async () => {
+      process.env.AUTH_BYPASS = 'true';
+      process.env.NODE_ENV = 'test';
+
+      const { req, res, next, statusMock } = createMockReqResNext('dj-charlie');
+
+      await showMemberMiddleware(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(statusMock).not.toHaveBeenCalled();
+    });
+
+    it('short-circuits when AUTH_BYPASS=true and NODE_ENV=development', async () => {
+      process.env.AUTH_BYPASS = 'true';
+      process.env.NODE_ENV = 'development';
+
+      const { req, res, next, statusMock } = createMockReqResNext('dj-charlie');
+
+      await showMemberMiddleware(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(statusMock).not.toHaveBeenCalled();
+    });
   });
 
   it('rejects a DJ who is not in the current show', async () => {
