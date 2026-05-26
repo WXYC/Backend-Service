@@ -256,6 +256,31 @@ describe('sse-metrics', () => {
 
       consoleErrorSpy.mockRestore();
     });
+
+    it('logs and swallows a throwing snapshot function instead of crashing the tick', async () => {
+      // A bug in the snapshot source (e.g. mutated underneath us) must not
+      // surface as an unhandledRejection from the periodic `void tick()` call.
+      const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      startSseMetrics(() => {
+        throw new Error('snapshot bug');
+      });
+
+      // Counter flush still runs even if the gauge flush bails — verify by
+      // recording one broadcast and asserting it was sent.
+      recordBroadcast('live-fs-topic');
+      await expect(__flushForTests()).resolves.toBeUndefined();
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('snapshot function threw'),
+        expect.any(Error)
+      );
+      const events = allData().filter((d) => d.MetricName === 'SSE/EventsBroadcast');
+      expect(events).toHaveLength(1);
+      const gauges = allData().filter((d) => d.MetricName === 'SSE/ClientCount');
+      expect(gauges).toHaveLength(0);
+
+      consoleErrorSpy.mockRestore();
+    });
   });
 
   describe('buffer-size flush', () => {

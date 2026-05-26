@@ -133,7 +133,18 @@ function buildCounterData(timestamp: Date): MetricDatum[] {
 
 function buildGaugeData(timestamp: Date): MetricDatum[] {
   if (!snapshotFn) return [];
-  const snapshot = snapshotFn();
+
+  // The snapshot source is owned by the caller (e.g. `serverEventsMgr.getClientCountByTopic`).
+  // A defensive guard here preserves the "metrics bookkeeping never escapes" contract — a
+  // bug in the source must not blow up the periodic tick or leak as an unhandledRejection.
+  let snapshot: TopicCount;
+  try {
+    snapshot = snapshotFn();
+  } catch (err) {
+    console.error('[sse-metrics] snapshot function threw; skipping gauge tick:', err);
+    return [];
+  }
+
   const data: MetricDatum[] = [];
   let total = 0;
 
