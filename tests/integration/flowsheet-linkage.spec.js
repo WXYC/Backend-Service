@@ -72,12 +72,12 @@ describe('Forward-path flowsheet linkage (B-2.1 E2E)', () => {
   beforeEach(async () => {
     if (!mockApiAvailable) return;
     await resetMockApi();
-    await fls_util.join_show(getTestDjId(), global.access_token);
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
   });
 
   afterEach(async () => {
     if (!mockApiAvailable) return;
-    await fls_util.leave_show(getTestDjId(), global.access_token);
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
   });
 
   test('free-form Autechre/Confield insert auto-links to seeded library row via LML', async () => {

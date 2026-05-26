@@ -36,11 +36,11 @@ const getTestDjId = () => global.secondary_dj_id;
 
 describe('Metadata Fields in Flowsheet Response', () => {
   beforeEach(async () => {
-    await fls_util.join_show(getTestDjId(), global.access_token);
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
   });
 
   afterEach(async () => {
-    await fls_util.leave_show(getTestDjId(), global.access_token);
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
   });
 
   test('Response includes all metadata fields (even if null)', async () => {
@@ -97,11 +97,11 @@ describe('Metadata Fields in Flowsheet Response', () => {
 
 describe('Fire-and-Forget Metadata Fetch', () => {
   beforeEach(async () => {
-    await fls_util.join_show(getTestDjId(), global.access_token);
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
   });
 
   afterEach(async () => {
-    await fls_util.leave_show(getTestDjId(), global.access_token);
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
   });
 
   test('Fire-and-forget does not block track insertion for library tracks', async () => {
@@ -185,11 +185,11 @@ describe('Fire-and-Forget Metadata Fetch', () => {
 
 describe('Flowsheet CRUD with Metadata', () => {
   beforeEach(async () => {
-    await fls_util.join_show(getTestDjId(), global.access_token);
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
   });
 
   afterEach(async () => {
-    await fls_util.leave_show(getTestDjId(), global.access_token);
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
   });
 
   test('New tracks appear in subsequent queries', async () => {
@@ -280,11 +280,11 @@ describe('Flowsheet CRUD with Metadata', () => {
 
 describe('Metadata with Rotation Entries', () => {
   beforeEach(async () => {
-    await fls_util.join_show(getTestDjId(), global.access_token);
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
   });
 
   afterEach(async () => {
-    await fls_util.leave_show(getTestDjId(), global.access_token);
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
   });
 
   test('Rotation entries include rotation_bin', async () => {
@@ -353,13 +353,13 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
     // the row is also auto-dropped if the library row ever goes away.
     await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
     if (mockApiAvailable) await resetMockApi();
-    await fls_util.join_show(getTestDjId(), global.access_token);
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
   });
 
   afterEach(async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
     if (mockApiAvailable) await resetMockApi();
-    await fls_util.leave_show(getTestDjId(), global.access_token);
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
   });
 
   test('V2 read returns album_metadata values when the row exists, regardless of flowsheet inline state', async () => {
@@ -458,11 +458,11 @@ describe('Metadata Service Initialization', () => {
 
 describe('Flowsheet Cache Behavior', () => {
   beforeEach(async () => {
-    await fls_util.join_show(getTestDjId(), global.access_token);
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
   });
 
   afterEach(async () => {
-    await fls_util.leave_show(getTestDjId(), global.access_token);
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
   });
 
   test('Repeated first-page queries return consistent results', async () => {
@@ -572,11 +572,11 @@ describe('Flowsheet Cache Behavior', () => {
 
 describe('Conditional GET (304 Not Modified)', () => {
   beforeEach(async () => {
-    await fls_util.join_show(getTestDjId(), global.access_token);
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
   });
 
   afterEach(async () => {
-    await fls_util.leave_show(getTestDjId(), global.access_token);
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
   });
 
   describe('Last-Modified header', () => {

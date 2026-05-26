@@ -2,26 +2,33 @@ import { Request, RequestHandler } from 'express';
 import { serverEventsMgr, TestEvents, Topics, type EventData } from '../utils/serverEvents';
 import WxycError from '../utils/error.js';
 
-// Role constants for event authorization
-const ROLE_DJ = 'dj';
+// Roles permitted to subscribe to DJ-tier event topics. Matches the WXYCRoles
+// hierarchy (member < dj < musicDirector < stationManager) — any role at or
+// above the dj tier qualifies. Kept as an explicit array (rather than a
+// hierarchy lookup) so the role list lives next to the topic list — a future
+// role addition prompts a deliberate edit here (BS#1104).
+const DJ_TIER_ROLES = ['dj', 'musicDirector', 'stationManager'];
 
 // Define access levels for events
 // Empty array = public access, array with roles = requires one of those roles
 const TopicAuthz: Record<string, string[]> = {
   [Topics.test]: [],
   [Topics.liveFs]: [],
-  [Topics.showDj]: [ROLE_DJ],
-  [Topics.primaryDj]: [ROLE_DJ],
-  [Topics.mirror]: [ROLE_DJ],
+  [Topics.showDj]: DJ_TIER_ROLES,
+  [Topics.primaryDj]: DJ_TIER_ROLES,
+  [Topics.mirror]: DJ_TIER_ROLES,
 };
 
 const filterAuthorizedTopics = (req: Pick<Request, 'auth'>, topics: string[]) => {
-  const hasAuth = !!req.auth;
-
   return topics.filter((topic) => {
-    if (TopicAuthz[topic] === undefined) return false;
-    if (!TopicAuthz[topic].length) return true;
-    return hasAuth;
+    const allowedRoles = TopicAuthz[topic];
+    if (allowedRoles === undefined) return false;
+    if (allowedRoles.length === 0) return true; // public topic
+    // Per-topic authz check (BS#1104). Pre-fix this returned `!!req.auth` —
+    // any authenticated caller, including a member-role user, got every
+    // topic in TopicAuthz including the `mirror` SQL stream.
+    const role = req.auth?.role;
+    return role !== undefined && allowedRoles.includes(role);
   });
 };
 
@@ -49,7 +56,11 @@ export const subscribeToTopic: RequestHandler<object, unknown, subReqBody> = (re
     throw new WxycError('Bad Request: client_id or topics missing from request body', 400);
   }
 
-  const subbedTopics = serverEventsMgr.subscribe(topics, client_id);
+  // Per-topic authz check (BS#1104). Pre-fix this called subscribe with the
+  // raw body topics — a member-role caller could subscribe to `mirror` /
+  // `primaryDj` / `showDj` straight from the wire.
+  const authorizedTopics = filterAuthorizedTopics(req, topics);
+  const subbedTopics = serverEventsMgr.subscribe(authorizedTopics, client_id);
   res.status(200).json({ message: 'successfully subscribed', topics: subbedTopics });
 };
 
