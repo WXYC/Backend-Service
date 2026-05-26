@@ -1,5 +1,5 @@
 /**
- * CloudWatch metrics for the SSE server (BS-3 of the live-updates plan).
+ * CloudWatch metrics for the SSE server.
  *
  * Three metrics in the `WXYC/BackendService` namespace under the `SSE/`
  * prefix:
@@ -95,8 +95,6 @@ function buildCounterData(timestamp: Date): MetricDatum[] {
   const data: MetricDatum[] = [];
 
   for (const [topic, count] of broadcastBuffer) {
-    // EventsBroadcast is dashboard-only — dimensioned series only, no
-    // alarmable companion. The plan calls it out explicitly.
     data.push({
       MetricName: METRIC_EVENTS_BROADCAST,
       Timestamp: timestamp,
@@ -107,7 +105,6 @@ function buildCounterData(timestamp: Date): MetricDatum[] {
   }
 
   for (const [topic, count] of failureBuffer) {
-    // Dimensioned for drill-down...
     data.push({
       MetricName: METRIC_BROADCAST_FAILURES,
       Timestamp: timestamp,
@@ -116,11 +113,9 @@ function buildCounterData(timestamp: Date): MetricDatum[] {
       Dimensions: [{ Name: 'Topic', Value: topic }],
     });
   }
-  // ...and a dimensionless companion that an aggregate-failure alarm can
-  // subscribe to via the plain Namespace/MetricName form. PutMetricAlarm
-  // can't aggregate across dimensions, so this companion is the alarm
-  // input. Only emitted when at least one failure happened so we don't
-  // pollute the namespace with zero-valued points.
+  // Dimensionless companion for the aggregate-failure alarm input — PutMetricAlarm
+  // can't aggregate across dimensions. Skipped when zero so the namespace isn't
+  // polluted with zero points that could invite a misconfigured alarm.
   if (failureBuffer.size > 0) {
     let total = 0;
     for (const count of failureBuffer.values()) total += count;
@@ -153,9 +148,8 @@ function buildGaugeData(timestamp: Date): MetricDatum[] {
     });
   }
 
-  // Dimensionless companion (alarm input) — always emitted, including when
-  // total is 0, so an "ClientCount unexpectedly 0" alarm has a continuous
-  // series to evaluate against.
+  // Dimensionless companion (alarm input) — always emitted, including total=0,
+  // so a "ClientCount unexpectedly 0" alarm has a continuous series to evaluate.
   data.push({
     MetricName: METRIC_CLIENT_COUNT,
     Timestamp: timestamp,
@@ -199,9 +193,7 @@ async function flushGauges(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
-  // Counters first so a gauge failure doesn't strand counter data.
-  await flushCounters();
-  await flushGauges();
+  await Promise.all([flushCounters(), flushGauges()]);
 }
 
 /**

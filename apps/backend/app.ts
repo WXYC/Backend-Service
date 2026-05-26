@@ -142,9 +142,6 @@ const server = app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
   startPlaylistProxy();
   startAlbumPlaysRefresh();
-  // CloudWatch metrics for SSE (`WXYC/BackendService/SSE/*`). Required signal
-  // before opening `/live` to public traffic — see docs/live-updates-sse.md,
-  // BS-3. Opt-out via `SSE_METRICS_DISABLED=true`.
   startSseMetrics(() => serverEventsMgr.getClientCountByTopic());
   void setupCdcWebSocket(server);
   // Second CDC handler: rebroadcasts terminal metadata UPDATEs as SSE
