@@ -37,11 +37,18 @@ export interface IFSEntryMetadata {
 // `legacy_link_attempted_at` and `metadata_attempt_at` are job-internal
 // markers consumed only by the broken-FK recovery and metadata backfill
 // jobs respectively, so they're excluded from the controller-facing entry.
+// `updated_at` (BS#902) is the row-level watermark consumed only by the
+// conditional-GET middleware via `getLastModifiedAt`; it's never projected
+// onto the wire format, so it stays out of IFSEntry alongside the other
+// internal markers.
 //
 // `metadata_status` and `enriching_since` (BS#891) ARE surfaced to the
 // controller layer because the V2 wire format projects metadata_status onto
 // track rows for iOS branch logic (WXYC/wxyc-ios-64#270).
-export interface IFSEntry extends Omit<FSEntry, 'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at'> {
+export interface IFSEntry extends Omit<
+  FSEntry,
+  'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at' | 'updated_at'
+> {
   label_id: number | null;
   rotation_bin: string | null;
   on_streaming: boolean | null;
