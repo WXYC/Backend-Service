@@ -30,7 +30,11 @@ library_route.get(
 
 library_route.post('/artists', requirePermissions({ catalog: ['write'] }), libraryController.addArtist);
 
-library_route.get('/artists/search', requirePermissions({ catalog: ['write'] }), libraryController.searchArtistsInGenre);
+library_route.get(
+  '/artists/search',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.searchArtistsInGenre
+);
 
 library_route.get('/artists/peek-code', requirePermissions({ catalog: ['write'] }), libraryController.peekArtistNumber);
 

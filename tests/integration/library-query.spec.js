@@ -98,10 +98,7 @@ describe('GET /library/query', () => {
     expect(rockOnly.body.results.length).toBeGreaterThan(0);
     expect(jazzOnly.body.results.length).toBeGreaterThan(0);
 
-    const combined = await auth
-      .get('/library/query')
-      .query({ genres: 'Rock,Jazz', limit: 100 })
-      .expect(200);
+    const combined = await auth.get('/library/query').query({ genres: 'Rock,Jazz', limit: 100 }).expect(200);
     expect(combined.body.results.length).toBeGreaterThan(0);
     for (const row of combined.body.results) {
       expect(['Rock', 'Jazz']).toContain(row.genre_name);
@@ -109,9 +106,7 @@ describe('GET /library/query', () => {
     const combinedIds = new Set(combined.body.results.map((r) => r.id));
     const rockIds = rockOnly.body.results.map((r) => r.id);
     const jazzIds = jazzOnly.body.results.map((r) => r.id);
-    expect(rockIds.some((id) => combinedIds.has(id)) || jazzIds.some((id) => combinedIds.has(id))).toBe(
-      true
-    );
+    expect(rockIds.some((id) => combinedIds.has(id)) || jazzIds.some((id) => combinedIds.has(id))).toBe(true);
   });
 
   test('formats filter ORs multiple format names', async () => {
@@ -225,10 +220,7 @@ describe('GET /library/query', () => {
   });
 
   test('rotation_bins AND missing both apply', async () => {
-    const res = await auth
-      .get('/library/query')
-      .query({ rotation_bins: 'H', missing: 'true', limit: 50 })
-      .expect(200);
+    const res = await auth.get('/library/query').query({ rotation_bins: 'H', missing: 'true', limit: 50 }).expect(200);
     for (const row of res.body.results) {
       expect(row.rotation_bin).toBe('H');
     }

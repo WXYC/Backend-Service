@@ -895,16 +895,8 @@ export const searchArtistsInGenre = async (
       code_number: genre_artist_crossreference.artist_genre_code,
     })
     .from(artists)
-    .innerJoin(
-      genre_artist_crossreference,
-      eq(genre_artist_crossreference.artist_id, artists.id)
-    )
-    .where(
-      and(
-        eq(genre_artist_crossreference.genre_id, genre_id),
-        sql`${artists.artist_name} ILIKE ${prefix + '%'}`
-      )
-    )
+    .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(and(eq(genre_artist_crossreference.genre_id, genre_id), sql`${artists.artist_name} ILIKE ${prefix + '%'}`))
     .orderBy(asc(artists.artist_name))
     .limit(cappedLimit);
 };
