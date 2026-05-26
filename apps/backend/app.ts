@@ -24,6 +24,8 @@ import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
 import { setupCdcWebSocket, shutdownCdcWebSocket } from './services/cdc/index.js';
 import { setupMetadataBroadcast } from './services/metadata-broadcast/index.js';
+import { startSseMetrics, stopSseMetrics } from './services/sse/sse-metrics.js';
+import { serverEventsMgr } from './utils/serverEvents.js';
 import { startRotationTracksCacheWarm } from './services/rotation-tracks-cache-warm.service.js';
 import { drainInFlightEnrichments } from './services/metadata/enrichment.service.js';
 import { activeShow } from './middleware/checkActiveShow.js';
@@ -140,6 +142,10 @@ const server = app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
   startPlaylistProxy();
   startAlbumPlaysRefresh();
+  // CloudWatch metrics for SSE (`WXYC/BackendService/SSE/*`). Required signal
+  // before opening `/live` to public traffic — see docs/live-updates-sse.md,
+  // BS-3. Opt-out via `SSE_METRICS_DISABLED=true`.
+  startSseMetrics(() => serverEventsMgr.getClientCountByTopic());
   void setupCdcWebSocket(server);
   // Second CDC handler: rebroadcasts terminal metadata UPDATEs as SSE
   // `liveFs:update` so dj-site stays in sync after the enrichment-worker
@@ -184,6 +190,7 @@ function shutdown(signal: string): void {
   console.log(`[shutdown] Received ${signal}, shutting down...`);
   stopPlaylistProxy();
   stopAlbumPlaysRefresh();
+  stopSseMetrics();
   void shutdownCdcWebSocket();
   // BS#905: observe enrichments abandoned mid-flight. Sentry captureMessage
   // fires only when at least one promise is still pending after the deadline,
