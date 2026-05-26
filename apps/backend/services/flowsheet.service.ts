@@ -402,7 +402,22 @@ function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null |
 }
 
 export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry> => {
-  const response = await db.update(flowsheet).set(entry).where(eq(flowsheet.id, entry_id)).returning();
+  // Defense in depth (BS#1099): construct the update object from named
+  // fields so even if a future controller starts passing the raw body,
+  // mass-assignment of internal columns (metadata_status, legacy_entry_id,
+  // show_id, play_order, linkage_*, etc.) is blocked at this boundary too.
+  const updateSet: UpdateRequestBody = {};
+  if (entry.artist_name !== undefined) updateSet.artist_name = entry.artist_name;
+  if (entry.album_title !== undefined) updateSet.album_title = entry.album_title;
+  if (entry.track_title !== undefined) updateSet.track_title = entry.track_title;
+  if (entry.track_position !== undefined) updateSet.track_position = entry.track_position;
+  if (entry.record_label !== undefined) updateSet.record_label = entry.record_label;
+  if (entry.label_id !== undefined) updateSet.label_id = entry.label_id;
+  if (entry.request_flag !== undefined) updateSet.request_flag = entry.request_flag;
+  if (entry.segue !== undefined) updateSet.segue = entry.segue;
+  if (entry.message !== undefined) updateSet.message = entry.message;
+
+  const response = await db.update(flowsheet).set(updateSet).where(eq(flowsheet.id, entry_id)).returning();
   updateLastModified();
   return response[0];
 };
