@@ -859,6 +859,40 @@ describe('flowsheet.controller', () => {
       }
       expect(res.status).toHaveBeenCalledWith(200);
     });
+
+    it('forwards every UpdateRequestBody field that the client legitimately sets', async () => {
+      // Anti-drift guard: the controller's pick list and the service-layer
+      // pick list both have to stay in sync with `UpdateRequestBody`. If
+      // either drops a documented field, this test catches it.
+      mockUpdateEntry.mockResolvedValue({ id: 7 });
+
+      const data = {
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+        track_position: 'A1',
+        record_label: 'Sonamos',
+        label_id: 99,
+        request_flag: true,
+        segue: false,
+        message: 'corrected DJ note',
+      };
+
+      const req = {
+        body: { entry_id: 7, data },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await updateEntry(req, res as Response, mockNext);
+
+      expect(mockUpdateEntry).toHaveBeenCalledTimes(1);
+      const passedData = (mockUpdateEntry as unknown as jest.Mock).mock.calls[0][1] as Record<string, unknown>;
+      // Every field in `data` (= every field in UpdateRequestBody) reaches
+      // the service. A drop here would silently break legitimate edits.
+      for (const [key, value] of Object.entries(data)) {
+        expect(passedData[key]).toEqual(value);
+      }
+    });
   });
 
   describe('addEntry free-form branch (BS#1099)', () => {
