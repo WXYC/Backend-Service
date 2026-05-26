@@ -7,6 +7,11 @@ jest.mock('../../../apps/backend/services/sse/sse-metrics', () => ({
   recordBroadcastFailure: jest.fn(),
 }));
 
+jest.mock('@sentry/node', () => ({
+  captureException: jest.fn(),
+}));
+
+import * as Sentry from '@sentry/node';
 import { ServerEventsManager } from '../../../apps/backend/utils/serverEvents';
 import { recordBroadcast, recordBroadcastFailure } from '../../../apps/backend/services/sse/sse-metrics';
 import { Response } from 'express';
@@ -165,6 +170,82 @@ describe('ServerEventsManager', () => {
       expect(recordBroadcastFailure).toHaveBeenCalledWith('topic-a');
       // dispatch() is single-client; it does not count as an EventsBroadcast.
       expect(recordBroadcast).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Sentry capture on write failure (BS-4)', () => {
+    beforeEach(() => {
+      (Sentry.captureException as jest.Mock).mockClear();
+      (recordBroadcastFailure as jest.Mock).mockClear();
+    });
+
+    it('captures broadcast write exceptions to Sentry with topic + client_id', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      const res = createMockResponse();
+      const client = mgr.registerClient(res);
+      mgr.subscribe(['topic-a'], client.id);
+
+      const failure = new Error('socket closed');
+      (res.write as jest.Mock).mockImplementation(() => {
+        throw failure;
+      });
+
+      mgr.broadcast('topic-a', { type: 'update', payload: {} });
+
+      expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+      const [err, context] = (Sentry.captureException as jest.Mock).mock.calls[0];
+      expect(err).toBe(failure);
+      expect(context).toMatchObject({
+        tags: expect.objectContaining({ subsystem: 'sse', op: 'broadcast', topic: 'topic-a' }),
+        extra: expect.objectContaining({ client_id: client.id }),
+      });
+    });
+
+    it('captures dispatch write exceptions to Sentry with topic + client_id', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      const res = createMockResponse();
+      const client = mgr.registerClient(res);
+      mgr.subscribe(['topic-a'], client.id);
+
+      (res.write as jest.Mock).mockImplementation(() => {
+        throw new Error('EPIPE');
+      });
+
+      mgr.dispatch('topic-a', client.id, { type: 'ping', payload: {} });
+
+      expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+      const [, context] = (Sentry.captureException as jest.Mock).mock.calls[0];
+      expect(context).toMatchObject({
+        tags: expect.objectContaining({ subsystem: 'sse', op: 'dispatch', topic: 'topic-a' }),
+        extra: expect.objectContaining({ client_id: client.id }),
+      });
+    });
+
+    it('does not capture anything on a successful broadcast', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      const res = createMockResponse();
+      const client = mgr.registerClient(res);
+      mgr.subscribe(['topic-a'], client.id);
+
+      mgr.broadcast('topic-a', { type: 'update', payload: {} });
+
+      expect(Sentry.captureException).not.toHaveBeenCalled();
+    });
+
+    it('Sentry capture and the CloudWatch counter both fire on the same write failure', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      const res = createMockResponse();
+      const client = mgr.registerClient(res);
+      mgr.subscribe(['topic-a'], client.id);
+
+      (res.write as jest.Mock).mockImplementation(() => {
+        throw new Error('write after end');
+      });
+
+      mgr.broadcast('topic-a', { type: 'update', payload: {} });
+
+      expect(recordBroadcastFailure).toHaveBeenCalledTimes(1);
+      expect(Sentry.captureException).toHaveBeenCalledTimes(1);
     });
   });
 
