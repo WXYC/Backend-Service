@@ -44,18 +44,10 @@ export const registerEventClient: RequestHandler<object, unknown, regReqBody> = 
   serverEventsMgr.subscribe(topics, client.id);
 };
 
-/**
- * Parse the `?topics=` query parameter into a topic-string array.
- *
- * Contract: a single comma-separated string. Anything else (missing, array
- * from repeated `?topics=&topics=`, non-string) collapses to `[]`. Tolerates
- * whitespace around each value so a hand-typed `?topics=live-fs-topic, test-topic`
- * still works.
- *
- * Unknown topic strings are passed through to `filterAuthorizedTopics`, which
- * drops them silently — matching the existing `POST /events/register` behavior
- * where `topics` not in `TopicAuthz` are filtered out before `subscribe`.
- */
+// Contract: a single comma-separated string. Repeated `?topics=&topics=`
+// (Express parses to array), missing, or non-string collapse to `[]`.
+// Unknown topic strings pass through to filterAuthorizedTopics, which drops
+// them silently — same shape as POST /events/register.
 const parseTopicsQuery = (raw: unknown): string[] => {
   if (typeof raw !== 'string' || raw.length === 0) return [];
   return raw
@@ -65,19 +57,15 @@ const parseTopicsQuery = (raw: unknown): string[] => {
 };
 
 /**
- * EventSource-friendly counterpart to `POST /events/register`.
+ * EventSource-friendly counterpart to `POST /events/register`. Native browser
+ * EventSource is GET-only and can't attach an `Authorization` header or a
+ * JSON body, so dj-site's listener middleware opens
+ * `EventSource('${BACKEND_URL}/events/stream?topics=live-fs-topic')`.
  *
- * Native browser EventSource is GET-only and can't attach an `Authorization`
- * header or a JSON body, so dj-site's listener middleware opens
- * `EventSource('${BACKEND_URL}/events/stream?topics=live-fs-topic')`. The
- * subscription pipeline is otherwise identical: `registerClient` →
- * `filterAuthorizedTopics` → `subscribe`.
- *
- * No `requirePermissions` guard at the route level — see comment on the
- * route definition. Authorization is per-topic via `TopicAuthz`: public
- * topics (`liveFs`, `test`) succeed without `req.auth`; DJ-tier topics
- * (`showDj`, `primaryDj`, `mirror`) are filtered out when the caller's
- * role isn't in `DJ_TIER_ROLES`.
+ * No `requirePermissions` guard at the route level — authorization is
+ * per-topic via `TopicAuthz` inside `filterAuthorizedTopics`. Public topics
+ * (`liveFs`, `test`) succeed without `req.auth`; DJ-tier topics filter out
+ * when the caller's role isn't in `DJ_TIER_ROLES`.
  */
 export const streamEventClient: RequestHandler = (req, res) => {
   const client = serverEventsMgr.registerClient(res);

@@ -162,13 +162,6 @@ describe('events controller', () => {
   });
 
   describe('streamEventClient (GET /events/stream)', () => {
-    // GET /events/stream is the EventSource-friendly counterpart to POST
-    // /events/register: same registerClient + filterAuthorizedTopics +
-    // subscribe pipeline, but topics arrive as a comma-separated `?topics=`
-    // query string instead of a JSON body. Browsers' native EventSource
-    // can't set custom headers or send a body — the GET-with-query shape
-    // is what dj-site's listener middleware speaks.
-
     it('parses comma-separated topics from the query string and subscribes', () => {
       const req = {
         query: { topics: `${Topics.liveFs},${Topics.test}` },
@@ -260,7 +253,6 @@ describe('events controller', () => {
     });
 
     it('trims whitespace around comma-separated topic values', () => {
-      // Tolerate `?topics=live-fs-topic, test-topic` from hand-typed URLs.
       const req = {
         query: { topics: ` ${Topics.liveFs} , ${Topics.test} ` },
       } as unknown as Request;
