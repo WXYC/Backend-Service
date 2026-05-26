@@ -60,7 +60,7 @@ describe('AUTH_BYPASS environment variable', () => {
     expect(mockRes.status).toHaveBeenCalledWith(401);
   });
 
-  it('should allow bypass in non-production when AUTH_BYPASS is true', async () => {
+  it('should allow bypass in NODE_ENV=test when AUTH_BYPASS is true', async () => {
     process.env.AUTH_BYPASS = 'true';
     process.env.NODE_ENV = 'test';
     mockReq.headers = { authorization: 'Bearer test-user-id' };
@@ -71,7 +71,18 @@ describe('AUTH_BYPASS environment variable', () => {
     expect(mockNext).toHaveBeenCalled();
   });
 
-  it('should allow bypass when NODE_ENV is not set and AUTH_BYPASS is true', async () => {
+  it('should allow bypass in NODE_ENV=development when AUTH_BYPASS is true', async () => {
+    process.env.AUTH_BYPASS = 'true';
+    process.env.NODE_ENV = 'development';
+    mockReq.headers = { authorization: 'Bearer test-user-id' };
+
+    const middleware = requirePermissions({ flowsheet: ['read'] });
+    await middleware(mockReq as Request, mockRes as Response, mockNext as NextFunction);
+
+    expect(mockNext).toHaveBeenCalled();
+  });
+
+  it('should NOT bypass when NODE_ENV is unset (default-safe)', async () => {
     process.env.AUTH_BYPASS = 'true';
     delete process.env.NODE_ENV;
     mockReq.headers = { authorization: 'Bearer test-user-id' };
@@ -79,7 +90,22 @@ describe('AUTH_BYPASS environment variable', () => {
     const middleware = requirePermissions({ flowsheet: ['read'] });
     await middleware(mockReq as Request, mockRes as Response, mockNext as NextFunction);
 
-    expect(mockNext).toHaveBeenCalled();
+    expect(mockNext).not.toHaveBeenCalled();
+    // Bypass declined → falls through to JWKS verify, which fails on the
+    // raw "test-user-id" token (not a JWT) and returns 401.
+    expect(mockRes.status).toHaveBeenCalledWith(401);
+  });
+
+  it('should NOT bypass when NODE_ENV is a non-allowed value (e.g. "staging")', async () => {
+    process.env.AUTH_BYPASS = 'true';
+    process.env.NODE_ENV = 'staging';
+    mockReq.headers = { authorization: 'Bearer test-user-id' };
+
+    const middleware = requirePermissions({ flowsheet: ['read'] });
+    await middleware(mockReq as Request, mockRes as Response, mockNext as NextFunction);
+
+    expect(mockNext).not.toHaveBeenCalled();
+    expect(mockRes.status).toHaveBeenCalledWith(401);
   });
 
   it('should reject requests without auth header even in bypass mode', async () => {

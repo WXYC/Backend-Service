@@ -36,4 +36,9 @@ COPY --from=builder ./auth-builder/shared/authentication/dist ./shared/authentic
 # shared/database/src/client.ts.
 ENV DB_APPLICATION_NAME=wxyc-auth
 
+# Pin NODE_ENV=production so AUTH_BYPASS and the /auth/test/* endpoints
+# stay closed even if the operator's .env omits NODE_ENV. Defense in depth
+# alongside the positive-list guard in auth.middleware.ts (BS#1097).
+ENV NODE_ENV=production
+
 CMD ["npm", "start", "--workspace=@wxyc/auth-service"]

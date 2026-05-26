@@ -167,6 +167,10 @@ services:
         NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [ci]
     environment:
+      # Override the Dockerfile's `ENV NODE_ENV=production` pin (BS#1097) so
+      # the positive-list AUTH_BYPASS guard engages for the integration suite.
+      # Matches the auth service's `NODE_ENV=test` above.
+      - NODE_ENV=test
       - DB_HOST=ci-db
       # In-container port: hardcoded to match what postgres listens on
       # inside the docker network. Host-side `DB_PORT` (e.g. the dev
