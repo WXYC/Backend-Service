@@ -19,7 +19,11 @@ jest.mock('../../../apps/backend/utils/serverEvents', () => {
   };
 });
 
-import { registerEventClient, subscribeToTopic } from '../../../apps/backend/controllers/events.controller';
+import {
+  registerEventClient,
+  subscribeToTopic,
+  streamEventClient,
+} from '../../../apps/backend/controllers/events.controller';
 import { serverEventsMgr, Topics } from '../../../apps/backend/utils/serverEvents';
 
 describe('events controller', () => {
@@ -154,6 +158,132 @@ describe('events controller', () => {
         expect.arrayContaining([Topics.liveFs, Topics.test]),
         'client-1'
       );
+    });
+  });
+
+  describe('streamEventClient (GET /events/stream)', () => {
+    // GET /events/stream is the EventSource-friendly counterpart to POST
+    // /events/register: same registerClient + filterAuthorizedTopics +
+    // subscribe pipeline, but topics arrive as a comma-separated `?topics=`
+    // query string instead of a JSON body. Browsers' native EventSource
+    // can't set custom headers or send a body — the GET-with-query shape
+    // is what dj-site's listener middleware speaks.
+
+    it('parses comma-separated topics from the query string and subscribes', () => {
+      const req = {
+        query: { topics: `${Topics.liveFs},${Topics.test}` },
+      } as unknown as Request;
+
+      const res = {} as Response;
+      const next = jest.fn();
+
+      streamEventClient(req, res, next);
+
+      expect(serverEventsMgr.registerClient).toHaveBeenCalledWith(res);
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
+        expect.arrayContaining([Topics.liveFs, Topics.test]),
+        'client-1'
+      );
+    });
+
+    it('subscribes to no topics when the query is missing', () => {
+      const req = { query: {} } as unknown as Request;
+
+      streamEventClient(req, {} as Response, jest.fn());
+
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith([], 'client-1');
+    });
+
+    it('allows public topics for unauthenticated callers (the liveFs path)', () => {
+      const req = {
+        query: { topics: Topics.liveFs },
+      } as unknown as Request;
+
+      streamEventClient(req, {} as Response, jest.fn());
+
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(expect.arrayContaining([Topics.liveFs]), 'client-1');
+    });
+
+    it('drops DJ-tier topics for unauthenticated callers (the EventSource path has no Authorization header)', () => {
+      const req = {
+        query: { topics: `${Topics.liveFs},${Topics.showDj},${Topics.mirror}` },
+      } as unknown as Request;
+
+      streamEventClient(req, {} as Response, jest.fn());
+
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
+        expect.not.arrayContaining([Topics.showDj, Topics.mirror]),
+        'client-1'
+      );
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(expect.arrayContaining([Topics.liveFs]), 'client-1');
+    });
+
+    it('drops DJ-tier topics when the caller has the member role (parity with POST /register)', () => {
+      const req = {
+        auth: { id: 'user-1', role: 'member' },
+        query: { topics: `${Topics.liveFs},${Topics.showDj},${Topics.mirror}` },
+      } as unknown as Request;
+
+      streamEventClient(req, {} as Response, jest.fn());
+
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
+        expect.not.arrayContaining([Topics.showDj, Topics.mirror]),
+        'client-1'
+      );
+    });
+
+    it('includes DJ-tier topics when the caller has the dj role (still works for authenticated EventSource clients)', () => {
+      const req = {
+        auth: { id: 'user-1', role: 'dj' },
+        query: { topics: `${Topics.liveFs},${Topics.showDj}` },
+      } as unknown as Request;
+
+      streamEventClient(req, {} as Response, jest.fn());
+
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
+        expect.arrayContaining([Topics.liveFs, Topics.showDj]),
+        'client-1'
+      );
+    });
+
+    it('silently drops topic strings that are not in TopicAuthz', () => {
+      const req = {
+        query: { topics: `${Topics.liveFs},does-not-exist` },
+      } as unknown as Request;
+
+      streamEventClient(req, {} as Response, jest.fn());
+
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
+        expect.not.arrayContaining(['does-not-exist']),
+        'client-1'
+      );
+    });
+
+    it('trims whitespace around comma-separated topic values', () => {
+      // Tolerate `?topics=live-fs-topic, test-topic` from hand-typed URLs.
+      const req = {
+        query: { topics: ` ${Topics.liveFs} , ${Topics.test} ` },
+      } as unknown as Request;
+
+      streamEventClient(req, {} as Response, jest.fn());
+
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
+        expect.arrayContaining([Topics.liveFs, Topics.test]),
+        'client-1'
+      );
+    });
+
+    it('ignores a non-string topics query parameter (e.g. repeated ?topics=&topics= produces an array)', () => {
+      // Express parses repeated query params into an array. The contract
+      // is a single comma-separated string, so anything else short-circuits
+      // to an empty subscription rather than crashing.
+      const req = {
+        query: { topics: [Topics.liveFs, Topics.test] },
+      } as unknown as Request;
+
+      streamEventClient(req, {} as Response, jest.fn());
+
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith([], 'client-1');
     });
   });
 });
