@@ -58,7 +58,11 @@ up publishing host metrics from a different namespace.
 
 ## Applying it
 
-Needs WXYC infra account creds (account `503977661500`, region `us-east-1`).
+Needs WXYC production AWS account creds (account `203767826763`, region
+`us-east-1`) — `wxyc-ec2` and its instance role live there, NOT in the
+`503977661500` infra account. The 2026-05-17 outage RCA on #965 listed the
+infra account, but cross-references in this repo (`scripts/provision-dryrun-aws.mjs`,
+`.env.example` SES topic ARN) confirm production is `203767826763`.
 
 ```sh
 # Identify the role attached to the wxyc-ec2 instance:
@@ -151,6 +155,8 @@ correct replacement.
 - **Parent**: #937 — 2026-05-17 EC2 wedge RCA. The semantic-index half of
   that ticket closed via `semantic-index#318`. This issue closes the
   Backend-Service half.
-- **Org docs**: the canonical AWS account split (production at
-  `203767826763`, infra at `503977661500`) is in the org-level memory; this
-  doc names the infra account inline to keep operator commands self-contained.
+- **Account note**: production EC2 (`wxyc-ec2`) lives in account
+  `203767826763`. Cross-references: `scripts/provision-dryrun-aws.mjs`,
+  the `SES_EVENTS_SNS_TOPIC_ARN` default in `.env.example`. The infra
+  account `503977661500` named in the #965 issue body is a documentation
+  drift, not where the EC2 role actually lives.
