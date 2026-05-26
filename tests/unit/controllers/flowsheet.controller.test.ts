@@ -795,5 +795,150 @@ describe('flowsheet.controller', () => {
       );
       expect(res.status).toHaveBeenCalledWith(200);
     });
+
+    it('strips internal columns from data before passing to the service (BS#1099)', async () => {
+      // Mass-assignment guard: any `flowsheet:write` caller can send arbitrary
+      // body keys today. Setting `metadata_status='enriched_match'` skips the
+      // enrichment worker forever; `legacy_entry_id` reintroduces the BS#908
+      // mirror loop; `show_id` reattaches the row to another show; `play_order`
+      // collides with the per-show sequence (#693). The controller must drop
+      // these fields before they reach `db.update().set()`.
+      mockUpdateEntry.mockResolvedValue({ id: 99, track_title: 'ok' });
+
+      const req = {
+        body: {
+          entry_id: 99,
+          data: {
+            track_title: 'ok',
+            // The following keys are server-internal and must be stripped.
+            metadata_status: 'enriched_match',
+            legacy_entry_id: 9999999,
+            legacy_release_id: 8888,
+            show_id: 1,
+            play_order: 0,
+            linkage_source: 'manual',
+            linkage_confidence: 0.99,
+            linked_at: new Date(),
+            metadata_attempt_at: new Date(),
+            enriching_since: new Date(),
+            dj_name: 'evil-dj',
+            album_id: 123,
+            artwork_url: 'https://example.com/x.jpg',
+            discogs_url: 'https://discogs.com/x',
+            release_year: 1999,
+          },
+        },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await updateEntry(req, res as Response, mockNext);
+
+      expect(mockUpdateEntry).toHaveBeenCalledTimes(1);
+      const passedData = (mockUpdateEntry as unknown as jest.Mock).mock.calls[0][1] as Record<string, unknown>;
+      // Allowed field is forwarded.
+      expect(passedData).toEqual(expect.objectContaining({ track_title: 'ok' }));
+      // Each internal key is absent from the service argument.
+      for (const internalKey of [
+        'metadata_status',
+        'legacy_entry_id',
+        'legacy_release_id',
+        'show_id',
+        'play_order',
+        'linkage_source',
+        'linkage_confidence',
+        'linked_at',
+        'metadata_attempt_at',
+        'enriching_since',
+        'dj_name',
+        'album_id',
+        'artwork_url',
+        'discogs_url',
+        'release_year',
+      ]) {
+        expect(passedData).not.toHaveProperty(internalKey);
+      }
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+  });
+
+  describe('addEntry free-form branch (BS#1099)', () => {
+    const activeShow = { id: 42, end_time: null };
+
+    beforeEach(() => {
+      mockGetLatestShow.mockResolvedValue(activeShow);
+      mockResolveDjNameForShow.mockResolvedValue('dj-real-name');
+    });
+
+    it('strips internal columns from body before constructing the insert payload', async () => {
+      // The free-form POST branch (no album_id, no message) used to spread
+      // `req.body` directly into the insert. A client with `flowsheet:write`
+      // could set `metadata_status`, `legacy_entry_id`, etc. The controller
+      // must construct the insert payload from named fields only.
+      // No album_id in the body — that's the discriminator that picks this
+      // branch over the (safe) album_id branch above.
+      mockAddTrack.mockResolvedValue({ id: 1, show_id: activeShow.id });
+      mockFetchMetadata.mockResolvedValue(undefined);
+
+      const req = {
+        body: {
+          // Required free-form fields:
+          artist_name: 'Juana Molina',
+          album_title: 'DOGA',
+          track_title: 'la paradoja',
+          record_label: 'Sonamos',
+          // Server-internal columns the client must not be able to set:
+          metadata_status: 'enriched_match',
+          legacy_entry_id: 9999999,
+          legacy_release_id: 8888,
+          show_id: 999,
+          play_order: 0,
+          linkage_source: 'manual',
+          linkage_confidence: 0.99,
+          linked_at: new Date(),
+          metadata_attempt_at: new Date(),
+          enriching_since: new Date(),
+          dj_name: 'evil-dj',
+          artwork_url: 'https://example.com/x.jpg',
+          discogs_url: 'https://discogs.com/x',
+          release_year: 1999,
+        },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await addEntry(req, res as Response, mockNext);
+
+      expect(mockAddTrack).toHaveBeenCalledTimes(1);
+      const passedEntry = (mockAddTrack as unknown as jest.Mock).mock.calls[0][0] as Record<string, unknown>;
+      // The server-controlled fields are overridden by the controller.
+      expect(passedEntry.show_id).toBe(activeShow.id);
+      expect(passedEntry.dj_name).toBe('dj-real-name');
+      // Allowed fields pass through.
+      expect(passedEntry.artist_name).toBe('Juana Molina');
+      expect(passedEntry.album_title).toBe('DOGA');
+      expect(passedEntry.track_title).toBe('la paradoja');
+      expect(passedEntry.record_label).toBe('Sonamos');
+      // Internal keys are absent from the service argument. `album_id` is
+      // deliberately not in this list — in the free-form branch the
+      // discriminator `body.album_id != null` already constrains it to
+      // null/undefined, and the BS#933 snapshot path still passes
+      // `album_id: null` through to preserve that semantic.
+      for (const internalKey of [
+        'metadata_status',
+        'legacy_entry_id',
+        'legacy_release_id',
+        'play_order',
+        'linkage_source',
+        'linkage_confidence',
+        'linked_at',
+        'metadata_attempt_at',
+        'enriching_since',
+        'artwork_url',
+        'discogs_url',
+        'release_year',
+      ]) {
+        expect(passedEntry).not.toHaveProperty(internalKey);
+      }
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
   });
 });
