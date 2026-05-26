@@ -27,6 +27,7 @@ import { lookupBySong, lookupMetadata, isLmlConfigured, type LookupResponse } fr
 import { filterSpacerGif } from './metadata/metadata.service.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
+import { isCompilationArtist } from './requestLine/matching/index.js';
 
 /**
  * Source columns on `artists` (and any joined / view-projected row) that
@@ -795,6 +796,12 @@ export const fuzzySearchLibrary = async (
   n = 5,
   on_streaming?: boolean
 ): Promise<TaggedLibraryViewEntry[]> => {
+  // Skip only the trigram-OR branches; the both-same tsvector path handles
+  // V/A queries cheaply via the search_doc GIN index.
+  if (artist_name !== album_title && isCompilationArtist(artist_name)) {
+    return [];
+  }
+
   await checkLibraryArtistNameHealth();
 
   // Both-mode default (dj-site sends the same string as artist and title).

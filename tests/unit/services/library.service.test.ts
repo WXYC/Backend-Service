@@ -124,6 +124,57 @@ describe('library.service', () => {
     });
   });
 
+  describe('fuzzySearchLibrary compilation-indicator short-circuit', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it.each<[string, string | undefined]>([
+      ['Various Artists', 'In-Correcto 15-25'],
+      ['V/A', 'Some Album'],
+      ['v.a.', 'Some Album'],
+      ['Soundtrack', 'Movie Title'],
+      ['Compilation', 'Best Of 2025'],
+      ['Various Artists', undefined],
+      ['V/A', undefined],
+    ])('returns [] without DB calls for artist=%s album=%s', async (artist, title) => {
+      const result = await fuzzySearchLibrary(artist, title, 10);
+      expect(result).toEqual([]);
+      expect(db.select).not.toHaveBeenCalled();
+      expect(db.execute).not.toHaveBeenCalled();
+    });
+
+    it('does NOT short-circuit when artist===album (both-mode cascade still runs)', async () => {
+      const chain = createMockQueryChain([]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+
+      await fuzzySearchLibrary('Various Artists', 'Various Artists', 5);
+
+      expect(db.select).toHaveBeenCalled();
+    });
+
+    it('does NOT short-circuit for legitimate artist names', async () => {
+      const chain = createMockQueryChain([]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+
+      await fuzzySearchLibrary('Stereolab', 'Dots and Loops', 5);
+
+      expect(db.select).toHaveBeenCalled();
+    });
+
+    it('does NOT short-circuit album-only queries (predicate checks artist field)', async () => {
+      const chain = createMockQueryChain([]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+
+      await fuzzySearchLibrary(undefined, 'Various Artists Compilation Vol 5', 5);
+
+      expect(db.select).toHaveBeenCalled();
+    });
+  });
+
   // Shared mock view row for search function tests
   const mockViewRow = {
     id: 1,
