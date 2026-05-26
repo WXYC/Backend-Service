@@ -26,7 +26,7 @@ runs the cheap decision tree.
 - LML's `prod` branch has both LML#370 and LML#372 deployed. Verify via the
   LML repo's deploy log; both were closed 2026-05-25 but the LML `prod`
   deploy is a separate event. Confirm with `gh issue view <id> --repo
-  WXYC/library-metadata-lookup` and look for the "deployed to prod"
+WXYC/library-metadata-lookup` and look for the "deployed to prod"
   comment, OR query LML's `/version` endpoint.
 - BS EC2 host healthy (`gh issue list --label status:investigating` shows
   nothing relevant, host metrics nominal).
@@ -78,11 +78,11 @@ grep '"step":"batch_done"' /tmp/bs-1064-baseline.log \
 
 ## Step 3 — Decide
 
-| `pct_error` | Verdict | Action |
-|---|---|---|
-| < 5% | **Hypothesis A confirmed; LML fixes closed the gap.** | Comment on BS#1064 with the numbers; close as fixed. No config change needed. |
-| 5–15% | Marginal. Could be A (a slightly too-tight budget still chops the tail) or B (intermittent stack degradation). | Bump `BACKFILL_LML_PER_CALL_TIMEOUT_MS` to `20000` in EC2 `.env` (Step 4) and re-run. If error rate drops to <5%: A. If it stays high: B. |
-| > 15% | **Hypothesis B; the BS-side stack is the bottleneck.** | Don't bump the budget — that just hides the symptom. Proceed to Step 5 (deeper investigation). |
+| `pct_error` | Verdict                                                                                                        | Action                                                                                                                                    |
+| ----------- | -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| < 5%        | **Hypothesis A confirmed; LML fixes closed the gap.**                                                          | Comment on BS#1064 with the numbers; close as fixed. No config change needed.                                                             |
+| 5–15%       | Marginal. Could be A (a slightly too-tight budget still chops the tail) or B (intermittent stack degradation). | Bump `BACKFILL_LML_PER_CALL_TIMEOUT_MS` to `20000` in EC2 `.env` (Step 4) and re-run. If error rate drops to <5%: A. If it stays high: B. |
+| > 15%       | **Hypothesis B; the BS-side stack is the bottleneck.**                                                         | Don't bump the budget — that just hides the symptom. Proceed to Step 5 (deeper investigation).                                            |
 
 ## Step 4 — Budget bump (only if Step 3 says "Marginal")
 

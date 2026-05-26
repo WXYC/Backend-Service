@@ -55,7 +55,7 @@ late-night UTC (00:00–08:00 UTC is ideal) when:
 - No active radio show on the WXYC stream. Check the dj-site flowsheet for
   recent `show_start` events.
 - BS deploys are quiet. Check `gh run list --workflow="Auto Build & Deploy"
-  --branch=main --limit=5` — if a deploy is in flight or imminent, defer.
+--branch=main --limit=5` — if a deploy is in flight or imminent, defer.
 
 ### Snapshot the starting state
 
@@ -163,13 +163,14 @@ job exposes that flag per BS#1041) — it's idempotent.
 
 Re-snapshot the same SQL from pre-flight and compare against T0:
 
-| Metric | Pre-flight | Expected post-run | Acceptance |
-|---|---|---|---|
-| `album_metadata` rows | T0 value | T0 + ~30k | growth ≥ 25k → ✅ |
-| `linked_pending_residual` | T0 value (~857k) | ≈ 0 | residual < 10k → ✅ |
-| `unique_linked_pending` | T0 value (~35,692) | ≈ 0 | residual < 1k → ✅ |
+| Metric                    | Pre-flight         | Expected post-run | Acceptance          |
+| ------------------------- | ------------------ | ----------------- | ------------------- |
+| `album_metadata` rows     | T0 value           | T0 + ~30k         | growth ≥ 25k → ✅   |
+| `linked_pending_residual` | T0 value (~857k)   | ≈ 0               | residual < 10k → ✅ |
+| `unique_linked_pending`   | T0 value (~35,692) | ≈ 0               | residual < 1k → ✅  |
 
 The "residual < N" tolerances allow for:
+
 - Cascade-exhaustion items that LML#370 explicitly bounces to the per-row
   drain cron (flowsheet-metadata-backfill); these stay `pending` here but
   are picked up by the daily cron.
