@@ -170,7 +170,7 @@ describe('sse-metrics', () => {
       expect(gauges[0].Value).toBe(0);
     });
 
-    it('does not start a second timer when called twice', async () => {
+    it('does not start a second timer when called twice', () => {
       const snapshot = jest.fn<() => Map<string, number>>().mockReturnValue(new Map([['live-fs-topic', 1]]));
       startSseMetrics(snapshot);
       startSseMetrics(snapshot);
@@ -211,7 +211,7 @@ describe('sse-metrics', () => {
       expect(mockSend).not.toHaveBeenCalled();
     });
 
-    it('SSE_METRICS_DISABLED=true skips starting the timer', async () => {
+    it('SSE_METRICS_DISABLED=true skips starting the timer', () => {
       process.env.SSE_METRICS_DISABLED = 'true';
       const snapshot = jest.fn<() => Map<string, number>>().mockReturnValue(new Map([['live-fs-topic', 99]]));
       startSseMetrics(snapshot);
@@ -220,7 +220,6 @@ describe('sse-metrics', () => {
       // probe it in disabled mode for debugging), but the periodic tick must
       // not fire. We verify by asserting no client send occurred during the
       // afterEach cleanup window.
-      // ...nothing to await — there is no tick. Just confirm send wasn't called.
       expect(mockSend).not.toHaveBeenCalled();
     });
   });
