@@ -171,8 +171,6 @@ async function flushCounters(): Promise<void> {
   failureBuffer = new Map();
   bufferedTotal = 0;
 
-  if (data.length === 0) return;
-
   try {
     await getClient().send(new PutMetricDataCommand({ Namespace: NAMESPACE, MetricData: data }));
   } catch (err) {

@@ -171,14 +171,33 @@ describe('sse-metrics', () => {
     });
 
     it('does not start a second timer when called twice', () => {
+      const setIntervalSpy = jest.spyOn(global, 'setInterval');
       const snapshot = jest.fn<() => Map<string, number>>().mockReturnValue(new Map([['live-fs-topic', 1]]));
       startSseMetrics(snapshot);
       startSseMetrics(snapshot);
-      // Stop and ensure we cleared the single timer cleanly.
+
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+
       stopSseMetrics();
-      // No assertion needed — if this leaked a timer, the afterEach __resetForTests
-      // would mismatch state. The key contract is that a double-start does not
-      // throw.
+      setIntervalSpy.mockRestore();
+    });
+
+    it('refreshes the snapshot function on a second startSseMetrics call', async () => {
+      // First snapshot — won't be invoked by __flushForTests below.
+      const snapshotA = jest.fn<() => Map<string, number>>().mockReturnValue(new Map([['topic-a', 1]]));
+      // Second snapshot — should be the one __flushForTests reads from.
+      const snapshotB = jest.fn<() => Map<string, number>>().mockReturnValue(new Map([['topic-b', 5]]));
+
+      startSseMetrics(snapshotA);
+      startSseMetrics(snapshotB);
+      await __flushForTests();
+
+      expect(snapshotA).not.toHaveBeenCalled();
+      expect(snapshotB).toHaveBeenCalled();
+      const dimensioned = allData().filter((d) => d.MetricName === 'SSE/ClientCount' && d.Dimensions.length > 0);
+      expect(dimensioned).toHaveLength(1);
+      expect(dimensioned[0].Dimensions[0].Value).toBe('topic-b');
+      expect(dimensioned[0].Value).toBe(5);
     });
   });
 
@@ -213,14 +232,15 @@ describe('sse-metrics', () => {
 
     it('SSE_METRICS_DISABLED=true skips starting the timer', () => {
       process.env.SSE_METRICS_DISABLED = 'true';
+      const setIntervalSpy = jest.spyOn(global, 'setInterval');
       const snapshot = jest.fn<() => Map<string, number>>().mockReturnValue(new Map([['live-fs-topic', 99]]));
       startSseMetrics(snapshot);
 
-      // The gauge snapshot function is still recorded (so __flushForTests can
-      // probe it in disabled mode for debugging), but the periodic tick must
-      // not fire. We verify by asserting no client send occurred during the
-      // afterEach cleanup window.
+      // The periodic tick must not fire — no setInterval registration and no
+      // CloudWatch send from a (non-existent) scheduled flush.
+      expect(setIntervalSpy).not.toHaveBeenCalled();
       expect(mockSend).not.toHaveBeenCalled();
+      setIntervalSpy.mockRestore();
     });
   });
 
