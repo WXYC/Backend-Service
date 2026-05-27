@@ -1,9 +1,9 @@
 /**
  * Tests for the album-level-backfill observability logger's pure helpers.
- * The init / JSON-line behavior mirrors `jobs/flowsheet-etl/logger.ts`
- * verbatim and is exercised by that job's smoke tests; the duplicated
- * resolveTracesSampleRate is re-asserted here so the duplication doesn't
- * drift silently.
+ * The init / JSON-line behavior mirrors `jobs/flowsheet-metadata-backfill/logger.ts`
+ * verbatim and is exercised by `tests/unit/jobs/flowsheet-etl/logger.test.ts`;
+ * the duplicated resolveTracesSampleRate is re-asserted here so the
+ * per-job duplication doesn't drift silently.
  */
 
 import { resolveTracesSampleRate } from '../../../../jobs/album-level-backfill/logger';

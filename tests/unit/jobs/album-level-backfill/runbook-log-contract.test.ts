@@ -46,33 +46,16 @@ const baseOptions = (over: Partial<BackfillOptions> = {}): BackfillOptions => ({
   ...over,
 });
 
-const captureStdoutJson = (): JsonLine[] => {
+const captureJson = (stream: 'stdout' | 'stderr'): JsonLine[] => {
   const lines: JsonLine[] = [];
-  jest.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+  jest.spyOn(process[stream], 'write').mockImplementation((chunk: unknown) => {
     const text = typeof chunk === 'string' ? chunk : (chunk as Buffer).toString();
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
       try {
         lines.push(JSON.parse(line) as JsonLine);
       } catch {
-        // Non-JSON stdout (jest worker chatter etc.) is ignored.
-      }
-    }
-    return true;
-  });
-  return lines;
-};
-
-const captureStderrJson = (): JsonLine[] => {
-  const lines: JsonLine[] = [];
-  jest.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
-    const text = typeof chunk === 'string' ? chunk : (chunk as Buffer).toString();
-    for (const line of text.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        lines.push(JSON.parse(line) as JsonLine);
-      } catch {
-        // Non-JSON stderr (e.g. Sentry's own warnings) is ignored.
+        // Non-JSON output (jest worker chatter, Sentry's own warnings) is ignored.
       }
     }
     return true;
@@ -115,33 +98,29 @@ describe('runbook log contract — batch_done', () => {
       ],
     });
 
-    const stdoutLines = captureStdoutJson();
+    const stdoutLines = captureJson('stdout');
     await runBackfill(baseOptions({ batchSize: 2 }));
 
-    const batchDone = stdoutLines.filter((l) => l.step === 'batch_done');
     // BS#1078 runbook watchdog (line 122 of ops-album-level-backfill-phase3.md):
     //   jq -r 'select(.step=="batch_done" and .wall_clock_ms>25000) | "...batch_index=\(.batch_index)..."'
-    // Both `step==='batch_done'` and the `wall_clock_ms` + `batch_index` keys
-    // MUST exist or the watchdog stays silent.
+    // Step-4 aggregate (lines 138-145) sums `.scanned` and `.lml_error // 0`.
+    // Renaming any of these keys without updating the runbook will silently
+    // re-break the watchdog (BS#1179).
+    const batchDone = stdoutLines.filter((l) => l.step === 'batch_done');
     expect(batchDone.length).toBe(2);
     for (const rec of batchDone) {
       expect(typeof rec.wall_clock_ms).toBe('number');
       expect(typeof rec.batch_index).toBe('number');
-      // Step-4 aggregate (line 138-145 of the runbook) sums `.scanned` and
-      // `.lml_error // 0`. Both keys must be numeric.
       expect(typeof rec.scanned).toBe('number');
       expect(typeof rec.lml_error).toBe('number');
-      // Spot-check the other accounting keys we emit alongside.
       expect(rec).toHaveProperty('match');
       expect(rec).toHaveProperty('no_match');
       expect(rec).toHaveProperty('upserts');
       expect(rec).toHaveProperty('batches');
-      // Tag bundle from the base logger.
       expect(rec.repo).toBe('Backend-Service');
       expect(rec.tool).toBe('album-level-backfill');
       expect(rec.run_id).toBe('test-run');
     }
-    // Per-batch lml_error reflects the LML per-item error.
     expect(batchDone[0].lml_error).toBe(1);
     expect(batchDone[1].lml_error).toBe(1);
   });
@@ -165,15 +144,15 @@ describe('runbook log contract — lml_batch_failed', () => {
       Object.assign(new Error('LML request timed out'), { name: 'LmlClientError' })
     );
 
-    const stdoutLines = captureStdoutJson();
-    const stderrLines = captureStderrJson();
+    // Pre-#1179 the plain-text line packed first/last_album_id + error into
+    // a flat string; the runbook can't tail-and-filter it. Now structured
+    // so `jq` can.
+    const stdoutLines = captureJson('stdout');
+    const stderrLines = captureJson('stderr');
     await runBackfill(baseOptions({ batchSize: 2 }));
 
     const failed = [...stdoutLines, ...stderrLines].find((l) => l.step === 'lml_batch_failed');
     expect(failed).toBeDefined();
-    // The plain-text line at jobs/album-level-backfill/job.ts (pre-#1179)
-    // packed first/last_album_id + error into a flat string; the runbook
-    // can't tail-and-filter it. Now structured so `jq` can.
     expect(failed?.size).toBe(2);
     expect(failed?.first_album_id).toBe(100);
     expect(failed?.last_album_id).toBe(200);
@@ -197,7 +176,7 @@ describe('runbook log contract — post_pass_update_done', () => {
       results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
     });
 
-    const stdoutLines = captureStdoutJson();
+    const stdoutLines = captureJson('stdout');
     await runBackfill(baseOptions({ batchSize: 1 }));
 
     // Runbook Step 5 (line 155): grep '"step":"post_pass_update_done"' /tmp/...
