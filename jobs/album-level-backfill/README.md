@@ -24,7 +24,7 @@ If `linked_pending / unique_album_ids > 5`, the dedup payoff justifies the run.
 
 1. `SELECT DISTINCT album_id` from pending flowsheet rows with non-null `album_id`.
 2. Resolve each chunk of album_ids to `(artist_name, album_title)` via `library` + `artists` join.
-3. Call LML `POST /api/v1/lookup/bulk` with batches of `BACKFILL_BULK_BATCH_SIZE` items (default 50).
+3. Call LML `POST /api/v1/lookup/bulk` with batches of `BACKFILL_BULK_BATCH_SIZE` items (default 10). The per-batch fetch timeout scales with this value (`batchSize × 2.5 s + 5 s` slack) so a cascade-heavy batch can't exhaust the shared LML-client's 30 s default (BS#1178).
 4. For each `match` result, UPSERT into `album_metadata` with the same race-guarded `setWhere: updated_at < NOW()` shape the enrichment-worker uses.
 5. After all bulk calls complete, ANALYZE `album_metadata`.
 6. Cooperative pause until quiet, then post-pass UPDATE: `WITH matched AS (UPDATE flowsheet ... FROM album_metadata) SELECT count(*)`. Scoped inside `db.transaction` + `SET LOCAL statement_timeout`.
@@ -49,7 +49,10 @@ docker stop flowsheet-metadata-backfill-cron
 # 4. Run a dry-run first to verify env + scope
 docker run --rm --env-file .env <image> --dry-run
 
-# 5. Run for real (expected wall-clock: ~12 hours at default 1 batch/min)
+# 5. Run for real. At post-BS#1178 defaults (batch=10, rate=1/min ≈ 10 items/min)
+#    a full 35,692-album drain takes ~60 h. For catch-up runs, bump
+#    BACKFILL_BULK_RATE_PER_MIN (e.g. 3 → ~20 h) — keep BATCH_SIZE at 10
+#    so the per-batch fetch-timeout headroom stays intact.
 docker run --rm --env-file .env <image> 2>&1 | tee /tmp/album-level-backfill.log
 
 # 6. Sanity check
@@ -70,17 +73,17 @@ psql "$DATABASE_URL" -c "
 
 ## Env knobs
 
-| Variable                                    | Default            | Meaning                                                                                |
-| ------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------- |
-| `BACKFILL_BULK_BATCH_SIZE`                  | `50`               | Items per LML bulk request. LML caps at 100.                                           |
-| `BACKFILL_BULK_RATE_PER_MIN`                | `1`                | Batches per minute. 1/min ≈ 50 items/min sustained.                                    |
-| `BACKFILL_BULK_BUDGET_MS`                   | `25000`            | Forwarded to LML as `X-Caller-Budget-Ms`.                                              |
-| `ALBUM_LEVEL_BACKFILL_POST_PASS_TIMEOUT_MS` | `14400000` (4h)    | `SET LOCAL statement_timeout` for the post-pass UPDATE.                                |
-| `ALBUM_LEVEL_BACKFILL_READ_TIMEOUT_MS`      | `300000` (5min)    | `SET LOCAL statement_timeout` for the enumerate scan + per-batch resolveAlbums lookup. |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`            | `300`              | Cooperative-pause lookback window; `0` disables.                                       |
-| `LIBRARY_METADATA_URL`                      | (required)         | LML base URL.                                                                          |
-| `LML_API_KEY`                               | (required in prod) | LML bearer token.                                                                      |
-| `DATABASE_URL`                              | (required)         | Postgres connection string.                                                            |
+| Variable                                    | Default            | Meaning                                                                                       |
+| ------------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------- |
+| `BACKFILL_BULK_BATCH_SIZE`                  | `10`               | Items per LML bulk request. LML caps at 100. Raising this scales the fetch timeout (BS#1178). |
+| `BACKFILL_BULK_RATE_PER_MIN`                | `1`                | Batches per minute. At the default batch size, 1/min ≈ 10 items/min sustained.                |
+| `BACKFILL_BULK_BUDGET_MS`                   | `25000`            | Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. NOT the batch fetch timeout.        |
+| `ALBUM_LEVEL_BACKFILL_POST_PASS_TIMEOUT_MS` | `14400000` (4h)    | `SET LOCAL statement_timeout` for the post-pass UPDATE.                                       |
+| `ALBUM_LEVEL_BACKFILL_READ_TIMEOUT_MS`      | `300000` (5min)    | `SET LOCAL statement_timeout` for the enumerate scan + per-batch resolveAlbums lookup.        |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`            | `300`              | Cooperative-pause lookback window; `0` disables.                                              |
+| `LIBRARY_METADATA_URL`                      | (required)         | LML base URL.                                                                                 |
+| `LML_API_KEY`                               | (required in prod) | LML bearer token.                                                                             |
+| `DATABASE_URL`                              | (required)         | Postgres connection string.                                                                   |
 
 ## Acceptance verification
 
