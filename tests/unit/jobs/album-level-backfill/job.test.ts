@@ -42,6 +42,9 @@ import {
   BULK_RATE_PER_MIN_DEFAULT,
   BULK_RATE_PER_MIN_ENV,
   BULK_BUDGET_MS_DEFAULT,
+  BULK_PER_ITEM_TIMEOUT_MS,
+  BULK_TIMEOUT_SLACK_MS,
+  computeBulkTimeoutMs,
   POST_PASS_TIMEOUT_DEFAULT,
   POST_PASS_TIMEOUT_ENV,
   READ_TIMEOUT_DEFAULT,
@@ -481,7 +484,7 @@ describe('runBatch', () => {
     expect(out).toMatchObject({ match: 0, no_match: 0, error: 0, upserts: 0 });
   });
 
-  it('forwards the resolved items + budgetMs to bulkLookupMetadata', async () => {
+  it('forwards the resolved items + budgetMs + dynamic timeoutMs to bulkLookupMetadata (BS#1178)', async () => {
     mockBulkLookupMetadata.mockResolvedValue({
       results: [
         { index: 0, status: 'no_match', lookup: { results: [] } },
@@ -497,7 +500,11 @@ describe('runBatch', () => {
       { artist: 'Juana Molina', album: 'DOGA', raw_message: 'Juana Molina - DOGA' },
       { artist: 'Jessica Pratt', album: 'OYOLA', raw_message: 'Jessica Pratt - OYOLA' },
     ]);
-    expect(opts).toEqual({ budgetMs: 25000 });
+    // BS#1178: `bulkLookupMetadata` MUST receive an explicit `timeoutMs`
+    // override so the 30 s shared-client default doesn't fire mid-batch
+    // for cascade-heavy items. The value is derived from batch size by
+    // `computeBulkTimeoutMs` and pinned independently below.
+    expect(opts).toEqual({ budgetMs: 25000, timeoutMs: computeBulkTimeoutMs(2) });
   });
 
   it('counts match / no_match / error per response and UPSERTs only matches', async () => {
@@ -557,6 +564,38 @@ describe('runBatch', () => {
 
     expect(out).toMatchObject({ batchSize: 2, match: 0, no_match: 0, error: 2, upserts: 0 });
     expect(db.insert as jest.Mock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bulk-fetch timeout sizing (BS#1178).
+// ---------------------------------------------------------------------------
+
+describe('computeBulkTimeoutMs (BS#1178)', () => {
+  // Pin the linear relationship so a future bump to BULK_BATCH_SIZE_DEFAULT
+  // without a paired slack bump fails loudly here, not in production as
+  // `LmlClientError: LML request timed out`.
+  it('is linear in batchSize: timeoutMs === batchSize × per_item + slack', () => {
+    for (const n of [1, 5, 10, 15, 50, 100]) {
+      expect(computeBulkTimeoutMs(n)).toBe(n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS);
+    }
+  });
+
+  // The acceptance bullet on BS#1178 ("Unit test pinning the relationship
+  // `timeoutMs ≥ batchSize × <per_item_estimate>`"). Slack is non-negative
+  // by construction, so the lower bound holds for any batchSize ≥ 0.
+  it('is at least batchSize × BULK_PER_ITEM_TIMEOUT_MS for every supported size', () => {
+    for (const n of [1, 5, 10, 15, 50, 100]) {
+      expect(computeBulkTimeoutMs(n)).toBeGreaterThanOrEqual(n * BULK_PER_ITEM_TIMEOUT_MS);
+    }
+  });
+
+  // The default batch size MUST fit under the shared-client 30 s ceiling
+  // with non-zero slack, otherwise BS#1178's regression reappears the
+  // moment the dynamic override is removed or the default is raised.
+  it('keeps the post-fix BULK_BATCH_SIZE_DEFAULT comfortably under any plausible LML-client ceiling', () => {
+    expect(BULK_BATCH_SIZE_DEFAULT).toBe(10);
+    expect(computeBulkTimeoutMs(BULK_BATCH_SIZE_DEFAULT)).toBe(30_000);
   });
 });
 
