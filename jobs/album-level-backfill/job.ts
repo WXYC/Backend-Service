@@ -43,66 +43,39 @@ const JOB_NAME = 'album-level-backfill';
 
 // -- Env knobs ---------------------------------------------------------------
 
-/** Items per bulk-lookup request. LML's hard cap is 100; default 10 is
+/** Items per bulk-lookup request. LML hard cap is 100; default 10 is
  * sized so one wave of LML's internal `LML_BULK_MAX_CONCURRENT=10`
- * fan-out fits inside a single per-item `caller_budget_ms` window —
- * keeping the worst-case wall-clock under the shared LML-client fetch
- * ceiling. Prior default of 50 (BS#1178) produced
- * `error=50 elapsed_ms=30016` on every batch because cascade-bait items
- * amortize at ~2.1 s each (LML#370 per-item cap is 25 s) and 50 × 2.1 s
- * blows past the 30 s shared-client timeout, so every call hit
- * `LmlClientError: LML request timed out` before any per-item verdict
- * was returned. The dynamic timeout in `computeBulkTimeoutMs` scales
- * with this value; raising it without raising the slack reintroduces
- * the same failure mode. */
+ * fan-out fits inside a single per-item `caller_budget_ms` window.
+ * `computeBulkTimeoutMs` scales the fetch timeout with this value;
+ * raising the env override without paired slack reintroduces the
+ * 30 s shared-client timeout. */
 export const BULK_BATCH_SIZE_ENV = 'BACKFILL_BULK_BATCH_SIZE';
 export const BULK_BATCH_SIZE_DEFAULT = 10;
 
 /** Batches per minute. Bound the bulk caller so it can run concurrently
  * with the per-row drain cron (BS#995, 4 items/min) without saturating
- * LML's serial Discogs fan-out. At the post-BS#1178 default
- * `BULK_BATCH_SIZE_DEFAULT=10`, 1 batch/min ≈ 10 items/min sustained;
- * operators tuning for catch-up should raise `BACKFILL_BULK_RATE_PER_MIN`
- * (not `BACKFILL_BULK_BATCH_SIZE`) to scale throughput without
- * regressing the per-batch fetch-timeout headroom. */
+ * LML's serial Discogs fan-out. Catch-up throughput should come from
+ * raising this knob, not `BACKFILL_BULK_BATCH_SIZE` — see README. */
 export const BULK_RATE_PER_MIN_ENV = 'BACKFILL_BULK_RATE_PER_MIN';
 export const BULK_RATE_PER_MIN_DEFAULT = 1;
 
-/** Per-ITEM wall-clock budget forwarded to LML as `X-Caller-Budget-Ms`.
- * LML's per-item `perform_lookup` uses this as `min(header, env default)`
- * (A8 / LML#345); it caps each individual cascade, not the whole batch.
- * 25 s matches LML's own ceiling. The fetch-level timeout that wraps
- * the entire bulk call is computed dynamically by `computeBulkTimeoutMs`
- * — do not interpret this as a batch budget. */
+/** Per-ITEM budget forwarded to LML as `X-Caller-Budget-Ms` (A8 / LML#345).
+ * Caps each individual cascade inside the bulk call, NOT the whole batch.
+ * The fetch-level timeout is computed dynamically by `computeBulkTimeoutMs`. */
 export const BULK_BUDGET_MS_ENV = 'BACKFILL_BULK_BUDGET_MS';
 export const BULK_BUDGET_MS_DEFAULT = 25_000;
 
-/** Per-item slice of the bulk fetch timeout. Cascade-bait items
- * empirically amortize at ~2.1 s server-side (LML#370 cap is 25 s;
- * cache-warm items resolve in 100–500 ms but the cascade-heavy ones
- * dominate the per-batch wall-clock). 2.5 s matches LML's amortized
- * rate (`BULK_BUDGET_MS_DEFAULT / LML_BULK_MAX_CONCURRENT = 25_000 /
- * 10`) so the linear formula in `computeBulkTimeoutMs` agrees with
- * the wave-based worst case for sizes that fall on a 10-item boundary
- * and stays conservative in between. Pinned by unit test. */
+/** Per-item slice of the bulk fetch timeout. Matches LML's amortized
+ * rate: `BULK_BUDGET_MS_DEFAULT / LML_BULK_MAX_CONCURRENT = 25_000 / 10`. */
 export const BULK_PER_ITEM_TIMEOUT_MS = 2_500;
 
-/** Fixed slack added on top of `batchSize × BULK_PER_ITEM_TIMEOUT_MS`.
- * Covers HTTP overhead, JSON encode/decode, and a small safety margin
- * for the case where every item in the batch happens to hit LML's
- * per-item cap. Pinned by unit test. */
+/** Fixed slack on top of `batchSize × BULK_PER_ITEM_TIMEOUT_MS`:
+ * HTTP overhead + JSON encode/decode + safety margin. */
 export const BULK_TIMEOUT_SLACK_MS = 5_000;
 
-/** Compute the client-side fetch timeout for one bulk call.
- *
- * BS#1178: the shared `lmlFetch` defaults `TIMEOUT_MS = 30_000`, sized
- * against the single-item `/api/v1/lookup` endpoint. The bulk endpoint's
- * wall-clock scales with batch size, so callers must override it. This
- * helper keeps the relationship explicit — change `BULK_BATCH_SIZE_*`,
- * and the fetch timeout follows automatically; the unit test in
- * `tests/unit/jobs/album-level-backfill/job.test.ts` pins it so a
- * future bump to either knob without the matching slack regresses
- * loudly. */
+/** Scale the LML-client fetch timeout to batch size. The shared
+ * `lmlFetch` default (30 s) is sized against the single-item endpoint;
+ * bulk wall-clock scales with batch size, so callers must override. */
 export const computeBulkTimeoutMs = (batchSize: number): number =>
   batchSize * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS;
 
@@ -435,16 +408,10 @@ export const runBatch = async (
 
   // Isolate HTTP-level failures (timeout, 5xx, network) so a single bad
   // batch can't abort the whole run. LML's bulk endpoint already
-  // isolates per-item failures via `status: 'error'` in its response —
-  // but if the HTTP call itself throws (LmlClientError on the fetch
-  // timeout, BS#1076 / BS#1178), the loop dies without try/catch.
-  // Treat a thrown batch as "all N items errored"; the per-row drain
-  // cron picks those album_ids up on its next sweep. Idempotency holds:
-  // nothing was UPSERTed.
-  //
-  // The fetch-level timeout is scaled to batch size (BS#1178) so the
-  // 30 s shared-client default doesn't fire mid-cascade — see
-  // `computeBulkTimeoutMs` above.
+  // isolates per-item failures via `status: 'error'`; if the HTTP call
+  // itself throws (LmlClientError on the fetch timeout, BS#1076), treat
+  // the whole batch as N errors and let the per-row drain cron retry on
+  // its next sweep. Idempotency holds: nothing was UPSERTed.
   const timeoutMs = computeBulkTimeoutMs(items.length);
   let response;
   try {
