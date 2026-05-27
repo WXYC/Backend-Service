@@ -34,10 +34,10 @@
  * Run procedure: see jobs/album-level-backfill/README.md.
  */
 
-import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import { album_metadata, db, closeDatabaseConnection } from '@wxyc/database';
 import { bulkLookupMetadata, type BulkLookupItem, type LookupResponse } from '@wxyc/lml-client';
+import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'album-level-backfill';
 
@@ -309,7 +309,10 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * lookback window is quiet (no track within `lookbackSeconds`). */
 export const awaitQuietWindow = async (lookbackSeconds: number, pauseMs: number): Promise<void> => {
   while (await checkLiveActivity(lookbackSeconds)) {
-    console.log(`[${JOB_NAME}] live DJ activity within ${lookbackSeconds}s; deferring ${Math.round(pauseMs / 1000)}s.`);
+    log('info', 'live_activity_pause', `live DJ activity within ${lookbackSeconds}s; deferring ${pauseMs}ms`, {
+      lookback_seconds: lookbackSeconds,
+      pause_ms: pauseMs,
+    });
     await sleep(pauseMs);
   }
 };
@@ -349,7 +352,7 @@ export const runPostPassUpdate = async (timeoutMs: number): Promise<number> => {
  * statistics before the post-pass UPDATE's JOIN. Paired-bulk rule from
  * docs/bulk-update-playbook.md. */
 export const analyzeAlbumMetadata = async (): Promise<void> => {
-  console.log(`[${JOB_NAME}] ANALYZE album_metadata.`);
+  log('info', 'analyze_started', 'ANALYZE album_metadata');
   await db.execute(sql`ANALYZE "wxyc_schema"."album_metadata"`);
 };
 
@@ -379,9 +382,10 @@ export const runBatch = async (
   const items = buildBulkItems(resolved);
 
   if (options.dryRun) {
-    console.log(
-      `[${JOB_NAME}] (dry-run) batch resolved=${resolved.length} would-call bulkLookup with ${items.length} items.`
-    );
+    log('info', 'batch_dry_run', `dry-run: would call bulkLookup with ${items.length} items`, {
+      resolved: resolved.length,
+      items: items.length,
+    });
     return { batchSize: items.length, match: 0, no_match: 0, error: 0, upserts: 0 };
   }
 
@@ -400,10 +404,18 @@ export const runBatch = async (
   try {
     response = await bulkLookupMetadata(items, { budgetMs: options.budgetMs });
   } catch (err) {
-    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    console.warn(
-      `[${JOB_NAME}] lml.batch_failed size=${items.length} first_album_id=${resolved[0]?.album_id ?? '?'} last_album_id=${resolved[resolved.length - 1]?.album_id ?? '?'} error=${JSON.stringify(msg)}`
-    );
+    const errorMessage = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    log('warn', 'lml_batch_failed', 'bulkLookupMetadata threw; entire batch counted as error', {
+      size: items.length,
+      first_album_id: resolved[0]?.album_id ?? null,
+      last_album_id: resolved[resolved.length - 1]?.album_id ?? null,
+      error_message: errorMessage,
+    });
+    captureError(err, 'lml_batch_failed', {
+      size: items.length,
+      first_album_id: resolved[0]?.album_id ?? null,
+      last_album_id: resolved[resolved.length - 1]?.album_id ?? null,
+    });
     return { batchSize: items.length, match: 0, no_match: 0, error: items.length, upserts: 0 };
   }
   // resolved[i] corresponds to items[i] which corresponds to response.results[i].
@@ -427,9 +439,10 @@ export const runBatch = async (
     } else {
       error += 1;
       const album = resolved[result.index];
-      console.warn(
-        `[${JOB_NAME}] lml.error album_id=${album?.album_id ?? '?'} message=${JSON.stringify(result.message ?? null)}`
-      );
+      log('warn', 'lml_error', `LML per-item error for album_id=${album?.album_id ?? '?'}`, {
+        album_id: album?.album_id ?? null,
+        error_message: result.message ?? null,
+      });
     }
   }
   const upserts = (await Promise.all(upsertPromises)).filter(Boolean).length;
@@ -486,16 +499,24 @@ const chunk = <T>(arr: T[], size: number): T[][] => {
 };
 
 export const runBackfill = async (options: BackfillOptions): Promise<BackfillSummary> => {
-  console.log(
-    `[${JOB_NAME}] start batchSize=${options.batchSize} ratePerMin=${options.ratePerMin} budgetMs=${options.budgetMs} dryRun=${options.dryRun}`
-  );
+  log('info', 'started', `${JOB_NAME} starting`, {
+    batch_size: options.batchSize,
+    rate_per_min: options.ratePerMin,
+    budget_ms: options.budgetMs,
+    dry_run: options.dryRun,
+  });
 
   const albumIds = await enumeratePendingAlbumIds(options.readTimeoutMs);
-  console.log(`[${JOB_NAME}] enumerated scanned=${albumIds.length} unique album_ids`);
+  log('info', 'enumerated', `enumerated ${albumIds.length} unique album_ids`, {
+    scanned: albumIds.length,
+  });
 
   if (options.dryRun) {
     const batches = chunk(albumIds, options.batchSize);
-    console.log(`[${JOB_NAME}] (dry-run) would run ${batches.length} batches of up to ${options.batchSize} items.`);
+    log('info', 'dry_run_plan', `(dry-run) would run ${batches.length} batches of up to ${options.batchSize} items`, {
+      batches: batches.length,
+      batch_size: options.batchSize,
+    });
     return {
       scanned: albumIds.length,
       batches: batches.length,
@@ -524,16 +545,29 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
       dryRun: false,
       readTimeoutMs: options.readTimeoutMs,
     });
-    const elapsedMs = Date.now() - t0;
+    const wallClockMs = Date.now() - t0;
 
     totalMatch += result.match;
     totalNoMatch += result.no_match;
     totalError += result.error;
     totalUpserts += result.upserts;
 
-    console.log(
-      `[${JOB_NAME}] batch=${i + 1}/${batches.length} size=${result.batchSize} match=${result.match} no_match=${result.no_match} error=${result.error} upserts=${result.upserts} elapsed_ms=${elapsedMs}`
-    );
+    // Field names are pinned to the BS#1078 Phase 3 runbook's `jq` watchdog
+    // (`docs/ops-album-level-backfill-phase3.md`). The watchdog filters on
+    // `.step=="batch_done" and .wall_clock_ms>25000`; the aggregate-first-20
+    // probe sums `.scanned` and `.lml_error`. Don't rename these without
+    // updating the runbook in lockstep — silent rename will leave the
+    // watchdog matching nothing again (BS#1179).
+    log('info', 'batch_done', `batch ${i + 1}/${batches.length} done`, {
+      batch_index: i + 1,
+      batches: batches.length,
+      scanned: result.batchSize,
+      match: result.match,
+      no_match: result.no_match,
+      lml_error: result.error,
+      upserts: result.upserts,
+      wall_clock_ms: wallClockMs,
+    });
 
     if (i < batches.length - 1 && interBatchSleepMs > 0) {
       await sleep(interBatchSleepMs);
@@ -546,11 +580,18 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
   // doesn't enter a 3-hour write window. Probe-and-defer happens BEFORE
   // opening the transaction, never inside it.
   await awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs);
-  console.log(`[${JOB_NAME}] starting post-pass UPDATE (statement_timeout=${options.postPassTimeoutMs}ms)`);
+  log('info', 'post_pass_started', `starting post-pass UPDATE`, {
+    statement_timeout_ms: options.postPassTimeoutMs,
+  });
   const t0 = Date.now();
   const flipped = await runPostPassUpdate(options.postPassTimeoutMs);
-  const elapsedMs = Date.now() - t0;
-  console.log(`[${JOB_NAME}] post-pass UPDATE flipped=${flipped} elapsed_ms=${elapsedMs}`);
+  const wallClockMs = Date.now() - t0;
+  // `post_pass_update_done` is the literal grep target in the runbook's
+  // Step 5 ("verify it completed"). Keep this step name stable.
+  log('info', 'post_pass_update_done', `post-pass UPDATE flipped=${flipped}`, {
+    flipped,
+    wall_clock_ms: wallClockMs,
+  });
 
   return {
     scanned: albumIds.length,
@@ -563,33 +604,22 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
   };
 };
 
-const resolveTracesSampleRate = (raw: string | undefined): number => {
-  if (raw === undefined) return 0;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 0;
-  return parsed;
-};
-
 const main = async (): Promise<void> => {
-  Sentry.init({
-    dsn: process.env.SENTRY_DSN,
-    release: process.env.SENTRY_RELEASE,
-    environment: process.env.NODE_ENV || 'production',
-    tracesSampleRate: resolveTracesSampleRate(process.env.SENTRY_TRACES_SAMPLE_RATE),
-  });
-  Sentry.setTag('repo', 'Backend-Service');
-  Sentry.setTag('tool', JOB_NAME);
+  const runId = initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
 
   try {
     const options = resolveOptions();
     const summary = await runBackfill(options);
-    console.log(`[${JOB_NAME}] DONE ${JSON.stringify(summary)}`);
+    log('info', 'finished', `${JOB_NAME} done`, { run_id: runId, ...summary });
   } catch (err) {
-    Sentry.captureException(err, { tags: { step: 'main' } });
-    console.error(`[${JOB_NAME}] FAILED:`, err);
+    captureError(err, 'main');
+    log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {
+      error_message: err instanceof Error ? err.message : String(err),
+      error_name: err instanceof Error ? err.name : null,
+    });
     process.exitCode = 1;
   } finally {
-    await Sentry.close(2000);
+    await closeLogger();
     await closeDatabaseConnection();
   }
 };
