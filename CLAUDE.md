@@ -12,6 +12,9 @@ CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in
 - **[`docs/replication.md`](docs/replication.md)** — Local PostgreSQL logical-replication setup and operation
 - **[`docs/cdc.md`](docs/cdc.md)** — CDC WebSocket endpoint, event format, reconciliation monitor
 - **[`docs/deploy.md`](docs/deploy.md)** — Deploy cadence, migration-chain risk, deploy-wedge anatomy, CI workflow pin maintenance (permissions, gha/v1 pins, caller-callee permissions trap from #857)
+- **[`docs/authentication.md`](docs/authentication.md)** — Roles, permissions matrix, JWT payload, `requirePermissions` middleware flow, `AUTH_BYPASS`, better-auth role-mismatch gotcha
+- **[`docs/testing.md`](docs/testing.md)** — Unit + integration + CI-mock test setup, jest configs, CI workflow job list
+- **[`docs/dev-db-fixture.md`](docs/dev-db-fixture.md)** — Dev DB seed pipeline (`seed_db.sql` + `seed-clone.sql`), `LOAD_CLONE_FIXTURE` gate, `predev` rebuild hook, `db:stop` volume drop
 
 For the org-wide cache-hierarchy reference (BS's `proxy.controller` LRUs in context with the upstream iOS caches and downstream LML caches), see [`WXYC/wiki/architecture/cache-hierarchy.md`](https://github.com/WXYC/wiki/blob/main/architecture/cache-hierarchy.md).
 
@@ -110,39 +113,9 @@ npm run drizzle:drop       # Delete a migration file
 
 ### Authentication (`shared/authentication`)
 
-**Key files:**
+better-auth wrapper providing JWT verification + role-based access control. Roles (hierarchical): member < dj < musicDirector < stationManager.
 
-- `auth.definition.ts` — better-auth config with plugins and hooks
-- `auth.roles.ts` — Role definitions and access control rules
-- `auth.middleware.ts` — JWT verification and permission checking
-- `auth.client.ts` — Client-side better-auth initialization
-- `email.ts` — SES email sending (password reset, verification)
-
-**Roles** (hierarchical): member < dj < musicDirector < stationManager
-
-**Permissions per role:**
-
-| Role           | bin        | catalog    | flowsheet   |
-| -------------- | ---------- | ---------- | ----------- |
-| member         | read/write | read       | read        |
-| dj             | read/write | read       | read/write  |
-| musicDirector  | read/write | read/write | read/write  |
-| stationManager | all        | all        | all + admin |
-
-**JWT payload**: `sub` (user ID), `email`, `role` (queried from the organization member table, not `user.role`).
-
-**`requirePermissions` middleware flow:**
-
-1. Extract Bearer token from `Authorization` header
-2. Verify against JWKS endpoint (`BETTER_AUTH_JWKS_URL`)
-3. Check issuer and audience claims
-4. Validate role exists in `WXYCRoles`
-5. Check permissions using the role's authorize function
-6. 403 if role invalid or permissions insufficient
-
-**Auth bypass**: Set `AUTH_BYPASS=true` to skip JWT verification in tests. Rate limiting is disabled when `NODE_ENV=test`.
-
-**Role mismatch gotcha**: better-auth's organization plugin has built-in roles (`owner`, `admin`, `member`) that overlap with WXYC's custom roles. If a user's `member.role` is set to a value not in `WXYCRoles`, the middleware returns 403 on every request. Organization hooks sync `stationManager`/`admin`/`owner` to `user.role='admin'` for the better-auth admin plugin.
+See **[`docs/authentication.md`](docs/authentication.md)** for the permissions matrix, JWT payload shape, `requirePermissions` middleware flow, `AUTH_BYPASS` test hook, and the better-auth role-mismatch gotcha.
 
 ## Development
 
@@ -154,11 +127,9 @@ npm run db:start         # Start PostgreSQL in Docker (port 5432)
 npm run dev              # Start auth (8082) + backend (8080) concurrently with hot reload
 ```
 
-`npm run dev` automatically rebuilds `@wxyc/database` + `@wxyc/authentication` first via the `predev` lifecycle hook (BS#968). Without this, a fresh clone or a pull that touches `shared/database/src/schema.ts` would serve a stale schema export to the running backend — typically surfacing as a `TypeError: Cannot convert undefined or null to object` deep inside `drizzle-orm/utils.js` with no column name to chase. `apps/backend`'s own `tsup --watch` already rebuilds its own sources, but it doesn't follow workspace dep dists; `predev` covers that gap.
+`npm run dev` rebuilds `@wxyc/database` + `@wxyc/authentication` first via the `predev` lifecycle hook so the backend doesn't serve a stale schema export. Stop the database with `npm run db:stop` (drops the `pg-data` volume; next `db:start` is a fresh DB).
 
-Stop the database with `npm run db:stop` (this runs `docker compose down -v` — the `-v` drops the `pg-data` named volume, so the dev DB is recreated from scratch on the next `db:start`).
-
-**Dev DB fixture**: `db:start` seeds the dev DB from two files, in order: `dev_env/seed_db.sql` (auth fixtures, test users, genres/formats with fixed IDs — identical to CI) and `dev_env/seed-clone.sql` (a ~14 MB `pg_dump` snapshot of prod's `artists / library / rotation / format / genre_artist_crossreference`, taken via the staging postgres clone — TRUNCATEs the small fixtures from the first file in the same transaction before loading). The clone gives realistic data for UI/feature work; CI keeps running against the small seed and the fixed IDs they assume. The dev/CI distinction is gated explicitly via `LOAD_CLONE_FIXTURE=true` set on the dev-profile `db-init` service in `docker-compose.yml` (BS#951): CI's bare `node dev_env/init-db.mjs` invocation skips the clone regardless of whether the .sql file exists in the checkout. To refresh the clone, follow the recipe in the comment at the top of `dev_env/seed-clone.sql`.
+See **[`docs/dev-db-fixture.md`](docs/dev-db-fixture.md)** for the seed pipeline (`seed_db.sql` + `seed-clone.sql`), the `LOAD_CLONE_FIXTURE` gate distinguishing dev from CI, the `predev` rebuild rationale, and how to refresh the clone.
 
 ### One-time per-clone setup
 
@@ -200,57 +171,9 @@ Descriptions in kebab-case. Keep them short.
 
 ## Testing
 
-### Unit tests
+Three test suites: `npm run test:unit` (mocked DB), `npm run test:integration` (requires `npm run db:start`, runs `--runInBand` because tests share show/DJ/flowsheet state), `npm run ci:testmock` (Docker-isolated mirror of CI).
 
-```bash
-npm run test:unit
-```
-
-- Config: `jest.unit.config.ts`
-- Location: `tests/unit/**/*.test.ts`
-- Setup: `tests/setup/unit.setup.ts`
-- Database is mocked via `tests/mocks/database.mock.ts`
-- No external dependencies required
-
-### Integration tests
-
-```bash
-npm run db:start         # Requires Docker DB
-npm run test:integration
-```
-
-- Config: `jest.config.json`
-- Location: `tests/integration/**/*.spec.js`
-- Setup: `tests/setup/integration.setup.js` with `tests/setup/globalSetup.js`
-- Tests run sequentially (`--runInBand`) because they share show state, DJ sessions, and flowsheet entries
-- 30-second timeout per test
-- Generates HTML report at `tests/report/report.html`
-
-### CI mock
-
-```bash
-npm run ci:testmock      # Sets up Docker env, runs tests, cleans up
-```
-
-Or manually:
-
-```bash
-npm run ci:env           # Start sandboxed Docker environment
-npm run ci:test          # Run tests against CI environment
-npm run ci:clean         # Tear down containers, volumes, networks
-```
-
-The CI environment uses `dev_env/docker-compose.yml` with Docker profiles (`ci`, `e2e`).
-
-## CI/CD
-
-GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
-
-1. **detect-changes** — Paths-filter identifies what changed (apps, jobs, shared, tests, db-init)
-2. **lint-and-typecheck** — `typecheck` + `lint` + `format:check` + `build`
-3. **unit-tests** — Runs affected tests only (`--changedSince=origin/<base>` on PRs)
-4. **integration-tests** — Only if apps/jobs/shared/tests change. Docker images cached by commit SHA in ECR.
-5. **migrate-dryrun** — Only when `db-init` paths change. Restores latest RDS snapshot, runs `dryrun-migrate.mjs`, tears down. Catches data-shape preconditions at PR-review time. Detail in [`docs/deploy.md`](docs/deploy.md).
+See **[`docs/testing.md`](docs/testing.md)** for jest configs, locations, setup files, and the GitHub Actions workflow (`.github/workflows/test.yml`) job list (detect-changes → lint-and-typecheck → unit-tests → integration-tests → migrate-dryrun).
 
 ## Deployment
 
