@@ -404,18 +404,15 @@ export const runBatch = async (
   try {
     response = await bulkLookupMetadata(items, { budgetMs: options.budgetMs });
   } catch (err) {
+    const firstAlbumId = resolved[0]?.album_id ?? null;
+    const lastAlbumId = resolved[resolved.length - 1]?.album_id ?? null;
     const errorMessage = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    const extra = { size: items.length, first_album_id: firstAlbumId, last_album_id: lastAlbumId };
     log('warn', 'lml_batch_failed', 'bulkLookupMetadata threw; entire batch counted as error', {
-      size: items.length,
-      first_album_id: resolved[0]?.album_id ?? null,
-      last_album_id: resolved[resolved.length - 1]?.album_id ?? null,
+      ...extra,
       error_message: errorMessage,
     });
-    captureError(err, 'lml_batch_failed', {
-      size: items.length,
-      first_album_id: resolved[0]?.album_id ?? null,
-      last_album_id: resolved[resolved.length - 1]?.album_id ?? null,
-    });
+    captureError(err, 'lml_batch_failed', extra);
     return { batchSize: items.length, match: 0, no_match: 0, error: items.length, upserts: 0 };
   }
   // resolved[i] corresponds to items[i] which corresponds to response.results[i].
@@ -605,12 +602,12 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
 };
 
 const main = async (): Promise<void> => {
-  const runId = initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
+  initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
 
   try {
     const options = resolveOptions();
     const summary = await runBackfill(options);
-    log('info', 'finished', `${JOB_NAME} done`, { run_id: runId, ...summary });
+    log('info', 'finished', `${JOB_NAME} done`, { ...summary });
   } catch (err) {
     captureError(err, 'main');
     log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {
