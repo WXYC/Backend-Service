@@ -43,6 +43,8 @@ export interface ProvisionUserResult {
 
 const ADMIN_SYNC_ROLES = ['stationManager', 'admin', 'owner'];
 
+const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 /**
  * Create a user, credential account, and organization membership atomically.
  *
@@ -104,7 +106,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
       updatedAt: new Date(),
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     if (message.includes('unique') || message.includes('duplicate') || message.includes('already exists')) {
       throw new ProvisionError(409, `Username "${username}" is already taken`);
     }
@@ -169,8 +171,8 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     // AWAITED (not fire-and-forget) so we can report `emailSent` to the caller.
     // A swallow-style .catch() leaks: the dj-site UI reports success, but the
     // user gets no email and has no way to log in. The provisioning itself
-    // succeeded though — the user row, credential, and member row are all
-    // committed — so we don't throw. The admin can re-trigger the email later.
+    // succeeded though — user row, credential, and member row are committed —
+    // so we don't throw.
     const frontendUrl = process.env.FRONTEND_SOURCE || 'http://localhost:3000';
     let emailSent = true;
     let emailError: string | undefined;
@@ -181,7 +183,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
       });
     } catch (error) {
       emailSent = false;
-      emailError = error instanceof Error ? error.message : String(error);
+      emailError = errorMessage(error);
       console.error('[PROVISION USER] Failed to trigger setup email:', error);
       Sentry.captureException(error, {
         tags: { subsystem: 'provision-user', step: 'request-password-reset' },
