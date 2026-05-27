@@ -17,6 +17,11 @@ jest.mock('better-auth/plugins/organization/access', () => ({
   defaultStatements: {},
 }));
 
+// Mock Sentry so the new captureException calls don't blow up in tests
+jest.mock('@sentry/node', () => ({
+  captureException: jest.fn(),
+}));
+
 // Mock @wxyc/database for admin role sync
 const mockDbUpdate = jest.fn().mockReturnValue({
   set: jest.fn().mockReturnValue({
@@ -409,6 +414,46 @@ describe('provisionUser()', () => {
       const result = await provisionUser(validInput);
 
       expect(result.user).toEqual(fakeUser);
+    });
+
+    it('should report emailSent=true on success', async () => {
+      mockRequestPasswordReset.mockResolvedValue({ status: true } as never);
+
+      const result = await provisionUser(validInput);
+
+      expect(result.emailSent).toBe(true);
+      expect(result.emailError).toBeUndefined();
+    });
+
+    it('should report emailSent=false with emailError on failure', async () => {
+      mockRequestPasswordReset.mockRejectedValue(new Error('SES throttled'));
+
+      const result = await provisionUser(validInput);
+
+      expect(result.emailSent).toBe(false);
+      expect(result.emailError).toBe('SES throttled');
+      // user still created — provisioning is not aborted
+      expect(result.user).toEqual(fakeUser);
+      expect(result.member).toBeDefined();
+    });
+
+    it('should await the password reset call (not fire-and-forget)', async () => {
+      let resolved = false;
+      mockRequestPasswordReset.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            setTimeout(() => {
+              resolved = true;
+              resolve();
+            }, 10);
+          })
+      );
+
+      await provisionUser(validInput);
+
+      // If the call were fire-and-forget, provisionUser would return before
+      // the promise settled and `resolved` would still be false here.
+      expect(resolved).toBe(true);
     });
   });
 
