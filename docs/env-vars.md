@@ -95,13 +95,19 @@ Bounded ring-buffer reports written under `mirror-logs/`. Reports never include 
 - `LML_CLIENT_MAX_CONCURRENT` — Maximum concurrent in-flight `/api/v1/lookup` calls; gates BS's fan-out at the chokepoint so back-pressure surfaces on the BS side instead of queueing inside LML. Mirrors LML's `discogs_max_concurrent` (default `5`). Set lower in production to leave headroom for other LML callers (request-o-matic, tubafrenzy).
 - `LML_CLIENT_RATE_PER_MIN` — Token-bucket refill rate (and capacity) for `/api/v1/lookup` calls per minute. Mirrors LML's `discogs_rate_limit` (default `50`). Tune downward in production to leave headroom for other LML callers.
 
-### Backfill LML rate gating (`jobs/flowsheet-metadata-backfill`)
+### Backfill LML rate gating (`jobs/flowsheet-metadata-backfill`, `jobs/rotation-release-id-backfill`)
 
-Stricter ceilings for the historical-drain cron, since one in-flight LML call held for the full per-call timeout saturates LML's serialized Discogs fan-out and starves real-time iOS/dj-site clients (BS#994 / BS#995). The first two are read at module load by `jobs/flowsheet-metadata-backfill/lml-limiter.ts:createLmlLimiter`; the third by `jobs/flowsheet-metadata-backfill/lml-fetch.ts`. All three are positive integers; non-positive or unparseable values fall back to the default with a `console.warn`. Mutating `process.env` after first import does NOT reconfigure the singletons — restart the container to change a value.
+Stricter ceilings for backfill-class LML callers, since one in-flight LML call held for the full per-call timeout saturates LML's serialized Discogs fan-out and starves real-time iOS/dj-site clients (BS#994 / BS#995). The first two are read at module load by each job's `lml-limiter.ts:createLmlLimiter`; the third by `lml-fetch.ts`. All three are positive integers; non-positive or unparseable values fall back to the default with a `console.warn`. Mutating `process.env` after first import does NOT reconfigure the singletons — restart the container to change a value. Each job creates its own `defaultLmlLimiter` so the same env name applied to one container does not lock-step the other.
 
-- `BACKFILL_LML_MAX_CONCURRENT` (default `1`) — Maximum concurrent in-flight backfill `/api/v1/lookup` calls. Tighter than runtime `LML_CLIENT_MAX_CONCURRENT=5` because the cron has no human-facing latency budget; serializing keeps blast radius bounded. The semaphore is belt-and-suspenders defense in case the orchestrator ever becomes concurrent.
+- `BACKFILL_LML_MAX_CONCURRENT` (default `1`) — Maximum concurrent in-flight backfill `/api/v1/lookup` calls. Tighter than runtime `LML_CLIENT_MAX_CONCURRENT=5` because backfills have no human-facing latency budget; serializing keeps blast radius bounded. The semaphore is belt-and-suspenders defense in case an orchestrator ever becomes concurrent.
 - `BACKFILL_LML_RATE_PER_MIN` (default `20`) — Token-bucket refill rate (and capacity) for backfill LML calls per minute. Tighter than runtime `LML_CLIENT_RATE_PER_MIN=50` to leave headroom for real-time traffic.
-- `BACKFILL_LML_PER_CALL_TIMEOUT_MS` (default `8000`) — Per-call abort budget. Tighter than `@wxyc/lml-client`'s 30 s runtime default because the cron's per-row hold time is what saturates LML's Discogs fan-out even at concurrency=1 (BS#994 follow-up, retro 2026-05-23). Cold-tail rows that exceed this stay `metadata_attempt_at IS NULL` and are retried on the next pass when LML's cache is warmer / once WXYC/library-metadata-lookup#338 lands. Mirrors BS#992's per-caller `timeoutMs` pattern for the rotation picker.
+- `BACKFILL_LML_PER_CALL_TIMEOUT_MS` (default `8000`) — Per-call abort budget. Tighter than `@wxyc/lml-client`'s 30 s runtime default because the per-row hold time is what saturates LML's Discogs fan-out even at concurrency=1 (BS#994 follow-up, retro 2026-05-23). Cold-tail rows that exceed this stay `discogs_release_id IS NULL` / `metadata_attempt_at IS NULL` and are retried on the next pass when LML's cache is warmer / once WXYC/library-metadata-lookup#338 lands. Mirrors BS#992's per-caller `timeoutMs` pattern for the rotation picker.
+
+### Rotation Discogs release backfill (`jobs/rotation-release-id-backfill`)
+
+One-shot ETL for BS#1029. Reuses `BACKFILL_LML_*` (above) and adds:
+
+- `DRY_RUN` (default unset / `false`) — when `'true'` or `'1'`, the orchestrator skips every UPDATE and increments `rows_resolved_dry` instead of `rows_resolved`. Each planned write is still logged. Useful for confirming the candidate set before a real run; harmless to forget — the `discogs_release_id IS NULL` SELECT predicate is idempotent across reruns.
 
 ### Bulk backfill (`jobs/album-level-backfill`)
 
