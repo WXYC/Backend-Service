@@ -202,10 +202,18 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
  * Populate metadata fields that come from the lookup response's artwork block
  * — release id/url, artwork URL, artist bio/wiki, streaming URLs. These are
  * present regardless of whether `extended=true` was requested.
+ *
+ * LML#401 synth shape (`release_id=0` + `release_url=""`) marks a
+ * streaming-only result on a Discogs miss. Skip the Discogs identifier
+ * fields so the proxy response doesn't surface release_id=0 / "" — but
+ * keep the streaming-URL projection so iOS can render buttons.
  */
 function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork: DiscogsMatchResult): void {
-  metadata.discogsReleaseId = artwork.release_id;
-  metadata.discogsUrl = artwork.release_url;
+  const synthetic = artwork.release_id === 0 && artwork.release_url === '';
+  if (!synthetic) {
+    metadata.discogsReleaseId = artwork.release_id;
+    metadata.discogsUrl = artwork.release_url;
+  }
   metadata.artworkUrl = filterSpacerGif(artwork.artwork_url);
 
   if (artwork.artist_bio) metadata.artistBio = artwork.artist_bio;
@@ -341,14 +349,18 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   }
 
   // Fallback: construct search URLs for services without LML-provided URLs.
-  // Per-service semantics live in `SearchUrlProvider` (BS#889) — YouTube/
-  // Bandcamp/SoundCloud each use a different field-fallback order, so the
-  // three URLs are no longer guaranteed to share a query string. Old
-  // behavior was a single combined `${artistName} ${searchTerm}` for all
-  // three; the new behavior matches the runtime path and the recurring
-  // backfill so iOS gets identical search URLs regardless of which BS path
-  // produced them.
+  // Per-service semantics live in `SearchUrlProvider` (BS#889) — each
+  // service uses a different field-fallback order, so the URLs are no
+  // longer guaranteed to share a query string. Old behavior was a single
+  // combined `${artistName} ${searchTerm}` for all three; the new behavior
+  // matches the runtime path and the recurring backfill so iOS gets
+  // identical search URLs regardless of which BS path produced them.
+  //
+  // Post-BS#1185: Spotify and Apple Music also have search-URL fallbacks so
+  // iOS doesn't show greyed buttons when LML fails or returns zero results.
   const fallbackUrls = searchUrlProvider.getAllSearchUrls(artistName, releaseTitle, trackTitle);
+  if (!metadata.spotifyUrl) metadata.spotifyUrl = fallbackUrls.spotifyUrl;
+  if (!metadata.appleMusicUrl) metadata.appleMusicUrl = fallbackUrls.appleMusicUrl;
   if (!metadata.youtubeMusicUrl) metadata.youtubeMusicUrl = fallbackUrls.youtubeMusicUrl;
   if (!metadata.bandcampUrl) metadata.bandcampUrl = fallbackUrls.bandcampUrl;
   if (!metadata.soundcloudUrl) metadata.soundcloudUrl = fallbackUrls.soundcloudUrl;
