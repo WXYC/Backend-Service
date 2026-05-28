@@ -75,6 +75,7 @@ jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: mockIsLmlConfigured,
   getRelease: mockGetRelease,
+  envInt: (_name: string, fallback: number) => fallback,
   LmlClientError: MockLmlClientError,
 }));
 

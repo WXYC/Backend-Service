@@ -19,6 +19,7 @@ import {
   getArtistDetails,
   resolveEntity as lmlResolveEntity,
   searchLibrary,
+  envInt,
   LmlClientError,
 } from '@wxyc/lml-client';
 import type { DiscogsMatchResult, DiscogsReleaseMetadata, DiscogsTrackItem, LookupResponse } from '@wxyc/lml-client';
@@ -57,15 +58,13 @@ function singleLookupEnabled(): boolean {
 }
 
 /**
- * Caller-honored LML budget forwarded as `X-Caller-Budget-Ms`
- * (WXYC/library-metadata-lookup#345). Set tightly because the proxy path is
- * user-visible (iOS playlist + dj-site cover-art); we'd rather degrade to
- * synthesized fallback URLs than hold the response on an obscure-artist
- * cascade burning Discogs quota for a response we'll discard. Matches the
- * 5 s deadline used by the rotation picker (BS#992) and the
- * WXYC/library-metadata-lookup#337 re-measurement target.
+ * Budget for the user-visible iOS playlist + dj-site cover-art path. Tight
+ * because the controller would rather degrade to synthesized fallback URLs
+ * than hold the response on an obscure-artist cascade. Matches the 5 s
+ * deadline used by the rotation picker (BS#992). See `LookupOptions.budgetMs`
+ * for the mechanics.
  */
-const PROXY_LML_BUDGET_MS = Number(process.env.PROXY_LML_BUDGET_MS ?? 5000);
+const PROXY_LML_BUDGET_MS = envInt('PROXY_LML_BUDGET_MS', 5000);
 
 /** Spotify OAuth2 token response. */
 interface SpotifyTokenResponse {

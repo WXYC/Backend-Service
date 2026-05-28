@@ -23,7 +23,7 @@ import {
   LibraryArtistViewEntry,
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
-import { lookupBySong, lookupMetadata, isLmlConfigured, type LookupResponse } from '@wxyc/lml-client';
+import { lookupBySong, lookupMetadata, isLmlConfigured, envInt, type LookupResponse } from '@wxyc/lml-client';
 import { filterSpacerGif } from './metadata/metadata.service.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
@@ -355,23 +355,19 @@ const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 10 * 60 * 1000;
 const ROTATION_LML_LOOKUP_TIMEOUT_MS = 5000;
 
 /**
- * Caller-honored budget forwarded to LML as `X-Caller-Budget-Ms`
- * (WXYC/library-metadata-lookup#345). Set ~1 s tighter than
- * `ROTATION_LML_LOOKUP_TIMEOUT_MS` so LML's A10 cutoff
- * (WXYC/library-metadata-lookup#403/#404) fires before the local
- * `AbortController` aborts the fetch — leaves room for the LML response
- * envelope on the wire when LML decides to short-circuit.
+ * Picker budget. Pinned ~1 s tighter than `ROTATION_LML_LOOKUP_TIMEOUT_MS`
+ * so LML's A10 cutoff fires before the local `AbortController` aborts the
+ * fetch. Hardcoded because the two constants are paired (changing one without
+ * the other breaks the timing). See `LookupOptions.budgetMs` for mechanics.
  */
 const ROTATION_LML_LOOKUP_BUDGET_MS = 4000;
 
 /**
- * Interactive (user-visible) LML budget for search-result artwork enrichment
- * and the catalog Track 2 lookup-by-song path. Matches the rotation-picker
- * deadline class (BS#992) — both are user-visible and would rather degrade
- * to no-artwork / shorter-list than hold the response on an obscure-artist
- * cascade burning Discogs quota for an answer BS won't render.
+ * Budget for `enrichWithArtwork` and `searchLibraryByTrack` — both user-visible
+ * read paths that would rather degrade than hold the response on an obscure-
+ * artist cascade. See `LookupOptions.budgetMs` for mechanics.
  */
-const LIBRARY_INTERACTIVE_LML_BUDGET_MS = Number(process.env.LIBRARY_INTERACTIVE_LML_BUDGET_MS ?? 5000);
+const LIBRARY_INTERACTIVE_LML_BUDGET_MS = envInt('LIBRARY_INTERACTIVE_LML_BUDGET_MS', 5000);
 
 const rotationLmlPositiveCache = new LRUCache<number, number>({
   max: ROTATION_LML_LOOKUP_CACHE_MAX,

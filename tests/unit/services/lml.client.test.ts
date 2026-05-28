@@ -202,10 +202,6 @@ describe('lml.client', () => {
     });
 
     it('forwards X-Caller-Budget-Ms when budgetMs is provided', async () => {
-      // Mirrors bulkLookupMetadata's header-forwarding contract so the LML
-      // A10 caller-budget cutoff (WXYC/library-metadata-lookup#403/#404)
-      // fires for single-lookup callers too — without the header, LML's
-      // empty-results cascade grinds past the caller's deadline.
       mockFetch.mockResolvedValue({
         ok: true,
         json: () =>

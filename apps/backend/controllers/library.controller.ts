@@ -18,21 +18,19 @@ import {
   lookupMetadata,
   isLmlConfigured,
   getRelease,
+  envInt,
   LmlClientError,
 } from '@wxyc/lml-client';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
 
 /**
- * Caller-honored LML budget forwarded as `X-Caller-Budget-Ms`
- * (WXYC/library-metadata-lookup#345). Used by both the add-album insert
- * (which blocks the 201 response on the LML enrichment) and the
- * fire-and-forget canonical-entity resolution. 5 s matches the
- * runtime-interactive class — the row is already persisted by the time
- * either call fires, so the budget is about freeing LML's Discogs quota
- * for an obscure-artist cascade, not about user-facing latency on the 201.
+ * Budget for the add-album insert + fire-and-forget canonical-entity paths.
+ * The row is already persisted before either call fires, so the budget is
+ * about freeing LML's Discogs quota — not about 201 latency. 5 s matches the
+ * other runtime-interactive sites. See `LookupOptions.budgetMs` for mechanics.
  */
-const LIBRARY_LML_BUDGET_MS = Number(process.env.LIBRARY_LML_BUDGET_MS ?? 5000);
+const LIBRARY_LML_BUDGET_MS = envInt('LIBRARY_LML_BUDGET_MS', 5000);
 
 type NewAlbumRequest = {
   album_title: string;
