@@ -16,10 +16,12 @@
  *   - data.metadata_status is a terminal state
  *     ('enriched_match' | 'enriched_no_match' | 'failed_no_retry')
  *
- * Per-row payload includes `id` and `metadata_status` so dj-site can scope
- * a refetch to just the changed row instead of paying for a list refetch.
- * Today's dj-site treats this as a generic update signal; the per-row
- * payload is forward-compat for finer-grained handling.
+ * Payload is the full flowsheet row from `event.data` (BS-2). dj-site's
+ * listener middleware patches the row into its RTK Query cache directly —
+ * a /live viewer that just opened the page sees post-enrichment fields
+ * (`artwork_url`, `release_year`, etc.) without a follow-up GET.
+ * `wxyc-shared`'s `LiveFsUpdateEvent` is the canonical cross-language
+ * shape; this file's `LiveFsUpdatePayload` mirrors that contract.
  *
  * False positives: the filter matches any flowsheet UPDATE that lands in
  * a terminal metadata_status. The historical `flowsheet-metadata-backfill`
@@ -33,19 +35,30 @@
  * so there's no per-client duplication.
  */
 
+import * as Sentry from '@sentry/node';
 import type { CdcEvent } from '@wxyc/database';
 import { onCdcEvent } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../../utils/serverEvents.js';
 
 const TERMINAL_STATUSES = new Set(['enriched_match', 'enriched_no_match', 'failed_no_retry']);
 
-export type MetadataBroadcastPayload = {
+/**
+ * Wire shape of the `liveFs:update` payload. Mirrors `LiveFsUpdateEvent` in
+ * `wxyc-shared/api.yaml`. The two required fields (`id`, `metadata_status`)
+ * are pinned because we assert them at the filter boundary; the rest of the
+ * flowsheet columns (`artist_name`, `album_title`, `artwork_url`, ...) ride
+ * along untyped at this seam — dj-site / iOS receive them via the typed
+ * `FlowsheetSongEntry` schema generated from `@wxyc/shared`, which is the
+ * cross-language source of truth.
+ */
+export type LiveFsUpdatePayload = {
   id: number;
   metadata_status: 'enriched_match' | 'enriched_no_match' | 'failed_no_retry';
+  [key: string]: unknown;
 };
 
 /** Pure filter for testability — returns the broadcast payload on match, null on skip. */
-export function filterMetadataUpdate(event: CdcEvent): MetadataBroadcastPayload | null {
+export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | null {
   if (event.table !== 'flowsheet') return null;
   if (event.action !== 'UPDATE') return null;
   if (!event.data) return null;
@@ -57,7 +70,11 @@ export function filterMetadataUpdate(event: CdcEvent): MetadataBroadcastPayload 
   const id = data.id;
   if (typeof id !== 'number') return null;
 
-  return { id, metadata_status: status as MetadataBroadcastPayload['metadata_status'] };
+  return {
+    ...data,
+    id,
+    metadata_status: status as LiveFsUpdatePayload['metadata_status'],
+  };
 }
 
 /**
@@ -80,8 +97,11 @@ export function setupMetadataBroadcast(): void {
       // serverEventsMgr.broadcast already swallows per-client errors
       // (unsubAll on write failure); this guard catches anything else
       // (e.g. an empty topic set wouldn't throw, but a future change
-      // might).
-      console.error('[metadata-broadcast] broadcast failed:', (err as Error).message);
+      // might). Surface to Sentry so a sudden rate spike isn't invisible.
+      Sentry.captureException(err, {
+        tags: { module: 'metadata-broadcast', subsystem: 'sse' },
+        extra: { id: payload.id, metadata_status: payload.metadata_status },
+      });
     }
   });
 }

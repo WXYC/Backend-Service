@@ -33,12 +33,20 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { lookupMetadata } from '@wxyc/lml-client';
+import { lookupMetadata, envInt } from '@wxyc/lml-client';
 import type { CdcEvent } from '@wxyc/database';
 
 import { claimRowForEnrichment } from './claim.js';
 import { filterForEnrichment, type EnrichmentCandidate } from './cdc-subscriber.js';
 import { finalizeRow, type FinalizeOutcome } from './enrich.js';
+
+/**
+ * Budget for the CDC consumer's lookup. Tracks the shared client's 30 s
+ * fetch timeout with 1 s of slack so LML cuts off just before the
+ * `AbortController` would — frees the row's `enriching` claim for C6 sweep
+ * recovery (#895) sooner. See `LookupOptions.budgetMs` for mechanics.
+ */
+const ENRICHMENT_LML_BUDGET_MS = envInt('ENRICHMENT_LML_BUDGET_MS', 29000);
 
 /**
  * Build a CDC event handler that runs the full enrichment chain.
@@ -83,7 +91,8 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
           const response = await lookupMetadata(
             candidate.artist_name,
             candidate.album_title ?? undefined,
-            candidate.track_title ?? undefined
+            candidate.track_title ?? undefined,
+            { budgetMs: ENRICHMENT_LML_BUDGET_MS }
           );
           outcome = await finalizeRow(candidate, response);
         } catch (err) {

@@ -63,7 +63,15 @@ export type RequiredPermissions = {
 
 export function requirePermissions(required: RequiredPermissions) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    if (process.env.AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production') {
+    // Positive-list gate (BS#1097): bypass requires explicit dev/test NODE_ENV.
+    // A negative check (`!== 'production'`) was unsafe — any operator who
+    // forgot to set NODE_ENV on EC2 (`.env.example` shipped `AUTH_BYPASS=true`,
+    // no Dockerfile pinned NODE_ENV) chained into account takeover via
+    // BS#1112/#1115. Keep this safe-by-default.
+    if (
+      process.env.AUTH_BYPASS === 'true' &&
+      (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test')
+    ) {
       // In bypass mode, skip JWKS signature verification but still enforce
       // the same request structure as production: require a Bearer token.
       const authHeader = req.headers.authorization;

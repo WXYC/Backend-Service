@@ -18,10 +18,19 @@ import {
   lookupMetadata,
   isLmlConfigured,
   getRelease,
+  envInt,
   LmlClientError,
 } from '@wxyc/lml-client';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
+
+/**
+ * Budget for the add-album insert + fire-and-forget canonical-entity paths.
+ * The row is already persisted before either call fires, so the budget is
+ * about freeing LML's Discogs quota — not about 201 latency. 5 s matches the
+ * other runtime-interactive sites. See `LookupOptions.budgetMs` for mechanics.
+ */
+const LIBRARY_LML_BUDGET_MS = envInt('LIBRARY_LML_BUDGET_MS', 5000);
 
 type NewAlbumRequest = {
   album_title: string;
@@ -93,7 +102,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     const artistName = body.alternate_artist_name || body.artist_name || '';
     const [streamingResult, artworkResult] = await Promise.allSettled([
       checkStreamingAvailability(artistName, body.album_title),
-      lookupMetadata(artistName, body.album_title),
+      lookupMetadata(artistName, body.album_title, undefined, { budgetMs: LIBRARY_LML_BUDGET_MS }),
     ]);
 
     if (streamingResult.status === 'fulfilled' && streamingResult.value.on_streaming !== null) {
@@ -141,7 +150,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 function fireAndForgetCanonicalEntity(libraryId: number, artistName: string | null, albumTitle: string): void {
   if (!artistName) return;
 
-  lookupMetadata(artistName, albumTitle)
+  lookupMetadata(artistName, albumTitle, undefined, { budgetMs: LIBRARY_LML_BUDGET_MS })
     .then(async (response) => {
       const linkage = libraryService.mapLookupToCanonicalEntity(response);
       if (!linkage) return;

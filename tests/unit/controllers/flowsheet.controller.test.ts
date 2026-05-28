@@ -16,6 +16,10 @@ const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
 const mockUpdateEntry = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockStartShow = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockAddDJToShow = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockEndShow = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockServiceLeaveShow = jest.fn<() => Promise<Record<string, unknown>>>();
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByPage: mockGetEntriesByPage,
@@ -28,6 +32,10 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
   resolveDjNameForShow: mockResolveDjNameForShow,
   updateEntry: mockUpdateEntry,
+  startShow: mockStartShow,
+  addDJToShow: mockAddDJToShow,
+  endShow: mockEndShow,
+  leaveShow: mockServiceLeaveShow,
 }));
 
 const mockFetchMetadata = jest.fn<() => Promise<void>>();
@@ -43,6 +51,8 @@ import {
   getShowInfo,
   addEntry,
   updateEntry,
+  joinShow,
+  leaveShow,
 } from '../../../apps/backend/controllers/flowsheet.controller';
 import WxycError from '../../../apps/backend/utils/error';
 
@@ -793,6 +803,308 @@ describe('flowsheet.controller', () => {
         99,
         expect.objectContaining({ track_position: 'A2', track_title: 'la paradoja' })
       );
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('strips internal columns from data before passing to the service (BS#1099)', async () => {
+      // Mass-assignment guard: any `flowsheet:write` caller can send arbitrary
+      // body keys today. Setting `metadata_status='enriched_match'` skips the
+      // enrichment worker forever; `legacy_entry_id` reintroduces the BS#908
+      // mirror loop; `show_id` reattaches the row to another show; `play_order`
+      // collides with the per-show sequence (#693). The controller must drop
+      // these fields before they reach `db.update().set()`.
+      mockUpdateEntry.mockResolvedValue({ id: 99, track_title: 'ok' });
+
+      const req = {
+        body: {
+          entry_id: 99,
+          data: {
+            track_title: 'ok',
+            // The following keys are server-internal and must be stripped.
+            metadata_status: 'enriched_match',
+            legacy_entry_id: 9999999,
+            legacy_release_id: 8888,
+            show_id: 1,
+            play_order: 0,
+            linkage_source: 'manual',
+            linkage_confidence: 0.99,
+            linked_at: new Date(),
+            metadata_attempt_at: new Date(),
+            enriching_since: new Date(),
+            dj_name: 'evil-dj',
+            album_id: 123,
+            artwork_url: 'https://example.com/x.jpg',
+            discogs_url: 'https://discogs.com/x',
+            release_year: 1999,
+          },
+        },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await updateEntry(req, res as Response, mockNext);
+
+      expect(mockUpdateEntry).toHaveBeenCalledTimes(1);
+      const passedData = (mockUpdateEntry as unknown as jest.Mock).mock.calls[0][1] as Record<string, unknown>;
+      // Allowed field is forwarded.
+      expect(passedData).toEqual(expect.objectContaining({ track_title: 'ok' }));
+      // Each internal key is absent from the service argument.
+      for (const internalKey of [
+        'metadata_status',
+        'legacy_entry_id',
+        'legacy_release_id',
+        'show_id',
+        'play_order',
+        'linkage_source',
+        'linkage_confidence',
+        'linked_at',
+        'metadata_attempt_at',
+        'enriching_since',
+        'dj_name',
+        'album_id',
+        'artwork_url',
+        'discogs_url',
+        'release_year',
+      ]) {
+        expect(passedData).not.toHaveProperty(internalKey);
+      }
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('forwards every UpdateRequestBody field that the client legitimately sets', async () => {
+      // Anti-drift guard: the controller's pick list and the service-layer
+      // pick list both have to stay in sync with `UpdateRequestBody`. If
+      // either drops a documented field, this test catches it.
+      mockUpdateEntry.mockResolvedValue({ id: 7 });
+
+      const data = {
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+        track_position: 'A1',
+        record_label: 'Sonamos',
+        label_id: 99,
+        request_flag: true,
+        segue: false,
+        message: 'corrected DJ note',
+      };
+
+      const req = {
+        body: { entry_id: 7, data },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await updateEntry(req, res as Response, mockNext);
+
+      expect(mockUpdateEntry).toHaveBeenCalledTimes(1);
+      const passedData = (mockUpdateEntry as unknown as jest.Mock).mock.calls[0][1] as Record<string, unknown>;
+      // Every field in `data` (= every field in UpdateRequestBody) reaches
+      // the service. A drop here would silently break legitimate edits.
+      for (const [key, value] of Object.entries(data)) {
+        expect(passedData[key]).toEqual(value);
+      }
+    });
+  });
+
+  describe('addEntry free-form branch (BS#1099)', () => {
+    const activeShow = { id: 42, end_time: null };
+
+    beforeEach(() => {
+      mockGetLatestShow.mockResolvedValue(activeShow);
+      mockResolveDjNameForShow.mockResolvedValue('dj-real-name');
+    });
+
+    it('strips internal columns from body before constructing the insert payload', async () => {
+      // The free-form POST branch (no album_id, no message) used to spread
+      // `req.body` directly into the insert. A client with `flowsheet:write`
+      // could set `metadata_status`, `legacy_entry_id`, etc. The controller
+      // must construct the insert payload from named fields only.
+      // No album_id in the body — that's the discriminator that picks this
+      // branch over the (safe) album_id branch above.
+      mockAddTrack.mockResolvedValue({ id: 1, show_id: activeShow.id });
+      mockFetchMetadata.mockResolvedValue(undefined);
+
+      const req = {
+        body: {
+          // Required free-form fields:
+          artist_name: 'Juana Molina',
+          album_title: 'DOGA',
+          track_title: 'la paradoja',
+          record_label: 'Sonamos',
+          // Server-internal columns the client must not be able to set:
+          metadata_status: 'enriched_match',
+          legacy_entry_id: 9999999,
+          legacy_release_id: 8888,
+          show_id: 999,
+          play_order: 0,
+          linkage_source: 'manual',
+          linkage_confidence: 0.99,
+          linked_at: new Date(),
+          metadata_attempt_at: new Date(),
+          enriching_since: new Date(),
+          dj_name: 'evil-dj',
+          artwork_url: 'https://example.com/x.jpg',
+          discogs_url: 'https://discogs.com/x',
+          release_year: 1999,
+        },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await addEntry(req, res as Response, mockNext);
+
+      expect(mockAddTrack).toHaveBeenCalledTimes(1);
+      const passedEntry = (mockAddTrack as unknown as jest.Mock).mock.calls[0][0] as Record<string, unknown>;
+      // The server-controlled fields are overridden by the controller.
+      expect(passedEntry.show_id).toBe(activeShow.id);
+      expect(passedEntry.dj_name).toBe('dj-real-name');
+      // Allowed fields pass through.
+      expect(passedEntry.artist_name).toBe('Juana Molina');
+      expect(passedEntry.album_title).toBe('DOGA');
+      expect(passedEntry.track_title).toBe('la paradoja');
+      expect(passedEntry.record_label).toBe('Sonamos');
+      // Internal keys are absent from the service argument. `album_id` is
+      // deliberately not in this list — in the free-form branch the
+      // discriminator `body.album_id != null` already constrains it to
+      // null/undefined, and the BS#933 snapshot path still passes
+      // `album_id: null` through to preserve that semantic.
+      for (const internalKey of [
+        'metadata_status',
+        'legacy_entry_id',
+        'legacy_release_id',
+        'play_order',
+        'linkage_source',
+        'linkage_confidence',
+        'linked_at',
+        'metadata_attempt_at',
+        'enriching_since',
+        'artwork_url',
+        'discogs_url',
+        'release_year',
+      ]) {
+        expect(passedEntry).not.toHaveProperty(internalKey);
+      }
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+  });
+
+  describe('joinShow (BS#1098)', () => {
+    it('rejects when body.dj_id does not match the authenticated user', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'victim-dj', show_name: 'taking over your show' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      expect(mockStartShow).not.toHaveBeenCalled();
+      expect(mockAddDJToShow).not.toHaveBeenCalled();
+    });
+
+    it('starts a new show when body.dj_id matches the caller and there is no active show', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', show_name: 'My Show', specialty_id: 7 },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', 'My Show', 7);
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('adds the caller to the active show as a co-host', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null });
+      mockAddDJToShow.mockResolvedValue({ id: 99, dj_id: 'caller-dj' });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockAddDJToShow).toHaveBeenCalledWith('caller-dj', expect.objectContaining({ id: 1 }));
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('rejects when req.auth.id is missing entirely', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+
+      const req = {
+        body: { dj_id: 'some-dj' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      expect(mockStartShow).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('leaveShow (BS#1102)', () => {
+    it('rejects when body.dj_id does not match the authenticated user', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null, primary_dj_id: 'victim-primary' });
+
+      const req = {
+        auth: { id: 'guest-dj' },
+        body: { dj_id: 'victim-primary' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(leaveShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      expect(mockEndShow).not.toHaveBeenCalled();
+      expect(mockServiceLeaveShow).not.toHaveBeenCalled();
+    });
+
+    it('rejects when a guest tries to kick a co-host (body.dj_id = other co-host)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null, primary_dj_id: 'primary-dj' });
+
+      const req = {
+        auth: { id: 'guest-dj' },
+        body: { dj_id: 'other-cohost' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(leaveShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      expect(mockServiceLeaveShow).not.toHaveBeenCalled();
+    });
+
+    it('ends the show when the caller is the primary DJ leaving', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null, primary_dj_id: 'primary-dj' });
+      mockEndShow.mockResolvedValue({ id: 1, end_time: new Date() });
+
+      const req = {
+        auth: { id: 'primary-dj' },
+        body: { dj_id: 'primary-dj' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await leaveShow(req, res as Response, mockNext);
+
+      expect(mockEndShow).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }));
+      expect(mockServiceLeaveShow).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('removes a guest DJ when the caller is the guest leaving themselves', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null, primary_dj_id: 'primary-dj' });
+      mockServiceLeaveShow.mockResolvedValue({ id: 99, dj_id: 'guest-dj' });
+
+      const req = {
+        auth: { id: 'guest-dj' },
+        body: { dj_id: 'guest-dj' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await leaveShow(req, res as Response, mockNext);
+
+      expect(mockServiceLeaveShow).toHaveBeenCalledWith('guest-dj', expect.objectContaining({ id: 1 }));
+      expect(mockEndShow).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
     });
   });

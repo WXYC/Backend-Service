@@ -15,11 +15,6 @@ jest.mock('../../../apps/backend/utils/serverEvents', () => ({
   serverEventsMgr: { broadcast: mockBroadcast },
 }));
 
-const mockUpdateLastModified = jest.fn();
-jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
-  updateLastModified: mockUpdateLastModified,
-}));
-
 const mockFireAndForgetMetadataForRow = jest.fn();
 jest.mock('../../../apps/backend/services/metadata/index', () => ({
   fireAndForgetMetadataForRow: mockFireAndForgetMetadataForRow,
@@ -195,7 +190,6 @@ describe('POST /internal/flowsheet-webhook', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(mockUpdateLastModified).toHaveBeenCalled();
     expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
       type: 'refetch',
       payload: { source: 'webhook' },
@@ -212,7 +206,6 @@ describe('POST /internal/flowsheet-webhook', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(mockUpdateLastModified).toHaveBeenCalled();
   });
 
   // -- Metadata enrichment trigger --
@@ -395,7 +388,6 @@ describe('POST /internal/flowsheet-webhook', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(mockUpdateLastModified).toHaveBeenCalled();
     expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
       type: 'refetch',
       payload: { source: 'webhook' },

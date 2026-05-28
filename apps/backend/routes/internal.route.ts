@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { eq, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, rotation, library, truncate } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
-import { updateLastModified } from '../services/flowsheet.service.js';
 import { fireAndForgetMetadataForRow } from '../services/metadata/index.js';
 import { mapProdEntryType, isMessageEntryType } from '../utils/flowsheet-transform.js';
 
@@ -180,7 +179,6 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       }
     }
 
-    updateLastModified();
     serverEventsMgr.broadcast(Topics.liveFs, {
       type: FsEvents.refetch,
       payload: { source: 'webhook' },

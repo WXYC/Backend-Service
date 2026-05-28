@@ -42,6 +42,9 @@ import {
   BULK_RATE_PER_MIN_DEFAULT,
   BULK_RATE_PER_MIN_ENV,
   BULK_BUDGET_MS_DEFAULT,
+  BULK_PER_ITEM_TIMEOUT_MS,
+  BULK_TIMEOUT_SLACK_MS,
+  computeBulkTimeoutMs,
   POST_PASS_TIMEOUT_DEFAULT,
   POST_PASS_TIMEOUT_ENV,
   READ_TIMEOUT_DEFAULT,
@@ -481,7 +484,7 @@ describe('runBatch', () => {
     expect(out).toMatchObject({ match: 0, no_match: 0, error: 0, upserts: 0 });
   });
 
-  it('forwards the resolved items + budgetMs to bulkLookupMetadata', async () => {
+  it('forwards the resolved items + budgetMs + dynamic timeoutMs to bulkLookupMetadata', async () => {
     mockBulkLookupMetadata.mockResolvedValue({
       results: [
         { index: 0, status: 'no_match', lookup: { results: [] } },
@@ -497,7 +500,7 @@ describe('runBatch', () => {
       { artist: 'Juana Molina', album: 'DOGA', raw_message: 'Juana Molina - DOGA' },
       { artist: 'Jessica Pratt', album: 'OYOLA', raw_message: 'Jessica Pratt - OYOLA' },
     ]);
-    expect(opts).toEqual({ budgetMs: 25000 });
+    expect(opts).toEqual({ budgetMs: 25000, timeoutMs: computeBulkTimeoutMs(2) });
   });
 
   it('counts match / no_match / error per response and UPSERTs only matches', async () => {
@@ -557,6 +560,25 @@ describe('runBatch', () => {
 
     expect(out).toMatchObject({ batchSize: 2, match: 0, no_match: 0, error: 2, upserts: 0 });
     expect(db.insert as jest.Mock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bulk-fetch timeout sizing.
+// ---------------------------------------------------------------------------
+
+describe('computeBulkTimeoutMs', () => {
+  // Pin the linear relationship so a future bump to BULK_BATCH_SIZE_DEFAULT
+  // without a paired slack bump fails loudly here, not in production as
+  // `LmlClientError: LML request timed out`.
+  it('is linear in batchSize: timeoutMs === batchSize × per_item + slack', () => {
+    for (const n of [1, 5, 10, 15, 50, 100]) {
+      expect(computeBulkTimeoutMs(n)).toBe(n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS);
+    }
+  });
+
+  it('keeps BULK_BATCH_SIZE_DEFAULT under the 30 s shared LML-client ceiling', () => {
+    expect(computeBulkTimeoutMs(BULK_BATCH_SIZE_DEFAULT)).toBeLessThanOrEqual(30_000);
   });
 });
 

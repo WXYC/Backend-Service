@@ -127,6 +127,7 @@ export const flowsheet = {
   segue: 'segue',
   message: 'message',
   add_time: 'add_time',
+  updated_at: 'updated_at',
   artwork_url: 'artwork_url',
   discogs_url: 'discogs_url',
   release_year: 'release_year',
@@ -144,6 +145,10 @@ export const flowsheet = {
   linkage_confidence: 'linkage_confidence',
   linked_at: 'linked_at',
   search_doc: 'search_doc',
+};
+export const flowsheet_watermark = {
+  id: 'id',
+  last_modified_at: 'last_modified_at',
 };
 export const album_metadata = {
   album_id: 'album_id',

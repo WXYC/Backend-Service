@@ -587,6 +587,23 @@ export const flowsheet = wxyc_schema.table(
     message: varchar('message', { length: 250 }),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
+    // BS#902 (Epic F / F1). Per-row mutation timestamp. Bumped by the
+    // BEFORE INSERT OR UPDATE trigger (`bump_flowsheet_updated_at`,
+    // migration 0084), so every write — including the enrichment-worker
+    // UPDATE that BS#628 reported never surfaced to a polling iOS client
+    // — refreshes the row's stamp. The conditional-GET middleware
+    // (`apps/backend/middleware/conditionalGet.ts`) does NOT read from
+    // this column; it reads from the single-row `flowsheet_watermark`
+    // sibling table, which the AFTER STATEMENT trigger advances on every
+    // mutation including DELETE. A `MAX(updated_at)` read would retreat
+    // when the row holding the peak is DELETEd and would cause polling
+    // clients to 304 against a stale baseline — the sibling-table shape
+    // sidesteps that. This column exists for future row-level callers
+    // (ETag derivation, per-row staleness queries); the
+    // `flowsheet_updated_at_idx` DESC index supports any such future
+    // MAX/range scan.
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
     // Metadata (fetched from LML on insert, stored inline)
     artwork_url: varchar('artwork_url', { length: 512 }),
     discogs_url: varchar('discogs_url', { length: 512 }),
@@ -712,6 +729,14 @@ export const flowsheet = wxyc_schema.table(
     // CONCURRENTLY out-of-band on prod 2026-04-30 to unblock the flowsheet
     // during a live show. See migration 0071.
     index('flowsheet_play_order_idx').on(sql`${table.play_order} DESC`),
+    // BS#902 (Epic F / F1). DESC B-tree on `updated_at` supports any
+    // per-row staleness query that filters on `updated_at` (e.g. partial
+    // ETag derivation downstream). The conditional-GET middleware itself
+    // reads from `flowsheet_watermark` (single-row sibling table) so DELETE
+    // can't move the watermark backward — see migration 0084's comment
+    // block for the trigger fan-out. The DESC ordering makes `MAX()` an
+    // O(1) leaf-page peek for any caller that prefers the row-level view.
+    index('flowsheet_updated_at_idx').on(sql`${table.updated_at} DESC`),
     // Partial B-tree on (id) covering the `metadata_attempt_at IS NULL`
     // tail. Both #638 (historical drain) and #639 Phase 2 (recurring
     // drift-repair sweep) keyset-paginate through this slice — without
@@ -867,6 +892,31 @@ export type AlbumMetadata = InferSelectModel<typeof album_metadata>;
  * entries (`album_id IS NULL`) don't reach this table — their metadata
  * stays inline on `flowsheet` until linkage resolves.
  */
+/**
+ * BS#902 (Epic F / F1). Single-row sibling watermark table that any
+ * INSERT/UPDATE/DELETE on `flowsheet` advances via the
+ * `touch_flowsheet_watermark` AFTER STATEMENT trigger (migration 0084).
+ *
+ * The conditional-GET middleware (`apps/backend/middleware/conditionalGet.ts`)
+ * reads `last_modified_at` from this table on every poll. We can't reuse
+ * `MAX(flowsheet.updated_at)` alone because DELETE on the row currently
+ * holding the MAX would make the watermark *retreat* — a polling iOS
+ * client's prior If-Modified-Since would 304 against the older surviving
+ * MAX and miss the deletion. This sibling row only ever moves forward
+ * (always `now()` on any mutation).
+ *
+ * The `id boolean PRIMARY KEY DEFAULT true` + `CHECK (id = true)` shape
+ * is the standard singleton-row pattern: only one row can ever exist
+ * (the seed inserted at migration apply time), so reads never need a
+ * predicate beyond the implicit "the row".
+ */
+export const flowsheet_watermark = wxyc_schema.table('flowsheet_watermark', {
+  // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+  id: boolean('id').primaryKey().notNull().default(true),
+  // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+  last_modified_at: timestamp('last_modified_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 export const album_metadata = wxyc_schema.table('album_metadata', {
   // `.notNull()` is redundant with `.primaryKey()` at the SQL level (PK
   // implies NOT NULL), but Drizzle's `InferInsertModel` type derivation

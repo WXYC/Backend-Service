@@ -39,4 +39,9 @@ COPY --from=builder ./builder/shared/lml-client/dist ./shared/lml-client/dist
 # obvious during incident triage.
 ENV DB_APPLICATION_NAME=wxyc-backend
 
+# Pin NODE_ENV=production so AUTH_BYPASS-gated paths stay closed even if the
+# operator's .env omits NODE_ENV. Defense in depth alongside the positive-list
+# guards in auth.middleware.ts and checkShowMember.ts (BS#1097).
+ENV NODE_ENV=production
+
 CMD ["npm", "start", "--workspace=@wxyc/backend"]

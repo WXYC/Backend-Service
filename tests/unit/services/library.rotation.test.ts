@@ -35,6 +35,7 @@ const mockIsLmlConfigured = jest.fn<() => boolean>();
 jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: mockIsLmlConfigured,
+  envInt: (_name: string, fallback: number) => fallback,
 }));
 
 import { getRotationFromDB } from '../../../apps/backend/services/library.service';

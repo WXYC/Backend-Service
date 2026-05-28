@@ -8,6 +8,12 @@ process.env.USE_MOCK_SERVICES = 'true';
 global.primary_dj_id = null;
 global.secondary_dj_id = null;
 global.access_token = '';
+// Secondary DJ's token. Populated as `Bearer <secondary_dj_id>` — a raw
+// user-id Bearer that AUTH_BYPASS accepts via auth.middleware.ts's catch
+// branch (no JWT parse, req.auth.id = token). Used by integration tests
+// that need to act AS the secondary DJ (e.g. /flowsheet/join with the
+// secondary's id) under the BS#1098 / BS#1102 dj_id=auth.id cross-check.
+global.secondary_access_token = '';
 
 // DB config with defaults to avoid connecting as root when envs are missing
 const dbConfig = {
@@ -51,4 +57,9 @@ beforeAll(async () => {
   await getUserIdsFromDatabase();
   const token = await get_access_token();
   global.access_token = `Bearer ${token}`;
+  // AUTH_BYPASS accepts a raw user-id Bearer when the token doesn't parse as
+  // a JWT, populating `req.auth.id` from the token value (see
+  // shared/authentication/src/auth.middleware.ts catch branch). That gives
+  // us a per-DJ identity without needing a second better-auth sign-in.
+  global.secondary_access_token = `Bearer ${global.secondary_dj_id}`;
 });

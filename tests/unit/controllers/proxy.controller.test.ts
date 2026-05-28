@@ -31,6 +31,7 @@ jest.mock('@wxyc/lml-client', () => ({
   getArtistDetails: mockGetArtistDetails,
   resolveEntity: mockResolveEntity,
   searchLibrary: mockSearchLibrary,
+  envInt: (_name: string, fallback: number) => fallback,
   LmlClientError: MockLmlClientError,
 }));
 
@@ -300,7 +301,10 @@ describe('proxy.controller', () => {
       expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');
     });
 
-    it('returns fallback search URLs when LML search fails', async () => {
+    it('returns fallback search URLs for all five services when LML search fails (BS#1185)', async () => {
+      // Pre-BS#1185, Spotify and Apple Music had no search-URL fallback,
+      // so an LML failure left iOS with two greyed buttons. Post-BS#1185,
+      // all five services have search-URL fallbacks via `SearchUrlProvider`.
       mockLookupMetadata.mockRejectedValue(new Error('LML down'));
 
       const req = { query: { artistName: 'Test Artist', releaseTitle: 'Test Album' } } as unknown as Request;
@@ -311,12 +315,70 @@ describe('proxy.controller', () => {
       expect(res.status).toHaveBeenCalledWith(200);
       const result = (res.json as jest.Mock).mock.calls[0][0];
       expect(result.discogsReleaseId).toBeUndefined();
-      expect(result.spotifyUrl).toBeUndefined();
-      expect(result.appleMusicUrl).toBeUndefined();
-      // Search URLs are always constructed as fallback
+      // Search URLs are always constructed as fallback — now all five
+      expect(result.spotifyUrl).toContain('open.spotify.com/search');
+      expect(result.appleMusicUrl).toContain('music.apple.com/search');
       expect(result.youtubeMusicUrl).toContain('music.youtube.com');
       expect(result.bandcampUrl).toContain('bandcamp.com');
       expect(result.soundcloudUrl).toContain('soundcloud.com');
+    });
+
+    it('omits discogsReleaseId/discogsUrl on LML synth shape (release_id=0, release_url="")', async () => {
+      // LML#401: the streaming-only synth shape carries iTunes Apple URL
+      // and search-URL fallbacks but no real Discogs identifiers. BS must
+      // NOT surface release_id=0 / discogs_url="" on the proxy response.
+      // Streaming URLs from the synth still flow through unchanged.
+      mockLookupMetadata.mockResolvedValue({
+        results: [
+          {
+            library_item: {
+              id: 0,
+              title: 'Tragic Magic',
+              artist: 'Julianna Barwick & Mary Lattimore',
+              call_number: '',
+              library_url: '',
+            },
+            artwork: {
+              release_id: 0,
+              release_url: '',
+              artwork_url: null,
+              album: null,
+              artist: null,
+              confidence: 0,
+              release_year: null,
+              artist_bio: null,
+              wikipedia_url: null,
+              spotify_url: 'https://open.spotify.com/search/Julianna%20Barwick%20Tragic',
+              apple_music_url: 'https://music.apple.com/us/album/tragic-magic/1843854211',
+              youtube_music_url: 'https://music.youtube.com/search?q=Julianna%20Tragic',
+              bandcamp_url: 'https://bandcamp.com/search?q=Julianna%20Tragic',
+              soundcloud_url: 'https://soundcloud.com/search?q=Julianna%20Tragic',
+            },
+          },
+        ],
+        search_type: 'artist_only',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      const req = {
+        query: {
+          artistName: 'Julianna Barwick & Mary Lattimore',
+          releaseTitle: 'Tragic Magic',
+          trackTitle: 'The Four Sleeping Princesses',
+        },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await getAlbumMetadata(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const result = (res.json as jest.Mock).mock.calls[0][0];
+      expect(result.discogsReleaseId).toBeUndefined();
+      expect(result.discogsUrl).toBeUndefined();
+      // Streaming URLs from synth flow through.
+      expect(result.appleMusicUrl).toBe('https://music.apple.com/us/album/tragic-magic/1843854211');
+      expect(result.spotifyUrl).toBe('https://open.spotify.com/search/Julianna%20Barwick%20Tragic');
     });
 
     it('uses per-service fallback shape (YouTube + Bandcamp include album; SoundCloud does not)', async () => {
@@ -464,7 +526,7 @@ describe('proxy.controller', () => {
       expect(result.label).toBe('Drag City');
     });
 
-    it('returns fallback search URLs when LML search returns empty results', async () => {
+    it('returns fallback search URLs for all five services when LML search returns empty results (BS#1185)', async () => {
       mockLookupMetadata.mockResolvedValue({
         results: [],
         search_type: 'none',
@@ -480,9 +542,9 @@ describe('proxy.controller', () => {
       expect(res.status).toHaveBeenCalledWith(200);
       const result = (res.json as jest.Mock).mock.calls[0][0];
       expect(result.discogsReleaseId).toBeUndefined();
-      expect(result.spotifyUrl).toBeUndefined();
-      expect(result.appleMusicUrl).toBeUndefined();
-      // Search URLs are constructed as fallback
+      // Post-BS#1185: all five streaming services have search-URL fallbacks.
+      expect(result.spotifyUrl).toContain('open.spotify.com/search');
+      expect(result.appleMusicUrl).toContain('music.apple.com/search');
       expect(result.youtubeMusicUrl).toContain('music.youtube.com');
       expect(result.youtubeMusicUrl).toContain('Obscure%20Artist');
       expect(result.bandcampUrl).toContain('bandcamp.com');
@@ -586,6 +648,7 @@ describe('proxy.controller', () => {
         // the new fields.
         expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
           extended: true,
+          budgetMs: 5000,
         });
       });
 

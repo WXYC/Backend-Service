@@ -65,15 +65,23 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
     result.artist = extractArtistMetadata(artwork) ?? undefined;
   }
 
-  // Fill missing search URLs (always available, no API calls)
+  // Fill missing search URLs (always available, no API calls). All five
+  // streaming services have search-URL fallbacks post-BS#1185 — the
+  // Tragic Magic case (artist not in WXYC library at all → LML returns
+  // zero results → no artwork to project) used to leave Spotify and
+  // Apple Music as null, greying out two iOS buttons.
   const urls = searchUrls.getAllSearchUrls(artistName, albumTitle, trackTitle);
   if (!result.album) {
     result.album = {
+      spotifyUrl: urls.spotifyUrl,
+      appleMusicUrl: urls.appleMusicUrl,
       youtubeMusicUrl: urls.youtubeMusicUrl,
       bandcampUrl: urls.bandcampUrl,
       soundcloudUrl: urls.soundcloudUrl,
     };
   } else {
+    if (!result.album.spotifyUrl) result.album.spotifyUrl = urls.spotifyUrl;
+    if (!result.album.appleMusicUrl) result.album.appleMusicUrl = urls.appleMusicUrl;
     if (!result.album.youtubeMusicUrl) result.album.youtubeMusicUrl = urls.youtubeMusicUrl;
     if (!result.album.bandcampUrl) result.album.bandcampUrl = urls.bandcampUrl;
     if (!result.album.soundcloudUrl) result.album.soundcloudUrl = urls.soundcloudUrl;
@@ -104,12 +112,31 @@ export function filterSpacerGif(url: string | null | undefined): string | undefi
 }
 
 /**
+ * Detect LML's streaming-only synthesized result shape (LML#401).
+ *
+ * On a Discogs miss, LML's `enrich_artwork_results` synthesizes a
+ * `DiscogsSearchResult(release_id=0, release_url="")` carrying only
+ * streaming URLs — no real album-derived fields. BS keys off this
+ * sentinel pair to skip persisting `release_id=0` / `discogs_url=""`
+ * on the flowsheet (would otherwise pollute filtered queries like
+ * `WHERE discogs_release_id IS NOT NULL`). Streaming URLs still flow.
+ *
+ * Exported as the canonical implementation so `proxy.controller.ts`
+ * shares one check site — mirrors the cross-file pattern established
+ * by `filterSpacerGif` above.
+ */
+export function isSyntheticArtwork(artwork: DiscogsMatchResult): boolean {
+  return artwork.release_id === 0 && artwork.release_url === '';
+}
+
+/**
  * Extract album metadata from a DiscogsMatchResult.
  */
 function extractAlbumMetadata(artwork: DiscogsMatchResult): AlbumMetadataResult {
+  const synthetic = isSyntheticArtwork(artwork);
   return {
-    discogsReleaseId: artwork.release_id,
-    discogsUrl: artwork.release_url,
+    discogsReleaseId: synthetic ? undefined : artwork.release_id,
+    discogsUrl: synthetic ? undefined : artwork.release_url,
     artworkUrl: filterSpacerGif(artwork.artwork_url),
     // Discogs returns 0 as "year unknown"; coerce to undefined so it doesn't
     // leak to iOS as a literal "0" or persist as 0 in flowsheet.release_year.

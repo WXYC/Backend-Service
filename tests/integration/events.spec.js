@@ -8,45 +8,35 @@ const { createAuthRequest, expectErrorContains, expectFields } = require('../uti
  * Tests for:
  * - POST /events/register - Register an SSE client (opens persistent connection)
  * - PUT /events/subscribe - Subscribe to event topics
- * - GET /events/test - Trigger a test broadcast event
+ * - GET /events/stream  - EventSource-friendly counterpart to /events/register (no auth required)
+ * - GET /events/test    - Trigger a test broadcast event
  */
 
 /**
- * Helper to make an SSE connection and collect the initial events.
- * Uses native http module with AbortController for proper stream handling.
+ * Open an SSE connection with the given http.request options and resolve
+ * once the initial `connection-established` event arrives (or `timeoutMs`
+ * elapses, which aborts the request). `writeBody` is invoked once the
+ * request is open so callers can attach a JSON body before `req.end()`.
+ *
+ * Used by both helpers below — POST /events/register (with body) and GET
+ * /events/stream (no body) share the same SSE-framing parser; only the
+ * request shape differs.
  */
-const connectSSE = (authToken, topics = [], timeoutMs = 2000) => {
+const openSSE = (options, timeoutMs, writeBody) => {
   return new Promise((resolve, reject) => {
-    const url = new URL(`${process.env.TEST_HOST}:${process.env.PORT}/events/register`);
-    const body = JSON.stringify({ topics });
-
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    const options = {
-      hostname: url.hostname,
-      port: url.port,
-      path: url.pathname,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body),
-        Authorization: authToken,
-      },
-      signal: controller.signal,
-    };
 
     let receivedData = '';
     const events = [];
 
-    const req = http.request(options, (res) => {
+    const req = http.request({ ...options, signal: controller.signal }, (res) => {
       if (res.statusCode !== 200) {
         clearTimeout(timeout);
         reject(new Error(`Unexpected status code: ${res.statusCode}`));
         return;
       }
 
-      // Verify SSE headers
       const contentType = res.headers['content-type'];
       if (!contentType || !contentType.includes('text/event-stream')) {
         clearTimeout(timeout);
@@ -56,24 +46,20 @@ const connectSSE = (authToken, topics = [], timeoutMs = 2000) => {
 
       res.on('data', (chunk) => {
         receivedData += chunk.toString();
-
-        // Parse SSE data format (data: {...}\n\n)
+        // Parse SSE data format (data: {...}\n\n). Keep the last incomplete chunk.
         const lines = receivedData.split('\n\n');
         for (let i = 0; i < lines.length - 1; i++) {
           const line = lines[i];
           if (line.startsWith('data: ')) {
             try {
-              const eventData = JSON.parse(line.slice(6));
-              events.push(eventData);
+              events.push(JSON.parse(line.slice(6)));
             } catch (e) {
               // Ignore parse errors for partial data
             }
           }
         }
-        // Keep the last incomplete chunk
         receivedData = lines[lines.length - 1];
 
-        // Once we have the connection event, we can resolve
         if (events.length > 0 && events[0].type === 'connection-established') {
           clearTimeout(timeout);
           controller.abort();
@@ -92,7 +78,6 @@ const connectSSE = (authToken, topics = [], timeoutMs = 2000) => {
 
     req.on('error', (err) => {
       clearTimeout(timeout);
-      // AbortError is expected
       if (err.name === 'AbortError' && events.length > 0) {
         resolve({ events, headers: {} });
       } else if (err.name !== 'AbortError') {
@@ -100,9 +85,55 @@ const connectSSE = (authToken, topics = [], timeoutMs = 2000) => {
       }
     });
 
-    req.write(body);
+    if (writeBody) writeBody(req);
     req.end();
   });
+};
+
+const connectSSE = (authToken, topics = [], timeoutMs = 2000) => {
+  const url = new URL(`${process.env.TEST_HOST}:${process.env.PORT}/events/register`);
+  const body = JSON.stringify({ topics });
+
+  return openSSE(
+    {
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        Authorization: authToken,
+      },
+    },
+    timeoutMs,
+    (req) => req.write(body)
+  );
+};
+
+/**
+ * GET /events/stream counterpart of `connectSSE`. Native EventSource is
+ * GET-only and can't send a JSON body, so topics ride in the query string
+ * as a comma-separated list. Auth is optional — omit `authToken` to exercise
+ * the public-topic path that browser EventSource clients walk.
+ */
+const connectSSEStream = (topics = [], authToken = undefined, timeoutMs = 2000) => {
+  const query = topics.length ? `?topics=${encodeURIComponent(topics.join(','))}` : '';
+  const url = new URL(`${process.env.TEST_HOST}:${process.env.PORT}/events/stream${query}`);
+
+  const headers = {};
+  if (authToken) headers.Authorization = authToken;
+
+  return openSSE(
+    {
+      hostname: url.hostname,
+      port: url.port,
+      path: `${url.pathname}${url.search}`,
+      method: 'GET',
+      headers,
+    },
+    timeoutMs
+  );
 };
 
 describe('Server-Sent Events', () => {
@@ -179,6 +210,26 @@ describe('Server-Sent Events', () => {
 
       expectFields(res.body, 'message');
       expect(res.body.message).toBe('event triggered');
+    });
+  });
+
+  describe('GET /events/stream', () => {
+    test('opens an SSE connection without an Authorization header', async () => {
+      // The whole point of this endpoint: native browser EventSource has no
+      // way to attach a Bearer token, so the route must succeed anonymously.
+      const { events, headers } = await connectSSEStream(['live-fs-topic']);
+
+      expect(events.length).toBeGreaterThanOrEqual(1);
+      expect(events[0].type).toBe('connection-established');
+      expectFields(events[0].payload, 'clientId');
+      expect(headers['content-type']).toContain('text/event-stream');
+    });
+
+    test('opens an SSE connection with no topics query parameter', async () => {
+      const { events } = await connectSSEStream();
+
+      expect(events.length).toBeGreaterThanOrEqual(1);
+      expect(events[0].type).toBe('connection-established');
     });
   });
 });

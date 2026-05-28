@@ -75,6 +75,7 @@ jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: mockIsLmlConfigured,
   getRelease: mockGetRelease,
+  envInt: (_name: string, fallback: number) => fallback,
   LmlClientError: MockLmlClientError,
 }));
 
@@ -409,7 +410,7 @@ describe('library.controller', () => {
 
         // Controller returns 201 immediately, before fire-and-forget completes.
         expect(res.status).toHaveBeenCalledWith(201);
-        expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA');
+        expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, { budgetMs: 5000 });
       });
 
       it('writes canonical_entity_id back to the inserted row when the lookup yields a match', async () => {

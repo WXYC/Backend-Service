@@ -23,10 +23,11 @@ import {
   LibraryArtistViewEntry,
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
-import { lookupBySong, lookupMetadata, isLmlConfigured, type LookupResponse } from '@wxyc/lml-client';
+import { lookupBySong, lookupMetadata, isLmlConfigured, envInt, type LookupResponse } from '@wxyc/lml-client';
 import { filterSpacerGif } from './metadata/metadata.service.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
+import { isCompilationArtist } from './requestLine/matching/index.js';
 
 /**
  * Source columns on `artists` (and any joined / view-projected row) that
@@ -353,6 +354,21 @@ const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 10 * 60 * 1000;
  */
 const ROTATION_LML_LOOKUP_TIMEOUT_MS = 5000;
 
+/**
+ * Picker budget. Pinned ~1 s tighter than `ROTATION_LML_LOOKUP_TIMEOUT_MS`
+ * so LML's A10 cutoff fires before the local `AbortController` aborts the
+ * fetch. Hardcoded because the two constants are paired (changing one without
+ * the other breaks the timing). See `LookupOptions.budgetMs` for mechanics.
+ */
+const ROTATION_LML_LOOKUP_BUDGET_MS = 4000;
+
+/**
+ * Budget for `enrichWithArtwork` and `searchLibraryByTrack` — both user-visible
+ * read paths that would rather degrade than hold the response on an obscure-
+ * artist cascade. See `LookupOptions.budgetMs` for mechanics.
+ */
+const LIBRARY_INTERACTIVE_LML_BUDGET_MS = envInt('LIBRARY_INTERACTIVE_LML_BUDGET_MS', 5000);
+
 const rotationLmlPositiveCache = new LRUCache<number, number>({
   max: ROTATION_LML_LOOKUP_CACHE_MAX,
   ttl: ROTATION_LML_LOOKUP_TTL_POSITIVE_MS,
@@ -471,6 +487,7 @@ async function resolveRotationDiscogsReleaseViaLml(
   try {
     const response = await lookupMetadata(artistName, albumTitle, undefined, {
       timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
+      budgetMs: ROTATION_LML_LOOKUP_BUDGET_MS,
     });
     releaseId = response.results?.[0]?.artwork?.release_id ?? null;
   } catch (err) {
@@ -590,7 +607,9 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
 
   const settlements = await Promise.allSettled(
     uncached.map(async (row) => {
-      const lookupResult = await lookupMetadata(row.artist_name, row.album_title);
+      const lookupResult = await lookupMetadata(row.artist_name, row.album_title, undefined, {
+        budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS,
+      });
       const artworkUrl = filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url);
       if (!artworkUrl) return;
       row.artwork_url = artworkUrl;
@@ -795,6 +814,12 @@ export const fuzzySearchLibrary = async (
   n = 5,
   on_streaming?: boolean
 ): Promise<TaggedLibraryViewEntry[]> => {
+  // Skip only the trigram-OR branches; the both-same tsvector path handles
+  // V/A queries cheaply via the search_doc GIN index.
+  if (artist_name !== album_title && isCompilationArtist(artist_name)) {
+    return [];
+  }
+
   await checkLibraryArtistNameHealth();
 
   // Both-mode default (dj-site sends the same string as artist and title).
@@ -1285,7 +1310,7 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  */
 async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<TaggedLibraryViewEntry[]> {
   const lookupStart = performance.now();
-  const response: LookupResponse = await lookupBySong(query);
+  const response: LookupResponse = await lookupBySong(query, { budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS });
   try {
     Sentry.getActiveSpan()?.setAttributes({
       'track_search.master_lookup_ms': performance.now() - lookupStart,

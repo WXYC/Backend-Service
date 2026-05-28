@@ -84,15 +84,18 @@ const TIMEOUT_MS = 30000;
  * with the client and stays the chokepoint for every consumer.
  */
 
-function envInt(name: string, fallback: number): number {
+/**
+ * Read a positive-integer env var with a fallback. Empty string and undefined
+ * map to the fallback; `0`, negative, and non-numeric values trigger a startup
+ * warn and also fall back — silently shipping `NaN`/`0` to downstream consumers
+ * (a semaphore-permit count, a budget header, etc.) is the failure mode this
+ * guards against.
+ */
+export function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
   const parsed = Number(raw);
   if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  // Surface misconfigurations at startup so an operator who set `=0`
-  // intending to disable the limiter sees their value was rejected
-  // instead of silently falling back. A 0-permit semaphore would
-  // deadlock, which is why we don't accept it.
   console.warn(`lml.client: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`);
   return fallback;
 }
@@ -283,6 +286,28 @@ function getBaseUrl(): string {
   return url.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
 }
 
+/**
+ * Caller-honored LML budget header (WXYC/library-metadata-lookup#345). When
+ * present, LML short-circuits its empty-results cascade once the budget
+ * elapses (WXYC/library-metadata-lookup#403/#404). Emitted by `postLookup`
+ * and `bulkLookupMetadata` when the caller sets `options.budgetMs`.
+ */
+const CALLER_BUDGET_HEADER = 'X-Caller-Budget-Ms';
+
+/**
+ * Build the request headers for a `/lookup` or `/lookup/bulk` POST. Returns a
+ * fresh object so callers can safely mutate. `budgetMs` becomes the
+ * `CALLER_BUDGET_HEADER` value when set; absent budget means no header (LML
+ * keeps the pre-A10 safety branch).
+ */
+function buildLookupHeaders(budgetMs?: number): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (budgetMs !== undefined) {
+    headers[CALLER_BUDGET_HEADER] = String(budgetMs);
+  }
+  return headers;
+}
+
 async function lmlFetch(path: string, init?: RequestInit, timeoutMs?: number): Promise<Response> {
   const url = `${getBaseUrl()}${path}`;
   const controller = new AbortController();
@@ -364,6 +389,19 @@ export interface LookupOptions {
    * defaults from BS#995) to keep accounting separated and tunable per caller.
    */
   limiter?: LmlLimiter;
+  /**
+   * Caller-honored budget (ms) forwarded to LML as `X-Caller-Budget-Ms`
+   * (WXYC/library-metadata-lookup#345). When set, LML short-circuits its
+   * empty-results cascade once the budget elapses
+   * (WXYC/library-metadata-lookup#403/#404) instead of burning Discogs quota
+   * on a response the caller has already abandoned. Pair with `timeoutMs`:
+   * set `budgetMs ~= timeoutMs - 1000` so LML's cutoff fires before the
+   * fetch aborts, leaving room for transport + the LML response slack.
+   * Omit to inherit LML's env soft budget (`LML_SEARCH_BUDGET_MS`, default
+   * 4 s) which only fires when at least one prior strategy returned results
+   * — the no-header path keeps the pre-A10 warm-cache / write-path semantics.
+   */
+  budgetMs?: number;
 }
 
 type LookupBody = {
@@ -402,7 +440,11 @@ export async function lookupMetadata(
   if (song) body.song = song;
   if (options?.extended) body.extended = true;
   if (options?.warm_cache) body.warm_cache = true;
-  return postLookup(body, { timeoutMs: options?.timeoutMs, limiter: options?.limiter });
+  return postLookup(body, {
+    timeoutMs: options?.timeoutMs,
+    limiter: options?.limiter,
+    budgetMs: options?.budgetMs,
+  });
 }
 
 /**
@@ -413,8 +455,11 @@ export async function lookupMetadata(
  * (BS#823) — Backend-Service is a thin proxy here; LML does all the ranking
  * and the response's `matched_via` carries the per-result evidence.
  */
-export async function lookupBySong(song: string, options?: Pick<LookupOptions, 'limiter'>): Promise<LookupResponse> {
-  return postLookup({ song, raw_message: song }, { limiter: options?.limiter });
+export async function lookupBySong(
+  song: string,
+  options?: Pick<LookupOptions, 'limiter' | 'budgetMs'>
+): Promise<LookupResponse> {
+  return postLookup({ song, raw_message: song }, { limiter: options?.limiter, budgetMs: options?.budgetMs });
 }
 
 /**
@@ -428,7 +473,7 @@ export async function lookupBySong(song: string, options?: Pick<LookupOptions, '
  */
 async function postLookup(
   body: LookupBody,
-  options?: { timeoutMs?: number; limiter?: LmlLimiter }
+  options?: { timeoutMs?: number; limiter?: LmlLimiter; budgetMs?: number }
 ): Promise<LookupResponse> {
   // BS#906 / G4: Mirror LML's Discogs ceilings on the client so back-pressure
   // surfaces at the BS chokepoint, not as queueing inside LML. The limiter
@@ -443,11 +488,12 @@ async function postLookup(
       } catch (err) {
         console.warn('lml.client: failed to project queue_depth onto span', err);
       }
+
       const response = await lmlFetch(
         '/api/v1/lookup',
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: buildLookupHeaders(options?.budgetMs),
           body: JSON.stringify(body),
         },
         options?.timeoutMs
@@ -571,16 +617,11 @@ export async function bulkLookupMetadata(
         console.warn('lml.client: failed to project queue_depth + bulk.size onto span', err);
       }
 
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (options?.budgetMs !== undefined) {
-        headers['X-Caller-Budget-Ms'] = String(options.budgetMs);
-      }
-
       const response = await lmlFetch(
         '/api/v1/lookup/bulk',
         {
           method: 'POST',
-          headers,
+          headers: buildLookupHeaders(options?.budgetMs),
           body: JSON.stringify({ items }),
         },
         options?.timeoutMs

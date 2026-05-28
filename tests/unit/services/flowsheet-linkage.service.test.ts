@@ -15,6 +15,7 @@ const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: jest.fn().mockReturnValue(true),
+  envInt: (_name: string, fallback: number) => fallback,
 }));
 
 import { runLmlLinkage } from '../../../apps/backend/services/flowsheet-linkage.service';

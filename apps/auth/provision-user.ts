@@ -4,6 +4,7 @@
  * endpoint and by createDefaultUser() at startup.
  */
 
+import * as Sentry from '@sentry/node';
 import { auth, formatUsernameError, validateUsername, WXYCRoles } from '@wxyc/authentication';
 import { db, user } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
@@ -33,9 +34,16 @@ export interface ProvisionUserInput {
 export interface ProvisionUserResult {
   user: { id: string; email: string; [key: string]: unknown };
   member: { id: string; organizationId: string; role: string; [key: string]: unknown };
+  // Welcome-email pipeline outcome. `emailSent: false` means the user was
+  // provisioned successfully but the password-setup email could not be
+  // dispatched — caller should surface this so an admin can manually resend.
+  emailSent: boolean;
+  emailError?: string;
 }
 
 const ADMIN_SYNC_ROLES = ['stationManager', 'admin', 'owner'];
+
+const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
  * Create a user, credential account, and organization membership atomically.
@@ -98,7 +106,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
       updatedAt: new Date(),
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     if (message.includes('unique') || message.includes('duplicate') || message.includes('already exists')) {
       throw new ProvisionError(409, `Username "${username}" is already taken`);
     }
@@ -159,17 +167,36 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     // 10. Trigger password reset flow to send welcome email with a tokenized setup URL.
     // The sendResetPassword hook in auth.definition.ts detects hasCompletedOnboarding === false
     // and sends the accountSetup email template instead of a plain password reset.
+    //
+    // AWAITED (not fire-and-forget) so we can report `emailSent` to the caller.
+    // A swallow-style .catch() leaks: the dj-site UI reports success, but the
+    // user gets no email and has no way to log in. The provisioning itself
+    // succeeded though — user row, credential, and member row are committed —
+    // so we don't throw.
     const frontendUrl = process.env.FRONTEND_SOURCE || 'http://localhost:3000';
-    auth.api
-      .requestPasswordReset({
+    let emailSent = true;
+    let emailError: string | undefined;
+    try {
+      await auth.api.requestPasswordReset({
         body: { email, redirectTo: `${frontendUrl}/login` },
         headers: new Headers({ origin: frontendUrl }),
-      })
-      .catch((error: unknown) => {
-        console.error('[PROVISION USER] Failed to trigger setup email:', error);
       });
+    } catch (error) {
+      emailSent = false;
+      emailError = errorMessage(error);
+      console.error('[PROVISION USER] Failed to trigger setup email:', error);
+      Sentry.captureException(error, {
+        tags: { subsystem: 'provision-user', step: 'request-password-reset' },
+        extra: { email, userId: newUser.id },
+      });
+    }
 
-    return { user: newUser, member: createdMember as unknown as ProvisionUserResult['member'] };
+    return {
+      user: newUser,
+      member: createdMember as unknown as ProvisionUserResult['member'],
+      emailSent,
+      emailError,
+    };
   } catch (error) {
     // Clean up: delete the orphaned user so we don't leave partial state
     try {

@@ -115,20 +115,19 @@ const EXPECTED_ONLY_IN_WORKFLOW = [
   'CI_DB_PORT',
   'CI_PORT',
 
+  // Why: auth-service auto-membership / org-sync hooks read this from env
+  // and no-op (with a warning) when unset. Compose sets it on the `auth`
+  // service env block; the backend service doesn't need it. In GHA CI's
+  // host-process model both services share workflow-level env, so it
+  // appears here. Mirroring it into the compose `backend` env would be
+  // harmless but pointless — the backend code never reads it.
+  'DEFAULT_ORG_SLUG',
+
   // Why: mock-api server addressing. Backend reads LIBRARY_METADATA_URL
   // (mirrored). MOCK_API_PORT + MOCK_API_URL exist for the harness side
   // (mock-server start command, test assertions about response bodies).
   'MOCK_API_PORT',
   'MOCK_API_URL',
-
-  // Why: test-mode signal needed on the workflow's host-process model
-  // (gates rate-limit middleware bypass, etc.). The compose backend
-  // container doesn't set NODE_ENV but its test-mode behaviors are reached
-  // via parallel gates (`TEST_RATE_LIMITING=false`, `AUTH_BYPASS=true`).
-  // If a code path appears that requires NODE_ENV=test specifically and
-  // can't reach it via those gates, this entry should move to "mirror in
-  // both" — but that's a backend change, not a CI-env one.
-  'NODE_ENV',
 
   // Why: workflow-level alias for CI_PORT used by certain non-test scripts
   // that read PORT (e.g. drizzle-kit migrations); harness-side.

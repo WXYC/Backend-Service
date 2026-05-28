@@ -9,6 +9,7 @@ jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   lookupBySong: mockLookupBySong,
   isLmlConfigured: mockIsLmlConfigured,
+  envInt: (_name: string, fallback: number) => fallback,
 }));
 
 // Mock @sentry/node so we can assert that searchLibraryByTrack creates a
@@ -121,6 +122,57 @@ describe('library.service', () => {
 
       expect(results).toHaveLength(1);
       expect(results[0]).toHaveProperty('on_streaming', true);
+    });
+  });
+
+  describe('fuzzySearchLibrary compilation-indicator short-circuit', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it.each<[string, string | undefined]>([
+      ['Various Artists', 'In-Correcto 15-25'],
+      ['V/A', 'Some Album'],
+      ['v.a.', 'Some Album'],
+      ['Soundtrack', 'Movie Title'],
+      ['Compilation', 'Best Of 2025'],
+      ['Various Artists', undefined],
+      ['V/A', undefined],
+    ])('returns [] without DB calls for artist=%s album=%s', async (artist, title) => {
+      const result = await fuzzySearchLibrary(artist, title, 10);
+      expect(result).toEqual([]);
+      expect(db.select).not.toHaveBeenCalled();
+      expect(db.execute).not.toHaveBeenCalled();
+    });
+
+    it('does NOT short-circuit when artist===album (both-mode cascade still runs)', async () => {
+      const chain = createMockQueryChain([]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+
+      await fuzzySearchLibrary('Various Artists', 'Various Artists', 5);
+
+      expect(db.select).toHaveBeenCalled();
+    });
+
+    it('does NOT short-circuit for legitimate artist names', async () => {
+      const chain = createMockQueryChain([]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+
+      await fuzzySearchLibrary('Stereolab', 'Dots and Loops', 5);
+
+      expect(db.select).toHaveBeenCalled();
+    });
+
+    it('does NOT short-circuit album-only queries (predicate checks artist field)', async () => {
+      const chain = createMockQueryChain([]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+
+      await fuzzySearchLibrary(undefined, 'Various Artists Compilation Vol 5', 5);
+
+      expect(db.select).toHaveBeenCalled();
     });
   });
 
@@ -987,7 +1039,7 @@ describe('library.service', () => {
       const results = await searchLibraryByTrack('Back, Baby', 10);
 
       expect(mockLookupBySong).toHaveBeenCalledTimes(1);
-      expect(mockLookupBySong).toHaveBeenCalledWith('Back, Baby');
+      expect(mockLookupBySong).toHaveBeenCalledWith('Back, Baby', { budgetMs: 5000 });
       // Bridge query reads from `library` (with joins) so the unique index
       // on legacy_release_id is reachable.
       expect(libraryChain.from).toHaveBeenCalledWith(library);
@@ -1400,7 +1452,7 @@ describe('library.service', () => {
       await searchLibraryByTrack('Different Song', 10);
 
       expect(mockLookupBySong.mock.calls.length).toBe(callsAfterFirst + 1);
-      expect(mockLookupBySong).toHaveBeenLastCalledWith('Different Song');
+      expect(mockLookupBySong).toHaveBeenLastCalledWith('Different Song', { budgetMs: 5000 });
     });
 
     it('trim + lowercase: variations of the same query share one cache entry', async () => {
@@ -1813,7 +1865,7 @@ describe('library.service', () => {
       const enriched = await enrichWithArtwork(results);
 
       expect(enriched[0].artwork_url).toBe('https://i.discogs.com/confield.jpg');
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield');
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, { budgetMs: 5000 });
       expect(db.update).toHaveBeenCalled();
     });
 
@@ -1901,7 +1953,7 @@ describe('library.service', () => {
       expect(enriched[1].artwork_url).toBe('https://i.discogs.com/lp5.jpg');
       // Only one LML call (for LP5, not Confield)
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5');
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, { budgetMs: 5000 });
     });
 
     it('handles LML returning no results', async () => {
@@ -2151,9 +2203,15 @@ describe('library.service', () => {
       const result = await getDiscogsReleaseIdByRotationId(42);
 
       expect(result).toBe(4080);
-      // The picker passes a 5 s budget so a hung LML call doesn't stall the
-      // dropdown for 30 s and tie up the shared LML semaphore permit (BS#992).
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, { timeoutMs: 5000 });
+      // The picker passes a 5 s fetch timeout so a hung LML call doesn't stall
+      // the dropdown for 30 s and tie up the shared LML semaphore permit
+      // (BS#992). The 4 s budgetMs forwards as X-Caller-Budget-Ms so LML's A10
+      // cutoff abandons its empty-results cascade ~1 s before BS aborts the
+      // fetch (WXYC/library-metadata-lookup#403/#404).
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
+        timeoutMs: 5000,
+        budgetMs: 4000,
+      });
     });
 
     it('does not call LML when the direct column has a value', async () => {

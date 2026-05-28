@@ -37,11 +37,18 @@ export interface IFSEntryMetadata {
 // `legacy_link_attempted_at` and `metadata_attempt_at` are job-internal
 // markers consumed only by the broken-FK recovery and metadata backfill
 // jobs respectively, so they're excluded from the controller-facing entry.
+// `updated_at` (BS#902) is the row-level watermark consumed only by the
+// conditional-GET middleware via `getLastModifiedAt`; it's never projected
+// onto the wire format, so it stays out of IFSEntry alongside the other
+// internal markers.
 //
 // `metadata_status` and `enriching_since` (BS#891) ARE surfaced to the
 // controller layer because the V2 wire format projects metadata_status onto
 // track rows for iOS branch logic (WXYC/wxyc-ios-64#270).
-export interface IFSEntry extends Omit<FSEntry, 'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at'> {
+export interface IFSEntry extends Omit<
+  FSEntry,
+  'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at' | 'updated_at'
+> {
   label_id: number | null;
   rotation_bin: string | null;
   on_streaming: boolean | null;
@@ -271,8 +278,26 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   } else if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
     throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
   } else {
+    // Explicit allowlist instead of `...body` spread (BS#1099). Any other
+    // body key — `metadata_status`, `legacy_entry_id`, `play_order`, etc. —
+    // would otherwise propagate verbatim into the INSERT and let a
+    // flowsheet:write caller mutate server-internal columns.
+    // `album_id` is included so explicit `null` from the snapshot branch
+    // (BS#933) still lands on the row; in this branch `body.album_id` is
+    // already constrained to null/undefined by the discriminator above.
     const fsEntry: NewFSEntry = {
-      ...body,
+      artist_name: body.artist_name,
+      album_title: body.album_title,
+      track_title: body.track_title,
+      track_position: body.track_position ?? null,
+      record_label: body.record_label,
+      label_id: body.label_id,
+      album_id: body.album_id,
+      rotation_id: body.rotation_id,
+      request_flag: body.request_flag,
+      segue: body.segue ?? false,
+      message: body.message,
+      entry_type: body.entry_type,
       show_id: latestShow.id,
       dj_name,
     };
@@ -310,6 +335,28 @@ export type UpdateRequestBody = {
   message?: string;
 };
 
+/**
+ * Pick only the fields the client is allowed to write through the public
+ * PATCH /flowsheet endpoint (BS#1099). The service-layer `updateEntry` does
+ * a passthrough `.set(entry)`, so any extra keys (`metadata_status`,
+ * `legacy_entry_id`, `show_id`, `play_order`, `linkage_*`, etc.) would land
+ * on the row. We allowlist at the controller boundary; the service also
+ * picks again for defense in depth.
+ */
+function pickUpdateEntryFields(data: UpdateRequestBody): UpdateRequestBody {
+  const picked: UpdateRequestBody = {};
+  if (data.artist_name !== undefined) picked.artist_name = data.artist_name;
+  if (data.album_title !== undefined) picked.album_title = data.album_title;
+  if (data.track_title !== undefined) picked.track_title = data.track_title;
+  if (data.track_position !== undefined) picked.track_position = data.track_position;
+  if (data.record_label !== undefined) picked.record_label = data.record_label;
+  if (data.label_id !== undefined) picked.label_id = data.label_id;
+  if (data.request_flag !== undefined) picked.request_flag = data.request_flag;
+  if (data.segue !== undefined) picked.segue = data.segue;
+  if (data.message !== undefined) picked.message = data.message;
+  return picked;
+}
+
 export const updateEntry: RequestHandler<object, unknown, { entry_id: number; data: UpdateRequestBody }> = async (
   req,
   res
@@ -319,7 +366,7 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
     throw new WxycError('Bad Request, Missing entry identifier: entry_id', 400);
   }
 
-  const updatedEntry: FSEntry = await flowsheet_service.updateEntry(entry_id, data);
+  const updatedEntry: FSEntry = await flowsheet_service.updateEntry(entry_id, pickUpdateEntryFields(data ?? {}));
   res.status(200).json(updatedEntry);
 };
 
@@ -336,6 +383,14 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     throw new WxycError('Bad Request, Must include a dj_id to join show', 400);
   }
 
+  // Cross-check body.dj_id against the authenticated user (BS#1098). Pre-fix
+  // any flowsheet:write caller could pass another DJ's id and start a show
+  // attributed to the victim in shows.primary_dj_id, show_start flowsheet
+  // messages, DJ stats, and every legacy mirror push.
+  if (!req.auth?.id || req.body.dj_id !== req.auth.id) {
+    throw new WxycError('Forbidden: dj_id must match the authenticated user', 403);
+  }
+
   if (current_show?.end_time !== null) {
     const show_session: Show = await flowsheet_service.startShow(
       req.body.dj_id,
@@ -350,11 +405,18 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   }
 };
 
-//TODO consume JWT and ensure that jwt.dj_id = current_show.dj_id
 export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = async (req, res) => {
   const currentShow = await flowsheet_service.getLatestShow();
   if (currentShow?.end_time !== null) {
     throw new WxycError('Bad Request: No active show session found.', 400);
+  }
+
+  // Cross-check body.dj_id against the authenticated user (BS#1102). Pre-fix
+  // showMemberMiddleware only checked the caller was in the show — never
+  // that body.dj_id matched. A guest DJ could end the entire show
+  // (body.dj_id = primary_dj_id) or kick a co-host (body.dj_id = co-host id).
+  if (!req.auth?.id || req.body.dj_id !== req.auth.id) {
+    throw new WxycError('Forbidden: dj_id must match the authenticated user', 403);
   }
 
   // Show membership is verified by showMemberMiddleware on the route

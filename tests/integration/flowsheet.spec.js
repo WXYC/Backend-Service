@@ -56,9 +56,12 @@ describe('Join Show', () => {
   });
 
   test('Properly Formatted Request', async () => {
+    // BS#1098: dj_id must match the authenticated caller, so the secondary
+    // DJ joins with their own Bearer (raw user-id token, accepted by
+    // AUTH_BYPASS — see tests/setup/integration.setup.js).
     const res = await request
       .post('/flowsheet/join')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         dj_id: global.secondary_dj_id,
       })
@@ -95,9 +98,13 @@ describe('End Show', () => {
       dj_id: global.primary_dj_id,
     });
 
+    // Secondary DJ attempts to /flowsheet/end after the show is over.
+    // BS#1102: dj_id must match the authenticated caller, so the secondary
+    // DJ has to send their own Bearer to get past the auth check; the
+    // 400 then comes from "No active show".
     const res = await request
       .post('/flowsheet/end')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         dj_id: global.secondary_dj_id,
       })
@@ -114,8 +121,8 @@ describe('Leave Show', () => {
     // Start show
     await fls_util.join_show(global.primary_dj_id, global.access_token);
 
-    // Second DJ joins
-    await fls_util.join_show(global.secondary_dj_id, global.access_token);
+    // Second DJ joins under their own auth (BS#1098 cross-check).
+    await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token);
   });
 
   // Ensure that primary dj ends the show for all show djs
@@ -133,14 +140,20 @@ describe('Leave Show', () => {
       .expect(200);
   });
 
-  test('DJ not in show', async () => {
+  test('Forbidden when dj_id does not match the authenticated user (BS#1102)', async () => {
+    // Pre-fix this test passed dj_id=1000 with primary's token and expected
+    // a 400 from the downstream "DJ not in show" path. Post-fix the
+    // controller rejects the dj_id≠auth.id mismatch with 403 before that
+    // path is reached — which is the more secure outcome (the body never
+    // reaches the show-membership check).
     const res = await request
       .post('/flowsheet/end')
       .set('Authorization', global.access_token)
       .send({
         dj_id: 1000,
       })
-      .expect(400);
+      .expect(403);
+    // WxycError serializes as `{ message }` (see middleware/errorHandler.ts).
     expect(res.body.message).toBeDefined();
   });
 
@@ -150,9 +163,11 @@ describe('Leave Show', () => {
       dj_id: global.primary_dj_id,
     });
 
+    // Secondary DJ attempts to /flowsheet/end the (now-ended) show. BS#1102
+    // requires the secondary's own Bearer for the dj_id=auth.id cross-check.
     const res = await request
       .post('/flowsheet/end')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         dj_id: global.secondary_dj_id,
       })
@@ -856,8 +871,8 @@ describe('On Air Status', () => {
     test('returns multiple DJs when multiple are on air', async () => {
       // Start a show with primary DJ
       await fls_util.join_show(global.primary_dj_id, global.access_token);
-      // Secondary DJ joins
-      await fls_util.join_show(global.secondary_dj_id, global.access_token);
+      // Secondary DJ joins under their own auth (BS#1098 cross-check).
+      await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token);
 
       const res = await request.get('/flowsheet/djs-on-air').set('Authorization', global.access_token).expect(200);
 
@@ -881,7 +896,8 @@ describe('Retrieve Playlist Object', () => {
     const body = await res.json();
     global.CurrentShowID = body.id;
 
-    await fls_util.join_show(global.secondary_dj_id, global.access_token);
+    // Secondary joins as themselves (BS#1098 cross-check).
+    await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token);
 
     // Insert entry to for show
     await request
