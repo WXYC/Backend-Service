@@ -1,0 +1,35 @@
+-- precondition-guard: not-required (ADD COLUMN with constant DEFAULT on
+--   PG11+ is metadata-only; NOT NULL is satisfied for existing rows by the
+--   default. Enum type DDL has no row-level invariants to violate.)
+-- 0085 — provenance column for rotation.discogs_release_id (BS#1029).
+--
+-- Two-value enum capturing where rotation.discogs_release_id came from:
+--   tubafrenzy_paste     — mirrored by jobs/rotation-etl from the
+--                          tubafrenzy rotation form's paste-URL prefill.
+--                          Music-director-verified.
+--   lml_offline_backfill — written by jobs/rotation-release-id-backfill
+--                          (one-shot ETL, BS#1029). Resolved via LML's
+--                          POST /api/v1/lookup at backfill time.
+--
+-- Provenance lets the read path (BS#1030's revert + future tooling)
+-- distinguish MD-verified ids from automatically-resolved ones; also lets
+-- a future re-run of the backfill scope its UPDATEs to lml_offline_backfill
+-- rows only, preserving any subsequent tubafrenzy paste.
+--
+-- Default 'tubafrenzy_paste' is set because:
+--   (a) rotation-etl's INSERT path doesn't need to set source explicitly —
+--       the column default carries the dominant case.
+--   (b) existing 21,563 rows already represent the "tubafrenzy is the
+--       source of truth" world. They have release_id=NULL, but if/when
+--       tubafrenzy fills them in, the source is correct by construction.
+--
+-- DDL-only — no row UPDATE. PG11+ stores the constant default in
+-- pg_attribute (`atthasmissing`/`attmissingval`) and reads it virtually
+-- for unmodified rows; no rewrite, no AccessExclusiveLock held beyond
+-- the catalog edit. Same pattern as 0078's metadata_status default.
+--
+-- @no-analyze-needed: ADD COLUMN with constant default doesn't rewrite
+-- rows on PG11+. No planner stats to refresh on either table.
+
+CREATE TYPE "wxyc_schema"."discogs_release_id_source_enum" AS ENUM('tubafrenzy_paste', 'lml_offline_backfill');--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."rotation" ADD COLUMN "discogs_release_id_source" "wxyc_schema"."discogs_release_id_source_enum" DEFAULT 'tubafrenzy_paste' NOT NULL;
