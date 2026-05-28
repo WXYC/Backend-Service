@@ -354,6 +354,25 @@ const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 10 * 60 * 1000;
  */
 const ROTATION_LML_LOOKUP_TIMEOUT_MS = 5000;
 
+/**
+ * Caller-honored budget forwarded to LML as `X-Caller-Budget-Ms`
+ * (WXYC/library-metadata-lookup#345). Set ~1 s tighter than
+ * `ROTATION_LML_LOOKUP_TIMEOUT_MS` so LML's A10 cutoff
+ * (WXYC/library-metadata-lookup#403/#404) fires before the local
+ * `AbortController` aborts the fetch — leaves room for the LML response
+ * envelope on the wire when LML decides to short-circuit.
+ */
+const ROTATION_LML_LOOKUP_BUDGET_MS = 4000;
+
+/**
+ * Interactive (user-visible) LML budget for search-result artwork enrichment
+ * and the catalog Track 2 lookup-by-song path. Matches the rotation-picker
+ * deadline class (BS#992) — both are user-visible and would rather degrade
+ * to no-artwork / shorter-list than hold the response on an obscure-artist
+ * cascade burning Discogs quota for an answer BS won't render.
+ */
+const LIBRARY_INTERACTIVE_LML_BUDGET_MS = Number(process.env.LIBRARY_INTERACTIVE_LML_BUDGET_MS ?? 5000);
+
 const rotationLmlPositiveCache = new LRUCache<number, number>({
   max: ROTATION_LML_LOOKUP_CACHE_MAX,
   ttl: ROTATION_LML_LOOKUP_TTL_POSITIVE_MS,
@@ -472,6 +491,7 @@ async function resolveRotationDiscogsReleaseViaLml(
   try {
     const response = await lookupMetadata(artistName, albumTitle, undefined, {
       timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
+      budgetMs: ROTATION_LML_LOOKUP_BUDGET_MS,
     });
     releaseId = response.results?.[0]?.artwork?.release_id ?? null;
   } catch (err) {
@@ -591,7 +611,9 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
 
   const settlements = await Promise.allSettled(
     uncached.map(async (row) => {
-      const lookupResult = await lookupMetadata(row.artist_name, row.album_title);
+      const lookupResult = await lookupMetadata(row.artist_name, row.album_title, undefined, {
+        budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS,
+      });
       const artworkUrl = filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url);
       if (!artworkUrl) return;
       row.artwork_url = artworkUrl;
@@ -1205,7 +1227,7 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  */
 async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<TaggedLibraryViewEntry[]> {
   const lookupStart = performance.now();
-  const response: LookupResponse = await lookupBySong(query);
+  const response: LookupResponse = await lookupBySong(query, { budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS });
   try {
     Sentry.getActiveSpan()?.setAttributes({
       'track_search.master_lookup_ms': performance.now() - lookupStart,

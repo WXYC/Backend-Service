@@ -201,6 +201,38 @@ describe('lml.client', () => {
       expect(callBody.warm_cache).toBeUndefined();
     });
 
+    it('forwards X-Caller-Budget-Ms when budgetMs is provided', async () => {
+      // Mirrors bulkLookupMetadata's header-forwarding contract so the LML
+      // A10 caller-budget cutoff (WXYC/library-metadata-lookup#403/#404)
+      // fires for single-lookup callers too — without the header, LML's
+      // empty-results cascade grinds past the caller's deadline.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Stereolab', 'Aluminum Tunes', undefined, { budgetMs: 5000 });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '5000' });
+    });
+
+    it('omits X-Caller-Budget-Ms when budgetMs is not provided', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Stereolab', 'Aluminum Tunes');
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+    });
+
     it('wraps the call in a Sentry span and projects cache_stats onto it', async () => {
       const cache_stats = {
         memory_hits: 1,
@@ -415,6 +447,34 @@ describe('lml.client', () => {
         'lml.cache.pg_misses': 1,
         'lml.cache.api_calls': 1,
       });
+    });
+
+    it('forwards X-Caller-Budget-Ms when budgetMs is provided', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupBySong('Back, Baby', { budgetMs: 5000 });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '5000' });
+    });
+
+    it('omits X-Caller-Budget-Ms when budgetMs is not provided', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupBySong('Back, Baby');
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
     });
 
     it('throws LmlClientError on non-2xx response', async () => {
