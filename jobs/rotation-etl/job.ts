@@ -116,9 +116,32 @@ const runIncremental = async (): Promise<SyncResult> => {
           artist_name: sql`excluded.artist_name`,
           album_title: sql`excluded.album_title`,
           record_label: sql`excluded.record_label`,
-          discogs_release_id: sql`excluded.discogs_release_id`,
+          // BS#1029: tubafrenzy paste wins when it contributes a non-NULL
+          // id; otherwise preserve any value written by
+          // jobs/rotation-release-id-backfill. Without COALESCE, an
+          // excluded NULL would clobber the backfill's writes on every
+          // 30-min tick (the load-bearing regression BS#1029 closes).
+          discogs_release_id: sql`COALESCE(excluded.discogs_release_id, ${rotation.discogs_release_id})`,
+          // Provenance mirrors COALESCE above: when tubafrenzy contributes
+          // a non-NULL id the source flips to 'tubafrenzy_paste' (the
+          // MD-verified-via-paste-URL invariant), otherwise the persisted
+          // source stays. Without this, a later tubafrenzy paste over a
+          // backfill-written row would leave provenance reading
+          // 'lml_offline_backfill' even though the value is now MD-verified.
+          discogs_release_id_source: sql`
+            CASE WHEN excluded.discogs_release_id IS NOT NULL
+                 THEN 'tubafrenzy_paste'::wxyc_schema.discogs_release_id_source_enum
+                 ELSE ${rotation.discogs_release_id_source}
+            END
+          `,
         },
         // BS#1059 mechanic; the 30-min cron was rewriting most rows every cycle.
+        // BS#1029: the plain IS DISTINCT FROM term on discogs_release_id
+        // would fire harmlessly when excluded was NULL but rotation held a
+        // backfill-written value — COALESCE turns the write into a no-op
+        // value-wise, but the row's xmin still bumps and CDC fires. Gate
+        // the term on "excluded is non-NULL" so a NULL upstream value cannot
+        // trigger a redundant UPDATE on a backfilled row.
         setWhere: sql`
           ${rotation.album_id} IS DISTINCT FROM excluded.album_id OR
           ${rotation.legacy_library_release_id} IS DISTINCT FROM excluded.legacy_library_release_id OR
@@ -127,7 +150,8 @@ const runIncremental = async (): Promise<SyncResult> => {
           ${rotation.artist_name} IS DISTINCT FROM excluded.artist_name OR
           ${rotation.album_title} IS DISTINCT FROM excluded.album_title OR
           ${rotation.record_label} IS DISTINCT FROM excluded.record_label OR
-          ${rotation.discogs_release_id} IS DISTINCT FROM excluded.discogs_release_id
+          (excluded.discogs_release_id IS NOT NULL
+            AND ${rotation.discogs_release_id} IS DISTINCT FROM excluded.discogs_release_id)
         `,
       });
 
