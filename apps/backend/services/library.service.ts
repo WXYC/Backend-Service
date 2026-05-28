@@ -889,6 +889,43 @@ export const getArtistNameById = async (artist_id: number): Promise<string | nul
   return response[0]?.artist_name ?? null;
 };
 
+export type ArtistInGenreSearchRow = {
+  id: number;
+  artist_name: string;
+  code_letters: string;
+  code_number: number;
+};
+
+/**
+ * Prefix search for artists in a genre (catalog add-entry autocomplete).
+ * `code_number` is the artist's number within that genre (`artist_genre_code`).
+ */
+export const searchArtistsInGenre = async (
+  genre_id: number,
+  q: string,
+  limit: number
+): Promise<ArtistInGenreSearchRow[]> => {
+  const prefix = q.trim();
+  if (prefix.length < 2) {
+    return [];
+  }
+
+  const cappedLimit = Math.min(20, Math.max(1, limit));
+
+  return db
+    .select({
+      id: artists.id,
+      artist_name: artists.artist_name,
+      code_letters: artists.code_letters,
+      code_number: genre_artist_crossreference.artist_genre_code,
+    })
+    .from(artists)
+    .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(and(eq(genre_artist_crossreference.genre_id, genre_id), sql`${artists.artist_name} ILIKE ${prefix + '%'}`))
+    .orderBy(asc(artists.artist_name))
+    .limit(cappedLimit);
+};
+
 export const artistIdFromName = async (artist_name: string, genre_id: number): Promise<number> => {
   const response = await db
     .select({ id: artists.id })
@@ -984,18 +1021,68 @@ export const generateArtistNumber = async (code_letters: string, genre_id: numbe
   return artist_genre_code;
 };
 
+export type UpdateAlbumRow = {
+  album_title: string;
+  label: string;
+  label_id?: number;
+  genre_id: number;
+  format_id: number;
+  artist_id: number;
+  artist_name: string;
+  alternate_artist_name?: string | null;
+  disc_quantity: number;
+};
+
+export const updateAlbumInDB = async (album_id: number, updates: UpdateAlbumRow) => {
+  const result = await db
+    .update(library)
+    .set({
+      album_title: updates.album_title,
+      label: updates.label,
+      label_id: updates.label_id,
+      genre_id: updates.genre_id,
+      format_id: updates.format_id,
+      artist_id: updates.artist_id,
+      artist_name: updates.artist_name,
+      alternate_artist_name: updates.alternate_artist_name ?? null,
+      disc_quantity: updates.disc_quantity,
+      last_modified: sql`NOW()`,
+    })
+    .where(eq(library.id, album_id))
+    .returning({ id: library.id });
+  return result[0];
+};
+
+export const artistExistsInGenre = async (artist_id: number, genre_id: number): Promise<boolean> => {
+  const rows = await db
+    .select({ artist_id: genre_artist_crossreference.artist_id })
+    .from(genre_artist_crossreference)
+    .where(
+      and(eq(genre_artist_crossreference.artist_id, artist_id), eq(genre_artist_crossreference.genre_id, genre_id))
+    )
+    .limit(1);
+  return rows.length > 0;
+};
+
 export const getAlbumFromDB = async (album_id: number) => {
   const album = await db
     .select({
       id: library.id,
+      artist_id: library.artist_id,
+      genre_id: library.genre_id,
+      format_id: library.format_id,
       code_letters: artists.code_letters,
       code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       artist_name: artists.artist_name,
       alphabetical_name: artists.alphabetical_name,
       album_title: library.album_title,
+      label: library.label,
       record_label: library.label,
       label_id: library.label_id,
+      alternate_artist_name: library.alternate_artist_name,
+      disc_quantity: library.disc_quantity,
+      album_artist: library.album_artist,
       plays: library.plays,
       add_date: library.add_date,
       last_modified: library.last_modified,
