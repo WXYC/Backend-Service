@@ -23,7 +23,7 @@ import {
 } from '@wxyc/lml-client';
 import type { DiscogsMatchResult, DiscogsReleaseMetadata, DiscogsTrackItem, LookupResponse } from '@wxyc/lml-client';
 import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
-import { filterSpacerGif } from '../services/metadata/metadata.service.js';
+import { filterSpacerGif, isSyntheticArtwork } from '../services/metadata/metadata.service.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
@@ -203,14 +203,13 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
  * — release id/url, artwork URL, artist bio/wiki, streaming URLs. These are
  * present regardless of whether `extended=true` was requested.
  *
- * LML#401 synth shape (`release_id=0` + `release_url=""`) marks a
- * streaming-only result on a Discogs miss. Skip the Discogs identifier
- * fields so the proxy response doesn't surface release_id=0 / "" — but
- * keep the streaming-URL projection so iOS can render buttons.
+ * LML#401 synth shape — see `isSyntheticArtwork()` in metadata.service.ts.
+ * Streaming URLs still flow on the synth path; the Discogs identifier
+ * fields are skipped so the proxy response doesn't surface `release_id=0`
+ * / `release_url=""`.
  */
 function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork: DiscogsMatchResult): void {
-  const synthetic = artwork.release_id === 0 && artwork.release_url === '';
-  if (!synthetic) {
+  if (!isSyntheticArtwork(artwork)) {
     metadata.discogsReleaseId = artwork.release_id;
     metadata.discogsUrl = artwork.release_url;
   }

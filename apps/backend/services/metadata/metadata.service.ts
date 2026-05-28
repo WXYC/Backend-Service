@@ -120,8 +120,12 @@ export function filterSpacerGif(url: string | null | undefined): string | undefi
  * sentinel pair to skip persisting `release_id=0` / `discogs_url=""`
  * on the flowsheet (would otherwise pollute filtered queries like
  * `WHERE discogs_release_id IS NOT NULL`). Streaming URLs still flow.
+ *
+ * Exported as the canonical implementation so `proxy.controller.ts`
+ * shares one check site — mirrors the cross-file pattern established
+ * by `filterSpacerGif` above.
  */
-function isSyntheticArtwork(artwork: DiscogsMatchResult): boolean {
+export function isSyntheticArtwork(artwork: DiscogsMatchResult): boolean {
   return artwork.release_id === 0 && artwork.release_url === '';
 }
 
