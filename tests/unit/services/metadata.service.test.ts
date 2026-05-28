@@ -243,6 +243,25 @@ describe('metadata.service', () => {
     expect(result?.artist).toBeUndefined();
   });
 
+  it('treats half-synth shapes as real Discogs matches (pins && semantics)', async () => {
+    // LML emits the synth sentinel as an atomic pair: release_id=0 AND
+    // release_url="". Half-synth shapes (only one of the two) aren't
+    // emitted today, but pinning the `&&` predicate here means a future
+    // refactor that loosens it to `||` can't silently slip past CI.
+    // If LML ever starts emitting just `release_id=0`, this test will
+    // need to be updated alongside the predicate.
+    const halfSynthResponse = structuredClone(lookupResponseWithResults);
+    halfSynthResponse.results[0].artwork.release_id = 0;
+    // release_url stays as the real Discogs URL.
+    mockLookupMetadata.mockResolvedValue(halfSynthResponse);
+
+    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
+
+    // discogsReleaseId surfaces as 0 (treated as real), not skipped.
+    expect(result?.album?.discogsReleaseId).toBe(0);
+    expect(result?.album?.discogsUrl).toBe('https://www.discogs.com/release/12345');
+  });
+
   it('rethrows when lookup fails so the caller can route to Sentry', async () => {
     // The previous behavior — swallowing LML errors and falling through to
     // synthesized search URLs — is removed in #639. Failures now propagate
