@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/rotation-release-id-backfill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot ETL: pre-resolve rotation.discogs_release_id for active rows via LML so the dj-site picker becomes a deterministic SQL read instead of a runtime LML cascade (BS#1029 / BS#994).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_rotation_release_id_backfill:ci -f ../../Dockerfile.rotation-release-id-backfill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.53.1",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
