@@ -1038,7 +1038,7 @@ describe('library.service', () => {
       const results = await searchLibraryByTrack('Back, Baby', 10);
 
       expect(mockLookupBySong).toHaveBeenCalledTimes(1);
-      expect(mockLookupBySong).toHaveBeenCalledWith('Back, Baby');
+      expect(mockLookupBySong).toHaveBeenCalledWith('Back, Baby', { budgetMs: 5000 });
       // Bridge query reads from `library` (with joins) so the unique index
       // on legacy_release_id is reachable.
       expect(libraryChain.from).toHaveBeenCalledWith(library);
@@ -1451,7 +1451,7 @@ describe('library.service', () => {
       await searchLibraryByTrack('Different Song', 10);
 
       expect(mockLookupBySong.mock.calls.length).toBe(callsAfterFirst + 1);
-      expect(mockLookupBySong).toHaveBeenLastCalledWith('Different Song');
+      expect(mockLookupBySong).toHaveBeenLastCalledWith('Different Song', { budgetMs: 5000 });
     });
 
     it('trim + lowercase: variations of the same query share one cache entry', async () => {
@@ -1864,7 +1864,7 @@ describe('library.service', () => {
       const enriched = await enrichWithArtwork(results);
 
       expect(enriched[0].artwork_url).toBe('https://i.discogs.com/confield.jpg');
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield');
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, { budgetMs: 5000 });
       expect(db.update).toHaveBeenCalled();
     });
 
@@ -1952,7 +1952,7 @@ describe('library.service', () => {
       expect(enriched[1].artwork_url).toBe('https://i.discogs.com/lp5.jpg');
       // Only one LML call (for LP5, not Confield)
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5');
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, { budgetMs: 5000 });
     });
 
     it('handles LML returning no results', async () => {
@@ -2202,9 +2202,15 @@ describe('library.service', () => {
       const result = await getDiscogsReleaseIdByRotationId(42);
 
       expect(result).toBe(4080);
-      // The picker passes a 5 s budget so a hung LML call doesn't stall the
-      // dropdown for 30 s and tie up the shared LML semaphore permit (BS#992).
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, { timeoutMs: 5000 });
+      // The picker passes a 5 s fetch timeout so a hung LML call doesn't stall
+      // the dropdown for 30 s and tie up the shared LML semaphore permit
+      // (BS#992). The 4 s budgetMs forwards as X-Caller-Budget-Ms so LML's A10
+      // cutoff abandons its empty-results cascade ~1 s before BS aborts the
+      // fetch (WXYC/library-metadata-lookup#403/#404).
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
+        timeoutMs: 5000,
+        budgetMs: 4000,
+      });
     });
 
     it('does not call LML when the direct column has a value', async () => {

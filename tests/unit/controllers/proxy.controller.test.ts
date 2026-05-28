@@ -647,6 +647,7 @@ describe('proxy.controller', () => {
         // the new fields.
         expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
           extended: true,
+          budgetMs: 5000,
         });
       });
 

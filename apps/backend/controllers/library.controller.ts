@@ -23,6 +23,17 @@ import {
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
 
+/**
+ * Caller-honored LML budget forwarded as `X-Caller-Budget-Ms`
+ * (WXYC/library-metadata-lookup#345). Used by both the add-album insert
+ * (which blocks the 201 response on the LML enrichment) and the
+ * fire-and-forget canonical-entity resolution. 5 s matches the
+ * runtime-interactive class — the row is already persisted by the time
+ * either call fires, so the budget is about freeing LML's Discogs quota
+ * for an obscure-artist cascade, not about user-facing latency on the 201.
+ */
+const LIBRARY_LML_BUDGET_MS = Number(process.env.LIBRARY_LML_BUDGET_MS ?? 5000);
+
 type NewAlbumRequest = {
   album_title: string;
   artist_name?: string;
@@ -93,7 +104,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     const artistName = body.alternate_artist_name || body.artist_name || '';
     const [streamingResult, artworkResult] = await Promise.allSettled([
       checkStreamingAvailability(artistName, body.album_title),
-      lookupMetadata(artistName, body.album_title),
+      lookupMetadata(artistName, body.album_title, undefined, { budgetMs: LIBRARY_LML_BUDGET_MS }),
     ]);
 
     if (streamingResult.status === 'fulfilled' && streamingResult.value.on_streaming !== null) {
@@ -141,7 +152,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 function fireAndForgetCanonicalEntity(libraryId: number, artistName: string | null, albumTitle: string): void {
   if (!artistName) return;
 
-  lookupMetadata(artistName, albumTitle)
+  lookupMetadata(artistName, albumTitle, undefined, { budgetMs: LIBRARY_LML_BUDGET_MS })
     .then(async (response) => {
       const linkage = libraryService.mapLookupToCanonicalEntity(response);
       if (!linkage) return;

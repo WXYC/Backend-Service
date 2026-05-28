@@ -56,6 +56,17 @@ function singleLookupEnabled(): boolean {
   return process.env.PROXY_METADATA_SINGLE_LOOKUP === 'true';
 }
 
+/**
+ * Caller-honored LML budget forwarded as `X-Caller-Budget-Ms`
+ * (WXYC/library-metadata-lookup#345). Set tightly because the proxy path is
+ * user-visible (iOS playlist + dj-site cover-art); we'd rather degrade to
+ * synthesized fallback URLs than hold the response on an obscure-artist
+ * cascade burning Discogs quota for a response we'll discard. Matches the
+ * 5 s deadline used by the rotation picker (BS#992) and the
+ * WXYC/library-metadata-lookup#337 re-measurement target.
+ */
+const PROXY_LML_BUDGET_MS = Number(process.env.PROXY_LML_BUDGET_MS ?? 5000);
+
 /** Spotify OAuth2 token response. */
 interface SpotifyTokenResponse {
   access_token: string;
@@ -309,9 +320,14 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   try {
     let lookupResponse: LookupResponse;
     if (useSingleLookup) {
-      lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle, { extended: true });
+      lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle, {
+        extended: true,
+        budgetMs: PROXY_LML_BUDGET_MS,
+      });
     } else {
-      lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle);
+      lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle, {
+        budgetMs: PROXY_LML_BUDGET_MS,
+      });
     }
     upstreamCalls += 1;
     artwork = lookupResponse.results?.[0]?.artwork;

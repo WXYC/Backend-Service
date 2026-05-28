@@ -41,6 +41,19 @@ import { filterForEnrichment, type EnrichmentCandidate } from './cdc-subscriber.
 import { finalizeRow, type FinalizeOutcome } from './enrich.js';
 
 /**
+ * Caller-honored LML budget forwarded as `X-Caller-Budget-Ms`
+ * (WXYC/library-metadata-lookup#345). The CDC consumer is fire-and-forget,
+ * but a slow lookup holds the row in `enriching` state until the C6
+ * stranded-claim sweep (#895) reverts it past `enriching_since + 60s`.
+ * Tracking the shared LML client's 30 s fetch timeout with 1 s of slack
+ * lets LML's A10 cutoff (WXYC/library-metadata-lookup#403/#404) abandon an
+ * obscure-artist cascade just before the BS `AbortController` would, so the
+ * row gets reclaimed by C6 sooner rather than burning Discogs quota on an
+ * answer the worker won't render.
+ */
+const ENRICHMENT_LML_BUDGET_MS = Number(process.env.ENRICHMENT_LML_BUDGET_MS ?? 29000);
+
+/**
  * Build a CDC event handler that runs the full enrichment chain.
  *
  * The returned function is the long-lived handler that
@@ -83,7 +96,8 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
           const response = await lookupMetadata(
             candidate.artist_name,
             candidate.album_title ?? undefined,
-            candidate.track_title ?? undefined
+            candidate.track_title ?? undefined,
+            { budgetMs: ENRICHMENT_LML_BUDGET_MS }
           );
           outcome = await finalizeRow(candidate, response);
         } catch (err) {
