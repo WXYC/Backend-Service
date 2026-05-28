@@ -20,6 +20,7 @@ jest.mock('@wxyc/database', () => ({
 jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: jest.fn(),
   isLmlConfigured: jest.fn().mockReturnValue(false),
+  envInt: (_name: string, fallback: number) => fallback,
 }));
 
 jest.mock('../../../apps/backend/services/requestLine/types', () => ({

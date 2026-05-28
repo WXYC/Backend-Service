@@ -31,6 +31,7 @@ jest.mock('@wxyc/lml-client', () => ({
   getArtistDetails: mockGetArtistDetails,
   resolveEntity: mockResolveEntity,
   searchLibrary: mockSearchLibrary,
+  envInt: (_name: string, fallback: number) => fallback,
   LmlClientError: MockLmlClientError,
 }));
 

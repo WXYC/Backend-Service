@@ -9,6 +9,7 @@ jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   lookupBySong: mockLookupBySong,
   isLmlConfigured: mockIsLmlConfigured,
+  envInt: (_name: string, fallback: number) => fallback,
 }));
 
 // Mock @sentry/node so we can assert that searchLibraryByTrack creates a

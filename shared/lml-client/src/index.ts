@@ -84,15 +84,18 @@ const TIMEOUT_MS = 30000;
  * with the client and stays the chokepoint for every consumer.
  */
 
-function envInt(name: string, fallback: number): number {
+/**
+ * Read a positive-integer env var with a fallback. Empty string and undefined
+ * map to the fallback; `0`, negative, and non-numeric values trigger a startup
+ * warn and also fall back — silently shipping `NaN`/`0` to downstream consumers
+ * (a semaphore-permit count, a budget header, etc.) is the failure mode this
+ * guards against.
+ */
+export function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
   const parsed = Number(raw);
   if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  // Surface misconfigurations at startup so an operator who set `=0`
-  // intending to disable the limiter sees their value was rejected
-  // instead of silently falling back. A 0-permit semaphore would
-  // deadlock, which is why we don't accept it.
   console.warn(`lml.client: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`);
   return fallback;
 }
@@ -283,6 +286,28 @@ function getBaseUrl(): string {
   return url.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
 }
 
+/**
+ * Caller-honored LML budget header (WXYC/library-metadata-lookup#345). When
+ * present, LML short-circuits its empty-results cascade once the budget
+ * elapses (WXYC/library-metadata-lookup#403/#404). Emitted by `postLookup`
+ * and `bulkLookupMetadata` when the caller sets `options.budgetMs`.
+ */
+const CALLER_BUDGET_HEADER = 'X-Caller-Budget-Ms';
+
+/**
+ * Build the request headers for a `/lookup` or `/lookup/bulk` POST. Returns a
+ * fresh object so callers can safely mutate. `budgetMs` becomes the
+ * `CALLER_BUDGET_HEADER` value when set; absent budget means no header (LML
+ * keeps the pre-A10 safety branch).
+ */
+function buildLookupHeaders(budgetMs?: number): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (budgetMs !== undefined) {
+    headers[CALLER_BUDGET_HEADER] = String(budgetMs);
+  }
+  return headers;
+}
+
 async function lmlFetch(path: string, init?: RequestInit, timeoutMs?: number): Promise<Response> {
   const url = `${getBaseUrl()}${path}`;
   const controller = new AbortController();
@@ -464,20 +489,11 @@ async function postLookup(
         console.warn('lml.client: failed to project queue_depth onto span', err);
       }
 
-      // Only emit X-Caller-Budget-Ms when the caller set budgetMs — absent
-      // header means LML keeps the pre-A10 safety branch for warm-cache /
-      // write-path callers (WXYC/library-metadata-lookup#403/#404). Same
-      // header-forwarding shape as `bulkLookupMetadata`.
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (options?.budgetMs !== undefined) {
-        headers['X-Caller-Budget-Ms'] = String(options.budgetMs);
-      }
-
       const response = await lmlFetch(
         '/api/v1/lookup',
         {
           method: 'POST',
-          headers,
+          headers: buildLookupHeaders(options?.budgetMs),
           body: JSON.stringify(body),
         },
         options?.timeoutMs
@@ -601,16 +617,11 @@ export async function bulkLookupMetadata(
         console.warn('lml.client: failed to project queue_depth + bulk.size onto span', err);
       }
 
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (options?.budgetMs !== undefined) {
-        headers['X-Caller-Budget-Ms'] = String(options.budgetMs);
-      }
-
       const response = await lmlFetch(
         '/api/v1/lookup/bulk',
         {
           method: 'POST',
-          headers,
+          headers: buildLookupHeaders(options?.budgetMs),
           body: JSON.stringify({ items }),
         },
         options?.timeoutMs

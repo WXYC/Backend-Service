@@ -33,7 +33,7 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { lookupMetadata } from '@wxyc/lml-client';
+import { lookupMetadata, envInt } from '@wxyc/lml-client';
 import type { CdcEvent } from '@wxyc/database';
 
 import { claimRowForEnrichment } from './claim.js';
@@ -41,17 +41,12 @@ import { filterForEnrichment, type EnrichmentCandidate } from './cdc-subscriber.
 import { finalizeRow, type FinalizeOutcome } from './enrich.js';
 
 /**
- * Caller-honored LML budget forwarded as `X-Caller-Budget-Ms`
- * (WXYC/library-metadata-lookup#345). The CDC consumer is fire-and-forget,
- * but a slow lookup holds the row in `enriching` state until the C6
- * stranded-claim sweep (#895) reverts it past `enriching_since + 60s`.
- * Tracking the shared LML client's 30 s fetch timeout with 1 s of slack
- * lets LML's A10 cutoff (WXYC/library-metadata-lookup#403/#404) abandon an
- * obscure-artist cascade just before the BS `AbortController` would, so the
- * row gets reclaimed by C6 sooner rather than burning Discogs quota on an
- * answer the worker won't render.
+ * Budget for the CDC consumer's lookup. Tracks the shared client's 30 s
+ * fetch timeout with 1 s of slack so LML cuts off just before the
+ * `AbortController` would — frees the row's `enriching` claim for C6 sweep
+ * recovery (#895) sooner. See `LookupOptions.budgetMs` for mechanics.
  */
-const ENRICHMENT_LML_BUDGET_MS = Number(process.env.ENRICHMENT_LML_BUDGET_MS ?? 29000);
+const ENRICHMENT_LML_BUDGET_MS = envInt('ENRICHMENT_LML_BUDGET_MS', 29000);
 
 /**
  * Build a CDC event handler that runs the full enrichment chain.
