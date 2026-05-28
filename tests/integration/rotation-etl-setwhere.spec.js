@@ -120,15 +120,52 @@ describe('rotation-etl value-aware setWhere (BS#1063)', () => {
     expect(after[0].rotation_bin).toBe('H');
   });
 
+  test('NULL → integer transition fires an UPDATE (IS DISTINCT FROM semantics)', async () => {
+    // discogs_release_id is nullable. The plain `=` predicate would yield
+    // NULL on a NULL → integer transition and skip the UPDATE — silently
+    // dropping the new value. IS DISTINCT FROM is the right operator.
+    const before = await sql`
+      SELECT xmin::text AS xmin, discogs_release_id
+      FROM ${sql(SCHEMA)}.rotation
+      WHERE legacy_rotation_id = ${ROTATION_LEGACY_ID}
+    `;
+    expect(before[0].discogs_release_id).toBeNull();
+
+    await upsertRotationEtlShape(sql, {
+      legacy_rotation_id: ROTATION_LEGACY_ID,
+      legacy_library_release_id: 5550001,
+      album_id: null,
+      rotation_bin: 'H',
+      add_date: '2026-05-24',
+      kill_date: null,
+      artist_name: 'Jessica Pratt',
+      album_title: 'On Your Own Love Again',
+      record_label: 'Drag City',
+      discogs_release_id: 123456,
+    });
+    const after = await sql`
+      SELECT xmin::text AS xmin, discogs_release_id
+      FROM ${sql(SCHEMA)}.rotation
+      WHERE legacy_rotation_id = ${ROTATION_LEGACY_ID}
+    `;
+    expect(after[0].xmin).not.toBe(before[0].xmin);
+    expect(after[0].discogs_release_id).toBe(123456);
+  });
+
   // BS#1029 — load-bearing behavior. Without COALESCE, the 30-min rotation-etl
   // cron clobbers any value written by jobs/rotation-release-id-backfill on
   // its next tick (tubafrenzy's discogs_release_id column is empty for 100% of
   // prod rows, so excluded.discogs_release_id is NULL on every tick). This is
   // the regression that motivated the entire ticket.
+  //
+  // Tests below explicitly arrange the row state they need rather than
+  // relying on the preceding test's residue — earlier tests in this file
+  // share row state (the row inserted in test 1 carries forward), but
+  // BS#1029's tests reset to a known shape so they can run in any order.
   test('COALESCE preserves a backfill-written id when tubafrenzy contributes NULL', async () => {
-    // Simulate the backfill writing a release id with the
+    // Arrange: simulate the backfill writing a release id with the
     // lml_offline_backfill source — what jobs/rotation-release-id-backfill
-    // does. The row already exists from the first test's upsert.
+    // does.
     await sql`
       UPDATE ${sql(SCHEMA)}.rotation
       SET discogs_release_id = 999001,
@@ -136,13 +173,13 @@ describe('rotation-etl value-aware setWhere (BS#1063)', () => {
       WHERE legacy_rotation_id = ${ROTATION_LEGACY_ID}
     `;
 
-    // The rotation-etl tick re-upserts with tubafrenzy's current shape:
+    // Act: the rotation-etl tick re-upserts with tubafrenzy's current shape:
     // discogs_release_id = NULL (the prod state today).
     await upsertRotationEtlShape(sql, {
       legacy_rotation_id: ROTATION_LEGACY_ID,
       legacy_library_release_id: 5550001,
       album_id: null,
-      rotation_bin: 'M',
+      rotation_bin: 'H',
       add_date: '2026-05-24',
       kill_date: null,
       artist_name: 'Jessica Pratt',
@@ -165,8 +202,6 @@ describe('rotation-etl value-aware setWhere (BS#1063)', () => {
   // MD-paste must win on both columns: the paste-URL wins the id, AND the
   // source flips so future readers know the value is now MD-verified.
   test('tubafrenzy paste overrides a backfill-written id and flips source', async () => {
-    // Reset state to a backfill-written row, then run the rotation-etl
-    // tick with a non-NULL excluded.discogs_release_id.
     await sql`
       UPDATE ${sql(SCHEMA)}.rotation
       SET discogs_release_id = 999001,
@@ -177,7 +212,7 @@ describe('rotation-etl value-aware setWhere (BS#1063)', () => {
       legacy_rotation_id: ROTATION_LEGACY_ID,
       legacy_library_release_id: 5550001,
       album_id: null,
-      rotation_bin: 'M',
+      rotation_bin: 'H',
       add_date: '2026-05-24',
       kill_date: null,
       artist_name: 'Jessica Pratt',
@@ -216,7 +251,7 @@ describe('rotation-etl value-aware setWhere (BS#1063)', () => {
       legacy_rotation_id: ROTATION_LEGACY_ID,
       legacy_library_release_id: 5550001,
       album_id: null,
-      rotation_bin: 'M',
+      rotation_bin: 'H',
       add_date: '2026-05-24',
       kill_date: null,
       artist_name: 'Jessica Pratt',
@@ -232,37 +267,5 @@ describe('rotation-etl value-aware setWhere (BS#1063)', () => {
     expect(after[0].xmin).toBe(before[0].xmin);
     expect(after[0].discogs_release_id).toBe(999001);
     expect(after[0].discogs_release_id_source).toBe('lml_offline_backfill');
-  });
-
-  test('NULL → integer transition fires an UPDATE (IS DISTINCT FROM semantics)', async () => {
-    // discogs_release_id is nullable. The plain `=` predicate would yield
-    // NULL on a NULL → integer transition and skip the UPDATE — silently
-    // dropping the new value. IS DISTINCT FROM is the right operator.
-    const before = await sql`
-      SELECT xmin::text AS xmin, discogs_release_id
-      FROM ${sql(SCHEMA)}.rotation
-      WHERE legacy_rotation_id = ${ROTATION_LEGACY_ID}
-    `;
-    expect(before[0].discogs_release_id).toBeNull();
-
-    await upsertRotationEtlShape(sql, {
-      legacy_rotation_id: ROTATION_LEGACY_ID,
-      legacy_library_release_id: 5550001,
-      album_id: null,
-      rotation_bin: 'H',
-      add_date: '2026-05-24',
-      kill_date: null,
-      artist_name: 'Jessica Pratt',
-      album_title: 'On Your Own Love Again',
-      record_label: 'Drag City',
-      discogs_release_id: 123456,
-    });
-    const after = await sql`
-      SELECT xmin::text AS xmin, discogs_release_id
-      FROM ${sql(SCHEMA)}.rotation
-      WHERE legacy_rotation_id = ${ROTATION_LEGACY_ID}
-    `;
-    expect(after[0].xmin).not.toBe(before[0].xmin);
-    expect(after[0].discogs_release_id).toBe(123456);
   });
 });
