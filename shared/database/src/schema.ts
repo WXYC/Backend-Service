@@ -452,6 +452,28 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
   'enriched_no_match',
   'failed_no_retry',
 ]);
+
+// Provenance for `rotation.discogs_release_id` (BS#1029). Two values:
+//
+//   tubafrenzy_paste     — mirrored from tubafrenzy ROTATION_RELEASE
+//                          .DISCOGS_RELEASE_ID by `jobs/rotation-etl`,
+//                          populated by the rotation form's paste-URL
+//                          prefill (music-director-verified).
+//   lml_offline_backfill — written by `jobs/rotation-release-id-backfill`
+//                          (one-shot ETL, BS#1029) after LML resolved the
+//                          `(artist, album)` tuple to a Discogs release id.
+//
+// Column default is `tubafrenzy_paste` so existing pre-migration rows
+// (PG11+ `attmissingval` virtual default) and new rotation-etl inserts
+// are correctly attributed without rotation-etl having to set the column
+// explicitly. The backfill writes `lml_offline_backfill` and the
+// rotation-etl ON CONFLICT path flips it back to `tubafrenzy_paste`
+// when tubafrenzy contributes a non-NULL id (COALESCE-paired with
+// `rotation.discogs_release_id`).
+export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_source_enum', [
+  'tubafrenzy_paste',
+  'lml_offline_backfill',
+]);
 /**
  * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes
  * rotation rows in tubafrenzy; Backend-Service is downstream. Tubafrenzy
@@ -493,8 +515,18 @@ export const rotation = wxyc_schema.table(
     // in tubafrenzy. NULL when the music director added the release without
     // a Discogs URL. Read path: getDiscogsReleaseIdByRotationId — reads
     // here first, falls back to library_identity for post-tubafrenzy-turndown
-    // rows created via dj-site.
+    // rows created via dj-site. Also written by
+    // jobs/rotation-release-id-backfill (BS#1029) — see
+    // `discogs_release_id_source` below for provenance.
     discogs_release_id: integer('discogs_release_id'),
+    // Provenance for `discogs_release_id` (BS#1029). See
+    // `discogsReleaseIdSourceEnum` above for value semantics. The DEFAULT
+    // applies virtually to existing pre-migration rows; the
+    // jobs/rotation-release-id-backfill writer overrides to
+    // 'lml_offline_backfill' on the UPDATE that resolves a NULL id.
+    discogs_release_id_source: discogsReleaseIdSourceEnum('discogs_release_id_source')
+      .notNull()
+      .default('tubafrenzy_paste'),
   },
   (table) => {
     return {
@@ -910,12 +942,24 @@ export type AlbumMetadata = InferSelectModel<typeof album_metadata>;
  * (the seed inserted at migration apply time), so reads never need a
  * predicate beyond the implicit "the row".
  */
-export const flowsheet_watermark = wxyc_schema.table('flowsheet_watermark', {
-  // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
-  id: boolean('id').primaryKey().notNull().default(true),
-  // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
-  last_modified_at: timestamp('last_modified_at', { withTimezone: true }).defaultNow().notNull(),
-});
+export const flowsheet_watermark = wxyc_schema.table(
+  'flowsheet_watermark',
+  {
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    id: boolean('id').primaryKey().notNull().default(true),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    last_modified_at: timestamp('last_modified_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (_table) => [
+    // Singleton-row guard ships in migration 0084 (BS#902 / BS#628) but was
+    // missing from the Drizzle table model, leaving the snapshot/schema diff
+    // perpetually "out of sync". Adding the model here lets drizzle:generate
+    // produce clean diffs for downstream PRs (BS#1029 surfaced this). The
+    // raw `"id" = true` form (no schema/table qualification) matches 0084's
+    // snapshot byte-for-byte so no DROP/ADD pair is generated.
+    check('flowsheet_watermark_singleton', sql.raw(`"id" = true`)),
+  ]
+);
 
 export const album_metadata = wxyc_schema.table('album_metadata', {
   // `.notNull()` is redundant with `.primaryKey()` at the SQL level (PK

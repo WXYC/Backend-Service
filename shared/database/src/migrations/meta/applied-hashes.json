@@ -81,5 +81,6 @@
   "0081_flowsheet-album-link-lookup-idx": "de71df66220f140601312711e74ed3e14219b6ab49519e79857726a2d3a87d71",
   "0082_drop-flowsheet-artwork-lookup-idx": "ec2c124cba2e31a7a280ad33b59e447c8de5d8f25bb64abf08c48156214efbe1",
   "0083_drop-flowsheet-dj-name-trgm-idx": "8a5ab046cbe6179d61c8de292ff4e5c11f4ba497399c709dcc28233aaa801f11",
-  "0084_flowsheet-updated-at": "1ddcd97d8ebf568c7d8f47d8d8d83e869bda38c488d1ff500057c1e8a823b951"
+  "0084_flowsheet-updated-at": "1ddcd97d8ebf568c7d8f47d8d8d83e869bda38c488d1ff500057c1e8a823b951",
+  "0085_rotation-discogs-release-id-source": "c7623638e10c3fe488fcdd720b382a5f07a24d1dac632c74598715482a1b91b7"
 }
