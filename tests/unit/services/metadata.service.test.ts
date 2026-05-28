@@ -27,6 +27,8 @@ jest.mock('../../../apps/backend/services/metadata/providers/search-urls.provide
     getAllSearchUrls: (artist: string, album?: string, track?: string) => {
       const q = track ? `${artist} ${track}` : album ? `${artist} ${album}` : artist;
       return {
+        spotifyUrl: `https://open.spotify.com/search/${encodeURIComponent(q)}`,
+        appleMusicUrl: `https://music.apple.com/search?term=${encodeURIComponent(q)}`,
         youtubeMusicUrl: `https://music.youtube.com/search?q=${encodeURIComponent(q)}`,
         bandcampUrl: `https://bandcamp.com/search?q=${encodeURIComponent(q)}`,
         soundcloudUrl: `https://soundcloud.com/search?q=${encodeURIComponent(q)}`,
@@ -167,7 +169,11 @@ describe('metadata.service', () => {
     expect(result?.album?.soundcloudUrl).toContain('soundcloud.com');
   });
 
-  it('uses SearchUrlProvider fallback when all LML URLs are null', async () => {
+  it('uses SearchUrlProvider fallback for every streaming service when LML URLs are null (BS#1185)', async () => {
+    // Pre-BS#1185, Spotify and Apple Music had no search-URL fallback, so a
+    // release with artwork-but-no-streaming-URLs left iOS with two greyed
+    // buttons. Post-BS#1185, all five services have search-URL fallbacks
+    // via `SearchUrlProvider`.
     const responseNoUrls = structuredClone(lookupResponseWithResults);
     const artwork = responseNoUrls.results[0].artwork;
     artwork.spotify_url = null;
@@ -179,12 +185,62 @@ describe('metadata.service', () => {
 
     const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
+    expect(result?.album?.spotifyUrl).toContain('open.spotify.com/search');
+    expect(result?.album?.appleMusicUrl).toContain('music.apple.com/search');
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
     expect(result?.album?.bandcampUrl).toContain('bandcamp.com');
     expect(result?.album?.soundcloudUrl).toContain('soundcloud.com');
-    // API-sourced URLs remain undefined (null → undefined)
-    expect(result?.album?.spotifyUrl).toBeUndefined();
-    expect(result?.album?.appleMusicUrl).toBeUndefined();
+  });
+
+  it('omits discogsReleaseId/discogsUrl on LML synth shape (release_id=0, release_url="")', async () => {
+    // LML#401: when LML returns a streaming-only synthesized result on a
+    // Discogs miss, BS must NOT persist release_id=0 / discogs_url="" to
+    // the flowsheet. The streaming-URL fields still flow through normally.
+    // See WXYC/library-metadata-lookup#401 and BS#1185.
+    const synthResponse = {
+      results: [
+        {
+          library_item: lookupResponseWithResults.results[0].library_item,
+          artwork: {
+            release_id: 0,
+            release_url: '',
+            artwork_url: null,
+            album: null,
+            artist: null,
+            confidence: 0,
+            release_year: null,
+            artist_bio: null,
+            wikipedia_url: null,
+            spotify_url: 'https://open.spotify.com/search/Julianna%20Barwick%20Four%20Sleeping',
+            apple_music_url: 'https://music.apple.com/us/album/tragic-magic/1843854211',
+            youtube_music_url: 'https://music.youtube.com/search?q=Julianna%20Four',
+            bandcamp_url: 'https://bandcamp.com/search?q=Julianna%20Tragic',
+            soundcloud_url: 'https://soundcloud.com/search?q=Julianna%20Four',
+          },
+        },
+      ],
+      search_type: 'artist_only',
+      song_not_found: false,
+      found_on_compilation: false,
+    };
+    mockLookupMetadata.mockResolvedValue(synthResponse);
+
+    const result = await fetchMetadata({
+      artistName: 'Julianna Barwick & Mary Lattimore',
+      albumTitle: 'Tragic Magic',
+      trackTitle: 'The Four Sleeping Princesses',
+    });
+
+    // Synth-shape sentinels are not persisted.
+    expect(result?.album?.discogsReleaseId).toBeUndefined();
+    expect(result?.album?.discogsUrl).toBeUndefined();
+    // Streaming URLs from synth flow through unchanged.
+    expect(result?.album?.appleMusicUrl).toBe('https://music.apple.com/us/album/tragic-magic/1843854211');
+    expect(result?.album?.spotifyUrl).toBe('https://open.spotify.com/search/Julianna%20Barwick%20Four%20Sleeping');
+    // Album-derived fields stay undefined (positional gating from LML#401).
+    expect(result?.album?.releaseYear).toBeUndefined();
+    expect(result?.album?.artworkUrl).toBeUndefined();
+    expect(result?.artist).toBeUndefined();
   });
 
   it('rethrows when lookup fails so the caller can route to Sentry', async () => {
@@ -199,16 +255,29 @@ describe('metadata.service', () => {
     await expect(fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' })).rejects.toThrow('LML down');
   });
 
-  it('returns search URLs when lookup returns empty results', async () => {
+  it('returns search URLs for all five services when lookup returns empty results (BS#1184/BS#1185 Tragic Magic case)', async () => {
+    // The actual production failure mode: artist isn't in the WXYC library
+    // at all, LML returns zero results, BS gets no artwork to project.
+    // Post-BS#1185 the fallback fills Spotify + Apple search URLs alongside
+    // the existing YT/BC/SC three, so iOS doesn't show all-greyed buttons.
     mockLookupMetadata.mockResolvedValue(emptyLookupResponse);
 
-    const result = await fetchMetadata({ artistName: 'Unknown Artist' });
+    const result = await fetchMetadata({
+      artistName: 'Julianna Barwick & Mary Lattimore',
+      albumTitle: 'Tragic Magic',
+      trackTitle: 'The Four Sleeping Princesses',
+    });
 
+    expect(result?.album?.spotifyUrl).toContain('open.spotify.com/search');
+    expect(result?.album?.appleMusicUrl).toContain('music.apple.com/search');
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
+    expect(result?.album?.bandcampUrl).toContain('bandcamp.com');
+    expect(result?.album?.soundcloudUrl).toContain('soundcloud.com');
     expect(result?.album?.discogsReleaseId).toBeUndefined();
+    expect(result?.album?.discogsUrl).toBeUndefined();
   });
 
-  it('returns search URLs when result has no artwork', async () => {
+  it('returns search URLs for all five services when result has no artwork', async () => {
     const responseNoArtwork = {
       ...lookupResponseWithResults,
       results: [{ library_item: lookupResponseWithResults.results[0].library_item, artwork: null }],
@@ -217,6 +286,8 @@ describe('metadata.service', () => {
 
     const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
+    expect(result?.album?.spotifyUrl).toContain('open.spotify.com/search');
+    expect(result?.album?.appleMusicUrl).toContain('music.apple.com/search');
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
     expect(result?.album?.discogsReleaseId).toBeUndefined();
   });
