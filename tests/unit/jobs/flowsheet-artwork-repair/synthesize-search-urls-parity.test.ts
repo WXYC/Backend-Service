@@ -11,6 +11,12 @@
  * between the two implementations. This test pins them in lockstep so
  * the next drift fails CI loudly. Mirrors the sibling parity test under
  * `tests/unit/jobs/flowsheet-metadata-backfill/`.
+ *
+ * Asserted shape — the four URLs the canonical write path persists
+ * post-BS#1192: `spotify_url`, `youtube_music_url`, `bandcamp_url`,
+ * `soundcloud_url`. `apple_music_url` is excluded — null is load-bearing
+ * "no verified iTunes match" on the write path (the read-path proxy
+ * synthesizes a search URL when needed).
  */
 
 import { synthesizeSearchUrls } from '../../../../jobs/flowsheet-artwork-repair/repair';
@@ -39,6 +45,7 @@ describe('synthesizeSearchUrls parity with SearchUrlProvider', () => {
     });
     const canonicalOut = canonical.getAllSearchUrls(artist, album ?? undefined, track ?? undefined);
 
+    expect(inline.spotify_url).toBe(canonicalOut.spotifyUrl);
     expect(inline.youtube_music_url).toBe(canonicalOut.youtubeMusicUrl);
     expect(inline.bandcamp_url).toBe(canonicalOut.bandcampUrl);
     expect(inline.soundcloud_url).toBe(canonicalOut.soundcloudUrl);
