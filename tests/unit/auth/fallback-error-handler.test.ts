@@ -85,17 +85,18 @@ describe('fallbackErrorHandler (BS#1109 sanitisation)', () => {
     expect(jsonMock).toHaveBeenCalledWith({ error: 'test-env message' });
   });
 
-  it('sanitises in production when NODE_ENV is unset (defensive default would leak — so we explicitly only relax for non-production)', () => {
+  it('treats unset NODE_ENV as non-production (dev-server convenience)', () => {
+    // The sanitisation gate is positive-list on `=== 'production'`, so an
+    // unset NODE_ENV falls into the dev branch and returns the detailed
+    // message. Production deploys always set NODE_ENV, so this only matters
+    // for local `node app.js` invocations. The acceptance criterion (no
+    // leak when NODE_ENV === 'production') is covered above.
     delete process.env.NODE_ENV;
     const { res, jsonMock } = mockResponse();
     const error = new Error('would-be-leaky message');
 
     fallbackErrorHandler(error, mockReq, res, mockNext);
 
-    // NODE_ENV unset is treated as "not production" by the current branch,
-    // so the detailed message is returned. This matches the dev-server case
-    // where NODE_ENV isn't always set. The acceptance criterion (no leak in
-    // production) is covered by the production-mode test above.
     expect(jsonMock).toHaveBeenCalledWith({ error: 'would-be-leaky message' });
   });
 

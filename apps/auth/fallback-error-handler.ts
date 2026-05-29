@@ -12,8 +12,7 @@ import type { Request, Response, NextFunction } from 'express';
 export function fallbackErrorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
   Sentry.captureException(err);
 
-  const isProduction = process.env.NODE_ENV === 'production';
-  if (isProduction) {
+  if (process.env.NODE_ENV === 'production') {
     res.status(500).json({ error: 'Internal server error' });
     return;
   }
