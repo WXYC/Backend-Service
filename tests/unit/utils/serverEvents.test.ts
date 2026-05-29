@@ -37,67 +37,88 @@ describe('ServerEventsManager', () => {
     jest.useRealTimers();
   });
 
-  describe('inactivity timeout', () => {
-    it('disconnects an idle client after 5 minutes', () => {
-      const mgr = new ServerEventsManager('topic-a');
-      const res = createMockResponse();
-      const _client = mgr.registerClient(res);
+  describe('heartbeat (BS#1130)', () => {
+    const HEARTBEAT_FRAME = ': keepalive\n\n';
+    const HEARTBEAT_INTERVAL_MS = 30 * 1000;
 
-      jest.advanceTimersByTime(5 * 60 * 1000);
-
-      expect(res.end).toHaveBeenCalled();
+    beforeEach(() => {
+      (Sentry.captureException as jest.Mock).mockClear();
     });
 
-    it('resets the timeout when a broadcast is sent to the client', () => {
+    it('writes a SSE comment heartbeat every 30 seconds', () => {
       const mgr = new ServerEventsManager('topic-a');
       const res = createMockResponse();
-      const client = mgr.registerClient(res);
-      mgr.subscribe(['topic-a'], client.id);
+      mgr.registerClient(res);
 
-      // Advance 4.5 minutes (not yet at 5-min threshold)
-      jest.advanceTimersByTime(4.5 * 60 * 1000);
+      const writeMock = res.write as jest.Mock;
+      // Discard the initial connection-established frame so we count only heartbeats.
+      writeMock.mockClear();
 
-      // Broadcast — this should reset the inactivity timer
-      mgr.broadcast('topic-a', { type: 'update', payload: { value: 1 } });
+      jest.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+      expect(writeMock).toHaveBeenCalledWith(HEARTBEAT_FRAME);
+      expect(writeMock).toHaveBeenCalledTimes(1);
 
-      // Advance another 4.5 minutes (9 min total from registration,
-      // but only 4.5 min since last activity)
-      jest.advanceTimersByTime(4.5 * 60 * 1000);
-
-      // Client should still be connected because the timer was reset
-      expect(res.end).not.toHaveBeenCalled();
-      expect(mgr.getSubs(client.id)).toEqual(['topic-a']);
+      jest.advanceTimersByTime(2 * HEARTBEAT_INTERVAL_MS);
+      expect(writeMock).toHaveBeenCalledTimes(3);
+      expect(writeMock).toHaveBeenNthCalledWith(2, HEARTBEAT_FRAME);
+      expect(writeMock).toHaveBeenNthCalledWith(3, HEARTBEAT_FRAME);
     });
 
-    it('resets the timeout when a dispatch is sent to the client', () => {
-      const mgr = new ServerEventsManager('topic-a');
+    it('keeps a quiet-topic client connected indefinitely while heartbeats are flowing', () => {
+      // BS#1130 regression: the prior 5-minute inactivity timeout would disconnect
+      // healthy clients subscribed only to quiet topics (e.g. `mirror`, `primaryDj`).
+      const mgr = new ServerEventsManager('quiet-topic');
       const res = createMockResponse();
       const client = mgr.registerClient(res);
-      mgr.subscribe(['topic-a'], client.id);
+      mgr.subscribe(['quiet-topic'], client.id);
 
-      jest.advanceTimersByTime(4.5 * 60 * 1000);
-
-      mgr.dispatch('topic-a', client.id, { type: 'ping', payload: {} });
-
-      jest.advanceTimersByTime(4.5 * 60 * 1000);
+      // Simulate two hours of total silence on the topic — no broadcast,
+      // no dispatch — only heartbeat ticks. The old code disconnected at 5 min.
+      jest.advanceTimersByTime(2 * 60 * 60 * 1000);
 
       expect(res.end).not.toHaveBeenCalled();
-      expect(mgr.getSubs(client.id)).toEqual(['topic-a']);
+      expect(mgr.getSubs(client.id)).toEqual(['quiet-topic']);
     });
 
-    it('still disconnects if no activity occurs after the reset window', () => {
+    it('stops the heartbeat after the client disconnects', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      const res = createMockResponse();
+      const client = mgr.registerClient(res);
+
+      mgr.disconnect(client.id);
+
+      const writeMock = res.write as jest.Mock;
+      writeMock.mockClear();
+
+      jest.advanceTimersByTime(5 * HEARTBEAT_INTERVAL_MS);
+
+      expect(writeMock).not.toHaveBeenCalledWith(HEARTBEAT_FRAME);
+    });
+
+    it('cleans up the client when the heartbeat write fails (half-dead socket)', () => {
       const mgr = new ServerEventsManager('topic-a');
       const res = createMockResponse();
       const client = mgr.registerClient(res);
       mgr.subscribe(['topic-a'], client.id);
 
-      jest.advanceTimersByTime(2 * 60 * 1000);
-      mgr.broadcast('topic-a', { type: 'update', payload: {} });
+      const failure = new Error('write after end');
+      (res.write as jest.Mock).mockImplementation((frame: string) => {
+        if (frame === HEARTBEAT_FRAME) throw failure;
+        return true;
+      });
 
-      // Full 5 minutes after the broadcast with no further activity
-      jest.advanceTimersByTime(5 * 60 * 1000);
+      jest.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
 
-      expect(res.end).toHaveBeenCalled();
+      // Captured to Sentry with the heartbeat op tag.
+      expect(Sentry.captureException).toHaveBeenCalledWith(
+        failure,
+        expect.objectContaining({
+          tags: expect.objectContaining({ subsystem: 'sse', op: 'heartbeat' }),
+          extra: expect.objectContaining({ client_id: client.id }),
+        })
+      );
+      // unsubAll fired — subscription map is empty.
+      expect(mgr.getSubs(client.id)).toEqual([]);
     });
   });
 
