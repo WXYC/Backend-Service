@@ -47,11 +47,10 @@ const JOB_NAME = 'album-level-backfill';
  * empirically-validated post-LML#370 ceiling under live `enrichment-worker`
  * contention for LML's 5-permit Discogs semaphore. The 2026-05-28 Phase 3
  * canary (BS#1078 / BS#1197) measured 38–50 % per-batch timeout at
- * `batchSize=10` vs 3–10 % at `batchSize=5` — smaller batches yield *higher*
- * net throughput because `computeBulkTimeoutMs(5)=17_500 ms` lands cascade-
- * heavy items under LML's 25 s `caller_budget_ms` window, while `(10)=30_000
- * ms` races the shared LML-client's own 30 s socket timeout. Catch-up
- * throughput comes from `BACKFILL_BULK_RATE_PER_MIN`, not this knob. */
+ * `batchSize=10` vs 3–10 % at `batchSize=5` — smaller batches keep total
+ * wall-clock inside LML's per-item 25 s `caller_budget_ms` cap (LML#370)
+ * instead of stacking cascade-bound items past it. Catch-up throughput
+ * comes from `BACKFILL_BULK_RATE_PER_MIN`, not this knob. */
 export const BULK_BATCH_SIZE_ENV = 'BACKFILL_BULK_BATCH_SIZE';
 export const BULK_BATCH_SIZE_DEFAULT = 5;
 
@@ -68,9 +67,16 @@ export const BULK_RATE_PER_MIN_DEFAULT = 1;
 export const BULK_BUDGET_MS_ENV = 'BACKFILL_BULK_BUDGET_MS';
 export const BULK_BUDGET_MS_DEFAULT = 25_000;
 
-/** Per-item slice of the bulk fetch timeout. Matches LML's amortized
- * rate: `BULK_BUDGET_MS_DEFAULT / LML_BULK_MAX_CONCURRENT = 25_000 / 10`. */
-export const BULK_PER_ITEM_TIMEOUT_MS = 2_500;
+/** Per-item slice of the bulk fetch timeout. Sized from LML's realized
+ * concurrency for cascade-bound items: `BULK_BUDGET_MS_DEFAULT` divided
+ * by LML's 5-permit Discogs semaphore, not its 10-wide bulk fan-out.
+ * The earlier `25_000 / 10 = 2_500` derivation held for warm-cache items
+ * but broke under live `enrichment-worker` contention — the 2026-05-28
+ * Phase 3 canary (BS#1078 T1) measured min elapsed 25_045 ms per batch,
+ * pinned at LML#370's per-item 25 s cap. Widening to `25_000 / 5 = 5_000`
+ * gives each cascade-bound item a full per-permit share plus the
+ * cancellation headroom from LML#372. */
+export const BULK_PER_ITEM_TIMEOUT_MS = 5_000;
 
 /** Fixed slack on top of `batchSize × BULK_PER_ITEM_TIMEOUT_MS`:
  * HTTP overhead + JSON encode/decode + safety margin. */
