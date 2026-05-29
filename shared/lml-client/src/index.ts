@@ -426,7 +426,7 @@ type LookupBody = {
  * @returns Lookup results with library items and enriched artwork metadata
  */
 export async function lookupMetadata(
-  artist: string,
+  artist: string | undefined,
   album?: string,
   song?: string,
   options?: LookupOptions
@@ -435,7 +435,12 @@ export async function lookupMetadata(
   // are already structured. Synthesize a free-form description that the LML
   // parser would have produced — matches the e2e fixtures in LML's repo.
   const rawMessage = [artist, album, song].filter(Boolean).join(' - ');
-  const body: LookupBody = { artist, raw_message: rawMessage };
+  // `artist` is optional so callers can opt out of artist-side disambiguation
+  // when they know the artist field would poison the match (e.g. the rotation
+  // picker for Various-Artists releases — LML's parser does better with the
+  // album-only path than with "Various Artists" as a literal artist).
+  const body: LookupBody = { raw_message: rawMessage };
+  if (artist) body.artist = artist;
   if (album) body.album = album;
   if (song) body.song = song;
   if (options?.extended) body.extended = true;

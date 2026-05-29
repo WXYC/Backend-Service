@@ -66,8 +66,8 @@ describe('lml.client', () => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            artist: 'Autechre',
             raw_message: 'Autechre - Confield - VI Scose Poise',
+            artist: 'Autechre',
             album: 'Confield',
             song: 'VI Scose Poise',
           }),
@@ -87,7 +87,7 @@ describe('lml.client', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         'http://lml.test:8000/api/v1/lookup',
         expect.objectContaining({
-          body: JSON.stringify({ artist: 'Autechre', raw_message: 'Autechre' }),
+          body: JSON.stringify({ raw_message: 'Autechre', artist: 'Autechre' }),
         })
       );
     });
