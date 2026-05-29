@@ -1,17 +1,24 @@
 /**
  * Parity test: the inline `synthesizeSearchUrls` in
- * `apps/enrichment-worker/enrich.ts` MUST produce identical output to the
- * canonical `SearchUrlProvider.getAllSearchUrls` in
+ * `apps/enrichment-worker/enrich.ts` MUST produce the same write-path-
+ * eligible search URLs as the canonical `SearchUrlProvider` in
  * `apps/backend/services/metadata/providers/search-urls.provider.ts`
- * for the same inputs (BS#889).
+ * (BS#889 / BS#1189).
  *
  * The inline copy exists for the same build-graph-isolation reason as the
  * backfill's: `apps/enrichment-worker` is bundled independently of
  * `apps/backend`. The cost of that isolation is silent drift between the
  * two implementations — historically three different services diverged
- * here, and iOS users saw different YouTube/Bandcamp/SoundCloud URLs
- * depending on which BS path enriched the row. This test pins them in
- * lockstep so the next drift fails CI loudly.
+ * here, and iOS users saw different Spotify/YouTube/Bandcamp/SoundCloud
+ * URLs depending on which BS path enriched the row. This test pins them
+ * in lockstep so the next drift fails CI loudly.
+ *
+ * Asserted shape — the **four** URLs the canonical write path
+ * (`metadata.service.fetchMetadata`) actually persists post-BS#1192:
+ * `spotify_url`, `youtube_music_url`, `bandcamp_url`, `soundcloud_url`.
+ * `appleMusicUrl` is intentionally excluded — `SearchUrlProvider` still
+ * exposes it for the read-path proxy (`proxy.controller.getAlbumMetadata`),
+ * but it does not flow to durable storage. See BS#1192 for the rationale.
  *
  * Sibling test:
  *   - `tests/unit/jobs/flowsheet-metadata-backfill/synthesize-search-urls-parity.test.ts`
@@ -43,6 +50,7 @@ describe('synthesizeSearchUrls parity (enrichment-worker inline ↔ SearchUrlPro
     });
     const canonicalOut = canonical.getAllSearchUrls(artist, album ?? undefined, track ?? undefined);
 
+    expect(inline.spotify_url).toBe(canonicalOut.spotifyUrl);
     expect(inline.youtube_music_url).toBe(canonicalOut.youtubeMusicUrl);
     expect(inline.bandcamp_url).toBe(canonicalOut.bandcampUrl);
     expect(inline.soundcloud_url).toBe(canonicalOut.soundcloudUrl);

@@ -99,7 +99,7 @@ describe('finalizeRow (BS#892 PR-2)', () => {
     expect(setCall.artist_wikipedia_url).toBe('https://en.wikipedia.org/wiki/Juana_Molina');
   });
 
-  it('on no-match: writes 3 synthesized search URLs and flips status to enriched_no_match', async () => {
+  it('on no-match: writes 4 synthesized search URLs and flips status to enriched_no_match', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
 
     const outcome = await finalizeRow(ROW, noMatchResponse);
@@ -108,12 +108,16 @@ describe('finalizeRow (BS#892 PR-2)', () => {
 
     const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(setCall.metadata_status).toBe('enriched_no_match');
-    // The 7 metadata columns are NOT in the .set() — preserves prior values.
+    // The 6 non-search-URL metadata columns are NOT in the .set() —
+    // preserves prior values. Apple Music intentionally absent (BS#1192).
     expect(setCall.artwork_url).toBeUndefined();
     expect(setCall.discogs_url).toBeUndefined();
     expect(setCall.release_year).toBeUndefined();
+    expect(setCall.apple_music_url).toBeUndefined();
     expect(setCall.artist_bio).toBeUndefined();
-    // The 3 search URLs ARE in the .set().
+    // The 4 search URLs ARE in the .set(): Spotify joined YT/BC/SC in
+    // BS#1189 to align with the canonical write-path shape.
+    expect(setCall.spotify_url).toContain('open.spotify.com/search');
     expect(setCall.youtube_music_url).toContain('music.youtube.com/search');
     expect(setCall.bandcamp_url).toContain('bandcamp.com/search');
     expect(setCall.soundcloud_url).toContain('soundcloud.com/search');
@@ -262,7 +266,7 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
     expect(setCall.artist_wikipedia_url).toBeUndefined();
   });
 
-  it('on no-match: UPSERTs only the 3 search URLs into album_metadata', async () => {
+  it('on no-match: UPSERTs the 4 search URLs into album_metadata', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
 
     const outcome = await finalizeRow(LINKED_ROW, noMatchResponse);
@@ -272,16 +276,18 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
 
     const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(insertPayload.album_id).toBe(5678);
+    // BS#1189 widened the no-match shape to 4 URLs: Spotify joined YT/BC/SC.
+    // Apple Music intentionally absent (BS#1192).
+    expect(insertPayload.spotify_url).toContain('open.spotify.com/search');
     expect(insertPayload.youtube_music_url).toContain('music.youtube.com/search');
     expect(insertPayload.bandcamp_url).toContain('bandcamp.com/search');
     expect(insertPayload.soundcloud_url).toContain('soundcloud.com/search');
-    // Other 7 metadata fields must NOT be in the insert payload — INSERT path
-    // leaves them NULL; UPDATE path leaves existing values untouched (matches
-    // the unlinked path's deliberate non-clobbering on no-match).
+    // 6 other metadata fields must NOT be in the insert payload — INSERT
+    // path leaves them NULL; UPDATE path leaves existing values untouched
+    // (matches the unlinked path's deliberate non-clobbering on no-match).
     expect(insertPayload).not.toHaveProperty('artwork_url');
     expect(insertPayload).not.toHaveProperty('discogs_url');
     expect(insertPayload).not.toHaveProperty('release_year');
-    expect(insertPayload).not.toHaveProperty('spotify_url');
     expect(insertPayload).not.toHaveProperty('apple_music_url');
     expect(insertPayload).not.toHaveProperty('artist_bio');
     expect(insertPayload).not.toHaveProperty('artist_wikipedia_url');
@@ -291,6 +297,7 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
     };
     expect(conflictCfg.set).not.toHaveProperty('artwork_url');
     expect(conflictCfg.set).not.toHaveProperty('artist_bio');
+    expect(conflictCfg.set.spotify_url).toContain('open.spotify.com/search');
     expect(conflictCfg.set.youtube_music_url).toContain('music.youtube.com/search');
   });
 
@@ -321,6 +328,22 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
 });
 
 describe('synthesizeSearchUrls (per-service precedence)', () => {
+  it('Spotify prefers trackTitle over albumTitle over artistName (same selector as YT)', () => {
+    // Path-style URL (no `?q=`) — must match LML's `_build_streaming_search_url`
+    // for byte-identical alignment so iOS reads back the same URL whether LML
+    // surfaced it or BS synthesized it (BS#1185 + LML#401).
+    expect(
+      synthesizeSearchUrls({ id: 1, artist_name: 'A', album_title: 'B', track_title: 'C', album_id: null }).spotify_url
+    ).toBe('https://open.spotify.com/search/A%20C');
+    expect(
+      synthesizeSearchUrls({ id: 1, artist_name: 'A', album_title: 'B', track_title: null, album_id: null }).spotify_url
+    ).toBe('https://open.spotify.com/search/A%20B');
+    expect(
+      synthesizeSearchUrls({ id: 1, artist_name: 'A', album_title: null, track_title: null, album_id: null })
+        .spotify_url
+    ).toBe('https://open.spotify.com/search/A');
+  });
+
   it('YouTube Music prefers trackTitle over albumTitle over artistName', () => {
     expect(
       synthesizeSearchUrls({ id: 1, artist_name: 'A', album_title: 'B', track_title: 'C', album_id: null })
