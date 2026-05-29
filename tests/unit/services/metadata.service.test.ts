@@ -156,6 +156,24 @@ describe('metadata.service', () => {
     expect(result?.artist?.wikipediaUrl).toBe('https://en.wikipedia.org/wiki/Autechre');
   });
 
+  it('preserves LML-provided apple_music_url end-to-end (BS#1192 negative case)', async () => {
+    // BS#1192 dropped the write-path Apple Music fallback so iTunes Search
+    // rejections (LML#390/#398 floor) stay null on the durable row. This
+    // pins the OTHER direction: when LML returns a real, verified
+    // `apple_music_url` (direct iTunes Search match OR LML#401 synth-shape
+    // pass-through), it must still flow to `result.album.appleMusicUrl`
+    // unchanged. A future refactor that broadens the BS#1192 drop into
+    // "strip Apple from the write path" would break this assertion.
+    mockLookupMetadata.mockResolvedValue(lookupResponseWithResults);
+
+    const result = await fetchMetadata({
+      artistName: 'Autechre',
+      albumTitle: 'Confield',
+    });
+
+    expect(result?.album?.appleMusicUrl).toBe('https://music.apple.com/album/xyz');
+  });
+
   it('fills missing streaming URLs with search URL fallbacks', async () => {
     mockLookupMetadata.mockResolvedValue(lookupResponseWithResults);
 
