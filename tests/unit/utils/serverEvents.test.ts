@@ -65,15 +65,12 @@ describe('ServerEventsManager', () => {
     });
 
     it('keeps a quiet-topic client connected indefinitely while heartbeats are flowing', () => {
-      // BS#1130 regression: the prior 5-minute inactivity timeout would disconnect
-      // healthy clients subscribed only to quiet topics (e.g. `mirror`, `primaryDj`).
       const mgr = new ServerEventsManager('quiet-topic');
       const res = createMockResponse();
       const client = mgr.registerClient(res);
       mgr.subscribe(['quiet-topic'], client.id);
 
-      // Simulate two hours of total silence on the topic — no broadcast,
-      // no dispatch — only heartbeat ticks. The old code disconnected at 5 min.
+      // Two hours of silence on the topic — no broadcast, no dispatch.
       jest.advanceTimersByTime(2 * 60 * 60 * 1000);
 
       expect(res.end).not.toHaveBeenCalled();
@@ -109,7 +106,6 @@ describe('ServerEventsManager', () => {
 
       jest.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
 
-      // Captured to Sentry with the heartbeat op tag.
       expect(Sentry.captureException).toHaveBeenCalledWith(
         failure,
         expect.objectContaining({
@@ -117,7 +113,6 @@ describe('ServerEventsManager', () => {
           extra: expect.objectContaining({ client_id: client.id }),
         })
       );
-      // unsubAll fired — subscription map is empty.
       expect(mgr.getSubs(client.id)).toEqual([]);
     });
   });

@@ -55,12 +55,8 @@ export class ServerEventsManager {
     this.topics = new Set(topicNames);
   }
 
-  // Per-client SSE comment-heartbeat cadence (BS#1130). 30 s is the same value
-  // tubafrenzy's upstream SSE feed uses (see `playlist-proxy.service.ts` prose),
-  // and well under typical L7-proxy idle thresholds (nginx 60 s, ALB 60 s) so an
-  // idle TCP connection never silently expires between writes. SSE comments
-  // (`: …\n\n`) are invisible to `addEventListener` consumers — they keep the
-  // socket alive without surfacing as a named event.
+  // 30 s matches tubafrenzy's upstream SSE feed (see `playlist-proxy.service.ts`
+  // prose) and stays under nginx/ALB's 60 s idle defaults.
   private static readonly HEARTBEAT_INTERVAL_MS = 30 * 1000;
   private static readonly HEARTBEAT_FRAME = ': keepalive\n\n';
 
@@ -75,13 +71,9 @@ export class ServerEventsManager {
    * Writes a `: keepalive\n\n` SSE comment to the client every
    * HEARTBEAT_INTERVAL_MS. The comment frame is silent to `addEventListener`
    * consumers (per the SSE spec) but keeps the TCP connection alive and resets
-   * any intermediary idle timers.
-   *
-   * If the write fails the client's socket is half-dead (post-FIN, EPIPE,
-   * write-after-end). We capture to Sentry with the broadcast tags so the
-   * existing aggregation slot picks it up, then `unsubAll` to clean up the
-   * map entries — `res.on('close')` may already have fired but the listener
-   * is idempotent via this same path.
+   * any intermediary idle timers. On write failure (half-dead socket: EPIPE,
+   * write-after-end) we capture to Sentry under `op: 'heartbeat'` and
+   * `unsubAll` to drop the client from the maps.
    */
   private startHeartbeat = (clientId: string) => {
     const existing = this.clientHeartbeats.get(clientId);
@@ -105,9 +97,7 @@ export class ServerEventsManager {
       }
     }, ServerEventsManager.HEARTBEAT_INTERVAL_MS);
 
-    // Don't keep the event loop alive solely for the heartbeat ticker —
-    // matches `startSseMetrics` in `sse-metrics.ts` so SIGTERM shutdown
-    // isn't blocked by idle SSE clients.
+    // unref so SIGTERM isn't blocked by an idle heartbeat ticker.
     intervalId.unref?.();
 
     this.clientHeartbeats.set(clientId, intervalId);
