@@ -577,8 +577,12 @@ describe('computeBulkTimeoutMs', () => {
     }
   });
 
-  it('keeps BULK_BATCH_SIZE_DEFAULT under the 30 s shared LML-client ceiling', () => {
-    expect(computeBulkTimeoutMs(BULK_BATCH_SIZE_DEFAULT)).toBeLessThanOrEqual(30_000);
+  // Tightened from ≤30_000 (the shared-client socket ceiling) to ≤20_000 so
+  // future drift back toward batchSize=10 — which produces a 30 s budget that
+  // races the LML-client socket timeout under live contention (BS#1078 / BS#1197)
+  // — fails CI before reaching production.
+  it('keeps BULK_BATCH_SIZE_DEFAULT under the 20 s cascade-budget ceiling', () => {
+    expect(computeBulkTimeoutMs(BULK_BATCH_SIZE_DEFAULT)).toBeLessThanOrEqual(20_000);
   });
 });
 
