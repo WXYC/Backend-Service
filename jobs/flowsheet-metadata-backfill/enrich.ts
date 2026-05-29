@@ -9,11 +9,11 @@
  *   - Linked (album_id != null) + match: UPSERT `album_metadata` with the
  *     10-column payload (race-guarded by `updated_at < NOW()`), then
  *     UPDATE `flowsheet` to stamp `metadata_attempt_at = now()` only.
- *   - Linked + no-match: UPSERT just the 3 synthesized search URLs into
+ *   - Linked + no-match: UPSERT just the 4 synthesized search URLs into
  *     `album_metadata`, then stamp the marker on `flowsheet`.
  *   - Unlinked (album_id IS NULL) + match: write the 10 metadata columns
  *     inline on `flowsheet`, stamping the marker in the same .set() block.
- *   - Unlinked + no-match: write the 3 synthesized search URLs inline on
+ *   - Unlinked + no-match: write the 4 synthesized search URLs inline on
  *     `flowsheet`, stamp the marker.
  *   - On LML throw: caller catches and DOES NOT call this. The row stays
  *     `metadata_attempt_at IS NULL` so the next sweep retries it.
@@ -86,14 +86,28 @@ export const filterSpacerGif = (url: string | null | undefined): string | null =
 };
 
 /**
- * Synthesize the three search URLs the runtime path falls back to on
- * no-match. Must match `apps/backend/services/metadata/providers/search-urls.provider.ts`
- * exactly — the inline copy is duplicated rather than imported for the same
- * build-graph isolation reason as `lml-fetch.ts`. The parity test at
+ * Synthesize the four search URLs the runtime path falls back to on
+ * no-match. Must match the write-path shape of
+ * `apps/backend/services/metadata/metadata.service.ts#fetchMetadata`
+ * exactly — the inline copy is duplicated rather than imported for the
+ * same build-graph isolation reason as `lml-fetch.ts`. The parity test at
  * `tests/unit/jobs/flowsheet-metadata-backfill/synthesize-search-urls-parity.test.ts`
- * pins the equivalence so the two cannot drift (BS#889).
+ * pins the equivalence so the two cannot drift (BS#889 / BS#1189).
+ *
+ * Apple Music is intentionally absent (BS#1192): LML's `apple_music_url`
+ * is load-bearing — null means "no verified iTunes match" — and persisting
+ * a `music.apple.com/search?term=…` URL on the write path launders that
+ * signal into a clickable button that drops users on the in-app search
+ * page. The read path (`proxy.controller.getAlbumMetadata`) still fills
+ * Apple at request time for the iOS Tragic Magic surface, where there's
+ * no persisted row to poison.
  *
  * Per-service semantics (deliberately asymmetric):
+ *   - Spotify:       trackTitle > albumTitle > artistName. Path-style URL
+ *                    (`https://open.spotify.com/search/<query>`) matches
+ *                    LML's `_build_streaming_search_url` byte-for-byte so
+ *                    iOS reads back the same URL whether LML surfaced it
+ *                    or BS synthesized it (BS#1185 + LML#401).
  *   - YouTube Music: trackTitle > albumTitle > artistName (3-tier).
  *   - Bandcamp:      albumTitle > artistName (album-leaning).
  *   - SoundCloud:    trackTitle > artistName (track-leaning, NO album
@@ -102,16 +116,18 @@ export const filterSpacerGif = (url: string | null | undefined): string | null =
  */
 export const synthesizeSearchUrls = (
   row: EnrichRow
-): { youtube_music_url: string; bandcamp_url: string; soundcloud_url: string } => {
+): { spotify_url: string; youtube_music_url: string; bandcamp_url: string; soundcloud_url: string } => {
   const artist = row.artist_name;
   const album = row.album_title ?? undefined;
   const track = row.track_title ?? undefined;
 
+  const spotifyQuery = track ? `${artist} ${track}` : album ? `${artist} ${album}` : artist;
   const youtubeQuery = track ? `${artist} ${track}` : album ? `${artist} ${album}` : artist;
   const bandcampQuery = album ? `${artist} ${album}` : artist;
   const soundcloudQuery = track ? `${artist} ${track}` : artist;
 
   return {
+    spotify_url: `https://open.spotify.com/search/${encodeURIComponent(spotifyQuery)}`,
     youtube_music_url: `https://music.youtube.com/search?q=${encodeURIComponent(youtubeQuery)}`,
     bandcamp_url: `https://bandcamp.com/search?q=${encodeURIComponent(bandcampQuery)}`,
     soundcloud_url: `https://soundcloud.com/search?q=${encodeURIComponent(soundcloudQuery)}`,
@@ -166,9 +182,11 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
       // doesn't carry a sentinel that iOS renders as literal "0". Mirrors
       // the runtime path in `metadata.service.ts#extractAlbumMetadata` (#1002).
       release_year: artwork.release_year || null,
-      spotify_url: artwork.spotify_url ?? null,
-      apple_music_url: artwork.apple_music_url ?? null,
       // Streaming search URLs: prefer LML's, fall back to synthesized.
+      // Spotify joins YT/BC/SC in BS#1189 — aligns with the canonical
+      // write path. Apple Music stays no-fallback per BS#1192.
+      spotify_url: artwork.spotify_url ?? searchUrls.spotify_url,
+      apple_music_url: artwork.apple_music_url ?? null,
       youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
       bandcamp_url: artwork.bandcamp_url ?? searchUrls.bandcamp_url,
       soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,
@@ -222,8 +240,9 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
   // 2026-04-28 inline recovery, `scripts/backfill-metadata.ts`), so nulling
   // them on a no-match would be silent data loss.
   if (row.album_id !== null) {
-    // Linked + no-match: UPSERT just the 3 search URLs into album_metadata.
-    // INSERT path leaves the other 7 columns NULL (no LML match to fill
+    // Linked + no-match: UPSERT just the 4 search URLs into album_metadata
+    // (Spotify joined YT/BC/SC in BS#1189; Apple stays out per BS#1192).
+    // INSERT path leaves the other 6 columns NULL (no LML match to fill
     // them); UPDATE path leaves them untouched on existing rows
     // (preserves any prior out-of-band values, matching the unlinked
     // path's deliberate non-clobbering on no-match).
@@ -231,6 +250,7 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
       .insert(album_metadata)
       .values({
         album_id: row.album_id,
+        spotify_url: searchUrls.spotify_url,
         youtube_music_url: searchUrls.youtube_music_url,
         bandcamp_url: searchUrls.bandcamp_url,
         soundcloud_url: searchUrls.soundcloud_url,
@@ -239,6 +259,7 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
       .onConflictDoUpdate({
         target: album_metadata.album_id,
         set: {
+          spotify_url: searchUrls.spotify_url,
           youtube_music_url: searchUrls.youtube_music_url,
           bandcamp_url: searchUrls.bandcamp_url,
           soundcloud_url: searchUrls.soundcloud_url,
@@ -257,6 +278,7 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
   const updated = await db
     .update(flowsheet)
     .set({
+      spotify_url: searchUrls.spotify_url,
       youtube_music_url: searchUrls.youtube_music_url,
       bandcamp_url: searchUrls.bandcamp_url,
       soundcloud_url: searchUrls.soundcloud_url,

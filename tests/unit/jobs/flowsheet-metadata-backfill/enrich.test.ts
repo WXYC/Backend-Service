@@ -134,21 +134,25 @@ describe('applyEnrichment', () => {
     expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/now\(\)/i);
   });
 
-  it('writes only synthesized search URLs and stamps on LML success-no-match (empty results)', async () => {
+  it('writes synthesized search URLs (4) and stamps on LML success-no-match (empty results)', async () => {
     const outcome = await applyEnrichment(baseRow, noMatchResponse);
     expect(outcome).toBe('enriched_no_match');
 
     const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    // BS#1189 widened the no-match shape to 4 URLs: Spotify joined YT/BC/SC
+    // as a write-path fallback. Apple Music is intentionally absent (BS#1192
+    // — null is load-bearing "no verified iTunes match" signal).
+    expect(setArgs.spotify_url).toContain('open.spotify.com/search');
     expect(setArgs.youtube_music_url).toContain('music.youtube.com/search');
     expect(setArgs.bandcamp_url).toContain('bandcamp.com/search');
     expect(setArgs.soundcloud_url).toContain('soundcloud.com/search');
     expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/now\(\)/i);
-    // The 7 metadata columns should NOT be set on no-match (so they remain
-    // NULL in the DB) — the runtime path produces the same shape.
+    // The 6 non-search-URL metadata columns should NOT be set on no-match
+    // (so they remain NULL in the DB) — the runtime path produces the same
+    // shape. Apple Music is also absent (BS#1192).
     expect('artwork_url' in setArgs).toBe(false);
     expect('discogs_url' in setArgs).toBe(false);
     expect('release_year' in setArgs).toBe(false);
-    expect('spotify_url' in setArgs).toBe(false);
     expect('apple_music_url' in setArgs).toBe(false);
     expect('artist_bio' in setArgs).toBe(false);
     expect('artist_wikipedia_url' in setArgs).toBe(false);
@@ -301,22 +305,24 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     expect(mockDb._chain.where.mock.calls[0]?.[0]).toBeDefined();
   });
 
-  it('on no-match: UPSERTs only the 3 search URLs into album_metadata', async () => {
+  it('on no-match: UPSERTs the 4 search URLs into album_metadata', async () => {
     const outcome = await applyEnrichment(linkedRow, noMatchResponse);
     expect(outcome).toBe('enriched_no_match');
     expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
 
     const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(insertPayload.album_id).toBe(linkedRow.album_id);
+    // BS#1189 widened the no-match shape to 4 URLs: Spotify joined YT/BC/SC.
+    // Apple Music intentionally absent (BS#1192).
+    expect(insertPayload.spotify_url).toContain('open.spotify.com/search');
     expect(insertPayload.youtube_music_url).toContain('music.youtube.com/search');
     expect(insertPayload.bandcamp_url).toContain('bandcamp.com/search');
     expect(insertPayload.soundcloud_url).toContain('soundcloud.com/search');
-    // 7 other metadata fields must NOT be in the insert payload — INSERT path
+    // 6 other metadata fields must NOT be in the insert payload — INSERT path
     // leaves them NULL; UPDATE path leaves existing values untouched.
     expect(insertPayload).not.toHaveProperty('artwork_url');
     expect(insertPayload).not.toHaveProperty('discogs_url');
     expect(insertPayload).not.toHaveProperty('release_year');
-    expect(insertPayload).not.toHaveProperty('spotify_url');
     expect(insertPayload).not.toHaveProperty('apple_music_url');
     expect(insertPayload).not.toHaveProperty('artist_bio');
     expect(insertPayload).not.toHaveProperty('artist_wikipedia_url');
@@ -327,6 +333,7 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     };
     expect(conflictCfg.set).not.toHaveProperty('artwork_url');
     expect(conflictCfg.set).not.toHaveProperty('artist_bio');
+    expect(conflictCfg.set.spotify_url).toContain('open.spotify.com/search');
     expect(conflictCfg.set.youtube_music_url).toContain('music.youtube.com/search');
     expect(conflictCfg.setWhere).toBeDefined();
     expect(renderSql(conflictCfg.setWhere)).toMatch(/<\s*NOW\(\)/i);
