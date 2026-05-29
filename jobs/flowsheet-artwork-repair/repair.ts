@@ -95,51 +95,74 @@ export const filterSpacerGif = (url: string | null | undefined): string | null =
 };
 
 /**
- * Pick the top-1 artwork block from an LML response, or null if the
- * response indicates the row is legitimate no-cover-anywhere territory
- * (empty results, or artwork field present-but-null on the top hit).
+ * Synthesize the three search URLs the runtime path falls back to on
+ * no-match. Must match `apps/backend/services/metadata/providers/search-urls.provider.ts`
+ * exactly — inline copy duplicated for the same build-graph isolation
+ * reason as the rest of `repair.ts`. Parity test at
+ * `tests/unit/jobs/flowsheet-artwork-repair/synthesize-search-urls-parity.test.ts`
+ * pins the equivalence so the two cannot drift (BS#889).
+ *
+ * Per-service semantics (deliberately asymmetric):
+ *   - YouTube Music: trackTitle > albumTitle > artistName (3-tier).
+ *   - Bandcamp:      albumTitle > artistName (album-leaning).
+ *   - SoundCloud:    trackTitle > artistName (track-leaning, NO album
+ *                    fallback — album-only SoundCloud queries return
+ *                    unrelated DJ mixes more often than the album).
  */
+export const synthesizeSearchUrls = (
+  row: FreeFormRow
+): { youtube_music_url: string; bandcamp_url: string; soundcloud_url: string } => {
+  const artist = row.artist_name;
+  const album = row.album_title ?? undefined;
+  const track = row.track_title ?? undefined;
+
+  const youtubeQuery = track ? `${artist} ${track}` : album ? `${artist} ${album}` : artist;
+  const bandcampQuery = album ? `${artist} ${album}` : artist;
+  const soundcloudQuery = track ? `${artist} ${track}` : artist;
+
+  return {
+    youtube_music_url: `https://music.youtube.com/search?q=${encodeURIComponent(youtubeQuery)}`,
+    bandcamp_url: `https://bandcamp.com/search?q=${encodeURIComponent(bandcampQuery)}`,
+    soundcloud_url: `https://soundcloud.com/search?q=${encodeURIComponent(soundcloudQuery)}`,
+  };
+};
+
 export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | null => {
   const first = response.results?.[0];
-  if (!first) return null;
-  if (!first.artwork) return null;
+  if (!first?.artwork) return null;
   return first.artwork;
 };
 
+type SearchUrls = { youtube_music_url: string; bandcamp_url: string; soundcloud_url: string };
+
 /**
- * Build the 10-column metadata payload from an LML artwork block. Same
- * shape as `apps/enrichment-worker/enrich.ts:181-198` (canonical writer).
- * Fan-out URLs default to null on no-LML-provided value — the drain
- * deliberately does NOT synthesize search URLs, unlike the sibling
- * `flowsheet-metadata-backfill` drain. Those URLs were already written
- * by the original enrichment cycle that landed `metadata_status =
- * 'enriched_match'` (the population this drain targets), so re-writing
- * with `null` would silently strip the synthesized fallbacks. Leaving
- * `null` in the payload pairs with the WHERE's IS NULL guard to preserve
- * the existing fan-out URLs on UPDATE.
+ * 10-column payload. Mirrors `apps/enrichment-worker/enrich.ts:181-198`
+ * (canonical writer).
  *
- * Wait — the WHERE only narrows by `artwork_url IS NULL`; it doesn't
- * pin the other 9. To avoid clobbering existing values on those, the
- * 10-col UPDATE shape includes them all, but in practice the population's
- * upstream cycle never wrote them either (they all came back null from
- * LML's degenerate response), so the UPDATE just confirms the same null.
- * The canonical writer shape is what the consumer wrote originally; we
- * mirror it exactly so the comparison "would the consumer have written
- * this column to this value if it had a fresh LML response?" answers yes
- * for every column, every time.
+ * Streaming-URL fallback asymmetry:
+ *   - Free-form path (`searchUrls` provided): fall back to synthesized
+ *     queries via `artwork.* ?? searchUrls.*`, same shape as the
+ *     enrichment-worker (lines 171-174) + flowsheet-metadata-backfill
+ *     (enrich.ts:172-174). The drain target rows were originally enriched
+ *     by the worker, which writes synthesized URLs on null. Writing null
+ *     over those would regress dj-site + iOS streaming links — that's
+ *     what BS#1209 was about.
+ *   - Linked path (`searchUrls` omitted): fall back to `null` — no
+ *     track_title available, and SoundCloud's track-leaning query would
+ *     degrade to album-only mixes (same call as
+ *     `album-level-backfill/job.ts:294-296`).
  */
-const buildPayload = (artwork: DiscogsMatchResult) => ({
+const buildPayload = (artwork: DiscogsMatchResult, searchUrls?: SearchUrls) => ({
   artwork_url: filterSpacerGif(artwork.artwork_url),
   discogs_url: artwork.release_url ?? null,
-  // Discogs returns 0 as "year unknown"; coerce to null so the column
-  // doesn't carry a sentinel that iOS renders as literal "0". Mirrors
-  // the runtime path in `metadata.service.ts#extractAlbumMetadata` (#1002).
+  // Discogs returns 0 as "year unknown"; null avoids the literal "0"
+  // iOS would otherwise render. Matches `metadata.service.ts#extractAlbumMetadata` (#1002).
   release_year: artwork.release_year || null,
   spotify_url: artwork.spotify_url ?? null,
   apple_music_url: artwork.apple_music_url ?? null,
-  youtube_music_url: artwork.youtube_music_url ?? null,
-  bandcamp_url: artwork.bandcamp_url ?? null,
-  soundcloud_url: artwork.soundcloud_url ?? null,
+  youtube_music_url: artwork.youtube_music_url ?? searchUrls?.youtube_music_url ?? null,
+  bandcamp_url: artwork.bandcamp_url ?? searchUrls?.bandcamp_url ?? null,
+  soundcloud_url: artwork.soundcloud_url ?? searchUrls?.soundcloud_url ?? null,
   artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
   artist_wikipedia_url: artwork.wikipedia_url ?? null,
 });
@@ -160,10 +183,9 @@ export const repairFreeFormRow = async (row: FreeFormRow, response: LookupRespon
   const artwork = extractArtwork(response);
   if (!artwork || !artwork.artwork_url) return 'still_null_after_lml';
 
-  const payload = buildPayload(artwork);
   const updated = await db
     .update(flowsheet)
-    .set(payload)
+    .set(buildPayload(artwork, synthesizeSearchUrls(row)))
     .where(sql`"id" = ${row.id} AND "artwork_url" IS NULL AND "metadata_status" = 'enriched_match'`)
     .returning({ id: flowsheet.id });
   return updated.length === 0 ? 'free_form_raced' : 'free_form_repaired';
