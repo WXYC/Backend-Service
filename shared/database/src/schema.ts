@@ -453,15 +453,28 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
   'failed_no_retry',
 ]);
 
-// Provenance for `rotation.discogs_release_id` (BS#1029). Two values:
+// Provenance for `rotation.discogs_release_id` (BS#1029). Three values:
 //
-//   tubafrenzy_paste     — mirrored from tubafrenzy ROTATION_RELEASE
-//                          .DISCOGS_RELEASE_ID by `jobs/rotation-etl`,
-//                          populated by the rotation form's paste-URL
-//                          prefill (music-director-verified).
-//   lml_offline_backfill — written by `jobs/rotation-release-id-backfill`
-//                          (one-shot ETL, BS#1029) after LML resolved the
-//                          `(artist, album)` tuple to a Discogs release id.
+//   tubafrenzy_paste        — mirrored from tubafrenzy ROTATION_RELEASE
+//                             .DISCOGS_RELEASE_ID by `jobs/rotation-etl`,
+//                             populated by the rotation form's paste-URL
+//                             prefill (music-director-verified).
+//   lml_offline_backfill    — written by `jobs/rotation-release-id-backfill`
+//                             (one-shot ETL, BS#1029) after LML resolved the
+//                             `(artist, album)` tuple to a Discogs release id.
+//   discogs_direct_backfill — written by the 2026-05-29 operator-run
+//                             bypass-LML rescue after the 2026-05-28 picker-
+//                             coverage regression collapsed LML matching. The
+//                             resolver hit `api.discogs.com/database/search`
+//                             directly with the `(artist, album)` pair, picked
+//                             the top-ranked release whose VA-aware Jaccard
+//                             scored >= 0.5 on both axes (relaxed retries for
+//                             NO_RESULT: strip EP/LP/Mixtape suffix, drop
+//                             bracketed annotations, self-titled coercion;
+//                             diacritic strip + feat. carve-out for LOW_CONF).
+//                             Tagged distinctly from `lml_offline_backfill` so
+//                             a future LML-based re-run can scope its UPDATEs
+//                             without clobbering the bypass-LML provenance.
 //
 // Column default is `tubafrenzy_paste` so existing pre-migration rows
 // (PG11+ `attmissingval` virtual default) and new rotation-etl inserts
@@ -473,6 +486,7 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
 export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_source_enum', [
   'tubafrenzy_paste',
   'lml_offline_backfill',
+  'discogs_direct_backfill',
 ]);
 /**
  * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes
@@ -523,7 +537,11 @@ export const rotation = wxyc_schema.table(
     // `discogsReleaseIdSourceEnum` above for value semantics. The DEFAULT
     // applies virtually to existing pre-migration rows; the
     // jobs/rotation-release-id-backfill writer overrides to
-    // 'lml_offline_backfill' on the UPDATE that resolves a NULL id.
+    // 'lml_offline_backfill' on the UPDATE that resolves a NULL id, and
+    // the 2026-05-29 bypass-LML operator rescue (see migration 0086 +
+    // scripts/relabel-rotation-direct-backfill.sql) writes
+    // 'discogs_direct_backfill' for rows it resolved via direct
+    // Discogs search.
     discogs_release_id_source: discogsReleaseIdSourceEnum('discogs_release_id_source')
       .notNull()
       .default('tubafrenzy_paste'),
