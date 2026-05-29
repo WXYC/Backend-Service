@@ -65,23 +65,33 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
     result.artist = extractArtistMetadata(artwork) ?? undefined;
   }
 
-  // Fill missing search URLs (always available, no API calls). All five
-  // streaming services have search-URL fallbacks post-BS#1185 — the
-  // Tragic Magic case (artist not in WXYC library at all → LML returns
-  // zero results → no artwork to project) used to leave Spotify and
-  // Apple Music as null, greying out two iOS buttons.
+  // Fill missing search URLs (always available, no API calls). Four of the
+  // five streaming services have search-URL fallbacks here: Spotify, YT,
+  // Bandcamp, SoundCloud. Apple Music is intentionally absent (BS#1192).
+  //
+  // LML's `_fetch_apple_music_url` enforces a verified iTunes match (80/80
+  // fuzzy floor + album-collection check). A null return is load-bearing
+  // signal — "we couldn't verify this release exists on Apple Music" —
+  // and persisting a keyword-search URL on the write path launders that
+  // signal into a clickable button that drops users on the in-app search
+  // page. Worse, `album_metadata` is keyed by `album_id` but the search
+  // query uses the enrichment-triggering `trackTitle`, so every linked
+  // flowsheet row for that album reads back the same track-scoped URL —
+  // wrong scope independent of the LML-signal issue.
+  //
+  // The read path (`proxy.controller.getAlbumMetadata`) still fills Apple
+  // at request time for the iOS Tragic Magic surface, where there's no
+  // persisted row to poison.
   const urls = searchUrls.getAllSearchUrls(artistName, albumTitle, trackTitle);
   if (!result.album) {
     result.album = {
       spotifyUrl: urls.spotifyUrl,
-      appleMusicUrl: urls.appleMusicUrl,
       youtubeMusicUrl: urls.youtubeMusicUrl,
       bandcampUrl: urls.bandcampUrl,
       soundcloudUrl: urls.soundcloudUrl,
     };
   } else {
     if (!result.album.spotifyUrl) result.album.spotifyUrl = urls.spotifyUrl;
-    if (!result.album.appleMusicUrl) result.album.appleMusicUrl = urls.appleMusicUrl;
     if (!result.album.youtubeMusicUrl) result.album.youtubeMusicUrl = urls.youtubeMusicUrl;
     if (!result.album.bandcampUrl) result.album.bandcampUrl = urls.bandcampUrl;
     if (!result.album.soundcloudUrl) result.album.soundcloudUrl = urls.soundcloudUrl;
