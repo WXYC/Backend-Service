@@ -160,14 +160,9 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
   });
 
   it('falls back to synthesized search URLs when LML returns null for streaming columns — no regression of populated columns', async () => {
-    // The drain's target population is rows already enriched
-    // (`metadata_status='enriched_match'`) whose artwork is null. Those
-    // rows carry synthesized search URLs from the original enrichment
-    // write. If LML returns null for youtube/bandcamp/soundcloud, the
-    // writer must persist the synthesized URLs instead of overwriting
-    // with null. Mirrors enrichment-worker (`apps/enrichment-worker/
-    // enrich.ts:171-174`) and flowsheet-metadata-backfill (`enrich.ts:
-    // 172-174`).
+    // All three streaming URLs null on the LML response. Writer must
+    // synthesize instead of nulling — see `buildPayload` header for the
+    // asymmetry.
     const allStreamingNullResponse: LookupResponse = {
       ...matchedResponse,
       results: [
