@@ -51,6 +51,7 @@ import {
   updateArtworkUrl,
   getDiscogsReleaseIdByRotationId,
   __resetRotationLmlLookupCacheForTests,
+  isVariousArtistsName,
 } from '../../../apps/backend/services/library.service';
 import { resetConfig as resetCatalogTrackSearchConfig } from '../../../apps/backend/config/catalogTrackSearch';
 
@@ -2203,15 +2204,63 @@ describe('library.service', () => {
       const result = await getDiscogsReleaseIdByRotationId(42);
 
       expect(result).toBe(4080);
-      // The picker passes a 5 s fetch timeout so a hung LML call doesn't stall
-      // the dropdown for 30 s and tie up the shared LML semaphore permit
-      // (BS#992). The 4 s budgetMs forwards as X-Caller-Budget-Ms so LML's A10
-      // cutoff abandons its empty-results cascade ~1 s before BS aborts the
-      // fetch (WXYC/library-metadata-lookup#403/#404).
+      // 10 s timeout matches tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` so picker
+      // coverage on long-tail rotation rows parity-matches the legacy system.
+      // No `budgetMs` here on purpose: BS#1186's cutoff was justified by
+      // malformed-query examples (track-titles-as-album-names) — for the
+      // picker, which always passes real `(artist_name, album_title)` pairs
+      // from rotation, the cascade's later strategies are exactly where the
+      // match for obscure college rotation comes from.
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
-        timeoutMs: 5000,
-        budgetMs: 4000,
+        timeoutMs: 10000,
       });
+    });
+
+    it("omits the artist field when the rotation row's artist_name is a Various-Artists variant", async () => {
+      // Mirrors tubafrenzy's `LibrarySearchClient.searchDiscogsRelease`
+      // carve-out (`LibrarySearchClient.java:283,429`): passing
+      // "Various Artists" pollutes LML's fuzzy matching and surfaces
+      // unrelated compilations instead of the actual release. LML's
+      // /lookup orchestrator supports the album-only path natively.
+      mockRow({
+        direct: null,
+        fallback: null,
+        artist_name: 'Various Artists',
+        album_title: 'All the Young Droids: Junkshop Synth Pop 1978-1985',
+      });
+      mockLookupMetadata.mockResolvedValue({
+        results: [{ artwork: { release_id: 26538110 } }],
+        search_type: 'direct',
+      });
+
+      const result = await getDiscogsReleaseIdByRotationId(42);
+
+      expect(result).toBe(26538110);
+      expect(mockLookupMetadata).toHaveBeenCalledWith(
+        undefined,
+        'All the Young Droids: Junkshop Synth Pop 1978-1985',
+        undefined,
+        { timeoutMs: 10000 }
+      );
+    });
+
+    it.each([
+      ['Various Artists', true],
+      ['various artists', true],
+      ['VARIOUS ARTISTS', true],
+      ['Various Artist', true],
+      ['various', true],
+      ['V/A', true],
+      ['V.A.', true],
+      ['v a', true],
+      ['Var Artists', true],
+      ['Var. Artists', true],
+      ['Variety Pack', false],
+      ['Variations', false],
+      ['Autechre', false],
+      ['', false],
+    ])('isVariousArtistsName(%p) === %p', (input, expected) => {
+      expect(isVariousArtistsName(input)).toBe(expected);
     });
 
     it('does not call LML when the direct column has a value', async () => {

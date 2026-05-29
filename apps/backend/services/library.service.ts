@@ -344,23 +344,24 @@ const ROTATION_LML_LOOKUP_CACHE_MAX = 500;
 const ROTATION_LML_LOOKUP_TTL_POSITIVE_MS = 60 * 60 * 1000;
 const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 10 * 60 * 1000;
 /**
- * Per-call LML timeout for the picker's tier-3 lookup (BS#992). The default
- * `TIMEOUT_MS` in the LML client is 30 s — appropriate for fire-and-forget
- * enrichment paths but unacceptable for a user-visible dropdown that's
- * already a degrades-to-free-text flow. The shorter budget also frees the
- * shared LML semaphore permit ~6× sooner so other concurrent callers
- * (`/proxy/metadata/album`, `/library/query`) aren't queued behind a
- * single hung tier-3 lookup.
+ * Per-call LML timeout for the picker's tier-3 lookup. 10 s matches
+ * tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` (`LibrarySearchClient.java:64`),
+ * which is the parity bar we measure picker coverage against. Shorter
+ * timeouts cut off LML's cascade before the later strategies that find
+ * obscure college-rotation releases get to run — the source of the
+ * coverage regression that motivated dropping the BS#1186 budget.
+ *
+ * Intentionally no `budgetMs` companion: BS#1186 added a 4 s
+ * `X-Caller-Budget-Ms` header to short-circuit LML's empty-results
+ * cascade. That cap was justified by malformed-query examples
+ * (track-titles-as-album-names) and applied uniformly across callers,
+ * including this one. For the picker — which always passes real
+ * `(artist_name, album_title)` pairs from rotation rows — the cascade's
+ * later strategies are exactly where matches come from, so capping at
+ * 4 s collapsed picker coverage to ~23 %. The iOS proxy/artwork hot-path
+ * callers keep their budgets; only this call site opts out.
  */
-const ROTATION_LML_LOOKUP_TIMEOUT_MS = 5000;
-
-/**
- * Picker budget. Pinned ~1 s tighter than `ROTATION_LML_LOOKUP_TIMEOUT_MS`
- * so LML's A10 cutoff fires before the local `AbortController` aborts the
- * fetch. Hardcoded because the two constants are paired (changing one without
- * the other breaks the timing). See `LookupOptions.budgetMs` for mechanics.
- */
-const ROTATION_LML_LOOKUP_BUDGET_MS = 4000;
+const ROTATION_LML_LOOKUP_TIMEOUT_MS = 10000;
 
 /**
  * Budget for `enrichWithArtwork` and `searchLibraryByTrack` — both user-visible
@@ -471,6 +472,26 @@ export async function getDiscogsReleaseIdByRotationId(rotationId: number): Promi
  * already wraps the call in a Sentry span carrying `lml.cache.*` and
  * `lml.queue_depth` attributes for trace-explorer drill-down.
  */
+/**
+ * Detect Various-Artists artist-name variants the picker should omit from
+ * the LML lookup. Mirrors tubafrenzy's `LibrarySearchClient.isVariousArtistsName`
+ * (`LibrarySearchClient.java:429`): passing "Various Artists" pollutes
+ * LML's fuzzy matching and surfaces unrelated compilations instead of the
+ * actual release. LML's /lookup orchestrator supports the album-only path.
+ *
+ * Exported for the unit-test parity matrix; not part of the public service
+ * surface.
+ */
+export function isVariousArtistsName(name: string): boolean {
+  const trimmed = name.trim().toLowerCase();
+  if (trimmed.length === 0) return false;
+  if (/^v[\s./]*a\.?$/.test(trimmed)) return true;
+  if (trimmed === 'various') return true;
+  if (/^various\s+art/.test(trimmed)) return true;
+  if (/^var\.?\s+art/.test(trimmed)) return true;
+  return false;
+}
+
 async function resolveRotationDiscogsReleaseViaLml(
   rotationId: number,
   artistName: string | null,
@@ -483,11 +504,12 @@ async function resolveRotationDiscogsReleaseViaLml(
   if (cachedPositive !== undefined) return cachedPositive;
   if (rotationLmlNegativeCache.has(rotationId)) return null;
 
+  const lookupArtist = isVariousArtistsName(artistName) ? undefined : artistName;
+
   let releaseId: number | null;
   try {
-    const response = await lookupMetadata(artistName, albumTitle, undefined, {
+    const response = await lookupMetadata(lookupArtist, albumTitle, undefined, {
       timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
-      budgetMs: ROTATION_LML_LOOKUP_BUDGET_MS,
     });
     releaseId = response.results?.[0]?.artwork?.release_id ?? null;
   } catch (err) {
