@@ -11,7 +11,20 @@
  * mirror `apps/enrichment-worker/enrich.ts:181-198`. Inlined for the
  * same build-graph isolation the sibling drains carry (no imports from
  * `apps/backend`); parity pinned via
- * `tests/unit/jobs/flowsheet-artwork-repair/filter-spacer-gif-parity.test.ts`.
+ * `tests/unit/jobs/flowsheet-artwork-repair/filter-spacer-gif-parity.test.ts`
+ * and `tests/unit/jobs/flowsheet-artwork-repair/synthesize-search-urls-parity.test.ts`.
+ *
+ * Streaming-URL fallback asymmetry (mirrors the canonical writers):
+ *   - Free-form path has track_title available → synthesize search URLs
+ *     and use `artwork.* ?? searchUrls.*` for youtube / bandcamp /
+ *     soundcloud (same shape as enrichment-worker:171-174 and
+ *     flowsheet-metadata-backfill/enrich.ts:172-174). Avoids regressing
+ *     existing synthesized URLs when LML returns null on those columns.
+ *   - Linked path has no track_title → fall back to `?? null` (same as
+ *     album-level-backfill/job.ts:294-296). SoundCloud's track-leaning
+ *     query would degrade to an album-only search that returns unrelated
+ *     DJ mixes, so leave the column null rather than synthesizing
+ *     against insufficient inputs.
  */
 
 import { sql } from 'drizzle-orm';
@@ -57,13 +70,56 @@ export const filterSpacerGif = (url: string | null | undefined): string | null =
   return url;
 };
 
+/**
+ * Synthesize the three search URLs the runtime path falls back to on
+ * no-match. Must match `apps/backend/services/metadata/providers/search-urls.provider.ts`
+ * exactly — the inline copy is duplicated rather than imported for the same
+ * build-graph isolation reason as the rest of `repair.ts`. Parity test at
+ * `tests/unit/jobs/flowsheet-artwork-repair/synthesize-search-urls-parity.test.ts`
+ * pins the equivalence so the two cannot drift (BS#889).
+ *
+ * Per-service semantics (deliberately asymmetric):
+ *   - YouTube Music: trackTitle > albumTitle > artistName (3-tier).
+ *   - Bandcamp:      albumTitle > artistName (album-leaning).
+ *   - SoundCloud:    trackTitle > artistName (track-leaning, NO album
+ *                    fallback — album-only SoundCloud queries return
+ *                    unrelated DJ mixes more often than the album).
+ */
+export const synthesizeSearchUrls = (
+  row: FreeFormRow
+): { youtube_music_url: string; bandcamp_url: string; soundcloud_url: string } => {
+  const artist = row.artist_name;
+  const album = row.album_title ?? undefined;
+  const track = row.track_title ?? undefined;
+
+  const youtubeQuery = track ? `${artist} ${track}` : album ? `${artist} ${album}` : artist;
+  const bandcampQuery = album ? `${artist} ${album}` : artist;
+  const soundcloudQuery = track ? `${artist} ${track}` : artist;
+
+  return {
+    youtube_music_url: `https://music.youtube.com/search?q=${encodeURIComponent(youtubeQuery)}`,
+    bandcamp_url: `https://bandcamp.com/search?q=${encodeURIComponent(bandcampQuery)}`,
+    soundcloud_url: `https://soundcloud.com/search?q=${encodeURIComponent(soundcloudQuery)}`,
+  };
+};
+
 export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | null => {
   const first = response.results?.[0];
   if (!first?.artwork) return null;
   return first.artwork;
 };
 
-const buildPayload = (artwork: DiscogsMatchResult) => ({
+type SearchUrls = { youtube_music_url: string; bandcamp_url: string; soundcloud_url: string };
+
+/**
+ * Free-form variant: streaming URLs fall back to synthesized queries so
+ * we never regress a populated column to null. `searchUrls` is required.
+ *
+ * Linked-album variant (`searchUrls` omitted): streaming URLs fall back
+ * to null — track_title isn't available, and SoundCloud's track-leaning
+ * query would degrade poorly on artist+album only inputs.
+ */
+const buildPayload = (artwork: DiscogsMatchResult, searchUrls?: SearchUrls) => ({
   artwork_url: filterSpacerGif(artwork.artwork_url),
   discogs_url: artwork.release_url ?? null,
   // Discogs returns 0 as "year unknown"; null avoids the literal "0"
@@ -71,9 +127,9 @@ const buildPayload = (artwork: DiscogsMatchResult) => ({
   release_year: artwork.release_year || null,
   spotify_url: artwork.spotify_url ?? null,
   apple_music_url: artwork.apple_music_url ?? null,
-  youtube_music_url: artwork.youtube_music_url ?? null,
-  bandcamp_url: artwork.bandcamp_url ?? null,
-  soundcloud_url: artwork.soundcloud_url ?? null,
+  youtube_music_url: artwork.youtube_music_url ?? searchUrls?.youtube_music_url ?? null,
+  bandcamp_url: artwork.bandcamp_url ?? searchUrls?.bandcamp_url ?? null,
+  soundcloud_url: artwork.soundcloud_url ?? searchUrls?.soundcloud_url ?? null,
   artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
   artist_wikipedia_url: artwork.wikipedia_url ?? null,
 });
@@ -84,7 +140,7 @@ export const repairFreeFormRow = async (row: FreeFormRow, response: LookupRespon
 
   const updated = await db
     .update(flowsheet)
-    .set(buildPayload(artwork))
+    .set(buildPayload(artwork, synthesizeSearchUrls(row)))
     .where(sql`"id" = ${row.id} AND "artwork_url" IS NULL AND "metadata_status" = 'enriched_match'`)
     .returning({ id: flowsheet.id });
   return updated.length === 0 ? 'raced' : 'repaired';
