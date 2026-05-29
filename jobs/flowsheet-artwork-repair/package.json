@@ -1,0 +1,25 @@
+{
+  "name": "@wxyc/flowsheet-artwork-repair",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot drain (BS#1209) — writers scaffold. Re-resolve LML artwork for rows stranded by the LML _resolve_fallback_artwork bug (LML#408, fixed in LML#409). Two write paths: free-form UPDATE on flowsheet (idempotent WHERE) and linked UPSERT on album_metadata (race-guarded). Orchestrator + entrypoint land in a follow-up PR (#1209 split).",
+  "type": "module",
+  "main": "./dist/repair.js",
+  "scripts": {
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.53.1",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
