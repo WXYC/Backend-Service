@@ -43,14 +43,17 @@ const JOB_NAME = 'album-level-backfill';
 
 // -- Env knobs ---------------------------------------------------------------
 
-/** Items per bulk-lookup request. LML hard cap is 100; default 10 is
- * sized so one wave of LML's internal `LML_BULK_MAX_CONCURRENT=10`
- * fan-out fits inside a single per-item `caller_budget_ms` window.
- * `computeBulkTimeoutMs` scales the fetch timeout with this value;
- * raising the env override without paired slack reintroduces the
- * 30 s shared-client timeout. */
+/** Items per bulk-lookup request. LML hard cap is 100; default 5 is the
+ * empirically-validated post-LML#370 ceiling under live `enrichment-worker`
+ * contention for LML's 5-permit Discogs semaphore. The 2026-05-28 Phase 3
+ * canary (BS#1078 / BS#1197) measured 38–50 % per-batch timeout at
+ * `batchSize=10` vs 3–10 % at `batchSize=5` — smaller batches yield *higher*
+ * net throughput because `computeBulkTimeoutMs(5)=17_500 ms` lands cascade-
+ * heavy items under LML's 25 s `caller_budget_ms` window, while `(10)=30_000
+ * ms` races the shared LML-client's own 30 s socket timeout. Catch-up
+ * throughput comes from `BACKFILL_BULK_RATE_PER_MIN`, not this knob. */
 export const BULK_BATCH_SIZE_ENV = 'BACKFILL_BULK_BATCH_SIZE';
-export const BULK_BATCH_SIZE_DEFAULT = 10;
+export const BULK_BATCH_SIZE_DEFAULT = 5;
 
 /** Batches per minute. Bound the bulk caller so it can run concurrently
  * with the per-row drain cron (BS#995, 4 items/min) without saturating
