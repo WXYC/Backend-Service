@@ -139,6 +139,9 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
     expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
     const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
 
+    // soundcloud_url is null on the LML response → falls back to a
+    // synthesized track-leaning query. See the streaming-URL fallback
+    // test below for the synthesis invariant.
     expect(setArgs).toEqual({
       artwork_url: 'https://i.discogs.com/art.jpg',
       discogs_url: 'https://www.discogs.com/release/12345',
@@ -147,13 +150,48 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
       apple_music_url: 'https://music.apple.com/album/xyz',
       youtube_music_url: 'https://music.youtube.com/album/aaa',
       bandcamp_url: 'https://stereolab.bandcamp.com/album/aluminum-tunes',
-      soundcloud_url: null,
+      soundcloud_url: `https://soundcloud.com/search?q=${encodeURIComponent('Stereolab Pop Quiz')}`,
       artist_bio: 'Tim Gane and Lætitia Sadier are Stereolab.',
       artist_wikipedia_url: 'https://en.wikipedia.org/wiki/Stereolab',
     });
     expect(Object.keys(setArgs)).toHaveLength(10);
     expect('metadata_status' in setArgs).toBe(false);
     expect('metadata_attempt_at' in setArgs).toBe(false);
+  });
+
+  it('falls back to synthesized search URLs when LML returns null for streaming columns — no regression of populated columns', async () => {
+    // The drain's target population is rows already enriched
+    // (`metadata_status='enriched_match'`) whose artwork is null. Those
+    // rows carry synthesized search URLs from the original enrichment
+    // write. If LML returns null for youtube/bandcamp/soundcloud, the
+    // writer must persist the synthesized URLs instead of overwriting
+    // with null. Mirrors enrichment-worker (`apps/enrichment-worker/
+    // enrich.ts:171-174`) and flowsheet-metadata-backfill (`enrich.ts:
+    // 172-174`).
+    const allStreamingNullResponse: LookupResponse = {
+      ...matchedResponse,
+      results: [
+        {
+          library_item: { id: 1 },
+          artwork: {
+            ...matchedResponse.results[0].artwork!,
+            youtube_music_url: null,
+            bandcamp_url: null,
+            soundcloud_url: null,
+          },
+        },
+      ],
+    };
+    await repairFreeFormRow(freeFormRow, allStreamingNullResponse);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+
+    expect(setArgs.youtube_music_url).toBe(
+      `https://music.youtube.com/search?q=${encodeURIComponent('Stereolab Pop Quiz')}`
+    );
+    expect(setArgs.bandcamp_url).toBe(
+      `https://bandcamp.com/search?q=${encodeURIComponent('Stereolab Aluminum Tunes')}`
+    );
+    expect(setArgs.soundcloud_url).toBe(`https://soundcloud.com/search?q=${encodeURIComponent('Stereolab Pop Quiz')}`);
   });
 
   it('strips Discogs spacer.gif from artwork_url', async () => {
