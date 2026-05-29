@@ -111,16 +111,18 @@ export const filterSpacerGif = (url: string | null | undefined): string | null =
  */
 export const synthesizeSearchUrls = (
   row: FreeFormRow
-): { youtube_music_url: string; bandcamp_url: string; soundcloud_url: string } => {
+): { spotify_url: string; youtube_music_url: string; bandcamp_url: string; soundcloud_url: string } => {
   const artist = row.artist_name;
   const album = row.album_title ?? undefined;
   const track = row.track_title ?? undefined;
 
+  const spotifyQuery = track ? `${artist} ${track}` : album ? `${artist} ${album}` : artist;
   const youtubeQuery = track ? `${artist} ${track}` : album ? `${artist} ${album}` : artist;
   const bandcampQuery = album ? `${artist} ${album}` : artist;
   const soundcloudQuery = track ? `${artist} ${track}` : artist;
 
   return {
+    spotify_url: `https://open.spotify.com/search/${encodeURIComponent(spotifyQuery)}`,
     youtube_music_url: `https://music.youtube.com/search?q=${encodeURIComponent(youtubeQuery)}`,
     bandcamp_url: `https://bandcamp.com/search?q=${encodeURIComponent(bandcampQuery)}`,
     soundcloud_url: `https://soundcloud.com/search?q=${encodeURIComponent(soundcloudQuery)}`,
@@ -158,7 +160,10 @@ const buildPayload = (artwork: DiscogsMatchResult, searchUrls?: SearchUrls) => (
   // Discogs returns 0 as "year unknown"; null avoids the literal "0"
   // iOS would otherwise render. Matches `metadata.service.ts#extractAlbumMetadata` (#1002).
   release_year: artwork.release_year || null,
-  spotify_url: artwork.spotify_url ?? null,
+  spotify_url: artwork.spotify_url ?? searchUrls?.spotify_url ?? null,
+  // apple_music_url stays `?? null` — null is load-bearing per BS#1192
+  // ("no verified iTunes match" signal; the read-path proxy synthesizes
+  // its own search URL when needed).
   apple_music_url: artwork.apple_music_url ?? null,
   youtube_music_url: artwork.youtube_music_url ?? searchUrls?.youtube_music_url ?? null,
   bandcamp_url: artwork.bandcamp_url ?? searchUrls?.bandcamp_url ?? null,

@@ -160,7 +160,7 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
   });
 
   it('falls back to synthesized search URLs when LML returns null for streaming columns — no regression of populated columns', async () => {
-    // All three streaming URLs null on the LML response. Writer must
+    // All four streaming URLs null on the LML response. Writer must
     // synthesize instead of nulling — see `buildPayload` header for the
     // asymmetry.
     const allStreamingNullResponse: LookupResponse = {
@@ -170,6 +170,7 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
           library_item: { id: 1 },
           artwork: {
             ...matchedResponse.results[0].artwork!,
+            spotify_url: null,
             youtube_music_url: null,
             bandcamp_url: null,
             soundcloud_url: null,
@@ -180,6 +181,7 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
     await repairFreeFormRow(freeFormRow, allStreamingNullResponse);
     const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
 
+    expect(setArgs.spotify_url).toBe(`https://open.spotify.com/search/${encodeURIComponent('Stereolab Pop Quiz')}`);
     expect(setArgs.youtube_music_url).toBe(
       `https://music.youtube.com/search?q=${encodeURIComponent('Stereolab Pop Quiz')}`
     );
