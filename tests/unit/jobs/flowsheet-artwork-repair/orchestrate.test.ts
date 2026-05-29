@@ -147,8 +147,8 @@ describe('resolveLiveActivityLookback / resolveLiveActivityPauseMs', () => {
 
 describe('runRepair', () => {
   const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResponse);
-  const freeFormFn = jest.fn<FreeFormRepairFn>().mockResolvedValue('free_form_repaired');
-  const linkedFn = jest.fn<LinkedRepairFn>().mockResolvedValue('linked_repaired');
+  const freeFormFn = jest.fn<FreeFormRepairFn>().mockResolvedValue('repaired');
+  const linkedFn = jest.fn<LinkedRepairFn>().mockResolvedValue('repaired');
   const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
 
   beforeEach(() => jest.clearAllMocks());
@@ -157,11 +157,11 @@ describe('runRepair', () => {
     const callOrder: string[] = [];
     freeFormFn.mockImplementation(() => {
       callOrder.push('free_form');
-      return Promise.resolve('free_form_repaired');
+      return Promise.resolve('repaired');
     });
     linkedFn.mockImplementation(() => {
       callOrder.push('linked');
-      return Promise.resolve('linked_repaired');
+      return Promise.resolve('repaired');
     });
 
     await runRepair({
@@ -186,12 +186,12 @@ describe('runRepair', () => {
 
   it('accumulates the six counters by writer outcome', async () => {
     freeFormFn
-      .mockResolvedValueOnce('free_form_repaired')
-      .mockResolvedValueOnce('free_form_raced')
+      .mockResolvedValueOnce('repaired')
+      .mockResolvedValueOnce('raced')
       .mockResolvedValueOnce('still_null_after_lml');
     linkedFn
-      .mockResolvedValueOnce('linked_repaired')
-      .mockResolvedValueOnce('linked_raced')
+      .mockResolvedValueOnce('repaired')
+      .mockResolvedValueOnce('raced')
       .mockResolvedValueOnce('still_null_after_lml');
 
     const result = await runRepair({

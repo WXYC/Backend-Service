@@ -1,10 +1,6 @@
 /**
- * Observability for flowsheet-artwork-repair: Sentry init + JSON logs.
- *
- * Mirrors `jobs/flowsheet-metadata-backfill/logger.ts` verbatim — every
- * one-shot job carries its own copy so its build graph is independent of
- * sibling jobs. Phase A foundation contract (issue #538): every log line
- * carries the four tags `repo`, `tool`, `step`, `run_id`.
+ * Sentry init + JSON-structured logs. Mirrors sibling jobs verbatim;
+ * carries the four base tags from the Phase A logging contract (#538).
  */
 
 import * as Sentry from '@sentry/node';

@@ -60,14 +60,14 @@ After one full run, both counts should drop to the LML-true-no-match floor.
 
 ## Env knobs
 
-| Variable                             | Default | Meaning                                                                                                                                                      |
-| ------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `BACKFILL_LML_RATE_PER_MIN`          | `20`    | Token-bucket cap on LML lookups per minute. Shared with `flowsheet-metadata-backfill` so concurrent drains pace cooperatively against LML's Discogs ceiling. |
-| `BACKFILL_LML_MAX_CONCURRENT`        | `1`     | Semaphore permit count. Belt-and-suspenders defense against future orchestrator concurrency.                                                                 |
-| `BACKFILL_ARTWORK_REPAIR_TIMEOUT_MS` | `35000` | Per-call abort budget. Sized to clear LML#370's 25.25 s per-item cascade-exhaustion cap plus ~10 s of queue-contention headroom.                             |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `60`    | Cooperative-pause window. Defer before each row when a track was inserted into `flowsheet` within this many seconds. Set `0` to disable (catch-up runs).     |
-| `LIVE_ACTIVITY_PAUSE_MS`             | `30000` | Sleep between re-probes when DJ activity is detected.                                                                                                        |
-| `LIBRARY_METADATA_URL`               | _(req)_ | LML base URL. The job fails fast if unset.                                                                                                                   |
+| Variable                           | Default | Meaning                                                                                                                                                      |
+| ---------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BACKFILL_LML_RATE_PER_MIN`        | `20`    | Token-bucket cap on LML lookups per minute. Shared with `flowsheet-metadata-backfill` so concurrent drains pace cooperatively against LML's Discogs ceiling. |
+| `BACKFILL_LML_MAX_CONCURRENT`      | `1`     | Semaphore permit count. Belt-and-suspenders defense against future orchestrator concurrency.                                                                 |
+| `BACKFILL_LML_PER_CALL_TIMEOUT_MS` | `35000` | Per-call abort budget. Shared with `flowsheet-metadata-backfill`. Sized to clear LML#370's 25.25 s per-item cascade-exhaustion cap plus ~10 s headroom.      |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`   | `60`    | Cooperative-pause window. Defer before each row when a track was inserted into `flowsheet` within this many seconds. Set `0` to disable (catch-up runs).     |
+| `LIVE_ACTIVITY_PAUSE_MS`           | `30000` | Sleep between re-probes when DJ activity is detected.                                                                                                        |
+| `LIBRARY_METADATA_URL`             | _(req)_ | LML base URL. The job fails fast if unset.                                                                                                                   |
 
 ## Counters
 
@@ -85,9 +85,7 @@ A free-form `enriched_match + null-artwork` row where LML#400's fix would (post-
 
 ## Race guards
 
-- **Free-form**: WHERE narrows by `id = $1 AND artwork_url IS NULL AND metadata_status = 'enriched_match'`. A concurrent fresh enrichment landing between the orchestrator's SELECT and our UPDATE would have flipped one of those two columns; either flip kicks the row out of the predicate, the UPDATE no-ops, and we count it as `free_form_raced`.
-- **Linked**: ON CONFLICT DO UPDATE with `setWhere: album_metadata.updated_at < NOW()`. If a concurrent enrichment landed with `updated_at = NOW() + Δ`, the setWhere evaluates false and the UPSERT no-ops. Counted as `linked_raced`.
-- **LML throw**: caught and counted as `error`. Row stays in its eligible state — a subsequent run retries it. Idempotent.
+See `repair.ts` for the per-population race-guard reasoning. LML throws are caught + counted as `error`; the row stays eligible so a subsequent run retries it (idempotent).
 
 ## Related
 

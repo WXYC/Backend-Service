@@ -1,21 +1,7 @@
 /**
- * One-shot drain entrypoint (BS#1209): repair LML artwork for the two
- * populations stranded by LML#408 (fixed in LML#409, deployed prod 2026-05-29).
- *
- * Run procedure: built as a Docker image and registered via the deploy
- * pipeline's `job-type=one-shot` pathway. Drain is gated on the LML#409
- * deploy clearing the ≥ 90 % `enriched_match → non-null artwork_url`
- * floor — verify via Sentry trace explorer (`enrichment.consumer.tick`
- * attributes) before launching.
- *
- * Failure isolation: any LML throw is counted as `error` and skipped; the
- * row stays in its eligible state so a subsequent run retries it.
- * Idempotent — the race-guarded WHERE clauses in `repair.ts` make re-runs
- * safe in any order.
- *
- * `metadata_status` is read-only across this entire job. After one full
- * run the residue should drop to the LML-true-no-match floor; the
- * `still_null_after_lml` counter feeds the LML#400 follow-up backfill.
+ * BS#1209 drain entrypoint. Operator contract + run procedure live in
+ * `README.md`; the run is gated on the LML#409 deploy clearing the ≥ 90%
+ * `enriched_match → non-null artwork_url` rate from Sentry trace explorer.
  */
 
 import { closeDatabaseConnection } from '@wxyc/database';

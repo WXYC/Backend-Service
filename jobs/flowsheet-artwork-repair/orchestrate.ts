@@ -1,40 +1,19 @@
 /**
- * Orchestrator for flowsheet-artwork-repair drain (BS#1209).
+ * Two-phase orchestrator for the BS#1209 drain. See `README.md` for the
+ * operator contract; this header covers the non-obvious invariants.
  *
- * Two-phase one-shot:
- *
- *   1. **Free-form phase**: SELECT every flowsheet row where
- *      `metadata_status = 'enriched_match' AND artwork_url IS NULL AND
- *      album_id IS NULL`. For each row: lookup → repairFreeFormRow → count.
- *   2. **Linked phase**: SELECT album_metadata rows where `artwork_url IS
- *      NULL`, joined to library for (artist_name, album_title). For each
- *      album: lookup → repairLinkedAlbum → count.
- *
- * The orchestrator does NOT throttle per-row directly. LML pacing is
- * delegated to `@wxyc/lml-client`'s shared chokepoint (the `defaultLmlLimiter`
- * singleton in `lml-limiter.ts`, wired with `BACKFILL_LML_RATE_PER_MIN=20`
- * + `BACKFILL_LML_MAX_CONCURRENT=1` env defaults so a runaway pace can't
- * repeat the BS#994 monopolization incident). No per-job rate limiter that
- * bypasses the chokepoint — that's BS#1137.
- *
- * Cooperative pause mirrors `jobs/flowsheet-metadata-backfill/orchestrate.ts`:
- * probe `flowsheet` for any track row added within `LIVE_ACTIVITY_LOOKBACK_SECONDS`
- * (default 60 s); if found, defer the next row for `LIVE_ACTIVITY_PAUSE_MS`
- * (default 30 s) and re-probe. Set lookback to 0 for catch-up runs.
- *
- * Status read-only. The two repair writers are responsible for ensuring
- * `metadata_status` never appears in their .set() blocks; the orchestrator
- * trusts them. The "status-update-count == 0 from this job" acceptance
- * criterion is satisfied by the writer test pinning `'metadata_status' in
- * setArgs === false` (see repair.test.ts).
- *
- * The free-form enumeration runs in a `db.transaction` with `SET LOCAL
- * statement_timeout` because the predicate isn't covered by an existing
- * partial index — the planner falls back to a seq scan over flowsheet's
- * 2.6M+ rows. The backend's 5 s default would trip. Mirrors
- * `jobs/album-level-backfill/job.ts#enumeratePendingAlbumIds`. Linked
- * enumeration is bounded by `album_metadata`'s much smaller row count, so
- * the same wrapper is applied but the timeout rarely matters.
+ *   - LML pacing is delegated to `@wxyc/lml-client`'s shared chokepoint;
+ *     the orchestrator does NOT throttle per-row directly. The local
+ *     `lml-limiter.ts` only wires the singleton with the BACKFILL_LML_*
+ *     env defaults (BS#995). Bypassing the chokepoint is the BS#1137
+ *     antipattern.
+ *   - `metadata_status` is read-only. The writers enforce it
+ *     (`repair.test.ts` pins absence from their `.set()` blocks); the
+ *     orchestrator trusts them.
+ *   - Enumerations wrap in `db.transaction` + `SET LOCAL statement_timeout`
+ *     because neither predicate is covered by an existing partial index —
+ *     the planner falls back to a seq scan and the backend's 5 s default
+ *     would trip.
  */
 
 import { sql } from 'drizzle-orm';
@@ -128,7 +107,6 @@ export const enumerateFreeFormResidue = async (timeoutMs: number = ENUMERATE_TIM
         AND "metadata_status" = 'enriched_match'
         AND "artwork_url" IS NULL
         AND "album_id" IS NULL
-      ORDER BY "id" ASC
     `)) as unknown as FreeFormRow[];
     return rows ?? [];
   });
@@ -157,7 +135,6 @@ export const enumerateLinkedResidue = async (timeoutMs: number = ENUMERATE_TIMEO
       WHERE am."artwork_url" IS NULL
         AND l."album_title" IS NOT NULL
         AND COALESCE(a."artist_name", l."artist_name") IS NOT NULL
-      ORDER BY am."album_id" ASC
     `)) as unknown as Array<{ album_id: number; artist_name: string; album_title: string }>;
     return rows.map((r) => ({
       album_id: Number(r.album_id),
@@ -278,8 +255,8 @@ export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
 
     const outcome = await opts.repairFreeForm(row, response);
     if (outcome === 'still_null_after_lml') totals.still_null_after_lml += 1;
-    else if (outcome === 'free_form_repaired') totals.free_form_repaired += 1;
-    else if (outcome === 'free_form_raced') totals.free_form_raced += 1;
+    else if (outcome === 'repaired') totals.free_form_repaired += 1;
+    else if (outcome === 'raced') totals.free_form_raced += 1;
   }
 
   // Phase 2: linked residue
@@ -307,8 +284,8 @@ export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
 
     const outcome = await opts.repairLinked(album, response);
     if (outcome === 'still_null_after_lml') totals.still_null_after_lml += 1;
-    else if (outcome === 'linked_repaired') totals.linked_repaired += 1;
-    else if (outcome === 'linked_raced') totals.linked_raced += 1;
+    else if (outcome === 'repaired') totals.linked_repaired += 1;
+    else if (outcome === 'raced') totals.linked_raced += 1;
   }
 
   log('info', 'finished', `${JOB_NAME} done`, { ...totals });

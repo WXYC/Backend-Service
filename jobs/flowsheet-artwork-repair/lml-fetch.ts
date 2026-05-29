@@ -1,20 +1,13 @@
 /**
- * LML lookup shim for the flowsheet-artwork-repair drain (BS#1209).
+ * LML lookup shim for the BS#1209 drain. Delegates to
+ * `@wxyc/lml-client.lookupMetadata` with this drain's `defaultLmlLimiter`
+ * injected.
  *
- * Delegates to `@wxyc/lml-client.lookupMetadata` (the shared chokepoint from
- * BS#887) with this drain's `defaultLmlLimiter` injected so the BACKFILL_LML_*
- * env-var ceiling applies — same env vars as `flowsheet-metadata-backfill`,
- * cooperative pacing across both jobs.
- *
- * Per-call timeout default 35_000 ms — same value as the sibling drain
- * (`jobs/flowsheet-metadata-backfill/lml-fetch.ts`), sized to clear LML's
- * 25.25 s per-item cascade-exhaustion cap (LML#370) plus ~10 s of headroom
- * for queue contention with the live backend + ROM + the sibling drain.
- * Override via `BACKFILL_ARTWORK_REPAIR_TIMEOUT_MS`.
- *
- * Drives both the free-form and linked phases — the `track` parameter is
- * provided for free-form (which has flowsheet.track_title) and omitted
- * for linked (album-level lookup, no track context).
+ * Per-call timeout default 35_000 ms — sized to clear LML#370's 25.25 s
+ * per-item cascade-exhaustion cap plus ~10 s of queue-contention headroom.
+ * Shares the env var with `flowsheet-metadata-backfill` so an operator
+ * tightening one job's per-call budget tightens both — same cooperative-
+ * pacing pattern as BACKFILL_LML_RATE_PER_MIN.
  */
 
 import { lookupMetadata as sharedLookupMetadata, type LookupResponse } from '@wxyc/lml-client';
@@ -30,7 +23,7 @@ const envInt = (name: string, fallback: number): number => {
   return fallback;
 };
 
-const TIMEOUT_MS = envInt('BACKFILL_ARTWORK_REPAIR_TIMEOUT_MS', 35_000);
+const TIMEOUT_MS = envInt('BACKFILL_LML_PER_CALL_TIMEOUT_MS', 35_000);
 
 export const lookupMetadata = (artist: string, album?: string, track?: string): Promise<LookupResponse> =>
   sharedLookupMetadata(artist, album, track, { limiter: defaultLmlLimiter, timeoutMs: TIMEOUT_MS });

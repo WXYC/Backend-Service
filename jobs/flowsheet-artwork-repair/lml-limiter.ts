@@ -1,27 +1,12 @@
 /**
- * Concurrency + rate-limit gate for the flowsheet-artwork-repair drain
- * (BS#1209). Same shape as `jobs/flowsheet-metadata-backfill/lml-limiter.ts`
- * (BS#995) — reuses the shared `@wxyc/lml-client` primitives so this drain
- * doesn't bypass the chokepoint (BS#1137 antipattern).
+ * BACKFILL_LML_* env vars are shared with `flowsheet-metadata-backfill` —
+ * an operator tightening one job's limit tightens both. Diverging the
+ * names would let a "speed up the other drain" change silently saturate
+ * LML when both jobs run concurrently (BS#994 monopolization pattern).
  *
- * Env defaults mirror flowsheet-metadata-backfill:
- *
- *   - BACKFILL_LML_MAX_CONCURRENT = 1
- *   - BACKFILL_LML_RATE_PER_MIN   = 20
- *
- * Why share the env vars with the sibling drain: when both jobs run
- * concurrently, the shared env var caps total combined pace at the
- * configured ceiling — exactly the cooperative throttling that the BS#994
- * monopolization incident demanded. If we forked the env vars, an operator
- * raising BACKFILL_LML_RATE_PER_MIN to speed up the historical drain would
- * NOT affect this job, and the combined throughput could saturate LML.
- *
- * The 2026-05-21 incident (BS#994) showed that the orchestrator's serial
- * loop alone isn't sufficient: one in-flight LML call held for the full
- * 30 s catch-arm budget already saturated LML's Discogs fan-out. The token
- * bucket caps burst rate independent of the orchestrator's speed; the
- * semaphore is belt-and-suspenders defense if a future orchestrator change
- * makes the loop concurrent.
+ * The token bucket bounds burst rate independent of the orchestrator's
+ * loop shape; the semaphore is belt-and-suspenders defense if a future
+ * change makes the loop concurrent.
  */
 
 import { type LmlLimiter, Semaphore, TokenBucket, createLmlLimiter as createSharedLmlLimiter } from '@wxyc/lml-client';
