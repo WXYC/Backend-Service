@@ -186,7 +186,11 @@ export const shows = {
   show_name: 'show_name',
   specialty_id: 'specialty_id',
 };
-export const show_djs = {};
+export const show_djs = {
+  show_id: 'show_id',
+  dj_id: 'dj_id',
+  active: 'active',
+};
 export const user = {
   id: 'id',
   name: 'name',
