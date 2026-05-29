@@ -2,7 +2,7 @@
   "name": "@wxyc/flowsheet-artwork-repair",
   "job-type": "one-shot",
   "version": "1.0.0",
-  "description": "WXYC one-shot drain (BS#1209) — writers scaffold. Re-resolve LML artwork for rows stranded by the LML _resolve_fallback_artwork bug (LML#408, fixed in LML#409). Two write paths: free-form UPDATE on flowsheet (idempotent WHERE) and linked UPSERT on album_metadata (race-guarded). Orchestrator + entrypoint land in a follow-up PR (#1209 split).",
+  "description": "WXYC one-shot drain (BS#1209): re-resolve LML artwork for rows stranded by the LML _resolve_fallback_artwork bug. Free-form UPDATE on flowsheet (idempotent WHERE) and linked UPSERT on album_metadata (race-guarded).",
   "type": "module",
   "main": "./dist/repair.js",
   "scripts": {

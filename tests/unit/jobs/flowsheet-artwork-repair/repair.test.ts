@@ -15,12 +15,7 @@
  *      anywhere releases (post-LML#409) and should not be touched.
  *
  * Race-guard tests exercise the "concurrent fresh enrichment landed first"
- * path:
- *   - Free-form: returning empty array ⇒ `free_form_raced`. The UPDATE
- *     ran but matched 0 rows (artwork already non-null, or status flipped
- *     to enriched_no_match by an LML#400 follow-up).
- *   - Linked: returning empty array on the UPSERT ⇒ `linked_raced`. The
- *     ON CONFLICT DO UPDATE branch's `setWhere` didn't fire.
+ * path: empty `returning()` array ⇒ `raced` for either writer.
  */
 import { jest } from '@jest/globals';
 
@@ -134,7 +129,7 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
 
   it('writes exactly 10 metadata columns on a fresh LML match — status NEVER touched', async () => {
     const outcome = await repairFreeFormRow(freeFormRow, matchedResponse);
-    expect(outcome).toBe('free_form_repaired');
+    expect(outcome).toBe('repaired');
 
     expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
     const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
@@ -167,7 +162,7 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
       ],
     };
     const outcome = await repairFreeFormRow(freeFormRow, spacerResponse);
-    expect(outcome).toBe('free_form_repaired');
+    expect(outcome).toBe('repaired');
     const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(setArgs.artwork_url).toBeNull();
   });
@@ -198,10 +193,10 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
     expect(rendered).toMatch(/enriched_match/);
   });
 
-  it('returns free_form_raced when 0 rows update (artwork already non-null OR status flipped)', async () => {
+  it('returns raced when 0 rows update (artwork already non-null OR status flipped)', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([]);
     const outcome = await repairFreeFormRow(freeFormRow, matchedResponse);
-    expect(outcome).toBe('free_form_raced');
+    expect(outcome).toBe('raced');
   });
 
   it('returns still_null_after_lml when LML returns empty results — no DB write', async () => {
@@ -243,7 +238,7 @@ describe('repairLinkedAlbum (BS#1209) — linked UPSERT shape', () => {
 
   it('UPSERTs exactly 10 metadata columns into album_metadata keyed by album_id — no flowsheet write', async () => {
     const outcome = await repairLinkedAlbum(linkedAlbum, matchedResponse);
-    expect(outcome).toBe('linked_repaired');
+    expect(outcome).toBe('repaired');
 
     expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
     expect(mockDb.update).not.toHaveBeenCalled();
@@ -309,10 +304,10 @@ describe('repairLinkedAlbum (BS#1209) — linked UPSERT shape', () => {
     expect(onConflictArg.set.release_year).toBeNull();
   });
 
-  it("returns linked_raced when the UPSERT setWhere doesn't fire (concurrent fresh enrichment)", async () => {
+  it("returns raced when the UPSERT setWhere doesn't fire (concurrent fresh enrichment)", async () => {
     mockDb._chain.returning.mockResolvedValueOnce([]);
     const outcome = await repairLinkedAlbum(linkedAlbum, matchedResponse);
-    expect(outcome).toBe('linked_raced');
+    expect(outcome).toBe('raced');
   });
 
   it('returns still_null_after_lml on empty results — no DB write', async () => {
