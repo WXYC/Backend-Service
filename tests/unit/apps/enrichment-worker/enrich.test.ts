@@ -115,8 +115,8 @@ describe('finalizeRow (BS#892 PR-2)', () => {
     expect(setCall.release_year).toBeUndefined();
     expect(setCall.apple_music_url).toBeUndefined();
     expect(setCall.artist_bio).toBeUndefined();
-    // The 4 search URLs ARE in the .set(): Spotify joined YT/BC/SC in
-    // BS#1189 to align with the canonical write-path shape.
+    expect(setCall.artist_wikipedia_url).toBeUndefined();
+    // The 4 search URLs ARE in the .set().
     expect(setCall.spotify_url).toContain('open.spotify.com/search');
     expect(setCall.youtube_music_url).toContain('music.youtube.com/search');
     expect(setCall.bandcamp_url).toContain('bandcamp.com/search');

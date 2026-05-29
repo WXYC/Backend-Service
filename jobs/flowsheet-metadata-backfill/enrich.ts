@@ -183,8 +183,8 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
       // the runtime path in `metadata.service.ts#extractAlbumMetadata` (#1002).
       release_year: artwork.release_year || null,
       // Streaming search URLs: prefer LML's, fall back to synthesized.
-      // Spotify joins YT/BC/SC in BS#1189 — aligns with the canonical
-      // write path. Apple Music stays no-fallback per BS#1192.
+      // Apple Music has no fallback — null is load-bearing "no verified
+      // iTunes match" signal (BS#1192).
       spotify_url: artwork.spotify_url ?? searchUrls.spotify_url,
       apple_music_url: artwork.apple_music_url ?? null,
       youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
@@ -241,11 +241,10 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
   // them on a no-match would be silent data loss.
   if (row.album_id !== null) {
     // Linked + no-match: UPSERT just the 4 search URLs into album_metadata
-    // (Spotify joined YT/BC/SC in BS#1189; Apple stays out per BS#1192).
-    // INSERT path leaves the other 6 columns NULL (no LML match to fill
-    // them); UPDATE path leaves them untouched on existing rows
-    // (preserves any prior out-of-band values, matching the unlinked
-    // path's deliberate non-clobbering on no-match).
+    // (Apple stays out per BS#1192). INSERT path leaves the other 6 columns
+    // NULL (no LML match to fill them); UPDATE path leaves them untouched
+    // on existing rows (preserves any prior out-of-band values, matching
+    // the unlinked path's deliberate non-clobbering on no-match).
     await db
       .insert(album_metadata)
       .values({

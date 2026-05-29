@@ -163,8 +163,8 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
         // render literal "0". Mirrors metadata.service.ts (#1002).
         release_year: artwork.release_year || null,
         // Prefer LML-supplied streaming URLs; fall back to synthesized.
-        // Spotify joins YT/BC/SC in BS#1189 — aligns with the canonical
-        // write path. Apple Music stays no-fallback per BS#1192.
+        // Apple Music has no fallback — null is load-bearing "no verified
+        // iTunes match" signal (BS#1192).
         spotify_url: artwork.spotify_url ?? searchUrls.spotify_url,
         apple_music_url: artwork.apple_music_url ?? null,
         youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
@@ -199,7 +199,7 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
         artwork_url: filterSpacerGif(artwork.artwork_url),
         discogs_url: artwork.release_url ?? null,
         release_year: artwork.release_year || null,
-        // Spotify joins YT/BC/SC in BS#1189; Apple stays no-fallback (BS#1192).
+        // Apple Music has no fallback — null is load-bearing (BS#1192).
         spotify_url: artwork.spotify_url ?? searchUrls.spotify_url,
         apple_music_url: artwork.apple_music_url ?? null,
         youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
@@ -220,10 +220,10 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
   // divergence from the runtime path (see backfill enrich.ts header).
   if (row.album_id !== null) {
     // Linked + no-match: UPSERT just the 4 search URLs into album_metadata
-    // (Spotify joined YT/BC/SC in BS#1189; Apple stays out per BS#1192).
-    // INSERT path leaves the other 6 columns NULL (no LML match to fill
-    // them); UPDATE path leaves them untouched on existing rows (preserves
-    // any prior out-of-band values, same semantics as the unlinked path).
+    // (Apple stays out per BS#1192). INSERT path leaves the other 6 columns
+    // NULL (no LML match to fill them); UPDATE path leaves them untouched
+    // on existing rows (preserves any prior out-of-band values, same
+    // semantics as the unlinked path).
     await db
       .insert(album_metadata)
       .values({
