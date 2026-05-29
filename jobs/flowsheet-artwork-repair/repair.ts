@@ -133,7 +133,7 @@ export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | n
   return first.artwork;
 };
 
-type SearchUrls = { youtube_music_url: string; bandcamp_url: string; soundcloud_url: string };
+type SearchUrls = ReturnType<typeof synthesizeSearchUrls>;
 
 /**
  * 10-column payload. Mirrors `apps/enrichment-worker/enrich.ts:181-198`
