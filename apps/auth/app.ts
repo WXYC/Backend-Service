@@ -10,11 +10,12 @@ import { auth } from '@wxyc/authentication';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
 import express from 'express';
-import type { Request, Response, NextFunction } from 'express';
+import type { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest } from './rate-limit-key';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
+import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
 import { resolveOrganization } from './resolve-organization';
@@ -332,11 +333,9 @@ app.get('/healthcheck', async (req, res) => {
 
 Sentry.setupExpressErrorHandler(app);
 
-// Fallback error handler
-app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-  const message = err instanceof Error ? err.message : String(err);
-  res.status(500).json({ error: message });
-});
+// Fallback error handler — sanitises response body, forwards full error to
+// Sentry. See `./fallback-error-handler.ts` for rationale (BS#1109).
+app.use(fallbackErrorHandler);
 
 // Create default user if needed
 const createDefaultUser = async () => {
