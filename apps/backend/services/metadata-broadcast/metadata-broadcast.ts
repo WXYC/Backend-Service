@@ -79,9 +79,12 @@ export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | nul
 
 /**
  * Register the metadata-broadcast CDC handler. Call once at startup, after
- * `serverEventsMgr` is ready and alongside `setupCdcWebSocket()` — both
- * register independent `onCdcEvent` handlers against the same per-process
- * LISTEN connection (see `apps/backend/services/cdc/cdc-websocket.ts:89`).
+ * `serverEventsMgr` is ready. Sits alongside `setupCdcWebSocket()` — both
+ * register independent `onCdcEvent` handlers against the per-process LISTEN
+ * connection owned by `startCdcDispatcher()` (see
+ * `apps/backend/services/cdc/dispatcher.ts`). The dispatcher runs whether
+ * or not the websocket is configured (BS#1187), so this handler fires in
+ * environments without `CDC_SECRET`.
  */
 export function setupMetadataBroadcast(): void {
   onCdcEvent((event) => {

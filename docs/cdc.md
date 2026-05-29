@@ -28,7 +28,8 @@ PostgreSQL triggers (`cdc_notify()`) fire `pg_notify('cdc', payload)` on every I
 
 - `shared/database/src/migrations/0045_cdc_notify_triggers.sql` — trigger function + per-table triggers
 - `shared/database/src/cdc-listener.ts` — dedicated LISTEN connection and event dispatch
-- `apps/backend/services/cdc/cdc-websocket.ts` — WebSocket server with auth and heartbeat
+- `apps/backend/services/cdc/dispatcher.ts` — per-process LISTEN startup/shutdown. Runs unconditionally so in-process consumers (`metadata-broadcast`) work regardless of `CDC_SECRET` (BS#1187)
+- `apps/backend/services/cdc/cdc-websocket.ts` — WebSocket server with auth and heartbeat; gated on `CDC_SECRET` (external-listener channel only)
 
 ## Reconciliation monitor
 
