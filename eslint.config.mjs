@@ -11,6 +11,7 @@ export default tseslint.config(
       '**/dist/',
       '**/.cache/',
       '.claude/',
+      '.worktrees/',
       '**/node_modules/',
       'coverage/',
       '**/*.js',
