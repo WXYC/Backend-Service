@@ -148,11 +148,10 @@ const server = app.listen(port, () => {
   startPlaylistProxy();
   startAlbumPlaysRefresh();
   startSseMetrics(() => serverEventsMgr.getClientCountByTopic());
-  // BS#1187: start the per-process CDC LISTEN unconditionally so in-process
-  // subscribers (`setupMetadataBroadcast()`, future consumers) work in
-  // environments that don't configure CDC_SECRET. The websocket fan-out
-  // remains hard-gated on the secret — it's the external exposure, not the
-  // listener owner.
+  // LISTEN startup runs unconditionally so in-process subscribers
+  // (`setupMetadataBroadcast`, future consumers) fire whether or not
+  // CDC_SECRET is set (BS#1187). The websocket call below self-no-ops
+  // when the secret is unset.
   void startCdcDispatcher();
   // Second CDC handler: rebroadcasts terminal metadata UPDATEs as SSE
   // `liveFs:update` so dj-site stays in sync after the enrichment-worker
@@ -160,9 +159,6 @@ const server = app.listen(port, () => {
   // on the same per-process LISTEN connection — independent of the
   // websocket handler, both fire on every event.
   setupMetadataBroadcast();
-  // The websocket exposure remains hard-gated on CDC_SECRET; the call is
-  // unconditional because `setupCdcWebSocket` self-no-ops (with the
-  // [cdc-ws] disabled log) when the secret is unset.
   void setupCdcWebSocket(server);
   // One-shot warm of the rotation-tracks picker LRUs in
   // `library.service.ts`. Fire-and-forget — the walk shares the LML

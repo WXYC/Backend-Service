@@ -29,11 +29,8 @@ let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
  * Sets up the CDC WebSocket server on the given HTTP server.
  * Handles upgrade requests to /cdc, authenticates via query parameter,
  * and registers a fan-out handler against the shared CDC dispatcher.
- *
- * Caller is responsible for the `CDC_SECRET` gate at the call site
- * (see `apps/backend/app.ts`). The secret is re-read here only to defend
- * against an accidental direct call; the canonical "WS disabled" log lives
- * here so deploy verification still sees the same `[cdc-ws]` line.
+ * No-ops (with the canonical `[cdc-ws]` disabled log) when CDC_SECRET
+ * is unset — deploy verification matches the same log line.
  */
 export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
   const secret = process.env.CDC_SECRET;
@@ -96,9 +93,7 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
   }, HEARTBEAT_INTERVAL_MS);
   heartbeatTimer.unref();
 
-  // Register CDC event handler — fan out to the WebSocket clients only.
-  // The dispatcher's LISTEN is already running (see `app.ts` startup),
-  // so this is a pure subscription with no side effects on the listener.
+  // Per-event fan-out to connected WebSocket clients.
   onCdcEvent((event: CdcEvent) => {
     if (!wss || wss.clients.size === 0) return;
     const msg = JSON.stringify(event);

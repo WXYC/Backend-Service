@@ -54,6 +54,19 @@ const makeServer = (): HttpServer => {
   return server as unknown as HttpServer;
 };
 
+/** Run `fn` with CDC_SECRET pinned to `value` (or unset when `null`) and restore the prior value afterwards. */
+async function withCdcSecret(value: string | null, fn: () => Promise<void>): Promise<void> {
+  const prev = process.env.CDC_SECRET;
+  if (value === null) delete process.env.CDC_SECRET;
+  else process.env.CDC_SECRET = value;
+  try {
+    await fn();
+  } finally {
+    if (prev === undefined) delete process.env.CDC_SECRET;
+    else process.env.CDC_SECRET = prev;
+  }
+}
+
 describe('startCdcDispatcher (BS#1187)', () => {
   // The dispatcher must own LISTEN startup so in-process subscribers
   // (`setupMetadataBroadcast`, future consumers) work whether or not the
@@ -64,14 +77,10 @@ describe('startCdcDispatcher (BS#1187)', () => {
   });
 
   it('calls startCdcListener regardless of CDC_SECRET', async () => {
-    const prev = process.env.CDC_SECRET;
-    delete process.env.CDC_SECRET;
-    try {
+    await withCdcSecret(null, async () => {
       await startCdcDispatcher();
       expect(startCdcListener).toHaveBeenCalledTimes(1);
-    } finally {
-      if (prev !== undefined) process.env.CDC_SECRET = prev;
-    }
+    });
   });
 
   it('does not register an onCdcEvent handler itself — that is the consumers job', async () => {
@@ -109,9 +118,7 @@ describe('setupCdcWebSocket (BS#1187)', () => {
   });
 
   it('no-ops with the [cdc-ws] disabled log when CDC_SECRET is unset', async () => {
-    const prev = process.env.CDC_SECRET;
-    delete process.env.CDC_SECRET;
-    try {
+    await withCdcSecret(null, async () => {
       await setupCdcWebSocket(makeServer());
 
       // Deploy-verification contract: this exact line was preserved across
@@ -119,37 +126,27 @@ describe('setupCdcWebSocket (BS#1187)', () => {
       expect(consoleLogSpy).toHaveBeenCalledWith('[cdc-ws] CDC_SECRET not set, CDC WebSocket disabled');
       expect(WebSocketServer).not.toHaveBeenCalled();
       // The decoupling guarantee: the websocket path no longer touches the
-      // listener. If this assertion regresses, in-process subscribers will
-      // silently lose events in CDC_SECRET-less environments — the exact
-      // bug BS#1187 fixed.
+      // listener. Regressing this would silently disable in-process
+      // subscribers in CDC_SECRET-less environments (the BS#1187 bug).
       expect(startCdcListener).not.toHaveBeenCalled();
       expect(onCdcEvent).not.toHaveBeenCalled();
-    } finally {
-      if (prev !== undefined) process.env.CDC_SECRET = prev;
-    }
+    });
   });
 
   it('binds the WebSocketServer and registers a fan-out handler when CDC_SECRET is set', async () => {
-    const prev = process.env.CDC_SECRET;
-    process.env.CDC_SECRET = 'test-secret';
-    try {
+    await withCdcSecret('test-secret', async () => {
       const server = makeServer();
-      await setupCdcWebSocket(server);
+      try {
+        await setupCdcWebSocket(server);
 
-      expect(WebSocketServer).toHaveBeenCalledTimes(1);
-      expect(server.on).toHaveBeenCalledWith('upgrade', expect.any(Function));
-      // The fan-out handler — the websocket's only consumer of the shared
-      // dispatcher. LISTEN startup itself stays in the dispatcher.
-      expect(onCdcEvent).toHaveBeenCalledTimes(1);
-      expect(startCdcListener).not.toHaveBeenCalled();
-    } finally {
-      if (prev !== undefined) {
-        process.env.CDC_SECRET = prev;
-      } else {
-        delete process.env.CDC_SECRET;
+        expect(WebSocketServer).toHaveBeenCalledTimes(1);
+        expect(server.on).toHaveBeenCalledWith('upgrade', expect.any(Function));
+        expect(onCdcEvent).toHaveBeenCalledTimes(1);
+        expect(startCdcListener).not.toHaveBeenCalled();
+      } finally {
+        await shutdownCdcWebSocket();
       }
-      await shutdownCdcWebSocket();
-    }
+    });
   });
 });
 
