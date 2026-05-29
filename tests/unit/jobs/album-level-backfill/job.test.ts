@@ -577,12 +577,26 @@ describe('computeBulkTimeoutMs', () => {
     }
   });
 
-  // Tightened from ≤30_000 (the shared-client socket ceiling) to ≤20_000 so
-  // future drift back toward batchSize=10 — which produces a 30 s budget that
-  // races the LML-client socket timeout under live contention (BS#1078 / BS#1197)
-  // — fails CI before reaching production.
-  it('keeps BULK_BATCH_SIZE_DEFAULT under the 20 s cascade-budget ceiling', () => {
-    expect(computeBulkTimeoutMs(BULK_BATCH_SIZE_DEFAULT)).toBeLessThanOrEqual(20_000);
+  // Slope-independent invariant: at the default batchSize, the client
+  // timeout should not exceed one full per-item server budget plus slack.
+  // Catches DEFAULT drift back to 10 (would give 55_000 ms at the post-#1198
+  // slope, well over the 30_000 ms ceiling) without re-baking arithmetic
+  // every time the slope or slack moves.
+  it('keeps BULK_BATCH_SIZE_DEFAULT under one per-item budget + slack', () => {
+    expect(computeBulkTimeoutMs(BULK_BATCH_SIZE_DEFAULT)).toBeLessThanOrEqual(
+      BULK_BUDGET_MS_DEFAULT + BULK_TIMEOUT_SLACK_MS
+    );
+  });
+
+  // Belt-and-suspenders cap on operator-overridden batch sizes (#1198 acceptance).
+  // BACKFILL_BULK_BATCH_SIZE up to 20 — chosen to bracket plausible catch-up
+  // overrides — must stay under 120 s of fetch budget. Above that we're outside
+  // the regime LML's per-item cap was sized for and the failure mode shifts
+  // from "slow batch" to "timeouts pile up while LML keeps doing work."
+  it('caps overridden batchSize ≤ 20 at ≤ 120 s of fetch budget', () => {
+    for (let n = 1; n <= 20; n++) {
+      expect(computeBulkTimeoutMs(n)).toBeLessThanOrEqual(120_000);
+    }
   });
 });
 
