@@ -22,7 +22,12 @@ import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
-import { setupCdcWebSocket, shutdownCdcWebSocket } from './services/cdc/index.js';
+import {
+  setupCdcWebSocket,
+  shutdownCdcWebSocket,
+  startCdcDispatcher,
+  shutdownCdcDispatcher,
+} from './services/cdc/index.js';
 import { setupMetadataBroadcast } from './services/metadata-broadcast/index.js';
 import { startSseMetrics, stopSseMetrics } from './services/sse/sse-metrics.js';
 import { serverEventsMgr } from './utils/serverEvents.js';
@@ -143,13 +148,22 @@ const server = app.listen(port, () => {
   startPlaylistProxy();
   startAlbumPlaysRefresh();
   startSseMetrics(() => serverEventsMgr.getClientCountByTopic());
-  void setupCdcWebSocket(server);
+  // BS#1187: start the per-process CDC LISTEN unconditionally so in-process
+  // subscribers (`setupMetadataBroadcast()`, future consumers) work in
+  // environments that don't configure CDC_SECRET. The websocket fan-out
+  // remains hard-gated on the secret — it's the external exposure, not the
+  // listener owner.
+  void startCdcDispatcher();
   // Second CDC handler: rebroadcasts terminal metadata UPDATEs as SSE
   // `liveFs:update` so dj-site stays in sync after the enrichment-worker
   // (BS#892) finalizes a row. Closes BS#893 + BS#628. Registers a handler
   // on the same per-process LISTEN connection — independent of the
   // websocket handler, both fire on every event.
   setupMetadataBroadcast();
+  // The websocket exposure remains hard-gated on CDC_SECRET; the call is
+  // unconditional because `setupCdcWebSocket` self-no-ops (with the
+  // [cdc-ws] disabled log) when the secret is unset.
+  void setupCdcWebSocket(server);
   // One-shot warm of the rotation-tracks picker LRUs in
   // `library.service.ts`. Fire-and-forget — the walk shares the LML
   // semaphore with concurrent traffic, and the LRUs are process-local so
@@ -189,6 +203,7 @@ function shutdown(signal: string): void {
   stopAlbumPlaysRefresh();
   stopSseMetrics();
   void shutdownCdcWebSocket();
+  void shutdownCdcDispatcher();
   // BS#905: observe enrichments abandoned mid-flight. Sentry captureMessage
   // fires only when at least one promise is still pending after the deadline,
   // so a clean shutdown stays silent. Drain happens in parallel with
