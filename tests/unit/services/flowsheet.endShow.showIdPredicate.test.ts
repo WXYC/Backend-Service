@@ -20,13 +20,17 @@ describe('endShow show_djs UPDATE predicate (#1100)', () => {
     jest.clearAllMocks();
   });
 
-  it('scopes show_djs.active=false UPDATE to (show_id, dj_id), not dj_id alone', async () => {
+  it('scopes show_djs.active=false UPDATE to (show_id=current, dj_id), leaving prior shows untouched', async () => {
+    const PRIOR_SHOW_ID = 1;
     const CURRENT_SHOW_ID = 2;
     const DJ_ID = 'dj-A';
 
-    // DJ A is the remaining-active row on show 2; the mock returns this as the
-    // only row the loop will iterate over. The DJ is also the primary DJ, so
-    // the loop skips the leave-notification branch.
+    // remaining_djs SELECT — DJ A is the only active member of show 2. The
+    // prior-show row (show 1) is not returned because the SELECT already
+    // filters by show_id, and isn't needed for the assertion either: the
+    // per-DJ UPDATE's predicate is derived from `currentShow.id`, so the
+    // contract we're verifying is that the captured WHERE clause carries
+    // `show_id = current` (and therefore PostgreSQL will skip show 1's row).
     const remainingDjsSelect = createMockQueryChain();
     remainingDjsSelect.where.mockResolvedValue([{ show_id: CURRENT_SHOW_ID, dj_id: DJ_ID, active: true }]);
     db.select.mockReturnValueOnce(remainingDjsSelect);
@@ -35,21 +39,19 @@ describe('endShow show_djs UPDATE predicate (#1100)', () => {
     const showDjsUpdate = createMockQueryChain();
     db.update.mockReturnValueOnce(showDjsUpdate);
 
-    // primary DJ user lookup (after the loop)
+    // primary DJ user lookup; DJ A is the primary so the loop skips
+    // createLeaveNotification.
     const userSelect = createMockQueryChain();
     userSelect.limit.mockResolvedValue([{ djName: 'DJ A', name: 'A' }]);
     db.select.mockReturnValueOnce(userSelect);
 
     // nextPlayOrder for the show_end insert
     db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(0));
-
     // flowsheet insert (show_end)
     db.insert.mockReturnValueOnce(createMockQueryChain([{ id: 999 }]));
-
     // shows update (end_time)
     db.update.mockReturnValueOnce(createMockQueryChain([{}]));
-
-    // getLatestShow() select chain
+    // getLatestShow()
     const latestShowSelect = createMockQueryChain();
     latestShowSelect.limit.mockResolvedValue([{ id: CURRENT_SHOW_ID, end_time: new Date() }]);
     db.select.mockReturnValueOnce(latestShowSelect);
@@ -57,7 +59,8 @@ describe('endShow show_djs UPDATE predicate (#1100)', () => {
     await endShow({ id: CURRENT_SHOW_ID, primary_dj_id: DJ_ID } as unknown as Parameters<typeof endShow>[0]);
 
     // The first call to showDjsUpdate.where is the per-DJ UPDATE inside the
-    // Promise.all loop. Assert it constrains both show_id and dj_id.
+    // Promise.all loop. Assert it constrains both show_id and dj_id — and
+    // that show_id is bound to the current show, not a prior one.
     const wherePredicate = showDjsUpdate.where.mock.calls[0]?.[0] as {
       and: Array<{ eq: [unknown, unknown] }>;
     };
@@ -66,48 +69,6 @@ describe('endShow show_djs UPDATE predicate (#1100)', () => {
       and: expect.arrayContaining([{ eq: [show_djs.show_id, CURRENT_SHOW_ID] }, { eq: [show_djs.dj_id, DJ_ID] }]),
     });
     expect(wherePredicate.and).toHaveLength(2);
-  });
-
-  it("does not flip a DJ's prior-show row when ending a later show", async () => {
-    // Sanity-check the contract from the other side: with the show_id
-    // predicate in place, a DJ who has active=true rows on shows 1 AND 2
-    // should only see show 2's row flipped when endShow(show2) runs. The
-    // UPDATE's WHERE clause carries the current show id; show 1's row is
-    // untouched because the predicate excludes it. We model that by
-    // asserting the captured predicate's show_id value equals the current
-    // show id and never the prior one.
-    const PRIOR_SHOW_ID = 1;
-    const CURRENT_SHOW_ID = 2;
-    const DJ_ID = 'dj-A';
-
-    const remainingDjsSelect = createMockQueryChain();
-    remainingDjsSelect.where.mockResolvedValue([{ show_id: CURRENT_SHOW_ID, dj_id: DJ_ID, active: true }]);
-    db.select.mockReturnValueOnce(remainingDjsSelect);
-
-    const showDjsUpdate = createMockQueryChain();
-    db.update.mockReturnValueOnce(showDjsUpdate);
-
-    const userSelect = createMockQueryChain();
-    userSelect.limit.mockResolvedValue([{ djName: 'DJ A', name: 'A' }]);
-    db.select.mockReturnValueOnce(userSelect);
-
-    db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(0));
-    db.insert.mockReturnValueOnce(createMockQueryChain([{ id: 999 }]));
-    db.update.mockReturnValueOnce(createMockQueryChain([{}]));
-
-    const latestShowSelect = createMockQueryChain();
-    latestShowSelect.limit.mockResolvedValue([{ id: CURRENT_SHOW_ID, end_time: new Date() }]);
-    db.select.mockReturnValueOnce(latestShowSelect);
-
-    await endShow({ id: CURRENT_SHOW_ID, primary_dj_id: DJ_ID } as unknown as Parameters<typeof endShow>[0]);
-
-    const wherePredicate = showDjsUpdate.where.mock.calls[0]?.[0] as {
-      and: Array<{ eq: [unknown, unknown] }>;
-    };
-    const showIdPredicate = wherePredicate.and.find(
-      (clause) => Array.isArray(clause.eq) && clause.eq[0] === show_djs.show_id
-    );
-    expect(showIdPredicate?.eq[1]).toBe(CURRENT_SHOW_ID);
-    expect(showIdPredicate?.eq[1]).not.toBe(PRIOR_SHOW_ID);
+    expect(wherePredicate.and).not.toContainEqual({ eq: [show_djs.show_id, PRIOR_SHOW_ID] });
   });
 });
