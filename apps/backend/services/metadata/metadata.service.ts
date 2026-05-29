@@ -65,23 +65,28 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
     result.artist = extractArtistMetadata(artwork) ?? undefined;
   }
 
-  // Fill missing search URLs (always available, no API calls). All five
-  // streaming services have search-URL fallbacks post-BS#1185 — the
-  // Tragic Magic case (artist not in WXYC library at all → LML returns
-  // zero results → no artwork to project) used to leave Spotify and
-  // Apple Music as null, greying out two iOS buttons.
+  // Fill missing search URLs (always available, no API calls). Four
+  // streaming services have write-path search-URL fallbacks: Spotify,
+  // YouTube Music, Bandcamp, SoundCloud. Apple Music is intentionally
+  // omitted from the WRITE path (BS#1192) — LML's `apple_music_url=null`
+  // is load-bearing signal that iTunes Search was either queried-and-empty
+  // or queried-and-rejected by LML#390/#398's artist/album/track-floor
+  // verification. Persisting a fabricated `music.apple.com/search?term=`
+  // URL onto `flowsheet`/`album_metadata` reverses LML's `42a6c5d`
+  // "missing-link strictly better than wrong-link" contract. The READ
+  // path in `proxy.controller.ts` still mints the Apple search URL at
+  // iOS runtime — that's where the BS#1184 Tragic Magic case lands
+  // (no V2 metadata → proxy.getAlbumMetadata fallback).
   const urls = searchUrls.getAllSearchUrls(artistName, albumTitle, trackTitle);
   if (!result.album) {
     result.album = {
       spotifyUrl: urls.spotifyUrl,
-      appleMusicUrl: urls.appleMusicUrl,
       youtubeMusicUrl: urls.youtubeMusicUrl,
       bandcampUrl: urls.bandcampUrl,
       soundcloudUrl: urls.soundcloudUrl,
     };
   } else {
     if (!result.album.spotifyUrl) result.album.spotifyUrl = urls.spotifyUrl;
-    if (!result.album.appleMusicUrl) result.album.appleMusicUrl = urls.appleMusicUrl;
     if (!result.album.youtubeMusicUrl) result.album.youtubeMusicUrl = urls.youtubeMusicUrl;
     if (!result.album.bandcampUrl) result.album.bandcampUrl = urls.bandcampUrl;
     if (!result.album.soundcloudUrl) result.album.soundcloudUrl = urls.soundcloudUrl;

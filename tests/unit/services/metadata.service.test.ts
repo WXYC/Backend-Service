@@ -169,11 +169,18 @@ describe('metadata.service', () => {
     expect(result?.album?.soundcloudUrl).toContain('soundcloud.com');
   });
 
-  it('uses SearchUrlProvider fallback for every streaming service when LML URLs are null (BS#1185)', async () => {
+  it('uses SearchUrlProvider fallback for Spotify + YT/BC/SC, leaves appleMusicUrl undefined (BS#1185 + BS#1192)', async () => {
     // Pre-BS#1185, Spotify and Apple Music had no search-URL fallback, so a
     // release with artwork-but-no-streaming-URLs left iOS with two greyed
-    // buttons. Post-BS#1185, all five services have search-URL fallbacks
-    // via `SearchUrlProvider`.
+    // buttons. BS#1185 added fallbacks for all five services. BS#1192 then
+    // pulled the Apple Music fallback back out of the WRITE path: LML's
+    // `apple_music_url=null` is load-bearing signal that iTunes was either
+    // queried-and-empty or queried-and-rejected by LML#390/#398's
+    // artist/album/track-floor verification. Synthesizing a search URL on
+    // the durable row reverses LML's `42a6c5d` "missing-link strictly
+    // better than wrong-link" contract. The read-path (proxy.controller)
+    // still fills it for iOS runtime requests — that's where the Tragic
+    // Magic case lands.
     const responseNoUrls = structuredClone(lookupResponseWithResults);
     const artwork = responseNoUrls.results[0].artwork;
     artwork.spotify_url = null;
@@ -186,10 +193,23 @@ describe('metadata.service', () => {
     const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
     expect(result?.album?.spotifyUrl).toContain('open.spotify.com/search');
-    expect(result?.album?.appleMusicUrl).toContain('music.apple.com/search');
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
     expect(result?.album?.bandcampUrl).toContain('bandcamp.com');
     expect(result?.album?.soundcloudUrl).toContain('soundcloud.com');
+    // BS#1192: write-path drops the Apple fallback. LML's null stays null.
+    expect(result?.album?.appleMusicUrl).toBeUndefined();
+  });
+
+  it('preserves LML-provided apple_music_url when present (BS#1192 negative case)', async () => {
+    // The write-path drop only suppresses fabricated search URLs. When LML
+    // returns a real Apple Music URL — direct match or post-verification
+    // synth-shape pass-through (LML#401) — it must still flow to the
+    // durable row.
+    mockLookupMetadata.mockResolvedValue(lookupResponseWithResults);
+
+    const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
+
+    expect(result?.album?.appleMusicUrl).toBe('https://music.apple.com/album/xyz');
   });
 
   it('omits discogsReleaseId/discogsUrl on LML synth shape (release_id=0, release_url="")', async () => {
@@ -274,11 +294,15 @@ describe('metadata.service', () => {
     await expect(fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' })).rejects.toThrow('LML down');
   });
 
-  it('returns search URLs for all five services when lookup returns empty results (BS#1184/BS#1185 Tragic Magic case)', async () => {
+  it('returns Spotify + YT/BC/SC search URLs when lookup returns empty results (BS#1184 Tragic Magic case, post-BS#1192)', async () => {
     // The actual production failure mode: artist isn't in the WXYC library
     // at all, LML returns zero results, BS gets no artwork to project.
-    // Post-BS#1185 the fallback fills Spotify + Apple search URLs alongside
-    // the existing YT/BC/SC three, so iOS doesn't show all-greyed buttons.
+    // BS#1185 added Spotify + Apple fallbacks for this case; BS#1192 pulled
+    // Apple back out of the write-path because iTunes wasn't queried at all
+    // (no LML lookup means no album-verified Apple link). The READ path
+    // (proxy.controller) still mints the Apple search URL when iOS asks at
+    // runtime; that's the Tragic Magic surface for the no-V2-metadata
+    // branch. See `proxy.controller.test.ts` for the read-path coverage.
     mockLookupMetadata.mockResolvedValue(emptyLookupResponse);
 
     const result = await fetchMetadata({
@@ -288,15 +312,15 @@ describe('metadata.service', () => {
     });
 
     expect(result?.album?.spotifyUrl).toContain('open.spotify.com/search');
-    expect(result?.album?.appleMusicUrl).toContain('music.apple.com/search');
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
     expect(result?.album?.bandcampUrl).toContain('bandcamp.com');
     expect(result?.album?.soundcloudUrl).toContain('soundcloud.com');
+    expect(result?.album?.appleMusicUrl).toBeUndefined();
     expect(result?.album?.discogsReleaseId).toBeUndefined();
     expect(result?.album?.discogsUrl).toBeUndefined();
   });
 
-  it('returns search URLs for all five services when result has no artwork', async () => {
+  it('returns Spotify + YT/BC/SC search URLs (no Apple) when result has no artwork', async () => {
     const responseNoArtwork = {
       ...lookupResponseWithResults,
       results: [{ library_item: lookupResponseWithResults.results[0].library_item, artwork: null }],
@@ -306,8 +330,8 @@ describe('metadata.service', () => {
     const result = await fetchMetadata({ artistName: 'Autechre', albumTitle: 'Confield' });
 
     expect(result?.album?.spotifyUrl).toContain('open.spotify.com/search');
-    expect(result?.album?.appleMusicUrl).toContain('music.apple.com/search');
     expect(result?.album?.youtubeMusicUrl).toContain('music.youtube.com');
+    expect(result?.album?.appleMusicUrl).toBeUndefined();
     expect(result?.album?.discogsReleaseId).toBeUndefined();
   });
 
