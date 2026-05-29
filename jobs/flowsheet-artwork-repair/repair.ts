@@ -32,7 +32,7 @@
  *
  * The 10-column payload, spacer.gif filter, Discogs-bio cleanup, and the
  * `release_year || null` coercion all mirror `apps/enrichment-worker/
- * enrich.ts:181-198` (canonical writer) and `jobs/flowsheet-metadata-
+ * enrich.ts:159-175` (canonical writer) and `jobs/flowsheet-metadata-
  * backfill/enrich.ts` (sibling drain). The duplication is the same build-
  * graph isolation the other one-shot jobs carry: no imports from
  * `apps/backend` so the job's Docker image graph is independent.
@@ -138,7 +138,7 @@ export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | n
 type SearchUrls = ReturnType<typeof synthesizeSearchUrls>;
 
 /**
- * 10-column payload. Mirrors `apps/enrichment-worker/enrich.ts:181-198`
+ * 10-column payload. Mirrors `apps/enrichment-worker/enrich.ts:159-175`
  * (canonical writer).
  *
  * Streaming-URL fallback asymmetry:
