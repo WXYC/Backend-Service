@@ -13,7 +13,7 @@
  * What gets warmed:
  *   For every active rotation row (`kill_date IS NULL OR kill_date >
  *   CURRENT_DATE` — the same predicate `getRotationFromDB` uses), the warmer
- *   calls `getDiscogsReleaseIdByRotationId` end-to-end so it goes through
+ *   calls `resolveRotationPickerSource` end-to-end so it goes through
  *   the same three-tier resolver real picker opens take. That means the
  *   warm walk shares the LML chokepoint with concurrent user traffic —
  *   `lookupSemaphore` (5 permits) and the rate-limit token bucket throttle
@@ -41,7 +41,7 @@
 import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import { db, rotation } from '@wxyc/database';
-import { getDiscogsReleaseIdByRotationId, __rotationLmlCacheSizesForWarm } from './library.service.js';
+import { resolveRotationPickerSource, __rotationLmlCacheSizesForWarm } from './library.service.js';
 
 const LOG_PREFIX = '[rotation-tracks-cache-warm]';
 
@@ -60,17 +60,17 @@ export interface WarmCounters {
   lmlPositive: number;
   /** Rows that hit LML and got nothing (negative cache populated). */
   lmlNegative: number;
-  /** Rows where `getDiscogsReleaseIdByRotationId` threw. */
+  /** Rows where `resolveRotationPickerSource` threw. */
   errors: number;
   /** Wall-clock duration of the walk in ms. */
   elapsedMs: number;
 }
 
 /**
- * Walk every active rotation row, calling `getDiscogsReleaseIdByRotationId`
+ * Walk every active rotation row, calling `resolveRotationPickerSource`
  * for each so the per-`rotation_id` LRUs in `library.service.ts` are populated.
  *
- * Sequential by design — `getDiscogsReleaseIdByRotationId` itself acquires
+ * Sequential by design — `resolveRotationPickerSource` itself acquires
  * the `lookupSemaphore` permit when it falls through to LML, so the upper
  * bound on outstanding LML calls remains 5. Driving extra concurrency here
  * would only deepen the semaphore queue without raising throughput, while
@@ -107,7 +107,7 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
 
     try {
       const beforeSizes = __rotationLmlCacheSizesForWarm();
-      const result = await getDiscogsReleaseIdByRotationId(rotationId);
+      const result = await resolveRotationPickerSource(rotationId);
       const afterSizes = __rotationLmlCacheSizesForWarm();
 
       // Per-row LRU-delta classifier: if a positive entry was added during

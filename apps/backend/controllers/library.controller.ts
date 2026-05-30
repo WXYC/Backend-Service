@@ -333,49 +333,45 @@ export const killRotation: RequestHandler<object, unknown, KillRotationRelease> 
   }
 };
 
-/**
- * Wire shape returned by `GET /library/rotation/:rotation_id/tracks`. The
- * dj-site rotation entry picker (`useGetRotationTracksQuery`) consumes this
- * directly — keep field names + types in lockstep with the dj-site
- * `RotationTrack` type in `lib/features/rotation/api.ts`.
- *
- * Distinct from the `/proxy/library/:libraryId/tracks` shape
- * (`{position, title, artist_credit, duration_ms}`) consumed by the
- * catalog-search picker (BS#836 / dj-site#501). Same upstream data, two
- * pickers with two pre-existing wire contracts.
- */
-export interface RotationTrack {
-  position: string;
-  title: string;
-  duration: string | null;
-  artists: string[];
-}
+// Wire shape `RotationTrack` lives in `library.service.ts` so the service
+// can project the LML extended-mode tracklist inline (BS#1185 + LML#427)
+// without crossing the controller → service direction; re-exported here so
+// consumers that import the type alongside the handler stay unbroken.
+//
+// Distinct from the `/proxy/library/:libraryId/tracks` shape
+// (`{position, title, artist_credit, duration_ms}`) consumed by the
+// catalog-search picker (BS#836 / dj-site#501). Same upstream data, two
+// pickers with two pre-existing wire contracts.
+import type { RotationTrack } from '../services/library.service.js';
+export type { RotationTrack };
 
 /**
  * GET /library/rotation/:rotation_id/tracks (BS#940)
  *
  * Composition for the dj-site rotation entry mode track picker.
- *   1. Resolve the Discogs release id via `getDiscogsReleaseIdByRotationId`,
- *      which walks three tiers: `rotation.discogs_release_id` (mirrored from
- *      tubafrenzy by jobs/rotation-etl, migration 0077), `library_identity.
- *      discogs_release_id` via the `rotation.album_id` bridge, and an LML
- *      `POST /api/v1/lookup` against the rotation row's `(artist_name,
- *      album_title)` — the substrate matching tubafrenzy's
- *      `RotationTracklistCache` (#986). Tier-3 results are cached per
- *      `rotation_id` in the service layer.
- *   2. Fetch the tracklist from LML's `GET /api/v1/discogs/release/{id}`.
- *   3. Project Discogs's per-track `artists` onto the dj-site shape; fall
- *      back to the release-level artist when a track has no per-track credits
- *      (Discogs's normal shape for non-V/A releases).
+ *   1. Resolve the picker source via `resolveRotationPickerSource`, which
+ *      walks three tiers: `rotation.discogs_release_id` (mirrored from
+ *      tubafrenzy by jobs/rotation-etl, migration 0077),
+ *      `library_identity.discogs_release_id` via the `rotation.album_id`
+ *      bridge, and an LML `POST /api/v1/lookup` (with `extended=true`)
+ *      against the rotation row's `(artist_name, album_title)`. Tier-3
+ *      results are cached per `rotation_id` in the service layer.
+ *   2. If the source carries an `inlineTracklist`, return it directly. LML
+ *      already projected the tracks (Discogs hit OR MusicBrainz rescue on
+ *      LML#427) — no follow-up `getRelease(id)` round-trip.
+ *   3. Otherwise fetch the tracklist from LML's
+ *      `GET /api/v1/discogs/release/{id}` and project per-track artists
+ *      onto the dj-site shape, falling back to the release-level artist
+ *      when a track has no per-track credits.
  *
- * Degrades gracefully: returns 200 + `[]` when the rotation row doesn't exist,
- * when all three resolution tiers miss, and when LML 404s the release. Only
- * LML 5xx bubbles up so transient upstream failures surface rather than
- * silently hiding the dropdown.
+ * Degrades gracefully: returns 200 + `[]` when the rotation row doesn't
+ * exist, when all three resolution tiers miss, and when LML 404s the
+ * release. Only LML 5xx bubbles up so transient upstream failures surface
+ * rather than silently hiding the dropdown.
  *
- * No controller-side cache on the `/release/{id}` fetch — LML's 3-tier cache
- * already deduplicates by release id. The tier-3 lookup is cached at the
- * service layer (keyed by `rotation_id`).
+ * No controller-side cache on the `/release/{id}` fetch — LML's 3-tier
+ * cache already deduplicates by release id. The tier-3 lookup is cached at
+ * the service layer (keyed by `rotation_id`).
  */
 export const getRotationTracks: RequestHandler<{ rotation_id: string }> = async (req, res) => {
   const rotationId = parseInt(req.params.rotation_id, 10);
@@ -383,15 +379,20 @@ export const getRotationTracks: RequestHandler<{ rotation_id: string }> = async 
     throw new WxycError('rotation_id must be a positive integer', 400);
   }
 
-  const discogsReleaseId = await libraryService.getDiscogsReleaseIdByRotationId(rotationId);
-  if (discogsReleaseId === null) {
+  const source = await libraryService.resolveRotationPickerSource(rotationId);
+  if (source === null) {
     res.status(200).json([]);
+    return;
+  }
+
+  if (source.inlineTracklist !== null) {
+    res.status(200).json(source.inlineTracklist);
     return;
   }
 
   let release;
   try {
-    release = await getRelease(discogsReleaseId);
+    release = await getRelease(source.releaseId);
   } catch (err) {
     if (err instanceof LmlClientError && err.statusCode === 404) {
       res.status(200).json([]);

@@ -326,7 +326,7 @@ export async function getDiscogsReleaseIdByLegacyId(legacyId: number): Promise<n
 
 /**
  * Per-rotation_id LRU for the LML `POST /api/v1/lookup` fallback in
- * `getDiscogsReleaseIdByRotationId`. The dj-site picker is opened many times
+ * `resolveRotationPickerSource`. The dj-site picker is opened many times
  * per session against a handful of rotation rows; caching avoids restarting
  * the LML query for each open. Mirrors tubafrenzy's `RotationTracklistCache`
  * concept (process-local map keyed by rotation id), minus the warm-on-startup
@@ -370,7 +370,42 @@ const ROTATION_LML_LOOKUP_TIMEOUT_MS = 10000;
  */
 const LIBRARY_INTERACTIVE_LML_BUDGET_MS = envInt('LIBRARY_INTERACTIVE_LML_BUDGET_MS', 5000);
 
-const rotationLmlPositiveCache = new LRUCache<number, number>({
+/**
+ * Wire shape returned by `GET /library/rotation/:rotation_id/tracks`. The
+ * dj-site rotation entry picker (`useGetRotationTracksQuery`) consumes this
+ * directly — keep field names + types in lockstep with the dj-site
+ * `RotationTrack` type in `lib/features/rotation/api.ts`. Re-exported from
+ * `apps/backend/controllers/library.controller.ts` for the surface that
+ * consumers reference today.
+ */
+export interface RotationTrack {
+  position: string;
+  title: string;
+  duration: string | null;
+  artists: string[];
+}
+
+/**
+ * What `resolveRotationPickerSource` hands back to the picker controller.
+ *
+ * `releaseId` is the Discogs release the picker can fetch a tracklist from.
+ * Tiers 1 and 2 (stored Discogs id) always produce a real release id with
+ * `inlineTracklist: null`, so the controller falls through to its existing
+ * `getRelease(releaseId)` projection. Tier 3 (runtime LML lookup with
+ * `extended=true`) carries an `inlineTracklist` when LML's response had one
+ * — Discogs hit (the cascade matched) or MusicBrainz rescue (BS#1185 synth
+ * + LML#427). In that case the controller short-circuits and returns
+ * `inlineTracklist` directly; no second LML round-trip needed. The
+ * `releaseId` may be `0` on the synth-with-MB-rescue path because there's
+ * no Discogs release behind the tracklist, and BS treats `release_id === 0`
+ * as a signal to skip the follow-up release fetch (matches BS#1185).
+ */
+export interface RotationPickerSource {
+  releaseId: number;
+  inlineTracklist: RotationTrack[] | null;
+}
+
+const rotationLmlPositiveCache = new LRUCache<number, RotationPickerSource>({
   max: ROTATION_LML_LOOKUP_CACHE_MAX,
   ttl: ROTATION_LML_LOOKUP_TTL_POSITIVE_MS,
   ttlAutopurge: true,
@@ -402,37 +437,40 @@ export function __rotationLmlCacheSizesForWarm(): { positive: number; negative: 
 }
 
 /**
- * Look up the resolved Discogs release id for a rotation row by its id.
+ * Resolve the source the rotation-tracks picker should render against, by
+ * `rotation_id`. Returns either a `releaseId` the controller can hand to
+ * `getRelease(id)`, an inline tracklist the controller can return as-is, or
+ * `null` if every tier missed and the picker should degrade to free-text.
  *
  * Three-tier resolution to match tubafrenzy's `RotationTracklistCache` parity
  * (see BS#986):
  *
  *   1. `rotation.discogs_release_id` (direct) — mirrored from tubafrenzy
  *      `ROTATION_RELEASE.DISCOGS_RELEASE_ID` by `jobs/rotation-etl`. Populated
- *      via the rotation-add form's paste-URL prefill flow. 0/21,563 rows
- *      carry a value in prod as of 2026-05-21, so tier 1 is the rare path.
+ *      via the rotation-add form's paste-URL prefill flow.
+ *      → `{ releaseId, inlineTracklist: null }`
  *   2. `library_identity.discogs_release_id` via the `album_id` bridge
- *      (fallback) — written by `jobs/library-identity-consumer` (BS#802),
- *      but the column is structurally NULL today until BS#801 extends LML's
- *      `bulk-resolve-libraries` contract with release-level resolution.
+ *      (fallback) — written by `jobs/library-identity-consumer` (BS#802).
+ *      → `{ releaseId, inlineTracklist: null }`
  *   3. LML `POST /api/v1/lookup` on `(rotation.artist_name, rotation.album_title)`
- *      (runtime) — the same `(artist, title)` lookup tubafrenzy's
- *      `RotationTracklistCache.fetchAndCache` uses. Per-`rotation_id` LRU
- *      caches positive and negative results.
- *
- * Tier 3 keeps the picker working today; tiers 1 and 2 are the substrate
- * we hand off to once upstreams catch up.
+ *      with `extended=true` — the same `(artist, title)` lookup tubafrenzy's
+ *      `RotationTracklistCache.fetchAndCache` uses, but extended to carry the
+ *      tracklist inline. When LML returns a tracklist (Discogs hit OR
+ *      MusicBrainz-rescued synth path on the BS#1185 sentinel + LML#427),
+ *      the controller returns it directly; no follow-up `getRelease(id)`
+ *      round-trip needed. Per-`rotation_id` LRU caches positive and negative
+ *      outcomes.
+ *      → `{ releaseId, inlineTracklist }`
  *
  * Returns null when all three tiers miss: rotation row doesn't exist; the
  * row has no `artist_name` or `album_title`; LML returns no results,
  * isn't configured, or fails. The picker degrades to free-text.
  *
- * Used by `/library/rotation/:rotation_id/tracks` (BS#940) to compose
- * against LML's `/api/v1/discogs/release/{id}` for the rotation entry
- * mode picker. Parallel to `getDiscogsReleaseIdByLegacyId` (BS#836)
- * which the catalog-search picker uses via `legacy_release_id`.
+ * Used by `/library/rotation/:rotation_id/tracks` (BS#940). Parallel to
+ * `getDiscogsReleaseIdByLegacyId` (BS#836) which the catalog-search picker
+ * uses via `legacy_release_id`.
  */
-export async function getDiscogsReleaseIdByRotationId(rotationId: number): Promise<number | null> {
+export async function resolveRotationPickerSource(rotationId: number): Promise<RotationPickerSource | null> {
   const rows = await db
     .select({
       direct: rotation.discogs_release_id,
@@ -447,13 +485,13 @@ export async function getDiscogsReleaseIdByRotationId(rotationId: number): Promi
   if (!rows[0]) return null;
 
   const stored = rows[0].direct ?? rows[0].fallback ?? null;
-  if (stored !== null) return stored;
+  if (stored !== null) return { releaseId: stored, inlineTracklist: null };
 
   return resolveRotationDiscogsReleaseViaLml(rotationId, rows[0].artist_name, rows[0].album_title);
 }
 
 /**
- * Tier-3 of `getDiscogsReleaseIdByRotationId`. Asks LML to identify the
+ * Tier-3 of `resolveRotationPickerSource`. Asks LML to identify the
  * Discogs release for a rotation row's `(artist_name, album_title)` when
  * the direct column and `library_identity` fallback both miss. Mirrors
  * tubafrenzy's `RotationTracklistCache.fetchAndCache`, which calls
@@ -496,7 +534,7 @@ async function resolveRotationDiscogsReleaseViaLml(
   rotationId: number,
   artistName: string | null,
   albumTitle: string | null
-): Promise<number | null> {
+): Promise<RotationPickerSource | null> {
   if (!artistName || !albumTitle) return null;
   if (!isLmlConfigured()) return null;
 
@@ -506,12 +544,23 @@ async function resolveRotationDiscogsReleaseViaLml(
 
   const lookupArtist = isVariousArtistsName(artistName) ? undefined : artistName;
 
-  let releaseId: number | null;
+  let source: RotationPickerSource | null;
   try {
+    // `extended: true` opts the top-1 result's `artwork` block into the
+    // extra payload LML already has during enrichment (LML#414) — including
+    // `tracklist`, which lets the picker skip the follow-up
+    // `getRelease(id)` round-trip and (for the MusicBrainz-rescued
+    // synth-result path on LML#427) get a tracklist for releases Discogs
+    // doesn't carry. Same `(artist, album)` call as before; the request body
+    // only gains the `extended` flag.
     const response = await lookupMetadata(lookupArtist, albumTitle, undefined, {
       timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
+      extended: true,
     });
-    releaseId = response.results?.[0]?.artwork?.release_id ?? null;
+    const artwork = response.results?.[0]?.artwork ?? null;
+    const releaseId = artwork?.release_id ?? null;
+    const inlineTracklist = projectInlineTracklist(artwork?.tracklist, artistName);
+    source = releaseId !== null || inlineTracklist !== null ? { releaseId: releaseId ?? 0, inlineTracklist } : null;
   } catch (err) {
     console.warn(
       '[library.service] LML /lookup for rotation_id=%d failed; degrading picker to free-text: %s',
@@ -521,13 +570,44 @@ async function resolveRotationDiscogsReleaseViaLml(
     return null;
   }
 
-  if (releaseId !== null) {
-    rotationLmlPositiveCache.set(rotationId, releaseId);
+  if (source !== null) {
+    rotationLmlPositiveCache.set(rotationId, source);
   } else {
     rotationLmlNegativeCache.set(rotationId, true);
   }
 
-  return releaseId;
+  return source;
+}
+
+/**
+ * Project the LML `extended=true` `artwork.tracklist` shape onto the picker's
+ * wire shape (`RotationTrack[]`). Mirrors the projection the controller does
+ * on `release.tracklist` from `getRelease(id)`, but on the inline-tracklist
+ * surface introduced by BS#1185 + LML#427.
+ *
+ * `artistFallback` is the rotation row's `artist_name` — used when a track
+ * has no per-track artist credits (Discogs's normal shape for non-V/A
+ * releases; MusicBrainz's normal shape for almost everything). The picker
+ * always wants at least one artist name to render against the track row.
+ *
+ * Returns `null` (not `[]`) when the tracklist is absent, so the caller can
+ * distinguish "LML returned a tracklist" from "LML didn't carry one and the
+ * controller should fall through to the release fetch".
+ */
+function projectInlineTracklist(
+  tracklist:
+    | ReadonlyArray<{ position: string; title: string; duration?: string | null; artists?: readonly string[] | null }>
+    | null
+    | undefined,
+  artistFallback: string
+): RotationTrack[] | null {
+  if (!tracklist || tracklist.length === 0) return null;
+  return tracklist.map((t) => ({
+    position: t.position,
+    title: t.title,
+    duration: t.duration ?? null,
+    artists: t.artists && t.artists.length > 0 ? Array.from(t.artists) : [artistFallback],
+  }));
 }
 
 export const updateOnStreaming = async (id: number, on_streaming: boolean | null) => {
