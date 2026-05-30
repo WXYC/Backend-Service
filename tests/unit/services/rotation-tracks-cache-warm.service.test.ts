@@ -204,8 +204,8 @@ describe('rotation-tracks-cache-warm.service', () => {
 
       const counters = await warmRotationTracksCache();
 
-      expect(counters.releasesWarmedPositive).toBe(1);
-      expect(counters.releasesWarmedNegative).toBe(1);
+      expect(counters.releaseFetchPositive).toBe(1);
+      expect(counters.releaseFetchNegative).toBe(1);
       expect(counters.releaseFetchErrors).toBe(0);
     });
 
@@ -234,6 +234,52 @@ describe('rotation-tracks-cache-warm.service', () => {
       expect(captureContext.tags?.subsystem).toBe('rotation-tracks-cache-warm');
       expect(captureContext.extra?.rotation_id).toBe(10);
       expect(captureContext.extra?.release_id).toBe(4080);
+    });
+
+    test('bails the loop and tallies budgetSkipped when the wall-clock budget elapses', async () => {
+      // Hard cap is 30 min (1.8e6 ms). Drive Date.now so iteration 3 fires
+      // after the cap; rows 1 and 2 should run, row 3 should be skipped.
+      mockActiveRotationRows([10, 20, 30]);
+      mockResolveRotationPickerSource.mockResolvedValue(null);
+      const BUDGET_MS = 30 * 60 * 1000;
+      const dateSpy = jest.spyOn(Date, 'now');
+      // startTime read.
+      dateSpy.mockReturnValueOnce(0);
+      // Per-iteration budget check.
+      dateSpy.mockReturnValueOnce(100); // row 10: within budget.
+      dateSpy.mockReturnValueOnce(200); // row 20: within budget.
+      dateSpy.mockReturnValueOnce(BUDGET_MS + 1); // row 30: over budget.
+      // Any further Date.now calls (final elapsedMs computation) — return a sane value.
+      dateSpy.mockReturnValue(BUDGET_MS + 100);
+
+      const counters = await warmRotationTracksCache();
+
+      expect(counters.scanned).toBe(2);
+      expect(counters.budgetSkipped).toBe(1);
+      expect(mockResolveRotationPickerSource).toHaveBeenCalledTimes(2);
+
+      dateSpy.mockRestore();
+    });
+
+    test('counts a cross-row release-fetch cache hit as releaseFetchAlreadyWarm', async () => {
+      // Two rows share the same releaseId. The first warms the LRU; the
+      // second's release-fetch returns the cached projection without
+      // growing either LRU.
+      mockActiveRotationRows([10, 20]);
+      mockResolveRotationPickerSource.mockResolvedValueOnce(source(4080));
+      mockResolveRotationPickerSource.mockResolvedValueOnce(source(4080));
+      mockGetRotationTracksFromRelease.mockImplementationOnce(() => {
+        releaseSizesRef.current = { ...releaseSizesRef.current, positive: releaseSizesRef.current.positive + 1 };
+        return Promise.resolve([]);
+      });
+      // Second call: no size change (cache hit).
+      mockGetRotationTracksFromRelease.mockResolvedValueOnce([]);
+
+      const counters = await warmRotationTracksCache();
+
+      expect(counters.releaseFetchPositive).toBe(1);
+      expect(counters.releaseFetchAlreadyWarm).toBe(1);
+      expect(counters.releaseFetchNegative).toBe(0);
     });
 
     test('does not halt when a single row throws — sibling rows still visited and captured to Sentry', async () => {

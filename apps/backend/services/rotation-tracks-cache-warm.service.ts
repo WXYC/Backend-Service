@@ -56,6 +56,16 @@ const LOG_PREFIX = '[rotation-tracks-cache-warm]';
  */
 const PROGRESS_LOG_EVERY = 50;
 
+/**
+ * Hard wall-clock cap for the warm pass. Backstop against the LML-monopolization
+ * pattern seen in BS#995 / BS#1011 / BS#1064 — if every row falls into a
+ * 2-9 s cold-path, 310 rows × 20 s ≈ 100 min of background LML pressure. 30 min
+ * keeps the warmer well under the saturation window observed in those
+ * incidents; rows skipped by the budget get retried on the next process restart
+ * and warm progressively across the deploy cadence.
+ */
+const WARM_PASS_BUDGET_MS = 30 * 60 * 1000;
+
 export interface WarmCounters {
   /** Total rows walked. */
   scanned: number;
@@ -67,12 +77,16 @@ export interface WarmCounters {
   lmlNegative: number;
   /** Rows where `resolveRotationPickerSource` threw. */
   errors: number;
-  /** Release-fetch follow-ups that populated the release-tracklist positive LRU. */
-  releasesWarmedPositive: number;
-  /** Release-fetch follow-ups that populated the release-tracklist negative LRU (LML 404). */
-  releasesWarmedNegative: number;
+  /** Release-fetch follow-ups that grew the release-tracklist positive LRU. */
+  releaseFetchPositive: number;
+  /** Release-fetch follow-ups that grew the release-tracklist negative LRU (LML 404). */
+  releaseFetchNegative: number;
+  /** Release-fetch follow-ups that found the release already cached cross-row. */
+  releaseFetchAlreadyWarm: number;
   /** Release-fetch follow-ups that threw (5xx, network, parse). */
   releaseFetchErrors: number;
+  /** Rows skipped after the wall-clock budget elapsed. */
+  budgetSkipped: number;
   /** Wall-clock duration of the walk in ms. */
   elapsedMs: number;
 }
@@ -107,9 +121,11 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
     lmlPositive: 0,
     lmlNegative: 0,
     errors: 0,
-    releasesWarmedPositive: 0,
-    releasesWarmedNegative: 0,
+    releaseFetchPositive: 0,
+    releaseFetchNegative: 0,
+    releaseFetchAlreadyWarm: 0,
     releaseFetchErrors: 0,
+    budgetSkipped: 0,
     elapsedMs: 0,
   };
 
@@ -117,6 +133,12 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
 
   for (const row of rows) {
     const rotationId = row.id as unknown as number;
+
+    if (Date.now() - startTime > WARM_PASS_BUDGET_MS) {
+      counters.budgetSkipped += 1;
+      continue;
+    }
+
     counters.scanned += 1;
 
     let result: Awaited<ReturnType<typeof resolveRotationPickerSource>> = null;
@@ -155,21 +177,19 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
       console.warn(`${LOG_PREFIX} row ${rotationId} failed: ${(err as Error).message}`);
     }
 
-    // Follow-up release-fetch warm: mirror the picker controller's fall-through.
-    // The controller calls getRotationTracksFromRelease iff
-    // `source.inlineTracklist === null && source.releaseId !== null`. The
-    // BS#1185 sentinel (`releaseId: 0`) is always paired with an inline
-    // tracklist, so `releaseId > 0` would be equivalent; the inline-tracklist
-    // check is the contract this walks.
+    // Mirror the picker controller's fall-through: getRotationTracksFromRelease
+    // iff inlineTracklist is null.
     if (result && result.releaseId !== null && result.inlineTracklist === null) {
       try {
         const beforeReleaseSizes = __releaseTracklistCacheSizesForWarm();
         await getRotationTracksFromRelease(result.releaseId);
         const afterReleaseSizes = __releaseTracklistCacheSizesForWarm();
         if (afterReleaseSizes.positive > beforeReleaseSizes.positive) {
-          counters.releasesWarmedPositive += 1;
+          counters.releaseFetchPositive += 1;
         } else if (afterReleaseSizes.negative > beforeReleaseSizes.negative) {
-          counters.releasesWarmedNegative += 1;
+          counters.releaseFetchNegative += 1;
+        } else {
+          counters.releaseFetchAlreadyWarm += 1;
         }
       } catch (err) {
         counters.releaseFetchErrors += 1;
@@ -188,8 +208,9 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
         `${LOG_PREFIX} progress: scanned=${counters.scanned}/${rows.length} ` +
           `preResolved=${counters.preResolved} lmlPositive=${counters.lmlPositive} ` +
           `lmlNegative=${counters.lmlNegative} ` +
-          `releasesWarmedPositive=${counters.releasesWarmedPositive} ` +
-          `releasesWarmedNegative=${counters.releasesWarmedNegative} ` +
+          `releaseFetchPositive=${counters.releaseFetchPositive} ` +
+          `releaseFetchNegative=${counters.releaseFetchNegative} ` +
+          `releaseFetchAlreadyWarm=${counters.releaseFetchAlreadyWarm} ` +
           `errors=${counters.errors} releaseFetchErrors=${counters.releaseFetchErrors}`
       );
     }
@@ -200,8 +221,10 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
   console.log(
     `${LOG_PREFIX} done: scanned=${counters.scanned} preResolved=${counters.preResolved} ` +
       `lmlPositive=${counters.lmlPositive} lmlNegative=${counters.lmlNegative} ` +
-      `releasesWarmedPositive=${counters.releasesWarmedPositive} ` +
-      `releasesWarmedNegative=${counters.releasesWarmedNegative} ` +
+      `releaseFetchPositive=${counters.releaseFetchPositive} ` +
+      `releaseFetchNegative=${counters.releaseFetchNegative} ` +
+      `releaseFetchAlreadyWarm=${counters.releaseFetchAlreadyWarm} ` +
+      `budgetSkipped=${counters.budgetSkipped} ` +
       `errors=${counters.errors} releaseFetchErrors=${counters.releaseFetchErrors} ` +
       `elapsedMs=${counters.elapsedMs} ` +
       `(starting cache sizes positive=${startSizes.positive} negative=${startSizes.negative})`
