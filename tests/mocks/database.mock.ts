@@ -95,6 +95,7 @@ export const rotation = {
   album_title: 'album_title',
   record_label: 'record_label',
   discogs_release_id: 'discogs_release_id',
+  tracklist_lookup_attempted_at: 'tracklist_lookup_attempted_at',
 };
 export const library_identity = {
   library_id: 'library_id',

@@ -1,5 +1,12 @@
 import { jest } from '@jest/globals';
-import { db, createMockQueryChain, library, library_artist_view, album_plays } from '../../mocks/database.mock';
+import {
+  db,
+  createMockQueryChain,
+  library,
+  library_artist_view,
+  album_plays,
+  rotation,
+} from '../../mocks/database.mock';
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockLookupBySong = jest.fn<() => Promise<unknown>>();
@@ -2195,10 +2202,11 @@ describe('library.service', () => {
       fallback: number | null;
       artist_name: string | null;
       album_title: string | null;
+      tracklist_lookup_attempted_at?: Date | null;
     }): void {
       const chain = createMockQueryChain();
       db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([row]);
+      chain.limit = jest.fn().mockResolvedValue([{ tracklist_lookup_attempted_at: null, ...row }]);
     }
 
     beforeEach(() => {
@@ -2477,6 +2485,115 @@ describe('library.service', () => {
           { position: '1', title: 'Tragic Magic', duration: '6:01', artists: ['Julianna Barwick & Mary Lattimore'] },
           { position: '2', title: 'For Mariko', duration: '4:18', artists: ['Julianna Barwick & Mary Lattimore'] },
         ],
+      });
+    });
+
+    describe('persistent negative marker (rotation.tracklist_lookup_attempted_at)', () => {
+      // The in-memory LRU survives within a process; this column survives
+      // restarts. Picker skips the LML cascade entirely when the column is
+      // set within the 7-day window — covers the 28-row "negative" set
+      // without re-paying 22 s cascade exhaustion on every deploy.
+
+      it('skips LML when tracklist_lookup_attempted_at is within the 7-day window', async () => {
+        mockRow({
+          direct: null,
+          fallback: null,
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+          tracklist_lookup_attempted_at: new Date(Date.now() - 24 * 60 * 60 * 1000), // 1 day ago
+        });
+
+        const result = await resolveRotationPickerSource(42);
+
+        expect(result).toBeNull();
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+      });
+
+      it('falls through to LML when tracklist_lookup_attempted_at is older than the 7-day window', async () => {
+        mockRow({
+          direct: null,
+          fallback: null,
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+          tracklist_lookup_attempted_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000), // 8 days ago
+        });
+        mockLookupMetadata.mockResolvedValue({
+          results: [{ artwork: { release_id: 4080 } }],
+          search_type: 'direct',
+        });
+
+        const result = await resolveRotationPickerSource(42);
+
+        expect(result).toEqual({ releaseId: 4080, inlineTracklist: null });
+        expect(mockLookupMetadata).toHaveBeenCalled();
+      });
+
+      it('falls through to LML when tracklist_lookup_attempted_at is NULL', async () => {
+        mockRow({
+          direct: null,
+          fallback: null,
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+          tracklist_lookup_attempted_at: null,
+        });
+        mockLookupMetadata.mockResolvedValue({
+          results: [{ artwork: { release_id: 4080 } }],
+          search_type: 'direct',
+        });
+
+        await resolveRotationPickerSource(42);
+
+        expect(mockLookupMetadata).toHaveBeenCalled();
+      });
+
+      it('does NOT skip when a stored release_id exists, even with a recent marker (positive wins)', async () => {
+        // A row that was negative-cached and then later got a stored
+        // release_id (e.g. music director paste) must short-circuit on the
+        // stored id, not the stale marker.
+        mockRow({
+          direct: 12345,
+          fallback: null,
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+          tracklist_lookup_attempted_at: new Date(),
+        });
+
+        const result = await resolveRotationPickerSource(42);
+
+        expect(result).toEqual({ releaseId: 12345, inlineTracklist: null });
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+      });
+
+      it('stamps the column on negative LML outcome', async () => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Mystery', album_title: 'Unknown' });
+        mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
+
+        const updateSetMock = jest.fn().mockReturnThis();
+        const updateWhereMock = jest.fn().mockResolvedValue(undefined);
+        db.update.mockReturnValue({ set: updateSetMock, where: updateWhereMock });
+        updateSetMock.mockReturnValue({ where: updateWhereMock });
+
+        const result = await resolveRotationPickerSource(42);
+
+        // Let microtasks drain so the fire-and-forget stamp lands.
+        await new Promise((r) => setImmediate(r));
+
+        expect(result).toBeNull();
+        expect(db.update).toHaveBeenCalledWith(rotation);
+        expect(updateSetMock).toHaveBeenCalled();
+      });
+
+      it('does NOT stamp the column on positive LML outcome', async () => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+        mockLookupMetadata.mockResolvedValue({
+          results: [{ artwork: { release_id: 4080 } }],
+          search_type: 'direct',
+        });
+
+        await resolveRotationPickerSource(42);
+        await new Promise((r) => setImmediate(r));
+
+        expect(db.update).not.toHaveBeenCalled();
       });
     });
   });
