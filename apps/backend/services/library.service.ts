@@ -346,13 +346,16 @@ export async function getDiscogsReleaseIdByLegacyId(legacyId: number): Promise<n
  * nothing) — match the artwork/negativeCache pattern in
  * `apps/backend/controllers/proxy.controller.ts`. lru-cache v11 constrains
  * value types to non-nullable, so the negative cache stores `true` and uses
- * key presence as the signal. Negative TTL is shorter so a row that becomes
- * resolvable (LML catalog improvements, Discogs additions) recovers within
- * minutes rather than waiting for the process to restart.
+ * key presence as the signal. Negative TTL is 24 h: the tier-3 cascade-
+ * exhaustion path costs the full `LML_SEARCH_HARD_TIMEOUT_MS` (~22 s)
+ * when the negative cache expires, and the rows it negatives are obscure
+ * (no Discogs release, no library_identity, no rotation.discogs_release_id —
+ * none of which flip in 10 min). Deploys re-warm the cache via the
+ * `rotation-tracks-cache-warm` walker (BS#1231), so 24 h is a soft ceiling.
  */
 const ROTATION_LML_LOOKUP_CACHE_MAX = 500;
 const ROTATION_LML_LOOKUP_TTL_POSITIVE_MS = 60 * 60 * 1000;
-const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 10 * 60 * 1000;
+const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 24 * 60 * 60 * 1000;
 /**
  * Per-call LML timeout for the picker's tier-3 lookup. 10 s matches
  * tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` (`LibrarySearchClient.java:64`),
