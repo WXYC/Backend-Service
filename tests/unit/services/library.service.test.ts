@@ -2482,12 +2482,6 @@ describe('library.service', () => {
   });
 
   describe('getRotationTracksFromRelease', () => {
-    // BS-side LRU on the projected RotationTrack[] keyed by Discogs release_id.
-    // The picker's dominant cost in prod is `GET /api/v1/discogs/release/{id}`
-    // (2-9s on LML cache miss; 78ms warm). This cache absorbs both the
-    // second-open-on-same-row case and the cross-rotation-row case where two
-    // rotation_ids resolve to the same release_id.
-
     const sampleRelease = {
       artist: 'Autechre',
       title: 'Confield',
@@ -2573,6 +2567,30 @@ describe('library.service', () => {
       const tracks = await getRotationTracksFromRelease(4080);
 
       expect(tracks).toEqual([]);
+    });
+
+    it('coalesces concurrent calls for the same release_id into a single getRelease call', async () => {
+      // A cold-cache deploy followed by a burst of DJs opening the same picker
+      // row should pay the 2-9 s cold-path once across all of them, not once
+      // per DJ. The in-flight Promise map is the single-flight guard.
+      let resolveRelease: (value: unknown) => void = () => undefined;
+      mockGetRelease.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveRelease = resolve;
+        })
+      );
+
+      const first = getRotationTracksFromRelease(4080);
+      const second = getRotationTracksFromRelease(4080);
+      const third = getRotationTracksFromRelease(4080);
+
+      resolveRelease(sampleRelease);
+      const [a, b, c] = await Promise.all([first, second, third]);
+
+      expect(mockGetRelease).toHaveBeenCalledTimes(1);
+      // All three callers see the same projected array (cache identity).
+      expect(b).toBe(a);
+      expect(c).toBe(a);
     });
   });
 });
