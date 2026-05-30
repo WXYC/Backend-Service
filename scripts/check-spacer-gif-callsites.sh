@@ -4,12 +4,12 @@
 # canonical `filterSpacerGif` (originally in
 # `apps/backend/services/metadata/metadata.service.ts`; moved to
 # `shared/metadata/src/helpers/filter-spacer-gif.ts` by the deep-module
-# refactor — `metadata.service.ts` now re-exports). The inline duplicates
-# in the four jobs + the enrichment worker remain pinned to that canonical
-# via the parity tests under tests/unit/jobs/<job>/ and
-# tests/unit/apps/enrichment-worker/. PR 7 of the deep-module refactor will
-# delete the inline copies (and this script) as each one migrates to
-# `@wxyc/metadata`.
+# refactor — `metadata.service.ts` now re-exports). The remaining inline
+# duplicates in the three jobs + the enrichment worker are pinned to that
+# canonical via the parity tests under tests/unit/jobs/<job>/ and
+# tests/unit/apps/enrichment-worker/. The deep-module rollout deletes these
+# copies one PR at a time (PR 2 dropped library-artwork-url-backfill); the
+# final PR will delete this script along with the last inline copy.
 #
 # Test files are EXCLUDED from the source-set count because they exercise
 # the inputs (they MUST contain the literal). Comments in unrelated files
@@ -26,9 +26,10 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Allowed source files (relative to repo root) that may contain the
 # `spacer.gif` *code literal* (a single- or double-quoted string).
 # The canonical lives in `shared/metadata/src/helpers/filter-spacer-gif.ts`
-# (npm package `@wxyc/metadata`); the four jobs + enrichment worker each
-# keep an inline copy for build-graph isolation from `apps/backend`. Those
-# inline copies are slated for removal as PR 7 of the deep-module refactor.
+# (npm package `@wxyc/metadata`); the three jobs + enrichment worker still
+# keep inline copies for build-graph isolation from `apps/backend`. Those
+# copies are removed incrementally by the deep-module rollout, one PR per
+# callsite, until the final PR retires this script.
 #
 # Adding a new entry here requires also adding a parity test under
 # tests/unit/jobs/<job>/filter-spacer-gif-parity.test.ts that pins the
