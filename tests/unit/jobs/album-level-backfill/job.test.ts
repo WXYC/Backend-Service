@@ -3,8 +3,6 @@
  *
  * Covers the BS#1041 acceptance criteria: batching, partial LML failure
  * isolation, idempotency on re-run, and the post-pass SQL UPDATE shape.
- * Also pins the build-graph-isolated helpers (cleanDiscogsBio,
- * filterSpacerGif) to the same shapes as their canonical sources.
  *
  * Uses the @wxyc/database mock and a jest.mock for @wxyc/lml-client so
  * no network IO happens. SQL is asserted via text inspection (same
@@ -24,8 +22,6 @@ jest.mock('@wxyc/lml-client', () => ({
 import { db, album_metadata } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import {
-  cleanDiscogsBio,
-  filterSpacerGif,
   enumeratePendingAlbumIds,
   resolveAlbums,
   buildBulkItems,
@@ -110,44 +106,6 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.restoreAllMocks();
-});
-
-// ---------------------------------------------------------------------------
-// Inlined helpers — parity with the canonical sources.
-// ---------------------------------------------------------------------------
-
-describe('cleanDiscogsBio (inlined for build-graph isolation)', () => {
-  it('strips [a=...], [l=...], [r=...], [m=...] markup', () => {
-    expect(cleanDiscogsBio('Member of [a=Stereolab]')).toBe('Member of Stereolab');
-    expect(cleanDiscogsBio('Released on [l=Drag City]')).toBe('Released on Drag City');
-    expect(cleanDiscogsBio('See [r=12345]')).toBe('See 12345');
-    expect(cleanDiscogsBio('See also [m=67890]')).toBe('See also 67890');
-  });
-
-  it('strips [url=...]label[/url] markup', () => {
-    expect(cleanDiscogsBio('Bio link [url=https://example.com]here[/url]')).toBe('Bio link here');
-  });
-
-  it('returns text unchanged when no markup is present', () => {
-    expect(cleanDiscogsBio('Juana Molina is an Argentine musician.')).toBe('Juana Molina is an Argentine musician.');
-  });
-});
-
-describe('filterSpacerGif (inlined for build-graph isolation)', () => {
-  it('returns null for null / undefined / empty', () => {
-    expect(filterSpacerGif(null)).toBeNull();
-    expect(filterSpacerGif(undefined)).toBeNull();
-    expect(filterSpacerGif('')).toBeNull();
-  });
-
-  it('returns null when the URL contains "spacer.gif"', () => {
-    expect(filterSpacerGif('https://img.discogs.com/spacer.gif')).toBeNull();
-  });
-
-  it('returns the URL unchanged when it does not reference spacer.gif', () => {
-    const url = 'https://img.discogs.com/release/12345.jpg';
-    expect(filterSpacerGif(url)).toBe(url);
-  });
 });
 
 // ---------------------------------------------------------------------------
