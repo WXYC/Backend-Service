@@ -23,15 +23,14 @@
  * "I personally enriched this row" from "this row was enriched by *someone*
  * during the run." Data outcome is identical either way.
  *
- * Spacer.gif filter: applied inline. Discogs occasionally returns
- * `spacer.gif` placeholder images; persisting them would defeat the
- * search-path short-circuit (a non-null spacer URL is still rendered as
- * broken artwork). Mirrors the inline filter in
- * `flowsheet-metadata-backfill/enrich.ts` until #649's shared helper lands.
+ * Spacer.gif filter: applied via `@wxyc/metadata` so Discogs `spacer.gif`
+ * placeholders never land in `library.artwork_url` (a non-null spacer URL
+ * is still rendered as broken artwork).
  */
 
 import { sql } from 'drizzle-orm';
 import { db, library } from '@wxyc/database';
+import { filterSpacerGif } from '@wxyc/metadata';
 import type { LmlArtwork, LmlLookupResponse } from './lml-types.js';
 
 export type EnrichRow = {
@@ -41,21 +40,6 @@ export type EnrichRow = {
 };
 
 export type EnrichOutcome = 'enriched_match' | 'enriched_match_raced' | 'enriched_no_match';
-
-/**
- * Drop Discogs spacer.gif placeholder URLs. Inline guard, duplicated for
- * build-graph isolation from `apps/backend` (same pattern as
- * `flowsheet-metadata-backfill/enrich.ts`). Must stay truthy/falsy-
- * equivalent to the canonical
- * `apps/backend/services/metadata/metadata.service.ts#filterSpacerGif`
- * (BS#890). Pinned by parity test at
- * `tests/unit/jobs/library-artwork-url-backfill/filter-spacer-gif-parity.test.ts`.
- */
-export const filterSpacerGif = (url: string | null | undefined): string | null => {
-  if (!url) return null;
-  if (url.includes('spacer.gif')) return null;
-  return url;
-};
 
 /**
  * Pick the first artwork from an LML response, or null on no-match.
