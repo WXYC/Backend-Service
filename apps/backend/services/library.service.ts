@@ -23,7 +23,14 @@ import {
   LibraryArtistViewEntry,
 } from '@wxyc/database';
 import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
-import { lookupBySong, lookupMetadata, isLmlConfigured, envInt, type LookupResponse } from '@wxyc/lml-client';
+import {
+  lookupBySong,
+  lookupMetadata,
+  isLmlConfigured,
+  envInt,
+  type LookupResponse,
+  type DiscogsTrackItem,
+} from '@wxyc/lml-client';
 import { filterSpacerGif } from './metadata/metadata.service.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
@@ -388,20 +395,20 @@ export interface RotationTrack {
 /**
  * What `resolveRotationPickerSource` hands back to the picker controller.
  *
- * `releaseId` is the Discogs release the picker can fetch a tracklist from.
- * Tiers 1 and 2 (stored Discogs id) always produce a real release id with
- * `inlineTracklist: null`, so the controller falls through to its existing
- * `getRelease(releaseId)` projection. Tier 3 (runtime LML lookup with
- * `extended=true`) carries an `inlineTracklist` when LML's response had one
- * — Discogs hit (the cascade matched) or MusicBrainz rescue (BS#1185 synth
- * + LML#427). In that case the controller short-circuits and returns
- * `inlineTracklist` directly; no second LML round-trip needed. The
- * `releaseId` may be `0` on the synth-with-MB-rescue path because there's
- * no Discogs release behind the tracklist, and BS treats `release_id === 0`
- * as a signal to skip the follow-up release fetch (matches BS#1185).
+ * The controller short-circuits whenever `inlineTracklist !== null` and
+ * returns it as the response. That covers both:
+ *   - tier 3 Discogs hit with `extended=true` (LML returned the tracklist
+ *     in the same response we asked for the release id), and
+ *   - tier 3 MusicBrainz rescue (LML synthesized the result; `releaseId`
+ *     is `null` because there's no Discogs release behind it — BS#1185).
+ *
+ * When `inlineTracklist === null` the controller calls `getRelease(releaseId)`
+ * and projects its tracklist. That path is taken for tiers 1 and 2 (stored
+ * id, no LML round-trip) and for tier-3 responses that LML couldn't extend
+ * with a tracklist (e.g. extended-mode payload was suppressed upstream).
  */
 export interface RotationPickerSource {
-  releaseId: number;
+  releaseId: number | null;
   inlineTracklist: RotationTrack[] | null;
 }
 
@@ -560,7 +567,7 @@ async function resolveRotationDiscogsReleaseViaLml(
     const artwork = response.results?.[0]?.artwork ?? null;
     const releaseId = artwork?.release_id ?? null;
     const inlineTracklist = projectInlineTracklist(artwork?.tracklist, artistName);
-    source = releaseId !== null || inlineTracklist !== null ? { releaseId: releaseId ?? 0, inlineTracklist } : null;
+    source = releaseId !== null || inlineTracklist !== null ? { releaseId, inlineTracklist } : null;
   } catch (err) {
     console.warn(
       '[library.service] LML /lookup for rotation_id=%d failed; degrading picker to free-text: %s',
@@ -580,25 +587,16 @@ async function resolveRotationDiscogsReleaseViaLml(
 }
 
 /**
- * Project the LML `extended=true` `artwork.tracklist` shape onto the picker's
- * wire shape (`RotationTrack[]`). Mirrors the projection the controller does
- * on `release.tracklist` from `getRelease(id)`, but on the inline-tracklist
- * surface introduced by BS#1185 + LML#427.
- *
- * `artistFallback` is the rotation row's `artist_name` — used when a track
- * has no per-track artist credits (Discogs's normal shape for non-V/A
- * releases; MusicBrainz's normal shape for almost everything). The picker
- * always wants at least one artist name to render against the track row.
- *
- * Returns `null` (not `[]`) when the tracklist is absent, so the caller can
- * distinguish "LML returned a tracklist" from "LML didn't carry one and the
- * controller should fall through to the release fetch".
+ * Project the LML tracklist shape onto the picker's wire shape. Shared
+ * between the service's `extended=true` inline path (BS#1185 + LML#427)
+ * and the controller's follow-up `getRelease(id)` path so the two surfaces
+ * can't drift. Returns `null` (not `[]`) when the tracklist is absent so
+ * the caller can distinguish "LML carried tracks" from "fall through to
+ * the release fetch". `artistFallback` is rendered against any track whose
+ * per-track `artists[]` is empty.
  */
-function projectInlineTracklist(
-  tracklist:
-    | ReadonlyArray<{ position: string; title: string; duration?: string | null; artists?: readonly string[] | null }>
-    | null
-    | undefined,
+export function projectInlineTracklist(
+  tracklist: ReadonlyArray<DiscogsTrackItem> | null | undefined,
   artistFallback: string
 ): RotationTrack[] | null {
   if (!tracklist || tracklist.length === 0) return null;
