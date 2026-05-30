@@ -6,12 +6,12 @@ Tracking: [#1242](https://github.com/WXYC/Backend-Service/issues/1242)
 
 Introduce `@wxyc/metadata` (`shared/metadata/`) as the single home for LML-response normalization logic. Today the same normalization (artwork filtering, search-URL synthesis, Discogs-markup cleanup, fallback application) is copy-pasted across five callsites and pinned together by seven parity tests + a CI allowlist script. The duplication exists because the worker and four jobs are bundled as independent Docker images and can't import from `apps/backend` — but they share a build-graph root (the npm workspace) with `shared/*` packages. Moving the canonical to `shared/metadata/` lets every caller import directly and lets all parity scaffolding be deleted.
 
-The deepening also introduces a *new* deeper interface, `normalizeLookup(LookupResponse, fallbacks?) → NormalizedMetadata`, which composes the existing helpers into one operation. This is more than deduplication: it concentrates the "how do we combine filter + synthesize + clean + fallback into a final write payload" logic — currently implicit in five callsites and untested as a unit — into one place where it can be tested at the interface.
+The deepening also introduces a _new_ deeper interface, `normalizeLookup(LookupResponse, fallbacks?) → NormalizedMetadata`, which composes the existing helpers into one operation. This is more than deduplication: it concentrates the "how do we combine filter + synthesize + clean + fallback into a final write payload" logic — currently implicit in five callsites and untested as a unit — into one place where it can be tested at the interface.
 
 Out of scope:
 
 - Changes to LML itself or to `@wxyc/lml-client`. The deep module consumes `LookupResponse` from lml-client; lml-client's own transport, rate-limiting, and Sentry instrumentation are unchanged.
-- Changes to the enrichment *pipeline* — the worker's CDC claim, the per-row backfill's `metadata_attempt_at` guard, the bulk job's post-pass UPDATE all stay exactly as they are. Only the "normalize a LookupResponse" step inside each pipeline is replaced.
+- Changes to the enrichment _pipeline_ — the worker's CDC claim, the per-row backfill's `metadata_attempt_at` guard, the bulk job's post-pass UPDATE all stay exactly as they are. Only the "normalize a LookupResponse" step inside each pipeline is replaced.
 - Migration of the five existing backend consumers (`library.controller`, `proxy.controller`, `library.service`, `artwork/providers/discogs.ts`, `metadata/enrichment.service.ts`) off the re-export shim. The shim is permanent until/unless a follow-up cleanup PR is filed; backend behavior is byte-identical through it.
 - Any change to `apps/backend/services/metadata/enrichment.service.ts`'s own enrichment pathway. It uses `SearchUrlProvider` directly (not via the worker), and continues to do so. It is a separate, in-process enrichment surface that may itself benefit from `normalizeLookup` in a future PR but is not part of this work.
 - Database changes. No migrations, no schema edits, no column additions.
@@ -22,13 +22,13 @@ Five inline implementations of the same normalization, plus the scaffolding that
 
 **Inline copies of `filterSpacerGif` and/or `synthesizeSearchUrls`:**
 
-| File | Helpers inlined | Pipeline role |
-|------|-----------------|---------------|
-| `apps/enrichment-worker/enrich.ts` | both | Runtime CDC consumer (BS#892) |
-| `jobs/flowsheet-metadata-backfill/enrich.ts` | both | Per-row drift-repair cron (#631/#638/#641) |
-| `jobs/library-artwork-url-backfill/enrich.ts` | `filterSpacerGif` only | One-shot library artwork warm (#637) |
-| `jobs/flowsheet-artwork-repair/repair.ts` | `filterSpacerGif` only | One-shot artwork re-resolve (BS#1209) |
-| `jobs/album-level-backfill/job.ts` | `filterSpacerGif` (in `upsertAlbumMatch`) | One-shot bulk drain (BS#1041) |
+| File                                          | Helpers inlined                           | Pipeline role                              |
+| --------------------------------------------- | ----------------------------------------- | ------------------------------------------ |
+| `apps/enrichment-worker/enrich.ts`            | both                                      | Runtime CDC consumer (BS#892)              |
+| `jobs/flowsheet-metadata-backfill/enrich.ts`  | both                                      | Per-row drift-repair cron (#631/#638/#641) |
+| `jobs/library-artwork-url-backfill/enrich.ts` | `filterSpacerGif` only                    | One-shot library artwork warm (#637)       |
+| `jobs/flowsheet-artwork-repair/repair.ts`     | `filterSpacerGif` only                    | One-shot artwork re-resolve (BS#1209)      |
+| `jobs/album-level-backfill/job.ts`            | `filterSpacerGif` (in `upsertAlbumMatch`) | One-shot bulk drain (BS#1041)              |
 
 **Canonical (referenced by the parity tests):**
 
@@ -89,16 +89,16 @@ type LookupResultItem = {
 };
 
 type DiscogsMatchResult = {
-  release_id: number;          // 0 = synthetic (no real Discogs match)
-  release_url: string;         // "" = synthetic
-  artwork_url: string | null;  // may be 'spacer.gif' placeholder
-  release_year: number;        // 0 = Discogs "year unknown" sentinel
+  release_id: number; // 0 = synthetic (no real Discogs match)
+  release_url: string; // "" = synthetic
+  artwork_url: string | null; // may be 'spacer.gif' placeholder
+  release_year: number; // 0 = Discogs "year unknown" sentinel
   spotify_url: string | null;
   apple_music_url: string | null;
   youtube_music_url: string | null;
   bandcamp_url: string | null;
   soundcloud_url: string | null;
-  artist_bio: string | null;   // contains Discogs markup tags
+  artist_bio: string | null; // contains Discogs markup tags
   wikipedia_url: string | null;
 };
 ```
@@ -122,10 +122,7 @@ import type { LookupResponse } from '@wxyc/lml-client';
 // The deep operation — preferred entry point for the enrich pipeline.
 // `fallbacks.artist` is required because synthesized search URLs always
 // need an artist name; without it normalization has nothing to compose.
-export function normalizeLookup(
-  response: LookupResponse,
-  fallbacks: MetadataFallbacks,
-): NormalizedMetadata;
+export function normalizeLookup(response: LookupResponse, fallbacks: MetadataFallbacks): NormalizedMetadata;
 
 // The deep operation's output type. Snake_case to spread directly into
 // Drizzle `set({...})` blocks for flowsheet / album_metadata writes.
@@ -137,16 +134,16 @@ export function normalizeLookup(
 // Synthesized search URL fields are non-null: composition from fallbacks
 // always produces a valid query URL.
 export type NormalizedMetadata = {
-  discogs_url: string | null;         // null on no-match or synthetic
-  artwork_url: string | null;         // null on no-match, synthetic, or spacer.gif
-  release_year: number | null;        // null on no-match or year=0 sentinel
-  spotify_url: string | null;         // null on no-match or LML-null
-  apple_music_url: string | null;     // null on no-match or LML-null (intentional, BS#1192)
-  artist_bio: string | null;          // null on no-match; markup-cleaned when present
+  discogs_url: string | null; // null on no-match or synthetic
+  artwork_url: string | null; // null on no-match, synthetic, or spacer.gif
+  release_year: number | null; // null on no-match or year=0 sentinel
+  spotify_url: string | null; // null on no-match or LML-null
+  apple_music_url: string | null; // null on no-match or LML-null (intentional, BS#1192)
+  artist_bio: string | null; // null on no-match; markup-cleaned when present
   artist_wikipedia_url: string | null; // null on no-match or LML-null
-  youtube_music_url: string;          // LML value if present, else synthesized — never null
-  bandcamp_url: string;               // LML value if present, else synthesized — never null
-  soundcloud_url: string;             // LML value if present, else synthesized — never null
+  youtube_music_url: string; // LML value if present, else synthesized — never null
+  bandcamp_url: string; // LML value if present, else synthesized — never null
+  soundcloud_url: string; // LML value if present, else synthesized — never null
 };
 
 // Note: there is no `discogs_release_id` field. The Drizzle schema for
@@ -189,18 +186,18 @@ Seven exports total (the `DiscogsMatchResult` predicate `isSyntheticArtwork` is 
 
 For each `NormalizedMetadata` field, the resolution chain:
 
-| Field | LML present + non-synthetic | LML synthetic | No LML match |
-|-------|------------------------------|---------------|--------------|
-| `discogs_url` | `artwork.release_url` | `null` | `null` |
-| `artwork_url` | `filterSpacerGif(artwork.artwork_url)` | `filterSpacerGif(artwork.artwork_url)` | `null` |
-| `release_year` | `artwork.release_year \|\| null` | `null` | `null` |
-| `spotify_url` | `artwork.spotify_url ?? null` | `artwork.spotify_url ?? null` | `null` |
-| `apple_music_url` | `artwork.apple_music_url ?? null` | `artwork.apple_music_url ?? null` | `null` |
-| `artist_bio` | `cleanDiscogsBio(artwork.artist_bio) ?? null` | `null` | `null` |
-| `artist_wikipedia_url` | `artwork.wikipedia_url ?? null` | `null` | `null` |
-| `youtube_music_url` | `artwork.youtube_music_url ?? synth.youtube_music_url` | `artwork.youtube_music_url ?? synth.youtube_music_url` | `synth.youtube_music_url` |
-| `bandcamp_url` | `artwork.bandcamp_url ?? synth.bandcamp_url` | `artwork.bandcamp_url ?? synth.bandcamp_url` | `synth.bandcamp_url` |
-| `soundcloud_url` | `artwork.soundcloud_url ?? synth.soundcloud_url` | `artwork.soundcloud_url ?? synth.soundcloud_url` | `synth.soundcloud_url` |
+| Field                  | LML present + non-synthetic                            | LML synthetic                                          | No LML match              |
+| ---------------------- | ------------------------------------------------------ | ------------------------------------------------------ | ------------------------- |
+| `discogs_url`          | `artwork.release_url`                                  | `null`                                                 | `null`                    |
+| `artwork_url`          | `filterSpacerGif(artwork.artwork_url)`                 | `filterSpacerGif(artwork.artwork_url)`                 | `null`                    |
+| `release_year`         | `artwork.release_year \|\| null`                       | `null`                                                 | `null`                    |
+| `spotify_url`          | `artwork.spotify_url ?? null`                          | `artwork.spotify_url ?? null`                          | `null`                    |
+| `apple_music_url`      | `artwork.apple_music_url ?? null`                      | `artwork.apple_music_url ?? null`                      | `null`                    |
+| `artist_bio`           | `cleanDiscogsBio(artwork.artist_bio) ?? null`          | `null`                                                 | `null`                    |
+| `artist_wikipedia_url` | `artwork.wikipedia_url ?? null`                        | `null`                                                 | `null`                    |
+| `youtube_music_url`    | `artwork.youtube_music_url ?? synth.youtube_music_url` | `artwork.youtube_music_url ?? synth.youtube_music_url` | `synth.youtube_music_url` |
+| `bandcamp_url`         | `artwork.bandcamp_url ?? synth.bandcamp_url`           | `artwork.bandcamp_url ?? synth.bandcamp_url`           | `synth.bandcamp_url`      |
+| `soundcloud_url`       | `artwork.soundcloud_url ?? synth.soundcloud_url`       | `artwork.soundcloud_url ?? synth.soundcloud_url`       | `synth.soundcloud_url`    |
 
 This precedence is the contract `normalize-lookup.test.ts` asserts. It is byte-equivalent to the worker's current per-branch logic (`finalizeRow` in `apps/enrichment-worker/enrich.ts:135-248`); the deepening preserves behavior while concentrating it.
 
@@ -208,7 +205,7 @@ The README at `shared/metadata/README.md` documents:
 
 - `normalizeLookup` as the preferred entry point — "use this if you have a LookupResponse and need to produce field values to write."
 - The four helpers as escape hatches — "use these only if you don't have a LookupResponse." Example: `library.controller` filtering a single URL pulled from a different code path.
-- The dependency direction rule: this package is the *deep core*. It must not import from `apps/*` or `jobs/*`. Code review enforces.
+- The dependency direction rule: this package is the _deep core_. It must not import from `apps/*` or `jobs/*`. Code review enforces.
 - The "no I/O" rule: pure functions only. No HTTP, no DB, no filesystem, no `process.env`. The test for whether something belongs here: would unit tests need to mock anything to call it? If yes, it doesn't belong here.
 - The "snake_case" rule: types and fields in this package are snake_case to match the Drizzle schema and the LML response shape. Convert to camelCase at the boundary if a consumer needs it (the `SearchUrlProvider` shim does this for backend's iOS proxy surface).
 
@@ -247,13 +244,12 @@ import { synthesizeSearchUrls } from './helpers/synthesize-search-urls';
 import { cleanDiscogsBio } from './helpers/clean-discogs-bio';
 import { isSyntheticArtwork } from './helpers/is-synthetic-artwork';
 
-export type NormalizedMetadata = { /* snake_case, see "Public surface" */ };
+export type NormalizedMetadata = {
+  /* snake_case, see "Public surface" */
+};
 export type MetadataFallbacks = { artist: string; album?: string | null; track?: string | null };
 
-export function normalizeLookup(
-  response: LookupResponse,
-  fallbacks: MetadataFallbacks,
-): NormalizedMetadata {
+export function normalizeLookup(response: LookupResponse, fallbacks: MetadataFallbacks): NormalizedMetadata {
   const artwork: DiscogsMatchResult | null = response.results?.[0]?.artwork ?? null;
   const synth = synthesizeSearchUrls(fallbacks);
 
@@ -278,10 +274,10 @@ export function normalizeLookup(
   return {
     discogs_url: synthetic ? null : artwork.release_url,
     artwork_url: filterSpacerGif(artwork.artwork_url),
-    release_year: artwork.release_year || null,            // 0 sentinel → null (#1002)
+    release_year: artwork.release_year || null, // 0 sentinel → null (#1002)
     spotify_url: artwork.spotify_url ?? null,
     apple_music_url: artwork.apple_music_url ?? null,
-    artist_bio: synthetic ? null : (artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null),
+    artist_bio: synthetic ? null : artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
     artist_wikipedia_url: synthetic ? null : (artwork.wikipedia_url ?? null),
     youtube_music_url: artwork.youtube_music_url ?? synth.youtube_music_url,
     bandcamp_url: artwork.bandcamp_url ?? synth.bandcamp_url,
@@ -343,14 +339,16 @@ export class SearchUrlProvider {
   // Preserve the spotify URL synthesis that the backend's iOS proxy surface
   // uses but the worker's inline synthesizeSearchUrls does not emit. This
   // method is unchanged from the existing class.
-  private getSpotifyUrl(artist: string, album?: string, track?: string) { /* ... */ }
+  private getSpotifyUrl(artist: string, album?: string, track?: string) {
+    /* ... */
+  }
 }
 ```
 
 Three notes on the shim:
 
 1. **The Spotify URL synthesis stays in the shim**, not in `@wxyc/metadata`. The deep module's `synthesizeSearchUrls` matches the worker's snake_case 3-service shape exactly (intentional — the worker doesn't emit a synthesized Spotify URL because BS#1192-style considerations apply asymmetrically). The backend's proxy surface needs Spotify and gets it from the shim. If a future PR consolidates the Spotify synthesis into the deep module, it'd need to commit to the same nullability + emission semantics across all callers — out of scope here.
-2. **The shim earns its keep** as a migration affordance: zero diff to the five backend consumer files in PR 1. The deletion test on the shim says it *is* a pass-through — correct for a migration shim. A follow-up cleanup PR can inline it out if the team wants; not blocking.
+2. **The shim earns its keep** as a migration affordance: zero diff to the five backend consumer files in PR 1. The deletion test on the shim says it _is_ a pass-through — correct for a migration shim. A follow-up cleanup PR can inline it out if the team wants; not blocking.
 3. **Error propagation**: both `synthesizeSearchUrls` (deep module) and `getSpotifyUrl` (shim-internal) are pure synchronous functions that do `encodeURIComponent` + string concatenation. Neither throws under any input the type system permits (`encodeURIComponent` on a string returns a string; concatenation can't fail). The shim does not introduce any try/catch — errors, if any future change adds one, propagate verbatim to the caller. The existing five backend consumers all call `getAllSearchUrls` synchronously without try/catch, matching this expectation.
 
 ### Dependency direction
@@ -366,7 +364,7 @@ Three notes on the shim:
        └── jobs/album-level-backfill
 ```
 
-`@wxyc/metadata` is the *deepest* node in this graph. It imports from nothing except the `LookupResponse` type. If `LookupResponse` ever migrates out of `lml-client` into a transport-neutral contract package, this dep goes away entirely — future refactor, not blocking.
+`@wxyc/metadata` is the _deepest_ node in this graph. It imports from nothing except the `LookupResponse` type. If `LookupResponse` ever migrates out of `lml-client` into a transport-neutral contract package, this dep goes away entirely — future refactor, not blocking.
 
 `lml-client` continues to be a transport adapter. It produces values of type `LookupResponse` over HTTP. It does NOT import from `@wxyc/metadata` (would create a cycle and is the wrong direction — the transport shouldn't know about normalization).
 
@@ -423,6 +421,7 @@ Seven PRs. Six functional, one cleanup. Each is independently shippable; each le
     "apps/enrichment-worker/enrich.ts"
   )
   ```
+
   PRs 2–6 each remove one of the inline-callsite lines as that callsite migrates. PR 7 deletes the script.
 
 **New tests pass; old tests pass; ESLint/typecheck clean; the integration suite is byte-identical.**
@@ -588,7 +587,7 @@ Assertions on URL encoding, query-string composition, and per-service URL templa
 
 ### `normalize-lookup.test.ts` — NEW
 
-The behavior that's currently untested. Asserts on the *combination* of helpers + the nullability precedence table. Test scope aligns directly with the precedence table — every cell in the table that has non-trivial resolution is one or more assertions.
+The behavior that's currently untested. Asserts on the _combination_ of helpers + the nullability precedence table. Test scope aligns directly with the precedence table — every cell in the table that has non-trivial resolution is one or more assertions.
 
 ```ts
 describe('normalizeLookup', () => {
@@ -646,57 +645,65 @@ export const NO_ARTWORK: LookupResponse = {
 };
 
 export const SYNTHETIC_MATCH: LookupResponse = {
-  results: [{
-    artwork: {
-      release_id: 0,
-      release_url: '',
-      artwork_url: null,
-      release_year: 0,
-      spotify_url: 'https://open.spotify.com/track/abc',
-      apple_music_url: null,
-      youtube_music_url: 'https://music.youtube.com/watch?v=xyz',
-      bandcamp_url: null,
-      soundcloud_url: null,
-      artist_bio: null,
-      wikipedia_url: null,
+  results: [
+    {
+      artwork: {
+        release_id: 0,
+        release_url: '',
+        artwork_url: null,
+        release_year: 0,
+        spotify_url: 'https://open.spotify.com/track/abc',
+        apple_music_url: null,
+        youtube_music_url: 'https://music.youtube.com/watch?v=xyz',
+        bandcamp_url: null,
+        soundcloud_url: null,
+        artist_bio: null,
+        wikipedia_url: null,
+      },
     },
-  }],
+  ],
 };
 
 export const FULL_MATCH: LookupResponse = {
-  results: [{
-    artwork: {
-      release_id: 12345,
-      release_url: 'https://www.discogs.com/release/12345',
-      artwork_url: 'https://i.discogs.com/abc.jpg',
-      release_year: 1997,
-      spotify_url: 'https://open.spotify.com/album/def',
-      apple_music_url: 'https://music.apple.com/album/123',
-      youtube_music_url: 'https://music.youtube.com/playlist?list=PL...',
-      bandcamp_url: 'https://stereolab.bandcamp.com/album/dots-and-loops',
-      soundcloud_url: null,  // LML didn't supply — normalizeLookup falls back to synthesized
-      artist_bio: 'Stereolab is a band [a=Tim Gane] [url=https://stereolab.net]link[/url].',
-      wikipedia_url: 'https://en.wikipedia.org/wiki/Stereolab',
+  results: [
+    {
+      artwork: {
+        release_id: 12345,
+        release_url: 'https://www.discogs.com/release/12345',
+        artwork_url: 'https://i.discogs.com/abc.jpg',
+        release_year: 1997,
+        spotify_url: 'https://open.spotify.com/album/def',
+        apple_music_url: 'https://music.apple.com/album/123',
+        youtube_music_url: 'https://music.youtube.com/playlist?list=PL...',
+        bandcamp_url: 'https://stereolab.bandcamp.com/album/dots-and-loops',
+        soundcloud_url: null, // LML didn't supply — normalizeLookup falls back to synthesized
+        artist_bio: 'Stereolab is a band [a=Tim Gane] [url=https://stereolab.net]link[/url].',
+        wikipedia_url: 'https://en.wikipedia.org/wiki/Stereolab',
+      },
     },
-  }],
+  ],
 };
 
 export const SPACER_GIF_ARTWORK: LookupResponse = {
-  results: [{
-    artwork: {
-      ...FULL_MATCH.results![0].artwork!,
-      artwork_url: 'https://s.discogs.com/images/spacer.gif',
+  results: [
+    {
+      artwork: {
+        ...FULL_MATCH.results![0].artwork!,
+        artwork_url: 'https://s.discogs.com/images/spacer.gif',
+      },
     },
-  }],
+  ],
 };
 
 export const YEAR_ZERO_MATCH: LookupResponse = {
-  results: [{
-    artwork: {
-      ...FULL_MATCH.results![0].artwork!,
-      release_year: 0,  // Discogs "year unknown" sentinel
+  results: [
+    {
+      artwork: {
+        ...FULL_MATCH.results![0].artwork!,
+        release_year: 0, // Discogs "year unknown" sentinel
+      },
     },
-  }],
+  ],
 };
 ```
 
@@ -758,7 +765,7 @@ Net test code: ~130 lines deleted.
 ### Active development during migration
 
 - **Risk**: a developer lands a change to `apps/enrichment-worker/enrich.ts` or one of the inline-copy backfill files after PR 1 ships but before that callsite's port PR lands. If the change modifies the inline `filterSpacerGif`, `synthesizeSearchUrls`, or `cleanDiscogsBio` semantics, the relevant parity test starts failing.
-  - **Detection**: the parity test fails in the developer's PR — *this is the intended behavior of the parity scaffolding* and is exactly why we're keeping the seven parity tests + allowlist script alive until each callsite migrates.
+  - **Detection**: the parity test fails in the developer's PR — _this is the intended behavior of the parity scaffolding_ and is exactly why we're keeping the seven parity tests + allowlist script alive until each callsite migrates.
   - **Resolution**: the developer coordinates with the open migration PR. Either (a) update both the inline copy AND the deep module's helper in the same PR, with the parity test confirming they still match, or (b) wait for the migration PR to land first, then make the change against `@wxyc/metadata` only (and the migrated callsite picks it up via import). Option (a) is fine and supported.
   - **Anti-pattern to avoid**: silencing the failing parity test by updating the inline copy alone. The test is there precisely to catch drift; updating one side without the other is the bug it's designed to surface.
   - **Note**: this is the same coordination cost the existing parity scaffolding already imposes — the deepening doesn't add new coordination risk during the migration window. After PR 7 lands, the scaffolding (and the coordination cost) is gone for good.
@@ -783,7 +790,7 @@ Deleting the allowlist script is trivial but unrelated to any functional change.
 
 ## Open questions
 
-1. ~~**`cleanDiscogsMarkup` location.**~~ *Resolved during plan revision.* The canonical function is `cleanDiscogsBio` (at `apps/backend/services/metadata/metadata.service.ts:22-29`), and it cleans Discogs markup tags only from the `artist_bio` field — not from artist names or album titles. The migration ports `cleanDiscogsBio` (not a hypothetical `cleanDiscogsMarkup`) into `shared/metadata/src/helpers/clean-discogs-bio.ts`. The plan, helper file list, exports, and test list have been updated to reflect this.
+1. ~~**`cleanDiscogsMarkup` location.**~~ _Resolved during plan revision._ The canonical function is `cleanDiscogsBio` (at `apps/backend/services/metadata/metadata.service.ts:22-29`), and it cleans Discogs markup tags only from the `artist_bio` field — not from artist names or album titles. The migration ports `cleanDiscogsBio` (not a hypothetical `cleanDiscogsMarkup`) into `shared/metadata/src/helpers/clean-discogs-bio.ts`. The plan, helper file list, exports, and test list have been updated to reflect this.
 2. **Sentry instrumentation inside `normalizeLookup`.** Should the deep module emit a Sentry breadcrumb when LML returned null artwork (signaling a "no match" rate) or when the synthesized fallback URLs are used (signaling LML coverage gaps)? Argument for: gives observability into LML coverage. Argument against: violates the "no I/O" rule for `shared/metadata/` — once Sentry is in, the package is no longer trivially testable without mocks. Resolution: leave Sentry out of the deep module; callers that want observability wrap the call (`Sentry.startSpan('normalize-lookup', () => normalizeLookup(...))`).
 3. **Backend `enrichment.service.ts` migration.** `apps/backend/services/metadata/enrichment.service.ts` has its own enrichment pathway using `SearchUrlProvider` directly. It is out of scope for this work — left untouched, continues to work via the shim. Should there be a follow-up plan to migrate it to `normalizeLookup` as well? Suggest: yes, as a separate plan after this lands, since the `enrichment.service.ts` pathway has different invariants (it's called from the iOS proxy controller, not from the worker's CDC path, and it composes results across both album and artist scopes for the proxy response shape).
 4. **README in `shared/metadata/`.** The body of the README — escape-hatch guidance, dependency-direction rule, no-I/O rule, snake_case rule — is sketched above. The exact text gets finalized in PR 1 implementation.

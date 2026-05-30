@@ -23,6 +23,8 @@ const config: Config = {
     // tests against the implementation use this; jest.mock(...) usages in
     // consumer-controller tests still take precedence.
     '^@wxyc/lml-client$': '<rootDir>/shared/lml-client/src/index.ts',
+    // @wxyc/metadata: resolve to source for the same reason as @wxyc/lml-client.
+    '^@wxyc/metadata$': '<rootDir>/shared/metadata/src/index.ts',
     // Mock database client for any path resolving to shared/database/src/client
     '^.*/shared/database/src/client(\\.js)?$': '<rootDir>/tests/mocks/database.mock.ts',
     // Mock better-auth modules (ESM-only, can't be transformed by ts-jest)

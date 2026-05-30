@@ -24,7 +24,8 @@
     "paths": {
       "@wxyc/authentication": ["shared/authentication/src"],
       "@wxyc/database": ["shared/database/src"],
-      "@wxyc/lml-client": ["shared/lml-client/src"]
+      "@wxyc/lml-client": ["shared/lml-client/src"],
+      "@wxyc/metadata": ["shared/metadata/src"]
     }
   }
 }

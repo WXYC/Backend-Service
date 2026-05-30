@@ -5,28 +5,27 @@
  * returned metadata directly on the flowsheet row. Uses LML's /lookup endpoint
  * which provides artist correction, title normalization, fallback strategies,
  * artwork, streaming URLs, and artist metadata in a single call.
+ *
+ * The pure response → metadata helpers live in `@wxyc/metadata` (deep module
+ * shared with `apps/enrichment-worker` and the four enrichment jobs). This
+ * file imports them and adds two backend-specific concerns:
+ *   1. The fetch (`fetchMetadata`) — LML I/O + the camelCase response shape
+ *      the proxy controller and enrichment service consume.
+ *   2. Re-exports of `filterSpacerGif` and `isSyntheticArtwork` — backend
+ *      callsites in `library.controller`, `proxy.controller`, `library.service`,
+ *      and the artwork providers still import these from here. The re-exports
+ *      keep those callsites stable; the underlying implementation now lives
+ *      in `@wxyc/metadata`.
  */
 import { MetadataRequest, AlbumMetadataResult, ArtistMetadataResult, FlowsheetMetadata } from './metadata.types.js';
 import { lookupMetadata } from '@wxyc/lml-client';
 import type { DiscogsMatchResult } from '@wxyc/lml-client';
+import { cleanDiscogsBio, filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
 import { SearchUrlProvider } from './providers/search-urls.provider.js';
 
-const searchUrls = new SearchUrlProvider();
+export { filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
 
-/**
- * Strip Discogs markup tags from bio text.
- *
- * Discogs profiles use custom markup like [a=Artist], [l=Label],
- * [url=...]...[/url]. This converts them to plain text.
- */
-function cleanDiscogsBio(bio: string): string {
-  return bio
-    .replace(/\[a=([^\]]+)\]/g, '$1')
-    .replace(/\[l=([^\]]+)\]/g, '$1')
-    .replace(/\[r=([^\]]+)\]/g, '$1')
-    .replace(/\[m=([^\]]+)\]/g, '$1')
-    .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
-}
+const searchUrls = new SearchUrlProvider();
 
 /**
  * Check whether the LML service is configured.
@@ -101,53 +100,17 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
 }
 
 /**
- * Drop Discogs `spacer.gif` placeholder URLs.
- *
- * Discogs returns `spacer.gif` when a release has no real cover artwork.
- * Persisting that to `flowsheet.artwork_url` would trip the playlist-proxy
- * partial index ("has artwork") and result in a broken/blank image on iOS.
- * Filtering at this single chokepoint covers every caller of `fetchMetadata`
- * (runtime enrichment, iOS playcut detail, and the historical-drain job)
- * so callers don't have to remember. See #649.
- *
- * Exported as the canonical implementation of the filter (BS#890). All
- * `apps/backend/**` consumers import this; the inline copy in
- * `jobs/flowsheet-metadata-backfill/enrich.ts` is preserved for build-
- * graph isolation but pinned to this canonical via parity test +
- * `scripts/check-spacer-gif-callsites.sh` allowlist.
- */
-export function filterSpacerGif(url: string | null | undefined): string | undefined {
-  if (!url) return undefined;
-  return url.includes('spacer.gif') ? undefined : url;
-}
-
-/**
- * Detect LML's streaming-only synthesized result shape (LML#401).
- *
- * On a Discogs miss, LML's `enrich_artwork_results` synthesizes a
- * `DiscogsSearchResult(release_id=0, release_url="")` carrying only
- * streaming URLs — no real album-derived fields. BS keys off this
- * sentinel pair to skip persisting `release_id=0` / `discogs_url=""`
- * on the flowsheet (would otherwise pollute filtered queries like
- * `WHERE discogs_release_id IS NOT NULL`). Streaming URLs still flow.
- *
- * Exported as the canonical implementation so `proxy.controller.ts`
- * shares one check site — mirrors the cross-file pattern established
- * by `filterSpacerGif` above.
- */
-export function isSyntheticArtwork(artwork: DiscogsMatchResult): boolean {
-  return artwork.release_id === 0 && artwork.release_url === '';
-}
-
-/**
- * Extract album metadata from a DiscogsMatchResult.
+ * Extract album metadata from a DiscogsMatchResult into the camelCase shape
+ * the backend `AlbumMetadataResult` consumers expect. The underlying field-
+ * by-field derivation is the same as `@wxyc/metadata`'s `normalizeLookup`;
+ * this wrapper coerces nulls to undefined to match the legacy optional shape.
  */
 function extractAlbumMetadata(artwork: DiscogsMatchResult): AlbumMetadataResult {
   const synthetic = isSyntheticArtwork(artwork);
   return {
     discogsReleaseId: synthetic ? undefined : artwork.release_id,
     discogsUrl: synthetic ? undefined : artwork.release_url,
-    artworkUrl: filterSpacerGif(artwork.artwork_url),
+    artworkUrl: filterSpacerGif(artwork.artwork_url) ?? undefined,
     // Discogs returns 0 as "year unknown"; coerce to undefined so it doesn't
     // leak to iOS as a literal "0" or persist as 0 in flowsheet.release_year.
     // #1002.
