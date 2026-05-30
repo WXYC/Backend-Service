@@ -1,14 +1,5 @@
-/**
- * Unit tests for jobs/rotation-release-id-backfill lml-fetch.ts.
- *
- * Focus: HTML-entity decode on (artist, album) ahead of the LML hop.
- * tubafrenzy paste data can land `rotation.artist_name` /
- * `rotation.album_title` as HTML-escaped strings (e.g. "Rome&#769;o Poirier"
- * instead of "Roméo Poirier"). LML's NFKD diacritic-strip runs over the raw
- * string — an entity-encoded combining mark never reaches that pass, so the
- * row stays NO_RESULT. Decoding here closes the gap for the rotation
- * backfill without touching the runtime lookup path.
- */
+// Pin the HTML-entity decode added in BS#1223. Rationale lives next to the
+// implementation at jobs/rotation-release-id-backfill/lml-fetch.ts.
 describe('jobs/rotation-release-id-backfill/lml-fetch (HTML-entity decode)', () => {
   beforeEach(() => {
     jest.resetModules();
@@ -37,10 +28,8 @@ describe('jobs/rotation-release-id-backfill/lml-fetch (HTML-entity decode)', () 
     const result = await lookupReleaseId('Rome&#769;o Poirier', 'Off the Record');
 
     expect(mockLookup).toHaveBeenCalledTimes(1);
-    // &#769; is U+0301 (combining acute) — the decoded form is decomposed
-    // (NFD): "Rome" + U+0301 + "o Poirier". That's the desired shape: LML's
-    // downstream NFKD strip can act on the combining mark and reduce to
-    // "Romeo Poirier" for cache-key matching.
+    // &#769; is U+0301 (combining acute); decoded form is NFD-decomposed,
+    // which is what LML's downstream NFKD strip needs to act on.
     expect(mockLookup).toHaveBeenCalledWith('Roméo Poirier', 'Off the Record', undefined, expect.any(Object));
     expect(result).toBe(12345);
   });
@@ -76,6 +65,35 @@ describe('jobs/rotation-release-id-backfill/lml-fetch (HTML-entity decode)', () 
     await lookupReleaseId('Bj&#xf6;rk', 'Vespertine');
 
     expect(mockLookup).toHaveBeenCalledWith('Björk', 'Vespertine', undefined, expect.any(Object));
+  });
+
+  it('passes unknown named entities through unchanged', async () => {
+    const mockLookup = jest.fn().mockResolvedValue({ results: [{ artwork: { release_id: 3 } }] });
+
+    const { lookupReleaseId } = await loadModule(mockLookup);
+    await lookupReleaseId('Foo &copy; Bar', '&trade;');
+
+    expect(mockLookup).toHaveBeenCalledWith('Foo &copy; Bar', '&trade;', undefined, expect.any(Object));
+  });
+
+  it('decodes multiple entities in the same string', async () => {
+    const mockLookup = jest.fn().mockResolvedValue({ results: [{ artwork: { release_id: 4 } }] });
+
+    const { lookupReleaseId } = await loadModule(mockLookup);
+    await lookupReleaseId('A &amp; B &#38; C', 'X');
+
+    expect(mockLookup).toHaveBeenCalledWith('A & B & C', 'X', undefined, expect.any(Object));
+  });
+
+  it('passes lone-surrogate codepoints through unchanged (avoids ill-formed UTF-16)', async () => {
+    const mockLookup = jest.fn().mockResolvedValue({ results: [{ artwork: { release_id: 5 } }] });
+
+    const { lookupReleaseId } = await loadModule(mockLookup);
+    // U+D800 is a high-surrogate; String.fromCodePoint accepts it silently
+    // and would produce ill-formed UTF-16.
+    await lookupReleaseId('Bad &#xd800; input', 'X');
+
+    expect(mockLookup).toHaveBeenCalledWith('Bad &#xd800; input', 'X', undefined, expect.any(Object));
   });
 
   it('returns null when LML returns no Discogs match', async () => {

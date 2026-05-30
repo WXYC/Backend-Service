@@ -51,16 +51,14 @@ const HTML_ENTITY_RE = /&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi;
 
 const decodeHtmlEntities = (input: string): string =>
   input.replace(HTML_ENTITY_RE, (match, body: string) => {
-    if (body[0] === '#') {
-      const codepoint = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
-      if (!Number.isFinite(codepoint) || codepoint < 0 || codepoint > 0x10ffff) return match;
-      try {
-        return String.fromCodePoint(codepoint);
-      } catch {
-        return match;
-      }
-    }
-    return NAMED_ENTITIES[body.toLowerCase()] ?? match;
+    if (body[0] !== '#') return NAMED_ENTITIES[body.toLowerCase()] ?? match;
+    const isHex = body[1] === 'x' || body[1] === 'X';
+    const codepoint = parseInt(body.slice(isHex ? 2 : 1), isHex ? 16 : 10);
+    // Reject surrogate-range too: String.fromCodePoint accepts lone
+    // surrogates without throwing and would produce ill-formed UTF-16 that
+    // breaks JSON.stringify on the LML hop.
+    if (codepoint > 0x10ffff || (codepoint >= 0xd800 && codepoint <= 0xdfff)) return match;
+    return String.fromCodePoint(codepoint);
   });
 
 export const lookupReleaseId = async (artist: string, album: string): Promise<number | null> => {
