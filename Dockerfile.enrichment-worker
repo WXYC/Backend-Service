@@ -17,9 +17,10 @@ COPY ./package.json ./package-lock.json ./
 COPY ./tsconfig.base.json ./
 COPY ./shared/database ./shared/database
 COPY ./shared/lml-client ./shared/lml-client
+COPY ./shared/metadata ./shared/metadata
 COPY ./apps/enrichment-worker ./apps/enrichment-worker
 
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/enrichment-worker
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/enrichment-worker
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -32,6 +33,7 @@ COPY ./package* ./
 COPY ./apps/enrichment-worker/package* ./apps/enrichment-worker/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/lml-client/package* ./shared/lml-client/
+COPY ./shared/metadata/package* ./shared/metadata/
 
 # `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
 # (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
@@ -42,6 +44,7 @@ RUN npm install --omit=dev && rm -f .npmrc
 COPY --from=builder ./enrichment-worker-builder/apps/enrichment-worker/dist ./apps/enrichment-worker/dist
 COPY --from=builder ./enrichment-worker-builder/shared/database/dist ./shared/database/dist
 COPY --from=builder ./enrichment-worker-builder/shared/lml-client/dist ./shared/lml-client/dist
+COPY --from=builder ./enrichment-worker-builder/shared/metadata/dist ./shared/metadata/dist
 
 # Inherit @wxyc/database's 5s statement timeout default — every query the
 # consumer issues is a single-row PK lookup; anything longer is a stuck

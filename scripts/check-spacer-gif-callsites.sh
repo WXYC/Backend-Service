@@ -4,11 +4,9 @@
 # canonical `filterSpacerGif` (originally in
 # `apps/backend/services/metadata/metadata.service.ts`; moved to
 # `shared/metadata/src/helpers/filter-spacer-gif.ts` by the deep-module
-# refactor — `metadata.service.ts` now re-exports). The remaining inline
-# duplicate in the enrichment worker is pinned to that canonical via the
-# parity test under tests/unit/apps/enrichment-worker/. The deep-module
-# rollout deletes these copies one PR at a time; the final PR will delete
-# this script along with the last inline copy.
+# refactor — `metadata.service.ts` now re-exports). The deep-module rollout
+# (BS#1242) has collapsed every inline duplicate onto the canonical; the
+# next (final) PR in that rollout deletes this script.
 #
 # Test files are EXCLUDED from the source-set count because they exercise
 # the inputs (they MUST contain the literal). Comments in unrelated files
@@ -23,19 +21,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Allowed source files (relative to repo root) that may contain the
-# `spacer.gif` *code literal* (a single- or double-quoted string).
-# The canonical lives in `shared/metadata/src/helpers/filter-spacer-gif.ts`
-# (npm package `@wxyc/metadata`); the enrichment worker still keeps an
-# inline copy for build-graph isolation from `apps/backend`. That copy is
-# removed by the next PR in the deep-module rollout, after which the final
-# PR retires this script.
-#
-# Adding a new entry here requires also adding a parity test under
-# tests/unit/apps/<app>/filter-spacer-gif-parity.test.ts that pins the
-# new inline copy's truthy/falsy behavior to the canonical.
+# `spacer.gif` *code literal* (a single- or double-quoted string). Only the
+# canonical remains; this script will be retired by the next (final) PR in
+# the BS#1242 deep-module rollout.
 ALLOWED=(
   "shared/metadata/src/helpers/filter-spacer-gif.ts"
-  "apps/enrichment-worker/enrich.ts"
 )
 
 cd "$REPO_ROOT"

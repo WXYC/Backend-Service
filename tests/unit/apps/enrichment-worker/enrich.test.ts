@@ -17,13 +17,7 @@ import { jest } from '@jest/globals';
 
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
-import {
-  cleanDiscogsBio,
-  extractArtwork,
-  filterSpacerGif,
-  finalizeRow,
-  synthesizeSearchUrls,
-} from '../../../../apps/enrichment-worker/enrich';
+import { extractArtwork, finalizeRow, synthesizeSearchUrls } from '../../../../apps/enrichment-worker/enrich';
 
 const mockDb = db as unknown as {
   insert: jest.Mock;
@@ -381,40 +375,6 @@ describe('synthesizeSearchUrls (per-service precedence)', () => {
       synthesizeSearchUrls({ id: 1, artist_name: 'A', album_title: 'B', track_title: null, album_id: null })
         .soundcloud_url
     ).toBe('https://soundcloud.com/search?q=A');
-  });
-});
-
-describe('filterSpacerGif', () => {
-  it('returns null for spacer.gif URLs', () => {
-    expect(filterSpacerGif('https://i.discogs.com/spacer.gif')).toBeNull();
-    expect(filterSpacerGif('https://example.com/path/spacer.gif?v=1')).toBeNull();
-  });
-
-  it('preserves non-spacer URLs', () => {
-    expect(filterSpacerGif('https://i.discogs.com/abc/cover.jpg')).toBe('https://i.discogs.com/abc/cover.jpg');
-  });
-
-  it('returns null for nullish input', () => {
-    expect(filterSpacerGif(null)).toBeNull();
-    expect(filterSpacerGif(undefined)).toBeNull();
-    expect(filterSpacerGif('')).toBeNull();
-  });
-});
-
-describe('cleanDiscogsBio', () => {
-  it('strips Discogs markup tags', () => {
-    expect(cleanDiscogsBio('See also [a=Other Artist] for more.')).toBe('See also Other Artist for more.');
-    expect(cleanDiscogsBio('Released on [l=Some Label] in 2022.')).toBe('Released on Some Label in 2022.');
-    expect(cleanDiscogsBio('Catalog [r=12345] is the master.')).toBe('Catalog 12345 is the master.');
-    expect(cleanDiscogsBio('From the [m=67890] master.')).toBe('From the 67890 master.');
-  });
-
-  it('strips Discogs URL tags, keeping link text', () => {
-    expect(cleanDiscogsBio('See [url=https://example.com]our site[/url] for more.')).toBe('See our site for more.');
-  });
-
-  it('leaves plain text alone', () => {
-    expect(cleanDiscogsBio('Just a plain bio with no markup.')).toBe('Just a plain bio with no markup.');
   });
 });
 
