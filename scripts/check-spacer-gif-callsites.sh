@@ -5,11 +5,10 @@
 # `apps/backend/services/metadata/metadata.service.ts`; moved to
 # `shared/metadata/src/helpers/filter-spacer-gif.ts` by the deep-module
 # refactor — `metadata.service.ts` now re-exports). The remaining inline
-# duplicates in the one job + the enrichment worker are pinned to that
-# canonical via the parity tests under tests/unit/jobs/<job>/ and
-# tests/unit/apps/enrichment-worker/. The deep-module rollout deletes these
-# copies one PR at a time; the final PR will delete this script along with
-# the last inline copy.
+# duplicate in the enrichment worker is pinned to that canonical via the
+# parity test under tests/unit/apps/enrichment-worker/. The deep-module
+# rollout deletes these copies one PR at a time; the final PR will delete
+# this script along with the last inline copy.
 #
 # Test files are EXCLUDED from the source-set count because they exercise
 # the inputs (they MUST contain the literal). Comments in unrelated files
@@ -26,17 +25,16 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Allowed source files (relative to repo root) that may contain the
 # `spacer.gif` *code literal* (a single- or double-quoted string).
 # The canonical lives in `shared/metadata/src/helpers/filter-spacer-gif.ts`
-# (npm package `@wxyc/metadata`); the one job + enrichment worker still
-# keep inline copies for build-graph isolation from `apps/backend`. Those
-# copies are removed incrementally by the deep-module rollout, one PR per
-# callsite, until the final PR retires this script.
+# (npm package `@wxyc/metadata`); the enrichment worker still keeps an
+# inline copy for build-graph isolation from `apps/backend`. That copy is
+# removed by the next PR in the deep-module rollout, after which the final
+# PR retires this script.
 #
 # Adding a new entry here requires also adding a parity test under
-# tests/unit/jobs/<job>/filter-spacer-gif-parity.test.ts that pins the
+# tests/unit/apps/<app>/filter-spacer-gif-parity.test.ts that pins the
 # new inline copy's truthy/falsy behavior to the canonical.
 ALLOWED=(
   "shared/metadata/src/helpers/filter-spacer-gif.ts"
-  "jobs/flowsheet-metadata-backfill/enrich.ts"
   "apps/enrichment-worker/enrich.ts"
 )
 

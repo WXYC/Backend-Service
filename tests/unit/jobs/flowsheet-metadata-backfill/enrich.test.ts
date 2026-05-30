@@ -11,18 +11,14 @@
  *      `isNull(flowsheet.metadata_attempt_at)` so a runtime stamp landing
  *      between the orchestrator's SELECT and this UPDATE wins.
  *
- * Also pins the spacer.gif filter (#638 implementation note 1) and the
- * Discogs bio cleanup mirroring metadata.service.ts.
+ * spacer.gif filter and Discogs bio cleanup are covered directly in
+ * tests/unit/shared/metadata/; exercised here transitively via
+ * applyEnrichment's match-path assertions.
  */
 import { jest } from '@jest/globals';
 
 import { album_metadata, db, flowsheet } from '@wxyc/database';
-import {
-  applyEnrichment,
-  cleanDiscogsBio,
-  extractArtwork,
-  type EnrichRow,
-} from '../../../../jobs/flowsheet-metadata-backfill/enrich';
+import { applyEnrichment, extractArtwork, type EnrichRow } from '../../../../jobs/flowsheet-metadata-backfill/enrich';
 import type { LookupResponse } from '@wxyc/lml-client';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
@@ -368,46 +364,6 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     const outcome = await applyEnrichment(linkedRow, noMatchResponse);
     expect(outcome).toBe('enriched_no_match_raced');
     expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
-  });
-});
-
-describe('cleanDiscogsBio', () => {
-  // Direct unit tests — `applyEnrichment` exercises this through
-  // `artist_bio` end-to-end, but pinning each markup form individually
-  // catches a regression that breaks one bracket form silently.
-  it('strips [a=Name] artist references', () => {
-    expect(cleanDiscogsBio('[a=Aphex Twin] is great')).toBe('Aphex Twin is great');
-  });
-
-  it('strips [l=Label] label references', () => {
-    expect(cleanDiscogsBio('Released on [l=Warp Records]')).toBe('Released on Warp Records');
-  });
-
-  it('strips [r=Release] release references', () => {
-    expect(cleanDiscogsBio('See [r=12345] for the release')).toBe('See 12345 for the release');
-  });
-
-  it('strips [m=Master] master references', () => {
-    expect(cleanDiscogsBio('Master entry [m=98765]')).toBe('Master entry 98765');
-  });
-
-  it('strips [url=...]label[/url] link markup, keeping the label text', () => {
-    expect(cleanDiscogsBio('Visit [url=https://example.com]their site[/url] for more')).toBe(
-      'Visit their site for more'
-    );
-  });
-
-  it('handles a bio with multiple markup forms in one pass', () => {
-    const raw = '[a=Rob Brown] and [a=Sean Booth] are Autechre, on [l=Warp Records].';
-    expect(cleanDiscogsBio(raw)).toBe('Rob Brown and Sean Booth are Autechre, on Warp Records.');
-  });
-
-  it('returns plain text unchanged', () => {
-    expect(cleanDiscogsBio('No markup here')).toBe('No markup here');
-  });
-
-  it('returns empty string unchanged', () => {
-    expect(cleanDiscogsBio('')).toBe('');
   });
 });
 

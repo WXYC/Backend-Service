@@ -26,17 +26,15 @@
  * invariant. Borrow the album_metadata UPSERT shape from the worker; do
  * NOT borrow its status-based guard.
  *
- * Spacer.gif filter: applied inline. Discogs occasionally returns
- * `spacer.gif` placeholder images; persisting them would pollute the
- * historical drain. The runtime path filters at the chokepoint in
- * `metadata.service.ts:extractAlbumMetadata` (#649); this job carries its
- * own copy because `lml-fetch.ts` deliberately does not go through the
- * backend service (build-graph isolation, see file header).
+ * Spacer.gif filter + Discogs bio cleanup: imported from `@wxyc/metadata`
+ * (BS#1242 deep-module rollout). The shared module is build-graph-safe for
+ * jobs; replaces the inline duplicates previously pinned by parity tests.
  */
 
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
+import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
 
 export type EnrichRow = {
   id: number;
@@ -51,39 +49,6 @@ export type EnrichRow = {
 };
 
 export type EnrichOutcome = 'enriched_match' | 'enriched_match_raced' | 'enriched_no_match' | 'enriched_no_match_raced';
-
-/**
- * Strip Discogs markup tags from bio text (mirrors metadata.service.ts).
- *
- * Exported for direct unit testing. Inlined into the job rather than
- * imported from the backend service for the same build-graph isolation
- * reason as `lml-fetch.ts` and `synthesizeSearchUrls`.
- */
-export const cleanDiscogsBio = (bio: string): string =>
-  bio
-    .replace(/\[a=([^\]]+)\]/g, '$1')
-    .replace(/\[l=([^\]]+)\]/g, '$1')
-    .replace(/\[r=([^\]]+)\]/g, '$1')
-    .replace(/\[m=([^\]]+)\]/g, '$1')
-    .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
-
-/**
- * Drop Discogs spacer.gif placeholder URLs. Inline guard, duplicated for
- * build-graph isolation from `apps/backend` (see file header). Must stay
- * truthy/falsy-equivalent to the canonical
- * `apps/backend/services/metadata/metadata.service.ts#filterSpacerGif`
- * (BS#890). The job writes to DB columns that are nullable, so the inline
- * copy returns `null` while the canonical returns `undefined`; the parity
- * test at
- * `tests/unit/jobs/flowsheet-metadata-backfill/filter-spacer-gif-parity.test.ts`
- * pins truthy/falsy parity across the two for all the inputs the runtime
- * exercises.
- */
-export const filterSpacerGif = (url: string | null | undefined): string | null => {
-  if (!url) return null;
-  if (url.includes('spacer.gif')) return null;
-  return url;
-};
 
 /**
  * Synthesize the four search URLs the runtime path falls back to on
