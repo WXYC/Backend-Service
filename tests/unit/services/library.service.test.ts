@@ -49,7 +49,7 @@ import {
   markAlbumFound,
   enrichWithArtwork,
   updateArtworkUrl,
-  getDiscogsReleaseIdByRotationId,
+  resolveRotationPickerSource,
   __resetRotationLmlLookupCacheForTests,
   isVariousArtistsName,
 } from '../../../apps/backend/services/library.service';
@@ -2102,7 +2102,7 @@ describe('library.service', () => {
     });
   });
 
-  describe('getDiscogsReleaseIdByRotationId', () => {
+  describe('resolveRotationPickerSource', () => {
     // Pins the direct + fallback precedence of the simplified read path
     // (post-tubafrenzy-parity migration 0077). The tubafrenzy-sourced
     // `rotation.discogs_release_id` wins when present; the library_identity
@@ -2119,8 +2119,8 @@ describe('library.service', () => {
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([{ direct: 12345, fallback: null }]);
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
-      expect(result).toBe(12345);
+      const result = await resolveRotationPickerSource(42);
+      expect(result).toEqual({ releaseId: 12345, inlineTracklist: null });
     });
 
     it('falls back to library_identity.discogs_release_id when the direct column is NULL', async () => {
@@ -2128,8 +2128,8 @@ describe('library.service', () => {
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([{ direct: null, fallback: 99 }]);
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
-      expect(result).toBe(99);
+      const result = await resolveRotationPickerSource(42);
+      expect(result).toEqual({ releaseId: 99, inlineTracklist: null });
     });
 
     it('prefers the direct column over the fallback when both are present', async () => {
@@ -2140,8 +2140,8 @@ describe('library.service', () => {
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([{ direct: 12345, fallback: 99 }]);
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
-      expect(result).toBe(12345);
+      const result = await resolveRotationPickerSource(42);
+      expect(result).toEqual({ releaseId: 12345, inlineTracklist: null });
     });
 
     it('returns null when both sources are NULL', async () => {
@@ -2149,7 +2149,7 @@ describe('library.service', () => {
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([{ direct: null, fallback: null }]);
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
       expect(result).toBeNull();
     });
 
@@ -2158,12 +2158,12 @@ describe('library.service', () => {
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([]);
 
-      const result = await getDiscogsReleaseIdByRotationId(404);
+      const result = await resolveRotationPickerSource(404);
       expect(result).toBeNull();
     });
   });
 
-  describe('getDiscogsReleaseIdByRotationId — tier-3 LML fallback', () => {
+  describe('resolveRotationPickerSource — tier-3 LML fallback', () => {
     // Tier 3 mirrors tubafrenzy's RotationTracklistCache parity (BS#986):
     // when direct + fallback both miss, ask LML `POST /api/v1/lookup` to
     // identify the release from (artist_name, album_title). Per-rotation_id
@@ -2201,9 +2201,9 @@ describe('library.service', () => {
         search_type: 'direct',
       });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
-      expect(result).toBe(4080);
+      expect(result).toEqual({ releaseId: 4080, inlineTracklist: null });
       // 10 s timeout matches tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` so picker
       // coverage on long-tail rotation rows parity-matches the legacy system.
       // No `budgetMs` here on purpose: BS#1186's cutoff was justified by
@@ -2213,6 +2213,7 @@ describe('library.service', () => {
       // match for obscure college rotation comes from.
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
         timeoutMs: 10000,
+        extended: true,
       });
     });
 
@@ -2233,14 +2234,14 @@ describe('library.service', () => {
         search_type: 'direct',
       });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
-      expect(result).toBe(26538110);
+      expect(result).toEqual({ releaseId: 26538110, inlineTracklist: null });
       expect(mockLookupMetadata).toHaveBeenCalledWith(
         undefined,
         'All the Young Droids: Junkshop Synth Pop 1978-1985',
         undefined,
-        { timeoutMs: 10000 }
+        { timeoutMs: 10000, extended: true }
       );
     });
 
@@ -2266,25 +2267,25 @@ describe('library.service', () => {
     it('does not call LML when the direct column has a value', async () => {
       mockRow({ direct: 12345, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
-      expect(result).toBe(12345);
+      expect(result).toEqual({ releaseId: 12345, inlineTracklist: null });
       expect(mockLookupMetadata).not.toHaveBeenCalled();
     });
 
     it('does not call LML when the fallback has a value', async () => {
       mockRow({ direct: null, fallback: 99, artist_name: 'Autechre', album_title: 'Confield' });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
-      expect(result).toBe(99);
+      expect(result).toEqual({ releaseId: 99, inlineTracklist: null });
       expect(mockLookupMetadata).not.toHaveBeenCalled();
     });
 
     it('returns null and does not call LML when artist_name is NULL', async () => {
       mockRow({ direct: null, fallback: null, artist_name: null, album_title: 'Confield' });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
       expect(result).toBeNull();
       expect(mockLookupMetadata).not.toHaveBeenCalled();
@@ -2293,7 +2294,7 @@ describe('library.service', () => {
     it('returns null and does not call LML when album_title is NULL', async () => {
       mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: null });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
       expect(result).toBeNull();
       expect(mockLookupMetadata).not.toHaveBeenCalled();
@@ -2303,7 +2304,7 @@ describe('library.service', () => {
       mockIsLmlConfigured.mockReturnValue(false);
       mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
       expect(result).toBeNull();
       expect(mockLookupMetadata).not.toHaveBeenCalled();
@@ -2314,7 +2315,7 @@ describe('library.service', () => {
       mockLookupMetadata.mockRejectedValue(new Error('LML 504'));
       const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
       expect(result).toBeNull();
       expect(consoleSpy).toHaveBeenCalled();
@@ -2325,7 +2326,7 @@ describe('library.service', () => {
       mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Unknown' });
       mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
       expect(result).toBeNull();
     });
@@ -2337,15 +2338,15 @@ describe('library.service', () => {
         search_type: 'direct',
       });
 
-      const first = await getDiscogsReleaseIdByRotationId(42);
-      expect(first).toBe(4080);
+      const first = await resolveRotationPickerSource(42);
+      expect(first).toEqual({ releaseId: 4080, inlineTracklist: null });
 
       // The DB read still happens on every call (this is by design — the LRU
       // only short-circuits the LML query, which is the expensive bit). The
       // second call reaches the resolver but hits the cache before LML.
       mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
-      const second = await getDiscogsReleaseIdByRotationId(42);
-      expect(second).toBe(4080);
+      const second = await resolveRotationPickerSource(42);
+      expect(second).toEqual({ releaseId: 4080, inlineTracklist: null });
 
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
     });
@@ -2354,11 +2355,11 @@ describe('library.service', () => {
       mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Unknown' });
       mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
 
-      const first = await getDiscogsReleaseIdByRotationId(42);
+      const first = await resolveRotationPickerSource(42);
       expect(first).toBeNull();
 
       mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Unknown' });
-      const second = await getDiscogsReleaseIdByRotationId(42);
+      const second = await resolveRotationPickerSource(42);
       expect(second).toBeNull();
 
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
@@ -2373,7 +2374,7 @@ describe('library.service', () => {
       mockLookupMetadata.mockRejectedValueOnce(new Error('LML timeout'));
       const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-      const first = await getDiscogsReleaseIdByRotationId(42);
+      const first = await resolveRotationPickerSource(42);
       expect(first).toBeNull();
 
       mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
@@ -2381,11 +2382,84 @@ describe('library.service', () => {
         results: [{ artwork: { release_id: 4080 } }],
         search_type: 'direct',
       });
-      const second = await getDiscogsReleaseIdByRotationId(42);
-      expect(second).toBe(4080);
+      const second = await resolveRotationPickerSource(42);
+      expect(second).toEqual({ releaseId: 4080, inlineTracklist: null });
 
       expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
       consoleSpy.mockRestore();
+    });
+
+    it('carries an inline tracklist when LML returns extended-mode tracks', async () => {
+      // BS#1185 + LML#427: `extended=true` opts the top-1 result into a
+      // tracklist on `artwork.tracklist`. The picker controller short-circuits
+      // on that, avoiding the follow-up `getRelease(id)` round-trip. Empty
+      // per-track artists fall back to the rotation row's artist_name so the
+      // dj-site picker always has at least one name to render.
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      mockLookupMetadata.mockResolvedValue({
+        results: [
+          {
+            artwork: {
+              release_id: 4080,
+              tracklist: [
+                { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
+                { position: 'A2', title: 'Cfern', duration: '5:11', artists: [] },
+                { position: 'A3', title: 'Pen Expers', duration: null, artists: null },
+              ],
+            },
+          },
+        ],
+        search_type: 'direct',
+      });
+
+      const result = await resolveRotationPickerSource(42);
+
+      expect(result).toEqual({
+        releaseId: 4080,
+        inlineTracklist: [
+          { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
+          { position: 'A2', title: 'Cfern', duration: '5:11', artists: ['Autechre'] },
+          { position: 'A3', title: 'Pen Expers', duration: null, artists: ['Autechre'] },
+        ],
+      });
+    });
+
+    it('carries an inline tracklist when LML synth-rescues with release_id=0 (MB rescue)', async () => {
+      // LML#427 MusicBrainz rescue: when Discogs misses, LML synthesizes a
+      // result with `release_id: 0` (the BS#1185 sentinel) and a tracklist
+      // sourced from musicbrainz-cache. The picker still gets a tracklist
+      // and skips `getRelease(0)` (which would 404). releaseId=0 short-circuits
+      // the controller via `inlineTracklist !== null`.
+      mockRow({
+        direct: null,
+        fallback: null,
+        artist_name: 'Julianna Barwick & Mary Lattimore',
+        album_title: 'Tragic Magic',
+      });
+      mockLookupMetadata.mockResolvedValue({
+        results: [
+          {
+            artwork: {
+              release_id: 0,
+              tracklist: [
+                { position: '1', title: 'Tragic Magic', duration: '6:01', artists: [] },
+                { position: '2', title: 'For Mariko', duration: '4:18', artists: [] },
+              ],
+            },
+          },
+        ],
+        search_type: 'direct',
+      });
+
+      const result = await resolveRotationPickerSource(42);
+
+      expect(result).toEqual({
+        releaseId: 0,
+        inlineTracklist: [
+          { position: '1', title: 'Tragic Magic', duration: '6:01', artists: ['Julianna Barwick & Mary Lattimore'] },
+          { position: '2', title: 'For Mariko', duration: '4:18', artists: ['Julianna Barwick & Mary Lattimore'] },
+        ],
+      });
     });
   });
 });

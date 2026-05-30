@@ -3,7 +3,7 @@
  *
  * Coverage:
  *  1. The walk fetches active rotation rows (kill_date IS NULL OR > today),
- *     calls `getDiscogsReleaseIdByRotationId` for each, and emits a final
+ *     calls `resolveRotationPickerSource` for each, and emits a final
  *     summary log line with the expected counters.
  *  2. A single row's failure is captured to Sentry and does not halt the
  *     walk; subsequent rows are still visited.
@@ -13,7 +13,7 @@
  *     the top-level walk is caught and Sentry-captured rather than escaping
  *     to the caller (which would be `app.listen`'s callback).
  *
- * The shared `db` and `getDiscogsReleaseIdByRotationId` (via library.service)
+ * The shared `db` and `resolveRotationPickerSource` (via library.service)
  * are mocked. We hold the LRU-sizes accessor stub so we can simulate
  * positive/negative cache growth.
  */
@@ -23,15 +23,18 @@ import { db } from '../../mocks/database.mock';
 // `library.service` exposes both the picker resolver we drive end-to-end
 // and the LRU-sizes accessor we read for the counter classifier. Mock at
 // the module boundary so the warm service receives our test doubles.
-const mockGetDiscogsReleaseIdByRotationId = jest.fn<(id: number) => Promise<number | null>>();
+type PickerSource = { releaseId: number; inlineTracklist: null };
+const mockResolveRotationPickerSource = jest.fn<(id: number) => Promise<PickerSource | null>>();
 type Sizes = { positive: number; negative: number };
 const sizesRef: { current: Sizes } = { current: { positive: 0, negative: 0 } };
 const mockRotationLmlCacheSizesForWarm = jest.fn<() => Sizes>(() => sizesRef.current);
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
-  getDiscogsReleaseIdByRotationId: mockGetDiscogsReleaseIdByRotationId,
+  resolveRotationPickerSource: mockResolveRotationPickerSource,
   __rotationLmlCacheSizesForWarm: mockRotationLmlCacheSizesForWarm,
 }));
+
+const source = (releaseId: number): PickerSource => ({ releaseId, inlineTracklist: null });
 
 const mockCaptureException = jest.fn();
 jest.mock('@sentry/node', () => ({
@@ -60,17 +63,17 @@ function mockActiveRotationRows(ids: number[]): void {
 }
 
 /**
- * Make `getDiscogsReleaseIdByRotationId` advance the LRU sizes accessor as
+ * Make `resolveRotationPickerSource` advance the LRU sizes accessor as
  * the real resolver would. Used by the tier-3 classification test.
  */
 function resolverSideEffect(grow: 'positive' | 'negative' | 'none', returnValue: number | null): void {
-  mockGetDiscogsReleaseIdByRotationId.mockImplementationOnce(() => {
+  mockResolveRotationPickerSource.mockImplementationOnce(() => {
     if (grow === 'positive') {
       sizesRef.current = { ...sizesRef.current, positive: sizesRef.current.positive + 1 };
     } else if (grow === 'negative') {
       sizesRef.current = { ...sizesRef.current, negative: sizesRef.current.negative + 1 };
     }
-    return Promise.resolve(returnValue);
+    return Promise.resolve(returnValue === null ? null : source(returnValue));
   });
 }
 
@@ -81,7 +84,7 @@ describe('rotation-tracks-cache-warm.service', () => {
 
   beforeEach(() => {
     selectMock.mockReset();
-    mockGetDiscogsReleaseIdByRotationId.mockReset();
+    mockResolveRotationPickerSource.mockReset();
     mockCaptureException.mockReset();
     sizesRef.current = { positive: 0, negative: 0 };
     consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -98,14 +101,14 @@ describe('rotation-tracks-cache-warm.service', () => {
   describe('warmRotationTracksCache', () => {
     test('visits every active rotation row in id order', async () => {
       mockActiveRotationRows([10, 20, 30]);
-      mockGetDiscogsReleaseIdByRotationId.mockResolvedValue(null);
+      mockResolveRotationPickerSource.mockResolvedValue(null);
 
       await warmRotationTracksCache();
 
-      expect(mockGetDiscogsReleaseIdByRotationId).toHaveBeenCalledTimes(3);
-      expect(mockGetDiscogsReleaseIdByRotationId).toHaveBeenNthCalledWith(1, 10);
-      expect(mockGetDiscogsReleaseIdByRotationId).toHaveBeenNthCalledWith(2, 20);
-      expect(mockGetDiscogsReleaseIdByRotationId).toHaveBeenNthCalledWith(3, 30);
+      expect(mockResolveRotationPickerSource).toHaveBeenCalledTimes(3);
+      expect(mockResolveRotationPickerSource).toHaveBeenNthCalledWith(1, 10);
+      expect(mockResolveRotationPickerSource).toHaveBeenNthCalledWith(2, 20);
+      expect(mockResolveRotationPickerSource).toHaveBeenNthCalledWith(3, 30);
     });
 
     test('summary counters: classifies tier-3 positive vs negative vs pre-resolved per row', async () => {
@@ -131,14 +134,14 @@ describe('rotation-tracks-cache-warm.service', () => {
 
     test('does not halt when a single row throws — sibling rows still visited and captured to Sentry', async () => {
       mockActiveRotationRows([10, 20, 30]);
-      mockGetDiscogsReleaseIdByRotationId.mockResolvedValueOnce(123);
-      mockGetDiscogsReleaseIdByRotationId.mockRejectedValueOnce(new Error('LML timeout'));
-      mockGetDiscogsReleaseIdByRotationId.mockResolvedValueOnce(null);
+      mockResolveRotationPickerSource.mockResolvedValueOnce(source(123));
+      mockResolveRotationPickerSource.mockRejectedValueOnce(new Error('LML timeout'));
+      mockResolveRotationPickerSource.mockResolvedValueOnce(null);
 
       const counters = await warmRotationTracksCache();
 
       // Walk visited all three rows despite the middle row throwing.
-      expect(mockGetDiscogsReleaseIdByRotationId).toHaveBeenCalledTimes(3);
+      expect(mockResolveRotationPickerSource).toHaveBeenCalledTimes(3);
       expect(counters.scanned).toBe(3);
       expect(counters.errors).toBe(1);
       expect(mockCaptureException).toHaveBeenCalledTimes(1);
@@ -180,7 +183,7 @@ describe('rotation-tracks-cache-warm.service', () => {
 
       const counters = await warmRotationTracksCache();
 
-      expect(mockGetDiscogsReleaseIdByRotationId).not.toHaveBeenCalled();
+      expect(mockResolveRotationPickerSource).not.toHaveBeenCalled();
       expect(counters.scanned).toBe(0);
       expect(counters.errors).toBe(0);
     });
