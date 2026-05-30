@@ -50,6 +50,7 @@ import {
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
   LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
   requireNonNegativeInt,
+  requirePositiveInt,
   type CheckLiveActivityFn,
 } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
@@ -88,14 +89,8 @@ const FLOWSHEET_TABLE = sql.raw(`"${SCHEMA}"."flowsheet"`);
  *
  * Exported so unit tests can drive it without mucking with process.env.
  */
-export const resolveBatchSize = (raw: string | undefined = process.env.BACKFILL_BATCH_SIZE): number => {
-  if (raw === undefined) return BATCH_SIZE;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    throw new Error(`Invalid BACKFILL_BATCH_SIZE=${JSON.stringify(raw)}; must be a positive integer.`);
-  }
-  return parsed;
-};
+export const resolveBatchSize = (raw: string | undefined = process.env.BACKFILL_BATCH_SIZE): number =>
+  requirePositiveInt(raw, 'BACKFILL_BATCH_SIZE', BATCH_SIZE);
 
 /**
  * Resolve `BACKFILL_THROTTLE_MS` from the environment, falling back to
@@ -105,14 +100,8 @@ export const resolveBatchSize = (raw: string | undefined = process.env.BACKFILL_
  *
  * Exported so unit tests can drive it without mucking with process.env.
  */
-export const resolveThrottleMs = (raw: string | undefined = process.env.BACKFILL_THROTTLE_MS): number => {
-  if (raw === undefined) return THROTTLE_MS;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new Error(`Invalid BACKFILL_THROTTLE_MS=${JSON.stringify(raw)}; must be a non-negative integer.`);
-  }
-  return parsed;
-};
+export const resolveThrottleMs = (raw: string | undefined = process.env.BACKFILL_THROTTLE_MS): number =>
+  requireNonNegativeInt(raw, 'BACKFILL_THROTTLE_MS', THROTTLE_MS);
 
 /**
  * Throws on misconfig — this is a cron-driven job; loud failure is
