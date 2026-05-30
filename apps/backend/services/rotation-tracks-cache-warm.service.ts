@@ -66,6 +66,72 @@ const PROGRESS_LOG_EVERY = 50;
  */
 const WARM_PASS_BUDGET_MS = 30 * 60 * 1000;
 
+/**
+ * Cooperative-pause lookback window in seconds — mirrors
+ * `jobs/flowsheet-metadata-backfill`'s pattern (#735). Before each rotation
+ * row, the walker probes `flowsheet` for any track inserts within this
+ * window. If found, a DJ is actively driving the playout and the walker
+ * yields rather than competing for LML semaphore slots. Without the pause,
+ * a deploy mid-show puts a DJ directly into the boot-warm contention window
+ * documented in BS#1237 (~38 % of pickers > 1 s for first ~7 min). With it,
+ * the walker stays out of the way during the exact moments when picker UX
+ * matters most. Set `WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS=0` to disable
+ * (emergency catch-up).
+ */
+const LIVE_ACTIVITY_LOOKBACK_SECONDS = 60;
+
+/**
+ * Sleep between cooperative-pause re-probes, ms. After a deferral the
+ * walker sleeps this long and re-checks. The 30 s wait + 60 s lookback
+ * lets the walker resume ~30 s after the DJ's last track add. No defer
+ * cap — `WARM_PASS_BUDGET_MS` is the wall-clock ceiling, and the next
+ * restart re-warms anything skipped.
+ */
+const LIVE_ACTIVITY_PAUSE_MS = 30_000;
+
+const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
+const FLOWSHEET_TABLE = sql.raw(`"${SCHEMA}"."flowsheet"`);
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Probe `flowsheet` for any track insert within the lookback window.
+ * Uses the `flowsheet_track_add_time_idx` partial index (migration 0050)
+ * for an index-only check; cost is negligible.
+ *
+ * Exported so tests can stub it.
+ */
+export const checkLiveActivity = async (lookbackSeconds: number): Promise<boolean> => {
+  if (lookbackSeconds <= 0) return false;
+  const rows = (await db.execute(sql`
+    SELECT 1
+    FROM ${FLOWSHEET_TABLE}
+    WHERE "entry_type" = 'track'
+      AND "add_time" > now() - (interval '1 second' * ${lookbackSeconds})
+    LIMIT 1
+  `)) as unknown as Array<unknown>;
+  return rows.length > 0;
+};
+
+/**
+ * Env-driven knob for `LIVE_ACTIVITY_LOOKBACK_SECONDS`. Operators set 0 to
+ * disable the probe entirely. Invalid values fall back to the default with
+ * a console.warn.
+ */
+const resolveLiveActivityLookback = (
+  raw: string | undefined = process.env.WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS
+): number => {
+  if (raw === undefined) return LIVE_ACTIVITY_LOOKBACK_SECONDS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    console.warn(
+      `${LOG_PREFIX} invalid WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS=${JSON.stringify(raw)}; using default ${LIVE_ACTIVITY_LOOKBACK_SECONDS}`
+    );
+    return LIVE_ACTIVITY_LOOKBACK_SECONDS;
+  }
+  return parsed;
+};
+
 export interface WarmCounters {
   /** Total rows walked. */
   scanned: number;
@@ -87,8 +153,22 @@ export interface WarmCounters {
   releaseFetchErrors: number;
   /** Rows skipped after the wall-clock budget elapsed. */
   budgetSkipped: number;
+  /** Number of times the walker yielded to live DJ activity (per-row, may repeat for the same row). */
+  liveActivityPauses: number;
+  /** Cumulative wall-clock time spent paused for live DJ activity, ms. */
+  pausedMs: number;
   /** Wall-clock duration of the walk in ms. */
   elapsedMs: number;
+}
+
+/**
+ * Options for `warmRotationTracksCache` — exists so tests can inject the
+ * `checkLiveActivity` probe + a 0 `pauseMs` to skip the real-time `setTimeout`.
+ */
+export interface WarmOptions {
+  checkLiveActivity?: (lookbackSeconds: number) => Promise<boolean>;
+  liveActivityLookbackSeconds?: number;
+  liveActivityPauseMs?: number;
 }
 
 /**
@@ -106,9 +186,12 @@ export interface WarmCounters {
  * tally without coupling this service to the LRU internals or requiring a
  * second pass.
  */
-export async function warmRotationTracksCache(): Promise<WarmCounters> {
+export async function warmRotationTracksCache(opts: WarmOptions = {}): Promise<WarmCounters> {
   const startTime = Date.now();
   const startSizes = __rotationLmlCacheSizesForWarm();
+  const probe = opts.checkLiveActivity ?? checkLiveActivity;
+  const lookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
+  const pauseMs = opts.liveActivityPauseMs ?? LIVE_ACTIVITY_PAUSE_MS;
 
   const rows = await db
     .select({ id: rotation.id })
@@ -126,6 +209,8 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
     releaseFetchAlreadyWarm: 0,
     releaseFetchErrors: 0,
     budgetSkipped: 0,
+    liveActivityPauses: 0,
+    pausedMs: 0,
     elapsedMs: 0,
   };
 
@@ -137,6 +222,22 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
     if (Date.now() - startTime > WARM_PASS_BUDGET_MS) {
       counters.budgetSkipped += 1;
       continue;
+    }
+
+    // Cooperative pause: yield while a DJ is active so the walker stops
+    // competing for LML semaphore slots during the picker UX-critical window.
+    // No defer cap — `WARM_PASS_BUDGET_MS` is the wall-clock ceiling.
+    if (lookbackSeconds > 0) {
+      while (await probe(lookbackSeconds)) {
+        if (Date.now() - startTime > WARM_PASS_BUDGET_MS) break;
+        counters.liveActivityPauses += 1;
+        console.log(
+          `${LOG_PREFIX} live_activity_pause: deferring rotation_id=${rotationId} for ${pauseMs}ms (lookback=${lookbackSeconds}s)`
+        );
+        const pauseStart = Date.now();
+        if (pauseMs > 0) await sleep(pauseMs);
+        counters.pausedMs += Date.now() - pauseStart;
+      }
     }
 
     counters.scanned += 1;
@@ -225,6 +326,8 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
       `releaseFetchNegative=${counters.releaseFetchNegative} ` +
       `releaseFetchAlreadyWarm=${counters.releaseFetchAlreadyWarm} ` +
       `budgetSkipped=${counters.budgetSkipped} ` +
+      `liveActivityPauses=${counters.liveActivityPauses} ` +
+      `pausedMs=${counters.pausedMs} ` +
       `errors=${counters.errors} releaseFetchErrors=${counters.releaseFetchErrors} ` +
       `elapsedMs=${counters.elapsedMs} ` +
       `(starting cache sizes positive=${startSizes.positive} negative=${startSizes.negative})`
