@@ -41,7 +41,12 @@
 import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import { db, rotation } from '@wxyc/database';
-import { resolveRotationPickerSource, __rotationLmlCacheSizesForWarm } from './library.service.js';
+import {
+  resolveRotationPickerSource,
+  __rotationLmlCacheSizesForWarm,
+  getRotationTracksFromRelease,
+  __releaseTracklistCacheSizesForWarm,
+} from './library.service.js';
 
 const LOG_PREFIX = '[rotation-tracks-cache-warm]';
 
@@ -62,6 +67,12 @@ export interface WarmCounters {
   lmlNegative: number;
   /** Rows where `resolveRotationPickerSource` threw. */
   errors: number;
+  /** Release-fetch follow-ups that populated the release-tracklist positive LRU. */
+  releasesWarmedPositive: number;
+  /** Release-fetch follow-ups that populated the release-tracklist negative LRU (LML 404). */
+  releasesWarmedNegative: number;
+  /** Release-fetch follow-ups that threw (5xx, network, parse). */
+  releaseFetchErrors: number;
   /** Wall-clock duration of the walk in ms. */
   elapsedMs: number;
 }
@@ -96,6 +107,9 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
     lmlPositive: 0,
     lmlNegative: 0,
     errors: 0,
+    releasesWarmedPositive: 0,
+    releasesWarmedNegative: 0,
+    releaseFetchErrors: 0,
     elapsedMs: 0,
   };
 
@@ -105,9 +119,10 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
     const rotationId = row.id as unknown as number;
     counters.scanned += 1;
 
+    let result: Awaited<ReturnType<typeof resolveRotationPickerSource>> = null;
     try {
       const beforeSizes = __rotationLmlCacheSizesForWarm();
-      const result = await resolveRotationPickerSource(rotationId);
+      result = await resolveRotationPickerSource(rotationId);
       const afterSizes = __rotationLmlCacheSizesForWarm();
 
       // Per-row LRU-delta classifier: if a positive entry was added during
@@ -140,11 +155,42 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
       console.warn(`${LOG_PREFIX} row ${rotationId} failed: ${(err as Error).message}`);
     }
 
+    // Follow-up release-fetch warm: mirror the picker controller's fall-through.
+    // The controller calls getRotationTracksFromRelease iff
+    // `source.inlineTracklist === null && source.releaseId !== null`. The
+    // BS#1185 sentinel (`releaseId: 0`) is always paired with an inline
+    // tracklist, so `releaseId > 0` would be equivalent; the inline-tracklist
+    // check is the contract this walks.
+    if (result && result.releaseId !== null && result.inlineTracklist === null) {
+      try {
+        const beforeReleaseSizes = __releaseTracklistCacheSizesForWarm();
+        await getRotationTracksFromRelease(result.releaseId);
+        const afterReleaseSizes = __releaseTracklistCacheSizesForWarm();
+        if (afterReleaseSizes.positive > beforeReleaseSizes.positive) {
+          counters.releasesWarmedPositive += 1;
+        } else if (afterReleaseSizes.negative > beforeReleaseSizes.negative) {
+          counters.releasesWarmedNegative += 1;
+        }
+      } catch (err) {
+        counters.releaseFetchErrors += 1;
+        Sentry.captureException(err, {
+          tags: { subsystem: 'rotation-tracks-cache-warm', phase: 'release_fetch' },
+          extra: { rotation_id: rotationId, release_id: result.releaseId },
+        });
+        console.warn(
+          `${LOG_PREFIX} row ${rotationId} release_fetch (release_id=${result.releaseId}) failed: ${(err as Error).message}`
+        );
+      }
+    }
+
     if (counters.scanned % PROGRESS_LOG_EVERY === 0) {
       console.log(
         `${LOG_PREFIX} progress: scanned=${counters.scanned}/${rows.length} ` +
           `preResolved=${counters.preResolved} lmlPositive=${counters.lmlPositive} ` +
-          `lmlNegative=${counters.lmlNegative} errors=${counters.errors}`
+          `lmlNegative=${counters.lmlNegative} ` +
+          `releasesWarmedPositive=${counters.releasesWarmedPositive} ` +
+          `releasesWarmedNegative=${counters.releasesWarmedNegative} ` +
+          `errors=${counters.errors} releaseFetchErrors=${counters.releaseFetchErrors}`
       );
     }
   }
@@ -154,7 +200,10 @@ export async function warmRotationTracksCache(): Promise<WarmCounters> {
   console.log(
     `${LOG_PREFIX} done: scanned=${counters.scanned} preResolved=${counters.preResolved} ` +
       `lmlPositive=${counters.lmlPositive} lmlNegative=${counters.lmlNegative} ` +
-      `errors=${counters.errors} elapsedMs=${counters.elapsedMs} ` +
+      `releasesWarmedPositive=${counters.releasesWarmedPositive} ` +
+      `releasesWarmedNegative=${counters.releasesWarmedNegative} ` +
+      `errors=${counters.errors} releaseFetchErrors=${counters.releaseFetchErrors} ` +
+      `elapsedMs=${counters.elapsedMs} ` +
       `(starting cache sizes positive=${startSizes.positive} negative=${startSizes.negative})`
   );
 
