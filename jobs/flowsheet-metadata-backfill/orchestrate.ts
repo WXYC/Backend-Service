@@ -114,13 +114,8 @@ export const resolveThrottleMs = (raw: string | undefined = process.env.BACKFILL
 };
 
 /**
- * Resolve `LIVE_ACTIVITY_LOOKBACK_SECONDS` from the environment, falling
- * back to `LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT`. Operators set `0` to
- * disable the cooperative-pause probe entirely (e.g., emergency catch-up
- * runs). Throws on misconfig — this is a cron-driven job; loud failure is
- * preferred so an operator notices.
- *
- * Exported so unit tests can drive it without mucking with process.env.
+ * Throws on misconfig — this is a cron-driven job; loud failure is
+ * preferred so an operator notices. `0` disables the probe (catch-up runs).
  */
 export const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
@@ -135,13 +130,6 @@ export const resolveLiveActivityLookback = (
   return parsed;
 };
 
-/**
- * Resolve `LIVE_ACTIVITY_PAUSE_MS` from the environment, falling back to
- * `LIVE_ACTIVITY_PAUSE_MS_DEFAULT`. Tests pass `0` to keep the deferral
- * loop tight.
- *
- * Exported so unit tests can drive it without mucking with process.env.
- */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number => {
   if (raw === undefined) return LIVE_ACTIVITY_PAUSE_MS_DEFAULT;
   const parsed = Number(raw);
