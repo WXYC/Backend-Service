@@ -390,6 +390,15 @@ export const getRotationTracks: RequestHandler<{ rotation_id: string }> = async 
     return;
   }
 
+  // The service contract guarantees `releaseId !== null` when
+  // `inlineTracklist === null`, but TypeScript can't narrow that without
+  // a discriminated union — guard explicitly so the cache shape stays
+  // simple.
+  if (source.releaseId === null) {
+    res.status(200).json([]);
+    return;
+  }
+
   let release;
   try {
     release = await getRelease(source.releaseId);
@@ -401,13 +410,7 @@ export const getRotationTracks: RequestHandler<{ rotation_id: string }> = async 
     throw err;
   }
 
-  const tracks: RotationTrack[] = release.tracklist.map((t) => ({
-    position: t.position,
-    title: t.title,
-    duration: t.duration ?? null,
-    artists: t.artists && t.artists.length > 0 ? t.artists : [release.artist],
-  }));
-  res.status(200).json(tracks);
+  res.status(200).json(libraryService.projectInlineTracklist(release.tracklist, release.artist) ?? []);
 };
 
 export const getFormats: RequestHandler = async (req, res) => {

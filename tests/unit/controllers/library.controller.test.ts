@@ -14,7 +14,7 @@ const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
 const mockUpdateCanonicalEntity = jest.fn<(id: number, entityId: string, confidence: number) => Promise<unknown>>();
 const mockMapLookupToCanonicalEntity = jest.fn<(response: unknown) => { id: string; confidence: number } | null>();
 type PickerSourceMock = {
-  releaseId: number;
+  releaseId: number | null;
   inlineTracklist: Array<{ position: string; title: string; duration: string | null; artists: string[] }> | null;
 };
 const mockResolveRotationPickerSource = jest.fn<(rotationId: number) => Promise<PickerSourceMock | null>>();
@@ -51,6 +51,24 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   insertFormat: jest.fn(),
   isISODate: jest.fn(),
   resolveRotationPickerSource: mockResolveRotationPickerSource,
+  // Real implementation lifted to the service so the controller's release-fetch
+  // path and the service's inline path share one projection. Pass through;
+  // assertions below pin the wire shape.
+  projectInlineTracklist: (
+    tracks:
+      | ReadonlyArray<{ position: string; title: string; duration?: string | null; artists?: readonly string[] | null }>
+      | null
+      | undefined,
+    artistFallback: string
+  ) =>
+    !tracks || tracks.length === 0
+      ? null
+      : tracks.map((t) => ({
+          position: t.position,
+          title: t.title,
+          duration: t.duration ?? null,
+          artists: t.artists && t.artists.length > 0 ? Array.from(t.artists) : [artistFallback],
+        })),
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
