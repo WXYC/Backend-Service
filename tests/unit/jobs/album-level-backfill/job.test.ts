@@ -500,7 +500,7 @@ describe('runBatch', () => {
       { artist: 'Juana Molina', album: 'DOGA', raw_message: 'Juana Molina - DOGA' },
       { artist: 'Jessica Pratt', album: 'OYOLA', raw_message: 'Jessica Pratt - OYOLA' },
     ]);
-    expect(opts).toEqual({ budgetMs: 25000, timeoutMs: computeBulkTimeoutMs(2) });
+    expect(opts).toEqual({ budgetMs: 25000, timeoutMs: computeBulkTimeoutMs(2), caller: 'album-level-backfill' });
   });
 
   it('counts match / no_match / error per response and UPSERTs only matches', async () => {

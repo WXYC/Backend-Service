@@ -48,4 +48,8 @@ const envInt = (name: string, fallback: number): number => {
 const TIMEOUT_MS = envInt('BACKFILL_LML_PER_CALL_TIMEOUT_MS', 35_000);
 
 export const lookupMetadata = (artist: string, album?: string, track?: string): Promise<LookupResponse> =>
-  sharedLookupMetadata(artist, album, track, { limiter: defaultLmlLimiter, timeoutMs: TIMEOUT_MS });
+  sharedLookupMetadata(artist, album, track, {
+    limiter: defaultLmlLimiter,
+    timeoutMs: TIMEOUT_MS,
+    caller: 'flowsheet-metadata-backfill',
+  });

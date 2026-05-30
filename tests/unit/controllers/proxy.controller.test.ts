@@ -649,6 +649,7 @@ describe('proxy.controller', () => {
         expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
           extended: true,
           budgetMs: 5000,
+          caller: 'proxy-album-metadata',
         });
       });
 

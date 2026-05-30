@@ -1065,7 +1065,10 @@ describe('library.service', () => {
       const results = await searchLibraryByTrack('Back, Baby', 10);
 
       expect(mockLookupBySong).toHaveBeenCalledTimes(1);
-      expect(mockLookupBySong).toHaveBeenCalledWith('Back, Baby', { budgetMs: 5000 });
+      expect(mockLookupBySong).toHaveBeenCalledWith('Back, Baby', {
+        budgetMs: 5000,
+        caller: 'library-track-search',
+      });
       // Bridge query reads from `library` (with joins) so the unique index
       // on legacy_release_id is reachable.
       expect(libraryChain.from).toHaveBeenCalledWith(library);
@@ -1478,7 +1481,10 @@ describe('library.service', () => {
       await searchLibraryByTrack('Different Song', 10);
 
       expect(mockLookupBySong.mock.calls.length).toBe(callsAfterFirst + 1);
-      expect(mockLookupBySong).toHaveBeenLastCalledWith('Different Song', { budgetMs: 5000 });
+      expect(mockLookupBySong).toHaveBeenLastCalledWith('Different Song', {
+        budgetMs: 5000,
+        caller: 'library-track-search',
+      });
     });
 
     it('trim + lowercase: variations of the same query share one cache entry', async () => {
@@ -1891,7 +1897,10 @@ describe('library.service', () => {
       const enriched = await enrichWithArtwork(results);
 
       expect(enriched[0].artwork_url).toBe('https://i.discogs.com/confield.jpg');
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, { budgetMs: 5000 });
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
+        budgetMs: 5000,
+        caller: 'library-enrich-artwork',
+      });
       expect(db.update).toHaveBeenCalled();
     });
 
@@ -1979,7 +1988,10 @@ describe('library.service', () => {
       expect(enriched[1].artwork_url).toBe('https://i.discogs.com/lp5.jpg');
       // Only one LML call (for LP5, not Confield)
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, { budgetMs: 5000 });
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, {
+        budgetMs: 5000,
+        caller: 'library-enrich-artwork',
+      });
     });
 
     it('handles LML returning no results', async () => {
@@ -2240,6 +2252,7 @@ describe('library.service', () => {
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
         timeoutMs: 10000,
         extended: true,
+        caller: 'library-rotation-picker',
       });
     });
 
@@ -2267,7 +2280,7 @@ describe('library.service', () => {
         undefined,
         'All the Young Droids: Junkshop Synth Pop 1978-1985',
         undefined,
-        { timeoutMs: 10000, extended: true }
+        { timeoutMs: 10000, extended: true, caller: 'library-rotation-picker' }
       );
     });
 

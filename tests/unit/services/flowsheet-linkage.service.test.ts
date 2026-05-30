@@ -69,6 +69,7 @@ describe('runLmlLinkage (B-2.1)', () => {
     // lookup for the same artist renders richer profile_tokens for free.
     expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, {
       warm_cache: true,
+      caller: 'flowsheet-linkage',
     });
     expect(outcome).toEqual({
       status: 'linked',

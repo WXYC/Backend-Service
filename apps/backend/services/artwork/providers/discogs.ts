@@ -31,7 +31,9 @@ export class DiscogsProvider implements ArtworkProvider {
 
     let lookupResponse;
     try {
-      lookupResponse = await lookupMetadata(request.artist || '', request.album, request.song);
+      lookupResponse = await lookupMetadata(request.artist || '', request.album, request.song, {
+        caller: 'artwork-discogs-fallback',
+      });
     } catch (error) {
       console.warn('[DiscogsProvider] LML lookup failed:', error);
       return [];

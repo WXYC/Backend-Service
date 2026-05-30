@@ -402,7 +402,10 @@ describe('library.controller', () => {
 
         // Controller returns 201 immediately, before fire-and-forget completes.
         expect(res.status).toHaveBeenCalledWith(201);
-        expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, { budgetMs: 5000 });
+        expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, {
+          budgetMs: 5000,
+          caller: 'library-canonical-entity',
+        });
       });
 
       it('writes canonical_entity_id back to the inserted row when the lookup yields a match', async () => {

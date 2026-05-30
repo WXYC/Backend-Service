@@ -322,10 +322,12 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
       lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle, {
         extended: true,
         budgetMs: PROXY_LML_BUDGET_MS,
+        caller: 'proxy-album-metadata',
       });
     } else {
       lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle, {
         budgetMs: PROXY_LML_BUDGET_MS,
+        caller: 'proxy-album-metadata',
       });
     }
     upstreamCalls += 1;

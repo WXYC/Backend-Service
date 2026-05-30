@@ -113,7 +113,9 @@ describe('metadata.service', () => {
       trackTitle: 'VI Scose Poise',
     });
 
-    expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', 'VI Scose Poise');
+    expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', 'VI Scose Poise', {
+      caller: 'metadata-service',
+    });
   });
 
   it('makes a single LML call instead of three', async () => {

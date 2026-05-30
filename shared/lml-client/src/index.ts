@@ -402,6 +402,19 @@ export interface LookupOptions {
    * — the no-header path keeps the pre-A10 warm-cache / write-path semantics.
    */
   budgetMs?: number;
+  /**
+   * Caller-class label projected onto the Sentry `lml.lookup` span as the
+   * `lml.caller` attribute (BS#1235). Used to slice the rolled-up p95 in
+   * Sentry's trace explorer (and the Epic A acceptance routine at
+   * WXYC/library-metadata-lookup#338) so interactive paths
+   * (proxy/library/rotation, ~5 s budget) and background paths
+   * (enrichment-worker, ~29 s budget) don't fight each other in the rollup.
+   * Lowercase kebab-case scoped to the call site (e.g. `proxy-album-metadata`,
+   * `enrichment-worker`, `library-track-search`). Omit at your peril — missing
+   * callers project as `lml.caller=unknown`, which is meant as a Sentry
+   * flag-of-shame so untracked call sites surface in queries.
+   */
+  caller?: string;
 }
 
 type LookupBody = {
@@ -449,6 +462,7 @@ export async function lookupMetadata(
     timeoutMs: options?.timeoutMs,
     limiter: options?.limiter,
     budgetMs: options?.budgetMs,
+    caller: options?.caller,
   });
 }
 
@@ -462,9 +476,12 @@ export async function lookupMetadata(
  */
 export async function lookupBySong(
   song: string,
-  options?: Pick<LookupOptions, 'limiter' | 'budgetMs'>
+  options?: Pick<LookupOptions, 'limiter' | 'budgetMs' | 'caller'>
 ): Promise<LookupResponse> {
-  return postLookup({ song, raw_message: song }, { limiter: options?.limiter, budgetMs: options?.budgetMs });
+  return postLookup(
+    { song, raw_message: song },
+    { limiter: options?.limiter, budgetMs: options?.budgetMs, caller: options?.caller }
+  );
 }
 
 /**
@@ -478,7 +495,7 @@ export async function lookupBySong(
  */
 async function postLookup(
   body: LookupBody,
-  options?: { timeoutMs?: number; limiter?: LmlLimiter; budgetMs?: number }
+  options?: { timeoutMs?: number; limiter?: LmlLimiter; budgetMs?: number; caller?: string }
 ): Promise<LookupResponse> {
   // BS#906 / G4: Mirror LML's Discogs ceilings on the client so back-pressure
   // surfaces at the BS chokepoint, not as queueing inside LML. The limiter
@@ -489,9 +506,12 @@ async function postLookup(
   return activeLimiter.run(async () => {
     return await Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
       try {
-        span.setAttributes({ 'lml.queue_depth': activeLimiter.state().queueDepth });
+        span.setAttributes({
+          'lml.queue_depth': activeLimiter.state().queueDepth,
+          'lml.caller': options?.caller ?? 'unknown',
+        });
       } catch (err) {
-        console.warn('lml.client: failed to project queue_depth onto span', err);
+        console.warn('lml.client: failed to project queue_depth + caller onto span', err);
       }
 
       const response = await lmlFetch(
@@ -598,7 +618,7 @@ const BULK_LOOKUP_INPUT_CAP = 100;
  */
 export async function bulkLookupMetadata(
   items: BulkLookupItem[],
-  options?: { timeoutMs?: number; limiter?: LmlLimiter; budgetMs?: number }
+  options?: { timeoutMs?: number; limiter?: LmlLimiter; budgetMs?: number; caller?: string }
 ): Promise<BulkLookupResponse> {
   if (items.length === 0) {
     throw new LmlClientError('bulkLookupMetadata requires at least 1 item.', 400);
@@ -617,9 +637,10 @@ export async function bulkLookupMetadata(
         span.setAttributes({
           'lml.queue_depth': activeLimiter.state().queueDepth,
           'lml.bulk.size': items.length,
+          'lml.caller': options?.caller ?? 'unknown',
         });
       } catch (err) {
-        console.warn('lml.client: failed to project queue_depth + bulk.size onto span', err);
+        console.warn('lml.client: failed to project queue_depth + bulk.size + caller onto span', err);
       }
 
       const response = await lmlFetch(
