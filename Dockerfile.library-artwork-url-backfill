@@ -1,8 +1,10 @@
 #Build stage
 FROM node:24-alpine AS builder
 
+ARG NPM_TOKEN
 WORKDIR /library-artwork-url-backfill-builder
 
+COPY ./.npmrc ./
 COPY ./package.json ./package-lock.json ./
 COPY ./tsconfig.base.json ./
 COPY ./shared/database ./shared/database
@@ -15,15 +17,21 @@ RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-cli
 #Production stage
 FROM node:24-alpine AS prod
 
+ARG NPM_TOKEN
 WORKDIR /library-artwork-url-backfill
 
+COPY ./.npmrc ./
 COPY ./package* ./
 COPY ./jobs/library-artwork-url-backfill/package* ./jobs/library-artwork-url-backfill/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/lml-client/package* ./shared/lml-client/
 COPY ./shared/metadata/package* ./shared/metadata/
 
-RUN npm install --omit=dev
+# `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
+# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
+# .npmrc the prod stage's npm install 401s on @wxyc/shared. Mirrors the
+# pattern in Dockerfile.backend / Dockerfile.flowsheet-metadata-backfill.
+RUN npm install --omit=dev && rm -f .npmrc
 
 COPY --from=builder ./library-artwork-url-backfill-builder/jobs/library-artwork-url-backfill/dist ./jobs/library-artwork-url-backfill/dist
 COPY --from=builder ./library-artwork-url-backfill-builder/shared/database/dist ./shared/database/dist
