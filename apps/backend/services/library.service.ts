@@ -343,18 +343,22 @@ export async function getDiscogsReleaseIdByLegacyId(legacyId: number): Promise<n
  * pass.
  *
  * Two caches — positive (resolved release id) and negative (LML returned
- * nothing) — match the artwork/negativeCache pattern in
- * `apps/backend/controllers/proxy.controller.ts`. lru-cache v11 constrains
- * value types to non-nullable, so the negative cache stores `true` and uses
- * key presence as the signal. Both TTLs are 24 h: Discogs release tracklists
- * and the negative classification ("no Discogs release for this
- * artist+album") are both stable conditions that don't flip within a day;
- * deploys re-warm both caches via the `rotation-tracks-cache-warm` walker
- * (BS#1231); 24 h is a soft ceiling against drift, not a refresh interval.
+ * nothing). lru-cache v11 constrains value types to non-nullable, so the
+ * negative cache stores `true` and uses key presence as the signal. Both
+ * TTLs are 24 h: Discogs release tracklists and the negative classification
+ * ("no Discogs release for this artist+album") are both stable conditions
+ * that don't flip within a day; deploys re-warm both caches via the
+ * `rotation-tracks-cache-warm` walker (BS#1231); 24 h is a soft ceiling
+ * against drift, not a refresh interval.
+ *
+ * (Distinct from `proxy.controller.ts`'s artwork/negativeCache pair, which
+ * uses a 1 h positive TTL because artwork images can be re-uploaded but the
+ * Discogs release ID for a given (artist, album) is effectively immutable.)
  */
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const ROTATION_LML_LOOKUP_CACHE_MAX = 500;
-const ROTATION_LML_LOOKUP_TTL_POSITIVE_MS = 24 * 60 * 60 * 1000;
-const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 24 * 60 * 60 * 1000;
+const ROTATION_LML_LOOKUP_TTL_POSITIVE_MS = MS_PER_DAY;
+const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = MS_PER_DAY;
 /**
  * How long a persisted `rotation.tracklist_lookup_attempted_at` stamp
  * suppresses re-asking LML. Negative outcomes here are "this artist+album
@@ -363,7 +367,7 @@ const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 24 * 60 * 60 * 1000;
  * within a week without being so aggressive that we re-pay the 22 s cascade
  * cost on every deploy.
  */
-const ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS = 7 * MS_PER_DAY;
 /**
  * Per-call LML timeout for the picker's tier-3 lookup. 10 s matches
  * tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` (`LibrarySearchClient.java:64`),
@@ -662,7 +666,7 @@ export function projectInlineTracklist(
  * cold-path once across DJs, not once per DJ.
  */
 const RELEASE_TRACKLIST_CACHE_MAX = 500;
-const RELEASE_TRACKLIST_TTL_POSITIVE_MS = 24 * 60 * 60 * 1000;
+const RELEASE_TRACKLIST_TTL_POSITIVE_MS = MS_PER_DAY;
 const RELEASE_TRACKLIST_TTL_NEGATIVE_MS = 10 * 60 * 1000;
 
 const releaseTracklistPositiveCache = new LRUCache<number, RotationTrack[]>({
