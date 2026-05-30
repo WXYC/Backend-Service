@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # Pins the set of source files that may mention the literal `spacer.gif`.
 # BS#890 / Epic B unified three drifted inline copies of the filter onto a
-# canonical `filterSpacerGif` in `apps/backend/services/metadata/metadata.service.ts`.
-# The only other source file allowed to mention `spacer.gif` is the inline
-# duplicate in `jobs/flowsheet-metadata-backfill/enrich.ts` — kept for the
-# same build-graph-isolation reason as `lml-fetch.ts`. Its truthy/falsy
-# behavior is pinned to the canonical via the parity test at
-# `tests/unit/jobs/flowsheet-metadata-backfill/filter-spacer-gif-parity.test.ts`.
-#
-# Source-file mentions are allowed only in:
-#   - apps/backend/services/metadata/metadata.service.ts (canonical)
-#   - jobs/flowsheet-metadata-backfill/enrich.ts         (inline copy)
+# canonical `filterSpacerGif` (originally in
+# `apps/backend/services/metadata/metadata.service.ts`; moved to
+# `shared/metadata/src/helpers/filter-spacer-gif.ts` by the deep-module
+# refactor — `metadata.service.ts` now re-exports). The inline duplicates
+# in the four jobs + the enrichment worker remain pinned to that canonical
+# via the parity tests under tests/unit/jobs/<job>/ and
+# tests/unit/apps/enrichment-worker/. PR 7 of the deep-module refactor will
+# delete the inline copies (and this script) as each one migrates to
+# `@wxyc/metadata`.
 #
 # Test files are EXCLUDED from the source-set count because they exercise
 # the inputs (they MUST contain the literal). Comments in unrelated files
@@ -26,16 +25,16 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Allowed source files (relative to repo root) that may contain the
 # `spacer.gif` *code literal* (a single- or double-quoted string).
-# Each of the three jobs that need an inline copy keeps it for build-
-# graph isolation from `apps/backend`; the canonical at
-# `apps/backend/services/metadata/metadata.service.ts` is the single
-# source of truth that all `apps/backend/**` consumers import.
+# The canonical lives in `shared/metadata/src/helpers/filter-spacer-gif.ts`
+# (npm package `@wxyc/metadata`); the four jobs + enrichment worker each
+# keep an inline copy for build-graph isolation from `apps/backend`. Those
+# inline copies are slated for removal as PR 7 of the deep-module refactor.
 #
 # Adding a new entry here requires also adding a parity test under
 # tests/unit/jobs/<job>/filter-spacer-gif-parity.test.ts that pins the
 # new inline copy's truthy/falsy behavior to the canonical.
 ALLOWED=(
-  "apps/backend/services/metadata/metadata.service.ts"
+  "shared/metadata/src/helpers/filter-spacer-gif.ts"
   "jobs/flowsheet-metadata-backfill/enrich.ts"
   "jobs/library-artwork-url-backfill/enrich.ts"
   "jobs/album-level-backfill/job.ts"
@@ -66,7 +65,7 @@ failed=0
 
 if [ -n "$UNEXPECTED" ]; then
   echo "FAIL: file(s) reference 'spacer.gif' but are not in the allowlist." >&2
-  echo "      BS#890 unified the filter on apps/backend/services/metadata/metadata.service.ts#filterSpacerGif." >&2
+  echo "      BS#890 / @wxyc/metadata is the canonical." >&2
   echo "      Import the canonical in apps/backend/** or register a new build-graph-isolated" >&2
   echo "      inline duplicate in scripts/check-spacer-gif-callsites.sh ALLOWED + parity test." >&2
   while IFS= read -r f; do [ -n "$f" ] && echo "      - $f"; done <<<"$UNEXPECTED" >&2

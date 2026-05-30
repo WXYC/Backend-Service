@@ -1,0 +1,29 @@
+{
+  "name": "@wxyc/metadata",
+  "version": "1.0.0",
+  "description": "Deep module that normalizes LML lookup responses into a flat, snake_case metadata shape. Single source of truth for the helpers (filterSpacerGif, isSyntheticArtwork, cleanDiscogsBio, synthesizeSearchUrls) plus the composition (normalizeLookup). Consumed by apps/backend and the enrichment worker + 4 jobs that previously kept inline copies.",
+  "author": "WXYC",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3"
+  },
+  "types": "dist/index.d.ts"
+}
