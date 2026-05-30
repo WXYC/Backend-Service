@@ -67,27 +67,21 @@ const PROGRESS_LOG_EVERY = 50;
 const WARM_PASS_BUDGET_MS = 30 * 60 * 1000;
 
 /**
- * Cooperative-pause lookback window in seconds — mirrors
- * `jobs/flowsheet-metadata-backfill`'s pattern (#735). Before each rotation
- * row, the walker probes `flowsheet` for any track inserts within this
- * window. If found, a DJ is actively driving the playout and the walker
- * yields rather than competing for LML semaphore slots. Without the pause,
- * a deploy mid-show puts a DJ directly into the boot-warm contention window
- * documented in BS#1237 (~38 % of pickers > 1 s for first ~7 min). With it,
- * the walker stays out of the way during the exact moments when picker UX
- * matters most. Set `WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS=0` to disable
- * (emergency catch-up).
+ * Cooperative-pause lookback / pause / per-row cap (BS#1237, mirrors
+ * `jobs/flowsheet-metadata-backfill`'s #735 pattern). Set
+ * `WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS=0` to disable.
  */
 const LIVE_ACTIVITY_LOOKBACK_SECONDS = 60;
+const LIVE_ACTIVITY_PAUSE_MS = 30_000;
 
 /**
- * Sleep between cooperative-pause re-probes, ms. After a deferral the
- * walker sleeps this long and re-checks. The 30 s wait + 60 s lookback
- * lets the walker resume ~30 s after the DJ's last track add. No defer
- * cap — `WARM_PASS_BUDGET_MS` is the wall-clock ceiling, and the next
- * restart re-warms anything skipped.
+ * Per-row pause cap: any single rotation row can hold up the walker for
+ * at most this long before we count it as `budgetSkipped` and move on.
+ * Prevents a row whose probe-window never clears (long continuous show)
+ * from consuming the entire wall-clock budget while later rows starve.
+ * Companion to `WARM_PASS_BUDGET_MS` — both are escape hatches.
  */
-const LIVE_ACTIVITY_PAUSE_MS = 30_000;
+const PER_ROW_PAUSE_BUDGET_MS = 10 * 60 * 1000;
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 const FLOWSHEET_TABLE = sql.raw(`"${SCHEMA}"."flowsheet"`);
@@ -151,12 +145,12 @@ export interface WarmCounters {
   releaseFetchAlreadyWarm: number;
   /** Release-fetch follow-ups that threw (5xx, network, parse). */
   releaseFetchErrors: number;
-  /** Rows skipped after the wall-clock budget elapsed. */
+  /** Rows skipped after the wall-clock budget or per-row pause cap elapsed. */
   budgetSkipped: number;
   /** Number of times the walker yielded to live DJ activity (per-row, may repeat for the same row). */
-  liveActivityPauses: number;
+  liveActivityPauseCount: number;
   /** Cumulative wall-clock time spent paused for live DJ activity, ms. */
-  pausedMs: number;
+  liveActivityPauseMs: number;
   /** Wall-clock duration of the walk in ms. */
   elapsedMs: number;
 }
@@ -209,8 +203,8 @@ export async function warmRotationTracksCache(opts: WarmOptions = {}): Promise<W
     releaseFetchAlreadyWarm: 0,
     releaseFetchErrors: 0,
     budgetSkipped: 0,
-    liveActivityPauses: 0,
-    pausedMs: 0,
+    liveActivityPauseCount: 0,
+    liveActivityPauseMs: 0,
     elapsedMs: 0,
   };
 
@@ -226,18 +220,29 @@ export async function warmRotationTracksCache(opts: WarmOptions = {}): Promise<W
 
     // Cooperative pause: yield while a DJ is active so the walker stops
     // competing for LML semaphore slots during the picker UX-critical window.
-    // No defer cap — `WARM_PASS_BUDGET_MS` is the wall-clock ceiling.
+    // Two escape hatches — global `WARM_PASS_BUDGET_MS` and `PER_ROW_PAUSE_BUDGET_MS`
+    // — both route over-budget rows to `budgetSkipped + continue` so we DON'T
+    // fire LML right after confirming a DJ is active (which would defeat the pause).
+    let pauseExceededBudget = false;
     if (lookbackSeconds > 0) {
+      const pauseLoopStart = Date.now();
       while (await probe(lookbackSeconds)) {
-        if (Date.now() - startTime > WARM_PASS_BUDGET_MS) break;
-        counters.liveActivityPauses += 1;
+        if (Date.now() - startTime > WARM_PASS_BUDGET_MS || Date.now() - pauseLoopStart > PER_ROW_PAUSE_BUDGET_MS) {
+          pauseExceededBudget = true;
+          break;
+        }
+        counters.liveActivityPauseCount += 1;
         console.log(
           `${LOG_PREFIX} live_activity_pause: deferring rotation_id=${rotationId} for ${pauseMs}ms (lookback=${lookbackSeconds}s)`
         );
         const pauseStart = Date.now();
         if (pauseMs > 0) await sleep(pauseMs);
-        counters.pausedMs += Date.now() - pauseStart;
+        counters.liveActivityPauseMs += Date.now() - pauseStart;
       }
+    }
+    if (pauseExceededBudget) {
+      counters.budgetSkipped += 1;
+      continue;
     }
 
     counters.scanned += 1;
@@ -326,8 +331,8 @@ export async function warmRotationTracksCache(opts: WarmOptions = {}): Promise<W
       `releaseFetchNegative=${counters.releaseFetchNegative} ` +
       `releaseFetchAlreadyWarm=${counters.releaseFetchAlreadyWarm} ` +
       `budgetSkipped=${counters.budgetSkipped} ` +
-      `liveActivityPauses=${counters.liveActivityPauses} ` +
-      `pausedMs=${counters.pausedMs} ` +
+      `liveActivityPauseCount=${counters.liveActivityPauseCount} ` +
+      `liveActivityPauseMs=${counters.liveActivityPauseMs} ` +
       `errors=${counters.errors} releaseFetchErrors=${counters.releaseFetchErrors} ` +
       `elapsedMs=${counters.elapsedMs} ` +
       `(starting cache sizes positive=${startSizes.positive} negative=${startSizes.negative})`

@@ -239,20 +239,19 @@ describe('rotation-tracks-cache-warm.service', () => {
     test('bails the loop and tallies budgetSkipped when the wall-clock budget elapses', async () => {
       // Hard cap is 30 min (1.8e6 ms). Drive Date.now so iteration 3 fires
       // after the cap; rows 1 and 2 should run, row 3 should be skipped.
+      // Disable the cooperative-pause probe to keep the Date.now() sequence
+      // simple — the pause path is exercised by dedicated tests below.
       mockActiveRotationRows([10, 20, 30]);
       mockResolveRotationPickerSource.mockResolvedValue(null);
       const BUDGET_MS = 30 * 60 * 1000;
       const dateSpy = jest.spyOn(Date, 'now');
-      // startTime read.
-      dateSpy.mockReturnValueOnce(0);
-      // Per-iteration budget check.
-      dateSpy.mockReturnValueOnce(100); // row 10: within budget.
-      dateSpy.mockReturnValueOnce(200); // row 20: within budget.
-      dateSpy.mockReturnValueOnce(BUDGET_MS + 1); // row 30: over budget.
-      // Any further Date.now calls (final elapsedMs computation) — return a sane value.
-      dateSpy.mockReturnValue(BUDGET_MS + 100);
+      dateSpy.mockReturnValueOnce(0); // startTime
+      dateSpy.mockReturnValueOnce(100); // row 10: within budget
+      dateSpy.mockReturnValueOnce(200); // row 20: within budget
+      dateSpy.mockReturnValueOnce(BUDGET_MS + 1); // row 30: over budget
+      dateSpy.mockReturnValue(BUDGET_MS + 100); // elapsedMs computation
 
-      const counters = await warmRotationTracksCache();
+      const counters = await warmRotationTracksCache({ liveActivityLookbackSeconds: 0 });
 
       expect(counters.scanned).toBe(2);
       expect(counters.budgetSkipped).toBe(1);
@@ -339,10 +338,6 @@ describe('rotation-tracks-cache-warm.service', () => {
     });
 
     test('cooperative pause: defers when checkLiveActivity returns true, resumes when it returns false', async () => {
-      // Walker visits row 10 after one pause cycle:
-      //   probe → true → pause → probe → false → process row 10
-      // Walker visits row 20 with no pause:
-      //   probe → false → process row 20
       mockActiveRotationRows([10, 20]);
       mockResolveRotationPickerSource.mockResolvedValue(null);
       const probe = jest.fn<(s: number) => Promise<boolean>>();
@@ -353,11 +348,11 @@ describe('rotation-tracks-cache-warm.service', () => {
       const counters = await warmRotationTracksCache({
         checkLiveActivity: probe,
         liveActivityLookbackSeconds: 60,
-        liveActivityPauseMs: 0, // skip the real-time setTimeout
+        liveActivityPauseMs: 0,
       });
 
       expect(counters.scanned).toBe(2);
-      expect(counters.liveActivityPauses).toBe(1);
+      expect(counters.liveActivityPauseCount).toBe(1);
       expect(mockResolveRotationPickerSource).toHaveBeenCalledTimes(2);
       expect(probe).toHaveBeenCalledTimes(3);
     });
@@ -374,26 +369,25 @@ describe('rotation-tracks-cache-warm.service', () => {
       });
 
       expect(counters.scanned).toBe(1);
-      expect(counters.liveActivityPauses).toBe(0);
+      expect(counters.liveActivityPauseCount).toBe(0);
       expect(probe).not.toHaveBeenCalled();
     });
 
-    test('cooperative pause: stops re-probing when budget elapses mid-pause', async () => {
-      // Walker has a budget cap; if the live activity never clears, the
-      // walker shouldn't loop forever waiting. The budget guard inside the
-      // pause loop should break out.
+    test('cooperative pause: row tallied as budgetSkipped (NOT scanned) when global budget elapses mid-pause', async () => {
+      // The whole point of the pause is to NOT contend with LML while a DJ
+      // is active. If the budget elapses while the walker is paused, the row
+      // must be skipped — firing LML right after confirming the DJ is on
+      // would defeat the pause's purpose. Pin that contract.
       mockActiveRotationRows([10]);
       mockResolveRotationPickerSource.mockResolvedValue(null);
-      const probe = jest.fn<(s: number) => Promise<boolean>>().mockResolvedValue(true);
       const BUDGET_MS = 30 * 60 * 1000;
+      const probe = jest.fn<(s: number) => Promise<boolean>>().mockResolvedValue(true);
       const dateSpy = jest.spyOn(Date, 'now');
       dateSpy.mockReturnValueOnce(0); // startTime
-      dateSpy.mockReturnValueOnce(1); // budget check before row
-      dateSpy.mockReturnValueOnce(2); // budget check inside pause loop
-      dateSpy.mockReturnValueOnce(2); // pauseStart inside pause loop
-      dateSpy.mockReturnValueOnce(3); // pauseStart elapsed
-      dateSpy.mockReturnValueOnce(BUDGET_MS + 1); // budget check inside pause loop — over budget, break
-      dateSpy.mockReturnValue(BUDGET_MS + 100);
+      dateSpy.mockReturnValueOnce(0); // top-of-loop budget check (within)
+      dateSpy.mockReturnValueOnce(0); // pauseLoopStart
+      dateSpy.mockReturnValueOnce(BUDGET_MS + 1); // inside while: over budget → break
+      dateSpy.mockReturnValue(BUDGET_MS + 100); // elapsedMs
 
       const counters = await warmRotationTracksCache({
         checkLiveActivity: probe,
@@ -401,9 +395,43 @@ describe('rotation-tracks-cache-warm.service', () => {
         liveActivityPauseMs: 0,
       });
 
-      // Walker broke out of pause loop on budget; row 10 still gets processed
-      // because the pause-loop break drops to scanned += 1.
-      expect(counters.liveActivityPauses).toBeGreaterThanOrEqual(1);
+      expect(counters.scanned).toBe(0);
+      expect(counters.budgetSkipped).toBe(1);
+      expect(mockResolveRotationPickerSource).not.toHaveBeenCalled();
+      dateSpy.mockRestore();
+    });
+
+    test('cooperative pause: row tallied as budgetSkipped when per-row pause cap exceeded', async () => {
+      // PER_ROW_PAUSE_BUDGET_MS (10 min) caps how long a single row can
+      // pause before the walker yields to the next row. Without this, a
+      // long continuous show could consume the whole 30-min global budget
+      // on a single stuck row.
+      mockActiveRotationRows([10, 20]);
+      mockResolveRotationPickerSource.mockResolvedValue(null);
+      const probe = jest
+        .fn<(s: number) => Promise<boolean>>()
+        .mockResolvedValueOnce(true) // row 10: stuck (probe returns true)
+        .mockResolvedValue(false); // subsequent calls (row 20): clear
+      const dateSpy = jest.spyOn(Date, 'now');
+      dateSpy.mockReturnValueOnce(0); // startTime
+      dateSpy.mockReturnValueOnce(0); // row 10: top-of-loop budget check
+      dateSpy.mockReturnValueOnce(0); // row 10: pauseLoopStart
+      // After probe returns true, inside the while body's two-arm check:
+      dateSpy.mockReturnValueOnce(11 * 60 * 1000); // global budget check (within 30min)
+      dateSpy.mockReturnValueOnce(11 * 60 * 1000); // per-row budget check (over 10min → break)
+      // Row 20 follows:
+      dateSpy.mockReturnValueOnce(11 * 60 * 1000); // row 20: top-of-loop
+      dateSpy.mockReturnValueOnce(11 * 60 * 1000); // row 20: pauseLoopStart
+      dateSpy.mockReturnValue(11 * 60 * 1000 + 100); // elapsedMs
+
+      const counters = await warmRotationTracksCache({
+        checkLiveActivity: probe,
+        liveActivityLookbackSeconds: 60,
+        liveActivityPauseMs: 0,
+      });
+
+      expect(counters.budgetSkipped).toBe(1); // row 10 capped
+      expect(counters.scanned).toBe(1); // row 20 still runs
       dateSpy.mockRestore();
     });
   });
