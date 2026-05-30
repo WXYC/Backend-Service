@@ -6,7 +6,7 @@ API and authentication service for WXYC applications. Provides endpoints for the
 
 CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in `docs/`:
 
-- **[`docs/migrations.md`](docs/migrations.md)** — Drizzle migration rules: journal `when` recipe, parallel-PR collisions, IF NOT EXISTS, DDL-only, precondition guards, cross-cache-identity gates, attempt-at markers, post-bulk-UPDATE ANALYZE
+- **[`docs/migrations.md`](docs/migrations.md)** — Drizzle migration rules: journal `when` recipe, parallel-PR collisions, IF NOT EXISTS, DDL-only, precondition guards, cross-cache-identity gates, attempt-at markers (flowsheet + rotation), drizzle-kit `applied-hashes.json` quirk, post-bulk-UPDATE ANALYZE
 - **[`docs/bulk-update-playbook.md`](docs/bulk-update-playbook.md)** — Per-row cost on `flowsheet`, ANALYZE-after-UPDATE rule, async-commit + batch-size + partial-index recipe, infinite-loop pitfall, sync-gap remediation
 - **[`docs/env-vars.md`](docs/env-vars.md)** — Full environment-variable reference (Backend, DB, Auth, Email, Sentry, Slack, ETL, mirror queue, cross-cache-identity flags)
 - **[`docs/replication.md`](docs/replication.md)** — Local PostgreSQL logical-replication setup and operation
