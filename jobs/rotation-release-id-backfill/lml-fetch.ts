@@ -33,8 +33,38 @@ const envInt = (name: string, fallback: number): number => {
 
 const TIMEOUT_MS = envInt('BACKFILL_LML_PER_CALL_TIMEOUT_MS', 8000);
 
+// Tubafrenzy paste data can land `rotation.artist_name` / `rotation.album_title`
+// as HTML-escaped strings (e.g. "Rome&#769;o Poirier"). LML's NFKD diacritic
+// strip runs over the raw string, so an entity-encoded combining mark never
+// reaches that pass and the row stays NO_RESULT. Decode here so the LML hop
+// sees the same text a reader would.
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+};
+
+const HTML_ENTITY_RE = /&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi;
+
+const decodeHtmlEntities = (input: string): string =>
+  input.replace(HTML_ENTITY_RE, (match, body: string) => {
+    if (body[0] === '#') {
+      const codepoint = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+      if (!Number.isFinite(codepoint) || codepoint < 0 || codepoint > 0x10ffff) return match;
+      try {
+        return String.fromCodePoint(codepoint);
+      } catch {
+        return match;
+      }
+    }
+    return NAMED_ENTITIES[body.toLowerCase()] ?? match;
+  });
+
 export const lookupReleaseId = async (artist: string, album: string): Promise<number | null> => {
-  const response = await sharedLookupMetadata(artist, album, undefined, {
+  const response = await sharedLookupMetadata(decodeHtmlEntities(artist), decodeHtmlEntities(album), undefined, {
     limiter: defaultLmlLimiter,
     timeoutMs: TIMEOUT_MS,
   });
