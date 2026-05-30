@@ -6,9 +6,11 @@ WORKDIR /library-artwork-url-backfill-builder
 COPY ./package.json ./package-lock.json ./
 COPY ./tsconfig.base.json ./
 COPY ./shared/database ./shared/database
+COPY ./shared/lml-client ./shared/lml-client
+COPY ./shared/metadata ./shared/metadata
 COPY ./jobs/library-artwork-url-backfill ./jobs/library-artwork-url-backfill
 
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/library-artwork-url-backfill
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/library-artwork-url-backfill
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -18,11 +20,15 @@ WORKDIR /library-artwork-url-backfill
 COPY ./package* ./
 COPY ./jobs/library-artwork-url-backfill/package* ./jobs/library-artwork-url-backfill/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
+COPY ./shared/metadata/package* ./shared/metadata/
 
 RUN npm install --omit=dev
 
 COPY --from=builder ./library-artwork-url-backfill-builder/jobs/library-artwork-url-backfill/dist ./jobs/library-artwork-url-backfill/dist
 COPY --from=builder ./library-artwork-url-backfill-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./library-artwork-url-backfill-builder/shared/lml-client/dist ./shared/lml-client/dist
+COPY --from=builder ./library-artwork-url-backfill-builder/shared/metadata/dist ./shared/metadata/dist
 
 # Long-running per-statement timeout: per-row UPDATEs are tiny (single-column,
 # id-equality WHERE) but the SELECT batch joins library to artists; a tightly
