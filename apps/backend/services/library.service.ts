@@ -648,6 +648,19 @@ export function __resetReleaseTracklistCacheForTests(): void {
 }
 
 /**
+ * Sizes of the per-release-id tracklist LRUs. Used by the rotation-tracks
+ * cache-warm service to classify post-`getRotationTracksFromRelease`
+ * outcomes (positive vs negative) without coupling to LRU internals.
+ * Parallel to `__rotationLmlCacheSizesForWarm`.
+ */
+export function __releaseTracklistCacheSizesForWarm(): { positive: number; negative: number } {
+  return {
+    positive: releaseTracklistPositiveCache.size,
+    negative: releaseTracklistNegativeCache.size,
+  };
+}
+
+/**
  * Fetch a Discogs release tracklist via LML and project it onto the
  * picker's `RotationTrack` wire shape. Cached per `release_id`.
  *

@@ -23,18 +23,28 @@ import { db } from '../../mocks/database.mock';
 // `library.service` exposes both the picker resolver we drive end-to-end
 // and the LRU-sizes accessor we read for the counter classifier. Mock at
 // the module boundary so the warm service receives our test doubles.
-type PickerSource = { releaseId: number; inlineTracklist: null };
+type RotationTrack = { position: string; title: string; duration: string | null; artists: string[] };
+type PickerSource = { releaseId: number | null; inlineTracklist: RotationTrack[] | null };
 const mockResolveRotationPickerSource = jest.fn<(id: number) => Promise<PickerSource | null>>();
 type Sizes = { positive: number; negative: number };
 const sizesRef: { current: Sizes } = { current: { positive: 0, negative: 0 } };
 const mockRotationLmlCacheSizesForWarm = jest.fn<() => Sizes>(() => sizesRef.current);
+const releaseSizesRef: { current: Sizes } = { current: { positive: 0, negative: 0 } };
+const mockReleaseTracklistCacheSizesForWarm = jest.fn<() => Sizes>(() => releaseSizesRef.current);
+const mockGetRotationTracksFromRelease = jest.fn<(releaseId: number) => Promise<RotationTrack[] | null>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   resolveRotationPickerSource: mockResolveRotationPickerSource,
   __rotationLmlCacheSizesForWarm: mockRotationLmlCacheSizesForWarm,
+  getRotationTracksFromRelease: mockGetRotationTracksFromRelease,
+  __releaseTracklistCacheSizesForWarm: mockReleaseTracklistCacheSizesForWarm,
 }));
 
 const source = (releaseId: number): PickerSource => ({ releaseId, inlineTracklist: null });
+const inlineSource = (releaseId: number | null, tracks: RotationTrack[]): PickerSource => ({
+  releaseId,
+  inlineTracklist: tracks,
+});
 
 const mockCaptureException = jest.fn();
 jest.mock('@sentry/node', () => ({
@@ -85,8 +95,11 @@ describe('rotation-tracks-cache-warm.service', () => {
   beforeEach(() => {
     selectMock.mockReset();
     mockResolveRotationPickerSource.mockReset();
+    mockGetRotationTracksFromRelease.mockReset();
+    mockGetRotationTracksFromRelease.mockResolvedValue([]);
     mockCaptureException.mockReset();
     sizesRef.current = { positive: 0, negative: 0 };
+    releaseSizesRef.current = { positive: 0, negative: 0 };
     consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
     consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -130,6 +143,97 @@ describe('rotation-tracks-cache-warm.service', () => {
       expect(counters.lmlNegative).toBe(1);
       expect(counters.errors).toBe(0);
       expect(counters.elapsedMs).toBeGreaterThanOrEqual(0);
+    });
+
+    test('warms the release-tracklist LRU for rows resolving via tier 1/2 (no inline tracklist)', async () => {
+      mockActiveRotationRows([10, 20]);
+      // Row 10: tier-1 hit (releaseId set, no inline tracklist) → must follow up.
+      // Row 20: tier-3 inline (releaseId set, inline tracklist carried) → must NOT follow up.
+      mockResolveRotationPickerSource.mockResolvedValueOnce(source(4080));
+      mockResolveRotationPickerSource.mockResolvedValueOnce(
+        inlineSource(12345, [{ position: '1', title: 'T', duration: null, artists: ['A'] }])
+      );
+
+      await warmRotationTracksCache();
+
+      expect(mockGetRotationTracksFromRelease).toHaveBeenCalledTimes(1);
+      expect(mockGetRotationTracksFromRelease).toHaveBeenCalledWith(4080);
+    });
+
+    test('does not call getRotationTracksFromRelease when the resolver returns null', async () => {
+      mockActiveRotationRows([10]);
+      mockResolveRotationPickerSource.mockResolvedValue(null);
+
+      await warmRotationTracksCache();
+
+      expect(mockGetRotationTracksFromRelease).not.toHaveBeenCalled();
+    });
+
+    test('does not call getRotationTracksFromRelease when releaseId is the BS#1185 sentinel zero with inline tracklist', async () => {
+      // MB-rescue rows carry releaseId=0 + inline tracklist; the picker
+      // short-circuits on inline tracks, so the warmer must too — calling
+      // getRotationTracksFromRelease(0) would 404 and waste a semaphore slot.
+      mockActiveRotationRows([10]);
+      mockResolveRotationPickerSource.mockResolvedValue(
+        inlineSource(0, [{ position: '1', title: 'T', duration: null, artists: ['A'] }])
+      );
+
+      await warmRotationTracksCache();
+
+      expect(mockGetRotationTracksFromRelease).not.toHaveBeenCalled();
+    });
+
+    test('release-tracklist warm counters: classifies positive vs negative cache additions per row', async () => {
+      mockActiveRotationRows([10, 20, 30]);
+      // Row 10: tier-1 hit, release-fetch warms positive LRU.
+      // Row 20: tier-1 hit, release-fetch returns null (404), warms negative LRU.
+      // Row 30: tier-3 inline, no release-fetch attempted.
+      mockResolveRotationPickerSource.mockResolvedValueOnce(source(4080));
+      mockResolveRotationPickerSource.mockResolvedValueOnce(source(9999999));
+      mockResolveRotationPickerSource.mockResolvedValueOnce(
+        inlineSource(12345, [{ position: '1', title: 'T', duration: null, artists: ['A'] }])
+      );
+      mockGetRotationTracksFromRelease.mockImplementationOnce(() => {
+        releaseSizesRef.current = { ...releaseSizesRef.current, positive: releaseSizesRef.current.positive + 1 };
+        return Promise.resolve([{ position: '1', title: 'T', duration: null, artists: ['A'] }]);
+      });
+      mockGetRotationTracksFromRelease.mockImplementationOnce(() => {
+        releaseSizesRef.current = { ...releaseSizesRef.current, negative: releaseSizesRef.current.negative + 1 };
+        return Promise.resolve(null);
+      });
+
+      const counters = await warmRotationTracksCache();
+
+      expect(counters.releasesWarmedPositive).toBe(1);
+      expect(counters.releasesWarmedNegative).toBe(1);
+      expect(counters.releaseFetchErrors).toBe(0);
+    });
+
+    test('release-fetch failure is captured to Sentry but does not halt the walk', async () => {
+      mockActiveRotationRows([10, 20]);
+      mockResolveRotationPickerSource.mockResolvedValueOnce(source(4080));
+      mockResolveRotationPickerSource.mockResolvedValueOnce(source(9999));
+      mockGetRotationTracksFromRelease.mockRejectedValueOnce(new Error('LML 504'));
+      mockGetRotationTracksFromRelease.mockResolvedValueOnce([]);
+
+      const counters = await warmRotationTracksCache();
+
+      expect(counters.scanned).toBe(2);
+      expect(counters.releaseFetchErrors).toBe(1);
+      expect(mockGetRotationTracksFromRelease).toHaveBeenCalledTimes(2);
+      // Sentry capture carries the rotation_id + release_id context.
+      const release_fetch_captures = mockCaptureException.mock.calls.filter(
+        (call) => (call[1] as { tags?: Record<string, string> })?.tags?.phase === 'release_fetch'
+      );
+      expect(release_fetch_captures).toHaveLength(1);
+      const [capturedErr, captureContext] = release_fetch_captures[0] as [
+        Error,
+        { tags?: Record<string, string>; extra?: Record<string, unknown> },
+      ];
+      expect(capturedErr.message).toBe('LML 504');
+      expect(captureContext.tags?.subsystem).toBe('rotation-tracks-cache-warm');
+      expect(captureContext.extra?.rotation_id).toBe(10);
+      expect(captureContext.extra?.release_id).toBe(4080);
     });
 
     test('does not halt when a single row throws — sibling rows still visited and captured to Sentry', async () => {
