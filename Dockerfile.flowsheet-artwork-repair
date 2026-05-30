@@ -9,9 +9,10 @@ COPY ./package.json ./package-lock.json ./
 COPY ./tsconfig.base.json ./
 COPY ./shared/database ./shared/database
 COPY ./shared/lml-client ./shared/lml-client
+COPY ./shared/metadata ./shared/metadata
 COPY ./jobs/flowsheet-artwork-repair ./jobs/flowsheet-artwork-repair
 
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/flowsheet-artwork-repair
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/flowsheet-artwork-repair
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -24,6 +25,7 @@ COPY ./package* ./
 COPY ./jobs/flowsheet-artwork-repair/package* ./jobs/flowsheet-artwork-repair/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/lml-client/package* ./shared/lml-client/
+COPY ./shared/metadata/package* ./shared/metadata/
 
 # `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
 # (GitHub Packages, `@wxyc:registry` in `.npmrc`). Mirrors the pattern in
@@ -33,6 +35,7 @@ RUN npm install --omit=dev && rm -f .npmrc
 COPY --from=builder ./flowsheet-artwork-repair-builder/jobs/flowsheet-artwork-repair/dist ./jobs/flowsheet-artwork-repair/dist
 COPY --from=builder ./flowsheet-artwork-repair-builder/shared/database/dist ./shared/database/dist
 COPY --from=builder ./flowsheet-artwork-repair-builder/shared/lml-client/dist ./shared/lml-client/dist
+COPY --from=builder ./flowsheet-artwork-repair-builder/shared/metadata/dist ./shared/metadata/dist
 
 # Long-running per-statement timeout: the enumeration query's predicate
 # (`metadata_status='enriched_match' AND artwork_url IS NULL AND album_id IS
