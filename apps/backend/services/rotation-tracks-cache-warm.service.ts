@@ -40,7 +40,14 @@
  */
 import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
-import { db, rotation } from '@wxyc/database';
+import {
+  db,
+  rotation,
+  checkLiveActivity as defaultCheckLiveActivity,
+  LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  type CheckLiveActivityFn,
+} from '@wxyc/database';
 import {
   resolveRotationPickerSource,
   __rotationLmlCacheSizesForWarm,
@@ -67,14 +74,6 @@ const PROGRESS_LOG_EVERY = 50;
 const WARM_PASS_BUDGET_MS = 30 * 60 * 1000;
 
 /**
- * Cooperative-pause lookback / pause / per-row cap (BS#1237, mirrors
- * `jobs/flowsheet-metadata-backfill`'s #735 pattern). Set
- * `WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS=0` to disable.
- */
-const LIVE_ACTIVITY_LOOKBACK_SECONDS = 60;
-const LIVE_ACTIVITY_PAUSE_MS = 30_000;
-
-/**
  * Per-row pause cap: any single rotation row can hold up the walker for
  * at most this long before we count it as `budgetSkipped` and move on.
  * Prevents a row whose probe-window never clears (long continuous show)
@@ -83,45 +82,25 @@ const LIVE_ACTIVITY_PAUSE_MS = 30_000;
  */
 const PER_ROW_PAUSE_BUDGET_MS = 10 * 60 * 1000;
 
-const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
-const FLOWSHEET_TABLE = sql.raw(`"${SCHEMA}"."flowsheet"`);
-
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Probe `flowsheet` for any track insert within the lookback window.
- * Uses the `flowsheet_track_add_time_idx` partial index (migration 0050)
- * for an index-only check; cost is negligible.
- *
- * Exported so tests can stub it.
- */
-export const checkLiveActivity = async (lookbackSeconds: number): Promise<boolean> => {
-  if (lookbackSeconds <= 0) return false;
-  const rows = (await db.execute(sql`
-    SELECT 1
-    FROM ${FLOWSHEET_TABLE}
-    WHERE "entry_type" = 'track'
-      AND "add_time" > now() - (interval '1 second' * ${lookbackSeconds})
-    LIMIT 1
-  `)) as unknown as Array<unknown>;
-  return rows.length > 0;
-};
-
-/**
- * Env-driven knob for `LIVE_ACTIVITY_LOOKBACK_SECONDS`. Operators set 0 to
- * disable the probe entirely. Invalid values fall back to the default with
- * a console.warn.
+ * Env-driven knob for `WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS`. Operators set
+ * 0 to disable the cooperative-pause probe entirely (BS#1237). Invalid
+ * values fall back to the default with a console.warn — boot must succeed
+ * even with a misconfigured env var, since the warmer is a best-effort
+ * optimization and the API needs to start serving traffic.
  */
 const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS
 ): number => {
-  if (raw === undefined) return LIVE_ACTIVITY_LOOKBACK_SECONDS;
+  if (raw === undefined) return LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 0) {
     console.warn(
-      `${LOG_PREFIX} invalid WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS=${JSON.stringify(raw)}; using default ${LIVE_ACTIVITY_LOOKBACK_SECONDS}`
+      `${LOG_PREFIX} invalid WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS=${JSON.stringify(raw)}; using default ${LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT}`
     );
-    return LIVE_ACTIVITY_LOOKBACK_SECONDS;
+    return LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT;
   }
   return parsed;
 };
@@ -160,7 +139,7 @@ export interface WarmCounters {
  * `checkLiveActivity` probe + a 0 `pauseMs` to skip the real-time `setTimeout`.
  */
 export interface WarmOptions {
-  checkLiveActivity?: (lookbackSeconds: number) => Promise<boolean>;
+  checkLiveActivity?: CheckLiveActivityFn;
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
 }
@@ -183,9 +162,9 @@ export interface WarmOptions {
 export async function warmRotationTracksCache(opts: WarmOptions = {}): Promise<WarmCounters> {
   const startTime = Date.now();
   const startSizes = __rotationLmlCacheSizesForWarm();
-  const probe = opts.checkLiveActivity ?? checkLiveActivity;
+  const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
   const lookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
-  const pauseMs = opts.liveActivityPauseMs ?? LIVE_ACTIVITY_PAUSE_MS;
+  const pauseMs = opts.liveActivityPauseMs ?? LIVE_ACTIVITY_PAUSE_MS_DEFAULT;
 
   const rows = await db
     .select({ id: rotation.id })
