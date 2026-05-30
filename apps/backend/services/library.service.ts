@@ -357,6 +357,15 @@ const ROTATION_LML_LOOKUP_CACHE_MAX = 500;
 const ROTATION_LML_LOOKUP_TTL_POSITIVE_MS = 60 * 60 * 1000;
 const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = 24 * 60 * 60 * 1000;
 /**
+ * How long a persisted `rotation.tracklist_lookup_attempted_at` stamp
+ * suppresses re-asking LML. Negative outcomes here are "this artist+album
+ * combo isn't resolvable to a Discogs release" — a stable condition that
+ * rarely flips. 7 days lets a music-director typo correction self-heal
+ * within a week without being so aggressive that we re-pay the 22 s cascade
+ * cost on every deploy.
+ */
+const ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/**
  * Per-call LML timeout for the picker's tier-3 lookup. 10 s matches
  * tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` (`LibrarySearchClient.java:64`),
  * which is the parity bar we measure picker coverage against. Shorter
@@ -490,6 +499,7 @@ export async function resolveRotationPickerSource(rotationId: number): Promise<R
       fallback: library_identity.discogs_release_id,
       artist_name: rotation.artist_name,
       album_title: rotation.album_title,
+      tracklist_lookup_attempted_at: rotation.tracklist_lookup_attempted_at,
     })
     .from(rotation)
     .leftJoin(library_identity, eq(library_identity.library_id, rotation.album_id))
@@ -499,6 +509,14 @@ export async function resolveRotationPickerSource(rotationId: number): Promise<R
 
   const stored = rows[0].direct ?? rows[0].fallback ?? null;
   if (stored !== null) return { releaseId: stored, inlineTracklist: null };
+
+  // Persistent negative marker. The in-memory rotationLmlNegativeCache covers
+  // within-process repeats; this column covers across-restart so the 28-row
+  // "negative" set doesn't re-pay 22 s cascade exhaustion on every deploy.
+  const attemptedAt = rows[0].tracklist_lookup_attempted_at;
+  if (attemptedAt && Date.now() - attemptedAt.getTime() < ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS) {
+    return null;
+  }
 
   return resolveRotationDiscogsReleaseViaLml(rotationId, rows[0].artist_name, rows[0].album_title);
 }
@@ -587,6 +605,23 @@ async function resolveRotationDiscogsReleaseViaLml(
     rotationLmlPositiveCache.set(rotationId, source);
   } else {
     rotationLmlNegativeCache.set(rotationId, true);
+    // Best-effort persistent stamp — the in-memory LRU is enough for the
+    // current request; the column survives restarts. Failure logs and is
+    // swallowed so the picker response isn't blocked on the write.
+    void (async () => {
+      try {
+        await db
+          .update(rotation)
+          .set({ tracklist_lookup_attempted_at: sql`NOW()` })
+          .where(eq(rotation.id, rotationId));
+      } catch (err) {
+        console.warn(
+          '[library.service] failed to stamp rotation.tracklist_lookup_attempted_at for rotation_id=%d: %s',
+          rotationId,
+          (err as Error).message
+        );
+      }
+    })();
   }
 
   return source;

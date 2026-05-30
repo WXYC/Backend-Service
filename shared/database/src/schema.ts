@@ -545,6 +545,15 @@ export const rotation = wxyc_schema.table(
     discogs_release_id_source: discogsReleaseIdSourceEnum('discogs_release_id_source')
       .notNull()
       .default('tubafrenzy_paste'),
+    // Stamped by `resolveRotationDiscogsReleaseViaLml` when the tier-3 LML
+    // cascade returns nothing for this row. The picker read path skips the
+    // LML call when this is set within `ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS`,
+    // mirroring `flowsheet.metadata_attempt_at` (#639). The per-process LRU
+    // covers within-process repeat opens; this column covers across-restart
+    // survival so the 28-row "negative" set doesn't re-pay 22 s cascade-
+    // exhaustion on every deploy. NULL on transient LML failures (caught arm
+    // — caller decides whether to retry) so the row stays retryable.
+    tracklist_lookup_attempted_at: timestamp('tracklist_lookup_attempted_at', { withTimezone: true }),
   },
   (table) => {
     return {
