@@ -428,7 +428,11 @@ export const runBatch = async (
   const timeoutMs = computeBulkTimeoutMs(items.length);
   let response;
   try {
-    response = await bulkLookupMetadata(items, { budgetMs: options.budgetMs, timeoutMs });
+    response = await bulkLookupMetadata(items, {
+      budgetMs: options.budgetMs,
+      timeoutMs,
+      caller: 'album-level-backfill',
+    });
   } catch (err) {
     const firstAlbumId = resolved[0]?.album_id ?? null;
     const lastAlbumId = resolved[resolved.length - 1]?.album_id ?? null;

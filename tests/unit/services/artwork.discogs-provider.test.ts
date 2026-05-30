@@ -75,7 +75,9 @@ describe('artwork DiscogsProvider', () => {
 
       const results = await provider.search({ artist: 'Autechre', album: 'Confield' });
 
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined);
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
+        caller: 'artwork-discogs-fallback',
+      });
       expect(results).toHaveLength(1);
       expect(results[0]).toEqual({
         artworkUrl: 'https://i.discogs.com/confield.jpg',
@@ -144,7 +146,9 @@ describe('artwork DiscogsProvider', () => {
 
       await provider.search({ artist: 'Autechre', song: 'VI Scose Poise' });
 
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', undefined, 'VI Scose Poise');
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', undefined, 'VI Scose Poise', {
+        caller: 'artwork-discogs-fallback',
+      });
     });
   });
 

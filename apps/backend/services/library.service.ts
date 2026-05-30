@@ -587,6 +587,7 @@ async function resolveRotationDiscogsReleaseViaLml(
     const response = await lookupMetadata(lookupArtist, albumTitle, undefined, {
       timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
       extended: true,
+      caller: 'library-rotation-picker',
     });
     const artwork = response.results?.[0]?.artwork ?? null;
     const releaseId = artwork?.release_id ?? null;
@@ -839,6 +840,7 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
     uncached.map(async (row) => {
       const lookupResult = await lookupMetadata(row.artist_name, row.album_title, undefined, {
         budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS,
+        caller: 'library-enrich-artwork',
       });
       const artworkUrl = filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url);
       if (!artworkUrl) return;
@@ -1453,7 +1455,10 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  */
 async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<TaggedLibraryViewEntry[]> {
   const lookupStart = performance.now();
-  const response: LookupResponse = await lookupBySong(query, { budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS });
+  const response: LookupResponse = await lookupBySong(query, {
+    budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS,
+    caller: 'library-track-search',
+  });
   try {
     Sentry.getActiveSpan()?.setAttributes({
       'track_search.master_lookup_ms': performance.now() - lookupStart,

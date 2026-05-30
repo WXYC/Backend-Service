@@ -229,6 +229,36 @@ describe('lml.client', () => {
       expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
     });
 
+    it('projects lml.caller onto the Sentry span when caller is provided', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Stereolab', 'Aluminum Tunes', undefined, { caller: 'proxy-album-metadata' });
+
+      const callerCalls = mockSpanSetAttributes.mock.calls.filter(
+        (args) => (args[0] as Record<string, unknown>)?.['lml.caller'] === 'proxy-album-metadata'
+      );
+      expect(callerCalls).toHaveLength(1);
+    });
+
+    it("projects lml.caller='unknown' when caller is not provided (flag-of-shame)", async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Stereolab', 'Aluminum Tunes');
+
+      const callerCalls = mockSpanSetAttributes.mock.calls.filter(
+        (args) => (args[0] as Record<string, unknown>)?.['lml.caller'] === 'unknown'
+      );
+      expect(callerCalls).toHaveLength(1);
+    });
+
     it('wraps the call in a Sentry span and projects cache_stats onto it', async () => {
       const cache_stats = {
         memory_hits: 1,
@@ -473,6 +503,21 @@ describe('lml.client', () => {
       expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
     });
 
+    it('projects lml.caller onto the Sentry span when caller is provided', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupBySong('Back, Baby', { caller: 'library-track-search' });
+
+      const callerCalls = mockSpanSetAttributes.mock.calls.filter(
+        (args) => (args[0] as Record<string, unknown>)?.['lml.caller'] === 'library-track-search'
+      );
+      expect(callerCalls).toHaveLength(1);
+    });
+
     it('throws LmlClientError on non-2xx response', async () => {
       mockFetch.mockResolvedValue({
         ok: false,
@@ -573,6 +618,20 @@ describe('lml.client', () => {
       const init = mockFetch.mock.calls[0][1];
       if (!init) throw new Error('mockFetch was not called with init args');
       expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+    });
+
+    it('projects lml.caller onto the bulk Sentry span when caller is provided', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], { caller: 'album-level-backfill' });
+
+      const callerCalls = mockSpanSetAttributes.mock.calls.filter(
+        (args) => (args[0] as Record<string, unknown>)?.['lml.caller'] === 'album-level-backfill'
+      );
+      expect(callerCalls).toHaveLength(1);
     });
 
     it('consumes exactly one limiter token per batch (not one per item)', async () => {

@@ -57,7 +57,7 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
   const { artistName, albumTitle, trackTitle } = request;
   const result: FlowsheetMetadata = {};
 
-  const lookupResponse = await lookupMetadata(artistName, albumTitle, trackTitle);
+  const lookupResponse = await lookupMetadata(artistName, albumTitle, trackTitle, { caller: 'metadata-service' });
   const artwork: DiscogsMatchResult | null = lookupResponse.results?.[0]?.artwork ?? null;
 
   if (artwork) {

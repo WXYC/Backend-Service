@@ -95,7 +95,10 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     const artistName = body.alternate_artist_name || body.artist_name || '';
     const [streamingResult, artworkResult] = await Promise.allSettled([
       checkStreamingAvailability(artistName, body.album_title),
-      lookupMetadata(artistName, body.album_title, undefined, { budgetMs: LIBRARY_LML_BUDGET_MS }),
+      lookupMetadata(artistName, body.album_title, undefined, {
+        budgetMs: LIBRARY_LML_BUDGET_MS,
+        caller: 'library-add-album',
+      }),
     ]);
 
     if (streamingResult.status === 'fulfilled' && streamingResult.value.on_streaming !== null) {
@@ -143,7 +146,10 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 function fireAndForgetCanonicalEntity(libraryId: number, artistName: string | null, albumTitle: string): void {
   if (!artistName) return;
 
-  lookupMetadata(artistName, albumTitle, undefined, { budgetMs: LIBRARY_LML_BUDGET_MS })
+  lookupMetadata(artistName, albumTitle, undefined, {
+    budgetMs: LIBRARY_LML_BUDGET_MS,
+    caller: 'library-canonical-entity',
+  })
     .then(async (response) => {
       const linkage = libraryService.mapLookupToCanonicalEntity(response);
       if (!linkage) return;

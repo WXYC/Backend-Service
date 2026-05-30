@@ -75,6 +75,7 @@ export async function runLmlLinkage(args: {
     // LML bounds concurrent warm tasks process-wide to cap Discogs amplification.
     response = await lookupMetadata(artistName, albumTitle ?? undefined, undefined, {
       warm_cache: true,
+      caller: 'flowsheet-linkage',
     });
   } catch (error) {
     // The forward path is fire-and-forget — we own error reporting here so
