@@ -267,9 +267,8 @@ export const flowsheetEntryTypeEnum = () => ({});
 // which library_id the tie-break "picks".
 export const pickPrimaryLibraryRow = jest.fn<(libraryIds: number[]) => Promise<number | null>>();
 
-// Cooperative-pause primitives (BS#1241). Mirrored from shared/database/src/live-activity.ts
-// so consumer unit tests that import them via `@wxyc/database` get the real default values
-// rather than `undefined`.
+// Mirror the real defaults so resolvers fall back to numbers, not undefined.
+// Drift is pinned by `tests/unit/database/live-activity.test.ts`.
 export const LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT = 60;
 export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
 export type CheckLiveActivityFn = (lookbackSeconds: number) => Promise<boolean>;

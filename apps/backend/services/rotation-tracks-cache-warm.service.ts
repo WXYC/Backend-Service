@@ -85,11 +85,9 @@ const PER_ROW_PAUSE_BUDGET_MS = 10 * 60 * 1000;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Env-driven knob for `WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS`. Operators set
- * 0 to disable the cooperative-pause probe entirely (BS#1237). Invalid
- * values fall back to the default with a console.warn — boot must succeed
- * even with a misconfigured env var, since the warmer is a best-effort
- * optimization and the API needs to start serving traffic.
+ * Warn-and-default on misconfig: boot must succeed even with a bad env var,
+ * since the warmer is a best-effort optimization and the API needs to start
+ * serving traffic. `0` disables the probe.
  */
 const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.WARM_LIVE_ACTIVITY_LOOKBACK_SECONDS
