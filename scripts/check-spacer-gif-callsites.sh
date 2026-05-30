@@ -5,11 +5,11 @@
 # `apps/backend/services/metadata/metadata.service.ts`; moved to
 # `shared/metadata/src/helpers/filter-spacer-gif.ts` by the deep-module
 # refactor — `metadata.service.ts` now re-exports). The remaining inline
-# duplicates in the three jobs + the enrichment worker are pinned to that
+# duplicates in the two jobs + the enrichment worker are pinned to that
 # canonical via the parity tests under tests/unit/jobs/<job>/ and
 # tests/unit/apps/enrichment-worker/. The deep-module rollout deletes these
-# copies one PR at a time (PR 2 dropped library-artwork-url-backfill); the
-# final PR will delete this script along with the last inline copy.
+# copies one PR at a time; the final PR will delete this script along with
+# the last inline copy.
 #
 # Test files are EXCLUDED from the source-set count because they exercise
 # the inputs (they MUST contain the literal). Comments in unrelated files
@@ -26,7 +26,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Allowed source files (relative to repo root) that may contain the
 # `spacer.gif` *code literal* (a single- or double-quoted string).
 # The canonical lives in `shared/metadata/src/helpers/filter-spacer-gif.ts`
-# (npm package `@wxyc/metadata`); the three jobs + enrichment worker still
+# (npm package `@wxyc/metadata`); the two jobs + enrichment worker still
 # keep inline copies for build-graph isolation from `apps/backend`. Those
 # copies are removed incrementally by the deep-module rollout, one PR per
 # callsite, until the final PR retires this script.
@@ -38,7 +38,6 @@ ALLOWED=(
   "shared/metadata/src/helpers/filter-spacer-gif.ts"
   "jobs/flowsheet-metadata-backfill/enrich.ts"
   "jobs/album-level-backfill/job.ts"
-  "jobs/flowsheet-artwork-repair/repair.ts"
   "apps/enrichment-worker/enrich.ts"
 )
 

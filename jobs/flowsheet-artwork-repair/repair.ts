@@ -30,12 +30,18 @@
  *   - Race-guarded UPSERT on the linked path: `setWhere: album_metadata.
  *     updated_at < NOW()`, mirroring the enrichment-worker shape verbatim.
  *
- * The 10-column payload, spacer.gif filter, Discogs-bio cleanup, and the
- * `release_year || null` coercion all mirror `apps/enrichment-worker/
- * enrich.ts:159-175` (canonical writer) and `jobs/flowsheet-metadata-
- * backfill/enrich.ts` (sibling drain). The duplication is the same build-
- * graph isolation the other one-shot jobs carry: no imports from
- * `apps/backend` so the job's Docker image graph is independent.
+ * The 10-column payload and the `release_year || null` coercion mirror
+ * `apps/enrichment-worker/enrich.ts:159-175` (canonical writer) and
+ * `jobs/flowsheet-metadata-backfill/enrich.ts` (sibling drain). The
+ * duplication is the same build-graph isolation the other one-shot jobs
+ * carry: no imports from `apps/backend` so the job's Docker image graph
+ * is independent. The spacer.gif filter and Discogs-bio cleanup now come
+ * from `@wxyc/metadata`, the build-graph-safe deep module that lifted
+ * those two helpers out of every inline copy (#1242). The inline
+ * `synthesizeSearchUrls` stays here for now — the shared helper omits
+ * `spotify_url` per BS#1184/BS#1192 while every production writer
+ * (worker + 4 jobs) actively persists a synthesized Spotify URL, so
+ * collapsing it requires a separate cross-caller behavior decision.
  *
  * No-write early-return on still-null-after-LML: a fresh LML lookup that
  * returns `results: []`, `artwork: null`, or `artwork.artwork_url: null`
@@ -48,6 +54,7 @@
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
+import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
 
 export type FreeFormRow = {
   id: number;
@@ -68,31 +75,6 @@ export type RepairOutcome =
   | 'linked_repaired'
   | 'linked_raced'
   | 'still_null_after_lml';
-
-/**
- * Strip Discogs markup tags from bio text. Mirrors
- * `apps/backend/services/metadata/metadata.service.ts#cleanDiscogsBio`
- * and `jobs/flowsheet-metadata-backfill/enrich.ts#cleanDiscogsBio`
- * verbatim. Duplicated for build-graph isolation.
- */
-export const cleanDiscogsBio = (bio: string): string =>
-  bio
-    .replace(/\[a=([^\]]+)\]/g, '$1')
-    .replace(/\[l=([^\]]+)\]/g, '$1')
-    .replace(/\[r=([^\]]+)\]/g, '$1')
-    .replace(/\[m=([^\]]+)\]/g, '$1')
-    .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
-
-/**
- * Drop Discogs spacer.gif placeholder URLs. Mirrors
- * `jobs/flowsheet-metadata-backfill/enrich.ts#filterSpacerGif`. The job
- * writes to nullable columns, so this returns `null` (not `undefined`).
- */
-export const filterSpacerGif = (url: string | null | undefined): string | null => {
-  if (!url) return null;
-  if (url.includes('spacer.gif')) return null;
-  return url;
-};
 
 /**
  * Synthesize the three search URLs the runtime path falls back to on
