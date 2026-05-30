@@ -17,11 +17,9 @@
  */
 import { jest } from '@jest/globals';
 
-import { db } from '@wxyc/database';
+import { db, type CheckLiveActivityFn } from '@wxyc/database';
 import {
   BATCH_SIZE,
-  LIVE_ACTIVITY_LOOKBACK_SECONDS,
-  LIVE_ACTIVITY_PAUSE_MS,
   THROTTLE_MS,
   processRow,
   resolveBatchSize,
@@ -30,7 +28,6 @@ import {
   resolvePartitionFilter,
   resolveThrottleMs,
   runBackfill,
-  type CheckLiveActivityFn,
   type EnrichFn,
   type LookupFn,
 } from '../../../../jobs/flowsheet-metadata-backfill/orchestrate';
@@ -134,8 +131,8 @@ describe('resolveThrottleMs', () => {
 });
 
 describe('resolveLiveActivityLookback', () => {
-  it('falls back to LIVE_ACTIVITY_LOOKBACK_SECONDS when env var is unset', () => {
-    expect(resolveLiveActivityLookback(undefined)).toBe(LIVE_ACTIVITY_LOOKBACK_SECONDS);
+  it('falls back to the shared 60s default when env var is unset', () => {
+    expect(resolveLiveActivityLookback(undefined)).toBe(60);
   });
 
   it('accepts 0 (operators can disable the cooperative pause for catch-up runs)', () => {
@@ -154,8 +151,8 @@ describe('resolveLiveActivityLookback', () => {
 });
 
 describe('resolveLiveActivityPauseMs', () => {
-  it('falls back to LIVE_ACTIVITY_PAUSE_MS when env var is unset', () => {
-    expect(resolveLiveActivityPauseMs(undefined)).toBe(LIVE_ACTIVITY_PAUSE_MS);
+  it('falls back to the shared 30s default when env var is unset', () => {
+    expect(resolveLiveActivityPauseMs(undefined)).toBe(30_000);
   });
 
   it('accepts 0 (tests may want no pause)', () => {
@@ -330,9 +327,9 @@ describe('runBackfill', () => {
     expect(THROTTLE_MS).toBe(100);
   });
 
-  it('exposes LIVE_ACTIVITY_LOOKBACK_SECONDS and LIVE_ACTIVITY_PAUSE_MS for ops tuning', () => {
-    expect(LIVE_ACTIVITY_LOOKBACK_SECONDS).toBe(60);
-    expect(LIVE_ACTIVITY_PAUSE_MS).toBe(30_000);
+  it('default resolvers produce the shared 60s lookback / 30s pause', () => {
+    expect(resolveLiveActivityLookback(undefined)).toBe(60);
+    expect(resolveLiveActivityPauseMs(undefined)).toBe(30_000);
   });
 
   it('defers a batch when checkLiveActivity returns true, then proceeds when it clears', async () => {

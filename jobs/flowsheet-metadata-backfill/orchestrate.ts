@@ -44,7 +44,13 @@
  */
 
 import { sql, type SQL } from 'drizzle-orm';
-import { db } from '@wxyc/database';
+import {
+  db,
+  checkLiveActivity as defaultCheckLiveActivity,
+  LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  type CheckLiveActivityFn,
+} from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import type { EnrichRow, EnrichOutcome } from './enrich.js';
 import { captureError, log } from './logger.js';
@@ -63,24 +69,6 @@ export const BATCH_SIZE = 500;
  * override to 0.
  */
 export const THROTTLE_MS = 100;
-
-/**
- * Default cooperative-pause lookback window, in seconds. Before each batch
- * the orchestrator probes `flowsheet` for any track inserts within this
- * window; if found, a DJ is actively managing the playout and the batch is
- * deferred until the window clears. This keeps the backfill out of the way
- * during exactly the moments when UX matters most. Set
- * `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` to disable the probe (catch-up runs).
- */
-export const LIVE_ACTIVITY_LOOKBACK_SECONDS = 60;
-
-/**
- * Default sleep between cooperative-pause re-probes, in ms. After a deferral
- * the loop sleeps this long, then re-checks. If activity persists, defer
- * again. There is no defer cap — the cron's outer `timeout 14400` is the
- * effective ceiling, and the next run picks up where this one left off.
- */
-export const LIVE_ACTIVITY_PAUSE_MS = 30_000;
 
 /**
  * Schema-qualified table reference, honoring `WXYC_SCHEMA_NAME` so parallel
@@ -127,15 +115,17 @@ export const resolveThrottleMs = (raw: string | undefined = process.env.BACKFILL
 
 /**
  * Resolve `LIVE_ACTIVITY_LOOKBACK_SECONDS` from the environment, falling
- * back to `LIVE_ACTIVITY_LOOKBACK_SECONDS`. Operators set `0` to disable
- * the cooperative-pause probe entirely (e.g., emergency catch-up runs).
+ * back to `LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT`. Operators set `0` to
+ * disable the cooperative-pause probe entirely (e.g., emergency catch-up
+ * runs). Throws on misconfig — this is a cron-driven job; loud failure is
+ * preferred so an operator notices.
  *
  * Exported so unit tests can drive it without mucking with process.env.
  */
 export const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
 ): number => {
-  if (raw === undefined) return LIVE_ACTIVITY_LOOKBACK_SECONDS;
+  if (raw === undefined) return LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 0) {
     throw new Error(
@@ -147,42 +137,18 @@ export const resolveLiveActivityLookback = (
 
 /**
  * Resolve `LIVE_ACTIVITY_PAUSE_MS` from the environment, falling back to
- * `LIVE_ACTIVITY_PAUSE_MS`. Tests pass `0` to keep the deferral loop tight.
+ * `LIVE_ACTIVITY_PAUSE_MS_DEFAULT`. Tests pass `0` to keep the deferral
+ * loop tight.
  *
  * Exported so unit tests can drive it without mucking with process.env.
  */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number => {
-  if (raw === undefined) return LIVE_ACTIVITY_PAUSE_MS;
+  if (raw === undefined) return LIVE_ACTIVITY_PAUSE_MS_DEFAULT;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 0) {
     throw new Error(`Invalid LIVE_ACTIVITY_PAUSE_MS=${JSON.stringify(raw)}; must be a non-negative integer (ms).`);
   }
   return parsed;
-};
-
-export type CheckLiveActivityFn = (lookbackSeconds: number) => Promise<boolean>;
-
-/**
- * Probe `flowsheet` for any track row inserted within the lookback window.
- * Returns true when a DJ is actively adding tracks (the highest UX-sensitivity
- * moment); returns false otherwise. Bypassed entirely when lookbackSeconds is
- * zero or negative.
- *
- * Uses the partial index from migration 0050
- * (`flowsheet_track_add_time_idx ON (add_time DESC) WHERE entry_type='track'`)
- * for an index-only check. Cost is negligible — single buffer read of the
- * leftmost leaf page.
- */
-export const checkLiveActivity: CheckLiveActivityFn = async (lookbackSeconds) => {
-  if (lookbackSeconds <= 0) return false;
-  const rows = (await db.execute(sql`
-    SELECT 1
-    FROM ${FLOWSHEET_TABLE}
-    WHERE "entry_type" = 'track'
-      AND "add_time" > now() - (interval '1 second' * ${lookbackSeconds})
-    LIMIT 1
-  `)) as unknown as Array<unknown>;
-  return rows.length > 0;
 };
 
 /**
@@ -328,7 +294,7 @@ export const runBackfill = async (opts: {
   const partition = opts.partition ?? resolvePartitionFilter();
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
-  const probe = opts.checkLiveActivity ?? checkLiveActivity;
+  const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
 
   log('info', 'started', `${JOB_NAME} starting`, {
     batch_size: batchSize,

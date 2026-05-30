@@ -16,16 +16,13 @@
  */
 import { jest } from '@jest/globals';
 
-import { db } from '@wxyc/database';
+import { db, type CheckLiveActivityFn } from '@wxyc/database';
 import {
-  LIVE_ACTIVITY_LOOKBACK_SECONDS,
-  LIVE_ACTIVITY_PAUSE_MS,
   enumerateFreeFormResidue,
   enumerateLinkedResidue,
   resolveLiveActivityLookback,
   resolveLiveActivityPauseMs,
   runRepair,
-  type CheckLiveActivityFn,
   type FreeFormRepairFn,
   type LinkedRepairFn,
   type LookupFn,
@@ -126,9 +123,9 @@ describe('enumerateLinkedResidue', () => {
 });
 
 describe('resolveLiveActivityLookback / resolveLiveActivityPauseMs', () => {
-  it('falls back on unset env var', () => {
-    expect(resolveLiveActivityLookback(undefined)).toBe(LIVE_ACTIVITY_LOOKBACK_SECONDS);
-    expect(resolveLiveActivityPauseMs(undefined)).toBe(LIVE_ACTIVITY_PAUSE_MS);
+  it('falls back to the shared 60s / 30s defaults when env var is unset', () => {
+    expect(resolveLiveActivityLookback(undefined)).toBe(60);
+    expect(resolveLiveActivityPauseMs(undefined)).toBe(30_000);
   });
 
   it('accepts valid non-negative integers (0 disables)', () => {

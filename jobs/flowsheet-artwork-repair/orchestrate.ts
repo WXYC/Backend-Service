@@ -38,7 +38,13 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { db } from '@wxyc/database';
+import {
+  db,
+  checkLiveActivity as defaultCheckLiveActivity,
+  LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  type CheckLiveActivityFn,
+} from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import type { FreeFormRow, LinkedAlbum, RepairOutcome } from './repair.js';
 import { captureError, log } from './logger.js';
@@ -51,12 +57,6 @@ const ALBUM_METADATA_TABLE = sql.raw(`"${SCHEMA}"."album_metadata"`);
 const LIBRARY_TABLE = sql.raw(`"${SCHEMA}"."library"`);
 const ARTISTS_TABLE = sql.raw(`"${SCHEMA}"."artists"`);
 
-/** Default lookback window for the cooperative-pause probe. */
-export const LIVE_ACTIVITY_LOOKBACK_SECONDS = 60;
-
-/** Default sleep between re-probes when DJ activity is detected. */
-export const LIVE_ACTIVITY_PAUSE_MS = 30_000;
-
 /** Default statement_timeout for the enumeration queries. The free-form
  * predicate isn't covered by an existing partial index; the planner falls
  * back to a seq scan over flowsheet's 2.6M+ rows. 5 min covers observed
@@ -68,7 +68,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 export const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
 ): number => {
-  if (raw === undefined) return LIVE_ACTIVITY_LOOKBACK_SECONDS;
+  if (raw === undefined) return LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 0) {
     throw new Error(
@@ -79,32 +79,12 @@ export const resolveLiveActivityLookback = (
 };
 
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number => {
-  if (raw === undefined) return LIVE_ACTIVITY_PAUSE_MS;
+  if (raw === undefined) return LIVE_ACTIVITY_PAUSE_MS_DEFAULT;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 0) {
     throw new Error(`Invalid LIVE_ACTIVITY_PAUSE_MS=${JSON.stringify(raw)}; must be a non-negative integer (ms).`);
   }
   return parsed;
-};
-
-export type CheckLiveActivityFn = (lookbackSeconds: number) => Promise<boolean>;
-
-/**
- * Probe `flowsheet` for any track row added within the lookback window.
- * Returns `true` while DJs are actively touching the playout. Bypassed
- * entirely when `lookbackSeconds <= 0`. Uses the partial index from
- * migration 0050 for an index-only single-leaf lookup.
- */
-export const checkLiveActivity: CheckLiveActivityFn = async (lookbackSeconds) => {
-  if (lookbackSeconds <= 0) return false;
-  const rows = (await db.execute(sql`
-    SELECT 1
-    FROM ${FLOWSHEET_TABLE}
-    WHERE "entry_type" = 'track'
-      AND "add_time" > now() - (interval '1 second' * ${lookbackSeconds})
-    LIMIT 1
-  `)) as unknown as Array<unknown>;
-  return rows.length > 0;
 };
 
 /**
@@ -238,7 +218,7 @@ export type RunRepairOptions = {
 export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
   const lookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const pauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
-  const probe = opts.checkLiveActivity ?? checkLiveActivity;
+  const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
 
   const freeFormRows = opts.freeFormRows ?? (await enumerateFreeFormResidue());
   const linkedAlbums = opts.linkedAlbums ?? (await enumerateLinkedResidue());
