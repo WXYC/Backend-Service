@@ -25,22 +25,19 @@
  * because its WHERE is `metadata_attempt_at IS NULL` — a historical-drain
  * concern that doesn't apply to the live consumer path.
  *
- * Build-graph isolation: the search-URL synthesis, spacer.gif filter, and bio
- * cleaner are inlined rather than imported from `apps/backend` so this package
- * can bundle independently. The canonical implementations are in
- * `apps/backend/services/metadata/metadata.service.ts` (spacer.gif filter,
- * the 4-URL write-path shape post-BS#1192) and
- * `apps/backend/services/metadata/providers/search-urls.provider.ts` (the
- * per-service search-URL formulas); divergence here would be a bug. Pinned
- * by parity tests:
- *   - tests/unit/apps/enrichment-worker/filter-spacer-gif-parity.test.ts (BS#890)
+ * Spacer.gif filter + Discogs bio cleanup: imported from `@wxyc/metadata`
+ * (BS#1242 deep-module rollout — the last build-graph-safe consumer to
+ * collapse onto the shared module). `synthesizeSearchUrls` stays inline
+ * pending a cross-caller decision on the `spotify_url` divergence
+ * (BS#1184 / BS#1192: shared `synthesizeSearchUrls` omits Spotify; the
+ * inline version here persists a synthesized URL). Pinned by parity test:
  *   - tests/unit/apps/enrichment-worker/synthesize-search-urls-parity.test.ts (BS#889 / BS#1189)
- * Also gated by scripts/check-spacer-gif-callsites.sh in CI.
  */
 
 import { and, eq, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
+import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
 
 export type EnrichRow = {
   id: number;
@@ -59,20 +56,6 @@ export type FinalizeOutcome =
   | 'enriched_match_raced'
   | 'enriched_no_match'
   | 'enriched_no_match_raced';
-
-export const cleanDiscogsBio = (bio: string): string =>
-  bio
-    .replace(/\[a=([^\]]+)\]/g, '$1')
-    .replace(/\[l=([^\]]+)\]/g, '$1')
-    .replace(/\[r=([^\]]+)\]/g, '$1')
-    .replace(/\[m=([^\]]+)\]/g, '$1')
-    .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
-
-export const filterSpacerGif = (url: string | null | undefined): string | null => {
-  if (!url) return null;
-  if (url.includes('spacer.gif')) return null;
-  return url;
-};
 
 /**
  * Synthesized search URLs (per-service semantics deliberately asymmetric):
