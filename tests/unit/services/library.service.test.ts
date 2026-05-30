@@ -4,12 +4,28 @@ import { db, createMockQueryChain, library, library_artist_view, album_plays } f
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockLookupBySong = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
+const mockGetRelease = jest.fn<(releaseId: number) => Promise<unknown>>();
+
+// Mirror the real `LmlClientError` shape so the service's
+// `err instanceof LmlClientError` branch picks up the mocked rejection
+// (BS#1185 / LML#427 negative-cache test). The real class lives in
+// `shared/lml-client/src/index.ts`.
+class MockLmlClientError extends Error {
+  statusCode: number;
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.name = 'LmlClientError';
+    this.statusCode = statusCode;
+  }
+}
 
 jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   lookupBySong: mockLookupBySong,
   isLmlConfigured: mockIsLmlConfigured,
+  getRelease: mockGetRelease,
   envInt: (_name: string, fallback: number) => fallback,
+  LmlClientError: MockLmlClientError,
 }));
 
 // Mock @sentry/node so we can assert that searchLibraryByTrack creates a
@@ -52,6 +68,8 @@ import {
   resolveRotationPickerSource,
   __resetRotationLmlLookupCacheForTests,
   isVariousArtistsName,
+  getRotationTracksFromRelease,
+  __resetReleaseTracklistCacheForTests,
 } from '../../../apps/backend/services/library.service';
 import { resetConfig as resetCatalogTrackSearchConfig } from '../../../apps/backend/config/catalogTrackSearch';
 
@@ -2460,6 +2478,101 @@ describe('library.service', () => {
           { position: '2', title: 'For Mariko', duration: '4:18', artists: ['Julianna Barwick & Mary Lattimore'] },
         ],
       });
+    });
+  });
+
+  describe('getRotationTracksFromRelease', () => {
+    // BS-side LRU on the projected RotationTrack[] keyed by Discogs release_id.
+    // The picker's dominant cost in prod is `GET /api/v1/discogs/release/{id}`
+    // (2-9s on LML cache miss; 78ms warm). This cache absorbs both the
+    // second-open-on-same-row case and the cross-rotation-row case where two
+    // rotation_ids resolve to the same release_id.
+
+    const sampleRelease = {
+      artist: 'Autechre',
+      title: 'Confield',
+      tracklist: [
+        { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
+        { position: 'A2', title: 'Cfern', duration: '5:11', artists: [] },
+      ],
+    };
+
+    beforeEach(() => {
+      __resetReleaseTracklistCacheForTests();
+      mockGetRelease.mockReset();
+    });
+
+    it('fetches the release, projects to RotationTrack shape, returns the array', async () => {
+      mockGetRelease.mockResolvedValue(sampleRelease);
+
+      const tracks = await getRotationTracksFromRelease(4080);
+
+      expect(mockGetRelease).toHaveBeenCalledWith(4080);
+      expect(tracks).toEqual([
+        { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
+        // Empty per-track artists fall back to the release-level artist so the
+        // dj-site picker always has at least one name to render.
+        { position: 'A2', title: 'Cfern', duration: '5:11', artists: ['Autechre'] },
+      ]);
+    });
+
+    it('caches positive results so subsequent calls do not hit getRelease within TTL', async () => {
+      mockGetRelease.mockResolvedValue(sampleRelease);
+
+      const first = await getRotationTracksFromRelease(4080);
+      const second = await getRotationTracksFromRelease(4080);
+
+      expect(first).toEqual(second);
+      expect(mockGetRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns the cached projection by reference (same array identity)', async () => {
+      // Subsequent picker opens should not re-allocate the projection — the
+      // LRU value is the array itself.
+      mockGetRelease.mockResolvedValue(sampleRelease);
+
+      const first = await getRotationTracksFromRelease(4080);
+      const second = await getRotationTracksFromRelease(4080);
+
+      expect(second).toBe(first);
+    });
+
+    it('returns null on LML 404 and negative-caches so subsequent calls skip getRelease', async () => {
+      mockGetRelease.mockRejectedValue(new MockLmlClientError('not found', 404));
+
+      const first = await getRotationTracksFromRelease(9999999);
+      const second = await getRotationTracksFromRelease(9999999);
+
+      expect(first).toBeNull();
+      expect(second).toBeNull();
+      expect(mockGetRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('rethrows non-404 LmlClientError (e.g. 5xx) so transient failures surface', async () => {
+      mockGetRelease.mockRejectedValue(new MockLmlClientError('upstream timeout', 504));
+
+      await expect(getRotationTracksFromRelease(4080)).rejects.toThrow('upstream timeout');
+    });
+
+    it('rethrows non-LmlClientError errors (network, JSON parse, etc.) without caching', async () => {
+      mockGetRelease.mockRejectedValueOnce(new Error('socket hang up'));
+
+      await expect(getRotationTracksFromRelease(4080)).rejects.toThrow('socket hang up');
+
+      // Next call should retry (no cached null), to give the picker a chance
+      // to recover when the upstream blip clears.
+      mockGetRelease.mockResolvedValueOnce(sampleRelease);
+      const second = await getRotationTracksFromRelease(4080);
+      expect(second).not.toBeNull();
+      expect(mockGetRelease).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns an empty array (not null) when the release has an empty tracklist', async () => {
+      mockGetRelease.mockResolvedValue({ artist: 'Autechre', title: 'Untitled', tracklist: [] });
+
+      const tracks = await getRotationTracksFromRelease(4080);
+
+      expect(tracks).toEqual([]);
     });
   });
 });

@@ -18,6 +18,8 @@ type PickerSourceMock = {
   inlineTracklist: Array<{ position: string; title: string; duration: string | null; artists: string[] }> | null;
 };
 const mockResolveRotationPickerSource = jest.fn<(rotationId: number) => Promise<PickerSourceMock | null>>();
+type RotationTrackMock = { position: string; title: string; duration: string | null; artists: string[] };
+const mockGetRotationTracksFromRelease = jest.fn<(releaseId: number) => Promise<RotationTrackMock[] | null>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
@@ -51,24 +53,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   insertFormat: jest.fn(),
   isISODate: jest.fn(),
   resolveRotationPickerSource: mockResolveRotationPickerSource,
-  // Real implementation lifted to the service so the controller's release-fetch
-  // path and the service's inline path share one projection. Pass through;
-  // assertions below pin the wire shape.
-  projectInlineTracklist: (
-    tracks:
-      | ReadonlyArray<{ position: string; title: string; duration?: string | null; artists?: readonly string[] | null }>
-      | null
-      | undefined,
-    artistFallback: string
-  ) =>
-    !tracks || tracks.length === 0
-      ? null
-      : tracks.map((t) => ({
-          position: t.position,
-          title: t.title,
-          duration: t.duration ?? null,
-          artists: t.artists && t.artists.length > 0 ? Array.from(t.artists) : [artistFallback],
-        })),
+  getRotationTracksFromRelease: mockGetRotationTracksFromRelease,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -78,27 +63,12 @@ jest.mock('../../../apps/backend/services/labels.service', () => ({
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockCheckStreamingAvailability = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>().mockReturnValue(false);
-const mockGetRelease = jest.fn<(releaseId: number) => Promise<unknown>>();
-
-// LmlClientError needs to be a real class so `err instanceof LmlClientError`
-// in the controller works after mocking. Mirrors the real shape in
-// shared/lml-client/src/index.ts (@wxyc/lml-client).
-class MockLmlClientError extends Error {
-  statusCode: number;
-  constructor(message: string, statusCode: number) {
-    super(message);
-    this.name = 'LmlClientError';
-    this.statusCode = statusCode;
-  }
-}
 
 jest.mock('@wxyc/lml-client', () => ({
   checkStreamingAvailability: mockCheckStreamingAvailability,
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: mockIsLmlConfigured,
-  getRelease: mockGetRelease,
   envInt: (_name: string, fallback: number) => fallback,
-  LmlClientError: MockLmlClientError,
 }));
 
 import {
@@ -479,22 +449,14 @@ describe('library.controller', () => {
   });
 
   describe('getRotationTracks', () => {
-    // Minimal Discogs release shape needed by the projection. The real
-    // DiscogsReleaseMetadata has more fields; we provide only what the
-    // controller reads.
-    const sampleRelease = {
-      release_id: 4080,
-      title: 'Confield',
-      artist: 'Autechre',
-      tracklist: [
-        { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
-        { position: 'A2', title: 'Cfern', duration: '5:11', artists: [] },
-      ],
-    };
+    const sampleProjection: RotationTrackMock[] = [
+      { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
+      { position: 'A2', title: 'Cfern', duration: '5:11', artists: ['Autechre'] },
+    ];
 
     beforeEach(() => {
       mockResolveRotationPickerSource.mockReset();
-      mockGetRelease.mockReset();
+      mockGetRotationTracksFromRelease.mockReset();
     });
 
     it('returns 400 for non-numeric rotation_id', async () => {
@@ -520,34 +482,29 @@ describe('library.controller', () => {
       await getRotationTracks(req, res, next);
 
       expect(mockResolveRotationPickerSource).toHaveBeenCalledWith(42);
-      expect(mockGetRelease).not.toHaveBeenCalled();
+      expect(mockGetRotationTracksFromRelease).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith([]);
     });
 
-    it('projects Discogs tracklist into RotationTrack shape when identity resolves and inline tracklist is absent', async () => {
+    it('delegates to getRotationTracksFromRelease when identity resolves and inline tracklist is absent', async () => {
       mockResolveRotationPickerSource.mockResolvedValue({ releaseId: 4080, inlineTracklist: null });
-      mockGetRelease.mockResolvedValue(sampleRelease);
+      mockGetRotationTracksFromRelease.mockResolvedValue(sampleProjection);
       const req = { params: { rotation_id: '42' } } as unknown as Request;
       const res = mockResponse();
 
       await getRotationTracks(req, res, next);
 
-      expect(mockGetRelease).toHaveBeenCalledWith(4080);
+      expect(mockGetRotationTracksFromRelease).toHaveBeenCalledWith(4080);
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith([
-        { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
-        // Empty Discogs track.artists falls back to the release artist so the
-        // dj-site picker always has at least one artist name to render.
-        { position: 'A2', title: 'Cfern', duration: '5:11', artists: ['Autechre'] },
-      ]);
+      expect(res.json).toHaveBeenCalledWith(sampleProjection);
     });
 
-    it('short-circuits to the inline tracklist when the resolver carries one (no getRelease call)', async () => {
+    it('short-circuits to the inline tracklist when the resolver carries one (no release fetch)', async () => {
       // BS#1185 + LML#427: when the tier-3 LML lookup returns an extended
       // result with a tracklist (Discogs hit OR MusicBrainz rescue), the
       // service projects it inline and the controller returns it directly.
-      // No second LML round-trip via `getRelease`.
+      // No second LML round-trip.
       const inlineTracklist = [
         { position: '1', title: 'Tragic Magic', duration: '6:01', artists: ['Julianna Barwick & Mary Lattimore'] },
         { position: '2', title: 'For Mariko', duration: '4:18', artists: ['Julianna Barwick & Mary Lattimore'] },
@@ -558,14 +515,14 @@ describe('library.controller', () => {
 
       await getRotationTracks(req, res, next);
 
-      expect(mockGetRelease).not.toHaveBeenCalled();
+      expect(mockGetRotationTracksFromRelease).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith(inlineTracklist);
     });
 
-    it('returns 200 + empty array on LML 404 (release unknown to Discogs)', async () => {
+    it('returns 200 + empty array when the service returns null (LML 404 negative-cached)', async () => {
       mockResolveRotationPickerSource.mockResolvedValue({ releaseId: 9999999, inlineTracklist: null });
-      mockGetRelease.mockRejectedValue(new MockLmlClientError('not found', 404));
+      mockGetRotationTracksFromRelease.mockResolvedValue(null);
       const req = { params: { rotation_id: '42' } } as unknown as Request;
       const res = mockResponse();
 
@@ -575,9 +532,9 @@ describe('library.controller', () => {
       expect(res.json).toHaveBeenCalledWith([]);
     });
 
-    it('bubbles LML 5xx errors so transient failures surface rather than silently degrading', async () => {
+    it('bubbles service errors (LML 5xx, network) so transient failures surface rather than silently degrading', async () => {
       mockResolveRotationPickerSource.mockResolvedValue({ releaseId: 4080, inlineTracklist: null });
-      mockGetRelease.mockRejectedValue(new MockLmlClientError('upstream timeout', 504));
+      mockGetRotationTracksFromRelease.mockRejectedValue(new Error('upstream timeout'));
       const req = { params: { rotation_id: '42' } } as unknown as Request;
       const res = mockResponse();
 

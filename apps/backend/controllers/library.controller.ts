@@ -13,14 +13,7 @@ import * as libraryService from '../services/library.service.js';
 import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
-import {
-  checkStreamingAvailability,
-  lookupMetadata,
-  isLmlConfigured,
-  getRelease,
-  envInt,
-  LmlClientError,
-} from '@wxyc/lml-client';
+import { checkStreamingAvailability, lookupMetadata, isLmlConfigured, envInt } from '@wxyc/lml-client';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
 
@@ -399,18 +392,8 @@ export const getRotationTracks: RequestHandler<{ rotation_id: string }> = async 
     return;
   }
 
-  let release;
-  try {
-    release = await getRelease(source.releaseId);
-  } catch (err) {
-    if (err instanceof LmlClientError && err.statusCode === 404) {
-      res.status(200).json([]);
-      return;
-    }
-    throw err;
-  }
-
-  res.status(200).json(libraryService.projectInlineTracklist(release.tracklist, release.artist) ?? []);
+  const tracks = await libraryService.getRotationTracksFromRelease(source.releaseId);
+  res.status(200).json(tracks ?? []);
 };
 
 export const getFormats: RequestHandler = async (req, res) => {
