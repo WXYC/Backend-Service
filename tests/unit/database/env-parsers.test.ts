@@ -1,9 +1,11 @@
 import { requireNonNegativeInt, requirePositiveInt } from '../../../shared/database/src/env-parsers';
 
 describe('requirePositiveInt', () => {
-  it('returns fallback when raw is undefined or empty', () => {
+  it('returns fallback when raw is undefined, empty, or whitespace-only', () => {
     expect(requirePositiveInt(undefined, 'X', 42)).toBe(42);
     expect(requirePositiveInt('', 'X', 42)).toBe(42);
+    expect(requirePositiveInt('   ', 'X', 42)).toBe(42);
+    expect(requirePositiveInt('\t\n', 'X', 42)).toBe(42);
   });
 
   it('returns the parsed integer when valid', () => {
@@ -21,9 +23,11 @@ describe('requirePositiveInt', () => {
 });
 
 describe('requireNonNegativeInt', () => {
-  it('returns fallback when raw is undefined or empty', () => {
+  it('returns fallback when raw is undefined, empty, or whitespace-only', () => {
     expect(requireNonNegativeInt(undefined, 'X', 42)).toBe(42);
     expect(requireNonNegativeInt('', 'X', 42)).toBe(42);
+    expect(requireNonNegativeInt('   ', 'X', 42)).toBe(42);
+    expect(requireNonNegativeInt('\t\n', 'X', 42)).toBe(42);
   });
 
   it('returns the parsed integer when valid (including zero)', () => {

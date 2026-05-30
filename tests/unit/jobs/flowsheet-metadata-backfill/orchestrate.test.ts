@@ -135,6 +135,11 @@ describe('resolveLiveActivityLookback', () => {
     expect(resolveLiveActivityLookback(undefined)).toBe(60);
   });
 
+  it('falls back to the default when env var is empty or whitespace-only', () => {
+    expect(resolveLiveActivityLookback('')).toBe(60);
+    expect(resolveLiveActivityLookback('   ')).toBe(60);
+  });
+
   it('accepts 0 (operators can disable the cooperative pause for catch-up runs)', () => {
     expect(resolveLiveActivityLookback('0')).toBe(0);
   });
@@ -153,6 +158,11 @@ describe('resolveLiveActivityLookback', () => {
 describe('resolveLiveActivityPauseMs', () => {
   it('falls back to the shared 30s default when env var is unset', () => {
     expect(resolveLiveActivityPauseMs(undefined)).toBe(30_000);
+  });
+
+  it('falls back to the default when env var is empty or whitespace-only', () => {
+    expect(resolveLiveActivityPauseMs('')).toBe(30_000);
+    expect(resolveLiveActivityPauseMs('   ')).toBe(30_000);
   });
 
   it('accepts 0 (tests may want no pause)', () => {

@@ -36,7 +36,7 @@ export const requirePositiveInt = (
   fallback: number,
   opts: IntParserOptions = {}
 ): number => {
-  if (raw === undefined || raw === '') return fallback;
+  if (raw === undefined || raw.trim() === '') return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
     throw new Error(formatIntError(envName, raw, 'positive', opts));
@@ -50,7 +50,7 @@ export const requireNonNegativeInt = (
   fallback: number,
   opts: IntParserOptions = {}
 ): number => {
-  if (raw === undefined || raw === '') return fallback;
+  if (raw === undefined || raw.trim() === '') return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
     throw new Error(formatIntError(envName, raw, 'non-negative', opts));

@@ -128,6 +128,13 @@ describe('resolveLiveActivityLookback / resolveLiveActivityPauseMs', () => {
     expect(resolveLiveActivityPauseMs(undefined)).toBe(30_000);
   });
 
+  it('falls back to the default when env var is empty or whitespace-only', () => {
+    expect(resolveLiveActivityLookback('')).toBe(60);
+    expect(resolveLiveActivityLookback('   ')).toBe(60);
+    expect(resolveLiveActivityPauseMs('')).toBe(30_000);
+    expect(resolveLiveActivityPauseMs('   ')).toBe(30_000);
+  });
+
   it('accepts valid non-negative integers (0 disables)', () => {
     expect(resolveLiveActivityLookback('0')).toBe(0);
     expect(resolveLiveActivityLookback('120')).toBe(120);
