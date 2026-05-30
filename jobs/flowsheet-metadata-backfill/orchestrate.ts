@@ -49,6 +49,7 @@ import {
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
   LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  requireNonNegativeInt,
   type CheckLiveActivityFn,
 } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
@@ -119,25 +120,14 @@ export const resolveThrottleMs = (raw: string | undefined = process.env.BACKFILL
  */
 export const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
-): number => {
-  if (raw === undefined) return LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new Error(
-      `Invalid LIVE_ACTIVITY_LOOKBACK_SECONDS=${JSON.stringify(raw)}; must be a non-negative integer (s). Use 0 to disable the cooperative pause.`
-    );
-  }
-  return parsed;
-};
+): number =>
+  requireNonNegativeInt(raw, 'LIVE_ACTIVITY_LOOKBACK_SECONDS', LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT, {
+    unit: 's',
+    note: 'Use 0 to disable the cooperative pause.',
+  });
 
-export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number => {
-  if (raw === undefined) return LIVE_ACTIVITY_PAUSE_MS_DEFAULT;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new Error(`Invalid LIVE_ACTIVITY_PAUSE_MS=${JSON.stringify(raw)}; must be a non-negative integer (ms).`);
-  }
-  return parsed;
-};
+export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
+  requireNonNegativeInt(raw, 'LIVE_ACTIVITY_PAUSE_MS', LIVE_ACTIVITY_PAUSE_MS_DEFAULT, { unit: 'ms' });
 
 /**
  * Resolve PARTITION_INDEX / PARTITION_COUNT env vars into a SQL fragment that
