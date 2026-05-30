@@ -107,7 +107,7 @@ npm run drizzle:migrate    # Apply migrations to database
 npm run drizzle:drop       # Delete a migration file
 ```
 
-**Read [`docs/migrations.md`](docs/migrations.md) before authoring any migration.** It covers the journal `when`-bumping recipe, the parallel-PR collision case, the `IF NOT EXISTS` index pattern, the DDL-only rule, the constraint-precondition-guard pattern, and the cross-cache-identity gate. Also documents the `flowsheet.legacy_link_attempted_at` and `metadata_attempt_at` markers and the jobs that stamp them.
+**Read [`docs/migrations.md`](docs/migrations.md) before authoring any migration.** It covers the journal `when`-bumping recipe, the parallel-PR collision case, the `IF NOT EXISTS` index pattern, the DDL-only rule, the constraint-precondition-guard pattern, and the cross-cache-identity gate. Also documents the `flowsheet.legacy_link_attempted_at`, `flowsheet.metadata_attempt_at`, and `rotation.tracklist_lookup_attempted_at` attempt-at markers and the jobs that stamp them.
 
 ### Authentication (`shared/authentication`)
 
