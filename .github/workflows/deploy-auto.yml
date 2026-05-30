@@ -5,6 +5,18 @@ on:
     branches:
       - main
 
+# Serialize Auto deploys: when a new merge to main arrives while an
+# earlier deploy is still running, cancel the earlier run. The newer
+# commit is a superset of the older one, and the in-flight `docker stop`
+# / `docker run` sequence on EC2 would otherwise get interrupted mid-
+# startup by the next deploy's `docker stop`, leaving the healthcheck
+# polling against an unstable container. Three-PR rapid-succession
+# merges on 2026-05-30 (#1238/#1239/#1240) reported this as two failed
+# deploys for a healthy prod (#1243).
+concurrency:
+  group: deploy-auto-${{ github.workflow }}
+  cancel-in-progress: true
+
 # Caller permissions must equal or exceed the reusable workflow's
 # declared scope; deploy-base.yml requires contents:write to create
 # release tags via github-script. Granting less here makes GHA reject
