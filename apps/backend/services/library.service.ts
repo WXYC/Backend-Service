@@ -32,6 +32,7 @@ import {
   LmlClientError,
   type LookupResponse,
   type DiscogsTrackItem,
+  type DiscogsReleaseMetadata,
 } from '@wxyc/lml-client';
 import { filterSpacerGif } from './metadata/metadata.service.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
@@ -613,20 +614,14 @@ export function projectInlineTracklist(
 /**
  * Per-`release_id` LRU on the projected `RotationTrack[]` from LML's
  * `GET /api/v1/discogs/release/{id}`. Absorbs the dominant cost on the
- * rotation-tracks picker: the LML release-fetch endpoint takes 2-9 s on
- * Discogs cache miss (78 ms warm). This cache covers both the
- * second-open-on-same-row case and the cross-row case where two rotation_ids
- * resolve to the same release_id.
+ * rotation-tracks picker — the LML release-fetch endpoint takes 2-9 s on
+ * Discogs cache miss vs. 78 ms warm.
  *
  * Positive TTL is long (24 h) because Discogs release tracklists are
- * effectively immutable — editorial corrections are rare and the picker
- * tolerates staleness. Negative TTL is short so a release that becomes
- * known to Discogs recovers quickly.
- *
- * Parity-aware with the upstream LML cache and the tier-3
- * `rotationLmlPositiveCache` (per-`rotation_id` LRU). Nothing flushes this
- * on rotation row edits — the read paths feeding it are picker-only and a
- * 24 h TTL is the right blast radius for an immutable Discogs payload.
+ * effectively immutable. Negative TTL is short so a release that becomes
+ * known to Discogs recovers quickly. In-flight map coalesces concurrent
+ * dropdown opens on the same release so a cold-deploy burst pays the
+ * cold-path once across DJs, not once per DJ.
  */
 const RELEASE_TRACKLIST_CACHE_MAX = 500;
 const RELEASE_TRACKLIST_TTL_POSITIVE_MS = 24 * 60 * 60 * 1000;
@@ -644,49 +639,52 @@ const releaseTracklistNegativeCache = new LRUCache<number, true>({
   ttlAutopurge: true,
 });
 
+const releaseTracklistInflight = new Map<number, Promise<RotationTrack[] | null>>();
+
 export function __resetReleaseTracklistCacheForTests(): void {
   releaseTracklistPositiveCache.clear();
   releaseTracklistNegativeCache.clear();
+  releaseTracklistInflight.clear();
 }
 
 /**
  * Fetch a Discogs release tracklist via LML and project it onto the
- * picker's `RotationTrack` wire shape. Results are cached per `release_id`
- * (see `releaseTracklistPositiveCache` / `releaseTracklistNegativeCache`).
+ * picker's `RotationTrack` wire shape. Cached per `release_id`.
  *
  * Returns:
- *   - `RotationTrack[]` — projected tracklist (possibly empty if the release
- *     itself has no tracks); positive-cached.
- *   - `null` — LML returned 404 for the release id; negative-cached so the
- *     picker doesn't re-ask on every dropdown open. The controller maps
- *     `null` → 200 + `[]`.
+ *   - `RotationTrack[]` — positive-cached projection.
+ *   - `null` — LML returned 404; negative-cached. Controller maps to 200 + `[]`.
  *
  * Other LML errors (5xx, network, parse) bubble so transient upstream
  * failures surface rather than silently degrading the picker.
- *
- * Used by `getRotationTracks` controller (BS#940) when
- * `resolveRotationPickerSource` returns a `releaseId` with no inline
- * tracklist (tier 1 / tier 2 hits).
  */
 export async function getRotationTracksFromRelease(releaseId: number): Promise<RotationTrack[] | null> {
   const cachedPositive = releaseTracklistPositiveCache.get(releaseId);
   if (cachedPositive !== undefined) return cachedPositive;
   if (releaseTracklistNegativeCache.has(releaseId)) return null;
 
-  let release: Awaited<ReturnType<typeof getRelease>>;
-  try {
-    release = await getRelease(releaseId);
-  } catch (err) {
-    if (err instanceof LmlClientError && err.statusCode === 404) {
-      releaseTracklistNegativeCache.set(releaseId, true);
-      return null;
-    }
-    throw err;
-  }
+  const inflight = releaseTracklistInflight.get(releaseId);
+  if (inflight) return inflight;
 
-  const tracks = projectInlineTracklist(release.tracklist, release.artist) ?? [];
-  releaseTracklistPositiveCache.set(releaseId, tracks);
-  return tracks;
+  const pending = (async () => {
+    let release: DiscogsReleaseMetadata;
+    try {
+      release = await getRelease(releaseId);
+    } catch (err) {
+      if (err instanceof LmlClientError && err.statusCode === 404) {
+        releaseTracklistNegativeCache.set(releaseId, true);
+        return null;
+      }
+      throw err;
+    }
+    const tracks = projectInlineTracklist(release.tracklist, release.artist) ?? [];
+    releaseTracklistPositiveCache.set(releaseId, tracks);
+    return tracks;
+  })().finally(() => {
+    releaseTracklistInflight.delete(releaseId);
+  });
+  releaseTracklistInflight.set(releaseId, pending);
+  return pending;
 }
 
 export const updateOnStreaming = async (id: number, on_streaming: boolean | null) => {
