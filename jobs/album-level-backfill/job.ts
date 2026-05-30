@@ -35,7 +35,7 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { album_metadata, db, closeDatabaseConnection } from '@wxyc/database';
+import { album_metadata, db, closeDatabaseConnection, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
 import { bulkLookupMetadata, type BulkLookupItem, type LookupResponse } from '@wxyc/lml-client';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
@@ -113,26 +113,6 @@ export const LIVE_ACTIVITY_LOOKBACK_DEFAULT = 300;
 
 /** Sleep between re-probes when DJ activity is detected. */
 export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
-
-// -- Env parsing -------------------------------------------------------------
-
-const requirePositiveInt = (raw: string | undefined, envName: string, fallback: number): number => {
-  if (raw === undefined || raw === '') return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
-    throw new Error(`[${JOB_NAME}] Invalid ${envName}=${raw}: must be a positive integer.`);
-  }
-  return n;
-};
-
-const requireNonNegativeInt = (raw: string | undefined, envName: string, fallback: number): number => {
-  if (raw === undefined || raw === '') return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
-    throw new Error(`[${JOB_NAME}] Invalid ${envName}=${raw}: must be a non-negative integer.`);
-  }
-  return n;
-};
 
 // -- Inlined helpers ---------------------------------------------------------
 //
@@ -503,16 +483,23 @@ export const resolveOptions = (
   env: NodeJS.ProcessEnv = process.env,
   args: string[] = process.argv
 ): BackfillOptions => {
+  const ctx = { context: JOB_NAME };
   return {
-    batchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT),
-    ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT),
-    budgetMs: requirePositiveInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT),
-    postPassTimeoutMs: requirePositiveInt(env[POST_PASS_TIMEOUT_ENV], POST_PASS_TIMEOUT_ENV, POST_PASS_TIMEOUT_DEFAULT),
-    readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT),
+    batchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT, ctx),
+    ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT, ctx),
+    budgetMs: requirePositiveInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
+    postPassTimeoutMs: requirePositiveInt(
+      env[POST_PASS_TIMEOUT_ENV],
+      POST_PASS_TIMEOUT_ENV,
+      POST_PASS_TIMEOUT_DEFAULT,
+      ctx
+    ),
+    readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
     liveActivityLookbackSeconds: requireNonNegativeInt(
       env[LIVE_ACTIVITY_LOOKBACK_ENV],
       LIVE_ACTIVITY_LOOKBACK_ENV,
-      LIVE_ACTIVITY_LOOKBACK_DEFAULT
+      LIVE_ACTIVITY_LOOKBACK_DEFAULT,
+      ctx
     ),
     liveActivityPauseMs: LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
     dryRun: args.includes('--dry-run'),

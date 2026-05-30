@@ -274,6 +274,9 @@ export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
 export type CheckLiveActivityFn = (lookbackSeconds: number) => Promise<boolean>;
 export const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
 
+export { requirePositiveInt, requireNonNegativeInt } from '../../shared/database/src/env-parsers.js';
+export type { IntParserOptions } from '../../shared/database/src/env-parsers.js';
+
 // Mock types
 export type AnonymousDevice = {
   id: number;
