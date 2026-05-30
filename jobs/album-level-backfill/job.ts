@@ -37,6 +37,7 @@
 import { sql } from 'drizzle-orm';
 import { album_metadata, db, closeDatabaseConnection, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
 import { bulkLookupMetadata, type BulkLookupItem, type LookupResponse } from '@wxyc/lml-client';
+import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'album-level-backfill';
@@ -113,31 +114,6 @@ export const LIVE_ACTIVITY_LOOKBACK_DEFAULT = 300;
 
 /** Sleep between re-probes when DJ activity is detected. */
 export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
-
-// -- Inlined helpers ---------------------------------------------------------
-//
-// Both helpers are inlined for the same build-graph isolation reason as
-// jobs/flowsheet-metadata-backfill/enrich.ts (no imports from apps/backend).
-// Parity with the canonical sources is pinned by the parity tests at
-// tests/unit/jobs/album-level-backfill/{clean-discogs-bio,filter-spacer-gif}-parity.test.ts.
-
-/** Strip Discogs markup tags from bio text. Mirrors
- * apps/backend/services/metadata/metadata.service.ts#cleanDiscogsBio and
- * jobs/flowsheet-metadata-backfill/enrich.ts#cleanDiscogsBio verbatim. */
-export const cleanDiscogsBio = (bio: string): string =>
-  bio
-    .replace(/\[a=([^\]]+)\]/g, '$1')
-    .replace(/\[l=([^\]]+)\]/g, '$1')
-    .replace(/\[r=([^\]]+)\]/g, '$1')
-    .replace(/\[m=([^\]]+)\]/g, '$1')
-    .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
-
-/** Drop Discogs spacer.gif placeholder URLs. Mirrors enrich.ts#filterSpacerGif. */
-export const filterSpacerGif = (url: string | null | undefined): string | null => {
-  if (!url) return null;
-  if (url.includes('spacer.gif')) return null;
-  return url;
-};
 
 // -- Source query ------------------------------------------------------------
 
