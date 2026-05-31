@@ -15,6 +15,7 @@ import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest } from './rate-limit-key';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
+import { checkRequestBanHandler } from './check-request-ban-handler';
 import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
@@ -287,6 +288,15 @@ if (!isTestEnv) {
 }
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
+
+// BS#1261 — request-line ban enforcement. Registered before the better-auth
+// handler so this specific path doesn't fall through to better-auth's
+// catch-all. ROM calls this on every POST /request to decide allow/block.
+// X-Internal-Key, if present and matching ROM_INTERNAL_KEY, signals an
+// intended ROM caller for rate-limit bucketing; the value is not validated
+// as authorization — JWT/fingerprint determine the response shape.
+app.post('/auth/check-request-ban', checkRequestBanHandler);
+
 app.use('/auth', toNodeHandler(auth));
 
 // Liveness/readiness endpoint. Body conforms to HealthCheckResponse from

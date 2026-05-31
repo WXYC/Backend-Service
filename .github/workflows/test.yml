@@ -354,6 +354,9 @@ jobs:
           # tubafrenzy-webhook integration spec needs this wired explicitly.
           # Matches the spec's INTERNAL_KEY fallback default.
           ETL_NOTIFY_KEY: test-secret-key
+          # BS#1261 — request-line ban CRUD + check-request-ban bucketing.
+          # Same shape as ETL_NOTIFY_KEY but distinct env var.
+          ROM_INTERNAL_KEY: test-rom-secret-key
           # LML client limiter: disable in CI. The integration suite runs
           # hundreds of fire-and-forget /lookup calls across spec files under
           # --runInBand; the module-level TokenBucket(50/min) would drain

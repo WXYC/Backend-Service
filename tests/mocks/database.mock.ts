@@ -212,6 +212,13 @@ export const user = {
   isAnonymous: 'is_anonymous',
   capabilities: 'capabilities',
 };
+export const banned_fingerprints = {
+  fingerprint: 'fingerprint',
+  banned_at: 'banned_at',
+  ban_reason: 'ban_reason',
+  ban_expires_at: 'ban_expires_at',
+  banned_by_user_id: 'banned_by_user_id',
+};
 export const specialty_shows = {};
 export const schedule = {};
 export const artist_crossreference = {};
