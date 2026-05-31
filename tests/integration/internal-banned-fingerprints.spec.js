@@ -104,6 +104,61 @@ describe('/internal/banned-fingerprints (BS#1261)', () => {
       const expected = Date.now() + 3600 * 1000;
       expect(Math.abs(expiresAt - expected)).toBeLessThan(60_000);
     });
+
+    test('trims surrounding whitespace from reason before storing', async () => {
+      const res = await request
+        .post('/internal/banned-fingerprints')
+        .set('X-Internal-Key', KEY)
+        .send({ fingerprint: FP1, reason: '   spammy spammer   ' });
+      expect(res.status).toBe(200);
+      expect(res.body.ban_reason).toBe('spammy spammer');
+
+      const rows = await sql.unsafe(
+        `SELECT ban_reason FROM ${SCHEMA}.banned_fingerprints WHERE fingerprint = $1::uuid`,
+        [FP1]
+      );
+      expect(rows[0].ban_reason).toBe('spammy spammer');
+    });
+
+    test('400 when bannedByUserId does not reference an existing auth_user.id', async () => {
+      // FK violation (SQLSTATE 23503) should surface as 400 with a clear
+      // operator-actionable message, not as a generic 500.
+      const res = await request
+        .post('/internal/banned-fingerprints')
+        .set('X-Internal-Key', KEY)
+        .send({ fingerprint: FP1, reason: 'spam', bannedByUserId: 'usr_does_not_exist_in_auth_user' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/bannedByUserId/);
+    });
+
+    test('upsert preserves original banned_by_user_id when re-ban omits it', async () => {
+      // Operator A bans with bannedByUserId=null (default). Operator B re-bans
+      // omitting bannedByUserId entirely. Original attribution should be
+      // preserved (or in this case, both should be null and stay null).
+      // Use the staging default user that the seed creates so the FK passes.
+      const userRows = await sql.unsafe(`SELECT id FROM auth_user LIMIT 1`);
+      if (userRows.length === 0) {
+        // No seeded user — skip the attribution-preservation case rather
+        // than fabricating an auth_user row in an integration spec.
+        return;
+      }
+      const operatorId = userRows[0].id;
+
+      // Initial ban WITH attribution.
+      await request
+        .post('/internal/banned-fingerprints')
+        .set('X-Internal-Key', KEY)
+        .send({ fingerprint: FP1, reason: 'initial', bannedByUserId: operatorId });
+
+      // Re-ban WITHOUT attribution. The COALESCE in the on-conflict clause
+      // should preserve operatorId rather than NULL it.
+      const res = await request
+        .post('/internal/banned-fingerprints')
+        .set('X-Internal-Key', KEY)
+        .send({ fingerprint: FP1, reason: 'updated reason' });
+      expect(res.status).toBe(200);
+      expect(res.body.banned_by_user_id).toBe(operatorId);
+    });
   });
 
   describe('DELETE', () => {

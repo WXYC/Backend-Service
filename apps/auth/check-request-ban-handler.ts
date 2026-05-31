@@ -9,17 +9,20 @@
  *   X-Device-Fingerprint: <uuid>     (optional)
  * At least one of the two must be present; otherwise 400 no_signal.
  *
- * Resolution model:
- *   - Verify the JWT in-process via `auth.api.verifyJWT` (JWKS-backed; no HTTP
- *     hop). If the JWT is present but invalid → 401 invalid_token. If the
- *     JWT verifies but the `sub` user has been deleted → 404 user_not_found.
- *   - Check the fingerprint against `banned_fingerprints`, filtering out
- *     rows whose `ban_expires_at` is in the past.
- *   - If both signals are banned, return `banSource: "fingerprint"` — the
- *     stickier ban and the more meaningful operator signal.
+ * Resolution order matters: the fingerprint side is checked FIRST so a
+ * banned-fingerprint caller cannot bypass enforcement by appending a
+ * malformed JWT to force a 401 short-circuit. If both signals are present
+ * and the fingerprint is banned, the response is 200 banned regardless of
+ * JWT validity. The JWT is only verified (and 401 returned on failure)
+ * when the fingerprint side did not produce a banned answer.
  *
- * Never log the raw JWT body — logged JWTs are credentials. Logging is keyed
- * on `userId` extracted from claims.
+ * Expired bans (user-side or fingerprint-side) are treated as not-banned.
+ * better-auth only auto-clears expired user.banned at session.create.before
+ * (next sign-in), so a stale JWT issued before the expiry would otherwise
+ * keep returning banned indefinitely — read banExpires here and honor it.
+ *
+ * Never log the raw JWT body — logged JWTs are credentials. Logging is
+ * keyed on userId extracted from claims.
  */
 
 import * as Sentry from '@sentry/node';
@@ -38,12 +41,22 @@ function extractBearer(header: string | undefined): string | null {
   return token.length > 0 ? token : null;
 }
 
-type UserBanRow = { id: string; banned: boolean | null; banReason: string | null };
+type UserBanRow = {
+  id: string;
+  banned: boolean | null;
+  banReason: string | null;
+  banExpires: Date | null;
+};
 type FingerprintBanRow = { fingerprint: string; ban_reason: string; ban_expires_at: Date | null };
 
 async function lookupUser(userId: string): Promise<UserBanRow | null> {
   const rows = await db
-    .select({ id: user.id, banned: user.banned, banReason: user.banReason })
+    .select({
+      id: user.id,
+      banned: user.banned,
+      banReason: user.banReason,
+      banExpires: user.banExpires,
+    })
     .from(user)
     .where(eq(user.id, userId))
     .limit(1);
@@ -65,20 +78,24 @@ async function lookupFingerprint(fingerprint: string): Promise<FingerprintBanRow
   return rows[0] ?? null;
 }
 
+function isUserCurrentlyBanned(row: UserBanRow): boolean {
+  if (!row.banned) return false;
+  if (row.banExpires && row.banExpires.getTime() <= Date.now()) return false;
+  return true;
+}
+
 export async function checkRequestBanHandler(req: Request, res: Response): Promise<Response> {
   try {
     const authHeader = req.get('Authorization');
     const bearer = extractBearer(authHeader);
     const fingerprintRaw = req.get('X-Device-Fingerprint');
 
-    // Authorization present but unparseable as Bearer → 401 (they tried to
-    // authenticate and the header is malformed). Distinct from "no header at
-    // all" which is treated as the JWT-absent path.
-    if (authHeader && !bearer) {
-      return res.status(401).json({ error: 'invalid_token' });
-    }
+    // Authorization present but unparseable as Bearer is a malformed JWT —
+    // hold the 401 until after the fingerprint check so a banned-fingerprint
+    // caller can't bypass by appending garbage to the Authorization header.
+    const authHeaderMalformed = !!authHeader && !bearer;
 
-    if (!bearer && !fingerprintRaw) {
+    if (!bearer && !fingerprintRaw && !authHeaderMalformed) {
       return res.status(400).json({ error: 'no_signal' });
     }
 
@@ -87,11 +104,27 @@ export async function checkRequestBanHandler(req: Request, res: Response): Promi
     }
     const fingerprint = fingerprintRaw ?? null;
 
-    // Verify the JWT (if present). better-auth's verifyJWT returns
-    // `{ payload: null }` on any failure (bad signature, expired, malformed).
-    // We can't distinguish expired from invalid here without parsing claims
-    // ourselves; the spec accepts a single "invalid_token" classification for
-    // both cases.
+    // Resolve the fingerprint first. If it's banned, the answer is "banned"
+    // regardless of JWT validity — that's the whole point of the
+    // fingerprint-as-stable-ban-target architecture.
+    const fingerprintRow = fingerprint ? await lookupFingerprint(fingerprint) : null;
+    if (fingerprintRow) {
+      return res.status(200).json({
+        userId: null,
+        fingerprint,
+        banned: true,
+        banReason: fingerprintRow.ban_reason,
+        banSource: 'fingerprint',
+      });
+    }
+
+    // Fingerprint is clean (or absent). Now the JWT side becomes load-bearing
+    // for a "banned: false" verdict — a malformed/invalid JWT must produce
+    // 401 here so callers can't get a "not banned" response from a bad token.
+    if (authHeaderMalformed) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+
     let userId: string | null = null;
     if (bearer) {
       // tsup's DTS emitter narrows `auth.api` to better-auth's base endpoints
@@ -109,35 +142,22 @@ export async function checkRequestBanHandler(req: Request, res: Response): Promi
       userId = payload.sub;
     }
 
-    // Look up user + fingerprint in parallel when both are present.
-    const [userRow, fingerprintRow] = await Promise.all([
-      userId ? lookupUser(userId) : Promise.resolve(null),
-      fingerprint ? lookupFingerprint(fingerprint) : Promise.resolve(null),
-    ]);
+    if (!userId) {
+      // Fingerprint-only request, fingerprint not banned → not banned.
+      return res.status(200).json({ userId: null, fingerprint, banned: false });
+    }
 
-    if (userId && !userRow) {
+    const userRow = await lookupUser(userId);
+    if (!userRow) {
       return res.status(404).json({ error: 'user_not_found' });
     }
 
-    const userBanned = !!userRow?.banned;
-    const fingerprintBanned = !!fingerprintRow;
-
-    if (fingerprintBanned) {
+    if (isUserCurrentlyBanned(userRow)) {
       return res.status(200).json({
         userId,
         fingerprint,
         banned: true,
-        banReason: fingerprintRow!.ban_reason,
-        banSource: 'fingerprint',
-      });
-    }
-
-    if (userBanned) {
-      return res.status(200).json({
-        userId,
-        fingerprint,
-        banned: true,
-        banReason: userRow!.banReason,
+        banReason: userRow.banReason,
         banSource: 'user',
       });
     }

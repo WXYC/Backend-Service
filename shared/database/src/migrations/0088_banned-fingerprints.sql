@@ -28,6 +28,6 @@ CREATE TABLE "wxyc_schema"."banned_fingerprints" (
     FOREIGN KEY ("banned_by_user_id") REFERENCES "public"."auth_user"("id")
     ON DELETE SET NULL ON UPDATE NO ACTION
 );--> statement-breakpoint
-CREATE INDEX "banned_fingerprints_ban_expires_at_idx"
+CREATE INDEX IF NOT EXISTS "banned_fingerprints_ban_expires_at_idx"
   ON "wxyc_schema"."banned_fingerprints" USING btree ("ban_expires_at")
   WHERE "wxyc_schema"."banned_fingerprints"."ban_expires_at" IS NOT NULL;

@@ -41,7 +41,10 @@ app.use(
   cors({
     origin: process.env.FRONTEND_SOURCE || '*',
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'Set-Cookie'],
+    // X-Device-Fingerprint is sent on /auth/check-request-ban (BS#1261).
+    // Add here so a future browser-origin caller (dj-site admin tool, iOS
+    // WebView, etc.) isn't blocked by the preflight.
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'Set-Cookie', 'X-Device-Fingerprint'],
     methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'DELETE', 'PATCH'],
     exposedHeaders: ['Content-Length', 'Set-Cookie'],
   })
@@ -285,6 +288,21 @@ if (!isTestEnv) {
   for (const path of rateLimitedPaths) {
     app.use(path, authMutationRateLimit);
   }
+
+  // BS#1261 — separate, more generous limiter for /auth/check-request-ban.
+  // The brute-force-sensitive limiter above (10/15min) is too tight for the
+  // per-request-line traffic profile, but the endpoint is public + does JWT
+  // signature verification + 1-2 DB lookups per call, so leaving it
+  // unbounded exposes the auth-service DB pool to a cheap DoS.
+  const checkRequestBanRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 120, // 2/s sustained per IP, well above expected ROM volume
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  app.use('/auth/check-request-ban', checkRequestBanRateLimit);
 }
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
@@ -292,9 +310,10 @@ app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
 // BS#1261 — request-line ban enforcement. Registered before the better-auth
 // handler so this specific path doesn't fall through to better-auth's
 // catch-all. ROM calls this on every POST /request to decide allow/block.
-// X-Internal-Key, if present and matching ROM_INTERNAL_KEY, signals an
-// intended ROM caller for rate-limit bucketing; the value is not validated
-// as authorization — JWT/fingerprint determine the response shape.
+// The endpoint is intentionally public (no X-Internal-Key gate): callers
+// authenticate per-request via JWT and/or X-Device-Fingerprint, and the
+// response shape is driven by those. Per-IP rate limiting is applied
+// above to bound the JWT-verify + DB lookup cost.
 app.post('/auth/check-request-ban', checkRequestBanHandler);
 
 app.use('/auth', toNodeHandler(auth));
