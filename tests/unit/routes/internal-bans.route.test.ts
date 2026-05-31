@@ -77,6 +77,43 @@ describe('POST /internal/banned-fingerprints (create)', () => {
     expect(res.status).toBe(400);
   });
 
+  it('returns 400 when expiresInSeconds is a non-integer', async () => {
+    const res = await request(app)
+      .post('/internal/banned-fingerprints')
+      .set('X-Internal-Key', KEY)
+      .send({ fingerprint: FP, reason: 'spam', expiresInSeconds: 3600.5 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/integer/i);
+  });
+
+  it('returns 400 when bannedByUserId is provided as a non-string', async () => {
+    const res = await request(app)
+      .post('/internal/banned-fingerprints')
+      .set('X-Internal-Key', KEY)
+      .send({ fingerprint: FP, reason: 'spam', bannedByUserId: 42 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/bannedByUserId/i);
+  });
+
+  it('accepts an omitted bannedByUserId (defaults to null)', async () => {
+    const row = {
+      fingerprint: FP,
+      banned_at: new Date('2026-05-31T12:00:00Z'),
+      ban_reason: 'spam',
+      ban_expires_at: null,
+      banned_by_user_id: null,
+    };
+    mockReturning.mockResolvedValueOnce([row]);
+
+    const res = await request(app)
+      .post('/internal/banned-fingerprints')
+      .set('X-Internal-Key', KEY)
+      .send({ fingerprint: FP, reason: 'spam' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.banned_by_user_id).toBeNull();
+  });
+
   it('returns 200 with the created row on success', async () => {
     const row = {
       fingerprint: FP,
