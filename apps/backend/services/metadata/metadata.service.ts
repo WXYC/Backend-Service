@@ -28,12 +28,10 @@ export { filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
 const searchUrls = new SearchUrlProvider();
 
 /**
- * Budget for the metadata-service LML lookup. Honest scope oversight from
- * BS#1186 (which listed four files but missed this one); without it, LML's
- * empty-cascade safety branch kept the lookup grinding to the 30 s
- * `AbortController` ceiling — measured at 30,002 ms p95 on 2026-05-31. 5 s
- * matches the other runtime callers in the same deadline class.
- * See `LookupOptions.budgetMs` for mechanics.
+ * Budget for the metadata-service fire-and-forget LML lookup on flowsheet
+ * insert. 5 s matches the other runtime callers — short enough that LML
+ * cuts off well before the BS-side 30 s `AbortController` ceiling. See
+ * `LookupOptions.budgetMs` for mechanics.
  */
 const METADATA_SERVICE_LML_BUDGET_MS = envInt('METADATA_SERVICE_LML_BUDGET_MS', 5000);
 
