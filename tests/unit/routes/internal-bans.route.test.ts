@@ -35,6 +35,12 @@ const FP = '11111111-1111-1111-1111-111111111111';
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // clearAllMocks() does NOT drain mockResolvedValueOnce queues; reset the
+  // per-call mocks fully so a stale queued value from a short-circuit test
+  // can't leak into the next test.
+  mockLimit.mockReset();
+  mockReturning.mockReset();
+  mockOffset.mockReset();
 });
 
 describe('POST /internal/banned-fingerprints (create)', () => {
@@ -94,6 +100,53 @@ describe('POST /internal/banned-fingerprints (create)', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/bannedByUserId/i);
   });
+
+  it('returns 400 when bannedByUserId is an empty string', async () => {
+    const res = await request(app)
+      .post('/internal/banned-fingerprints')
+      .set('X-Internal-Key', KEY)
+      .send({ fingerprint: FP, reason: 'spam', bannedByUserId: '' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/bannedByUserId/i);
+  });
+
+  it('returns 400 when bannedByUserId exceeds 255 characters', async () => {
+    const res = await request(app)
+      .post('/internal/banned-fingerprints')
+      .set('X-Internal-Key', KEY)
+      .send({ fingerprint: FP, reason: 'spam', bannedByUserId: 'x'.repeat(256) });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/bannedByUserId/i);
+  });
+
+  it('returns 400 when reason exceeds 1000 characters', async () => {
+    const res = await request(app)
+      .post('/internal/banned-fingerprints')
+      .set('X-Internal-Key', KEY)
+      .send({ fingerprint: FP, reason: 'x'.repeat(1001) });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/1000/);
+  });
+
+  it('returns 400 with a clear message when bannedByUserId triggers a foreign-key violation', async () => {
+    // PG raises SQLSTATE 23503 when bannedByUserId doesn't reference an
+    // existing auth_user.id. Handler surfaces as 400, not generic 500.
+    const fkError = Object.assign(new Error('insert violates foreign key constraint'), { code: '23503' });
+    mockReturning.mockRejectedValueOnce(fkError);
+
+    const res = await request(app)
+      .post('/internal/banned-fingerprints')
+      .set('X-Internal-Key', KEY)
+      .send({ fingerprint: FP, reason: 'spam', bannedByUserId: 'usr_does_not_exist' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/bannedByUserId/i);
+  });
+
+  // Trim behavior is exercised against a real DB in the integration spec at
+  // tests/integration/internal-banned-fingerprints.spec.js — capturing the
+  // values passed to a mocked drizzle chain requires fragile jest.spyOn
+  // gymnastics that leak state across tests, so we rely on integration
+  // coverage for the contract.
 
   it('accepts an omitted bannedByUserId (defaults to null)', async () => {
     const row = {
@@ -219,5 +272,31 @@ describe('GET /internal/banned-fingerprints (list)', () => {
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(2);
     expect(res.body.nextCursor).not.toBeNull();
+  });
+
+  it('returns 400 when limit is zero', async () => {
+    const res = await request(app).get('/internal/banned-fingerprints?limit=0').set('X-Internal-Key', KEY);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/limit/);
+  });
+
+  it('returns 400 when limit is negative', async () => {
+    const res = await request(app).get('/internal/banned-fingerprints?limit=-5').set('X-Internal-Key', KEY);
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when limit is fractional', async () => {
+    const res = await request(app).get('/internal/banned-fingerprints?limit=1.5').set('X-Internal-Key', KEY);
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when limit exceeds the max', async () => {
+    const res = await request(app).get('/internal/banned-fingerprints?limit=999').set('X-Internal-Key', KEY);
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when limit is provided as an array (repeated query param)', async () => {
+    const res = await request(app).get('/internal/banned-fingerprints?limit=1&limit=2').set('X-Internal-Key', KEY);
+    expect(res.status).toBe(400);
   });
 });
