@@ -177,9 +177,14 @@ internalBansRoute.get('/', async (req, res) => {
     // volume the sort+filter pays trivially. Add a (banned_at DESC,
     // fingerprint DESC) index when row count grows past a few thousand.
     const query = db.select().from(banned_fingerprints);
+    // Pre-stringify the Date — drizzle's postgres-js driver rebinds the
+    // 1184/1114 outbound serializers to a transparent passthrough, so a
+    // raw `Date` inside `sql\`\`` flows into `postgres-js`'s Bind layer
+    // unconverted and throws ERR_INVALID_ARG_TYPE. Same trap documented
+    // in jobs/library-identity-consumer/writer.ts and the BS#802 fix.
     const withCursor = cursor
       ? query.where(
-          sql`(${banned_fingerprints.banned_at}, ${banned_fingerprints.fingerprint}) < (${cursor.bannedAt}, ${cursor.fingerprint}::uuid)`
+          sql`(${banned_fingerprints.banned_at}, ${banned_fingerprints.fingerprint}) < (${cursor.bannedAt.toISOString()}::timestamptz, ${cursor.fingerprint}::uuid)`
         )
       : query;
     const rows = await withCursor
