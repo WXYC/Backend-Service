@@ -17,6 +17,7 @@ import { events_route } from './routes/events.route.js';
 import { request_line_route } from './routes/requestLine.route.js';
 import { config_route } from './routes/config.route.js';
 import { internal_route } from './routes/internal.route.js';
+import { internalBansRoute } from './routes/internal-bans.route.js';
 import { ses_events_route } from './routes/ses-events.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
@@ -139,6 +140,12 @@ app.use('/internal/ses-events', ses_events_route);
 
 // Internal endpoints (ETL sync notifications, key-authenticated)
 app.use('/internal', internal_route);
+
+// BS#1261 — request-line ban CRUD called by request-o-matic. Mounted as a
+// sibling under /internal so the existing X-Internal-Key + ROM_INTERNAL_KEY
+// pattern composes cleanly. Distinct router because the auth key differs:
+// ROM_INTERNAL_KEY (this router) vs ETL_NOTIFY_KEY (the sibling).
+app.use('/internal/banned-fingerprints', internalBansRoute);
 
 Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureExpressError });
 app.use(errorHandler);

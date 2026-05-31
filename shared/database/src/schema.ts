@@ -186,6 +186,43 @@ export const dj_stats = wxyc_schema.table('dj_stats', {
   shows_covered: smallint('shows_covered').default(0).notNull(),
 });
 
+// BS#1261. Request-line ban surface. Ban-target is the stable iOS-generated
+// UUIDv4 in iCloud Keychain (separate item from AuthSession), sent on every
+// `POST /request` to ROM and on `/sign-in/anonymous`. Per-fingerprint rather
+// than per-`user.id` because better-auth anonymous re-sign-in mints a fresh
+// `user.id`, so a `user.banned`-only ban is one tap away from evasion. The
+// fingerprint survives anonymous re-sign-in and reinstall on the same Apple
+// ID; a deliberate attacker disabling iCloud Keychain + reinstalling still
+// gets a fresh value, which is the accepted limitation.
+//
+// `banned_by_user_id` is nullable to permit Slack-actor bans (no
+// corresponding better-auth user). `ON DELETE SET NULL` so deleting an
+// operator account doesn't cascade-delete ban history.
+//
+// Partial index on `ban_expires_at` covers the temporary-ban tail; the
+// permanent rows (NULL `ban_expires_at`) are the common case and don't need
+// the index. The check-request-ban handler treats `ban_expires_at < now()`
+// as not-banned without deleting the row (cleanup is a separate concern).
+export type NewBannedFingerprint = InferInsertModel<typeof banned_fingerprints>;
+export type BannedFingerprint = InferSelectModel<typeof banned_fingerprints>;
+export const banned_fingerprints = wxyc_schema.table(
+  'banned_fingerprints',
+  {
+    fingerprint: uuid('fingerprint').primaryKey(),
+    banned_at: timestamp('banned_at', { withTimezone: true }).notNull().defaultNow(),
+    ban_reason: text('ban_reason').notNull(),
+    ban_expires_at: timestamp('ban_expires_at', { withTimezone: true }),
+    banned_by_user_id: varchar('banned_by_user_id', { length: 255 }).references(() => user.id, {
+      onDelete: 'set null',
+    }),
+  },
+  (table) => [
+    index('banned_fingerprints_ban_expires_at_idx')
+      .on(table.ban_expires_at)
+      .where(sql`${table.ban_expires_at} IS NOT NULL`),
+  ]
+);
+
 export type NewShift = InferInsertModel<typeof schedule>;
 export type Shift = InferSelectModel<typeof schedule>;
 // days {0: mon, 1: tue, ... , 6: sun}

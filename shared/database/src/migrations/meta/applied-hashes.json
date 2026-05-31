@@ -84,5 +84,6 @@
   "0084_flowsheet-updated-at": "1ddcd97d8ebf568c7d8f47d8d8d83e869bda38c488d1ff500057c1e8a823b951",
   "0085_rotation-discogs-release-id-source": "c7623638e10c3fe488fcdd720b382a5f07a24d1dac632c74598715482a1b91b7",
   "0086_rotation-discogs-direct-backfill-source": "e3d4856c856bc658fe24f4740a9626c5c7d1adebc42e8d6b9aa2586c2595aab9",
-  "0087_rotation-tracklist-lookup-attempted-at": "1f053e1810e805820eb760b7ba8100da7b6c29f3e779cd8c49a2b2407da94799"
+  "0087_rotation-tracklist-lookup-attempted-at": "1f053e1810e805820eb760b7ba8100da7b6c29f3e779cd8c49a2b2407da94799",
+  "0088_banned-fingerprints": "f4584f63f5fa23b3a596897ee6c4a71f16fa6ff4eee18ed24f91f8bc9a715c74"
 }
