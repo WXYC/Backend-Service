@@ -13,7 +13,7 @@
  */
 
 import { Router } from 'express';
-import { eq, desc, lt, sql } from 'drizzle-orm';
+import { eq, desc, sql } from 'drizzle-orm';
 import { db, banned_fingerprints } from '@wxyc/database';
 
 const ROM_INTERNAL_KEY = process.env.ROM_INTERNAL_KEY ?? '';
@@ -51,19 +51,30 @@ internalBansRoute.post('/', async (req, res) => {
   if (body.expiresInSeconds !== undefined) {
     if (
       typeof body.expiresInSeconds !== 'number' ||
-      body.expiresInSeconds <= 0 ||
-      !Number.isFinite(body.expiresInSeconds)
+      !Number.isInteger(body.expiresInSeconds) ||
+      body.expiresInSeconds <= 0
     ) {
-      return res.status(400).json({ error: 'expiresInSeconds must be a positive number' });
+      return res.status(400).json({ error: 'expiresInSeconds must be a positive integer' });
     }
     banExpiresAt = new Date(Date.now() + body.expiresInSeconds * 1000);
   }
 
-  const bannedByUserId = typeof body.bannedByUserId === 'string' ? body.bannedByUserId : null;
+  // bannedByUserId is optional. Reject wrong-type values so operator typos
+  // surface as 400 rather than silently dropping attribution to NULL.
+  let bannedByUserId: string | null = null;
+  if (body.bannedByUserId !== undefined && body.bannedByUserId !== null) {
+    if (typeof body.bannedByUserId !== 'string') {
+      return res.status(400).json({ error: 'bannedByUserId must be a string when provided' });
+    }
+    bannedByUserId = body.bannedByUserId;
+  }
 
   try {
     // Idempotent upsert: on conflict, refresh the mutable fields (reason,
-    // expiry, actor) so a re-ban "tops up" rather than failing.
+    // expiry, actor) AND advance `banned_at` to now() so the GET listing's
+    // ORDER BY banned_at DESC surfaces re-bans as recent activity. Operators
+    // re-banning a fingerprint typically want the row to bubble to the top
+    // for an eventual UI; preserving the original `banned_at` would bury it.
     const rows = await db
       .insert(banned_fingerprints)
       .values({
@@ -78,6 +89,7 @@ internalBansRoute.post('/', async (req, res) => {
           ban_reason: sql`excluded.ban_reason`,
           ban_expires_at: sql`excluded.ban_expires_at`,
           banned_by_user_id: sql`excluded.banned_by_user_id`,
+          banned_at: sql`now()`,
         },
       })
       .returning();
@@ -124,8 +136,12 @@ internalBansRoute.delete('/:fingerprint', async (req, res) => {
 });
 
 // ---- GET /internal/banned-fingerprints?limit=&cursor= ----
-// Keyset-paginated list ordered by banned_at DESC, cursor encodes the last
-// row's banned_at timestamp ISO string. Default limit 50, max 200.
+// Keyset-paginated list ordered by (banned_at DESC, fingerprint DESC).
+// Cursor is "<iso_timestamp>|<fingerprint_uuid>" — a composite tiebreaker
+// so two rows sharing the same `banned_at` (sub-millisecond writes, bulk
+// loads) don't get skipped at the page boundary. The predicate is
+// `(banned_at, fingerprint) < (?, ?)` in Postgres row-comparison form.
+// Default limit 50, max 200.
 internalBansRoute.get('/', async (req, res) => {
   if (!authenticateInternal(req.get('X-Internal-Key'))) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -134,24 +150,46 @@ internalBansRoute.get('/', async (req, res) => {
   const rawLimit = Number(req.query.limit ?? 50);
   const limit = Math.max(1, Math.min(200, Number.isFinite(rawLimit) ? rawLimit : 50));
 
-  let cursorDate: Date | null = null;
+  let cursor: { bannedAt: Date; fingerprint: string } | null = null;
   if (typeof req.query.cursor === 'string' && req.query.cursor.length > 0) {
-    const parsed = new Date(req.query.cursor);
-    if (Number.isNaN(parsed.getTime())) {
-      return res.status(400).json({ error: 'cursor must be a valid ISO timestamp' });
+    const separatorIdx = req.query.cursor.lastIndexOf('|');
+    if (separatorIdx === -1) {
+      return res.status(400).json({ error: 'cursor must be "<iso_timestamp>|<fingerprint_uuid>"' });
     }
-    cursorDate = parsed;
+    const tsPart = req.query.cursor.slice(0, separatorIdx);
+    const fpPart = req.query.cursor.slice(separatorIdx + 1);
+    const parsed = new Date(tsPart);
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ error: 'cursor timestamp segment must be a valid ISO string' });
+    }
+    if (!UUID_REGEX.test(fpPart)) {
+      return res.status(400).json({ error: 'cursor fingerprint segment must be a UUID' });
+    }
+    cursor = { bannedAt: parsed, fingerprint: fpPart };
   }
 
   try {
     // Ask for limit+1 so we can detect whether another page exists.
+    // Row-comparison `(a, b) < (?, ?)` is Postgres's native composite
+    // keyset-pagination operator; planner picks the (banned_at, fingerprint)
+    // index path when one exists. There isn't one yet — fingerprint is the
+    // PK and banned_at has no index — but for the expected operator-scale
+    // volume the sort+filter pays trivially. Add a (banned_at DESC,
+    // fingerprint DESC) index when row count grows past a few thousand.
     const query = db.select().from(banned_fingerprints);
-    const withCursor = cursorDate ? query.where(lt(banned_fingerprints.banned_at, cursorDate)) : query;
-    const rows = await withCursor.orderBy(desc(banned_fingerprints.banned_at)).limit(limit + 1);
+    const withCursor = cursor
+      ? query.where(
+          sql`(${banned_fingerprints.banned_at}, ${banned_fingerprints.fingerprint}) < (${cursor.bannedAt}, ${cursor.fingerprint}::uuid)`
+        )
+      : query;
+    const rows = await withCursor
+      .orderBy(desc(banned_fingerprints.banned_at), desc(banned_fingerprints.fingerprint))
+      .limit(limit + 1);
 
     const hasMore = rows.length > limit;
     const items = hasMore ? rows.slice(0, limit) : rows;
-    const nextCursor = hasMore ? items[items.length - 1].banned_at.toISOString() : null;
+    const last = items[items.length - 1];
+    const nextCursor = hasMore && last ? `${last.banned_at.toISOString()}|${last.fingerprint}` : null;
 
     return res.status(200).json({ items, nextCursor });
   } catch (error) {
