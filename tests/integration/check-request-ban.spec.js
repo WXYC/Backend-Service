@@ -98,10 +98,13 @@ describe('POST /auth/check-request-ban (BS#1261)', () => {
     expect(body.fingerprint).toBeNull();
   });
 
-  // Requires admin credentials (AUTH_USERNAME/AUTH_PASSWORD) — skip when not
-  // configured. Mirrors the existing pattern in requestLine.spec.js.
-  const adminCredsAvailable = !!(process.env.AUTH_USERNAME && process.env.AUTH_PASSWORD);
-  const itIfAdminCreds = adminCredsAvailable ? test : test.skip;
+  // Admin-side ban requires both AUTH_USERNAME/AUTH_PASSWORD AND the
+  // explicit TEST_ADMIN_BAN=true opt-in — matches the gating in
+  // requestLine.spec.js so default CI runs (where the seeded admin user
+  // may not have ban permissions in this org) skip the test cleanly.
+  const enableAdminBan =
+    process.env.TEST_ADMIN_BAN === 'true' && !!(process.env.AUTH_USERNAME && process.env.AUTH_PASSWORD);
+  const itIfAdminCreds = enableAdminBan ? test : test.skip;
 
   itIfAdminCreds('200 banned:true with banSource:"user" when better-auth banUser was called', async () => {
     const { jwt, userId } = await getAnonymousJwt(authBaseUrl);

@@ -154,9 +154,14 @@ internalBansRoute.post('/', async (req, res) => {
     // PG foreign_key_violation (SQLSTATE 23503) on bannedByUserId — operator
     // passed a string that's well-formed but doesn't match any auth_user.id.
     // Surface as 400 so the caller can correct the input instead of being
-    // told the server is broken. Existence-check round-trip avoided.
-    const pgError = error as { code?: string };
-    if (pgError?.code === '23503') {
+    // told the server is broken. Drizzle wraps the underlying postgres-js
+    // error in DrizzleQueryError with the real error on `.cause` (see
+    // drizzle-orm/errors.ts) — check both `.code` and `.cause.code` so
+    // tests that throw a bare error and prod runs that throw the wrapped
+    // form both classify correctly.
+    const directCode = (error as { code?: string })?.code;
+    const causeCode = (error as { cause?: { code?: string } })?.cause?.code;
+    if (directCode === '23503' || causeCode === '23503') {
       return res.status(400).json({ error: 'bannedByUserId does not reference an existing user' });
     }
     console.error('[INTERNAL BANS] POST error:', error);
