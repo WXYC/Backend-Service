@@ -18,7 +18,7 @@
  *      in `@wxyc/metadata`.
  */
 import { MetadataRequest, AlbumMetadataResult, ArtistMetadataResult, FlowsheetMetadata } from './metadata.types.js';
-import { lookupMetadata } from '@wxyc/lml-client';
+import { lookupMetadata, envInt } from '@wxyc/lml-client';
 import type { DiscogsMatchResult } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
 import { SearchUrlProvider } from './providers/search-urls.provider.js';
@@ -26,6 +26,16 @@ import { SearchUrlProvider } from './providers/search-urls.provider.js';
 export { filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
 
 const searchUrls = new SearchUrlProvider();
+
+/**
+ * Budget for the metadata-service LML lookup. Honest scope oversight from
+ * BS#1186 (which listed four files but missed this one); without it, LML's
+ * empty-cascade safety branch kept the lookup grinding to the 30 s
+ * `AbortController` ceiling — measured at 30,002 ms p95 on 2026-05-31. 5 s
+ * matches the other runtime callers in the same deadline class.
+ * See `LookupOptions.budgetMs` for mechanics.
+ */
+const METADATA_SERVICE_LML_BUDGET_MS = envInt('METADATA_SERVICE_LML_BUDGET_MS', 5000);
 
 /**
  * Check whether the LML service is configured.
@@ -56,7 +66,10 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
   const { artistName, albumTitle, trackTitle } = request;
   const result: FlowsheetMetadata = {};
 
-  const lookupResponse = await lookupMetadata(artistName, albumTitle, trackTitle, { caller: 'metadata-service' });
+  const lookupResponse = await lookupMetadata(artistName, albumTitle, trackTitle, {
+    caller: 'metadata-service',
+    budgetMs: METADATA_SERVICE_LML_BUDGET_MS,
+  });
   const artwork: DiscogsMatchResult | null = lookupResponse.results?.[0]?.artwork ?? null;
 
   if (artwork) {

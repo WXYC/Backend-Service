@@ -12,6 +12,7 @@ const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 
 jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
+  envInt: (_name: string, fallback: number) => fallback,
   LmlClientError: class LmlClientError extends Error {
     statusCode: number;
     constructor(message: string, statusCode: number) {
@@ -115,6 +116,7 @@ describe('metadata.service', () => {
 
     expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', 'VI Scose Poise', {
       caller: 'metadata-service',
+      budgetMs: 5000,
     });
   });
 
