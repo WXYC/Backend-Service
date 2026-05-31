@@ -152,5 +152,34 @@ describe('/internal/banned-fingerprints (BS#1261)', () => {
       const fingerprintsReturned = res.body.items.map((r) => r.fingerprint);
       expect(fingerprintsReturned).toEqual(expect.arrayContaining([FP1, FP2]));
     });
+
+    // Regression guard for the drizzle date-serializer trap (BS#802 lineage):
+    // raw `Date` bound into `sql\`\`` flows into postgres-js's Bind layer
+    // unconverted and throws ERR_INVALID_ARG_TYPE. Unit tests mock the chain
+    // so they can't catch this — only a real bind exercises the path. First
+    // page returns nextCursor, second page consumes it.
+    test('paginated GET with cursor returns 200 (date-serializer regression guard)', async () => {
+      await request
+        .post('/internal/banned-fingerprints')
+        .set('X-Internal-Key', KEY)
+        .send({ fingerprint: FP1, reason: 'first' });
+      await request
+        .post('/internal/banned-fingerprints')
+        .set('X-Internal-Key', KEY)
+        .send({ fingerprint: FP2, reason: 'second' });
+
+      const page1 = await request.get('/internal/banned-fingerprints?limit=1').set('X-Internal-Key', KEY);
+      expect(page1.status).toBe(200);
+      expect(page1.body.items).toHaveLength(1);
+      expect(page1.body.nextCursor).toBeTruthy();
+
+      const page2 = await request
+        .get(`/internal/banned-fingerprints?limit=1&cursor=${encodeURIComponent(page1.body.nextCursor)}`)
+        .set('X-Internal-Key', KEY);
+      expect(page2.status).toBe(200);
+      expect(page2.body.items).toHaveLength(1);
+      // The second page's row must be different from the first.
+      expect(page2.body.items[0].fingerprint).not.toBe(page1.body.items[0].fingerprint);
+    });
   });
 });
