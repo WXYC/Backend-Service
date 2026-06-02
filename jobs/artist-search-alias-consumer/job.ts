@@ -49,7 +49,7 @@ const requireLmlConfigured = (): void => {
 
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
-  await Sentry.startSpan({ name: `${JOB_NAME}.run`, op: 'job.run' }, async (span) => {
+  await Sentry.startSpan({ name: `${JOB_NAME}.run`, op: 'job.run' }, async () => {
     try {
       requireLmlConfigured();
       log('info', 'init', `${JOB_NAME} initialized`);
@@ -72,19 +72,32 @@ const main = async (): Promise<void> => {
         dryRun,
       });
 
-      // Surface the run totals as span attributes so trace explorer can
-      // pivot on them without scraping the JSON log.
-      span.setAttributes({
-        'consumer.names_scanned': result.totals.names_scanned,
-        'consumer.names_resolved': result.totals.names_resolved,
-        'consumer.names_missing': result.totals.names_missing,
-        'consumer.names_unaccounted': result.totals.names_unaccounted,
-        'consumer.fanout_writes': result.totals.fanout_writes,
-        'consumer.source_rows_written': result.totals.source_rows_written,
-        'consumer.writer_errors': result.totals.writer_errors,
-        'consumer.lml_total_calls': result.totals.lml_total_calls,
-        'consumer.lml_total_latency_ms': result.totals.lml_total_latency_ms,
-      });
+      // Surface run totals as a CHILD span whose numeric attributes are set
+      // at creation time. Per BS#1081 (and MEMORY's
+      // `feedback_sentry_attribute_typing_trap`), numeric values passed via
+      // `setAttribute(name, number)` AFTER the span has already started get
+      // indexed as strings, which breaks avg/p50/p95/sum aggregation on
+      // Sentry dashboards. Passing them via the `attributes` field of the
+      // startSpan options indexes them as numbers.
+      Sentry.startSpan(
+        {
+          name: `${JOB_NAME}.run.totals`,
+          attributes: {
+            'consumer.names_scanned': result.totals.names_scanned,
+            'consumer.names_resolved': result.totals.names_resolved,
+            'consumer.names_missing': result.totals.names_missing,
+            'consumer.names_unaccounted': result.totals.names_unaccounted,
+            'consumer.fanout_writes': result.totals.fanout_writes,
+            'consumer.source_rows_written': result.totals.source_rows_written,
+            'consumer.writer_errors': result.totals.writer_errors,
+            'consumer.lml_total_calls': result.totals.lml_total_calls,
+            'consumer.lml_total_latency_ms': result.totals.lml_total_latency_ms,
+          },
+        },
+        () => {
+          /* attributes set at creation; nothing else to do */
+        }
+      );
     } catch (error) {
       log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
       captureError(error, 'failed');

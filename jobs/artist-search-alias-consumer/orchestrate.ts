@@ -180,6 +180,14 @@ export const runConsumer = async (opts: {
     const allArtistIds = eligible.flatMap((g) => g.artist_ids);
     const altsByArtist = await opts.fetchAlts(allArtistIds);
 
+    // Collect cardinality-drift names within the batch, then emit ONE
+    // Sentry event for the whole batch at the end of the loop body.
+    // Per-name captureError would flood Sentry under wholesale upstream
+    // drift (a 500-name batch × N batches = tens of thousands of events
+    // per nightly run for one upstream incident). Mirrors the aggregate-
+    // per-batch pattern in library-identity-consumer/orchestrate.ts.
+    const unaccountedInBatch: string[] = [];
+
     for (const group of eligible) {
       totals.names_scanned += 1;
       const lmlResult = lmlByName.get(group.artist_name);
@@ -190,19 +198,9 @@ export const runConsumer = async (opts: {
         // Cardinality drift from LML: the name was sent, but neither
         // `artists[]` nor `missing[]` mentions it. Bucket separately so
         // Sentry's `consumer.names_unaccounted` surfaces upstream API
-        // drift rather than burying it inside `names_missing`. Also
-        // capture as a soft error so the trace explorer can pivot on
-        // `step:cardinality_drift`.
+        // drift rather than burying it inside `names_missing`.
         totals.names_unaccounted += 1;
-        log('warn', 'cardinality_drift', `LML returned no row for input name "${group.artist_name}"`, {
-          batch_index: batchIndex,
-          name: group.artist_name,
-        });
-        captureError(
-          new Error(`LML cardinality drift: input "${group.artist_name}" not in artists[] or missing[]`),
-          'cardinality_drift',
-          { batch_index: batchIndex, name: group.artist_name }
-        );
+        unaccountedInBatch.push(group.artist_name);
       }
 
       const lmlVariants = lmlResult?.variants ?? [];
@@ -240,6 +238,30 @@ export const runConsumer = async (opts: {
           captureError(error, 'writer_error', { artist_id });
         }
       }
+    }
+
+    // One aggregate cardinality-drift event per batch, if any drift seen.
+    // Sample the first few names so the Sentry payload stays bounded even
+    // under wholesale upstream drift.
+    if (unaccountedInBatch.length > 0) {
+      const sample = unaccountedInBatch.slice(0, 10);
+      log(
+        'warn',
+        'cardinality_drift',
+        `LML omitted ${unaccountedInBatch.length} input names from both artists[] and missing[]`,
+        {
+          batch_index: batchIndex,
+          unaccounted_count: unaccountedInBatch.length,
+          sample,
+        }
+      );
+      captureError(
+        new Error(
+          `LML cardinality drift: ${unaccountedInBatch.length} input names in batch ${batchIndex} not in artists[] or missing[]`
+        ),
+        'cardinality_drift',
+        { batch_index: batchIndex, unaccounted_count: unaccountedInBatch.length, sample }
+      );
     }
 
     log('info', 'batch_done', `batch ${batchIndex} done`, {

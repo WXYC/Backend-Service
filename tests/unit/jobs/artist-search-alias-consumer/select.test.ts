@@ -150,6 +150,20 @@ describe('loadNameGroups', () => {
     expect(serialized).toMatch(/Stereolab/);
   });
 
+  it('uses abs(hashtext(...)::bigint) so negative hash values map into [0, count)', async () => {
+    // PG's hashtext() returns signed int4: ~50% of outputs are negative.
+    // `%` on a negative dividend produces a non-positive remainder, which
+    // never matches `partition.index ∈ [0, count)`. Without `abs(...)`,
+    // a 4-way partitioned run silently drops ~37.5% of distinct names.
+    // The ::bigint widening matters too — `abs()` on raw int4 overflows on
+    // INT_MIN. Codebase precedent: apps/backend/services/library.service.ts:204.
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadNameGroups('', 500, { index: 2, count: 4, description: 'partition=2/4' }, 7);
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(serialized).toMatch(/abs\(hashtext/);
+    expect(serialized).toMatch(/::bigint/);
+  });
+
   it('respects a non-trivial partition (count > 1) by including the modulo predicate in serialized SQL', async () => {
     (db.execute as jest.Mock).mockResolvedValue([]);
     await loadNameGroups('', 500, { index: 2, count: 4, description: 'partition=2/4' }, 7);

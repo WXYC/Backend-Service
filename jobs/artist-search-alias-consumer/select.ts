@@ -143,7 +143,7 @@ export const loadNameGroups = async (
           LIMIT 1
         )
       )
-      AND (${partition.count} = 1 OR hashtext(n."artist_name") % ${partition.count} = ${partition.index})
+      AND (${partition.count} = 1 OR abs(hashtext(n."artist_name")::bigint) % ${partition.count} = ${partition.index})
     ORDER BY n."artist_name"
     LIMIT ${batchSize}
   `);
