@@ -150,6 +150,26 @@ describe('loadNameGroups', () => {
     expect(serialized).toMatch(/Stereolab/);
   });
 
+  it('uses the per-member EXISTS-NOT-fresh predicate (mixed-coverage gap regression)', async () => {
+    // The original two-branch OR (`NOT EXISTS any row OR EXISTS stale row`)
+    // silently skipped name groups where one artist_id had fresh coverage
+    // and another had none — the new artist_id stayed un-aliased for up to
+    // STALE_THRESHOLD_DAYS. The fix uses `EXISTS (unnest(artist_ids) member
+    // WHERE NOT EXISTS fresh-row-for-member)` so any member without fresh
+    // coverage flips the whole group eligible. Pin the SQL fragments so a
+    // future refactor can't regress to the OR shape.
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadNameGroups('', 500, { index: 0, count: 1, description: 'partition=none' }, 7);
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    // Per-member iteration via unnest.
+    expect(serialized).toMatch(/unnest\(n\.artist_ids\)/);
+    // Freshness predicate flipped to `>=` (i.e., the SELECT picks groups
+    // whose members have NO row satisfying `last_verified_at >= cutoff`).
+    // The serialized SQL JSON-stringifies the table-qualified identifier so
+    // the `"` around the column name appears as `\"`.
+    expect(serialized).toMatch(/last_verified_at.{0,4}>=/);
+  });
+
   it('uses abs(hashtext(...)::bigint) so negative hash values map into [0, count)', async () => {
     // PG's hashtext() returns signed int4: ~50% of outputs are negative.
     // `%` on a negative dividend produces a non-positive remainder, which
