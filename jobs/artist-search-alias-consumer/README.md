@@ -92,9 +92,11 @@ The job emits a top-level `artist-search-alias-consumer.run` span. Run totals la
 
 - `consumer.names_scanned`
 - `consumer.names_resolved`
-- `consumer.names_missing`
+- `consumer.names_missing` — names LML flagged as `missing[]` (real signal: no `entity.identity` row)
+- `consumer.names_unaccounted` — names absent from both `artists[]` and `missing[]`; non-zero means upstream LML API drift, also captured as `step:cardinality_drift`
 - `consumer.fanout_writes` — per-write count for groups with duplicate `artists.artist_name`; surfaces tubafrenzy data-quality regressions
 - `consumer.source_rows_written`
+- `consumer.writer_errors` — per-artist DB write failures (caught + Sentry-captured under `step:writer_error`)
 - `consumer.lml_total_calls`
 - `consumer.lml_total_latency_ms`
 

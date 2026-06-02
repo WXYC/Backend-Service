@@ -357,4 +357,79 @@ describe('runConsumer — happy path', () => {
     // The second batch's name is resolved.
     expect(result.totals.names_resolved).toBe(1);
   });
+
+  it('counts names absent from both artists[] and missing[] as names_unaccounted (not names_missing)', async () => {
+    // Cardinality drift: LML responds successfully but the input "Cat Power"
+    // is mentioned in neither bucket. This is upstream API drift, not a
+    // real miss; the orchestrator must surface it on its own counter so
+    // Sentry's `consumer.names_unaccounted` lights up.
+    const batch: NameGroup[] = [
+      { artist_name: 'Stereolab', artist_ids: [7] },
+      { artist_name: 'Cat Power', artist_ids: [99] },
+    ];
+    const loadNameGroups = jest.fn<LoadNameGroupsFn>().mockResolvedValueOnce(batch).mockResolvedValue([]);
+
+    const fetchBulk = jest.fn<FetchBulkFn>().mockResolvedValue({
+      artists: [makeLmlResult('Stereolab', 1)],
+      missing: [], // Cat Power is absent from BOTH lists — drift.
+    });
+    const fetchAlts = jest.fn<FetchAltsFn>().mockResolvedValue(new Map());
+    const writeArtistVariants = jest.fn<WriteFn>().mockResolvedValue({ variants_written: 1 });
+
+    const result = await runConsumer({
+      loadNameGroups,
+      fetchBulk,
+      fetchAlts,
+      writeArtistVariants,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { index: 0, count: 1, description: 'partition=none' },
+      dryRun: false,
+    });
+
+    expect(result.totals.names_resolved).toBe(1);
+    expect(result.totals.names_missing).toBe(0); // NOT bucketed as missing.
+    expect(result.totals.names_unaccounted).toBe(1);
+  });
+
+  it('counts per-artist writer failures into the writer_errors counter (source_rows_written unaffected)', async () => {
+    const batch: NameGroup[] = [
+      { artist_name: 'Stereolab', artist_ids: [7] },
+      { artist_name: 'Juana Molina', artist_ids: [42] },
+    ];
+    const loadNameGroups = jest.fn<LoadNameGroupsFn>().mockResolvedValueOnce(batch).mockResolvedValue([]);
+
+    const fetchBulk = jest.fn<FetchBulkFn>().mockResolvedValue({
+      artists: [makeLmlResult('Stereolab', 2), makeLmlResult('Juana Molina', 1)],
+      missing: [],
+    });
+    const fetchAlts = jest.fn<FetchAltsFn>().mockResolvedValue(new Map());
+
+    // First write succeeds, second throws.
+    let callCount = 0;
+    const writeArtistVariants = jest.fn<WriteFn>().mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) return Promise.resolve({ variants_written: 2 });
+      return Promise.reject(new Error('PG connection reset'));
+    });
+
+    const result = await runConsumer({
+      loadNameGroups,
+      fetchBulk,
+      fetchAlts,
+      writeArtistVariants,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { index: 0, count: 1, description: 'partition=none' },
+      dryRun: false,
+    });
+
+    expect(result.totals.writer_errors).toBe(1);
+    // source_rows_written reflects only the successful write.
+    expect(result.totals.source_rows_written).toBe(2);
+    // Both names still count as resolved on the LML side.
+    expect(result.totals.names_resolved).toBe(2);
+  });
 });
