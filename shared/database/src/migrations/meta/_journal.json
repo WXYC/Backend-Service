@@ -610,6 +610,13 @@
       "when": 1779856000020,
       "tag": "0088_banned-fingerprints",
       "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1779856000021,
+      "tag": "0089_artist-search-alias",
+      "breakpoints": true
     }
   ]
 }

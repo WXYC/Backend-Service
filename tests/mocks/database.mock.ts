@@ -103,6 +103,19 @@ export const library_identity = {
 };
 export const library_artist_view = {
   on_streaming: 'on_streaming',
+  artist_id: 'artist_id',
+};
+export const artist_search_alias = {
+  artist_id: 'artist_id',
+  source: 'source',
+  variant: 'variant',
+  related_artist_id: 'related_artist_id',
+  external_subject_id: 'external_subject_id',
+  external_object_id: 'external_object_id',
+  active: 'active',
+  method: 'method',
+  confidence: 'confidence',
+  last_verified_at: 'last_verified_at',
 };
 export const album_plays = {
   album_id: 'album_id',

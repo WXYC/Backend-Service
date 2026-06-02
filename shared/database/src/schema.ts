@@ -1241,6 +1241,8 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       spotify_artist_id: artists.spotify_artist_id,
       apple_music_artist_id: artists.apple_music_artist_id,
       bandcamp_id: artists.bandcamp_id,
+      // Keyed read for the artist_search_alias LATERAL JOIN (PR 5).
+      artist_id: library.artist_id,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -1282,6 +1284,7 @@ export type LibraryArtistViewEntry = {
   spotify_artist_id: string | null;
   apple_music_artist_id: string | null;
   bandcamp_id: string | null;
+  artist_id: number;
 };
 
 // Per-album play count, aggregated from `flowsheet` track entries. The MV is
@@ -1453,3 +1456,50 @@ export const library_identity_history = wxyc_schema.table('library_identity_hist
 
 export type LibraryIdentityHistory = InferSelectModel<typeof library_identity_history>;
 export type NewLibraryIdentityHistory = InferInsertModel<typeof library_identity_history>;
+
+/**
+ * Source-agnostic cache of alias / variant / member strings for each WXYC
+ * artist, populated by `jobs/artist-search-alias-consumer/` (artist-search-alias
+ * plan PR 4) from LML's `POST /api/v1/artists/search-aliases/bulk` plus a
+ * shadow-ingest of `library.alternate_artist_name`. Read by the catalog search
+ * via a LATERAL JOIN keyed on `artist_id` (PR 5).
+ *
+ * The `source` column tags origin; new sources are additive (no schema
+ * migration). See `docs/adr/0001-source-agnostic-artist-search-alias.md`.
+ *
+ * Cascade behavior:
+ *   - `artist_id` ON DELETE CASCADE — alias rows belong to the artist.
+ *   - `related_artist_id` ON DELETE SET NULL — the related (alias/member)
+ *     artist may be removed independently without orphaning the cache row.
+ */
+export const artist_search_alias = wxyc_schema.table(
+  'artist_search_alias',
+  {
+    artist_id: integer('artist_id')
+      .notNull()
+      .references(() => artists.id, { onDelete: 'cascade' }),
+    source: text('source').notNull(),
+    variant: text('variant').notNull(),
+    related_artist_id: integer('related_artist_id').references(() => artists.id, {
+      onDelete: 'set null',
+    }),
+    external_subject_id: text('external_subject_id'),
+    external_object_id: text('external_object_id'),
+    active: boolean('active'),
+    method: text('method').notNull(),
+    confidence: real('confidence').notNull(),
+    last_verified_at: timestamp('last_verified_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      name: 'artist_search_alias_pkey',
+      columns: [table.artist_id, table.source, table.variant],
+    }),
+    index('artist_search_alias_variant_trgm_idx').using('gin', sql`${table.variant} gin_trgm_ops`),
+    check('artist_search_alias_confidence_range', sql`${table.confidence} BETWEEN 0 AND 1`),
+    check('artist_search_alias_variant_nonblank', sql`length(trim(${table.variant})) > 0`),
+  ]
+);
+
+export type ArtistSearchAlias = InferSelectModel<typeof artist_search_alias>;
+export type NewArtistSearchAlias = InferInsertModel<typeof artist_search_alias>;
