@@ -56,4 +56,23 @@ describe('fetchAlternateArtistNames', () => {
     const result = await fetchAlternateArtistNames([7]);
     expect(result.get(7)).toEqual(['Tim Gane']);
   });
+
+  it('binds the artist_ids as a single PG-array-literal text param (anti-regression for BS#1068/#1071 array splat)', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+    await fetchAlternateArtistNames([1, 2, 3, 42, 1234567]);
+
+    // The drizzle-orm `sql\`...\`` template stores positional binds in
+    // `queryChunks` as objects with a `value` array. The fix passes a single
+    // PG-array-literal string (`'{1,2,3,42,1234567}'`) — never the raw JS
+    // array. Inspect the serialised payload and confirm:
+    //   1. the literal '{1,2,3,42,1234567}' appears as a bind value
+    //   2. no raw integer array is passed as a single bind
+    const call = (db.execute as jest.Mock).mock.calls[0][0];
+    const serialized = JSON.stringify(call);
+    expect(serialized).toContain('{1,2,3,42,1234567}');
+    // Regression guard: the raw JS array `[1,2,3,42,1234567]` must NOT be
+    // serialised into the SQL. (postgres-js would splat it into N positional
+    // placeholders.)
+    expect(serialized).not.toContain('[1,2,3,42,1234567]');
+  });
 });

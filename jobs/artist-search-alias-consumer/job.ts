@@ -78,8 +78,10 @@ const main = async (): Promise<void> => {
         'consumer.names_scanned': result.totals.names_scanned,
         'consumer.names_resolved': result.totals.names_resolved,
         'consumer.names_missing': result.totals.names_missing,
+        'consumer.names_unaccounted': result.totals.names_unaccounted,
         'consumer.fanout_writes': result.totals.fanout_writes,
         'consumer.source_rows_written': result.totals.source_rows_written,
+        'consumer.writer_errors': result.totals.writer_errors,
         'consumer.lml_total_calls': result.totals.lml_total_calls,
         'consumer.lml_total_latency_ms': result.totals.lml_total_latency_ms,
       });

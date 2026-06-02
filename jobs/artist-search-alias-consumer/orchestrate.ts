@@ -32,8 +32,7 @@
 import type { ArtistSearchAliasesBulkResponse, ArtistSearchAliasVariant } from './lml-types.js';
 import type { NameGroup, Partition } from './select.js';
 import { captureError, log } from './logger.js';
-
-import { isCompilationArtist } from '../../apps/backend/services/requestLine/matching/compilation.js';
+import { isCompilationArtist } from './compilation.js';
 
 const JOB_NAME = 'artist-search-alias-consumer';
 const WXYC_LIBRARY_ALT_CONFIDENCE = 0.85;
@@ -51,8 +50,22 @@ export type Totals = {
   names_scanned: number;
   names_resolved: number;
   names_missing: number;
+  /**
+   * Names that LML neither resolved nor flagged as missing — i.e., a
+   * cardinality drift in LML's response. Should always be 0 in steady
+   * state; a non-zero value points at upstream API drift and warrants
+   * investigation (also Sentry-captured under `cardinality_drift` step).
+   */
+  names_unaccounted: number;
   fanout_writes: number;
   source_rows_written: number;
+  /**
+   * Per-artist writer failures (caught + Sentry-captured). Surfaced on the
+   * top-level run span as `consumer.writer_errors` so the operator can
+   * pivot on it without scraping logs; `source_rows_written` under-counts
+   * by exactly this number when non-zero.
+   */
+  writer_errors: number;
   would_write_rows: number;
   lml_total_calls: number;
   lml_total_latency_ms: number;
@@ -78,8 +91,10 @@ const emptyTotals = (): Totals => ({
   names_scanned: 0,
   names_resolved: 0,
   names_missing: 0,
+  names_unaccounted: 0,
   fanout_writes: 0,
   source_rows_written: 0,
+  writer_errors: 0,
   would_write_rows: 0,
   lml_total_calls: 0,
   lml_total_latency_ms: 0,
@@ -171,10 +186,24 @@ export const runConsumer = async (opts: {
       const isMissing = !lmlResult && lmlMissing.has(group.artist_name);
       if (lmlResult) totals.names_resolved += 1;
       else if (isMissing) totals.names_missing += 1;
-      // Names with neither a resolved entry nor a missing entry should be
-      // rare (cardinality drift from LML) — count as missing so the
-      // accounting stays sound.
-      else totals.names_missing += 1;
+      else {
+        // Cardinality drift from LML: the name was sent, but neither
+        // `artists[]` nor `missing[]` mentions it. Bucket separately so
+        // Sentry's `consumer.names_unaccounted` surfaces upstream API
+        // drift rather than burying it inside `names_missing`. Also
+        // capture as a soft error so the trace explorer can pivot on
+        // `step:cardinality_drift`.
+        totals.names_unaccounted += 1;
+        log('warn', 'cardinality_drift', `LML returned no row for input name "${group.artist_name}"`, {
+          batch_index: batchIndex,
+          name: group.artist_name,
+        });
+        captureError(
+          new Error(`LML cardinality drift: input "${group.artist_name}" not in artists[] or missing[]`),
+          'cardinality_drift',
+          { batch_index: batchIndex, name: group.artist_name }
+        );
+      }
 
       const lmlVariants = lmlResult?.variants ?? [];
       // `sources_present` records which legs the composer ran. We always
@@ -203,6 +232,7 @@ export const runConsumer = async (opts: {
           const outcome = await opts.writeArtistVariants(artist_id, allVariants, sourcesPresent);
           totals.source_rows_written += outcome.variants_written;
         } catch (error) {
+          totals.writer_errors += 1;
           log('warn', 'writer_error', `writer failed for artist_id=${artist_id}`, {
             artist_id,
             error_message: (error as Error).message,
