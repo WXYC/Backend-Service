@@ -542,7 +542,10 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
 
   await Promise.all(
     remaining_djs.map(async (dj: ShowDJ) => {
-      await db.update(show_djs).set({ active: false }).where(eq(show_djs.dj_id, dj.dj_id));
+      await db
+        .update(show_djs)
+        .set({ active: false })
+        .where(and(eq(show_djs.show_id, currentShow.id), eq(show_djs.dj_id, dj.dj_id)));
       if (dj.dj_id === primary_dj_id) return;
       await createLeaveNotification(dj.dj_id, currentShow.id);
     })

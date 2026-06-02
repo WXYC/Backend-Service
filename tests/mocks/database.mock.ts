@@ -95,6 +95,7 @@ export const rotation = {
   album_title: 'album_title',
   record_label: 'record_label',
   discogs_release_id: 'discogs_release_id',
+  tracklist_lookup_attempted_at: 'tracklist_lookup_attempted_at',
 };
 export const library_identity = {
   library_id: 'library_id',
@@ -102,6 +103,19 @@ export const library_identity = {
 };
 export const library_artist_view = {
   on_streaming: 'on_streaming',
+  artist_id: 'artist_id',
+};
+export const artist_search_alias = {
+  artist_id: 'artist_id',
+  source: 'source',
+  variant: 'variant',
+  related_artist_id: 'related_artist_id',
+  external_subject_id: 'external_subject_id',
+  external_object_id: 'external_object_id',
+  active: 'active',
+  method: 'method',
+  confidence: 'confidence',
+  last_verified_at: 'last_verified_at',
 };
 export const album_plays = {
   album_id: 'album_id',
@@ -186,7 +200,11 @@ export const shows = {
   show_name: 'show_name',
   specialty_id: 'specialty_id',
 };
-export const show_djs = {};
+export const show_djs = {
+  show_id: 'show_id',
+  dj_id: 'dj_id',
+  active: 'active',
+};
 export const user = {
   id: 'id',
   name: 'name',
@@ -206,6 +224,13 @@ export const user = {
   appSkin: 'app_skin',
   isAnonymous: 'is_anonymous',
   capabilities: 'capabilities',
+};
+export const banned_fingerprints = {
+  fingerprint: 'fingerprint',
+  banned_at: 'banned_at',
+  ban_reason: 'ban_reason',
+  ban_expires_at: 'ban_expires_at',
+  banned_by_user_id: 'banned_by_user_id',
 };
 export const specialty_shows = {};
 export const schedule = {};
@@ -261,6 +286,16 @@ export const flowsheetEntryTypeEnum = () => ({});
 // (B-2.1 forward path, B-2.2 backfill) override this per-test to control
 // which library_id the tie-break "picks".
 export const pickPrimaryLibraryRow = jest.fn<(libraryIds: number[]) => Promise<number | null>>();
+
+// Mirror the real defaults so resolvers fall back to numbers, not undefined.
+// Drift is pinned by `tests/unit/database/live-activity.test.ts`.
+export const LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT = 60;
+export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
+export type CheckLiveActivityFn = (lookbackSeconds: number) => Promise<boolean>;
+export const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
+
+export { requirePositiveInt, requireNonNegativeInt } from '../../shared/database/src/env-parsers.js';
+export type { IntParserOptions } from '../../shared/database/src/env-parsers.js';
 
 // Mock types
 export type AnonymousDevice = {

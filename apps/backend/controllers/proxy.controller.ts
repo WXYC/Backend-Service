@@ -223,7 +223,11 @@ function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork
     metadata.discogsReleaseId = artwork.release_id;
     metadata.discogsUrl = artwork.release_url;
   }
-  metadata.artworkUrl = filterSpacerGif(artwork.artwork_url);
+  // `?? undefined` preserves the original "key omitted in JSON" semantics
+  // (the wire contract to iOS); `@wxyc/metadata`'s `filterSpacerGif` returns
+  // `null` for falsy/spacer.gif inputs, which would JSON-serialize as
+  // `"artworkUrl": null` and break iOS's "missing => draw placeholder" path.
+  metadata.artworkUrl = filterSpacerGif(artwork.artwork_url) ?? undefined;
 
   if (artwork.artist_bio) metadata.artistBio = artwork.artist_bio;
   if (artwork.wikipedia_url) metadata.artistWikipediaUrl = artwork.wikipedia_url;
@@ -322,10 +326,12 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
       lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle, {
         extended: true,
         budgetMs: PROXY_LML_BUDGET_MS,
+        caller: 'proxy-album-metadata',
       });
     } else {
       lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle, {
         budgetMs: PROXY_LML_BUDGET_MS,
+        caller: 'proxy-album-metadata',
       });
     }
     upstreamCalls += 1;

@@ -92,7 +92,7 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
             candidate.artist_name,
             candidate.album_title ?? undefined,
             candidate.track_title ?? undefined,
-            { budgetMs: ENRICHMENT_LML_BUDGET_MS }
+            { budgetMs: ENRICHMENT_LML_BUDGET_MS, caller: 'enrichment-worker' }
           );
           outcome = await finalizeRow(candidate, response);
         } catch (err) {

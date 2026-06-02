@@ -229,7 +229,7 @@ export async function processRequest(body: RequestLineRequestBody): Promise<Unif
               }));
             },
             searchReleasesByArtist: async (artist: string, limit = 10) => {
-              const response = await lookupMetadata(artist);
+              const response = await lookupMetadata(artist, undefined, undefined, { caller: 'request-line' });
               return (response.results ?? [])
                 .filter((r) => r.library_item?.title)
                 .slice(0, limit)

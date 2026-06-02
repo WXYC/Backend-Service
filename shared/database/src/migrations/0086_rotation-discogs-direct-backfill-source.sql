@@ -1,0 +1,44 @@
+-- precondition-guard: not-required (ALTER TYPE ... ADD VALUE has no
+--   row-level invariants to violate; the value is type-system metadata.)
+-- 0086 — add `discogs_direct_backfill` provenance value for
+--   `rotation.discogs_release_id_source` (companion to BS#1029 / 0085).
+--
+-- New value:
+--   discogs_direct_backfill — written by the 2026-05-29 operator-run
+--                             bypass-LML rescue script after the
+--                             2026-05-28 picker-coverage regression
+--                             collapsed LML matching to ~23%. The rescue
+--                             hit `api.discogs.com/database/search`
+--                             directly with `(artist, album)` pairs from
+--                             active rotation rows missing
+--                             discogs_release_id, picking the top-ranked
+--                             release whose VA-aware Jaccard scored
+--                             >= 0.5 on both axes (relaxed retries:
+--                             strip EP/LP/Mixtape suffix, drop bracketed
+--                             annotations, self-titled coercion;
+--                             diacritic strip + feat. carve-out for
+--                             LOW_CONF). Tagged distinctly from
+--                             `lml_offline_backfill` so a future LML-
+--                             based re-run can scope its UPDATEs to its
+--                             own provenance without clobbering the
+--                             bypass-LML writes (and vice versa).
+--
+-- The 2026-05-29 operator-run UPDATE that flips the bypass-LML rows from
+-- `lml_offline_backfill` to `discogs_direct_backfill` lives at
+-- `scripts/relabel-rotation-direct-backfill.sql`. It runs once, post-
+-- deploy, scoped by `WHERE discogs_release_id_source = 'lml_offline_backfill'`.
+-- DDL-only here because ALTER TYPE ... ADD VALUE cannot be used in the
+-- same transaction as a write referencing the new value (PG12+ rule:
+-- value addable inside a tx, but not usable until commit).
+--
+-- The rotation-etl ON CONFLICT flip-back logic at jobs/rotation-etl/job.ts
+-- preserves `discogs_direct_backfill` rows the same way it preserves
+-- `lml_offline_backfill` rows: if tubafrenzy later contributes a non-NULL
+-- discogs_release_id, the source correctly flips to `tubafrenzy_paste`
+-- (MD-verified supersedes both bypass-LML and LML-based backfills);
+-- otherwise the persisted source stays untouched.
+--
+-- @no-analyze-needed: ALTER TYPE ADD VALUE is type-system metadata only.
+-- No rows are rewritten, no planner stats to refresh.
+
+ALTER TYPE "wxyc_schema"."discogs_release_id_source_enum" ADD VALUE 'discogs_direct_backfill';

@@ -172,9 +172,6 @@ jobs:
       - name: legacy_entry_id writes (three-use invariant)
         run: node scripts/check-legacy-entry-id-writes.mjs
 
-      - name: spacer.gif callsites (filterSpacerGif unification)
-        run: scripts/check-spacer-gif-callsites.sh
-
       - name: Bulk UPDATE + ANALYZE pairing (BS#934)
         run: node scripts/check-bulk-update-analyze.mjs --strict
 
@@ -357,6 +354,9 @@ jobs:
           # tubafrenzy-webhook integration spec needs this wired explicitly.
           # Matches the spec's INTERNAL_KEY fallback default.
           ETL_NOTIFY_KEY: test-secret-key
+          # BS#1261 — request-line ban CRUD + check-request-ban bucketing.
+          # Same shape as ETL_NOTIFY_KEY but distinct env var.
+          ROM_INTERNAL_KEY: test-rom-secret-key
           # LML client limiter: disable in CI. The integration suite runs
           # hundreds of fire-and-forget /lookup calls across spec files under
           # --runInBand; the module-level TokenBucket(50/min) would drain

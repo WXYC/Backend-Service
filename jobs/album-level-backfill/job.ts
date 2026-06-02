@@ -35,22 +35,25 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { album_metadata, db, closeDatabaseConnection } from '@wxyc/database';
+import { album_metadata, db, closeDatabaseConnection, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
 import { bulkLookupMetadata, type BulkLookupItem, type LookupResponse } from '@wxyc/lml-client';
+import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'album-level-backfill';
 
 // -- Env knobs ---------------------------------------------------------------
 
-/** Items per bulk-lookup request. LML hard cap is 100; default 10 is
- * sized so one wave of LML's internal `LML_BULK_MAX_CONCURRENT=10`
- * fan-out fits inside a single per-item `caller_budget_ms` window.
- * `computeBulkTimeoutMs` scales the fetch timeout with this value;
- * raising the env override without paired slack reintroduces the
- * 30 s shared-client timeout. */
+/** Items per bulk-lookup request. LML hard cap is 100; default 5 is the
+ * empirically-validated post-LML#370 ceiling under live `enrichment-worker`
+ * contention for LML's 5-permit Discogs semaphore. The 2026-05-28 Phase 3
+ * canary (BS#1078 / BS#1197) measured 38–50 % per-batch timeout at
+ * `batchSize=10` vs 3–10 % at `batchSize=5` — smaller batches keep total
+ * wall-clock inside LML's per-item 25 s `caller_budget_ms` cap (LML#370)
+ * instead of stacking cascade-bound items past it. Catch-up throughput
+ * comes from `BACKFILL_BULK_RATE_PER_MIN`, not this knob. */
 export const BULK_BATCH_SIZE_ENV = 'BACKFILL_BULK_BATCH_SIZE';
-export const BULK_BATCH_SIZE_DEFAULT = 10;
+export const BULK_BATCH_SIZE_DEFAULT = 5;
 
 /** Batches per minute. Bound the bulk caller so it can run concurrently
  * with the per-row drain cron (BS#995, 4 items/min) without saturating
@@ -65,9 +68,16 @@ export const BULK_RATE_PER_MIN_DEFAULT = 1;
 export const BULK_BUDGET_MS_ENV = 'BACKFILL_BULK_BUDGET_MS';
 export const BULK_BUDGET_MS_DEFAULT = 25_000;
 
-/** Per-item slice of the bulk fetch timeout. Matches LML's amortized
- * rate: `BULK_BUDGET_MS_DEFAULT / LML_BULK_MAX_CONCURRENT = 25_000 / 10`. */
-export const BULK_PER_ITEM_TIMEOUT_MS = 2_500;
+/** Per-item slice of the bulk fetch timeout. Sized from LML's realized
+ * concurrency for cascade-bound items: `BULK_BUDGET_MS_DEFAULT` divided
+ * by LML's 5-permit Discogs semaphore, not its 10-wide bulk fan-out.
+ * The earlier `25_000 / 10 = 2_500` derivation held for warm-cache items
+ * but broke under live `enrichment-worker` contention — the 2026-05-28
+ * Phase 3 canary (BS#1078 T1) measured min elapsed 25_045 ms per batch,
+ * pinned at LML#370's per-item 25 s cap. Widening to `25_000 / 5 = 5_000`
+ * gives each cascade-bound item a full per-permit share plus the
+ * cancellation headroom from LML#372. */
+export const BULK_PER_ITEM_TIMEOUT_MS = 5_000;
 
 /** Fixed slack on top of `batchSize × BULK_PER_ITEM_TIMEOUT_MS`:
  * HTTP overhead + JSON encode/decode + safety margin. */
@@ -104,51 +114,6 @@ export const LIVE_ACTIVITY_LOOKBACK_DEFAULT = 300;
 
 /** Sleep between re-probes when DJ activity is detected. */
 export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
-
-// -- Env parsing -------------------------------------------------------------
-
-const requirePositiveInt = (raw: string | undefined, envName: string, fallback: number): number => {
-  if (raw === undefined || raw === '') return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
-    throw new Error(`[${JOB_NAME}] Invalid ${envName}=${raw}: must be a positive integer.`);
-  }
-  return n;
-};
-
-const requireNonNegativeInt = (raw: string | undefined, envName: string, fallback: number): number => {
-  if (raw === undefined || raw === '') return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
-    throw new Error(`[${JOB_NAME}] Invalid ${envName}=${raw}: must be a non-negative integer.`);
-  }
-  return n;
-};
-
-// -- Inlined helpers ---------------------------------------------------------
-//
-// Both helpers are inlined for the same build-graph isolation reason as
-// jobs/flowsheet-metadata-backfill/enrich.ts (no imports from apps/backend).
-// Parity with the canonical sources is pinned by the parity tests at
-// tests/unit/jobs/album-level-backfill/{clean-discogs-bio,filter-spacer-gif}-parity.test.ts.
-
-/** Strip Discogs markup tags from bio text. Mirrors
- * apps/backend/services/metadata/metadata.service.ts#cleanDiscogsBio and
- * jobs/flowsheet-metadata-backfill/enrich.ts#cleanDiscogsBio verbatim. */
-export const cleanDiscogsBio = (bio: string): string =>
-  bio
-    .replace(/\[a=([^\]]+)\]/g, '$1')
-    .replace(/\[l=([^\]]+)\]/g, '$1')
-    .replace(/\[r=([^\]]+)\]/g, '$1')
-    .replace(/\[m=([^\]]+)\]/g, '$1')
-    .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
-
-/** Drop Discogs spacer.gif placeholder URLs. Mirrors enrich.ts#filterSpacerGif. */
-export const filterSpacerGif = (url: string | null | undefined): string | null => {
-  if (!url) return null;
-  if (url.includes('spacer.gif')) return null;
-  return url;
-};
 
 // -- Source query ------------------------------------------------------------
 
@@ -419,7 +384,11 @@ export const runBatch = async (
   const timeoutMs = computeBulkTimeoutMs(items.length);
   let response;
   try {
-    response = await bulkLookupMetadata(items, { budgetMs: options.budgetMs, timeoutMs });
+    response = await bulkLookupMetadata(items, {
+      budgetMs: options.budgetMs,
+      timeoutMs,
+      caller: 'album-level-backfill',
+    });
   } catch (err) {
     const firstAlbumId = resolved[0]?.album_id ?? null;
     const lastAlbumId = resolved[resolved.length - 1]?.album_id ?? null;
@@ -490,16 +459,23 @@ export const resolveOptions = (
   env: NodeJS.ProcessEnv = process.env,
   args: string[] = process.argv
 ): BackfillOptions => {
+  const ctx = { context: JOB_NAME };
   return {
-    batchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT),
-    ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT),
-    budgetMs: requirePositiveInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT),
-    postPassTimeoutMs: requirePositiveInt(env[POST_PASS_TIMEOUT_ENV], POST_PASS_TIMEOUT_ENV, POST_PASS_TIMEOUT_DEFAULT),
-    readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT),
+    batchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT, ctx),
+    ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT, ctx),
+    budgetMs: requirePositiveInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
+    postPassTimeoutMs: requirePositiveInt(
+      env[POST_PASS_TIMEOUT_ENV],
+      POST_PASS_TIMEOUT_ENV,
+      POST_PASS_TIMEOUT_DEFAULT,
+      ctx
+    ),
+    readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
     liveActivityLookbackSeconds: requireNonNegativeInt(
       env[LIVE_ACTIVITY_LOOKBACK_ENV],
       LIVE_ACTIVITY_LOOKBACK_ENV,
-      LIVE_ACTIVITY_LOOKBACK_DEFAULT
+      LIVE_ACTIVITY_LOOKBACK_DEFAULT,
+      ctx
     ),
     liveActivityPauseMs: LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
     dryRun: args.includes('--dry-run'),

@@ -1,15 +1,38 @@
 import { jest } from '@jest/globals';
-import { db, createMockQueryChain, library, library_artist_view, album_plays } from '../../mocks/database.mock';
+import {
+  db,
+  createMockQueryChain,
+  library,
+  library_artist_view,
+  album_plays,
+  rotation,
+} from '../../mocks/database.mock';
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockLookupBySong = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
+const mockGetRelease = jest.fn<(releaseId: number) => Promise<unknown>>();
+
+// Mirror the real `LmlClientError` shape so the service's
+// `err instanceof LmlClientError` branch picks up the mocked rejection
+// (BS#1185 / LML#427 negative-cache test). The real class lives in
+// `shared/lml-client/src/index.ts`.
+class MockLmlClientError extends Error {
+  statusCode: number;
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.name = 'LmlClientError';
+    this.statusCode = statusCode;
+  }
+}
 
 jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   lookupBySong: mockLookupBySong,
   isLmlConfigured: mockIsLmlConfigured,
+  getRelease: mockGetRelease,
   envInt: (_name: string, fallback: number) => fallback,
+  LmlClientError: MockLmlClientError,
 }));
 
 // Mock @sentry/node so we can assert that searchLibraryByTrack creates a
@@ -49,8 +72,11 @@ import {
   markAlbumFound,
   enrichWithArtwork,
   updateArtworkUrl,
-  getDiscogsReleaseIdByRotationId,
+  resolveRotationPickerSource,
   __resetRotationLmlLookupCacheForTests,
+  isVariousArtistsName,
+  getRotationTracksFromRelease,
+  __resetReleaseTracklistCacheForTests,
 } from '../../../apps/backend/services/library.service';
 import { resetConfig as resetCatalogTrackSearchConfig } from '../../../apps/backend/config/catalogTrackSearch';
 
@@ -1039,7 +1065,10 @@ describe('library.service', () => {
       const results = await searchLibraryByTrack('Back, Baby', 10);
 
       expect(mockLookupBySong).toHaveBeenCalledTimes(1);
-      expect(mockLookupBySong).toHaveBeenCalledWith('Back, Baby', { budgetMs: 5000 });
+      expect(mockLookupBySong).toHaveBeenCalledWith('Back, Baby', {
+        budgetMs: 5000,
+        caller: 'library-track-search',
+      });
       // Bridge query reads from `library` (with joins) so the unique index
       // on legacy_release_id is reachable.
       expect(libraryChain.from).toHaveBeenCalledWith(library);
@@ -1452,7 +1481,10 @@ describe('library.service', () => {
       await searchLibraryByTrack('Different Song', 10);
 
       expect(mockLookupBySong.mock.calls.length).toBe(callsAfterFirst + 1);
-      expect(mockLookupBySong).toHaveBeenLastCalledWith('Different Song', { budgetMs: 5000 });
+      expect(mockLookupBySong).toHaveBeenLastCalledWith('Different Song', {
+        budgetMs: 5000,
+        caller: 'library-track-search',
+      });
     });
 
     it('trim + lowercase: variations of the same query share one cache entry', async () => {
@@ -1865,7 +1897,10 @@ describe('library.service', () => {
       const enriched = await enrichWithArtwork(results);
 
       expect(enriched[0].artwork_url).toBe('https://i.discogs.com/confield.jpg');
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, { budgetMs: 5000 });
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
+        budgetMs: 5000,
+        caller: 'library-enrich-artwork',
+      });
       expect(db.update).toHaveBeenCalled();
     });
 
@@ -1953,7 +1988,10 @@ describe('library.service', () => {
       expect(enriched[1].artwork_url).toBe('https://i.discogs.com/lp5.jpg');
       // Only one LML call (for LP5, not Confield)
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
-      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, { budgetMs: 5000 });
+      expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, {
+        budgetMs: 5000,
+        caller: 'library-enrich-artwork',
+      });
     });
 
     it('handles LML returning no results', async () => {
@@ -2101,7 +2139,7 @@ describe('library.service', () => {
     });
   });
 
-  describe('getDiscogsReleaseIdByRotationId', () => {
+  describe('resolveRotationPickerSource', () => {
     // Pins the direct + fallback precedence of the simplified read path
     // (post-tubafrenzy-parity migration 0077). The tubafrenzy-sourced
     // `rotation.discogs_release_id` wins when present; the library_identity
@@ -2118,8 +2156,8 @@ describe('library.service', () => {
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([{ direct: 12345, fallback: null }]);
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
-      expect(result).toBe(12345);
+      const result = await resolveRotationPickerSource(42);
+      expect(result).toEqual({ releaseId: 12345, inlineTracklist: null });
     });
 
     it('falls back to library_identity.discogs_release_id when the direct column is NULL', async () => {
@@ -2127,8 +2165,8 @@ describe('library.service', () => {
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([{ direct: null, fallback: 99 }]);
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
-      expect(result).toBe(99);
+      const result = await resolveRotationPickerSource(42);
+      expect(result).toEqual({ releaseId: 99, inlineTracklist: null });
     });
 
     it('prefers the direct column over the fallback when both are present', async () => {
@@ -2139,8 +2177,8 @@ describe('library.service', () => {
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([{ direct: 12345, fallback: 99 }]);
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
-      expect(result).toBe(12345);
+      const result = await resolveRotationPickerSource(42);
+      expect(result).toEqual({ releaseId: 12345, inlineTracklist: null });
     });
 
     it('returns null when both sources are NULL', async () => {
@@ -2148,7 +2186,7 @@ describe('library.service', () => {
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([{ direct: null, fallback: null }]);
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
       expect(result).toBeNull();
     });
 
@@ -2157,12 +2195,12 @@ describe('library.service', () => {
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([]);
 
-      const result = await getDiscogsReleaseIdByRotationId(404);
+      const result = await resolveRotationPickerSource(404);
       expect(result).toBeNull();
     });
   });
 
-  describe('getDiscogsReleaseIdByRotationId — tier-3 LML fallback', () => {
+  describe('resolveRotationPickerSource — tier-3 LML fallback', () => {
     // Tier 3 mirrors tubafrenzy's RotationTracklistCache parity (BS#986):
     // when direct + fallback both miss, ask LML `POST /api/v1/lookup` to
     // identify the release from (artist_name, album_title). Per-rotation_id
@@ -2176,10 +2214,11 @@ describe('library.service', () => {
       fallback: number | null;
       artist_name: string | null;
       album_title: string | null;
+      tracklist_lookup_attempted_at?: Date | null;
     }): void {
       const chain = createMockQueryChain();
       db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([row]);
+      chain.limit = jest.fn().mockResolvedValue([{ tracklist_lookup_attempted_at: null, ...row }]);
     }
 
     beforeEach(() => {
@@ -2200,42 +2239,92 @@ describe('library.service', () => {
         search_type: 'direct',
       });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
-      expect(result).toBe(4080);
-      // The picker passes a 5 s fetch timeout so a hung LML call doesn't stall
-      // the dropdown for 30 s and tie up the shared LML semaphore permit
-      // (BS#992). The 4 s budgetMs forwards as X-Caller-Budget-Ms so LML's A10
-      // cutoff abandons its empty-results cascade ~1 s before BS aborts the
-      // fetch (WXYC/library-metadata-lookup#403/#404).
+      expect(result).toEqual({ releaseId: 4080, inlineTracklist: null });
+      // 10 s timeout matches tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` so picker
+      // coverage on long-tail rotation rows parity-matches the legacy system.
+      // No `budgetMs` here on purpose: BS#1186's cutoff was justified by
+      // malformed-query examples (track-titles-as-album-names) — for the
+      // picker, which always passes real `(artist_name, album_title)` pairs
+      // from rotation, the cascade's later strategies are exactly where the
+      // match for obscure college rotation comes from.
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
-        timeoutMs: 5000,
-        budgetMs: 4000,
+        timeoutMs: 10000,
+        extended: true,
+        caller: 'library-rotation-picker',
       });
+    });
+
+    it("omits the artist field when the rotation row's artist_name is a Various-Artists variant", async () => {
+      // Mirrors tubafrenzy's `LibrarySearchClient.searchDiscogsRelease`
+      // carve-out (`LibrarySearchClient.java:283,429`): passing
+      // "Various Artists" pollutes LML's fuzzy matching and surfaces
+      // unrelated compilations instead of the actual release. LML's
+      // /lookup orchestrator supports the album-only path natively.
+      mockRow({
+        direct: null,
+        fallback: null,
+        artist_name: 'Various Artists',
+        album_title: 'All the Young Droids: Junkshop Synth Pop 1978-1985',
+      });
+      mockLookupMetadata.mockResolvedValue({
+        results: [{ artwork: { release_id: 26538110 } }],
+        search_type: 'direct',
+      });
+
+      const result = await resolveRotationPickerSource(42);
+
+      expect(result).toEqual({ releaseId: 26538110, inlineTracklist: null });
+      expect(mockLookupMetadata).toHaveBeenCalledWith(
+        undefined,
+        'All the Young Droids: Junkshop Synth Pop 1978-1985',
+        undefined,
+        { timeoutMs: 10000, extended: true, caller: 'library-rotation-picker' }
+      );
+    });
+
+    it.each([
+      ['Various Artists', true],
+      ['various artists', true],
+      ['VARIOUS ARTISTS', true],
+      ['Various Artist', true],
+      ['various', true],
+      ['V/A', true],
+      ['V.A.', true],
+      ['v a', true],
+      ['Var Artists', true],
+      ['Var. Artists', true],
+      ['Variety Pack', false],
+      ['Variations', false],
+      ['Autechre', false],
+      ['', false],
+    ])('isVariousArtistsName(%p) === %p', (input, expected) => {
+      expect(isVariousArtistsName(input)).toBe(expected);
     });
 
     it('does not call LML when the direct column has a value', async () => {
       mockRow({ direct: 12345, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
-      expect(result).toBe(12345);
+      expect(result).toEqual({ releaseId: 12345, inlineTracklist: null });
       expect(mockLookupMetadata).not.toHaveBeenCalled();
     });
 
     it('does not call LML when the fallback has a value', async () => {
       mockRow({ direct: null, fallback: 99, artist_name: 'Autechre', album_title: 'Confield' });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
-      expect(result).toBe(99);
+      expect(result).toEqual({ releaseId: 99, inlineTracklist: null });
       expect(mockLookupMetadata).not.toHaveBeenCalled();
     });
 
     it('returns null and does not call LML when artist_name is NULL', async () => {
       mockRow({ direct: null, fallback: null, artist_name: null, album_title: 'Confield' });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
       expect(result).toBeNull();
       expect(mockLookupMetadata).not.toHaveBeenCalled();
@@ -2244,7 +2333,7 @@ describe('library.service', () => {
     it('returns null and does not call LML when album_title is NULL', async () => {
       mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: null });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
       expect(result).toBeNull();
       expect(mockLookupMetadata).not.toHaveBeenCalled();
@@ -2254,7 +2343,7 @@ describe('library.service', () => {
       mockIsLmlConfigured.mockReturnValue(false);
       mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
       expect(result).toBeNull();
       expect(mockLookupMetadata).not.toHaveBeenCalled();
@@ -2265,7 +2354,7 @@ describe('library.service', () => {
       mockLookupMetadata.mockRejectedValue(new Error('LML 504'));
       const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
       expect(result).toBeNull();
       expect(consoleSpy).toHaveBeenCalled();
@@ -2276,7 +2365,7 @@ describe('library.service', () => {
       mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Unknown' });
       mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
 
-      const result = await getDiscogsReleaseIdByRotationId(42);
+      const result = await resolveRotationPickerSource(42);
 
       expect(result).toBeNull();
     });
@@ -2288,15 +2377,15 @@ describe('library.service', () => {
         search_type: 'direct',
       });
 
-      const first = await getDiscogsReleaseIdByRotationId(42);
-      expect(first).toBe(4080);
+      const first = await resolveRotationPickerSource(42);
+      expect(first).toEqual({ releaseId: 4080, inlineTracklist: null });
 
       // The DB read still happens on every call (this is by design — the LRU
       // only short-circuits the LML query, which is the expensive bit). The
       // second call reaches the resolver but hits the cache before LML.
       mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
-      const second = await getDiscogsReleaseIdByRotationId(42);
-      expect(second).toBe(4080);
+      const second = await resolveRotationPickerSource(42);
+      expect(second).toEqual({ releaseId: 4080, inlineTracklist: null });
 
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
     });
@@ -2305,11 +2394,11 @@ describe('library.service', () => {
       mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Unknown' });
       mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
 
-      const first = await getDiscogsReleaseIdByRotationId(42);
+      const first = await resolveRotationPickerSource(42);
       expect(first).toBeNull();
 
       mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Unknown' });
-      const second = await getDiscogsReleaseIdByRotationId(42);
+      const second = await resolveRotationPickerSource(42);
       expect(second).toBeNull();
 
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
@@ -2324,7 +2413,7 @@ describe('library.service', () => {
       mockLookupMetadata.mockRejectedValueOnce(new Error('LML timeout'));
       const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-      const first = await getDiscogsReleaseIdByRotationId(42);
+      const first = await resolveRotationPickerSource(42);
       expect(first).toBeNull();
 
       mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
@@ -2332,11 +2421,306 @@ describe('library.service', () => {
         results: [{ artwork: { release_id: 4080 } }],
         search_type: 'direct',
       });
-      const second = await getDiscogsReleaseIdByRotationId(42);
-      expect(second).toBe(4080);
+      const second = await resolveRotationPickerSource(42);
+      expect(second).toEqual({ releaseId: 4080, inlineTracklist: null });
 
       expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
       consoleSpy.mockRestore();
+    });
+
+    it('carries an inline tracklist when LML returns extended-mode tracks', async () => {
+      // BS#1185 + LML#427: `extended=true` opts the top-1 result into a
+      // tracklist on `artwork.tracklist`. The picker controller short-circuits
+      // on that, avoiding the follow-up `getRelease(id)` round-trip. Empty
+      // per-track artists fall back to the rotation row's artist_name so the
+      // dj-site picker always has at least one name to render.
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      mockLookupMetadata.mockResolvedValue({
+        results: [
+          {
+            artwork: {
+              release_id: 4080,
+              tracklist: [
+                { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
+                { position: 'A2', title: 'Cfern', duration: '5:11', artists: [] },
+                { position: 'A3', title: 'Pen Expers', duration: null, artists: null },
+              ],
+            },
+          },
+        ],
+        search_type: 'direct',
+      });
+
+      const result = await resolveRotationPickerSource(42);
+
+      expect(result).toEqual({
+        releaseId: 4080,
+        inlineTracklist: [
+          { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
+          { position: 'A2', title: 'Cfern', duration: '5:11', artists: ['Autechre'] },
+          { position: 'A3', title: 'Pen Expers', duration: null, artists: ['Autechre'] },
+        ],
+      });
+    });
+
+    it('carries an inline tracklist when LML synth-rescues with release_id=0 (MB rescue)', async () => {
+      // LML#427 MusicBrainz rescue: when Discogs misses, LML synthesizes a
+      // result with `release_id: 0` (the BS#1185 sentinel) and a tracklist
+      // sourced from musicbrainz-cache. The picker still gets a tracklist
+      // and skips `getRelease(0)` (which would 404). releaseId=0 short-circuits
+      // the controller via `inlineTracklist !== null`.
+      mockRow({
+        direct: null,
+        fallback: null,
+        artist_name: 'Julianna Barwick & Mary Lattimore',
+        album_title: 'Tragic Magic',
+      });
+      mockLookupMetadata.mockResolvedValue({
+        results: [
+          {
+            artwork: {
+              release_id: 0,
+              tracklist: [
+                { position: '1', title: 'Tragic Magic', duration: '6:01', artists: [] },
+                { position: '2', title: 'For Mariko', duration: '4:18', artists: [] },
+              ],
+            },
+          },
+        ],
+        search_type: 'direct',
+      });
+
+      const result = await resolveRotationPickerSource(42);
+
+      expect(result).toEqual({
+        releaseId: 0,
+        inlineTracklist: [
+          { position: '1', title: 'Tragic Magic', duration: '6:01', artists: ['Julianna Barwick & Mary Lattimore'] },
+          { position: '2', title: 'For Mariko', duration: '4:18', artists: ['Julianna Barwick & Mary Lattimore'] },
+        ],
+      });
+    });
+
+    describe('persistent negative marker (rotation.tracklist_lookup_attempted_at)', () => {
+      // The in-memory LRU survives within a process; this column survives
+      // restarts. Picker skips the LML cascade entirely when the column is
+      // set within the 7-day window — covers the 28-row "negative" set
+      // without re-paying 22 s cascade exhaustion on every deploy.
+
+      it('skips LML when tracklist_lookup_attempted_at is within the 7-day window', async () => {
+        mockRow({
+          direct: null,
+          fallback: null,
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+          tracklist_lookup_attempted_at: new Date(Date.now() - 24 * 60 * 60 * 1000), // 1 day ago
+        });
+
+        const result = await resolveRotationPickerSource(42);
+
+        expect(result).toBeNull();
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+      });
+
+      it('falls through to LML when tracklist_lookup_attempted_at is older than the 7-day window', async () => {
+        mockRow({
+          direct: null,
+          fallback: null,
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+          tracklist_lookup_attempted_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000), // 8 days ago
+        });
+        mockLookupMetadata.mockResolvedValue({
+          results: [{ artwork: { release_id: 4080 } }],
+          search_type: 'direct',
+        });
+
+        const result = await resolveRotationPickerSource(42);
+
+        expect(result).toEqual({ releaseId: 4080, inlineTracklist: null });
+        expect(mockLookupMetadata).toHaveBeenCalled();
+      });
+
+      it('falls through to LML when tracklist_lookup_attempted_at is NULL', async () => {
+        mockRow({
+          direct: null,
+          fallback: null,
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+          tracklist_lookup_attempted_at: null,
+        });
+        mockLookupMetadata.mockResolvedValue({
+          results: [{ artwork: { release_id: 4080 } }],
+          search_type: 'direct',
+        });
+
+        await resolveRotationPickerSource(42);
+
+        expect(mockLookupMetadata).toHaveBeenCalled();
+      });
+
+      it('does NOT skip when a stored release_id exists, even with a recent marker (positive wins)', async () => {
+        // A row that was negative-cached and then later got a stored
+        // release_id (e.g. music director paste) must short-circuit on the
+        // stored id, not the stale marker.
+        mockRow({
+          direct: 12345,
+          fallback: null,
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+          tracklist_lookup_attempted_at: new Date(),
+        });
+
+        const result = await resolveRotationPickerSource(42);
+
+        expect(result).toEqual({ releaseId: 12345, inlineTracklist: null });
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+      });
+
+      it('stamps the column on negative LML outcome', async () => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Mystery', album_title: 'Unknown' });
+        mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
+
+        const updateSetMock = jest.fn().mockReturnThis();
+        const updateWhereMock = jest.fn().mockResolvedValue(undefined);
+        db.update.mockReturnValue({ set: updateSetMock, where: updateWhereMock });
+        updateSetMock.mockReturnValue({ where: updateWhereMock });
+
+        const result = await resolveRotationPickerSource(42);
+
+        // Let microtasks drain so the fire-and-forget stamp lands.
+        await new Promise((r) => setImmediate(r));
+
+        expect(result).toBeNull();
+        expect(db.update).toHaveBeenCalledWith(rotation);
+        expect(updateSetMock).toHaveBeenCalled();
+      });
+
+      it('does NOT stamp the column on positive LML outcome', async () => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+        mockLookupMetadata.mockResolvedValue({
+          results: [{ artwork: { release_id: 4080 } }],
+          search_type: 'direct',
+        });
+
+        await resolveRotationPickerSource(42);
+        await new Promise((r) => setImmediate(r));
+
+        expect(db.update).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('getRotationTracksFromRelease', () => {
+    const sampleRelease = {
+      artist: 'Autechre',
+      title: 'Confield',
+      tracklist: [
+        { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
+        { position: 'A2', title: 'Cfern', duration: '5:11', artists: [] },
+      ],
+    };
+
+    beforeEach(() => {
+      __resetReleaseTracklistCacheForTests();
+      mockGetRelease.mockReset();
+    });
+
+    it('fetches the release, projects to RotationTrack shape, returns the array', async () => {
+      mockGetRelease.mockResolvedValue(sampleRelease);
+
+      const tracks = await getRotationTracksFromRelease(4080);
+
+      expect(mockGetRelease).toHaveBeenCalledWith(4080);
+      expect(tracks).toEqual([
+        { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
+        // Empty per-track artists fall back to the release-level artist so the
+        // dj-site picker always has at least one name to render.
+        { position: 'A2', title: 'Cfern', duration: '5:11', artists: ['Autechre'] },
+      ]);
+    });
+
+    it('caches positive results so subsequent calls do not hit getRelease within TTL', async () => {
+      mockGetRelease.mockResolvedValue(sampleRelease);
+
+      const first = await getRotationTracksFromRelease(4080);
+      const second = await getRotationTracksFromRelease(4080);
+
+      expect(first).toEqual(second);
+      expect(mockGetRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns the cached projection by reference (same array identity)', async () => {
+      // Subsequent picker opens should not re-allocate the projection — the
+      // LRU value is the array itself.
+      mockGetRelease.mockResolvedValue(sampleRelease);
+
+      const first = await getRotationTracksFromRelease(4080);
+      const second = await getRotationTracksFromRelease(4080);
+
+      expect(second).toBe(first);
+    });
+
+    it('returns null on LML 404 and negative-caches so subsequent calls skip getRelease', async () => {
+      mockGetRelease.mockRejectedValue(new MockLmlClientError('not found', 404));
+
+      const first = await getRotationTracksFromRelease(9999999);
+      const second = await getRotationTracksFromRelease(9999999);
+
+      expect(first).toBeNull();
+      expect(second).toBeNull();
+      expect(mockGetRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('rethrows non-404 LmlClientError (e.g. 5xx) so transient failures surface', async () => {
+      mockGetRelease.mockRejectedValue(new MockLmlClientError('upstream timeout', 504));
+
+      await expect(getRotationTracksFromRelease(4080)).rejects.toThrow('upstream timeout');
+    });
+
+    it('rethrows non-LmlClientError errors (network, JSON parse, etc.) without caching', async () => {
+      mockGetRelease.mockRejectedValueOnce(new Error('socket hang up'));
+
+      await expect(getRotationTracksFromRelease(4080)).rejects.toThrow('socket hang up');
+
+      // Next call should retry (no cached null), to give the picker a chance
+      // to recover when the upstream blip clears.
+      mockGetRelease.mockResolvedValueOnce(sampleRelease);
+      const second = await getRotationTracksFromRelease(4080);
+      expect(second).not.toBeNull();
+      expect(mockGetRelease).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns an empty array (not null) when the release has an empty tracklist', async () => {
+      mockGetRelease.mockResolvedValue({ artist: 'Autechre', title: 'Untitled', tracklist: [] });
+
+      const tracks = await getRotationTracksFromRelease(4080);
+
+      expect(tracks).toEqual([]);
+    });
+
+    it('coalesces concurrent calls for the same release_id into a single getRelease call', async () => {
+      // A cold-cache deploy followed by a burst of DJs opening the same picker
+      // row should pay the 2-9 s cold-path once across all of them, not once
+      // per DJ. The in-flight Promise map is the single-flight guard.
+      let resolveRelease: (value: unknown) => void = () => undefined;
+      mockGetRelease.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveRelease = resolve;
+        })
+      );
+
+      const first = getRotationTracksFromRelease(4080);
+      const second = getRotationTracksFromRelease(4080);
+      const third = getRotationTracksFromRelease(4080);
+
+      resolveRelease(sampleRelease);
+      const [a, b, c] = await Promise.all([first, second, third]);
+
+      expect(mockGetRelease).toHaveBeenCalledTimes(1);
+      // All three callers see the same projected array (cache identity).
+      expect(b).toBe(a);
+      expect(c).toBe(a);
     });
   });
 });

@@ -17,12 +17,18 @@ import { events_route } from './routes/events.route.js';
 import { request_line_route } from './routes/requestLine.route.js';
 import { config_route } from './routes/config.route.js';
 import { internal_route } from './routes/internal.route.js';
+import { internalBansRoute } from './routes/internal-bans.route.js';
 import { ses_events_route } from './routes/ses-events.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
-import { setupCdcWebSocket, shutdownCdcWebSocket } from './services/cdc/index.js';
+import {
+  setupCdcWebSocket,
+  shutdownCdcWebSocket,
+  startCdcDispatcher,
+  shutdownCdcDispatcher,
+} from './services/cdc/index.js';
 import { setupMetadataBroadcast } from './services/metadata-broadcast/index.js';
 import { startSseMetrics, stopSseMetrics } from './services/sse/sse-metrics.js';
 import { serverEventsMgr } from './utils/serverEvents.js';
@@ -135,6 +141,12 @@ app.use('/internal/ses-events', ses_events_route);
 // Internal endpoints (ETL sync notifications, key-authenticated)
 app.use('/internal', internal_route);
 
+// BS#1261 — request-line ban CRUD called by request-o-matic. Mounted as a
+// sibling under /internal so the existing X-Internal-Key + ROM_INTERNAL_KEY
+// pattern composes cleanly. Distinct router because the auth key differs:
+// ROM_INTERNAL_KEY (this router) vs ETL_NOTIFY_KEY (the sibling).
+app.use('/internal/banned-fingerprints', internalBansRoute);
+
 Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureExpressError });
 app.use(errorHandler);
 
@@ -143,13 +155,18 @@ const server = app.listen(port, () => {
   startPlaylistProxy();
   startAlbumPlaysRefresh();
   startSseMetrics(() => serverEventsMgr.getClientCountByTopic());
-  void setupCdcWebSocket(server);
+  // LISTEN startup runs unconditionally so in-process subscribers
+  // (`setupMetadataBroadcast`, future consumers) fire whether or not
+  // CDC_SECRET is set (BS#1187). The websocket call below self-no-ops
+  // when the secret is unset.
+  void startCdcDispatcher();
   // Second CDC handler: rebroadcasts terminal metadata UPDATEs as SSE
   // `liveFs:update` so dj-site stays in sync after the enrichment-worker
   // (BS#892) finalizes a row. Closes BS#893 + BS#628. Registers a handler
   // on the same per-process LISTEN connection — independent of the
   // websocket handler, both fire on every event.
   setupMetadataBroadcast();
+  void setupCdcWebSocket(server);
   // One-shot warm of the rotation-tracks picker LRUs in
   // `library.service.ts`. Fire-and-forget — the walk shares the LML
   // semaphore with concurrent traffic, and the LRUs are process-local so
@@ -189,6 +206,7 @@ function shutdown(signal: string): void {
   stopAlbumPlaysRefresh();
   stopSseMetrics();
   void shutdownCdcWebSocket();
+  void shutdownCdcDispatcher();
   // BS#905: observe enrichments abandoned mid-flight. Sentry captureMessage
   // fires only when at least one promise is still pending after the deadline,
   // so a clean shutdown stays silent. Drain happens in parallel with

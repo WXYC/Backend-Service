@@ -13,7 +13,13 @@ const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number) => Promise<number
 const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
 const mockUpdateCanonicalEntity = jest.fn<(id: number, entityId: string, confidence: number) => Promise<unknown>>();
 const mockMapLookupToCanonicalEntity = jest.fn<(response: unknown) => { id: string; confidence: number } | null>();
-const mockGetDiscogsReleaseIdByRotationId = jest.fn<(rotationId: number) => Promise<number | null>>();
+type PickerSourceMock = {
+  releaseId: number | null;
+  inlineTracklist: Array<{ position: string; title: string; duration: string | null; artists: string[] }> | null;
+};
+const mockResolveRotationPickerSource = jest.fn<(rotationId: number) => Promise<PickerSourceMock | null>>();
+type RotationTrackMock = { position: string; title: string; duration: string | null; artists: string[] };
+const mockGetRotationTracksFromRelease = jest.fn<(releaseId: number) => Promise<RotationTrackMock[] | null>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
@@ -46,7 +52,8 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   insertGenre: jest.fn(),
   insertFormat: jest.fn(),
   isISODate: jest.fn(),
-  getDiscogsReleaseIdByRotationId: mockGetDiscogsReleaseIdByRotationId,
+  resolveRotationPickerSource: mockResolveRotationPickerSource,
+  getRotationTracksFromRelease: mockGetRotationTracksFromRelease,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -56,27 +63,12 @@ jest.mock('../../../apps/backend/services/labels.service', () => ({
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockCheckStreamingAvailability = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>().mockReturnValue(false);
-const mockGetRelease = jest.fn<(releaseId: number) => Promise<unknown>>();
-
-// LmlClientError needs to be a real class so `err instanceof LmlClientError`
-// in the controller works after mocking. Mirrors the real shape in
-// shared/lml-client/src/index.ts (@wxyc/lml-client).
-class MockLmlClientError extends Error {
-  statusCode: number;
-  constructor(message: string, statusCode: number) {
-    super(message);
-    this.name = 'LmlClientError';
-    this.statusCode = statusCode;
-  }
-}
 
 jest.mock('@wxyc/lml-client', () => ({
   checkStreamingAvailability: mockCheckStreamingAvailability,
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: mockIsLmlConfigured,
-  getRelease: mockGetRelease,
   envInt: (_name: string, fallback: number) => fallback,
-  LmlClientError: MockLmlClientError,
 }));
 
 import {
@@ -410,7 +402,10 @@ describe('library.controller', () => {
 
         // Controller returns 201 immediately, before fire-and-forget completes.
         expect(res.status).toHaveBeenCalledWith(201);
-        expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, { budgetMs: 5000 });
+        expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, {
+          budgetMs: 5000,
+          caller: 'library-canonical-entity',
+        });
       });
 
       it('writes canonical_entity_id back to the inserted row when the lookup yields a match', async () => {
@@ -457,22 +452,14 @@ describe('library.controller', () => {
   });
 
   describe('getRotationTracks', () => {
-    // Minimal Discogs release shape needed by the projection. The real
-    // DiscogsReleaseMetadata has more fields; we provide only what the
-    // controller reads.
-    const sampleRelease = {
-      release_id: 4080,
-      title: 'Confield',
-      artist: 'Autechre',
-      tracklist: [
-        { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
-        { position: 'A2', title: 'Cfern', duration: '5:11', artists: [] },
-      ],
-    };
+    const sampleProjection: RotationTrackMock[] = [
+      { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
+      { position: 'A2', title: 'Cfern', duration: '5:11', artists: ['Autechre'] },
+    ];
 
     beforeEach(() => {
-      mockGetDiscogsReleaseIdByRotationId.mockReset();
-      mockGetRelease.mockReset();
+      mockResolveRotationPickerSource.mockReset();
+      mockGetRotationTracksFromRelease.mockReset();
     });
 
     it('returns 400 for non-numeric rotation_id', async () => {
@@ -480,7 +467,7 @@ describe('library.controller', () => {
       const res = mockResponse();
 
       await expect(getRotationTracks(req, res, next)).rejects.toThrow('positive integer');
-      expect(mockGetDiscogsReleaseIdByRotationId).not.toHaveBeenCalled();
+      expect(mockResolveRotationPickerSource).not.toHaveBeenCalled();
     });
 
     it('returns 400 for non-positive rotation_id', async () => {
@@ -491,39 +478,54 @@ describe('library.controller', () => {
     });
 
     it('returns 200 + empty array when no identity resolves (rotation missing, no album_id, or no library_identity row)', async () => {
-      mockGetDiscogsReleaseIdByRotationId.mockResolvedValue(null);
+      mockResolveRotationPickerSource.mockResolvedValue(null);
       const req = { params: { rotation_id: '42' } } as unknown as Request;
       const res = mockResponse();
 
       await getRotationTracks(req, res, next);
 
-      expect(mockGetDiscogsReleaseIdByRotationId).toHaveBeenCalledWith(42);
-      expect(mockGetRelease).not.toHaveBeenCalled();
+      expect(mockResolveRotationPickerSource).toHaveBeenCalledWith(42);
+      expect(mockGetRotationTracksFromRelease).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith([]);
     });
 
-    it('projects Discogs tracklist into RotationTrack shape when identity resolves', async () => {
-      mockGetDiscogsReleaseIdByRotationId.mockResolvedValue(4080);
-      mockGetRelease.mockResolvedValue(sampleRelease);
+    it('delegates to getRotationTracksFromRelease when identity resolves and inline tracklist is absent', async () => {
+      mockResolveRotationPickerSource.mockResolvedValue({ releaseId: 4080, inlineTracklist: null });
+      mockGetRotationTracksFromRelease.mockResolvedValue(sampleProjection);
       const req = { params: { rotation_id: '42' } } as unknown as Request;
       const res = mockResponse();
 
       await getRotationTracks(req, res, next);
 
-      expect(mockGetRelease).toHaveBeenCalledWith(4080);
+      expect(mockGetRotationTracksFromRelease).toHaveBeenCalledWith(4080);
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith([
-        { position: 'A1', title: 'VI Scose Poise', duration: '5:30', artists: ['Autechre'] },
-        // Empty Discogs track.artists falls back to the release artist so the
-        // dj-site picker always has at least one artist name to render.
-        { position: 'A2', title: 'Cfern', duration: '5:11', artists: ['Autechre'] },
-      ]);
+      expect(res.json).toHaveBeenCalledWith(sampleProjection);
     });
 
-    it('returns 200 + empty array on LML 404 (release unknown to Discogs)', async () => {
-      mockGetDiscogsReleaseIdByRotationId.mockResolvedValue(9999999);
-      mockGetRelease.mockRejectedValue(new MockLmlClientError('not found', 404));
+    it('short-circuits to the inline tracklist when the resolver carries one (no release fetch)', async () => {
+      // BS#1185 + LML#427: when the tier-3 LML lookup returns an extended
+      // result with a tracklist (Discogs hit OR MusicBrainz rescue), the
+      // service projects it inline and the controller returns it directly.
+      // No second LML round-trip.
+      const inlineTracklist = [
+        { position: '1', title: 'Tragic Magic', duration: '6:01', artists: ['Julianna Barwick & Mary Lattimore'] },
+        { position: '2', title: 'For Mariko', duration: '4:18', artists: ['Julianna Barwick & Mary Lattimore'] },
+      ];
+      mockResolveRotationPickerSource.mockResolvedValue({ releaseId: 0, inlineTracklist });
+      const req = { params: { rotation_id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getRotationTracks(req, res, next);
+
+      expect(mockGetRotationTracksFromRelease).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(inlineTracklist);
+    });
+
+    it('returns 200 + empty array when the service returns null (LML 404 negative-cached)', async () => {
+      mockResolveRotationPickerSource.mockResolvedValue({ releaseId: 9999999, inlineTracklist: null });
+      mockGetRotationTracksFromRelease.mockResolvedValue(null);
       const req = { params: { rotation_id: '42' } } as unknown as Request;
       const res = mockResponse();
 
@@ -533,9 +535,9 @@ describe('library.controller', () => {
       expect(res.json).toHaveBeenCalledWith([]);
     });
 
-    it('bubbles LML 5xx errors so transient failures surface rather than silently degrading', async () => {
-      mockGetDiscogsReleaseIdByRotationId.mockResolvedValue(4080);
-      mockGetRelease.mockRejectedValue(new MockLmlClientError('upstream timeout', 504));
+    it('bubbles service errors (LML 5xx, network) so transient failures surface rather than silently degrading', async () => {
+      mockResolveRotationPickerSource.mockResolvedValue({ releaseId: 4080, inlineTracklist: null });
+      mockGetRotationTracksFromRelease.mockRejectedValue(new Error('upstream timeout'));
       const req = { params: { rotation_id: '42' } } as unknown as Request;
       const res = mockResponse();
 

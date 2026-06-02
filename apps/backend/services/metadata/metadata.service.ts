@@ -5,28 +5,35 @@
  * returned metadata directly on the flowsheet row. Uses LML's /lookup endpoint
  * which provides artist correction, title normalization, fallback strategies,
  * artwork, streaming URLs, and artist metadata in a single call.
+ *
+ * The pure response → metadata helpers live in `@wxyc/metadata` (deep module
+ * shared with `apps/enrichment-worker` and the four enrichment jobs). This
+ * file imports them and adds two backend-specific concerns:
+ *   1. The fetch (`fetchMetadata`) — LML I/O + the camelCase response shape
+ *      the proxy controller and enrichment service consume.
+ *   2. Re-exports of `filterSpacerGif` and `isSyntheticArtwork` — backend
+ *      callsites in `library.controller`, `proxy.controller`, `library.service`,
+ *      and the artwork providers still import these from here. The re-exports
+ *      keep those callsites stable; the underlying implementation now lives
+ *      in `@wxyc/metadata`.
  */
 import { MetadataRequest, AlbumMetadataResult, ArtistMetadataResult, FlowsheetMetadata } from './metadata.types.js';
-import { lookupMetadata } from '@wxyc/lml-client';
+import { lookupMetadata, envInt } from '@wxyc/lml-client';
 import type { DiscogsMatchResult } from '@wxyc/lml-client';
+import { cleanDiscogsBio, filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
 import { SearchUrlProvider } from './providers/search-urls.provider.js';
+
+export { filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
 
 const searchUrls = new SearchUrlProvider();
 
 /**
- * Strip Discogs markup tags from bio text.
- *
- * Discogs profiles use custom markup like [a=Artist], [l=Label],
- * [url=...]...[/url]. This converts them to plain text.
+ * Budget for the metadata-service fire-and-forget LML lookup on flowsheet
+ * insert. 5 s matches the other runtime callers — short enough that LML
+ * cuts off well before the BS-side 30 s `AbortController` ceiling. See
+ * `LookupOptions.budgetMs` for mechanics.
  */
-function cleanDiscogsBio(bio: string): string {
-  return bio
-    .replace(/\[a=([^\]]+)\]/g, '$1')
-    .replace(/\[l=([^\]]+)\]/g, '$1')
-    .replace(/\[r=([^\]]+)\]/g, '$1')
-    .replace(/\[m=([^\]]+)\]/g, '$1')
-    .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2');
-}
+const METADATA_SERVICE_LML_BUDGET_MS = envInt('METADATA_SERVICE_LML_BUDGET_MS', 5000);
 
 /**
  * Check whether the LML service is configured.
@@ -57,7 +64,10 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
   const { artistName, albumTitle, trackTitle } = request;
   const result: FlowsheetMetadata = {};
 
-  const lookupResponse = await lookupMetadata(artistName, albumTitle, trackTitle);
+  const lookupResponse = await lookupMetadata(artistName, albumTitle, trackTitle, {
+    caller: 'metadata-service',
+    budgetMs: METADATA_SERVICE_LML_BUDGET_MS,
+  });
   const artwork: DiscogsMatchResult | null = lookupResponse.results?.[0]?.artwork ?? null;
 
   if (artwork) {
@@ -65,23 +75,33 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
     result.artist = extractArtistMetadata(artwork) ?? undefined;
   }
 
-  // Fill missing search URLs (always available, no API calls). All five
-  // streaming services have search-URL fallbacks post-BS#1185 — the
-  // Tragic Magic case (artist not in WXYC library at all → LML returns
-  // zero results → no artwork to project) used to leave Spotify and
-  // Apple Music as null, greying out two iOS buttons.
+  // Fill missing search URLs (always available, no API calls). Four of the
+  // five streaming services have search-URL fallbacks here: Spotify, YT,
+  // Bandcamp, SoundCloud. Apple Music is intentionally absent (BS#1192).
+  //
+  // LML's `_fetch_apple_music_url` enforces a verified iTunes match (80/80
+  // fuzzy floor + album-collection check). A null return is load-bearing
+  // signal — "we couldn't verify this release exists on Apple Music" —
+  // and persisting a keyword-search URL on the write path launders that
+  // signal into a clickable button that drops users on the in-app search
+  // page. Worse, `album_metadata` is keyed by `album_id` but the search
+  // query uses the enrichment-triggering `trackTitle`, so every linked
+  // flowsheet row for that album reads back the same track-scoped URL —
+  // wrong scope independent of the LML-signal issue.
+  //
+  // The read path (`proxy.controller.getAlbumMetadata`) still fills Apple
+  // at request time for the iOS Tragic Magic surface, where there's no
+  // persisted row to poison.
   const urls = searchUrls.getAllSearchUrls(artistName, albumTitle, trackTitle);
   if (!result.album) {
     result.album = {
       spotifyUrl: urls.spotifyUrl,
-      appleMusicUrl: urls.appleMusicUrl,
       youtubeMusicUrl: urls.youtubeMusicUrl,
       bandcampUrl: urls.bandcampUrl,
       soundcloudUrl: urls.soundcloudUrl,
     };
   } else {
     if (!result.album.spotifyUrl) result.album.spotifyUrl = urls.spotifyUrl;
-    if (!result.album.appleMusicUrl) result.album.appleMusicUrl = urls.appleMusicUrl;
     if (!result.album.youtubeMusicUrl) result.album.youtubeMusicUrl = urls.youtubeMusicUrl;
     if (!result.album.bandcampUrl) result.album.bandcampUrl = urls.bandcampUrl;
     if (!result.album.soundcloudUrl) result.album.soundcloudUrl = urls.soundcloudUrl;
@@ -91,53 +111,17 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
 }
 
 /**
- * Drop Discogs `spacer.gif` placeholder URLs.
- *
- * Discogs returns `spacer.gif` when a release has no real cover artwork.
- * Persisting that to `flowsheet.artwork_url` would trip the playlist-proxy
- * partial index ("has artwork") and result in a broken/blank image on iOS.
- * Filtering at this single chokepoint covers every caller of `fetchMetadata`
- * (runtime enrichment, iOS playcut detail, and the historical-drain job)
- * so callers don't have to remember. See #649.
- *
- * Exported as the canonical implementation of the filter (BS#890). All
- * `apps/backend/**` consumers import this; the inline copy in
- * `jobs/flowsheet-metadata-backfill/enrich.ts` is preserved for build-
- * graph isolation but pinned to this canonical via parity test +
- * `scripts/check-spacer-gif-callsites.sh` allowlist.
- */
-export function filterSpacerGif(url: string | null | undefined): string | undefined {
-  if (!url) return undefined;
-  return url.includes('spacer.gif') ? undefined : url;
-}
-
-/**
- * Detect LML's streaming-only synthesized result shape (LML#401).
- *
- * On a Discogs miss, LML's `enrich_artwork_results` synthesizes a
- * `DiscogsSearchResult(release_id=0, release_url="")` carrying only
- * streaming URLs — no real album-derived fields. BS keys off this
- * sentinel pair to skip persisting `release_id=0` / `discogs_url=""`
- * on the flowsheet (would otherwise pollute filtered queries like
- * `WHERE discogs_release_id IS NOT NULL`). Streaming URLs still flow.
- *
- * Exported as the canonical implementation so `proxy.controller.ts`
- * shares one check site — mirrors the cross-file pattern established
- * by `filterSpacerGif` above.
- */
-export function isSyntheticArtwork(artwork: DiscogsMatchResult): boolean {
-  return artwork.release_id === 0 && artwork.release_url === '';
-}
-
-/**
- * Extract album metadata from a DiscogsMatchResult.
+ * Extract album metadata from a DiscogsMatchResult into the camelCase shape
+ * the backend `AlbumMetadataResult` consumers expect. The underlying field-
+ * by-field derivation is the same as `@wxyc/metadata`'s `normalizeLookup`;
+ * this wrapper coerces nulls to undefined to match the legacy optional shape.
  */
 function extractAlbumMetadata(artwork: DiscogsMatchResult): AlbumMetadataResult {
   const synthetic = isSyntheticArtwork(artwork);
   return {
     discogsReleaseId: synthetic ? undefined : artwork.release_id,
     discogsUrl: synthetic ? undefined : artwork.release_url,
-    artworkUrl: filterSpacerGif(artwork.artwork_url),
+    artworkUrl: filterSpacerGif(artwork.artwork_url) ?? undefined,
     // Discogs returns 0 as "year unknown"; coerce to undefined so it doesn't
     // leak to iOS as a literal "0" or persist as 0 in flowsheet.release_year.
     // #1002.

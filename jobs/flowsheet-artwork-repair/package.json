@@ -1,0 +1,28 @@
+{
+  "name": "@wxyc/flowsheet-artwork-repair",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot drain (BS#1209): re-resolve LML artwork for rows stranded by the LML _resolve_fallback_artwork bug (LML#408, fixed in LML#409). Two populations — free-form (flowsheet.metadata_status='enriched_match' AND artwork_url IS NULL AND album_id IS NULL) and linked (album_metadata.artwork_url IS NULL). Status read-only; idempotent WHERE clauses; race-guarded UPSERT.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_flowsheet_artwork_repair:ci -f ../../Dockerfile.flowsheet-artwork-repair ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.53.1",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0",
+    "@wxyc/metadata": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

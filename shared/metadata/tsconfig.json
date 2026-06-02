@@ -1,0 +1,15 @@
+{
+  "extends": ["../../tsconfig.base.json"],
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "src/__tests__/**"],
+  "compilerOptions": {
+    "composite": true,
+    "baseUrl": ".",
+    "rootDir": ".",
+    "outDir": "./dist",
+    "tsBuildInfoFile": "./.cache/tsconfig.tsbuildinfo",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true
+  }
+}

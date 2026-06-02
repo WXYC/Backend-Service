@@ -5,6 +5,18 @@ on:
     branches:
       - main
 
+# Serialize Auto deploys: queue subsequent runs instead of letting two
+# deploys race each other's `docker stop` / `docker run` sequence on EC2.
+# Three-PR rapid-succession merges on 2026-05-30 (#1238/#1239/#1240)
+# reported this as two healthcheck failures for a healthy prod (#1243).
+# `cancel-in-progress: false` is deliberate — cancellation between the
+# deploy script's `docker stop` and `docker run` would leave the service
+# down, the exact failure mode `deploy-base.yml`'s `deploy` job already
+# disables `fail-fast` to avoid (post-BS#798 comment).
+concurrency:
+  group: deploy-auto-${{ github.workflow }}
+  cancel-in-progress: false
+
 # Caller permissions must equal or exceed the reusable workflow's
 # declared scope; deploy-base.yml requires contents:write to create
 # release tags via github-script. Granting less here makes GHA reject

@@ -7,14 +7,22 @@
  *   - the backfill's own `defaultLmlLimiter` so this surface gets its stricter
  *     BACKFILL_LML_* rate ceiling instead of the runtime path's
  *     LML_CLIENT_* defaults (BS#995 / BS#994), and
- *   - a tighter per-call abort budget (`BACKFILL_LML_PER_CALL_TIMEOUT_MS`,
- *     default 8000 ms) so cold-tail rows that LML can't resolve quickly
- *     don't hold one of LML's serialized Discogs fan-out slots for the
- *     runtime path's 30 s (BS#994 follow-up, retro 2026-05-23). Rows that
- *     exceed the budget stay `metadata_attempt_at IS NULL` and are
- *     retried on the next pass when LML's cache is warmer / once LML#338
- *     lands. Pattern mirrors BS#992's per-caller timeout for the rotation
- *     picker.
+ *   - a per-call abort budget (`BACKFILL_LML_PER_CALL_TIMEOUT_MS`,
+ *     default 35_000 ms). Sized to clear LML#370's 25.25 s per-item
+ *     cascade-exhaustion cap (deployed to LML prod 2026-05-25) plus
+ *     ~10 s of headroom for LML queue contention with the live backend +
+ *     ROM. The prior 8000 ms default (BS#994, retro 2026-05-23) was set
+ *     against the pre-LML#370 topology and aborted before LML could
+ *     return its `{timeout:true, results:[]}` body for cascade-bait
+ *     rows — those rows stayed `metadata_attempt_at IS NULL` and the
+ *     cron re-failed them every pass. BS#1064 / BS#1180 empirical
+ *     re-validation: at 8 s, ~86% per-row `lml_error`; at 35 s, ~23%.
+ *     The 35 s budget lets the timeout body reach `applyEnrichment`'s
+ *     empty-results branch so the row drains as `enriched_no_match`
+ *     instead of looping. Steady-state `lml_error` floor (LML queue
+ *     contention rows the per-row defaults can't fix) is drained by
+ *     BS#1199's planned retry cap. Pattern mirrors BS#992's per-caller
+ *     timeout for the rotation picker.
  *
  * The third parameter is named `track` (not `song`) to match the orchestrator's
  * `EnrichRow.track_title` field. It's plumbed through to LML's `body.song` by
@@ -37,7 +45,11 @@ const envInt = (name: string, fallback: number): number => {
   return fallback;
 };
 
-const TIMEOUT_MS = envInt('BACKFILL_LML_PER_CALL_TIMEOUT_MS', 8000);
+const TIMEOUT_MS = envInt('BACKFILL_LML_PER_CALL_TIMEOUT_MS', 35_000);
 
 export const lookupMetadata = (artist: string, album?: string, track?: string): Promise<LookupResponse> =>
-  sharedLookupMetadata(artist, album, track, { limiter: defaultLmlLimiter, timeoutMs: TIMEOUT_MS });
+  sharedLookupMetadata(artist, album, track, {
+    limiter: defaultLmlLimiter,
+    timeoutMs: TIMEOUT_MS,
+    caller: 'flowsheet-metadata-backfill',
+  });

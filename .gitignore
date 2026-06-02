@@ -8,6 +8,7 @@ mirror-logs
 .cache
 *.tsbuildinfo
 .claude/worktrees/
+.worktrees/
 __pycache__
 .pytest_cache
 .dryrun-provisioning-state.json

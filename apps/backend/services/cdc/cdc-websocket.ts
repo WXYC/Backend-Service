@@ -3,14 +3,20 @@
  *
  * Attaches to the existing Express HTTP server via the 'upgrade' event,
  * filtered to the /cdc path. Authenticates connections via CDC_SECRET
- * query parameter. Broadcasts PostgreSQL CDC events (from LISTEN/NOTIFY)
- * to all connected clients.
+ * query parameter. Fans out PostgreSQL CDC events (received via the shared
+ * dispatcher's `onCdcEvent`) to all connected WebSocket clients.
+ *
+ * The LISTEN startup itself lives in `dispatcher.ts` (BS#1187): the
+ * dispatcher always runs so in-process subscribers like
+ * `setupMetadataBroadcast()` work whether or not `CDC_SECRET` is configured.
+ * This module owns only the external WebSocket exposure and remains
+ * hard-gated on `CDC_SECRET`.
  */
 
 import { Server as HttpServer, IncomingMessage } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { URL } from 'url';
-import { onCdcEvent, startCdcListener, stopCdcListener } from '@wxyc/database';
+import { onCdcEvent } from '@wxyc/database';
 import type { CdcEvent } from '@wxyc/database';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -22,7 +28,9 @@ let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 /**
  * Sets up the CDC WebSocket server on the given HTTP server.
  * Handles upgrade requests to /cdc, authenticates via query parameter,
- * and starts the PostgreSQL CDC listener.
+ * and registers a fan-out handler against the shared CDC dispatcher.
+ * No-ops (with the canonical `[cdc-ws]` disabled log) when CDC_SECRET
+ * is unset — deploy verification matches the same log line.
  */
 export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
   const secret = process.env.CDC_SECRET;
@@ -85,7 +93,7 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
   }, HEARTBEAT_INTERVAL_MS);
   heartbeatTimer.unref();
 
-  // Register CDC event handler
+  // Per-event fan-out to connected WebSocket clients.
   onCdcEvent((event: CdcEvent) => {
     if (!wss || wss.clients.size === 0) return;
     const msg = JSON.stringify(event);
@@ -98,13 +106,14 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
     }
   });
 
-  // Start listening for PostgreSQL notifications
-  await startCdcListener();
   console.log(`[cdc-ws] CDC WebSocket ready at ${CDC_PATH}`);
 }
 
 /**
- * Shuts down the CDC WebSocket server and stops the PostgreSQL listener.
+ * Shuts down the CDC WebSocket server. Safe to call unconditionally —
+ * a no-op when the WebSocket was never set up (e.g. `CDC_SECRET` unset).
+ * The CDC LISTEN connection is owned by the dispatcher and torn down
+ * separately via `shutdownCdcDispatcher()`.
  */
 export async function shutdownCdcWebSocket(): Promise<void> {
   if (heartbeatTimer) {
@@ -120,6 +129,5 @@ export async function shutdownCdcWebSocket(): Promise<void> {
     wss = null;
   }
 
-  await stopCdcListener();
   console.log('[cdc-ws] CDC WebSocket shut down');
 }

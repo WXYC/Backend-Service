@@ -10,11 +10,13 @@ import { auth } from '@wxyc/authentication';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
 import express from 'express';
-import type { Request, Response, NextFunction } from 'express';
+import type { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest } from './rate-limit-key';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
+import { checkRequestBanHandler } from './check-request-ban-handler';
+import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
 import { resolveOrganization } from './resolve-organization';
@@ -39,7 +41,10 @@ app.use(
   cors({
     origin: process.env.FRONTEND_SOURCE || '*',
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'Set-Cookie'],
+    // X-Device-Fingerprint is sent on /auth/check-request-ban (BS#1261).
+    // Add here so a future browser-origin caller (dj-site admin tool, iOS
+    // WebView, etc.) isn't blocked by the preflight.
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'Set-Cookie', 'X-Device-Fingerprint'],
     methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'DELETE', 'PATCH'],
     exposedHeaders: ['Content-Length', 'Set-Cookie'],
   })
@@ -283,9 +288,34 @@ if (!isTestEnv) {
   for (const path of rateLimitedPaths) {
     app.use(path, authMutationRateLimit);
   }
+
+  // BS#1261 — separate, more generous limiter for /auth/check-request-ban.
+  // The brute-force-sensitive limiter above (10/15min) is too tight for the
+  // per-request-line traffic profile, but the endpoint is public + does JWT
+  // signature verification + 1-2 DB lookups per call, so leaving it
+  // unbounded exposes the auth-service DB pool to a cheap DoS.
+  const checkRequestBanRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 120, // 2/s sustained per IP, well above expected ROM volume
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  app.use('/auth/check-request-ban', checkRequestBanRateLimit);
 }
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
+
+// BS#1261 — request-line ban enforcement. Registered before the better-auth
+// handler so this specific path doesn't fall through to better-auth's
+// catch-all. ROM calls this on every POST /request to decide allow/block.
+// The endpoint is intentionally public (no X-Internal-Key gate): callers
+// authenticate per-request via JWT and/or X-Device-Fingerprint, and the
+// response shape is driven by those. Per-IP rate limiting is applied
+// above to bound the JWT-verify + DB lookup cost.
+app.post('/auth/check-request-ban', checkRequestBanHandler);
+
 app.use('/auth', toNodeHandler(auth));
 
 // Liveness/readiness endpoint. Body conforms to HealthCheckResponse from
@@ -332,11 +362,9 @@ app.get('/healthcheck', async (req, res) => {
 
 Sentry.setupExpressErrorHandler(app);
 
-// Fallback error handler
-app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-  const message = err instanceof Error ? err.message : String(err);
-  res.status(500).json({ error: message });
-});
+// Fallback error handler — sanitises response body, forwards full error to
+// Sentry. See `./fallback-error-handler.ts` for rationale (BS#1109).
+app.use(fallbackErrorHandler);
 
 // Create default user if needed
 const createDefaultUser = async () => {

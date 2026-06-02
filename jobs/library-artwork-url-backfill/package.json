@@ -15,7 +15,8 @@
   "license": "MIT",
   "dependencies": {
     "@sentry/node": "^10.53.1",
-    "@wxyc/database": "^1.0.0"
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/metadata": "^1.0.0"
   },
   "peerDependencies": {
     "drizzle-orm": "^0.45.0"

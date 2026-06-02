@@ -55,28 +55,60 @@ export class ServerEventsManager {
     this.topics = new Set(topicNames);
   }
 
-  private static readonly INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+  // 30 s matches tubafrenzy's upstream SSE feed (see `playlist-proxy.service.ts`
+  // prose) and stays under nginx/ALB's 60 s idle defaults.
+  private static readonly HEARTBEAT_INTERVAL_MS = 30 * 1000;
+  private static readonly HEARTBEAT_FRAME = ': keepalive\n\n';
 
   private topics: Set<string> = new Set();
   // each map key is a topic e.g. primary_dj, show_dj, live_fs,
   private clients: Map<string, EventClient> = new Map();
   private clientTopics: Map<string, Set<string>> = new Map(); // clientId -> topicIds
   private topicClients: Map<string, Set<string>> = new Map(); // topicId -> clientIds
-  private clientTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private clientHeartbeats: Map<string, ReturnType<typeof setInterval>> = new Map();
 
-  private resetTimeout = (clientId: string) => {
-    const existing = this.clientTimeouts.get(clientId);
-    if (existing) {
-      clearTimeout(existing);
-    }
+  /**
+   * Writes a `: keepalive\n\n` SSE comment to the client every
+   * HEARTBEAT_INTERVAL_MS. The comment frame is silent to `addEventListener`
+   * consumers (per the SSE spec) but keeps the TCP connection alive and resets
+   * any intermediary idle timers. On write failure (half-dead socket: EPIPE,
+   * write-after-end) we capture to Sentry under `op: 'heartbeat'` and
+   * `unsubAll` to drop the client from the maps.
+   */
+  private startHeartbeat = (clientId: string) => {
+    const existing = this.clientHeartbeats.get(clientId);
+    if (existing) clearInterval(existing);
 
-    const timeoutId = setTimeout(() => {
-      if (this.clients.has(clientId)) {
-        this.disconnect(clientId, 'Connection terminated due to inactivity');
+    const intervalId = setInterval(() => {
+      const client = this.clients.get(clientId);
+      if (!client) {
+        clearInterval(intervalId);
+        this.clientHeartbeats.delete(clientId);
+        return;
       }
-    }, ServerEventsManager.INACTIVITY_TIMEOUT_MS);
+      try {
+        client.res.write(ServerEventsManager.HEARTBEAT_FRAME);
+      } catch (error) {
+        Sentry.captureException(error, {
+          tags: { subsystem: 'sse', op: 'heartbeat' },
+          extra: { client_id: clientId },
+        });
+        this.unsubAll(clientId);
+      }
+    }, ServerEventsManager.HEARTBEAT_INTERVAL_MS);
 
-    this.clientTimeouts.set(clientId, timeoutId);
+    // unref so SIGTERM isn't blocked by an idle heartbeat ticker.
+    intervalId.unref?.();
+
+    this.clientHeartbeats.set(clientId, intervalId);
+  };
+
+  private stopHeartbeat = (clientId: string) => {
+    const intervalId = this.clientHeartbeats.get(clientId);
+    if (intervalId) {
+      clearInterval(intervalId);
+      this.clientHeartbeats.delete(clientId);
+    }
   };
 
   registerClient = (res: Response): EventClient => {
@@ -85,14 +117,10 @@ export class ServerEventsManager {
       res: res,
     };
 
-    this.resetTimeout(client.id);
+    this.startHeartbeat(client.id);
 
     client.res.on('close', () => {
-      const timeoutId = this.clientTimeouts.get(client.id);
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-        this.clientTimeouts.delete(client.id);
-      }
+      this.stopHeartbeat(client.id);
       this.unsubAll(client.id);
     });
 
@@ -200,11 +228,7 @@ export class ServerEventsManager {
     this.clientTopics.delete(clientId);
     this.clients.delete(clientId);
 
-    const timeoutId = this.clientTimeouts.get(clientId);
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-      this.clientTimeouts.delete(clientId);
-    }
+    this.stopHeartbeat(clientId);
   };
 
   broadcast = (topicId: string, data: EventData) => {
@@ -225,7 +249,6 @@ export class ServerEventsManager {
       if (client) {
         try {
           client.res.write(message);
-          this.resetTimeout(clientId);
         } catch (error) {
           // The CloudWatch counter (BS-3) makes the rate visible; Sentry
           // surfaces the exception so we can read the underlying error
@@ -257,7 +280,6 @@ export class ServerEventsManager {
     if (client) {
       try {
         client.res.write(message);
-        this.resetTimeout(clientId);
       } catch (error) {
         recordBroadcastFailure(topicId);
         Sentry.captureException(error, {

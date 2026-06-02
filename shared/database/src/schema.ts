@@ -186,6 +186,43 @@ export const dj_stats = wxyc_schema.table('dj_stats', {
   shows_covered: smallint('shows_covered').default(0).notNull(),
 });
 
+// BS#1261. Request-line ban surface. Ban-target is the stable iOS-generated
+// UUIDv4 in iCloud Keychain (separate item from AuthSession), sent on every
+// `POST /request` to ROM and on `/sign-in/anonymous`. Per-fingerprint rather
+// than per-`user.id` because better-auth anonymous re-sign-in mints a fresh
+// `user.id`, so a `user.banned`-only ban is one tap away from evasion. The
+// fingerprint survives anonymous re-sign-in and reinstall on the same Apple
+// ID; a deliberate attacker disabling iCloud Keychain + reinstalling still
+// gets a fresh value, which is the accepted limitation.
+//
+// `banned_by_user_id` is nullable to permit Slack-actor bans (no
+// corresponding better-auth user). `ON DELETE SET NULL` so deleting an
+// operator account doesn't cascade-delete ban history.
+//
+// Partial index on `ban_expires_at` covers the temporary-ban tail; the
+// permanent rows (NULL `ban_expires_at`) are the common case and don't need
+// the index. The check-request-ban handler treats `ban_expires_at < now()`
+// as not-banned without deleting the row (cleanup is a separate concern).
+export type NewBannedFingerprint = InferInsertModel<typeof banned_fingerprints>;
+export type BannedFingerprint = InferSelectModel<typeof banned_fingerprints>;
+export const banned_fingerprints = wxyc_schema.table(
+  'banned_fingerprints',
+  {
+    fingerprint: uuid('fingerprint').primaryKey(),
+    banned_at: timestamp('banned_at', { withTimezone: true }).notNull().defaultNow(),
+    ban_reason: text('ban_reason').notNull(),
+    ban_expires_at: timestamp('ban_expires_at', { withTimezone: true }),
+    banned_by_user_id: varchar('banned_by_user_id', { length: 255 }).references(() => user.id, {
+      onDelete: 'set null',
+    }),
+  },
+  (table) => [
+    index('banned_fingerprints_ban_expires_at_idx')
+      .on(table.ban_expires_at)
+      .where(sql`${table.ban_expires_at} IS NOT NULL`),
+  ]
+);
+
 export type NewShift = InferInsertModel<typeof schedule>;
 export type Shift = InferSelectModel<typeof schedule>;
 // days {0: mon, 1: tue, ... , 6: sun}
@@ -452,6 +489,42 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
   'enriched_no_match',
   'failed_no_retry',
 ]);
+
+// Provenance for `rotation.discogs_release_id` (BS#1029). Three values:
+//
+//   tubafrenzy_paste        — mirrored from tubafrenzy ROTATION_RELEASE
+//                             .DISCOGS_RELEASE_ID by `jobs/rotation-etl`,
+//                             populated by the rotation form's paste-URL
+//                             prefill (music-director-verified).
+//   lml_offline_backfill    — written by `jobs/rotation-release-id-backfill`
+//                             (one-shot ETL, BS#1029) after LML resolved the
+//                             `(artist, album)` tuple to a Discogs release id.
+//   discogs_direct_backfill — written by the 2026-05-29 operator-run
+//                             bypass-LML rescue after the 2026-05-28 picker-
+//                             coverage regression collapsed LML matching. The
+//                             resolver hit `api.discogs.com/database/search`
+//                             directly with the `(artist, album)` pair, picked
+//                             the top-ranked release whose VA-aware Jaccard
+//                             scored >= 0.5 on both axes (relaxed retries for
+//                             NO_RESULT: strip EP/LP/Mixtape suffix, drop
+//                             bracketed annotations, self-titled coercion;
+//                             diacritic strip + feat. carve-out for LOW_CONF).
+//                             Tagged distinctly from `lml_offline_backfill` so
+//                             a future LML-based re-run can scope its UPDATEs
+//                             without clobbering the bypass-LML provenance.
+//
+// Column default is `tubafrenzy_paste` so existing pre-migration rows
+// (PG11+ `attmissingval` virtual default) and new rotation-etl inserts
+// are correctly attributed without rotation-etl having to set the column
+// explicitly. The backfill writes `lml_offline_backfill` and the
+// rotation-etl ON CONFLICT path flips it back to `tubafrenzy_paste`
+// when tubafrenzy contributes a non-NULL id (COALESCE-paired with
+// `rotation.discogs_release_id`).
+export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_source_enum', [
+  'tubafrenzy_paste',
+  'lml_offline_backfill',
+  'discogs_direct_backfill',
+]);
 /**
  * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes
  * rotation rows in tubafrenzy; Backend-Service is downstream. Tubafrenzy
@@ -493,8 +566,31 @@ export const rotation = wxyc_schema.table(
     // in tubafrenzy. NULL when the music director added the release without
     // a Discogs URL. Read path: getDiscogsReleaseIdByRotationId — reads
     // here first, falls back to library_identity for post-tubafrenzy-turndown
-    // rows created via dj-site.
+    // rows created via dj-site. Also written by
+    // jobs/rotation-release-id-backfill (BS#1029) — see
+    // `discogs_release_id_source` below for provenance.
     discogs_release_id: integer('discogs_release_id'),
+    // Provenance for `discogs_release_id` (BS#1029). See
+    // `discogsReleaseIdSourceEnum` above for value semantics. The DEFAULT
+    // applies virtually to existing pre-migration rows; the
+    // jobs/rotation-release-id-backfill writer overrides to
+    // 'lml_offline_backfill' on the UPDATE that resolves a NULL id, and
+    // the 2026-05-29 bypass-LML operator rescue (see migration 0086 +
+    // scripts/relabel-rotation-direct-backfill.sql) writes
+    // 'discogs_direct_backfill' for rows it resolved via direct
+    // Discogs search.
+    discogs_release_id_source: discogsReleaseIdSourceEnum('discogs_release_id_source')
+      .notNull()
+      .default('tubafrenzy_paste'),
+    // Stamped by `resolveRotationDiscogsReleaseViaLml` when the tier-3 LML
+    // cascade returns nothing for this row. The picker read path skips the
+    // LML call when this is set within `ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS`,
+    // mirroring `flowsheet.metadata_attempt_at` (#639). The per-process LRU
+    // covers within-process repeat opens; this column covers across-restart
+    // survival so the 28-row "negative" set doesn't re-pay 22 s cascade-
+    // exhaustion on every deploy. NULL on transient LML failures (caught arm
+    // — caller decides whether to retry) so the row stays retryable.
+    tracklist_lookup_attempted_at: timestamp('tracklist_lookup_attempted_at', { withTimezone: true }),
   },
   (table) => {
     return {
@@ -910,12 +1006,24 @@ export type AlbumMetadata = InferSelectModel<typeof album_metadata>;
  * (the seed inserted at migration apply time), so reads never need a
  * predicate beyond the implicit "the row".
  */
-export const flowsheet_watermark = wxyc_schema.table('flowsheet_watermark', {
-  // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
-  id: boolean('id').primaryKey().notNull().default(true),
-  // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
-  last_modified_at: timestamp('last_modified_at', { withTimezone: true }).defaultNow().notNull(),
-});
+export const flowsheet_watermark = wxyc_schema.table(
+  'flowsheet_watermark',
+  {
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    id: boolean('id').primaryKey().notNull().default(true),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    last_modified_at: timestamp('last_modified_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (_table) => [
+    // Singleton-row guard ships in migration 0084 (BS#902 / BS#628) but was
+    // missing from the Drizzle table model, leaving the snapshot/schema diff
+    // perpetually "out of sync". Adding the model here lets drizzle:generate
+    // produce clean diffs for downstream PRs (BS#1029 surfaced this). The
+    // raw `"id" = true` form (no schema/table qualification) matches 0084's
+    // snapshot byte-for-byte so no DROP/ADD pair is generated.
+    check('flowsheet_watermark_singleton', sql.raw(`"id" = true`)),
+  ]
+);
 
 export const album_metadata = wxyc_schema.table('album_metadata', {
   // `.notNull()` is redundant with `.primaryKey()` at the SQL level (PK
@@ -1133,6 +1241,8 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       spotify_artist_id: artists.spotify_artist_id,
       apple_music_artist_id: artists.apple_music_artist_id,
       bandcamp_id: artists.bandcamp_id,
+      // Keyed read for the artist_search_alias LATERAL JOIN (PR 5).
+      artist_id: library.artist_id,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -1174,6 +1284,7 @@ export type LibraryArtistViewEntry = {
   spotify_artist_id: string | null;
   apple_music_artist_id: string | null;
   bandcamp_id: string | null;
+  artist_id: number;
 };
 
 // Per-album play count, aggregated from `flowsheet` track entries. The MV is
@@ -1345,3 +1456,51 @@ export const library_identity_history = wxyc_schema.table('library_identity_hist
 
 export type LibraryIdentityHistory = InferSelectModel<typeof library_identity_history>;
 export type NewLibraryIdentityHistory = InferInsertModel<typeof library_identity_history>;
+
+/**
+ * Source-agnostic cache of alias / variant / member strings for each WXYC
+ * artist, populated by `jobs/artist-search-alias-consumer/` (artist-search-alias
+ * plan PR 4) from LML's `POST /api/v1/artists/search-aliases/bulk` plus a
+ * shadow-ingest of `library.alternate_artist_name`. Read by the catalog search
+ * via a LATERAL JOIN keyed on `artist_id` (PR 5).
+ *
+ * The `source` column tags origin; new sources are additive (no schema
+ * migration). Design + acceptance live in WXYC/Backend-Service#1264 and the
+ * artist-search-alias plan referenced therein.
+ *
+ * Cascade behavior:
+ *   - `artist_id` ON DELETE CASCADE — alias rows belong to the artist.
+ *   - `related_artist_id` ON DELETE SET NULL — the related (alias/member)
+ *     artist may be removed independently without orphaning the cache row.
+ */
+export const artist_search_alias = wxyc_schema.table(
+  'artist_search_alias',
+  {
+    artist_id: integer('artist_id')
+      .notNull()
+      .references(() => artists.id, { onDelete: 'cascade' }),
+    source: text('source').notNull(),
+    variant: text('variant').notNull(),
+    related_artist_id: integer('related_artist_id').references(() => artists.id, {
+      onDelete: 'set null',
+    }),
+    external_subject_id: text('external_subject_id'),
+    external_object_id: text('external_object_id'),
+    active: boolean('active'),
+    method: text('method').notNull(),
+    confidence: real('confidence').notNull(),
+    last_verified_at: timestamp('last_verified_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      name: 'artist_search_alias_pkey',
+      columns: [table.artist_id, table.source, table.variant],
+    }),
+    index('artist_search_alias_variant_trgm_idx').using('gin', sql`${table.variant} gin_trgm_ops`),
+    check('artist_search_alias_confidence_range', sql`${table.confidence} BETWEEN 0 AND 1`),
+    check('artist_search_alias_variant_nonblank', sql`length(trim(${table.variant})) > 0`),
+  ]
+);
+
+export type ArtistSearchAlias = InferSelectModel<typeof artist_search_alias>;
+export type NewArtistSearchAlias = InferInsertModel<typeof artist_search_alias>;
