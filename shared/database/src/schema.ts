@@ -1465,7 +1465,8 @@ export type NewLibraryIdentityHistory = InferInsertModel<typeof library_identity
  * via a LATERAL JOIN keyed on `artist_id` (PR 5).
  *
  * The `source` column tags origin; new sources are additive (no schema
- * migration). See `docs/adr/0001-source-agnostic-artist-search-alias.md`.
+ * migration). Design + acceptance live in WXYC/Backend-Service#1264 and the
+ * artist-search-alias plan referenced therein.
  *
  * Cascade behavior:
  *   - `artist_id` ON DELETE CASCADE — alias rows belong to the artist.
