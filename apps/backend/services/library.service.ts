@@ -892,6 +892,7 @@ const LIBRARY_VIEW_PROJECTION = {
   spotify_artist_id: artists.spotify_artist_id,
   apple_music_artist_id: artists.apple_music_artist_id,
   bandcamp_id: artists.bandcamp_id,
+  artist_id: library.artist_id,
 } as const;
 
 /**
