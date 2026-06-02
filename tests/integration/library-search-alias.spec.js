@@ -67,14 +67,8 @@ describe('GET /library/query — alias-aware LATERAL JOIN (PR 5)', () => {
   });
 
   test('control: without an alias row, querying the variant returns 0 rows', async () => {
-    await sql.unsafe(
-      `DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = $1`,
-      [TEST_ARTIST_ID]
-    );
-    const res = await auth
-      .get('/library/query')
-      .query({ q: 'Thee Oh Sees', limit: 50 })
-      .expect(200);
+    await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = $1`, [TEST_ARTIST_ID]);
+    const res = await auth.get('/library/query').query({ q: 'Thee Oh Sees', limit: 50 }).expect(200);
 
     const hit = res.body.results.find((r) => r.id === TEST_LIBRARY_ID);
     expect(hit).toBeUndefined();
@@ -92,10 +86,7 @@ describe('GET /library/query — alias-aware LATERAL JOIN (PR 5)', () => {
       [TEST_ARTIST_ID]
     );
 
-    const res = await auth
-      .get('/library/query')
-      .query({ q: 'Thee Oh Sees', limit: 50 })
-      .expect(200);
+    const res = await auth.get('/library/query').query({ q: 'Thee Oh Sees', limit: 50 }).expect(200);
 
     const hit = res.body.results.find((r) => r.id === TEST_LIBRARY_ID);
     if (hit === undefined) {
@@ -110,23 +101,15 @@ describe('GET /library/query — alias-aware LATERAL JOIN (PR 5)', () => {
       return;
     }
     expect(hit.artist_name).toBe('OHSEES');
-    expect(hit.matched_via_alias).toEqual([
-      { matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' },
-    ]);
+    expect(hit.matched_via_alias).toEqual([{ matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' }]);
   });
 });
 
 async function cleanupSeededRows(sql, wxycSchema) {
   // Delete in FK-safe order. artist_search_alias FKs onto artists; library
   // FKs onto artists.
-  await sql.unsafe(
-    `DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = $1`,
-    [TEST_ARTIST_ID]
-  );
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = $1`, [TEST_ARTIST_ID]);
   await sql.unsafe(`DELETE FROM ${wxycSchema}.library WHERE id = $1`, [TEST_LIBRARY_ID]);
-  await sql.unsafe(
-    `DELETE FROM ${wxycSchema}.genre_artist_crossreference WHERE artist_id = $1`,
-    [TEST_ARTIST_ID]
-  );
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.genre_artist_crossreference WHERE artist_id = $1`, [TEST_ARTIST_ID]);
   await sql.unsafe(`DELETE FROM ${wxycSchema}.artists WHERE id = $1`, [TEST_ARTIST_ID]);
 }

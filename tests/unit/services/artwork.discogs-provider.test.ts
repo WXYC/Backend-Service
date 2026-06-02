@@ -17,6 +17,9 @@ jest.mock('@wxyc/lml-client', () => ({
   searchTrackReleases: mockSearchTrackReleases,
   validateTrackOnRelease: mockValidateTrackOnRelease,
   isLmlConfigured: mockIsLmlConfigured,
+  // metadata.service.ts reads envInt at module-load via DiscogsProvider's
+  // transitive import (commit 10d4d5c4). Stub it so the suite loads.
+  envInt: (_name: string, fallback: number) => fallback,
 }));
 
 import { DiscogsProvider } from '../../../apps/backend/services/artwork/providers/discogs';
