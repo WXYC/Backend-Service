@@ -1,11 +1,9 @@
--- @no-precondition-needed: fresh CREATE TABLE; no FK from existing data. The two
---   FKs (artist_id, related_artist_id) target wxyc_schema.artists but the table
---   is empty at ADD CONSTRAINT time. The view replacement is additive (a single
---   new column projection) and invisible to existing consumers.
+-- precondition-guard: not-required (fresh CREATE TABLE; no FK from existing data; the two FKs target wxyc_schema.artists but the table is empty at ADD CONSTRAINT time, and the view replacement is additive — the cross-cache-identity gate doesn't apply because this migration only mentions library_identity in commentary, not DDL)
+-- @no-precondition-needed: same rationale as the precondition-guard opt-out above — every constraint added here (composite PK, two FKs, two CHECKs) is evaluated against an empty table at ADD CONSTRAINT time, so there is no data invariant that current rows could violate. The view replacement is additive (one new column projection) and invisible to existing consumers; no precondition needed.
 -- 0089 — Artist Search Alias cache for alias-aware catalog search.
 --
--- Source-of-truth: WXYC/Backend-Service/docs/adr/0001-source-agnostic-artist-search-alias.md
--- See WXYC/Backend-Service/CONTEXT.md for "Artist Search Alias" definition.
+-- Plan + design: WXYC/Backend-Service#1264 (parent issue, contains full schema spec)
+-- and the artist-search-alias plan referenced therein.
 --
 -- One polymorphic table; `source` column tags origin. Future sources
 -- (musicbrainz_alias, wikidata_label, etc.) are additive — no schema migration.
