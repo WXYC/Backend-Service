@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/artist-search-alias-consumer",
+  "cron-schedule": "15 4 * * *",
+  "version": "1.0.0",
+  "description": "WXYC daily ETL: consume LML's POST /api/v1/artists/search-aliases/bulk and UPSERT variants into artist_search_alias (migration 0089). Shadow-ingests library.alternate_artist_name as the wxyc_library_alt source. Populates the cache the catalog search's alias-aware LATERAL JOIN reads from (BS#1266 / artist-search-alias plan PR 4).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_artist_search_alias_consumer:ci -f ../../Dockerfile.artist-search-alias-consumer ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.53.1",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
