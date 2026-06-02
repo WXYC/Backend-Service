@@ -12,6 +12,7 @@ import {
   NewGenre,
   RotationRelease,
   album_plays,
+  artist_search_alias,
   artists,
   compilation_track_artist,
   genre_artist_crossreference,
@@ -22,7 +23,13 @@ import {
   rotation,
   LibraryArtistViewEntry,
 } from '@wxyc/database';
-import { LibraryResult, EnrichedLibraryResult, enrichLibraryResult } from './requestLine/types.js';
+import {
+  LibraryResult,
+  EnrichedLibraryResult,
+  enrichLibraryResult,
+  ArtistMatchHint,
+  ArtistSearchAliasSource,
+} from './requestLine/types.js';
 import {
   getRelease,
   lookupBySong,
@@ -37,6 +44,7 @@ import {
 import { filterSpacerGif } from './metadata/metadata.service.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
+import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
 
 /**
@@ -58,11 +66,47 @@ type ReconciledIdentityKey = (typeof RECONCILED_IDENTITY_KEYS)[number];
 /**
  * A library_artist_view row that may carry an attached `matched_via` hint when
  * the cascade's CTA or LML `/lookup` fallback surfaced it (catalog-track-search
- * plan §5.1). Wraps `LibraryArtistViewEntry` rather than replacing it so
- * downstream functions (enrichWithArtwork, serializeReconciledIdentity) accept
- * tagged rows without signature changes.
+ * plan §5.1), or a `matched_via_alias` hint when the artist-search-alias
+ * LATERAL JOIN surfaced it (artist-search-alias plan §PR 5). Wraps
+ * `LibraryArtistViewEntry` rather than replacing it so downstream functions
+ * (enrichWithArtwork, serializeReconciledIdentity) accept tagged rows without
+ * signature changes.
  */
-export type TaggedLibraryViewEntry = LibraryArtistViewEntry & { matched_via?: TrackMatchHint[] };
+export type TaggedLibraryViewEntry = LibraryArtistViewEntry & {
+  matched_via?: TrackMatchHint[];
+  matched_via_alias?: ArtistMatchHint[];
+};
+
+/**
+ * Raw projection fields appended to the SELECT when the alias LATERAL is on.
+ * Returned as nullable columns so callers can detect a no-hit row by
+ * `alias_max_sim === null` without forcing a separate query.
+ */
+type AliasHitFields = {
+  alias_max_sim: number | null;
+  alias_matched_variant: string | null;
+  alias_matched_source: string | null;
+};
+
+/**
+ * Attach `matched_via_alias` to a tagged row when the LATERAL JOIN surfaced a
+ * non-null hit. No-op when all three alias fields are null (the row matched
+ * via the underlying trigram predicate, not via the alias cache).
+ */
+function attachAliasHint<R extends LibraryArtistViewEntry & AliasHitFields>(row: R): TaggedLibraryViewEntry {
+  // Strip the alias-only fields off the wire-shape; matched_via_alias carries
+  // the same information in the public sibling-type shape.
+  const { alias_max_sim, alias_matched_variant, alias_matched_source, ...rest } = row;
+  if (alias_max_sim === null || alias_matched_variant === null || alias_matched_source === null) {
+    return rest as TaggedLibraryViewEntry;
+  }
+  return {
+    ...(rest as TaggedLibraryViewEntry),
+    matched_via_alias: [
+      { matched_variant: alias_matched_variant, source: alias_matched_source as ArtistSearchAliasSource },
+    ],
+  };
+}
 
 /** A row that carries the six external-ID fields (artist row, view row, or any join projection). */
 type ReconciledIdentitySource = {
@@ -896,6 +940,80 @@ const LIBRARY_VIEW_PROJECTION = {
 } as const;
 
 /**
+ * Raw SQL mirror of `libraryViewQuery(false)`'s join chain. Used when the
+ * caller needs a query shape Drizzle's chained builder can't express
+ * (`LEFT JOIN LATERAL` for the alias path). Schema is named once here so a
+ * future column change is a single edit.
+ */
+const LIBRARY_VIEW_JOINS_RAW = sql`
+  INNER JOIN ${artists} ON ${artists.id} = ${library.artist_id}
+  INNER JOIN ${format} ON ${format.id} = ${library.format_id}
+  INNER JOIN ${genres} ON ${genres.id} = ${library.genre_id}
+  INNER JOIN ${genre_artist_crossreference}
+    ON ${genre_artist_crossreference.artist_id} = ${library.artist_id}
+    AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
+  LEFT JOIN ${rotation}
+    ON ${rotation.album_id} = ${library.id}
+    AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)
+`;
+
+/** Raw SQL projection mirroring `LIBRARY_VIEW_PROJECTION` for the alias path. */
+const LIBRARY_VIEW_PROJECTION_RAW = sql`
+  ${library.id} AS id,
+  ${artists.code_letters} AS code_letters,
+  ${genre_artist_crossreference.artist_genre_code} AS code_artist_number,
+  ${library.code_number} AS code_number,
+  ${artists.artist_name} AS artist_name,
+  ${artists.alphabetical_name} AS alphabetical_name,
+  ${library.album_title} AS album_title,
+  ${format.format_name} AS format_name,
+  ${genres.genre_name} AS genre_name,
+  ${rotation.rotation_bin} AS rotation_bin,
+  ${library.add_date} AS add_date,
+  ${library.label} AS label,
+  ${library.label_id} AS label_id,
+  ${library.on_streaming} AS on_streaming,
+  ${library.album_artist} AS album_artist,
+  ${library.plays} AS plays,
+  ${library.artwork_url} AS artwork_url,
+  ${artists.discogs_artist_id} AS discogs_artist_id,
+  ${artists.musicbrainz_artist_id} AS musicbrainz_artist_id,
+  ${artists.wikidata_qid} AS wikidata_qid,
+  ${artists.spotify_artist_id} AS spotify_artist_id,
+  ${artists.apple_music_artist_id} AS apple_music_artist_id,
+  ${artists.bandcamp_id} AS bandcamp_id,
+  ${library.artist_id} AS artist_id
+`;
+
+/**
+ * The alias LATERAL JOIN fragment plus its associated SELECT projection,
+ * WHERE-list contribution, and ORDER BY ranking term. Keyed on
+ * `library.artist_id` (the catalog read paths all project it through their
+ * underlying `FROM library` joins). Multiple cached variants for the same
+ * artist collapse to a single row via MAX/array_agg ORDER BY similarity
+ * (the highest-similarity variant + its source win).
+ */
+function buildAliasLateralFragments(query: string) {
+  return {
+    projection: sql`,
+      alias_hit.max_sim AS alias_max_sim,
+      alias_hit.matched_variant AS alias_matched_variant,
+      alias_hit.matched_source AS alias_matched_source`,
+    join: sql`
+      LEFT JOIN LATERAL (
+        SELECT MAX(similarity(asa.variant, ${query})) AS max_sim,
+               (array_agg(asa.variant ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_variant,
+               (array_agg(asa.source ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_source
+        FROM ${artist_search_alias} asa
+        WHERE asa.artist_id = ${library.artist_id}
+          AND asa.variant % ${query}
+      ) alias_hit ON true`,
+    predicate: sql`OR alias_hit.max_sim IS NOT NULL`,
+    rankTerm: sql`, COALESCE(alias_hit.max_sim, 0)`,
+  };
+}
+
+/**
  * Build the `FROM library` query shape with the joins needed to project the
  * `LibraryArtistViewEntry` columns. `withPlays` adds the `album_plays`
  * materialized view as a LEFT JOIN — only the tsvector ranker needs it, so
@@ -963,16 +1081,48 @@ async function searchLibraryByTrigramBoth(
   query: string,
   n: number,
   on_streaming?: boolean
-): Promise<LibraryArtistViewEntry[]> {
-  const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
-  const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
+): Promise<TaggedLibraryViewEntry[]> {
+  const aliasEnabled = getCatalogSearchAliasConfig().enabled;
 
-  return libraryViewQuery(false)
-    .where(streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate)
-    .orderBy(
-      desc(sql`GREATEST(similarity(${library.artist_name}, ${query}), similarity(${library.album_title}, ${query}))`)
+  if (!aliasEnabled) {
+    // Byte-identical legacy path. The alias-off branch must stay on the
+    // chained builder so the planner reaches the per-column GIN trigram
+    // indexes via the same bind shape as today.
+    const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
+    const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
+    return libraryViewQuery(false)
+      .where(streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate)
+      .orderBy(
+        desc(sql`GREATEST(similarity(${library.artist_name}, ${query}), similarity(${library.album_title}, ${query}))`)
+      )
+      .limit(n) as unknown as Promise<TaggedLibraryViewEntry[]>;
+  }
+
+  // Alias-enabled path: raw SQL with `LEFT JOIN LATERAL` against the alias
+  // cache. The OR-trigram predicate stays, plus the alias hit; rank widens
+  // to GREATEST(artist_sim, album_sim, COALESCE(alias_sim, 0)).
+  const alias = buildAliasLateralFragments(query);
+  const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
+  const rows = (await db.execute(sql`
+    SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${alias.projection}
+    FROM ${library}
+    ${LIBRARY_VIEW_JOINS_RAW}
+    ${alias.join}
+    WHERE (
+      ${library.artist_name} % ${query}
+      OR ${library.album_title} % ${query}
+      ${alias.predicate}
     )
-    .limit(n) as unknown as Promise<LibraryArtistViewEntry[]>;
+    ${streamingClause}
+    ORDER BY GREATEST(
+      similarity(${library.artist_name}, ${query}),
+      similarity(${library.album_title}, ${query})
+      ${alias.rankTerm}
+    ) DESC
+    LIMIT ${n}
+  `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];
+
+  return rows.map(attachAliasHint);
 }
 
 /**
@@ -1097,6 +1247,7 @@ export const fuzzySearchLibrary = async (
 export type LibraryArtistViewResponse = Omit<LibraryArtistViewEntry, ReconciledIdentityKey> & {
   reconciled_identity: ReconciledIdentity | null;
   matched_via?: TrackMatchHint[];
+  matched_via_alias?: ArtistMatchHint[];
 };
 
 /**
@@ -1360,6 +1511,7 @@ export async function searchLibrary(
   return rows.map((row) => {
     const enriched = enrichLibraryResult(viewRowToLibraryResult(row));
     if (row.matched_via) enriched.matched_via = row.matched_via;
+    if (row.matched_via_alias) enriched.matched_via_alias = row.matched_via_alias;
     return enriched;
   });
 }
@@ -1690,12 +1842,43 @@ export async function searchLibraryByTrack(query: string, limit: number): Promis
 export async function searchByArtist(artistName: string, limit = 5): Promise<EnrichedLibraryResult[]> {
   await checkLibraryArtistNameHealth();
 
-  const rows = (await libraryViewQuery(false)
-    .where(sql`${library.artist_name} % ${artistName}`)
-    .orderBy(desc(sql`similarity(${library.artist_name}, ${artistName})`))
-    .limit(limit)) as unknown as LibraryArtistViewEntry[];
+  const aliasEnabled = getCatalogSearchAliasConfig().enabled;
 
-  return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
+  if (!aliasEnabled) {
+    const rows = (await libraryViewQuery(false)
+      .where(sql`${library.artist_name} % ${artistName}`)
+      .orderBy(desc(sql`similarity(${library.artist_name}, ${artistName})`))
+      .limit(limit)) as unknown as LibraryArtistViewEntry[];
+
+    return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
+  }
+
+  // Alias-enabled: single-column trigram on artist_name, OR'd with the
+  // LATERAL alias hit. GREATEST collapses to MAX of two terms since there's
+  // no album_title predicate here.
+  const alias = buildAliasLateralFragments(artistName);
+  const rows = (await db.execute(sql`
+    SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${alias.projection}
+    FROM ${library}
+    ${LIBRARY_VIEW_JOINS_RAW}
+    ${alias.join}
+    WHERE (
+      ${library.artist_name} % ${artistName}
+      ${alias.predicate}
+    )
+    ORDER BY GREATEST(
+      similarity(${library.artist_name}, ${artistName})
+      ${alias.rankTerm}
+    ) DESC
+    LIMIT ${limit}
+  `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];
+
+  return rows.map((row) => {
+    const tagged = attachAliasHint(row);
+    const enriched = enrichLibraryResult(viewRowToLibraryResult(tagged));
+    if (tagged.matched_via_alias) enriched.matched_via_alias = tagged.matched_via_alias;
+    return enriched;
+  });
 }
 
 /**
