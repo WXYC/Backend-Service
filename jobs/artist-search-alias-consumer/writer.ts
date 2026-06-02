@@ -61,6 +61,16 @@ export const writeArtistVariants = async (
     return { variants_written: 0 };
   }
 
+  // Defensive filter against the `artist_search_alias_variant_nonblank`
+  // CHECK constraint. A single blank-after-trim variant rolls the whole
+  // per-artist transaction back, dropping every other valid variant for
+  // this artist_id. The most realistic source is a whitespace-only
+  // `library.alternate_artist_name` from upstream free-text entry, which
+  // alt-name-source.ts forwards as a `wxyc_library_alt` variant (it only
+  // filters NULL). Drop blanks at the writer boundary so one bad row
+  // doesn't poison the whole artist's run.
+  const filteredVariants = variants.filter((v) => v.variant.trim().length > 0);
+
   const lastVerifiedAt = new Date().toISOString(); // Pre-stringify (BS#802 trap).
 
   let variantsWritten = 0;
@@ -70,7 +80,7 @@ export const writeArtistVariants = async (
     // positional text param; comma-/quote-safe.
     const srcValues = sourcesPresent.map((s) => sql`(${s}::text)`);
 
-    if (variants.length === 0) {
+    if (filteredVariants.length === 0) {
       await tx.execute(sql`
         DELETE FROM ${ARTIST_SEARCH_ALIAS_TABLE}
         WHERE "artist_id" = ${artist_id}
@@ -81,7 +91,7 @@ export const writeArtistVariants = async (
 
     // Same parameterised pattern for the `(source, variant)` pair list.
     // Each pair binds two positional text params — comma-/quote-safe.
-    const pairValues = variants.map((v) => sql`(${v.source}::text, ${v.variant}::text)`);
+    const pairValues = filteredVariants.map((v) => sql`(${v.source}::text, ${v.variant}::text)`);
 
     await tx.execute(sql`
       DELETE FROM ${ARTIST_SEARCH_ALIAS_TABLE}
@@ -92,7 +102,7 @@ export const writeArtistVariants = async (
         )
     `);
 
-    for (const v of variants) {
+    for (const v of filteredVariants) {
       await tx.execute(sql`
         INSERT INTO ${ARTIST_SEARCH_ALIAS_TABLE}
           ("artist_id", "source", "variant", "related_artist_id",

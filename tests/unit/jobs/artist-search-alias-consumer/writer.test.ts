@@ -168,4 +168,38 @@ describe('writeArtistVariants', () => {
     const outcome = await writeArtistVariants(42, variants, ['discogs_name_variation']);
     expect(outcome.variants_written).toBe(3);
   });
+
+  it('filters out blank-after-trim variants before INSERT (CHECK-violation rollback defense)', async () => {
+    // `length(trim(variant)) > 0` is enforced by the substrate's CHECK
+    // constraint; a single blank/whitespace variant rolls the whole
+    // per-artist transaction back, dropping every other valid variant.
+    // The most realistic source is a whitespace-only
+    // library.alternate_artist_name surfacing via alt-name-source.ts
+    // (which only filters IS NOT NULL). The writer pre-filters so one
+    // bad row can't poison the whole run.
+    const variants = [
+      variant({ variant: 'Valid Name' }),
+      variant({ variant: '   ' }), // blank-after-trim
+      variant({ variant: '' }), // empty
+      variant({ variant: '\t\n  ' }), // whitespace-only
+      variant({ variant: 'Another Valid' }),
+    ];
+    const outcome = await writeArtistVariants(42, variants, ['discogs_name_variation']);
+    // Only the 2 valid variants reach the INSERT loop. 1 DELETE + 2 INSERTs.
+    expect(outcome.variants_written).toBe(2);
+    expect(mockExecute).toHaveBeenCalledTimes(3);
+    // The blank variant strings must not appear as bound values.
+    const allBinds = sqlTagCalls.flatMap((c) => c.values);
+    expect(allBinds).not.toContain('   ');
+    expect(allBinds).not.toContain('');
+    expect(allBinds).not.toContain('\t\n  ');
+  });
+
+  it('falls back to DELETE-only when every variant is blank-after-trim (treats filtered-out as variants=[])', async () => {
+    // If the only variants supplied are all blank, the writer should
+    // behave as if variants=[] was passed: scoped DELETE, no INSERT.
+    await writeArtistVariants(42, [variant({ variant: '   ' }), variant({ variant: '' })], ['discogs_name_variation']);
+    // Exactly one statement fires — the DELETE-only branch.
+    expect(mockExecute).toHaveBeenCalledTimes(1);
+  });
 });

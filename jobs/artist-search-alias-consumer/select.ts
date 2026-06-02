@@ -131,16 +131,19 @@ export const loadNameGroups = async (
     SELECT n."artist_name", n.artist_ids
     FROM name_to_artists n
     WHERE n."artist_name" > ${cursor}
-      AND (
-        NOT EXISTS (
+      -- Group is eligible if at least one artist_id in the group lacks
+      -- fresh alias coverage. The previous two-branch OR (NOT EXISTS for
+      -- any-row OR EXISTS stale) missed the mixed-coverage case: when a
+      -- duplicate-name group gains a NEW artist_id alongside an existing
+      -- one whose alias rows are still fresh, the group was skipped for
+      -- STALE_THRESHOLD_DAYS, leaving the new artist invisible to alias-
+      -- aware search.
+      AND EXISTS (
+        SELECT 1 FROM unnest(n.artist_ids) AS member(id)
+        WHERE NOT EXISTS (
           SELECT 1 FROM ${ARTIST_SEARCH_ALIAS_TABLE} asa
-          WHERE asa."artist_id" = ANY(n.artist_ids)
-        )
-        OR EXISTS (
-          SELECT 1 FROM ${ARTIST_SEARCH_ALIAS_TABLE} asa
-          WHERE asa."artist_id" = ANY(n.artist_ids)
-            AND asa."last_verified_at" < NOW() - (interval '1 day' * ${staleDays})
-          LIMIT 1
+          WHERE asa."artist_id" = member.id
+            AND asa."last_verified_at" >= NOW() - (interval '1 day' * ${staleDays})
         )
       )
       AND (${partition.count} = 1 OR abs(hashtext(n."artist_name")::bigint) % ${partition.count} = ${partition.index})
