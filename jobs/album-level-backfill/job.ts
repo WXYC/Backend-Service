@@ -426,18 +426,25 @@ export const runBatch = async (
   let no_match = 0;
   let error = 0;
   let unexpected_index = 0;
+  // BS#1316 gap 3: accumulate first-mismatch context inside the loop and
+  // emit ONE breadcrumb per batch after, instead of one per row. Sentry's
+  // default `maxBreadcrumbs` is 100 FIFO; per-row emission under a full
+  // contract break would evict legitimate upstream context (LML HTTP span,
+  // DB query trail) before the NEXT captured event could attach to them.
+  let firstMismatchIndex: number | null = null;
+  let firstMismatchGot: number | null = null;
+  let firstMismatchAlbumId: number | null = null;
   const upsertPromises: Array<Promise<boolean>> = [];
   for (let i = 0; i < items.length; i++) {
     const result = response.results[i];
     if (!result || result.index !== i) {
       unexpected_index += 1;
       const album = resolved[i];
-      Sentry.addBreadcrumb({
-        category: 'album-level-backfill',
-        message: 'unexpected_result_index',
-        level: 'warning',
-        data: { expected: i, got: result?.index ?? null, album_id: album?.album_id ?? null },
-      });
+      if (firstMismatchIndex === null) {
+        firstMismatchIndex = i;
+        firstMismatchGot = result?.index ?? null;
+        firstMismatchAlbumId = album?.album_id ?? null;
+      }
       log('warn', 'unexpected_result_index', `LML result.index mismatch at position ${i}; skipping write`, {
         expected_index: i,
         got_index: result?.index ?? null,
@@ -462,6 +469,39 @@ export const runBatch = async (
     }
   }
   const upserts = (await Promise.all(upsertPromises)).filter(Boolean).length;
+
+  // BS#1316 gaps 2 + 3: surface the non-zero `unexpected_index` signal.
+  // Without this, the per-row counter aggregates correctly in the
+  // `batch_done` log + `BackfillSummary` but evaporates from the Sentry
+  // Issues view at process exit (no captured event → orphaned breadcrumbs).
+  // One breadcrumb per batch caps FIFO pressure; one `captureMessage` per
+  // non-zero batch surfaces the signal with a stable fingerprint so an
+  // alert rule can hang off the issue and cause-aggregation persists across
+  // deploys.
+  if (unexpected_index > 0) {
+    Sentry.addBreadcrumb({
+      category: 'album-level-backfill',
+      message: 'unexpected_result_index',
+      level: 'warning',
+      data: {
+        mismatch_count: unexpected_index,
+        first_mismatch_index: firstMismatchIndex,
+        first_mismatch_got: firstMismatchGot,
+        first_mismatch_album_id: firstMismatchAlbumId,
+      },
+    });
+    Sentry.captureMessage('album-level-backfill.unexpected_index', {
+      level: 'warning',
+      tags: { source: 'album-level-backfill' },
+      extra: {
+        unexpected_index,
+        scanned: items.length,
+        batch_first_id: resolved[0]?.album_id ?? null,
+      },
+      fingerprint: ['album-level-backfill', 'unexpected_index'],
+    });
+  }
+
   return { batchSize: items.length, match, no_match, error, upserts, unexpected_index };
 };
 

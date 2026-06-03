@@ -140,9 +140,17 @@ grep '"step":"batch_done"' /tmp/bs-1078-phase3-*.log \
       batches: length,
       max_wall_ms: ([.[].wall_clock_ms] | max),
       total_errors: ([.[].lml_error // 0] | add),
-      total_scanned: ([.[].scanned] | add)
+      total_scanned: ([.[].scanned] | add),
+      total_unexpected_index: ([.[].unexpected_index // 0] | add)
     }'
 ```
+
+`total_unexpected_index` is the BS#1088 / BS#1316 acceptance signal: a
+non-zero value means LML silently dropped its bulk input-order contract
+and the job skipped the affected writes. Also watch the new
+`album-level-backfill.unexpected_index` Sentry issue — the job fires
+`captureMessage` with a stable fingerprint per non-zero batch, so the
+issue persists across deploys and you can hang an alert rule off it.
 
 ### Step 5 — Post-pass UPDATE
 

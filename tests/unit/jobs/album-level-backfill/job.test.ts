@@ -25,9 +25,11 @@ jest.mock('@wxyc/lml-client', () => ({
 // non-configurable, so `jest.spyOn(Sentry, 'addBreadcrumb')` throws — we
 // have to replace the surface at module-mock time.
 const mockSentryAddBreadcrumb = jest.fn<(b: unknown) => void>();
+const mockSentryCaptureMessage = jest.fn<(msg: string, ctx?: unknown) => void>();
 jest.mock('@sentry/node', () => ({
   __esModule: true,
   addBreadcrumb: mockSentryAddBreadcrumb,
+  captureMessage: mockSentryCaptureMessage,
   // The job's logger.ts module also imports @sentry/node; preserve the
   // surface it touches so `initLogger()` (not called in unit tests) and
   // `captureError()` (called by BS#1076 path) don't crash if exercised.
@@ -566,7 +568,12 @@ describe('runBatch', () => {
       expect((db.insert as jest.Mock).mock.calls.length).toBe(expected.upserts);
     });
 
-    it('emits a Sentry breadcrumb on mismatch (category album-level-backfill, expected vs got)', async () => {
+    // BS#1316 gap 3: per-row breadcrumbs blow the 100-entry FIFO when every
+    // row mismatches. Cap at one breadcrumb per batch carrying the
+    // `first_mismatch_*` + `mismatch_count` payload so legitimate upstream
+    // breadcrumbs (LML HTTP span, DB query trail) survive into the NEXT
+    // captured event.
+    it('BS#1316: emits at most one breadcrumb per batch carrying first_mismatch + mismatch_count', async () => {
       mockSentryAddBreadcrumb.mockClear();
       mockBulkLookupMetadata.mockResolvedValue({
         results: [
@@ -577,21 +584,105 @@ describe('runBatch', () => {
 
       await runBatch([1, 2], { budgetMs: 25000, dryRun: false });
 
-      expect(mockSentryAddBreadcrumb).toHaveBeenCalledTimes(2);
+      expect(mockSentryAddBreadcrumb).toHaveBeenCalledTimes(1);
       expect(mockSentryAddBreadcrumb).toHaveBeenCalledWith(
         expect.objectContaining({
           category: 'album-level-backfill',
           message: 'unexpected_result_index',
-          data: expect.objectContaining({ expected: 0, got: 5 }),
+          level: 'warning',
+          data: expect.objectContaining({
+            first_mismatch_index: 0,
+            first_mismatch_got: 5,
+            mismatch_count: 2,
+          }),
         })
       );
-      expect(mockSentryAddBreadcrumb).toHaveBeenCalledWith(
+    });
+
+    // BS#1316 gap 3 continued: even at the worst case (every row in a batch
+    // mismatches), exactly one breadcrumb fires. This is the FIFO-protection
+    // invariant — at default batchSize=5 the prior shape could emit 5
+    // breadcrumbs per batch; with one-per-batch the cap is bounded.
+    it('BS#1316: a fully-mismatched batch still produces one breadcrumb', async () => {
+      mockSentryAddBreadcrumb.mockClear();
+      mockBulkLookupMetadata.mockResolvedValue({
+        results: [
+          { index: 9, status: 'match' as const, lookup: lookupWithArtwork() },
+          { index: 8, status: 'match' as const, lookup: lookupWithArtwork() },
+        ],
+      });
+
+      await runBatch([1, 2], { budgetMs: 25000, dryRun: false });
+
+      expect(mockSentryAddBreadcrumb).toHaveBeenCalledTimes(1);
+      const breadcrumb = mockSentryAddBreadcrumb.mock.calls[0]?.[0] as {
+        data?: { mismatch_count?: number; first_mismatch_index?: number; first_mismatch_got?: number };
+      };
+      expect(breadcrumb?.data?.mismatch_count).toBe(2);
+      expect(breadcrumb?.data?.first_mismatch_index).toBe(0);
+      expect(breadcrumb?.data?.first_mismatch_got).toBe(9);
+    });
+
+    // BS#1316 gap 3: when the batch is healthy, no breadcrumb fires.
+    it('BS#1316: no breadcrumb when the batch has zero mismatches', async () => {
+      mockSentryAddBreadcrumb.mockClear();
+      mockBulkLookupMetadata.mockResolvedValue({
+        results: [
+          { index: 0, status: 'match' as const, lookup: lookupWithArtwork() },
+          { index: 1, status: 'match' as const, lookup: lookupWithArtwork() },
+        ],
+      });
+
+      await runBatch([1, 2], { budgetMs: 25000, dryRun: false });
+
+      expect(mockSentryAddBreadcrumb).not.toHaveBeenCalled();
+    });
+
+    // BS#1316 gap 2: breadcrumbs evaporate at process exit unless an event
+    // is captured. Fire `Sentry.captureMessage` per non-zero batch so the
+    // Sentry Issues view surfaces it with a stable fingerprint that an
+    // alert rule can hang off.
+    it('BS#1316: fires Sentry.captureMessage with stable fingerprint when unexpected_index > 0', async () => {
+      mockSentryCaptureMessage.mockClear();
+      mockBulkLookupMetadata.mockResolvedValue({
+        results: [
+          { index: 5, status: 'match' as const, lookup: lookupWithArtwork() },
+          { index: 1, status: 'match' as const, lookup: lookupWithArtwork() },
+        ],
+      });
+
+      await runBatch([1, 2], { budgetMs: 25000, dryRun: false });
+
+      expect(mockSentryCaptureMessage).toHaveBeenCalledTimes(1);
+      expect(mockSentryCaptureMessage).toHaveBeenCalledWith(
+        'album-level-backfill.unexpected_index',
         expect.objectContaining({
-          category: 'album-level-backfill',
-          message: 'unexpected_result_index',
-          data: expect.objectContaining({ expected: 1, got: 0 }),
+          level: 'warning',
+          tags: expect.objectContaining({ source: 'album-level-backfill' }),
+          extra: expect.objectContaining({
+            unexpected_index: 1,
+            scanned: 2,
+            batch_first_id: 1,
+          }),
+          fingerprint: ['album-level-backfill', 'unexpected_index'],
         })
       );
+    });
+
+    // BS#1316 gap 2: healthy batches stay silent — captureMessage only fires
+    // on the signal, not on every successful batch.
+    it('BS#1316: does NOT fire captureMessage when the batch has zero mismatches', async () => {
+      mockSentryCaptureMessage.mockClear();
+      mockBulkLookupMetadata.mockResolvedValue({
+        results: [
+          { index: 0, status: 'match' as const, lookup: lookupWithArtwork() },
+          { index: 1, status: 'match' as const, lookup: lookupWithArtwork() },
+        ],
+      });
+
+      await runBatch([1, 2], { budgetMs: 25000, dryRun: false });
+
+      expect(mockSentryCaptureMessage).not.toHaveBeenCalled();
     });
 
     it('mismatch does not abort the batch: sibling in-order matches still write', async () => {
