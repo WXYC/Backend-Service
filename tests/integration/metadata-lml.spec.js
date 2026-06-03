@@ -86,7 +86,7 @@ describe('Proxy endpoints via LML (Mock API)', () => {
     expect(res.body.id).toBe(3391);
   });
 
-  test('LML 500 translates to 502 on proxy endpoint', async () => {
+  test('LML 500 falls back to synthesized search URLs on /proxy/metadata/album', async () => {
     if (!mockApiAvailable || !anonToken) return;
 
     // Permanent error (no count) — affects all subsequent LML search calls.
@@ -95,8 +95,14 @@ describe('Proxy endpoints via LML (Mock API)', () => {
     const res = await request
       .get('/proxy/metadata/album')
       .set('Authorization', `Bearer ${anonToken}`)
-      .query({ artistName: 'Autechre' });
+      .query({ artistName: 'Autechre' })
+      .expect(200);
 
-    expect(res.status).toBe(502);
+    // SearchUrlProvider-backed fallback (BS#889 + BS#1185) — when LML lookup
+    // fails, the endpoint still returns 200 with synthesized service URLs so
+    // iOS doesn't show greyed buttons.
+    expect(res.body.youtubeMusicUrl).toContain('music.youtube.com');
+    expect(res.body.bandcampUrl).toContain('bandcamp.com');
+    expect(res.body.soundcloudUrl).toContain('soundcloud.com');
   });
 });
