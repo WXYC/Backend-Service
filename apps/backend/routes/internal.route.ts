@@ -99,10 +99,12 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       const albumTitle = truncate(entry.releaseTitle, 128);
       const trackTitle = truncate(entry.songTitle, 128);
 
-      // Resolve linkage at INSERT so enrichment fires with album_id already
-      // set; without this, D3's writer takes the unlinked branch and writes
+      // Resolve linkage at INSERT so the CDC consumer worker sees
+      // `album_id` already set and takes the linked enrichment branch;
+      // without this, the worker takes the unlinked branch and writes
       // inline metadata that never reaches album_metadata until the next
-      // flowsheet-etl cycle (#1028).
+      // flowsheet-etl cycle (#1028). Post-#894 inline enrichment no longer
+      // fires from this route — CDC drives the consumer.
       const rawLibraryId = entry.libraryReleaseId ?? 0;
       const rawRotationId = entry.rotationReleaseId ?? 0;
       const [showId, albumId, rotationId] = await Promise.all([
@@ -118,7 +120,8 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // signal replaces the previous `(xmax = 0)` system-column trick
       // (BS#909): same correctness, no MVCC-internal dependency, race-
       // safe under concurrent webhook delivery (acceptance criterion (c)
-      // — exactly one delivery fires enrichment per legacy_entry_id).
+      // — exactly one fresh-INSERT row per legacy_entry_id, so the CDC
+      // consumer worker sees exactly one INSERT event per logical row).
       //
       // `rotation_id` (BS#1268) is set on INSERT only — like `album_id`,
       // linkage is anchored to the first delivery and not refreshed on
