@@ -339,6 +339,26 @@ internal_route.post('/rotation-webhook', async (req, res) => {
       const killDate =
         release.killDate && release.killDate !== 0 ? new Date(release.killDate).toISOString().split('T')[0] : null;
 
+      // BS#1082: tubafrenzy's sendRotationLinked posts only {id,
+      // libraryReleaseId, action: 'update'} on linkage. Including rotation_bin
+      // / kill_date in SET unconditionally would clobber the existing row's
+      // values with the JS defaults ('N' / null) computed above for missing
+      // payload fields. Presence-gate the SET so partial updates leave them
+      // alone.
+      const setClause: Record<string, unknown> = {
+        album_id: sql`excluded.album_id`,
+        legacy_library_release_id: sql`excluded.legacy_library_release_id`,
+        artist_name: sql`excluded.artist_name`,
+        album_title: sql`excluded.album_title`,
+        record_label: sql`excluded.record_label`,
+      };
+      if (release.rotationType !== undefined) {
+        setClause.rotation_bin = sql`excluded.rotation_bin`;
+      }
+      if (release.killDate !== undefined) {
+        setClause.kill_date = sql`excluded.kill_date`;
+      }
+
       await db
         .insert(rotation)
         .values({
@@ -354,15 +374,7 @@ internal_route.post('/rotation-webhook', async (req, res) => {
         })
         .onConflictDoUpdate({
           target: rotation.legacy_rotation_id,
-          set: {
-            album_id: sql`excluded.album_id`,
-            legacy_library_release_id: sql`excluded.legacy_library_release_id`,
-            rotation_bin: sql`excluded.rotation_bin`,
-            kill_date: sql`excluded.kill_date`,
-            artist_name: sql`excluded.artist_name`,
-            album_title: sql`excluded.album_title`,
-            record_label: sql`excluded.record_label`,
-          },
+          set: setClause,
         });
     }
 
