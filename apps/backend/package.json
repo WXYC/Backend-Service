@@ -23,7 +23,7 @@
     "@wxyc/database": "^1.0.0",
     "@wxyc/lml-client": "^1.0.0",
     "@wxyc/metadata": "^1.0.0",
-    "@wxyc/shared": "^1.6.0",
+    "@wxyc/shared": "^1.9.0",
     "async-mutex": "^0.5.0",
     "aws-jwt-verify": "^5.1.1",
     "axios": "^1.16.1",

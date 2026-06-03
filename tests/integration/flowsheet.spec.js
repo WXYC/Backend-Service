@@ -424,6 +424,37 @@ describe('Add to Flowsheet', () => {
     expect(res.body.record_label).toEqual('Mini Records');
   });
 
+  test('With album_id null + rotation_id + snapshot fields (BS#1308)', async () => {
+    // Rotation albums that aren't in the WXYC library catalog (LEFT JOIN to
+    // library yields id: null on /library/rotation) need to preserve rotation
+    // linkage on the wire so the V2 read path can JOIN back to rotation for
+    // rotation_bin and the iOS rotation-artwork resolver can find the entry.
+    // Pre-fix, dj-site either synthesized a negative album_id (defect class
+    // #564/#608/#698/#701) or fell back to FlowsheetCreateSongFreeform and
+    // dropped rotation_id on the wire. wxyc-shared#158 added rotation_id to
+    // the freeform variant; this pins that BS persists it through the
+    // snapshot/else branch alongside album_id IS NULL.
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        rotation_id: 1, // Built to Spill — Keep it Like a Secret (seed rotation row)
+        artist_name: 'Noura Mint Seymali',
+        album_title: 'Tzenni',
+        track_title: 'Tzenni',
+        record_label: 'Glitterbeat',
+      })
+      .expect(201);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.album_id).toBeNull();
+    expect(res.body.rotation_id).toEqual(1);
+    expect(res.body.artist_name).toEqual('Noura Mint Seymali');
+    expect(res.body.album_title).toEqual('Tzenni');
+    expect(res.body.track_title).toEqual('Tzenni');
+  });
+
   test('With track_position (BS#943, album_id branch)', async () => {
     // The dj-site flowsheet picker (E6-6) calls /proxy/library/{id}/tracks
     // after a release pick, then submits the chosen track with the library
