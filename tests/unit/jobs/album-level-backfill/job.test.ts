@@ -19,6 +19,24 @@ jest.mock('@wxyc/lml-client', () => ({
   bulkLookupMetadata: mockBulkLookupMetadata,
 }));
 
+// Spyable Sentry mock so the BS#1088 breadcrumb test can assert call shape
+// without depending on a live Sentry transport. Mirrors the established
+// `mockBulkLookupMetadata` pattern above. `@sentry/node`'s ESM exports are
+// non-configurable, so `jest.spyOn(Sentry, 'addBreadcrumb')` throws — we
+// have to replace the surface at module-mock time.
+const mockSentryAddBreadcrumb = jest.fn<(b: unknown) => void>();
+jest.mock('@sentry/node', () => ({
+  __esModule: true,
+  addBreadcrumb: mockSentryAddBreadcrumb,
+  // The job's logger.ts module also imports @sentry/node; preserve the
+  // surface it touches so `initLogger()` (not called in unit tests) and
+  // `captureError()` (called by BS#1076 path) don't crash if exercised.
+  init: jest.fn(),
+  setTag: jest.fn(),
+  captureException: jest.fn(),
+  close: jest.fn(() => Promise.resolve(true)),
+}));
+
 import { db, album_metadata } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import {
@@ -502,6 +520,97 @@ describe('runBatch', () => {
     expect(out).toMatchObject({ batchSize: 0, match: 0 });
   });
 
+  // BS#1088: defensive pin against a future LML refactor that drops the
+  // input-order `result.index === i` invariant. LML's current bulk handler
+  // honors `index=i` via asyncio.gather, but a partial-failure isolation
+  // change (try/except skip mid-batch) would silently UPSERT
+  // `album_metadata` for the wrong album_id — same failure class as
+  // BS#1051 in a different code path. Per-row assert with O(1) lookup;
+  // mismatch is logged, counted to `unexpected_index`, breadcrumbed to
+  // Sentry, and skipped.
+  describe('BS#1088 result.index defense', () => {
+    it.each([
+      {
+        name: 'in-order',
+        results: [
+          { index: 0, status: 'match' as const, lookup: lookupWithArtwork() },
+          { index: 1, status: 'match' as const, lookup: lookupWithArtwork() },
+        ],
+        expect: { match: 2, upserts: 2, unexpected_index: 0 },
+      },
+      {
+        name: 'out-of-order (swap)',
+        results: [
+          { index: 1, status: 'match' as const, lookup: lookupWithArtwork() },
+          { index: 0, status: 'match' as const, lookup: lookupWithArtwork() },
+        ],
+        // Both results land on the mismatch branch: position 0 carries
+        // index=1, position 1 carries index=0. Neither writes; both count.
+        expect: { match: 0, upserts: 0, unexpected_index: 2 },
+      },
+      {
+        name: 'missing-index (LML returns N-1 results)',
+        results: [{ index: 0, status: 'match' as const, lookup: lookupWithArtwork() }],
+        // Position 0 matches; position 1 is missing entirely (undefined
+        // pulled from response.results, which has no entry there).
+        expect: { match: 1, upserts: 1, unexpected_index: 1 },
+      },
+    ])('parameterized: $name', async ({ results, expect: expected }) => {
+      mockBulkLookupMetadata.mockResolvedValue({ results });
+
+      const out = await runBatch([1, 2], { budgetMs: 25000, dryRun: false });
+
+      expect(out.match).toBe(expected.match);
+      expect(out.upserts).toBe(expected.upserts);
+      expect(out.unexpected_index).toBe(expected.unexpected_index);
+      expect((db.insert as jest.Mock).mock.calls.length).toBe(expected.upserts);
+    });
+
+    it('emits a Sentry breadcrumb on mismatch (category album-level-backfill, expected vs got)', async () => {
+      mockSentryAddBreadcrumb.mockClear();
+      mockBulkLookupMetadata.mockResolvedValue({
+        results: [
+          { index: 5, status: 'match' as const, lookup: lookupWithArtwork() },
+          { index: 0, status: 'match' as const, lookup: lookupWithArtwork() },
+        ],
+      });
+
+      await runBatch([1, 2], { budgetMs: 25000, dryRun: false });
+
+      expect(mockSentryAddBreadcrumb).toHaveBeenCalledTimes(2);
+      expect(mockSentryAddBreadcrumb).toHaveBeenCalledWith(
+        expect.objectContaining({
+          category: 'album-level-backfill',
+          message: 'unexpected_result_index',
+          data: expect.objectContaining({ expected: 0, got: 5 }),
+        })
+      );
+      expect(mockSentryAddBreadcrumb).toHaveBeenCalledWith(
+        expect.objectContaining({
+          category: 'album-level-backfill',
+          message: 'unexpected_result_index',
+          data: expect.objectContaining({ expected: 1, got: 0 }),
+        })
+      );
+    });
+
+    it('mismatch does not abort the batch: sibling in-order matches still write', async () => {
+      mockBulkLookupMetadata.mockResolvedValue({
+        results: [
+          { index: 0, status: 'match' as const, lookup: lookupWithArtwork() },
+          { index: 0, status: 'match' as const, lookup: lookupWithArtwork() }, // duplicate index at position 1
+        ],
+      });
+
+      const out = await runBatch([1, 2], { budgetMs: 25000, dryRun: false });
+
+      expect(out.match).toBe(1);
+      expect(out.upserts).toBe(1);
+      expect(out.unexpected_index).toBe(1);
+      expect((db.insert as jest.Mock).mock.calls.length).toBe(1);
+    });
+  });
+
   it('BS#1076: HTTP-level bulkLookupMetadata throw is isolated; batch reports error=N and run continues', async () => {
     // Reproduces the 2026-05-24 prod failure: batch 2 hit a 30s LML
     // timeout (LmlClientError statusCode 504), which an uncaught throw
@@ -644,6 +753,7 @@ describe('runBackfill', () => {
       error: 0,
       upserts: 0,
       flipped: 0,
+      unexpected_index: 0,
     });
     expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
     expect(db.insert as jest.Mock).not.toHaveBeenCalled();
