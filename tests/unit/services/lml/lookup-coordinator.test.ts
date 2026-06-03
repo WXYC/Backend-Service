@@ -158,6 +158,25 @@ describe('LmlLookupCoordinator', () => {
       await coord.lookup('Autechre', 'Confield', undefined, { caller: 'b' });
       expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
     });
+
+    it('a same-key caller arriving immediately after the wire settles hits cache (no race window)', async () => {
+      // Regression test for the cache-set vs inflight-delete ordering race.
+      // A naive `.finally(() => inflight.delete(key))` runs *before* the
+      // outer `await promise` resumes to set the cache, so a same-key
+      // caller arriving in the microtask gap would miss both cache and
+      // inflight and issue a redundant wire call. The coordinator's
+      // `.then(setCache).finally(deleteInflight)` ordering closes the gap.
+      mockLookupMetadata.mockResolvedValue(fakeResponse());
+
+      const firstSettle = lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'a' });
+      await firstSettle;
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+
+      // Immediately after `await firstSettle` resumes, the cache must
+      // already contain the result. A second call must not issue a wire.
+      await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'b' });
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('cache key normalization', () => {

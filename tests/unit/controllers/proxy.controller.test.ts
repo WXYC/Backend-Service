@@ -404,7 +404,16 @@ describe('proxy.controller', () => {
       expect(result.soundcloudUrl).toBe('https://soundcloud.com/search?q=Stereolab');
     });
 
-    it('returns search-only metadata when release fetch fails', async () => {
+    it('omits enriched fields when the lookup artwork has no extended metadata', async () => {
+      // The artwork block carries release-detail fields when LML's
+      // extended pipeline finds them (`release_year`, `genres`, `styles`,
+      // `tracklist`, `discogs_artist_id`, `full_release_date`). When the
+      // artwork lacks those fields (LML matched the release but the
+      // extended pipeline returned no enrichment), the proxy response
+      // surfaces the search-only metadata (Discogs IDs + streaming URLs)
+      // and omits the missing enriched fields rather than fabricating
+      // them. No follow-up `getRelease()` call happens — the coordinator
+      // forces `extended: true` on the single lookup.
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
@@ -435,8 +444,6 @@ describe('proxy.controller', () => {
         found_on_compilation: false,
       });
 
-      mockGetRelease.mockRejectedValue(new Error('Release fetch failed'));
-
       const req = {
         query: { artistName: 'Cat Power', releaseTitle: 'Moon Pix' },
       } as unknown as Request;
@@ -448,11 +455,13 @@ describe('proxy.controller', () => {
       const result = (res.json as jest.Mock).mock.calls[0][0];
       expect(result.discogsReleaseId).toBe(99999);
       expect(result.artworkUrl).toBe('https://i.discogs.com/art.jpg');
-      // Streaming URLs from search result still present
+      // Streaming URLs from search result still present.
       expect(result.spotifyUrl).toBe('https://open.spotify.com/album/moonpix');
-      // No enriched fields since release fetch failed
+      // Enriched fields are omitted when the artwork doesn't carry them.
       expect(result.genres).toBeUndefined();
       expect(result.tracklist).toBeUndefined();
+      // getRelease is never called on the album path post-BS#885.
+      expect(mockGetRelease).not.toHaveBeenCalled();
     });
 
     it('strips Discogs spacer.gif placeholder from artworkUrl (#649)', async () => {

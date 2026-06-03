@@ -210,7 +210,12 @@ function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork
   if (artwork.artist_bio) metadata.artistBio = artwork.artist_bio;
   if (artwork.wikipedia_url) metadata.artistWikipediaUrl = artwork.wikipedia_url;
   if (artwork.artist_image_url) metadata.artistImageUrl = artwork.artist_image_url;
-  if (artwork.profile_tokens) metadata.bioTokens = artwork.profile_tokens;
+  // Empty `profile_tokens` arrays are truthy in JS; omit the field
+  // entirely to match the codebase's "omit when empty" wire convention
+  // (cf. `populateReleaseMetadata`'s `genres.length > 0 ? ... : undefined`).
+  if (artwork.profile_tokens && artwork.profile_tokens.length > 0) {
+    metadata.bioTokens = artwork.profile_tokens;
+  }
 
   if (artwork.spotify_url) metadata.spotifyUrl = artwork.spotify_url;
   if (artwork.apple_music_url) metadata.appleMusicUrl = artwork.apple_music_url;
@@ -257,10 +262,12 @@ function populateReleaseMetadata(
       duration: t.duration ?? undefined,
     }));
   }
-  // Prefer release artwork over lookup artwork — but still filter out
-  // spacer.gif placeholders (see #649). On the extended path the values
-  // are typically identical; on the legacy path the release fetch can
-  // surface a higher-quality image.
+  // Filter spacer.gif placeholders (#649) and surface the artwork URL.
+  // On the extended-lookup path this is the same value already set by
+  // `populateCommonMetadataFields`; the assignment is idempotent. Kept
+  // distinct so the `libraryTracks` path (which calls
+  // `populateReleaseMetadata` from a `getRelease()` result) still gets
+  // the URL when populateCommonMetadataFields wasn't called.
   const releaseArtwork = filterSpacerGif(release.artwork_url);
   if (releaseArtwork) metadata.artworkUrl = releaseArtwork;
 }
