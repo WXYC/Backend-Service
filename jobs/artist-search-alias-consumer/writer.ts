@@ -18,7 +18,7 @@
  *      `INSERT … ON CONFLICT (artist_id, source, variant) DO UPDATE` per
  *      variant.
  *
- * Two BS-incident-driven invariants:
+ * Three BS-incident-driven invariants:
  *   - **No `'{...}'::text[]` literals.** Variant strings can carry commas,
  *     apostrophes, and Unicode ("Earth, Wind & Fire" / "Sinéad O'Connor").
  *     The Drizzle/postgres-js array-literal pattern silently corrupts
@@ -32,6 +32,14 @@
  *     returns it unchanged, and `Buffer.byteLength()` inside `b.str()`
  *     throws ERR_INVALID_ARG_TYPE (BS#802 cost 14,405 UPSERTs in prod).
  *     Use `new Date().toISOString()` to defeat the override.
+ *   - **Coerce nullable interpolations to `null` (not `undefined`).**
+ *     Drizzle's `sql` tag interpolates `undefined` as an empty parameter
+ *     position, producing invalid `VALUES (…, , …)` syntax. LML can emit
+ *     sparse JSON for `discogs_name_variation` rows (all relationship
+ *     columns missing), which `JSON.parse` materialises as `undefined`
+ *     rather than `null`. Use `${v.field ?? null}` on every nullable
+ *     column (BS#1300 cost 899 writer_errors on the 2026-06-03 first
+ *     prod run — ~20% of substrate rows).
  */
 
 import { sql } from 'drizzle-orm';
@@ -109,8 +117,8 @@ export const writeArtistVariants = async (
            "external_subject_id", "external_object_id", "active",
            "method", "confidence", "last_verified_at")
         VALUES
-          (${artist_id}, ${v.source}, ${v.variant}, ${v.related_artist_id},
-           ${v.external_subject_id}, ${v.external_object_id}, ${v.active},
+          (${artist_id}, ${v.source}, ${v.variant}, ${v.related_artist_id ?? null},
+           ${v.external_subject_id ?? null}, ${v.external_object_id ?? null}, ${v.active ?? null},
            ${v.method}, ${v.confidence}, ${lastVerifiedAt})
         ON CONFLICT ("artist_id", "source", "variant") DO UPDATE SET
           "related_artist_id"   = EXCLUDED."related_artist_id",
