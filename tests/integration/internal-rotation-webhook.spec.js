@@ -1,11 +1,15 @@
 /**
- * Integration tests for POST /internal/rotation-webhook (BS#1082).
+ * Integration tests for POST /internal/rotation-webhook (BS#1082, BS#1312).
  *
  * The webhook receives tubafrenzy rotation events. The acceptance criterion
- * tested here is from #1082: when `sendRotationLinked` posts the partial
- * shape `{id, libraryReleaseId, action: 'update'}`, the receiver must NOT
- * clobber `rotation_bin` or `kill_date` with the JS-default values computed
- * for missing payload fields.
+ * tested here is from #1082 + #1312: when `sendRotationLinked` posts the
+ * partial shape `{id, libraryReleaseId, action: 'update'}`, the receiver
+ * must NOT clobber the existing row's `rotation_bin`, `kill_date`,
+ * `artist_name`, `album_title`, or `record_label` with the JS-default
+ * values computed for missing payload fields. The denorm trio is the
+ * surface tubafrenzy + dj-site catalog views render when `album_id IS NULL`
+ * — clobbering them turns Heavy rotation rows display-blind until the 30m
+ * rotation-etl cron repairs them.
  *
  * The companion unit test at `tests/unit/routes/internal.route.test.ts`
  * verifies the SET-clause shape against a mocked db; this spec verifies the
@@ -30,7 +34,7 @@ function makeSql() {
   });
 }
 
-describe('POST /internal/rotation-webhook — partial update preserves rotation_bin / kill_date (BS#1082)', () => {
+describe('POST /internal/rotation-webhook — partial update preserves denorm fields (BS#1082 + BS#1312)', () => {
   let sql;
 
   // Use a legacy_rotation_id deep in a range that's unlikely to collide.
@@ -61,7 +65,7 @@ describe('POST /internal/rotation-webhook — partial update preserves rotation_
     );
   }
 
-  test('linkage update {id, libraryReleaseId} preserves existing rotation_bin and kill_date', async () => {
+  test('linkage update {id, libraryReleaseId} preserves all five denorm fields (rotation_bin, kill_date, artist_name, album_title, record_label)', async () => {
     await seedHeavyRotationRow('2026-12-31');
 
     const res = await request
@@ -71,14 +75,18 @@ describe('POST /internal/rotation-webhook — partial update preserves rotation_
     expect(res.status).toBe(200);
 
     const [row] = await sql.unsafe(
-      `SELECT rotation_bin, kill_date FROM ${SCHEMA}.rotation WHERE legacy_rotation_id = $1`,
+      `SELECT rotation_bin, kill_date, artist_name, album_title, record_label
+         FROM ${SCHEMA}.rotation WHERE legacy_rotation_id = $1`,
       [LEGACY_ROTATION_ID]
     );
     expect(row.rotation_bin).toBe('H');
     expect(row.kill_date).toEqual(new Date('2026-12-31'));
+    expect(row.artist_name).toBe('Jessica Pratt');
+    expect(row.album_title).toBe('On Your Own Love Again');
+    expect(row.record_label).toBe('Drag City');
   });
 
-  test('full-shape update {rotationType, killDate} still overwrites those fields', async () => {
+  test('full-shape update {rotationType, killDate, artistName, albumTitle, labelName} overwrites all five denorm fields', async () => {
     await seedHeavyRotationRow('2026-12-31');
 
     const res = await request
@@ -91,19 +99,23 @@ describe('POST /internal/rotation-webhook — partial update preserves rotation_
           libraryReleaseId: 0,
           rotationType: 'M',
           killDate: 0,
-          artistName: 'Jessica Pratt',
-          albumTitle: 'On Your Own Love Again',
-          labelName: 'Drag City',
+          artistName: 'Juana Molina',
+          albumTitle: 'DOGA',
+          labelName: 'Sonamos',
           addDate: 1706799600000,
         },
       });
     expect(res.status).toBe(200);
 
     const [row] = await sql.unsafe(
-      `SELECT rotation_bin, kill_date FROM ${SCHEMA}.rotation WHERE legacy_rotation_id = $1`,
+      `SELECT rotation_bin, kill_date, artist_name, album_title, record_label
+         FROM ${SCHEMA}.rotation WHERE legacy_rotation_id = $1`,
       [LEGACY_ROTATION_ID]
     );
     expect(row.rotation_bin).toBe('M');
     expect(row.kill_date).toBeNull();
+    expect(row.artist_name).toBe('Juana Molina');
+    expect(row.album_title).toBe('DOGA');
+    expect(row.record_label).toBe('Sonamos');
   });
 });

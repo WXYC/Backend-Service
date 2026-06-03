@@ -339,24 +339,33 @@ internal_route.post('/rotation-webhook', async (req, res) => {
       const killDate =
         release.killDate && release.killDate !== 0 ? new Date(release.killDate).toISOString().split('T')[0] : null;
 
-      // BS#1082: tubafrenzy's sendRotationLinked posts only {id,
-      // libraryReleaseId, action: 'update'} on linkage. Including rotation_bin
-      // / kill_date in SET unconditionally would clobber the existing row's
-      // values with the JS defaults ('N' / null) computed above for missing
-      // payload fields. Presence-gate the SET so partial updates leave them
-      // alone.
+      // BS#1082 + BS#1312: tubafrenzy's sendRotationLinked posts only {id,
+      // libraryReleaseId, action: 'update'} on linkage. Including any of the
+      // payload-derived denorm fields in SET unconditionally would clobber
+      // the existing row's values with the JS defaults computed above for
+      // missing payload fields ('N' for rotation_bin, null for kill_date,
+      // null for artist_name / album_title / record_label when albumId is
+      // null). Presence-gate the SET so partial updates leave them alone.
+      // The INSERT path keeps the JS-default values so the create branch
+      // still populates these columns on first delivery.
       const setClause: Record<string, unknown> = {
         album_id: sql`excluded.album_id`,
         legacy_library_release_id: sql`excluded.legacy_library_release_id`,
-        artist_name: sql`excluded.artist_name`,
-        album_title: sql`excluded.album_title`,
-        record_label: sql`excluded.record_label`,
       };
       if (release.rotationType !== undefined) {
         setClause.rotation_bin = sql`excluded.rotation_bin`;
       }
       if (release.killDate !== undefined) {
         setClause.kill_date = sql`excluded.kill_date`;
+      }
+      if (release.artistName !== undefined) {
+        setClause.artist_name = sql`excluded.artist_name`;
+      }
+      if (release.albumTitle !== undefined) {
+        setClause.album_title = sql`excluded.album_title`;
+      }
+      if (release.labelName !== undefined) {
+        setClause.record_label = sql`excluded.record_label`;
       }
 
       await db
