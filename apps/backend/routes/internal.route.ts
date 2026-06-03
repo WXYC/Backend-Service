@@ -105,7 +105,12 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // inline metadata that never reaches album_metadata until the next
       // flowsheet-etl cycle (#1028).
       const rawLibraryId = entry.libraryReleaseId ?? 0;
-      const [showId, albumId] = await Promise.all([resolveShowId(entry.radioShowId), resolveAlbumId(rawLibraryId)]);
+      const rawRotationId = entry.rotationReleaseId ?? 0;
+      const [showId, albumId, rotationId] = await Promise.all([
+        resolveShowId(entry.radioShowId),
+        resolveAlbumId(rawLibraryId),
+        resolveRotationId(rawRotationId),
+      ]);
 
       // INSERT ... ON CONFLICT DO NOTHING RETURNING { id }: either we win
       // the insert and PG hands back exactly one row, or a concurrent
@@ -115,12 +120,19 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // (BS#909): same correctness, no MVCC-internal dependency, race-
       // safe under concurrent webhook delivery (acceptance criterion (c)
       // — exactly one delivery fires enrichment per legacy_entry_id).
+      //
+      // `rotation_id` (BS#1268) is set on INSERT only — like `album_id`,
+      // linkage is anchored to the first delivery and not refreshed on
+      // ON CONFLICT updates. Tubafrenzy is the source of truth for the
+      // linkage; if the operator re-binds a flowsheet entry to a different
+      // rotation row, that's a new legacy_entry_id, not an UPDATE.
       const inserted = await db
         .insert(flowsheet)
         .values({
           legacy_entry_id: entry.id,
           legacy_release_id: rawLibraryId || null,
           album_id: albumId,
+          rotation_id: rotationId,
           show_id: showId,
           entry_type: entryType,
           artist_name: artistName,
@@ -245,6 +257,26 @@ async function resolveAlbumId(legacyLibraryReleaseId: number): Promise<number | 
     .select({ id: library.id })
     .from(library)
     .where(eq(library.legacy_release_id, legacyLibraryReleaseId))
+    .limit(1);
+  return row?.id ?? null;
+}
+
+/**
+ * Resolve a Backend-Service rotation_id from a tubafrenzy ROTATION_RELEASE_ID
+ * (the `entry.rotationReleaseId` field on the flowsheet webhook payload, set
+ * by tubafrenzy's `FlowsheetEntryAddServlet.populateRotationRelease()`).
+ * Returns null if the legacy id is 0 / unset or no rotation row matches.
+ *
+ * Single indexed SELECT via `rotation_legacy_rotation_id_idx` (unique by the
+ * tubafrenzy invariant — one rotation row per legacy_rotation_id). BS#1268.
+ */
+async function resolveRotationId(legacyRotationId: number): Promise<number | null> {
+  if (!legacyRotationId) return null;
+
+  const [row] = await db
+    .select({ id: rotation.id })
+    .from(rotation)
+    .where(eq(rotation.legacy_rotation_id, legacyRotationId))
     .limit(1);
   return row?.id ?? null;
 }
