@@ -38,13 +38,45 @@ import { sweepStrandedClaims } from './sweep.js';
 const SWEEP_INTERVAL_MS = envInt('ENRICHMENT_SWEEP_INTERVAL_MS', 60_000);
 
 /**
- * Bound the shutdown wait for an in-flight sweep so SIGTERM never hangs
- * if PG is unresponsive. After this many ms we proceed with
- * `closeDatabaseConnection` regardless; postgres-js will end its pool
- * cleanly, and any straggling sweep promise rejects with a
- * `CONNECTION_ENDED` that runSweep's catch handler tolerates.
+ * Per-step bound for the shutdown path so SIGTERM never hangs if PG (or
+ * the CDC LISTEN socket, or the healthcheck server) is unresponsive.
+ * Each step is best-effort: a throw is captured to Sentry and the next
+ * step still runs; a hang trips the bound and the next step still runs.
+ * `process.exit(0)` fires unconditionally in the outer finally.
  */
-const SWEEP_SHUTDOWN_WAIT_MS = 5_000;
+const SHUTDOWN_STEP_BOUND_MS = 5_000;
+
+/**
+ * Run a shutdown step with a per-step bound and a swallow-and-capture
+ * handler. Returns when the work resolves, when the bound trips, or when
+ * the work rejects (with the rejection sent to Sentry). Never throws.
+ *
+ * The bound timer is cleared as soon as the work resolves so successful
+ * fast steps don't hold libuv ref'd for the full bound window.
+ */
+async function runShutdownStep(label: string, work: Promise<unknown> | (() => Promise<unknown>)): Promise<void> {
+  let timeoutHandle: NodeJS.Timeout | undefined;
+  const promise = typeof work === 'function' ? Promise.resolve().then(work) : work;
+  try {
+    await Promise.race([
+      promise.finally(() => {
+        if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+      }),
+      new Promise<void>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          console.warn(`[enrichment-worker] shutdown step ${label} timed out after ${SHUTDOWN_STEP_BOUND_MS}ms`);
+          resolve();
+        }, SHUTDOWN_STEP_BOUND_MS);
+      }),
+    ]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    Sentry.captureException(err, {
+      tags: { component: 'enrichment-worker', step: `shutdown_${label}` },
+    });
+    console.error(`[enrichment-worker] shutdown step ${label} failed`, { error: message });
+  }
+}
 
 const main = async (): Promise<void> => {
   console.log('[enrichment-worker] starting');
@@ -72,35 +104,26 @@ const main = async (): Promise<void> => {
     console.log(`[enrichment-worker] received ${signal}; shutting down`);
     try {
       if (sweepTimer !== undefined) clearInterval(sweepTimer);
-      // Stop the CDC LISTEN socket BEFORE awaiting the in-flight sweep so
-      // new CDC events don't fire fresh `handleCandidate` dispatches during
-      // the 5-second sweep wait window (those would race
-      // closeDatabaseConnection below). In-flight handlers from before
-      // shutdown are not tracked — a pre-existing limitation of the C2
-      // worker — but at least we don't compound it here.
-      await stopCdcListener();
-      // Await any in-flight sweep so closeDatabaseConnection doesn't tear
-      // its connection mid-UPDATE. Bound the wait — PG could be hung; we'd
-      // rather log a slow-shutdown warning than block the deploy forever.
-      // Capture the timeout id so we can clear it when activeSweep wins
-      // the race; otherwise the timer holds the libuv loop ref'd for the
-      // full SWEEP_SHUTDOWN_WAIT_MS even though we've moved on.
+      // Each step is bounded + best-effort via runShutdownStep so a hang
+      // or throw in one (e.g. a wedged CDC LISTEN socket — BS#1014 lists
+      // the exact failure modes) doesn't skip the cleanup steps that
+      // follow. The ordering still matters:
+      //   1. Stop CDC dispatches first so new `handleCandidate` calls
+      //      don't fire fresh DB writes during the sweep wait.
+      //   2. Drain any in-flight sweep so closeDatabaseConnection
+      //      doesn't tear its UPDATE.
+      //   3. Close the pool, then the healthcheck server.
+      //   4. Flush Sentry LAST so captures from earlier steps also land.
+      await runShutdownStep('stop_cdc', stopCdcListener);
       if (activeSweep !== null) {
-        let timeoutHandle: NodeJS.Timeout | undefined;
-        await Promise.race([
-          activeSweep.finally(() => {
-            if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-          }),
-          new Promise<void>((resolve) => {
-            timeoutHandle = setTimeout(resolve, SWEEP_SHUTDOWN_WAIT_MS);
-          }),
-        ]);
+        await runShutdownStep('drain_sweep', activeSweep);
       }
-      await closeDatabaseConnection();
-      await new Promise<void>((resolve) => healthServer.close(() => resolve()));
-      // Flush pending Sentry spans/events so the last sweep tick's
-      // `sweep.stranded_recovered_count` (and any captured exceptions
-      // from runSweep) actually land. Mirrors the pattern in every
+      await runShutdownStep('close_db', closeDatabaseConnection);
+      await runShutdownStep(
+        'close_health_server',
+        () => new Promise<void>((resolve) => healthServer.close(() => resolve()))
+      );
+      // Sentry.close has its own bound; mirror the pattern in every
       // `jobs/*/logger.ts` shutdown path.
       await Sentry.close(2000);
     } finally {
