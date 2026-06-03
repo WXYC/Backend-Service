@@ -38,14 +38,21 @@ const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
  * Issue the worker's sweep SQL directly. Mirrors `sweepStrandedClaims` in
  * `apps/enrichment-worker/sweep.ts` — when that file is hand-edited the
  * SQL here must follow. Returns the count of rows reverted.
+ *
+ * Scoped to `id = ANY(scopeIds)` so sibling integration specs running
+ * against the same shared schema under `--runInBand` can't cross-affect
+ * one another's rows. Production `sweepStrandedClaims` is unscoped (it
+ * sweeps the whole table) — that's correct behavior there; the scoping
+ * here exists purely for test isolation.
  */
-async function runSweep(sql) {
+async function runSweep(sql, scopeIds) {
   const rows = await sql`
     UPDATE ${sql(SCHEMA)}.flowsheet
        SET metadata_status = 'pending',
            enriching_since = NULL
      WHERE metadata_status = 'enriching'
        AND enriching_since < now() - interval '60 seconds'
+       AND id = ANY(${scopeIds})
     RETURNING id
   `;
   return rows.length;
@@ -118,7 +125,7 @@ describe('enrichment-worker stranded-claim sweep (real PG)', () => {
     expect(await claimRow(sql, id)).toBe(true);
     await backdateEnrichingSince(sql, id, 120);
 
-    await runSweep(sql);
+    await runSweep(sql, [id]);
 
     const [row] = await sql`
       SELECT metadata_status, enriching_since
@@ -142,7 +149,7 @@ describe('enrichment-worker stranded-claim sweep (real PG)', () => {
       await backdateEnrichingSince(sql, id, 90);
     }
 
-    await runSweep(sql);
+    await runSweep(sql, ids);
 
     const rows = await sql`
       SELECT id, metadata_status
@@ -162,7 +169,7 @@ describe('enrichment-worker stranded-claim sweep (real PG)', () => {
 
     expect(await claimRow(sql, id)).toBe(true);
     // enriching_since defaulted to now() — well inside the 60s TTL.
-    await runSweep(sql);
+    await runSweep(sql, [id]);
 
     const [row] = await sql`
       SELECT metadata_status, enriching_since
@@ -193,7 +200,7 @@ describe('enrichment-worker stranded-claim sweep (real PG)', () => {
       `;
     }
 
-    await runSweep(sql);
+    await runSweep(sql, ids);
 
     const rows = await sql`
       SELECT id, metadata_status

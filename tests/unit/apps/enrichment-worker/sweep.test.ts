@@ -5,24 +5,26 @@
  * accidental WHERE-loosening fails CI before deploy.
  *
  * The sweep flips `metadata_status='enriching'` rows whose `enriching_since`
- * is older than the 60s TTL back to `'pending'` (and NULLs `enriching_since`)
- * so the next CDC tick can re-claim them. Without it, every LML throw or
- * worker SIGTERM leaks a row in `enriching` forever — the C2 worker (#892)
- * documents this in `handler.ts:90-115` and tests/integration/
- * enrichment-worker-claim.spec.js:175-205 exercises the SQL inline.
+ * is older than `STRANDED_TTL_SECONDS` back to `'pending'` (and NULLs
+ * `enriching_since`). The TTL is derived from `ENRICHMENT_LML_BUDGET_MS`
+ * with a floor of 60s to keep the invariant `TTL > LML budget`. Without
+ * this sweep, every LML throw or worker SIGTERM leaks a row in
+ * `enriching` forever — the C2 worker (#892) documents this in
+ * `handler.ts:90-115` and tests/integration/enrichment-worker-claim.spec.js
+ * exercises the SQL inline.
  *
  * Three contract guarantees pinned here:
  *   1. WHERE narrows by `metadata_status='enriching'`. Loosening this would
  *      revert terminal rows back to pending, re-enqueueing finished work.
- *   2. WHERE narrows by `enriching_since < now() - interval '60 seconds'`.
- *      The 60s TTL is the partial index's predicate; loosening it (or
- *      forgetting the cutoff entirely) would race in-flight claims.
+ *   2. WHERE narrows by `enriching_since < now() - <interval>` (subtraction
+ *      direction matters — flipping to `>` would revert in-flight claims
+ *      and leave stale ones untouched).
  *   3. SET writes `metadata_status='pending'` AND `enriching_since=NULL`.
  *      Forgetting the NULL would leave a stale enriching_since the next
  *      claim-then-strand cycle has to overwrite.
  *
  * Integration coverage of the end-to-end recovery cycle (claim → strand →
- * sweep → re-claim) lives in `tests/integration/enrichment-worker-claim.spec.js`.
+ * sweep → re-claim) lives in `tests/integration/enrichment-worker-sweep.spec.js`.
  */
 import { jest } from '@jest/globals';
 
@@ -79,13 +81,13 @@ describe('sweepStrandedClaims (BS#1225)', () => {
     expect(setCall.enriching_since).toBeNull();
   });
 
-  it('WHERE references both the enriching guard and the 60-second cutoff', async () => {
+  it('WHERE references the enriching guard, the cutoff direction, and an interval', async () => {
     // The WHERE uses a raw `sql\`...\`` chunk (codebase convention for
     // multi-predicate partial-index queries; mirrors the `schema.ts`
-    // index definitions). Render the chunk and assert both the
-    // metadata_status='enriching' guard and the 60-second TTL cutoff are
-    // present — a future "drop the status guard" or "bump to 30s" edit
-    // is caught here.
+    // index definitions). Render the chunk and assert the
+    // metadata_status='enriching' guard, the `<` cutoff direction, and
+    // an interval subtraction are all present — a "drop the status
+    // guard" or "swap `<` for `>`" edit is caught here.
     mockDb._chain.returning.mockResolvedValueOnce([]);
 
     await sweepStrandedClaims();
@@ -94,8 +96,15 @@ describe('sweepStrandedClaims (BS#1225)', () => {
     const whereArg = mockDb._chain.where.mock.calls[0]?.[0];
     expect(whereArg).toBeDefined();
     const rendered = renderSql(whereArg);
+    // The renderer drops column refs and bound params, so the rendered
+    // string is the static SQL between interpolations: e.g.
+    //   " = 'enriching' AND  < now() - make_interval(secs => )"
+    // Assert the enum literal, the cutoff operator + direction, and the
+    // interval subtraction — these three together pin both the status
+    // guard and the `enriching_since < now() - interval` shape. A swap
+    // to `>` or to `now() + interval` fails the regex below.
     expect(rendered).toContain("'enriching'");
-    expect(rendered).toContain('60 seconds');
+    expect(rendered).toMatch(/<\s+now\(\)\s*-\s*make_interval/);
   });
 
   it('returns the recovered row count', async () => {
