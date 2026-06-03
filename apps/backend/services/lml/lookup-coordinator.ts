@@ -23,12 +23,16 @@
  * driven by `extended`.
  *
  * **First-caller-wins on the wire** for `caller`, `budgetMs`, `timeoutMs`,
- * `limiter`. Subsequent coalescers await the in-flight promise as-is. The
- * `warm_cache` flag accumulates — if ANY in-flight caller asks for it the
- * wire call carries `warm_cache: true` (write-path callers opt in; read-
- * path callers don't). On error the in-flight entry is discarded along
- * with the accumulated `warm_cache` flag — a subsequent retry rebuilds
- * the flag from the new coalescing population.
+ * `limiter`, and `warm_cache`. Subsequent coalescers await the in-flight
+ * promise as-is — the wire request body is already serialized and in
+ * flight by the time a coalescing caller arrives, so there is no
+ * opportunity to union flags onto it. Write-path callers (`library-add-
+ * album`, `library-canonical-entity`) set `warm_cache: true`; whether a
+ * coalesced burst warms the LML PG cache is decided entirely by which
+ * caller arrived first. Acceptable in practice: write-path callers
+ * dominate same-key bursts that originate from a single user action, and
+ * the warm-cache effect is a side benefit (LML's PG cache stays warm),
+ * not a correctness invariant.
  *
  * **No error caching.** Throws propagate to all waiters; the next request
  * for the same key issues a fresh wire call. LML's own short cache TTL
@@ -51,10 +55,6 @@ export type CoordinatorLookupOptions = Pick<
 
 interface InFlightEntry {
   promise: Promise<LookupResponse>;
-  /** Caller tags collected from the originating call and every coalescer; surfaced on the span. */
-  callers: Set<string>;
-  /** Union across coalesced callers: any `warm_cache: true` sets this true. Discarded on error. */
-  warmCacheRequested: boolean;
 }
 
 const DEFAULT_MAX_ENTRIES = 1000;
@@ -94,8 +94,6 @@ export class LmlLookupCoordinator {
 
       const existing = this.inflight.get(key);
       if (existing) {
-        existing.callers.add(caller);
-        if (options?.warm_cache) existing.warmCacheRequested = true;
         this.setSpanAttrs(span, { hit: 'inflight', caller });
         return existing.promise;
       }
@@ -103,13 +101,7 @@ export class LmlLookupCoordinator {
       const promise = this.fetchUncached(artist, album, song, options).finally(() => {
         this.inflight.delete(key);
       });
-
-      const entry: InFlightEntry = {
-        promise,
-        callers: new Set([caller]),
-        warmCacheRequested: !!options?.warm_cache,
-      };
-      this.inflight.set(key, entry);
+      this.inflight.set(key, { promise });
       this.setSpanAttrs(span, { hit: 'miss', caller });
 
       const result = await promise;
