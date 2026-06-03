@@ -23,6 +23,14 @@ jest.mock('@wxyc/lml-client', () => ({
   },
 }));
 
+// Backend code paths now route through the LmlLookupCoordinator (BS#885).
+// The coordinator's `lookup` method is what callsite tests assert on; mock
+// it to the same fn the previous `@wxyc/lml-client` mock served so existing
+// `mockResolvedValue` setups continue to work.
+jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
+  lmlLookupCoordinator: { lookup: mockLookupMetadata },
+}));
+
 jest.mock('../../../apps/backend/services/metadata/providers/search-urls.provider', () => ({
   SearchUrlProvider: jest.fn().mockImplementation(() => ({
     getAllSearchUrls: (artist: string, album?: string, track?: string) => {

@@ -35,6 +35,11 @@ jest.mock('@wxyc/lml-client', () => ({
   LmlClientError: MockLmlClientError,
 }));
 
+// Backend code paths now route through the LmlLookupCoordinator (BS#885).
+jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
+  lmlLookupCoordinator: { lookup: mockLookupMetadata },
+}));
+
 // library.service mock — only the helper libraryTracks consumes.
 const mockGetDiscogsReleaseIdByLegacyId = jest.fn<(legacyId: number) => Promise<number | null>>();
 
@@ -220,6 +225,10 @@ describe('proxy.controller', () => {
     });
 
     it('returns merged metadata from LML lookup + release details', async () => {
+      // Post-BS#885: the coordinator forces `extended: true` on every
+      // lookup, so the artwork block carries the release-detail fields
+      // (year/label/genres/styles/tracklist/discogs_artist_id/released)
+      // inline. No separate `getRelease()` call.
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
@@ -242,32 +251,22 @@ describe('proxy.controller', () => {
               youtube_music_url: 'https://music.youtube.com/search?q=Autechre+Confield',
               bandcamp_url: 'https://bandcamp.com/search?q=Autechre+Confield',
               soundcloud_url: 'https://soundcloud.com/search?q=Autechre+Confield',
+              release_year: 2001,
+              label: 'Warp',
+              discogs_artist_id: 3840,
+              genres: ['Electronic'],
+              styles: ['IDM', 'Abstract'],
+              tracklist: [
+                { position: '1', title: 'VI Scose Poise', duration: '6:45' },
+                { position: '2', title: 'Cfern', duration: '7:01' },
+              ],
+              full_release_date: '2001-04-30',
             },
           },
         ],
         search_type: 'direct',
         song_not_found: false,
         found_on_compilation: false,
-      });
-
-      mockGetRelease.mockResolvedValue({
-        release_id: 12345,
-        title: 'Confield',
-        artist: 'Autechre',
-        year: 2001,
-        label: 'Warp',
-        artist_id: 3840,
-        genres: ['Electronic'],
-        styles: ['IDM', 'Abstract'],
-        tracklist: [
-          { position: '1', title: 'VI Scose Poise', duration: '6:45', artists: [] },
-          { position: '2', title: 'Cfern', duration: '7:01', artists: [] },
-        ],
-        artwork_url: 'https://i.discogs.com/art.jpg',
-        release_url: 'https://www.discogs.com/release/12345',
-        released: '2001-04-30',
-        cached: false,
-        artists: [{ artist_id: 3840, name: 'Autechre', join: '', role: null }],
       });
 
       const req = {
@@ -462,6 +461,8 @@ describe('proxy.controller', () => {
       // release has no real cover art; passing that through results in a
       // broken/blank image on iOS. Drop it at this callsite the same way
       // metadata.service.ts does.
+      // Post-BS#885: release-detail fields come back inline on the
+      // artwork block (coordinator forces `extended: true`).
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
@@ -484,29 +485,19 @@ describe('proxy.controller', () => {
               youtube_music_url: null,
               bandcamp_url: null,
               soundcloud_url: null,
+              release_year: 2015,
+              label: 'Drag City',
+              discogs_artist_id: 5555,
+              genres: ['Rock'],
+              styles: [],
+              tracklist: [],
+              full_release_date: '2015-02-03',
             },
           },
         ],
         search_type: 'direct',
         song_not_found: false,
         found_on_compilation: false,
-      });
-
-      mockGetRelease.mockResolvedValue({
-        release_id: 7777,
-        title: 'On Your Own Love Again',
-        artist: 'Jessica Pratt',
-        year: 2015,
-        label: 'Drag City',
-        artist_id: 5555,
-        genres: ['Rock'],
-        styles: [],
-        tracklist: [],
-        artwork_url: 'https://s.discogs.com/images/spacer.gif',
-        release_url: 'https://www.discogs.com/release/7777',
-        released: '2015-02-03',
-        cached: false,
-        artists: [{ artist_id: 5555, name: 'Jessica Pratt', join: '', role: null }],
       });
 
       const req = {
@@ -552,26 +543,15 @@ describe('proxy.controller', () => {
       expect(mockGetRelease).not.toHaveBeenCalled();
     });
 
-    // --- Single-call path (PROXY_METADATA_SINGLE_LOOKUP=true) ---
+    // --- Single-call path (the only path post-BS#885) ---
     //
-    // When the flag is on, `getAlbumMetadata` calls LML once with
-    // `extended: true` and reads the release-detail fields off the lookup
-    // response's `artwork` block. The follow-up `getRelease()` call goes
-    // away. These tests pin the new path's contract; the legacy path's
-    // tests above remain to cover the pre-cutover behavior.
+    // The coordinator forces `extended: true`, so LML returns the
+    // release-detail fields inline on the lookup response's `artwork`
+    // block. No follow-up `getRelease()` call. (The `PROXY_METADATA_SINGLE_LOOKUP`
+    // env flag and its legacy two-call branch were removed when this
+    // coordinator landed; BS#918 cleanup folded here.)
 
-    describe('PROXY_METADATA_SINGLE_LOOKUP=true', () => {
-      const originalFlag = process.env.PROXY_METADATA_SINGLE_LOOKUP;
-
-      beforeEach(() => {
-        process.env.PROXY_METADATA_SINGLE_LOOKUP = 'true';
-      });
-
-      afterEach(() => {
-        if (originalFlag === undefined) delete process.env.PROXY_METADATA_SINGLE_LOOKUP;
-        else process.env.PROXY_METADATA_SINGLE_LOOKUP = originalFlag;
-      });
-
+    describe('extended-mode response shape', () => {
       it('reads release-detail fields off the lookup artwork and skips getRelease', async () => {
         mockLookupMetadata.mockResolvedValue({
           results: [
@@ -644,10 +624,11 @@ describe('proxy.controller', () => {
         // The whole point of this PR: no follow-up LML call.
         expect(mockGetRelease).not.toHaveBeenCalled();
 
-        // Lookup was called with `extended: true` so LML knows to populate
-        // the new fields.
+        // Post-BS#885: callsite no longer passes `extended` — the
+        // LmlLookupCoordinator forces it on the wire. The coordinator
+        // mock receives the callsite args; `extended` is applied inside
+        // the (real) coordinator's fetchUncached path.
         expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
-          extended: true,
           budgetMs: 5000,
           caller: 'proxy-album-metadata',
         });

@@ -33,7 +33,6 @@ import {
 import {
   getRelease,
   lookupBySong,
-  lookupMetadata,
   isLmlConfigured,
   envInt,
   LmlClientError,
@@ -41,6 +40,7 @@ import {
   type DiscogsTrackItem,
   type DiscogsReleaseMetadata,
 } from '@wxyc/lml-client';
+import { lmlLookupCoordinator } from './lml/index.js';
 import { filterSpacerGif } from './metadata/metadata.service.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
@@ -636,9 +636,8 @@ async function resolveRotationDiscogsReleaseViaLml(
     // synth-result path on LML#427) get a tracklist for releases Discogs
     // doesn't carry. Same `(artist, album)` call as before; the request body
     // only gains the `extended` flag.
-    const response = await lookupMetadata(lookupArtist, albumTitle, undefined, {
+    const response = await lmlLookupCoordinator.lookup(lookupArtist, albumTitle, undefined, {
       timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
-      extended: true,
       caller: 'library-rotation-picker',
     });
     const artwork = response.results?.[0]?.artwork ?? null;
@@ -890,7 +889,7 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
 
   const settlements = await Promise.allSettled(
     uncached.map(async (row) => {
-      const lookupResult = await lookupMetadata(row.artist_name, row.album_title, undefined, {
+      const lookupResult = await lmlLookupCoordinator.lookup(row.artist_name, row.album_title, undefined, {
         budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS,
         caller: 'library-enrich-artwork',
       });

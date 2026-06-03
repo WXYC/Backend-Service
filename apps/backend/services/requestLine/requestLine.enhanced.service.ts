@@ -22,7 +22,8 @@ import { getConfig, isParsingEnabled } from './config.js';
 import { parseRequest, isParserAvailable } from '../ai/index.js';
 import { executeSearchPipeline, getSearchTypeFromState } from './search/index.js';
 import { findSimilarArtist } from '../library.service.js';
-import { searchTrackReleases, lookupMetadata, validateTrackOnRelease, isLmlConfigured } from '@wxyc/lml-client';
+import { searchTrackReleases, validateTrackOnRelease, isLmlConfigured } from '@wxyc/lml-client';
+import { lmlLookupCoordinator } from '../lml/index.js';
 import { fetchArtworkForItems } from '../artwork/index.js';
 import {
   buildSlackBlocks,
@@ -229,7 +230,9 @@ export async function processRequest(body: RequestLineRequestBody): Promise<Unif
               }));
             },
             searchReleasesByArtist: async (artist: string, limit = 10) => {
-              const response = await lookupMetadata(artist, undefined, undefined, { caller: 'request-line' });
+              const response = await lmlLookupCoordinator.lookup(artist, undefined, undefined, {
+                caller: 'request-line',
+              });
               return (response.results ?? [])
                 .filter((r) => r.library_item?.title)
                 .slice(0, limit)
