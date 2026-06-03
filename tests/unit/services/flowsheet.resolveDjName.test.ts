@@ -2,9 +2,11 @@
  * Unit tests for the resolveDjNameForShow helper used by the live insert path
  * (step 5b.2) to denormalize the resolved DJ name onto each new flowsheet row.
  *
- * The helper must mirror the COALESCE priority used by both the search service
- * (DJ_NAME_EXPR) and migration 0053 backfill:
- *   COALESCE(auth_user.dj_name, shows.legacy_dj_name, auth_user.name)
+ * Priority after BS#1321 (migration 0090):
+ *   1. shows.dj_name_override (per-show operator-intent override)
+ *   2. auth_user.dj_name (Anonymous-filtered)
+ *   3. shows.legacy_dj_name (tubafrenzy-owned fallback)
+ *   4. auth_user.name
  */
 import { jest } from '@jest/globals';
 
@@ -76,5 +78,96 @@ describe('resolveDjNameForShow', () => {
       legacy_dj_name: 'Fallback',
     } as any);
     expect(result).toBe('Fallback');
+  });
+});
+
+/**
+ * BS#1321 — `shows.dj_name_override` is the top of the precedence chain.
+ * Promotes BS#1295's marker-only stamp into a durable per-show field, so
+ * every track row added via `addEntry` after `startShow` reflects the
+ * override too — fixing the within-show inconsistency C1 raised on PR #1320.
+ *
+ * The override short-circuits before the user lookup runs at all — no DB
+ * round-trip on the SELECT chain when the override is set.
+ */
+describe('resolveDjNameForShow with dj_name_override (BS#1321)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('prefers dj_name_override over user.djName, legacy_dj_name, and user.name', async () => {
+    // Critical case from issue #1321: DJ has a non-Anonymous `auth_user.dj_name`,
+    // and operator set an override on join. Without BS#1321 the user.djName
+    // branch wins → marker says "Aubrey Hearst" but track rows say
+    // "DJ Stardust". The user lookup must NOT be consulted; if it were
+    // mocked here, the test would still pass because override comes first —
+    // but configuring the chain helps catch regressions where override
+    // promotion is removed and the resolver silently falls through.
+    setUserLookupResult([{ djName: 'DJ Stardust', name: 'Alex Stardust' }]);
+    const result = await resolveDjNameForShow({
+      id: 1,
+      primary_dj_id: 'user-1',
+      dj_name_override: 'Aubrey Hearst',
+      legacy_dj_name: 'Some Legacy Name',
+    } as any);
+    expect(result).toBe('Aubrey Hearst');
+  });
+
+  it('prefers dj_name_override even when primary_dj_id is null', async () => {
+    // Tubafrenzy-originated shows can carry NULL primary_dj_id; the override
+    // path must still work for the (admittedly unusual but possible) case
+    // where an operator sets one on such a show.
+    const result = await resolveDjNameForShow({
+      id: 1,
+      primary_dj_id: null,
+      dj_name_override: 'Guest Host',
+      legacy_dj_name: 'tubafrenzy name',
+    } as any);
+    expect(result).toBe('Guest Host');
+  });
+
+  it('trims whitespace from the override before returning', async () => {
+    const result = await resolveDjNameForShow({
+      id: 1,
+      primary_dj_id: 'user-1',
+      dj_name_override: '   Aubrey Hearst   ',
+    } as any);
+    expect(result).toBe('Aubrey Hearst');
+  });
+
+  it('treats whitespace-only override as absent — falls through to user.djName', async () => {
+    setUserLookupResult([{ djName: 'DJ Stardust', name: 'Alex Stardust' }]);
+    const result = await resolveDjNameForShow({
+      id: 1,
+      primary_dj_id: 'user-1',
+      dj_name_override: '   ',
+      legacy_dj_name: null,
+    } as any);
+    expect(result).toBe('DJ Stardust');
+  });
+
+  it('treats null override as absent — falls through to user.djName', async () => {
+    setUserLookupResult([{ djName: 'DJ Stardust', name: 'Alex Stardust' }]);
+    const result = await resolveDjNameForShow({
+      id: 1,
+      primary_dj_id: 'user-1',
+      dj_name_override: null,
+      legacy_dj_name: null,
+    } as any);
+    expect(result).toBe('DJ Stardust');
+  });
+
+  it('returns the override even when it matches the literal "Anonymous"', async () => {
+    // The Anonymous-filtering rule applies to auth_user.dj_name (a workaround
+    // for an upstream onboarding bug that wrote "Anonymous" automatically),
+    // NOT to the operator-supplied override. If the operator typed
+    // "Anonymous" into the override field, they chose that string on
+    // purpose — trust it verbatim.
+    const result = await resolveDjNameForShow({
+      id: 1,
+      primary_dj_id: 'user-1',
+      dj_name_override: 'Anonymous',
+    } as any);
+    expect(result).toBe('Anonymous');
   });
 });

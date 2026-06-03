@@ -1173,6 +1173,26 @@ export const shows = wxyc_schema.table(
     legacy_show_id: integer('legacy_show_id'),
     legacy_dj_name: varchar('legacy_dj_name', { length: 128 }),
     legacy_dj_id: integer('legacy_dj_id'),
+    /**
+     * Per-show DJ display-name override (BS#1321, epic #1288). When non-null
+     * takes precedence over `auth_user.dj_name` for every flowsheet row on
+     * this show — the show_start marker (written at join time), every track
+     * row added via `addEntry` (via `resolveDjNameForShow`), and the
+     * tubafrenzy mirror's `djHandle`.
+     *
+     * Distinct from `legacy_dj_name` on purpose: `legacy_dj_name` is owned
+     * by the tubafrenzy ETL upsert (it gets overwritten on every sync tick
+     * for shows that round-trip through tubafrenzy — see jobs/flowsheet-etl
+     * line 346), so it can't be the persistence target for an operator
+     * intent. The override is a Backend-Service-only field; nothing on the
+     * ETL side writes it.
+     *
+     * Capped at 255 to match the `auth_user.dj_name` width and the
+     * `dj_name_override` request parameter cap. The dj-site joinShow
+     * controller and the service-layer `startShow` both length-check
+     * defensively before INSERT.
+     */
+    dj_name_override: varchar('dj_name_override', { length: 255 }),
     show_name: varchar('show_name', { length: 128 }),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     start_time: timestamp('start_time', { withTimezone: true }).defaultNow().notNull(),

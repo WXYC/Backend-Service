@@ -617,6 +617,13 @@
       "when": 1779856000021,
       "tag": "0089_artist-search-alias",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1780520783641,
+      "tag": "0090_shows-dj-name-override",
+      "breakpoints": true
     }
   ]
 }

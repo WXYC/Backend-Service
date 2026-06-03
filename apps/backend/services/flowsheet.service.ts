@@ -243,17 +243,39 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
 });
 
 /**
- * Resolve the DJ name for a show using the same priority as the search
- * service's DJ_NAME_EXPR and migration 0053:
- *   COALESCE(auth_user.dj_name, shows.legacy_dj_name, auth_user.name).
+ * Resolve the DJ name for a show using the priority:
+ *   1. `shows.dj_name_override` (per-show operator-intent override, BS#1321)
+ *   2. `auth_user.dj_name` (filtered for the literal "Anonymous", see
+ *      `resolveDjDisplayName`)
+ *   3. `shows.legacy_dj_name` (tubafrenzy-owned; "DJ name at time of the
+ *      show for shows whose primary_dj_id couldn't be resolved")
+ *   4. `auth_user.name`
  *
  * Used by the live insert path (step 5b.2) to denormalize the resolved value
  * onto each new flowsheet row so search no longer needs to join shows -> auth_user.
  *
+ * The override is at the top of the chain because operators set it on the
+ * join body when they want a per-show display name (guest hosts, alumni
+ * one-offs, on-air name corrections) — they expect it to take effect for
+ * the whole show, not just the show_start marker. Pre-BS#1321 the override
+ * only landed on the marker row + `shows.legacy_dj_name`, and any subsequent
+ * track row for a DJ with a non-Anonymous `auth_user.dj_name` reverted to
+ * `auth_user.dj_name` (priority 1 won), producing within-show inconsistency.
+ *
  * Filters the literal "Anonymous" out of `auth_user.dj_name` via
- * `resolveDjDisplayName`, then folds in the legacy fallback. See #1286/#1288.
+ * `resolveDjDisplayName`. See #1286/#1288 for the Anonymous filtering
+ * rationale; #1321 for the override-precedence promotion.
+ *
+ * The override itself is not "Anonymous"-filtered: an operator who types
+ * the literal "Anonymous" into the override surface has chosen that string
+ * on purpose. The pre-existing `auth_user.dj_name` filter was a workaround
+ * for an upstream onboarding bug that wrote "Anonymous" automatically;
+ * the override is operator-supplied, so we trust it verbatim.
  */
 export const resolveDjNameForShow = async (show: Show): Promise<string | null> => {
+  const override = ((show.dj_name_override as string | null | undefined) ?? '').trim();
+  if (override.length > 0) return override;
+
   const legacy = (show.legacy_dj_name as string | null | undefined) ?? null;
   const primaryDjId = (show.primary_dj_id as string | null | undefined) ?? null;
 
@@ -473,15 +495,6 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
   return response[0];
 };
 
-/**
- * Maximum width of `shows.legacy_dj_name` (varchar(128) — see schema.ts).
- * The override field as a whole is capped at 255 (matching `auth_user.dj_name`)
- * at the controller boundary; the narrower legacy column gets a defensive
- * truncate to avoid a 22001 string-too-long error when a caller sends 129-255
- * chars. Truncation matches the flowsheet-etl pattern in jobs/flowsheet-etl.
- */
-const SHOWS_LEGACY_DJ_NAME_MAX_LENGTH = 128;
-
 export const startShow = async (
   dj_id: string,
   show_name?: string,
@@ -494,18 +507,23 @@ export const startShow = async (
     throw new WxycError(`DJ with id '${dj_id}' not found`, 404);
   }
 
-  // BS#1295: per-show display-name override. The controller already trimmed
-  // and length-checked; re-trim here as a defense-in-depth (the service is
-  // also called directly from tests / future call sites that may bypass the
-  // controller). Empty / whitespace-only override falls through to the
-  // resolveDjDisplayName path — preserving today's behavior.
+  // BS#1295/BS#1321: per-show display-name override. The controller already
+  // trimmed and length-checked; re-trim here as a defense-in-depth (the
+  // service is also called directly from tests / future call sites that may
+  // bypass the controller). Empty / whitespace-only override falls through
+  // to the resolveDjDisplayName path — preserving today's behavior.
+  //
+  // BS#1321 redirects the persistence target from `shows.legacy_dj_name` to
+  // a dedicated `shows.dj_name_override` column. `legacy_dj_name` is owned
+  // by jobs/flowsheet-etl (it gets overwritten on every tubafrenzy upsert
+  // tick — see job.ts line 346), so an override that lived there only
+  // survived until the next sync window. The new column is
+  // Backend-Service-only and is checked at the top of
+  // `resolveDjNameForShow`'s precedence chain so every subsequent track
+  // row reflects it for the rest of the show. See migration 0090 for the
+  // full rationale.
   const trimmed_override = dj_name_override?.trim() ?? '';
   const effective_override = trimmed_override.length > 0 ? trimmed_override : null;
-
-  // Truncate to the narrower shows.legacy_dj_name column width. The
-  // marker text and flowsheet.dj_name keep the full string; only the
-  // legacy mirror column is clipped.
-  const legacy_dj_name = effective_override ? effective_override.slice(0, SHOWS_LEGACY_DJ_NAME_MAX_LENGTH) : undefined;
 
   const new_show = await db
     .insert(shows)
@@ -513,7 +531,7 @@ export const startShow = async (
       primary_dj_id: dj_id,
       specialty_id: specialty_id,
       show_name: show_name,
-      legacy_dj_name: legacy_dj_name,
+      dj_name_override: effective_override ?? undefined,
     })
     .returning();
 
