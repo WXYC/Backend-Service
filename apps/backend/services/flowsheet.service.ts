@@ -1,4 +1,5 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
+import * as Sentry from '@sentry/node';
 import WxycError from '../utils/error.js';
 import {
   db,
@@ -21,6 +22,38 @@ import {
 } from '@wxyc/database';
 import { IFSEntry, ShowInfo, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
+
+/**
+ * Resolve the DJ display name shown to listeners on the public flowsheet,
+ * applying the rules locked by the 2026-06-02 Aubrey Hearst on-air incident
+ * (WXYC/Backend-Service#1286, epic #1288):
+ *
+ *   1. Prefer `djName` (the user's stage handle on `auth_user.dj_name`).
+ *   2. Fall back to `name` (better-auth `auth_user.name`).
+ *   3. Treat the literal string "Anonymous" (case- and whitespace-insensitive)
+ *      as if `djName` were absent. The better-auth anonymous plugin and a
+ *      since-corrected onboarding default were both observed writing the
+ *      literal "Anonymous" into `auth_user.dj_name`; rendering that string to
+ *      the public on-air playlist confuses listeners and the wxyc.info playlist.
+ *   4. Trim returned values; return `null` if both inputs are blank or
+ *      Anonymous-with-no-fallback.
+ *
+ * Callers should treat `null` as "name is unresolvable" and either degrade
+ * the marker template (show_start / show_end keep a row but drop the name) or
+ * suppress the row entirely and log to Sentry (dj_join / dj_leave) — see
+ * `startShow`, `endShow`, `createJoinNotification`, `createLeaveNotification`.
+ */
+export const resolveDjDisplayName = (djName: string | null, name: string | null): string | null => {
+  const trimmedDjName = djName?.trim() ?? '';
+  if (trimmedDjName.length > 0 && trimmedDjName.toLowerCase() !== 'anonymous') {
+    return trimmedDjName;
+  }
+  const trimmedName = name?.trim() ?? '';
+  if (trimmedName.length > 0) {
+    return trimmedName;
+  }
+  return null;
+};
 
 /**
  * Compute the next play_order value for a new flowsheet entry within a given
@@ -216,6 +249,9 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
  *
  * Used by the live insert path (step 5b.2) to denormalize the resolved value
  * onto each new flowsheet row so search no longer needs to join shows -> auth_user.
+ *
+ * Filters the literal "Anonymous" out of `auth_user.dj_name` via
+ * `resolveDjDisplayName`, then folds in the legacy fallback. See #1286/#1288.
  */
 export const resolveDjNameForShow = async (show: Show): Promise<string | null> => {
   const legacy = (show.legacy_dj_name as string | null | undefined) ?? null;
@@ -229,7 +265,14 @@ export const resolveDjNameForShow = async (show: Show): Promise<string | null> =
     .where(eq(user.id, primaryDjId))
     .limit(1);
   const dj = rows[0];
-  return dj?.djName ?? legacy ?? dj?.name ?? null;
+  if (!dj) return legacy;
+  // Apply the same Anonymous / blank filtering used everywhere else, but
+  // splice the legacy_dj_name in as a middle priority so existing imports
+  // continue to surface on shows whose auth_user has no usable handle.
+  const filteredDjName = resolveDjDisplayName(dj.djName ?? null, null);
+  if (filteredDjName) return filteredDjName;
+  if (legacy && legacy.trim().length > 0) return legacy.trim();
+  return resolveDjDisplayName(null, dj.name ?? null);
 };
 
 /**
@@ -454,17 +497,22 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
     })
     .returning();
 
+  const display_dj_name = resolveDjDisplayName(dj_info.djName ?? null, dj_info.name ?? null);
+  const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+  // Asymmetric fallback (epic #1288): when the DJ name is unresolvable we
+  // still want a marker row so consumers know the show began. The wording
+  // degrades from "Start of Show: <name> joined the set at ${time}" to a
+  // bare "Start of show: ${time}".
+  const message = display_dj_name
+    ? `Start of Show: ${display_dj_name} joined the set at ${now}`
+    : `Start of show: ${now}`;
+
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
     entry_type: 'show_start',
-    dj_name: dj_info.djName || dj_info.name || null,
+    dj_name: display_dj_name,
     play_order: await nextPlayOrder(new_show[0].id),
-    message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString(
-      'en-US',
-      {
-        timeZone: 'America/New_York',
-      }
-    )}`,
+    message,
   });
 
   return new_show[0];
@@ -508,22 +556,32 @@ export const addDJToShow = async (dj_id: string, current_show: Show): Promise<Sh
   return show_dj_instance[0];
 };
 
-const createJoinNotification = async (id: string, show_id: number): Promise<FSEntry> => {
+const createJoinNotification = async (id: string, show_id: number): Promise<FSEntry | null> => {
   const dj = (await db.select().from(user).where(eq(user.id, id)).limit(1))[0];
 
-  const persisted_dj_name = dj?.djName || dj?.name || null;
-  const display_dj_name = persisted_dj_name ?? 'A DJ';
+  const display_dj_name = resolveDjDisplayName(dj?.djName ?? null, dj?.name ?? null);
 
-  const message = `${display_dj_name} joined the set!`;
+  // Asymmetric fallback (epic #1288): a nameless mid-show join is a degraded
+  // state. The marker is suppressed rather than written — better logged than
+  // rendered to the public on-air playlist — and a Sentry warning carries
+  // dj_id + show_id so the cause is debuggable.
+  if (!display_dj_name) {
+    Sentry.captureMessage('Suppressed dj_join marker: DJ display name unresolvable', {
+      level: 'warning',
+      tags: { tool: 'flowsheet', entry_type: 'dj_join' },
+      extra: { dj_id: id, show_id },
+    });
+    return null;
+  }
 
   const notification = await db
     .insert(flowsheet)
     .values({
       show_id: show_id,
       entry_type: 'dj_join',
-      dj_name: persisted_dj_name,
+      dj_name: display_dj_name,
       play_order: await nextPlayOrder(show_id),
-      message: message,
+      message: `${display_dj_name} joined the set!`,
     })
     .returning();
 
@@ -554,17 +612,18 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   );
 
   const dj_information = (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0];
-  const persisted_dj_name = dj_information?.djName || dj_information?.name || null;
-  const display_dj_name = persisted_dj_name ?? 'A DJ';
+  const display_dj_name = resolveDjDisplayName(dj_information?.djName ?? null, dj_information?.name ?? null);
+  const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+  // Symmetric to startShow: keep the row, degrade the wording to bare
+  // "End of show: ${time}" when the name is unresolvable (epic #1288).
+  const message = display_dj_name ? `End of Show: ${display_dj_name} left the set at ${now}` : `End of show: ${now}`;
 
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
     entry_type: 'show_end',
-    dj_name: persisted_dj_name,
+    dj_name: display_dj_name,
     play_order: await nextPlayOrder(currentShow.id),
-    message: `End of Show: ${display_dj_name} left the set at ${new Date().toLocaleString('en-US', {
-      timeZone: 'America/New_York',
-    })}`,
+    message,
   });
 
   await db.update(shows).set({ end_time: new Date() }).where(eq(shows.id, currentShow.id));
@@ -594,22 +653,30 @@ export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowD
   return update_result;
 };
 
-const createLeaveNotification = async (dj_id: string, show_id: number): Promise<FSEntry> => {
+const createLeaveNotification = async (dj_id: string, show_id: number): Promise<FSEntry | null> => {
   const dj = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
-  const persisted_dj_name = dj?.djName || dj?.name || null;
-  const display_dj_name = persisted_dj_name ?? 'A DJ';
+  const display_dj_name = resolveDjDisplayName(dj?.djName ?? null, dj?.name ?? null);
 
-  const message = `${display_dj_name} left the set!`;
+  // Symmetric to createJoinNotification: suppress the row and log a Sentry
+  // warning when the DJ name is unresolvable (epic #1288).
+  if (!display_dj_name) {
+    Sentry.captureMessage('Suppressed dj_leave marker: DJ display name unresolvable', {
+      level: 'warning',
+      tags: { tool: 'flowsheet', entry_type: 'dj_leave' },
+      extra: { dj_id, show_id },
+    });
+    return null;
+  }
 
   const notification = await db
     .insert(flowsheet)
     .values({
       show_id: show_id,
       entry_type: 'dj_leave',
-      dj_name: persisted_dj_name,
+      dj_name: display_dj_name,
       play_order: await nextPlayOrder(show_id),
-      message: message,
+      message: `${display_dj_name} left the set!`,
     })
     .returning();
 
@@ -757,7 +824,10 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
 export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
 
-  const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({ id: dj.id, dj_name: dj.djName || dj.name }));
+  const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({
+    id: dj.id,
+    dj_name: resolveDjDisplayName(dj.djName ?? null, dj.name ?? null),
+  }));
 
   let specialty_show_name = '';
   if (show[0].specialty_id != null) {
