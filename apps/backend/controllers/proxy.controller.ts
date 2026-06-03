@@ -213,8 +213,11 @@ function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork
   // Empty `profile_tokens` arrays are truthy in JS; omit the field
   // entirely to match the codebase's "omit when empty" wire convention
   // (cf. `populateReleaseMetadata`'s `genres.length > 0 ? ... : undefined`).
+  // Defensive copy: `artwork` may be the coordinator's cached LookupResponse;
+  // assigning the array by reference would let any downstream mutation of
+  // `metadata.bioTokens` poison the cache.
   if (artwork.profile_tokens && artwork.profile_tokens.length > 0) {
-    metadata.bioTokens = artwork.profile_tokens;
+    metadata.bioTokens = [...artwork.profile_tokens];
   }
 
   if (artwork.spotify_url) metadata.spotifyUrl = artwork.spotify_url;
@@ -229,9 +232,16 @@ function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork
  * full release date, discogs artist id, release year) from the
  * `DiscogsMatchResult.artwork` block — the coordinator forces `extended:
  * true` on every lookup, so these fields are always present when LML
- * matches a release. Shape kept generic so the `libraryTracks` path can
- * reuse it with a `DiscogsReleaseMetadata` from a direct `getRelease()`
- * call.
+ * matches a release.
+ *
+ * Sole caller is `getAlbumMetadata` (the `libraryTracks` path projects
+ * tracks via `projectTracks` directly from a `getRelease()` result).
+ * The genres/styles/tracklist arrays are defensively copied before
+ * being assigned onto `metadata` because the source object can be the
+ * coordinator's cached `LookupResponse` — a downstream mutation of
+ * `metadata.genres` would otherwise poison the cache for every
+ * subsequent same-key reader within the 5-min TTL (cf. the coordinator's
+ * read-only contract).
  */
 function populateReleaseMetadata(
   metadata: Record<string, unknown>,
@@ -250,8 +260,8 @@ function populateReleaseMetadata(
   // leak to iOS as a literal "0" on the playcut detail view. Mirrors the
   // chokepoint in `metadata.service.ts#extractAlbumMetadata`. #1002.
   metadata.releaseYear = release.year || undefined;
-  metadata.genres = release.genres && release.genres.length > 0 ? release.genres : undefined;
-  metadata.styles = release.styles && release.styles.length > 0 ? release.styles : undefined;
+  metadata.genres = release.genres && release.genres.length > 0 ? [...release.genres] : undefined;
+  metadata.styles = release.styles && release.styles.length > 0 ? [...release.styles] : undefined;
   metadata.label = release.label ?? undefined;
   metadata.discogsArtistId = release.artist_id ?? null;
   metadata.fullReleaseDate = release.released ?? undefined;
@@ -264,10 +274,7 @@ function populateReleaseMetadata(
   }
   // Filter spacer.gif placeholders (#649) and surface the artwork URL.
   // On the extended-lookup path this is the same value already set by
-  // `populateCommonMetadataFields`; the assignment is idempotent. Kept
-  // distinct so the `libraryTracks` path (which calls
-  // `populateReleaseMetadata` from a `getRelease()` result) still gets
-  // the URL when populateCommonMetadataFields wasn't called.
+  // `populateCommonMetadataFields`; the assignment is idempotent.
   const releaseArtwork = filterSpacerGif(release.artwork_url);
   if (releaseArtwork) metadata.artworkUrl = releaseArtwork;
 }
