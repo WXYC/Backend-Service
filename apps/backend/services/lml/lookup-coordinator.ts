@@ -34,6 +34,16 @@
  * the warm-cache effect is a side benefit (LML's PG cache stays warm),
  * not a correctness invariant.
  *
+ * **`warm_cache` on cache hits is a no-op.** When a cached response is
+ * served (no wire call fires), the `warm_cache: true` flag the caller
+ * passed never reaches LML — the PG cache is not warmed even when
+ * explicitly requested. This is the same trade-off as first-caller-wins
+ * extended to the cache layer: a read-path caller filling the LRU at T=0
+ * locks out warm-cache effects for write-path callers arriving within
+ * the 5-min TTL. `warm_cache` remains best-effort across both paths;
+ * the LML PG cache has its own (longer) TTL and is repopulated by
+ * subsequent reads regardless.
+ *
  * **No error caching.** Throws propagate to all waiters; the next request
  * for the same key issues a fresh wire call. LML's own short cache TTL
  * on errors handles avalanche.
@@ -116,7 +126,11 @@ export class LmlLookupCoordinator {
       // All current callsites read-only; a deep freeze would be safer
       // but costs O(n) per cache-set on every response. Tracked as a
       // follow-up if mutation footguns appear.
-      const settle = this.fetchUncached(artist, album, song, options)
+      // Pass the resolved `caller` (not the raw `options?.caller`) so the
+      // wire span's `lml.caller` attribute matches what we projected onto
+      // the coordinator span — single source of truth for the "unknown"
+      // default. The other options forward as-is.
+      const settle = this.fetchUncached(artist, album, song, { ...options, caller })
         .then((result) => {
           this.cache.set(key, result);
           return result;

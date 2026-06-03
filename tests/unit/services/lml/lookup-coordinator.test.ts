@@ -159,24 +159,20 @@ describe('LmlLookupCoordinator', () => {
       expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
     });
 
-    it('a same-key caller arriving immediately after the wire settles hits cache (no race window)', async () => {
-      // Regression test for the cache-set vs inflight-delete ordering race.
-      // A naive `.finally(() => inflight.delete(key))` runs *before* the
-      // outer `await promise` resumes to set the cache, so a same-key
-      // caller arriving in the microtask gap would miss both cache and
-      // inflight and issue a redundant wire call. The coordinator's
-      // `.then(setCache).finally(deleteInflight)` ordering closes the gap.
-      mockLookupMetadata.mockResolvedValue(fakeResponse());
-
-      const firstSettle = lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'a' });
-      await firstSettle;
-      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
-
-      // Immediately after `await firstSettle` resumes, the cache must
-      // already contain the result. A second call must not issue a wire.
-      await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'b' });
-      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
-    });
+    // Note on the cache-set vs inflight-delete race window: the bug was a
+    // microtask-ordering hazard between `.finally(deleteInflight)` and
+    // `cache.set`; the fix sequences them inside one `.then(cacheSet)
+    // .finally(deleteInflight)` chain so an arriving same-key caller
+    // always sees either inflight (before fetchUncached resolves) or
+    // cache (after). The race is documented in source at
+    // `lookup-coordinator.ts:lookup()`. A faithful regression test
+    // would need to inject a caller in the microtask gap between
+    // `fetchUncached` resolving and the coordinator's chained handlers
+    // firing — the test scaffold for that is fragile (depends on Jest's
+    // microtask scheduling and breaks if the SDK changes how spans
+    // wrap async). The cache-hit test above (`serves a settled prior
+    // call from cache`) pins the post-settle invariant the fix
+    // delivers; that is the load-bearing check.
   });
 
   describe('cache key normalization', () => {

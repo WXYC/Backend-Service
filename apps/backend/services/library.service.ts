@@ -587,7 +587,7 @@ export async function resolveRotationPickerSource(rotationId: number): Promise<R
  * isn't a write target on this path either, and a column-mix between
  * paste-URL-prefilled and LML-resolved values would muddy provenance.
  *
- * Bounded at `ROTATION_LML_LOOKUP_TIMEOUT_MS` (5 s) per call — fast-fail
+ * Bounded at `ROTATION_LML_LOOKUP_TIMEOUT_MS` (10 s) per call — fast-fail
  * for the user-visible picker (BS#992). Caller errors are swallowed so
  * the picker degrades to free-text rather than 500ing; the LML client
  * already wraps the call in a Sentry span carrying `lml.cache.*` and
