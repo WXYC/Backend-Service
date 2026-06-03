@@ -613,6 +613,46 @@ describe('POST /internal/rotation-webhook', () => {
     expect(res.body.ok).toBe(true);
   });
 
+  // BS#1082: A `sendRotationLinked` linkage event sends only `{id,
+  // libraryReleaseId, action: 'update'}`. Prior shape unconditionally wrote
+  // defaults into rotation_bin / kill_date on every update, flipping Heavy
+  // rotation rows to 'N' and clearing kill_date until the rotation-etl cron
+  // tick repaired them.
+  it('update with partial payload omits rotation_bin and kill_date from SET clause', async () => {
+    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
+    onConflictSpy.mockClear();
+
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', release: { id: 500, libraryReleaseId: 0 } });
+
+    expect(res.status).toBe(200);
+    expect(onConflictSpy).toHaveBeenCalledTimes(1);
+    const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
+    expect(setClause).not.toHaveProperty('rotation_bin');
+    expect(setClause).not.toHaveProperty('kill_date');
+  });
+
+  // Companion to the above: when the payload DOES carry rotationType /
+  // killDate (the create path, or a full-shape update), those fields must
+  // still appear in SET so the update overwrites them.
+  it('update with full payload keeps rotation_bin and kill_date in SET clause', async () => {
+    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
+    onConflictSpy.mockClear();
+
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', release: validRelease });
+
+    expect(res.status).toBe(200);
+    expect(onConflictSpy).toHaveBeenCalledTimes(1);
+    const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
+    expect(setClause).toHaveProperty('rotation_bin');
+    expect(setClause).toHaveProperty('kill_date');
+  });
+
   // -- Kill --
 
   it('returns 200 for valid kill', async () => {
