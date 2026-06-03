@@ -291,6 +291,32 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(results).toHaveLength(1);
       expect(results[0].matched_via_alias).toBeUndefined();
     });
+
+    it('flag on + only field-specific conditions: LATERAL is suppressed (no all-field branch to OR into)', async () => {
+      // A pure `artist:foo` query parses to one field=='artist_name'
+      // condition. buildAllFieldMatch is never called, so the alias OR is
+      // never added to WHERE; the LATERAL would compute similarity for every
+      // candidate row with no chance of an alias-only hit surviving. Skip
+      // the join entirely — result set is identical to the flag-off path.
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+      stubGenreFormatLookups();
+      db.execute.mockReset();
+      db.execute.mockResolvedValueOnce([baseQueryRow]).mockResolvedValueOnce([{ total: 1 }]);
+
+      const { results } = await searchCatalogQuery({ ...baseQueryParams, q: 'artist:OHSEES' });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].matched_via_alias).toBeUndefined();
+      // Both calls are issued via Promise.all (dataQuery + countQuery). The
+      // load-bearing assertion is that neither SQL embedded `alias_hit`.
+      const dataCall = db.execute.mock.calls[0]?.[0];
+      const countCall = db.execute.mock.calls[1]?.[0];
+      const renderedData = JSON.stringify(dataCall ?? '');
+      const renderedCount = JSON.stringify(countCall ?? '');
+      expect(renderedData).not.toContain('alias_hit');
+      expect(renderedCount).not.toContain('alias_hit');
+    });
   });
 
   describe('searchByArtist (request-line single-column trigram)', () => {

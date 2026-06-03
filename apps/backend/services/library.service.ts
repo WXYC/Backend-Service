@@ -97,7 +97,12 @@ function attachAliasHint<R extends LibraryArtistViewEntry & AliasHitFields>(row:
   // Strip the alias-only fields off the wire-shape; matched_via_alias carries
   // the same information in the public sibling-type shape.
   const { alias_max_sim, alias_matched_variant, alias_matched_source, ...rest } = row;
-  if (alias_max_sim === null || alias_matched_variant === null || alias_matched_source === null) {
+  // Defensive: require non-nullish numeric and truthy variant + source. The
+  // LATERAL JOIN should never emit empty-string fields, but mirror the same
+  // guard `toAlbumSearchResultRow` uses in library-search.service so the
+  // catalog (/library/query) and request-line surfaces agree on what counts
+  // as an alias hit.
+  if (alias_max_sim === null || alias_max_sim === undefined || !alias_matched_variant || !alias_matched_source) {
     return rest as TaggedLibraryViewEntry;
   }
   return {

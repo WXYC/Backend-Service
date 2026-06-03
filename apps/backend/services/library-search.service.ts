@@ -101,7 +101,15 @@ export async function searchLibrary(
   // give the SELECT projection and the WHERE predicate different views of
   // the flag — alias rows would surface in the SELECT but get re-filtered
   // out by the WHERE.
-  const aliasActive = getCatalogSearchAliasConfig().enabled && params.q.trim().length > 0;
+  //
+  // Also gate on `hasAllField`: only `field === 'all'` conditions ever inject
+  // the alias OR predicate via buildAllFieldMatch. A pure field-specific
+  // query (`artist:foo`, `album:bar`) would otherwise still pay the LATERAL
+  // cost per candidate row with no chance of an alias-only hit surviving
+  // WHERE. The result set is identical to the flag-off path in that case, so
+  // skip the join entirely.
+  const hasAllFieldCondition = conditions.some((c) => c.field === 'all');
+  const aliasActive = getCatalogSearchAliasConfig().enabled && params.q.trim().length > 0 && hasAllFieldCondition;
   const queryWhere = buildWhereClause(conditions, aliasActive);
   const filterWhere = buildFilterClause(params);
 
