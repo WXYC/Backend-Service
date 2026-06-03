@@ -320,7 +320,7 @@ export type JoinRequestBody = {
   /**
    * Optional per-show display-name override (BS#1295, epic #1288). When
    * non-empty after trim, takes priority over `auth_user.dj_name` for the
-   * show_start marker, `flowsheet.dj_name`, and `shows.legacy_dj_name`.
+   * show_start marker, `flowsheet.dj_name`, and `shows.dj_name_override`.
    * Capped at 255 chars to match the `auth_user.dj_name` column. Only
    * honored on the new-show path; ignored on the co-host /join path
    * (`addDJToShow`) because there's no per-co-host override surface today.
@@ -329,11 +329,8 @@ export type JoinRequestBody = {
 };
 
 /**
- * Maximum length of `dj_name_override`. Matches the `auth_user.dj_name`
- * varchar(255) ceiling — the override is semantically a per-show stand-in
- * for that value. `shows.legacy_dj_name` is narrower (varchar(128)); the
- * service-side write truncates rather than rejecting so the override stays
- * a single soft cap from the caller's point of view.
+ * Maximum length of `dj_name_override`. Absolute ceiling matching both the
+ * `auth_user.dj_name` and `shows.dj_name_override` varchar(255) columns.
  */
 const DJ_NAME_OVERRIDE_MAX_LENGTH = 255;
 
