@@ -408,6 +408,90 @@ describe('runBackfill', () => {
     expect(checkLiveActivity).toHaveBeenCalledWith(120);
   });
 
+  describe('cache stats injection (peer ticket to BS#1011)', () => {
+    // The (artist, album) dedup cache lives in lml-fetch.ts; the orchestrator
+    // gets a `cacheStats` injection so the batch_done log line can emit
+    // `cache_hits` / `cache_misses` / `cache_size` as flat fields alongside
+    // the totals. The fields are read at end-of-batch (after every row in
+    // the batch has gone through lookup), not at end-of-row.
+
+    it('emits cache_hits/cache_misses/cache_size in batch_done when cacheStats is provided', async () => {
+      const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+      const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+      initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-1' });
+
+      try {
+        const batch = [
+          { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
+          { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
+        ];
+        (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+
+        const cacheStats = jest
+          .fn<() => { size: number; hits: number; misses: number }>()
+          .mockReturnValue({ size: 1, hits: 1, misses: 1 });
+
+        const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+        await runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0, cacheStats });
+
+        const stdoutLines = writeSpy.mock.calls.map((args) => String(args[0]));
+        const batchDoneLine = stdoutLines.find((l) => l.includes('"step":"batch_done"'));
+        if (!batchDoneLine) throw new Error('expected a batch_done log line');
+        const parsed = JSON.parse(batchDoneLine.trim());
+        expect(parsed.cache_hits).toBe(1);
+        expect(parsed.cache_misses).toBe(1);
+        expect(parsed.cache_size).toBe(1);
+        // Existing totals are still flat keys, not nested under a `cache` object.
+        expect(parsed.scanned).toBe(2);
+        expect(parsed.enriched_match).toBe(2);
+
+        // The finished line also carries cache stats.
+        const finishedLine = stdoutLines.find((l) => l.includes('"step":"finished"'));
+        if (!finishedLine) throw new Error('expected a finished log line');
+        const parsedFinished = JSON.parse(finishedLine.trim());
+        expect(parsedFinished.cache_hits).toBe(1);
+        expect(parsedFinished.cache_misses).toBe(1);
+        expect(parsedFinished.cache_size).toBe(1);
+
+        // cacheStats should be invoked once per batch_done plus once on finished.
+        expect(cacheStats).toHaveBeenCalledTimes(2);
+
+        writeSpy.mockRestore();
+      } finally {
+        await closeLogger();
+      }
+    });
+
+    it('omits cache_* fields when cacheStats is not provided (back-compat)', async () => {
+      const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+      const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+      initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-2' });
+
+      try {
+        const batch = [{ id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null }];
+        (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+
+        const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+        await runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0 });
+
+        const batchDoneLine = writeSpy.mock.calls
+          .map((args) => String(args[0]))
+          .find((l) => l.includes('"step":"batch_done"'));
+        if (!batchDoneLine) throw new Error('expected a batch_done log line');
+        const parsed = JSON.parse(batchDoneLine.trim());
+        expect(parsed.cache_hits).toBeUndefined();
+        expect(parsed.cache_misses).toBeUndefined();
+        expect(parsed.cache_size).toBeUndefined();
+
+        writeSpy.mockRestore();
+      } finally {
+        await closeLogger();
+      }
+    });
+  });
+
   it('counts enriched_match_raced separately from enriched_match', async () => {
     // Race scenario at the orchestrator level: enrich returns the
     // *_raced variant when 0 rows updated. The orchestrator must bump

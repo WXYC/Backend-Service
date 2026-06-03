@@ -161,6 +161,16 @@ export type LookupFn = (artist: string, album?: string, track?: string) => Promi
 
 export type EnrichFn = (row: EnrichRow, response: LookupResponse) => Promise<EnrichOutcome>;
 
+/**
+ * Read the current (artist, album) lookup-dedup cache state. Wired by
+ * `job.ts` to `getLookupCache().stats()`; tests inject a stub. Returns
+ * undefined when the orchestrator is driven without a cache (synthetic
+ * tests that don't care about dedup observability).
+ *
+ * See plans/flowsheet-backfill-lookup-dedup.md and `lookup-cache.ts`.
+ */
+export type CacheStatsFn = () => { size: number; hits: number; misses: number };
+
 export type Totals = {
   scanned: number;
   enriched_match: number;
@@ -255,6 +265,7 @@ export const runBackfill = async (opts: {
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
+  cacheStats?: CacheStatsFn;
 }): Promise<RunResult> => {
   const batchSize = opts.batchSize ?? resolveBatchSize();
   const throttleMs = opts.throttleMs ?? resolveThrottleMs();
@@ -305,13 +316,25 @@ export const runBackfill = async (opts: {
       if (throttleMs > 0) await sleep(throttleMs);
     }
 
+    const cacheFields = readCacheFields(opts.cacheStats);
+
     log('info', 'batch_done', `batch ${batchIndex} done`, {
       batch_index: batchIndex,
       last_id: lastId,
       ...totals,
+      ...cacheFields,
     });
   }
 
-  log('info', 'finished', `${JOB_NAME} done. ${formatTotals(totals)}`, { ...totals });
+  const finalCacheFields = readCacheFields(opts.cacheStats);
+  log('info', 'finished', `${JOB_NAME} done. ${formatTotals(totals)}`, { ...totals, ...finalCacheFields });
   return { totals };
+};
+
+const readCacheFields = (
+  cacheStats: CacheStatsFn | undefined
+): { cache_hits: number; cache_misses: number; cache_size: number } | Record<string, never> => {
+  if (!cacheStats) return {};
+  const { size, hits, misses } = cacheStats();
+  return { cache_hits: hits, cache_misses: misses, cache_size: size };
 };
