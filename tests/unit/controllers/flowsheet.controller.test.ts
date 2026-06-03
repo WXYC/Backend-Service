@@ -813,6 +813,10 @@ describe('flowsheet.controller', () => {
       // mirror loop; `show_id` reattaches the row to another show; `play_order`
       // collides with the per-show sequence (#693). The controller must drop
       // these fields before they reach `db.update().set()`.
+      //
+      // `album_id` and `rotation_id` are explicitly NOT on this list — they
+      // are first-class FKs the picker writes (BS#1270). They're covered by
+      // the dedicated positive test below.
       mockUpdateEntry.mockResolvedValue({ id: 99, track_title: 'ok' });
 
       const req = {
@@ -832,7 +836,6 @@ describe('flowsheet.controller', () => {
             metadata_attempt_at: new Date(),
             enriching_since: new Date(),
             dj_name: 'evil-dj',
-            album_id: 123,
             artwork_url: 'https://example.com/x.jpg',
             discogs_url: 'https://discogs.com/x',
             release_year: 1999,
@@ -860,13 +863,40 @@ describe('flowsheet.controller', () => {
         'metadata_attempt_at',
         'enriching_since',
         'dj_name',
-        'album_id',
         'artwork_url',
         'discogs_url',
         'release_year',
       ]) {
         expect(passedData).not.toHaveProperty(internalKey);
       }
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('forwards album_id and rotation_id from data to the service (BS#1270)', async () => {
+      // BS#1099 originally omitted `album_id` and `rotation_id` from the
+      // controller allowlist, which silently stripped them from every
+      // PATCH the dj-site rotation/library picker issued. This caused
+      // rotation-listed but library-unlinked albums (Yenbett class) to
+      // render without artwork on iOS / dj-site. Both are first-class FKs
+      // the picker legitimately writes; restore them to the allowlist and
+      // pin the contract here.
+      mockUpdateEntry.mockResolvedValue({ id: 99, album_id: 42, rotation_id: 7 });
+
+      const req = {
+        body: {
+          entry_id: 99,
+          data: {
+            album_id: 42,
+            rotation_id: 7,
+          },
+        },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await updateEntry(req, res as Response, mockNext);
+
+      expect(mockUpdateEntry).toHaveBeenCalledTimes(1);
+      expect(mockUpdateEntry).toHaveBeenCalledWith(99, expect.objectContaining({ album_id: 42, rotation_id: 7 }));
       expect(res.status).toHaveBeenCalledWith(200);
     });
 
@@ -883,6 +913,8 @@ describe('flowsheet.controller', () => {
         track_position: 'A1',
         record_label: 'Sonamos',
         label_id: 99,
+        album_id: 100,
+        rotation_id: 5,
         request_flag: true,
         segue: false,
         message: 'corrected DJ note',

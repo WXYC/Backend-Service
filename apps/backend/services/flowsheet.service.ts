@@ -420,6 +420,8 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
   if (entry.track_position !== undefined) updateSet.track_position = entry.track_position;
   if (entry.record_label !== undefined) updateSet.record_label = entry.record_label;
   if (entry.label_id !== undefined) updateSet.label_id = entry.label_id;
+  if (entry.album_id !== undefined) updateSet.album_id = entry.album_id;
+  if (entry.rotation_id !== undefined) updateSet.rotation_id = entry.rotation_id;
   if (entry.request_flag !== undefined) updateSet.request_flag = entry.request_flag;
   if (entry.segue !== undefined) updateSet.segue = entry.segue;
   if (entry.message !== undefined) updateSet.message = entry.message;
