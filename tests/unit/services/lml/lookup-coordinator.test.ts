@@ -194,7 +194,7 @@ describe('LmlLookupCoordinator', () => {
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
     });
 
-    it('undefined fields key distinctly from empty strings', async () => {
+    it('undefined and empty string normalize to the same key (both map to the ∅ sentinel)', async () => {
       mockLookupMetadata.mockResolvedValue(fakeResponse());
 
       await lmlLookupCoordinator.lookup(undefined, 'Album', undefined, { caller: 'a' });
