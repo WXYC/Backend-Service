@@ -15,16 +15,16 @@ LML's PG cache remains the source of truth; this is "we asked LML 30 s ago, the 
 
 Identified by `grep -n 'lookupMetadata(' apps/backend/{controllers,services}/**/*.ts`, after BS#894 (orphan callers removed) and the BS#918 follow-up cleanup folded into this PR (removes the `PROXY_METADATA_SINGLE_LOOKUP=false` legacy `else` branch at `proxy.controller.ts:332`).
 
-| # | File:line | Function | Path class | `extended` today | Budget/timeout today | Existing `caller` tag |
-|---|---|---|---|---|---|---|
-| 1 | `apps/backend/controllers/proxy.controller.ts:326` | `getAlbumMetadata` | iOS read | `true` | `PROXY_LML_BUDGET_MS=5000` | `proxy-album-metadata` |
-| 2 | `apps/backend/controllers/library.controller.ts:98` | `addAlbum` (artwork+streaming) | DJ write | — | `LIBRARY_LML_BUDGET_MS=5000` | `library-add-album` |
-| 3 | `apps/backend/controllers/library.controller.ts:149` | `fireAndForgetCanonicalEntity` | DJ write | — | `LIBRARY_LML_BUDGET_MS=5000` | `library-canonical-entity` |
-| 4 | `apps/backend/services/library.service.ts:639` | rotation picker `resolveRotationLmlSource` | DJ read | `true` | `ROTATION_LML_LOOKUP_TIMEOUT_MS=10000` | `library-rotation-picker` |
-| 5 | `apps/backend/services/library.service.ts:893` | `enrichWithArtwork` | DJ read | — | `LIBRARY_INTERACTIVE_LML_BUDGET_MS=5000` | `library-enrich-artwork` |
-| 6 | `apps/backend/services/artwork/providers/discogs.ts:34` | Discogs artwork provider `search` | proxy read | — | (none) | `artwork-discogs-fallback` |
-| 7 | `apps/backend/services/requestLine/requestLine.enhanced.service.ts:232` | `searchReleasesByArtist` | anonymous read | — | (none) | `request-line` |
-| 8 | `apps/backend/services/metadata/metadata.service.ts:67` | `fetchMetadata` | various | — | `METADATA_SERVICE_LML_BUDGET_MS=5000` | `metadata-service` |
+| #   | File:line                                                               | Function                                   | Path class     | `extended` today | Budget/timeout today                     | Existing `caller` tag      |
+| --- | ----------------------------------------------------------------------- | ------------------------------------------ | -------------- | ---------------- | ---------------------------------------- | -------------------------- |
+| 1   | `apps/backend/controllers/proxy.controller.ts:326`                      | `getAlbumMetadata`                         | iOS read       | `true`           | `PROXY_LML_BUDGET_MS=5000`               | `proxy-album-metadata`     |
+| 2   | `apps/backend/controllers/library.controller.ts:98`                     | `addAlbum` (artwork+streaming)             | DJ write       | —                | `LIBRARY_LML_BUDGET_MS=5000`             | `library-add-album`        |
+| 3   | `apps/backend/controllers/library.controller.ts:149`                    | `fireAndForgetCanonicalEntity`             | DJ write       | —                | `LIBRARY_LML_BUDGET_MS=5000`             | `library-canonical-entity` |
+| 4   | `apps/backend/services/library.service.ts:639`                          | rotation picker `resolveRotationLmlSource` | DJ read        | `true`           | `ROTATION_LML_LOOKUP_TIMEOUT_MS=10000`   | `library-rotation-picker`  |
+| 5   | `apps/backend/services/library.service.ts:893`                          | `enrichWithArtwork`                        | DJ read        | —                | `LIBRARY_INTERACTIVE_LML_BUDGET_MS=5000` | `library-enrich-artwork`   |
+| 6   | `apps/backend/services/artwork/providers/discogs.ts:34`                 | Discogs artwork provider `search`          | proxy read     | —                | (none)                                   | `artwork-discogs-fallback` |
+| 7   | `apps/backend/services/requestLine/requestLine.enhanced.service.ts:232` | `searchReleasesByArtist`                   | anonymous read | —                | (none)                                   | `request-line`             |
+| 8   | `apps/backend/services/metadata/metadata.service.ts:67`                 | `fetchMetadata`                            | various        | —                | `METADATA_SERVICE_LML_BUDGET_MS=5000`    | `metadata-service`         |
 
 The `proxy.controller.ts:332` legacy `else` branch is deleted as part of this PR — see Cleanups below.
 
@@ -55,15 +55,16 @@ import { LRUCache } from 'lru-cache';
 import { lookupMetadata, type LookupOptions, type LookupResponse } from '@wxyc/lml-client';
 import * as Sentry from '@sentry/node';
 
-export interface CoordinatorLookupOptions extends Pick<LookupOptions, 'budgetMs' | 'timeoutMs' | 'caller' | 'warm_cache' | 'limiter'> {
+export interface CoordinatorLookupOptions extends Pick<
+  LookupOptions,
+  'budgetMs' | 'timeoutMs' | 'caller' | 'warm_cache' | 'limiter'
+> {
   // `extended` is intentionally NOT exposed — the coordinator forces `true`
   // so cached responses are valid for any caller (BS#885's "passes `extended: true` explicitly").
 }
 
 interface InFlightEntry {
   promise: Promise<LookupResponse>;
-  callers: Set<string>;
-  warmCacheRequested: boolean;
 }
 
 export class LmlLookupCoordinator {
@@ -85,38 +86,29 @@ export class LmlLookupCoordinator {
   ): Promise<LookupResponse> {
     const key = this.cacheKey(artist, album, song);
 
-    return Sentry.startSpan(
-      { name: 'lml.coordinator.lookup', op: 'function' },
-      async (span) => {
-        const cached = this.cache.get(key);
-        if (cached) {
-          this.setSpanAttrs(span, { hit: 'cache', caller: options?.caller });
-          return cached;
-        }
-
-        const existing = this.inflight.get(key);
-        if (existing) {
-          existing.callers.add(options?.caller ?? 'unknown');
-          if (options?.warm_cache) existing.warmCacheRequested = true;
-          this.setSpanAttrs(span, { hit: 'inflight', caller: options?.caller });
-          return existing.promise;
-        }
-
-        const entry: InFlightEntry = {
-          callers: new Set([options?.caller ?? 'unknown']),
-          warmCacheRequested: !!options?.warm_cache,
-          promise: this.fetchUncached(artist, album, song, options).finally(() => {
-            this.inflight.delete(key);
-          }),
-        };
-        this.inflight.set(key, entry);
-        this.setSpanAttrs(span, { hit: 'miss', caller: options?.caller });
-
-        const result = await entry.promise;
-        this.cache.set(key, result);
-        return result;
+    return Sentry.startSpan({ name: 'lml.coordinator.lookup', op: 'function' }, async (span) => {
+      const cached = this.cache.get(key);
+      if (cached) {
+        this.setSpanAttrs(span, { hit: 'cache', caller: options?.caller });
+        return cached;
       }
-    );
+
+      const existing = this.inflight.get(key);
+      if (existing) {
+        this.setSpanAttrs(span, { hit: 'inflight', caller: options?.caller });
+        return existing.promise;
+      }
+
+      const promise = this.fetchUncached(artist, album, song, options).finally(() => {
+        this.inflight.delete(key);
+      });
+      this.inflight.set(key, { promise });
+      this.setSpanAttrs(span, { hit: 'miss', caller: options?.caller });
+
+      const result = await promise;
+      this.cache.set(key, result);
+      return result;
+    });
   }
 
   private async fetchUncached(
@@ -173,7 +165,7 @@ export function _resetLmlLookupCoordinatorForTest(): void {
 
 1. **`extended: true` is forced.** Some callers don't need the extra fields; passing them harmlessly inflates payload size by ~1 KB. The win — every cached entry is usable by every caller, no shape mismatch — outweighs the per-call cost. This is the issue's stated mandate.
 
-2. **`warm_cache` unions across coalesced callers.** If any in-flight caller asks for `warm_cache: true`, the wire call carries it. Write-path callers (`library-add-album`, `library-canonical-entity`) opt in by setting `warm_cache: true` at their call site. Read-path callers leave it absent. **Error path**: on rejection, the in-flight entry is cleared (the `finally` block); the accumulated `warmCacheRequested` flag is discarded with it. A subsequent retry for the same key re-accumulates from the new coalescing population — the flag never persists across error/retry boundaries.
+2. **`warm_cache` follows first-caller-wins like every other LookupOption.** Whether the wire call carries `warm_cache: true` is decided by whichever caller arrived first. Subsequent coalescers don't union onto the in-flight request — the wire body is already serialized and in flight by the time they arrive. Write-path callers (`library-add-album`, `library-canonical-entity`) set `warm_cache: true` at their call site; whether a coalesced burst warms LML's PG cache is decided entirely by which caller arrived first. Acceptable in practice because (a) write-path callers dominate same-key bursts originating from a single user action, and (b) warm-cache is a best-effort side benefit, not a correctness invariant.
 
 3. **First-caller-wins for budget/timeout/limiter/caller-tag on the wire.** Subsequent coalescers wait on the in-flight promise. Each caller wraps its own deadline locally via `Promise.race` against an `AbortSignal.timeout` if they need stricter semantics — out of scope for the coordinator itself; the read paths that have tight budgets (proxy, library) already handle their own catch arms. **This is documented behavior**: the coordinator does not honor per-caller timeoutMs after coalescing.
 
@@ -187,10 +179,10 @@ export function _resetLmlLookupCoordinatorForTest(): void {
 
 ### Span instrumentation
 
-| Attribute | Values | Purpose |
-|---|---|---|
-| `lml.coordinator.hit` | `cache` \| `inflight` \| `miss` | Outcome class — drives the "did coalescing/caching collapse a call?" Sentry query |
-| `lml.coordinator.caller` | the caller tag of THIS invocation | Per-call attribution even when underlying wire call inherited a different tag |
+| Attribute                | Values                            | Purpose                                                                           |
+| ------------------------ | --------------------------------- | --------------------------------------------------------------------------------- |
+| `lml.coordinator.hit`    | `cache` \| `inflight` \| `miss`   | Outcome class — drives the "did coalescing/caching collapse a call?" Sentry query |
+| `lml.coordinator.caller` | the caller tag of THIS invocation | Per-call attribution even when underlying wire call inherited a different tag     |
 
 The underlying `lml.lookup` span continues to fire on wire-call misses (existing chokepoint instrumentation in `@wxyc/lml-client`). Cache hits and in-flight coalesces produce only the `lml.coordinator.lookup` span — by construction, that's the observability win.
 
@@ -199,6 +191,7 @@ The underlying `lml.lookup` span continues to fire on wire-call misses (existing
 8 callsite changes, each: replace `lookupMetadata(...)` with `lmlLookupCoordinator.lookup(...)`; drop the `extended` flag (coordinator forces it); keep `budgetMs`/`timeoutMs`/`caller`/`warm_cache`/`limiter`.
 
 Write-path additions:
+
 - `library.controller.ts:98` (`addAlbum`) → add `warm_cache: true`
 - `library.controller.ts:149` (`fireAndForgetCanonicalEntity`) → add `warm_cache: true`
 
@@ -239,7 +232,7 @@ Consumed by `wxyc-ios-64#270`'s fallback path. The parallel `metadata.service.ts
 - **TTL expiry**: `lookup()` after the TTL elapses → fresh `lookupMetadata` invocation (use jest fake timers + injected `ttlMs`).
 - **Error propagation, no cache poisoning**: a throwing `lookupMetadata` rejects all coalescing waiters; the next call issues a fresh wire request.
 - **Cache key normalization**: `("Beatles", "Abbey Road", undefined)` and `("BEATLES ", " abbey  road", "")` map to the same cache entry.
-- **`warm_cache` union**: two concurrent callers — one with `warm_cache: true`, one without — produce one wire call with `warm_cache: true`.
+- **`warm_cache` passthrough (first-caller-wins)**: two concurrent callers where the first sets `warm_cache: false` and the second sets `warm_cache: true` produce one wire call with `warm_cache: false`. The reverse ordering produces `warm_cache: true`. (Documents the actual semantics — the wire body is in flight before coalescers arrive.)
 - **First-caller-wins on caller tag**: the wire call's `caller` field matches the first caller in.
 
 ### Existing callsite unit tests
@@ -258,19 +251,20 @@ The mock LML server already exists in `dev_env/mock-lml/` per `metadata-lml.spec
 ### Sentry acceptance (post-deploy)
 
 Per BS#885 acceptance criteria:
+
 - A single dj-site addEntry that previously produced two `lml.lookup` spans (one from `fireAndForgetMetadata`, one from `fireAndForgetLinkage`) produces… well, the two-call pattern was already eliminated by BS#894, so this criterion is **already satisfied at the trace-shape level**. The coordinator's narrower acceptance is the next bullet:
 - Two concurrent intra-instance calls for the same `(artist, album, song)` produce one outbound `lml.lookup` span (one coordinator-miss, one coordinator-inflight-hit). Verifiable in the Sentry trace explorer within 24h of deploy.
 
 ## Risks + mitigations
 
-| Risk | Mitigation |
-|---|---|
-| Forcing `extended: true` for callers that don't read those fields incurs LML cost. | LML's response shape already populates the fields on cache hit; on cache miss, the existing `extended` flag triggers the same downstream work. No new LML compute. Payload size grows by ~1 KB per response. Acceptable. |
-| First-caller-wins for budget means a tight-deadline second caller waits for a longer-deadline first caller. | Documented. Callers with hard deadlines (proxy) wrap with their own catch arm — the existing `try/catch` patterns in proxy.controller already do this. |
-| The new module-level singleton's state isn't reset between Jest test suites, leaking cache hits across tests. | Provide `_resetLmlLookupCoordinatorForTest()`; call from each callsite test's `beforeEach`. |
-| `warm_cache: true` union could amplify LML background fan-out if many read-path callers coalesce with one write-path caller. | LML's `warm_cache` is idempotent — duplicate background tasks are deduplicated server-side. The amplification is theoretical, not measured. |
-| Stale cached response (5 min TTL) returned after an artwork was updated in LML. | Cached response is the *prior* LookupResponse; LML's own writes don't propagate through BS's cache. Acceptable for ~5 min UI staleness. If real, this becomes a TTL tuning ticket post-launch. |
-| Per-instance singleton means N BS replicas have N independent caches; same-key bursts hitting different replicas still produce N wire calls. | Documented as "intra-instance only" — the issue's explicit out-of-scope. dj-site session stickiness collapses most bursts onto one replica. |
+| Risk                                                                                                                                         | Mitigation                                                                                                                                                                                                                                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Forcing `extended: true` for callers that don't read those fields incurs LML cost.                                                           | LML's response shape already populates the fields on cache hit; on cache miss, the existing `extended` flag triggers the same downstream work. No new LML compute. Payload size grows by ~1 KB per response. Acceptable.                                                                                                                                                                |
+| First-caller-wins for budget means a tight-deadline second caller waits for a longer-deadline first caller.                                  | Documented. Callers with hard deadlines (proxy) wrap with their own catch arm — the existing `try/catch` patterns in proxy.controller already do this.                                                                                                                                                                                                                                  |
+| The new module-level singleton's state isn't reset between Jest test suites, leaking cache hits across tests.                                | Provide `_resetLmlLookupCoordinatorForTest()`; call from each callsite test's `beforeEach`.                                                                                                                                                                                                                                                                                             |
+| `warm_cache` first-caller-wins means a read-path caller arriving first can prevent a coalescing write-path caller's PG cache warm.           | Warm-cache is a best-effort side benefit, not a correctness invariant. Same-key bursts that originate from a single DJ action almost always have the write-path caller arrive first because the write-path is what _triggers_ the burst (`library.controller.addAlbum` fires both the artwork lookup and the canonical-entity lookup before any downstream read paths see the new row). |
+| Stale cached response (5 min TTL) returned after an artwork was updated in LML.                                                              | Cached response is the _prior_ LookupResponse; LML's own writes don't propagate through BS's cache. Acceptable for ~5 min UI staleness. If real, this becomes a TTL tuning ticket post-launch.                                                                                                                                                                                          |
+| Per-instance singleton means N BS replicas have N independent caches; same-key bursts hitting different replicas still produce N wire calls. | Documented as "intra-instance only" — the issue's explicit out-of-scope. dj-site session stickiness collapses most bursts onto one replica.                                                                                                                                                                                                                                             |
 
 ## PR delta estimate
 

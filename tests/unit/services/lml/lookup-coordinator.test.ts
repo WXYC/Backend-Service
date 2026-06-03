@@ -238,8 +238,13 @@ describe('LmlLookupCoordinator', () => {
     });
   });
 
-  describe('warm_cache union across coalesced callers', () => {
-    it('passes warm_cache=true on wire when any in-flight caller requested it', async () => {
+  describe('warm_cache passthrough (first-caller-wins)', () => {
+    // The wire request body is serialized and in flight by the time a
+    // coalescing caller arrives — there's no opportunity to union flags
+    // onto it. So warm_cache, like every other LookupOptions field, is
+    // decided by whichever caller arrived first.
+
+    it('passes warm_cache=false on the wire when the first caller did not request it', async () => {
       let resolveFn: (r: LookupResponse) => void = () => {};
       mockLookupMetadata.mockImplementation(
         () =>
@@ -252,16 +257,12 @@ describe('LmlLookupCoordinator', () => {
         caller: 'read-path',
         warm_cache: false,
       });
-      const _p2 = lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, {
+      const p2 = lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, {
         caller: 'write-path',
         warm_cache: true,
       });
 
-      // First wire call already issued (warm_cache=false from p1, the first caller).
-      // The union behavior is asserted by the issued wire call carrying warm_cache=true
-      // only when the FIRST caller asked for it — this test sets read-path FIRST.
-      // For the dominant semantics we want, the wire call should reflect what the
-      // first caller asked. (Documented in the plan: first-caller-wins.)
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
       expect(mockLookupMetadata).toHaveBeenCalledWith(
         'Autechre',
         'Confield',
@@ -270,7 +271,7 @@ describe('LmlLookupCoordinator', () => {
       );
 
       resolveFn(fakeResponse());
-      await p1;
+      await Promise.all([p1, p2]);
     });
 
     it('passes warm_cache=true when the first caller is the write-path caller', async () => {
@@ -305,7 +306,7 @@ describe('LmlLookupCoordinator', () => {
         budgetMs: 3000,
         timeoutMs: 5000,
       });
-      const _p2 = lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, {
+      const p2 = lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, {
         caller: 'second-caller',
         budgetMs: 10000,
         timeoutMs: 15000,
@@ -320,7 +321,7 @@ describe('LmlLookupCoordinator', () => {
       );
 
       resolveFn(fakeResponse());
-      await p1;
+      await Promise.all([p1, p2]);
     });
   });
 });
