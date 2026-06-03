@@ -296,6 +296,12 @@ interface MirrorShow {
   show_name?: string | null;
   specialty_id?: number | null;
   start_time?: Date | string | number | null;
+  // BS#1321: per-show display-name override (migration 0090). When non-null
+  // takes precedence over `dj.djName` for the tubafrenzy `djHandle` so the
+  // mirror surface (which the legacy tubafrenzy admin UI + on-air playlist
+  // both render) reflects the operator-intent override for the whole show,
+  // not just the BS-side flowsheet rows.
+  dj_name_override?: string | null;
 }
 
 interface MirrorDJ {
@@ -306,12 +312,23 @@ interface MirrorDJ {
 
 /**
  * Maps a Backend-Service Show + user to the tubafrenzy radioShow POST body.
+ *
+ * `djHandle` picks the per-show override first (BS#1321) so the mirror
+ * surface matches every other consumer of `resolveDjNameForShow`. If no
+ * override is set, fall back to the DJ's stage handle (`auth_user.dj_name`)
+ * and then to their name. `djName` (note: capital N — tubafrenzy's distinct
+ * "real-name" field) is always `realName || name`; we don't override it
+ * because the upstream surface treats `djName` as "the human behind the
+ * mic" rather than "the on-air display name", and the override is the
+ * latter, not the former.
  */
 export function mapShowToTubafrenzy(show: MirrorShow, dj: MirrorDJ): Record<string, unknown> {
   const startMs = show.start_time ? new Date(show.start_time).getTime() : Date.now();
+  const override = show.dj_name_override?.trim();
+  const djHandle = override && override.length > 0 ? override : dj.djName || dj.name;
   return {
     djName: dj.realName || dj.name,
-    djHandle: dj.djName || dj.name,
+    djHandle,
     djId: 0,
     showName: show.show_name ?? '',
     specialtyShowId: show.specialty_id ?? 0,

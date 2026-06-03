@@ -198,6 +198,7 @@ export const shows = {
   legacy_dj_name: 'legacy_dj_name',
   legacy_dj_id: 'legacy_dj_id',
   legacy_show_id: 'legacy_show_id',
+  dj_name_override: 'dj_name_override',
   start_time: 'start_time',
   end_time: 'end_time',
   show_name: 'show_name',

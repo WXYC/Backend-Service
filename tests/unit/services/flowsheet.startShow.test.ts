@@ -93,15 +93,24 @@ describe('startShow', () => {
 
 /**
  * dj_name_override coverage for the 2026-06-02 Aubrey Hearst incident
- * follow-up (WXYC/Backend-Service#1295, epic #1288). Override is per-call,
- * trumps `auth_user.dj_name`/`auth_user.name` for the show_start marker text,
- * the `flowsheet.dj_name` column, and the new `shows.legacy_dj_name` column.
+ * follow-up (WXYC/Backend-Service#1295 → #1321, epic #1288). Override is
+ * per-call, trumps `auth_user.dj_name`/`auth_user.name` for the show_start
+ * marker text, the `flowsheet.dj_name` column, and the new
+ * `shows.dj_name_override` column (migration 0090).
+ *
+ * BS#1321 redirects the persistence target from `shows.legacy_dj_name` to
+ * a dedicated `shows.dj_name_override` column. `legacy_dj_name` is owned by
+ * the tubafrenzy ETL upsert (`jobs/flowsheet-etl/job.ts` overwrites it on
+ * every sync tick), so an override written there only survived until the
+ * next sync window. The new column is Backend-Service-only and is checked
+ * at the top of `resolveDjNameForShow`'s precedence chain so every
+ * subsequent track row added via `addEntry` also reflects it.
  *
  * Empty / whitespace-only override is treated as absent — today's
  * resolveDjDisplayName fallback path must remain the only behavior change
  * is opt-in.
  */
-describe('startShow dj_name_override (BS#1295)', () => {
+describe('startShow dj_name_override (BS#1295 → BS#1321)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -134,9 +143,13 @@ describe('startShow dj_name_override (BS#1295)', () => {
     const flowsheetValues = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(flowsheetValues.dj_name).toBe('Aubrey Hearst');
     expect(flowsheetValues.message).toMatch(/^Start of Show: Aubrey Hearst joined the set at /);
-    // AC#4: shows.legacy_dj_name populated to match the marker name when override present.
+    // AC#4: shows.dj_name_override populated to match the marker name (BS#1321).
+    // BS#1321: the override no longer lands on `shows.legacy_dj_name` — that
+    // column is upstream-owned (tubafrenzy ETL). The dedicated override
+    // column is the durable, ETL-safe persistence target.
     const showsValues = showsInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(showsValues.legacy_dj_name).toBe('Aubrey Hearst');
+    expect(showsValues.dj_name_override).toBe('Aubrey Hearst');
+    expect(showsValues.legacy_dj_name).toBeUndefined();
   });
 
   it('trims whitespace from the override before persisting', async () => {
@@ -148,7 +161,7 @@ describe('startShow dj_name_override (BS#1295)', () => {
     expect(flowsheetValues.dj_name).toBe('Aubrey Hearst');
     expect(flowsheetValues.message).toMatch(/^Start of Show: Aubrey Hearst joined the set at /);
     const showsValues = showsInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(showsValues.legacy_dj_name).toBe('Aubrey Hearst');
+    expect(showsValues.dj_name_override).toBe('Aubrey Hearst');
   });
 
   it('treats empty-string override as absent — falls back to auth_user.dj_name', async () => {
@@ -159,9 +172,9 @@ describe('startShow dj_name_override (BS#1295)', () => {
     const flowsheetValues = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(flowsheetValues.dj_name).toBe('DJ Stardust');
     expect(flowsheetValues.message).toMatch(/^Start of Show: DJ Stardust joined the set at /);
-    // No override → legacy_dj_name stays null (preserves pre-#1295 shape).
+    // No override → dj_name_override stays null (preserves pre-#1295 shape).
     const showsValues = showsInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(showsValues.legacy_dj_name ?? null).toBeNull();
+    expect(showsValues.dj_name_override ?? null).toBeNull();
   });
 
   it('treats whitespace-only override as absent — falls back to auth_user.dj_name', async () => {
@@ -172,7 +185,7 @@ describe('startShow dj_name_override (BS#1295)', () => {
     const flowsheetValues = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(flowsheetValues.dj_name).toBe('DJ Stardust');
     const showsValues = showsInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(showsValues.legacy_dj_name ?? null).toBeNull();
+    expect(showsValues.dj_name_override ?? null).toBeNull();
   });
 
   it('absent override (undefined) produces the same shape as pre-#1295 — no regression', async () => {
@@ -186,7 +199,8 @@ describe('startShow dj_name_override (BS#1295)', () => {
     const showsValues = showsInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(showsValues.show_name).toBe('Some Show');
     expect(showsValues.specialty_id).toBe(7);
-    expect(showsValues.legacy_dj_name ?? null).toBeNull();
+    expect(showsValues.dj_name_override ?? null).toBeNull();
+    expect(showsValues.legacy_dj_name).toBeUndefined();
   });
 
   it('does not touch show_name / specialty_id plumbing when override is present', async () => {
@@ -197,6 +211,6 @@ describe('startShow dj_name_override (BS#1295)', () => {
     const showsValues = showsInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(showsValues.show_name).toBe('Some Show');
     expect(showsValues.specialty_id).toBe(7);
-    expect(showsValues.legacy_dj_name).toBe('Aubrey Hearst');
+    expect(showsValues.dj_name_override).toBe('Aubrey Hearst');
   });
 });

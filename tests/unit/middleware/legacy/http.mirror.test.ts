@@ -648,5 +648,65 @@ describe('http.mirror', () => {
       expect(result.specialtyShowId).toBe(0);
       expect(result.djId).toBe(0);
     });
+
+    // BS#1321: tubafrenzy mirror reflects the per-show display-name override
+    // on the `djHandle` field so the legacy tubafrenzy admin UI + on-air
+    // playlist surfaces match Backend-Service's flowsheet rows. Override
+    // does NOT touch `djName` (tubafrenzy's distinct real-name field).
+    it('uses dj_name_override on djHandle when present (BS#1321)', () => {
+      const show = {
+        id: 100,
+        show_name: 'Friday Night Jazz',
+        specialty_id: 5,
+        start_time: new Date('2024-02-01T12:00:00Z'),
+        dj_name_override: 'Guest Host Aubrey',
+      };
+      const dj = { realName: 'Kate Bailey', djName: 'DJ Catalyst', name: 'kate' };
+
+      const result = mapShowToTubafrenzy(show, dj);
+
+      expect(result.djHandle).toBe('Guest Host Aubrey');
+      // djName tracks "the human behind the mic" — it stays unchanged.
+      expect(result.djName).toBe('Kate Bailey');
+    });
+
+    it('trims whitespace from dj_name_override (BS#1321)', () => {
+      const show = {
+        id: 100,
+        start_time: new Date(),
+        dj_name_override: '  Aubrey Hearst  ',
+      };
+      const dj = { realName: 'Kate Bailey', djName: 'DJ Catalyst', name: 'kate' };
+
+      const result = mapShowToTubafrenzy(show, dj);
+
+      expect(result.djHandle).toBe('Aubrey Hearst');
+    });
+
+    it('falls back to dj.djName when dj_name_override is null (BS#1321)', () => {
+      const show = {
+        id: 100,
+        start_time: new Date(),
+        dj_name_override: null,
+      };
+      const dj = { realName: 'Kate Bailey', djName: 'DJ Catalyst', name: 'kate' };
+
+      const result = mapShowToTubafrenzy(show, dj);
+
+      expect(result.djHandle).toBe('DJ Catalyst');
+    });
+
+    it('falls back to dj.djName when dj_name_override is whitespace-only (BS#1321)', () => {
+      const show = {
+        id: 100,
+        start_time: new Date(),
+        dj_name_override: '   ',
+      };
+      const dj = { realName: 'Kate Bailey', djName: 'DJ Catalyst', name: 'kate' };
+
+      const result = mapShowToTubafrenzy(show, dj);
+
+      expect(result.djHandle).toBe('DJ Catalyst');
+    });
   });
 });
