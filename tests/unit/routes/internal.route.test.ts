@@ -613,12 +613,14 @@ describe('POST /internal/rotation-webhook', () => {
     expect(res.body.ok).toBe(true);
   });
 
-  // BS#1082: A `sendRotationLinked` linkage event sends only `{id,
-  // libraryReleaseId, action: 'update'}`. Prior shape unconditionally wrote
-  // defaults into rotation_bin / kill_date on every update, flipping Heavy
-  // rotation rows to 'N' and clearing kill_date until the rotation-etl cron
-  // tick repaired them.
-  it('update with partial payload omits rotation_bin and kill_date from SET clause', async () => {
+  // BS#1082 + BS#1312: A `sendRotationLinked` linkage event sends only
+  // `{id, libraryReleaseId, action: 'update'}`. Prior shape unconditionally
+  // wrote defaults into rotation_bin / kill_date on every update, flipping
+  // Heavy rotation rows to 'N' and clearing kill_date until the rotation-etl
+  // cron tick repaired them. BS#1312 extends the gate symmetrically to the
+  // three denorm fields (artist_name / album_title / record_label) used by
+  // tubafrenzy + dj-site catalog views when `album_id IS NULL`.
+  it('update with partial payload omits gated fields (rotation_bin, kill_date, artist_name, album_title, record_label) from SET clause', async () => {
     const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
     onConflictSpy.mockClear();
 
@@ -632,12 +634,15 @@ describe('POST /internal/rotation-webhook', () => {
     const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
     expect(setClause).not.toHaveProperty('rotation_bin');
     expect(setClause).not.toHaveProperty('kill_date');
+    expect(setClause).not.toHaveProperty('artist_name');
+    expect(setClause).not.toHaveProperty('album_title');
+    expect(setClause).not.toHaveProperty('record_label');
   });
 
-  // Companion to the above: when the payload DOES carry rotationType /
-  // killDate (the create path, or a full-shape update), those fields must
-  // still appear in SET so the update overwrites them.
-  it('update with full payload keeps rotation_bin and kill_date in SET clause', async () => {
+  // Companion to the above: when the payload DOES carry the gated fields (the
+  // create path, or a full-shape update), all five must still appear in SET
+  // so the update overwrites them.
+  it('update with full payload keeps gated fields (rotation_bin, kill_date, artist_name, album_title, record_label) in SET clause', async () => {
     const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
     onConflictSpy.mockClear();
 
@@ -651,6 +656,9 @@ describe('POST /internal/rotation-webhook', () => {
     const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
     expect(setClause).toHaveProperty('rotation_bin');
     expect(setClause).toHaveProperty('kill_date');
+    expect(setClause).toHaveProperty('artist_name');
+    expect(setClause).toHaveProperty('album_title');
+    expect(setClause).toHaveProperty('record_label');
   });
 
   // -- Kill --
