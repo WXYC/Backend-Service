@@ -111,15 +111,18 @@ describe('POST /internal/flowsheet-webhook', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    // Each webhook call issues two .limit(1) SELECTs in order: resolveShowId
-    // then resolveAlbumId. Default queue resolves the show but not the album
-    // (unlinked path); tests that need a resolved album_id queue their own
-    // values before triggering the request.
+    // Each webhook call issues three .limit(1) SELECTs in `Promise.all`:
+    // resolveShowId, resolveAlbumId, resolveRotationId. They dispatch in
+    // declaration order and the mocked driver resolves them FIFO. Default
+    // queue resolves the show but not the album or rotation (unlinked
+    // path); tests that need a resolved album_id or rotation_id queue
+    // their own values before triggering the request.
     mockReturning.mockReset();
     mockReturning.mockResolvedValue([{ id: 5555 }]);
     mockLimit.mockReset();
     mockLimit
       .mockResolvedValueOnce([{ id: 9999 }])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValue([]);
   });
@@ -323,7 +326,10 @@ describe('POST /internal/flowsheet-webhook', () => {
 
   it('forwards the resolved album_id when libraryReleaseId matches a library row', async () => {
     mockLimit.mockReset();
-    mockLimit.mockResolvedValueOnce([{ id: 9999 }]).mockResolvedValueOnce([{ id: 7777 }]);
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999 }])
+      .mockResolvedValueOnce([{ id: 7777 }])
+      .mockResolvedValueOnce([]);
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
 
     const res = await request(app)
@@ -376,6 +382,81 @@ describe('POST /internal/flowsheet-webhook', () => {
       albumTitle: 'Confield',
       trackTitle: 'VI Scose Poise',
     });
+  });
+
+  // -- rotationReleaseId → rotation_id resolution (BS#1268) --
+  //
+  // Sibling of BS#1028's library-side path: tubafrenzy sends
+  // `entry.rotationReleaseId` on every flowsheet webhook (set by
+  // `FlowsheetEntryAddServlet.populateRotationRelease()`). BS resolves it via
+  // `rotation_legacy_rotation_id_idx` (unique) and writes the BS-side
+  // `rotation.id` into `flowsheet.rotation_id` on the fresh-INSERT branch.
+  // The conflict-UPDATE path doesn't refresh linkage — anchored to the
+  // first delivery.
+
+  const mockValues = (mockChain as unknown as { values: jest.Mock }).values;
+  const lastInsertValues = (): Record<string, unknown> => mockValues.mock.calls[0]![0] as Record<string, unknown>;
+
+  it('forwards the resolved rotation_id when rotationReleaseId matches a rotation row', async () => {
+    // resolveShowId → 9999, resolveAlbumId → unlinked, resolveRotationId → 4242.
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999 }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 4242 }]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, rotationReleaseId: 12345 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ rotation_id: 4242 }));
+  });
+
+  it('inserts rotation_id: null when rotationReleaseId is 0 (no rotation context)', async () => {
+    // rotationReleaseId=0 short-circuits resolveRotationId — no rotation
+    // SELECT issued. Default beforeEach queue handles this implicitly, but
+    // we pin the contract explicitly here.
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, rotationReleaseId: 0 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ rotation_id: null }));
+  });
+
+  it('inserts rotation_id: null when rotationReleaseId does not match any rotation row', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, rotationReleaseId: 999_999 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ rotation_id: null }));
+  });
+
+  it('coexists with libraryReleaseId — both album_id and rotation_id are populated when both resolve', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999 }])
+      .mockResolvedValueOnce([{ id: 7777 }])
+      .mockResolvedValueOnce([{ id: 4242 }]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, rotationReleaseId: 12345 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ album_id: 7777, rotation_id: 4242 }));
   });
 
   // -- Delete --
