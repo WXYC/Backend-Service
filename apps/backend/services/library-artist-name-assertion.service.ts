@@ -30,9 +30,14 @@ import { db, library, artists } from '@wxyc/database';
  *      visible before it reaches a DJ.
  *
  * Both checks are memoized so each fires at most once per process and stays
- * off the per-search hot path after the first call. Transient DB errors clear
- * the cache so the next call retries. Neither check ever throws to the
- * consumer — search continues to serve under any degraded state.
+ * off the per-search hot path after the first call. A check's outcome is
+ * cached for the lifetime of the process — success memoizes resolved,
+ * failure memoizes rejected. Operator restart is the retry mechanism. The
+ * wrapper (`checkLibraryArtistNameHealth`) uses `Promise.allSettled` so an
+ * inner check's rejection is never propagated to the caller; catalog search
+ * continues to serve under any degraded state (BS#1310, follow-up to the
+ * 2026-04-30 OPN incident BS#685 — same failure shape reintroduced via the
+ * drift leg's larger query surface).
  */
 
 let _nullCheckPromise: Promise<void> | null = null;
@@ -104,35 +109,38 @@ async function runDriftCheck(): Promise<void> {
  * Drift probe (BS#1092). Counts rows where `library.artist_name` has drifted
  * away from `artists.artist_name` and emits a Sentry warning with a sampled
  * set of `library_id`s when drift > 0. Memoized; fires at most once per
- * process. Resolves on both healthy and degraded states.
+ * process. Resolves on healthy and degraded states; if the underlying query
+ * itself rejects (e.g. `DB_STATEMENT_TIMEOUT_MS` under load — the drift
+ * query's `IS DISTINCT FROM` predicate is non-indexable), the rejection is
+ * memoized too: subsequent calls return the same rejected promise without
+ * re-running the expensive JOIN (BS#1310 storm-pattern prevention). The
+ * `checkLibraryArtistNameHealth` wrapper absorbs that rejection so search
+ * callers never observe it; direct callers see the raw outcome.
  */
 export async function checkLibraryArtistNameDrift(): Promise<void> {
   if (_driftCheckPromise === null) {
-    _driftCheckPromise = runDriftCheck().catch((err) => {
-      _driftCheckPromise = null;
-      throw err;
-    });
+    _driftCheckPromise = runDriftCheck();
   }
   return _driftCheckPromise;
 }
 
 /**
  * Run the soft data-quality assertion sweep (NULL check + drift check)
- * exactly once per process per check. Returns void on both healthy and
- * degraded states; consumers must not branch on the result. Callable from
- * any catalog-search entry point as a fire-and-observe hook.
+ * exactly once per process per check. Returns void on healthy, degraded,
+ * AND query-failure states — consumers must not branch on the result and
+ * must not see the rejection from either inner check. Callable from any
+ * catalog-search entry point as a fire-and-observe hook (BS#1310).
  */
 export async function checkLibraryArtistNameHealth(): Promise<void> {
   if (_nullCheckPromise === null) {
-    _nullCheckPromise = runNullCheck().catch((err) => {
-      _nullCheckPromise = null;
-      throw err;
-    });
+    _nullCheckPromise = runNullCheck();
   }
-  // Fan out — both checks run, both memoize independently. The drift check
-  // is cheap (single indexed JOIN, count) and doesn't block readiness; the
-  // caller awaits both because each check's failure mode is its own probe.
-  await Promise.all([_nullCheckPromise, checkLibraryArtistNameDrift()]);
+  // Fan out — both checks run, both memoize independently. `Promise.allSettled`
+  // is load-bearing: an inner-check rejection (e.g. drift query exceeding the
+  // statement timeout under load) must not propagate to catalog search.
+  // That was the 2026-04-30 OPN failure mode for the NULL check (#685), and
+  // the larger query surface of the drift leg reintroduced it (BS#1310).
+  await Promise.allSettled([_nullCheckPromise, checkLibraryArtistNameDrift()]);
 }
 
 /**
