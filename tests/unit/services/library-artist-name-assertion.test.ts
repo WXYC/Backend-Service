@@ -107,17 +107,45 @@ describe('library-artist-name-assertion', () => {
       expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
     });
 
-    it('clears the cache on transient DB errors so the next call retries', async () => {
-      // The first leg (NULL check) throws; the wrapper's Promise.all rejects.
-      // The drift check still ran and its result (mocked clean) is cached.
-      // On retry, only the NULL leg re-executes.
-      db.execute.mockRejectedValueOnce(new Error('connection reset')).mockResolvedValueOnce([{ n: 0, sample_ids: [] }]);
-      await expect(checkLibraryArtistNameHealth()).rejects.toThrow('connection reset');
-
-      db.execute.mockResolvedValueOnce([{ n: 0 }]);
+    it('regression (BS#1310): does not propagate inner-check rejection — drift query timing out must not 503 search', async () => {
+      // The drift query (`library × artists JOIN WHERE artist_name IS DISTINCT FROM`)
+      // has a non-indexable predicate and can exceed DB_STATEMENT_TIMEOUT_MS under
+      // load. A `Promise.all` wrapper would propagate the rejection to every
+      // catalog-search code path that awaits this assertion — the same failure
+      // shape the 2026-04-30 OPN incident (#685) closed for the NULL check.
+      // The wrapper must use Promise.allSettled and never throw.
+      db.execute.mockResolvedValueOnce([{ n: 0 }]).mockRejectedValueOnce(new Error('statement timeout'));
       await expect(checkLibraryArtistNameHealth()).resolves.toBeUndefined();
-      // 3 total: failed NULL, successful drift (cached), retried NULL.
-      expect(db.execute).toHaveBeenCalledTimes(3);
+    });
+
+    it('regression (BS#1310): both legs rejecting still does not propagate to caller', async () => {
+      db.execute
+        .mockRejectedValueOnce(new Error('connection reset'))
+        .mockRejectedValueOnce(new Error('statement timeout'));
+      await expect(checkLibraryArtistNameHealth()).resolves.toBeUndefined();
+    });
+
+    it('regression (BS#1310): rejected drift check stays memoized — no storm-pattern re-runs', async () => {
+      // Under a persistent timeout condition, clearing memoization on rejection
+      // would let every subsequent search call re-issue the expensive JOIN,
+      // amplifying the upstream load that caused the timeout in the first place.
+      // Operator restart is the retry mechanism; the cached rejection is the
+      // backpressure.
+      db.execute.mockResolvedValueOnce([{ n: 0 }]).mockRejectedValueOnce(new Error('statement timeout'));
+      await checkLibraryArtistNameHealth();
+      await checkLibraryArtistNameHealth();
+      await checkLibraryArtistNameHealth();
+      // First call: NULL success + drift rejected (2 db calls).
+      // Subsequent calls: both legs memoized, zero new db calls.
+      expect(db.execute).toHaveBeenCalledTimes(2);
+    });
+
+    it('regression (BS#1310): rejected NULL check stays memoized — no storm-pattern re-runs', async () => {
+      db.execute.mockRejectedValueOnce(new Error('connection reset')).mockResolvedValueOnce([{ n: 0, sample_ids: [] }]);
+      await checkLibraryArtistNameHealth();
+      await checkLibraryArtistNameHealth();
+      await checkLibraryArtistNameHealth();
+      expect(db.execute).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -180,13 +208,17 @@ describe('library-artist-name-assertion', () => {
       expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
     });
 
-    it('clears the cache on transient DB errors so the next call retries', async () => {
+    it('BS#1310: the rejected promise stays memoized — no storm-pattern re-runs of an expensive failed query', async () => {
+      // Direct invocation of the drift check (not through the wrapper) still
+      // exposes the underlying rejection — callers that opt in get the raw
+      // outcome. But the failure is memoized: a second call returns the same
+      // rejected promise without re-running the query. The wrapper
+      // (`checkLibraryArtistNameHealth`) absorbs the rejection so search
+      // callers never see it.
       db.execute.mockRejectedValueOnce(new Error('statement timeout'));
       await expect(checkLibraryArtistNameDrift()).rejects.toThrow('statement timeout');
-
-      db.execute.mockResolvedValueOnce([{ n: 0, sample_ids: [] }]);
-      await expect(checkLibraryArtistNameDrift()).resolves.toBeUndefined();
-      expect(db.execute).toHaveBeenCalledTimes(2);
+      await expect(checkLibraryArtistNameDrift()).rejects.toThrow('statement timeout');
+      expect(db.execute).toHaveBeenCalledTimes(1);
     });
 
     it('does not throw when drift is detected — degraded data must not take catalog search down', async () => {
