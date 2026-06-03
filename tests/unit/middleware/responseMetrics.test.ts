@@ -76,16 +76,28 @@ describe('responseMetricsMiddleware', () => {
       }>;
     };
     expect(call.Namespace).toBe('WXYC/BackendService');
-    expect(call.MetricData).toHaveLength(1);
-    expect(call.MetricData[0].MetricName).toBe('MutationClientError');
-    expect(call.MetricData[0].Unit).toBe('Count');
-    expect(call.MetricData[0].Value).toBe(1);
-    expect(call.MetricData[0].Dimensions).toEqual(
+    // Emit-twice convention: one dimensioned datum (dashboards / per-route
+    // drill-down) plus one dimensionless companion (the series the canary's
+    // plain-form Namespace/MetricName alarm queries). See wxyc-canary#13 for
+    // the post-mortem that drove this pattern.
+    expect(call.MetricData).toHaveLength(2);
+    const dimensioned = call.MetricData.filter((datum) => datum.Dimensions.length > 0);
+    const dimensionless = call.MetricData.filter((datum) => datum.Dimensions.length === 0);
+    expect(dimensioned).toHaveLength(1);
+    expect(dimensionless).toHaveLength(1);
+    expect(dimensioned[0].MetricName).toBe('MutationClientError');
+    expect(dimensioned[0].Unit).toBe('Count');
+    expect(dimensioned[0].Value).toBe(1);
+    expect(dimensioned[0].Dimensions).toEqual(
       expect.arrayContaining([
         { Name: 'Route', Value: 'POST /flowsheet/' },
         { Name: 'StatusCode', Value: '403' },
       ])
     );
+    expect(dimensionless[0].MetricName).toBe('MutationClientError');
+    expect(dimensionless[0].Unit).toBe('Count');
+    expect(dimensionless[0].Value).toBe(1);
+    expect(dimensionless[0].Dimensions).toEqual([]);
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
@@ -178,8 +190,10 @@ describe('responseMetricsMiddleware', () => {
     const call = mockPutMetricDataCommand.mock.calls[0][0] as {
       MetricData: Array<{ Value: number; Dimensions: Array<{ Name: string; Value: string }> }>;
     };
-    expect(call.MetricData).toHaveLength(1);
-    expect(call.MetricData[0].Value).toBe(3);
+    // One coalesced (POST /flowsheet/, 403) entry surfaces as two datapoints
+    // under the emit-twice convention: dimensioned + dimensionless companion.
+    expect(call.MetricData).toHaveLength(2);
+    expect(call.MetricData.every((datum) => datum.Value === 3)).toBe(true);
   });
 
   it('flushes automatically when the buffer hits 10 errors', async () => {
@@ -197,9 +211,50 @@ describe('responseMetricsMiddleware', () => {
 
     expect(mockSend).toHaveBeenCalledTimes(1);
     const call = mockPutMetricDataCommand.mock.calls[0][0] as {
-      MetricData: Array<{ Value: number }>;
+      MetricData: Array<{ Value: number; Dimensions: Array<{ Name: string; Value: string }> }>;
     };
-    expect(call.MetricData[0].Value).toBe(10);
+    expect(call.MetricData).toHaveLength(2);
+    expect(call.MetricData.every((datum) => datum.Value === 10)).toBe(true);
+  });
+
+  it('emits N dimensioned + N dimensionless entries when the buffer holds distinct (route, statusCode) pairs', async () => {
+    // Mix two distinct coalescence keys in one flush. Expect a dimensioned and
+    // dimensionless datapoint per key, with matching Values across the pair.
+    const cases: Array<{ method: 'POST' | 'PATCH'; url: string; status: number }> = [
+      { method: 'POST', url: '/flowsheet/', status: 403 },
+      { method: 'POST', url: '/flowsheet/', status: 403 },
+      { method: 'PATCH', url: '/flowsheet/play-order', status: 409 },
+    ];
+    for (const c of cases) {
+      const req = makeReq(c.method, c.url);
+      const res = makeRes(c.status);
+      responseMetricsMiddleware(req, res as unknown as Response, next);
+      res.emit('finish');
+    }
+    await __flushForTests();
+
+    expect(mockPutMetricDataCommand).toHaveBeenCalledTimes(1);
+    const call = mockPutMetricDataCommand.mock.calls[0][0] as {
+      MetricData: Array<{
+        MetricName: string;
+        Value: number;
+        Dimensions: Array<{ Name: string; Value: string }>;
+      }>;
+    };
+    // Two distinct (route, statusCode) pairs => 2 dimensioned + 2 dimensionless = 4 total.
+    expect(call.MetricData).toHaveLength(4);
+    const dimensioned = call.MetricData.filter((datum) => datum.Dimensions.length > 0);
+    const dimensionless = call.MetricData.filter((datum) => datum.Dimensions.length === 0);
+    expect(dimensioned).toHaveLength(2);
+    expect(dimensionless).toHaveLength(2);
+    // Per-key value parity: each dimensioned entry has a partner dimensionless
+    // entry with the same Value, so Statistic: Sum returns identical totals
+    // when sliced or not. The (POST /flowsheet/, 403) key has Value 2, the
+    // (PATCH /flowsheet/play-order, 409) key has Value 1.
+    const dimensionedValues = [...dimensioned.map((d) => d.Value)].sort();
+    const dimensionlessValues = [...dimensionless.map((d) => d.Value)].sort();
+    expect(dimensionedValues).toEqual([1, 2]);
+    expect(dimensionlessValues).toEqual([1, 2]);
   });
 });
 
