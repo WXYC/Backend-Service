@@ -185,9 +185,12 @@ describe('enrichment-worker claim primitive (real PG)', () => {
        WHERE id = ${id}
     `;
 
-    // 2. C6 recovery sweep SQL — when BS#895 ships, the cron will run
-    //    this exact query (modulo batch size). Pinning it here so a
-    //    schema change that breaks the sweep fails CI now.
+    // 2. C6 recovery sweep SQL — shipped as `sweepStrandedClaims` in
+    //    `apps/enrichment-worker/sweep.ts` (BS#1225). End-to-end coverage
+    //    of the real sweep function against multi-row batches and
+    //    terminal-state safety lives in `enrichment-worker-sweep.spec.js`;
+    //    this assertion remains as a sibling-level pin so a schema change
+    //    that breaks the sweep also fails this spec.
     const reverted = await sql`
       UPDATE ${sql(SCHEMA)}.flowsheet
          SET metadata_status = 'pending',
