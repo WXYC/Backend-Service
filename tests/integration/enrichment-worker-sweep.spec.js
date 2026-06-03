@@ -39,6 +39,14 @@ const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
  * `apps/enrichment-worker/sweep.ts` — when that file is hand-edited the
  * SQL here must follow. Returns the count of rows reverted.
  *
+ * Pins the SQL contract at the production-default TTL (60s, which
+ * STRANDED_TTL_SECONDS resolves to when `ENRICHMENT_LML_BUDGET_MS` is at
+ * its 29s default). If a future change raises the LML budget high enough
+ * to push the derived TTL above 60s, the test backdates below are
+ * deliberately well above any reasonable TTL so the recovery path still
+ * fires; only the "exact cutoff" boundary would drift, which is
+ * intentional — the test pins behavior at the default deployment.
+ *
  * Scoped to `id = ANY(scopeIds)` so sibling integration specs running
  * against the same shared schema under `--runInBand` can't cross-affect
  * one another's rows. Production `sweepStrandedClaims` is unscoped (it
@@ -123,7 +131,9 @@ describe('enrichment-worker stranded-claim sweep (real PG)', () => {
     insertedIds.push(id);
 
     expect(await claimRow(sql, id)).toBe(true);
-    await backdateEnrichingSince(sql, id, 120);
+    // Backdate well above any reasonable derived TTL so the test pinning
+    // remains correct if STRANDED_TTL_SECONDS grows beyond 60s.
+    await backdateEnrichingSince(sql, id, 600);
 
     await runSweep(sql, [id]);
 
@@ -146,7 +156,9 @@ describe('enrichment-worker stranded-claim sweep (real PG)', () => {
       ids.push(id);
       insertedIds.push(id);
       await claimRow(sql, id);
-      await backdateEnrichingSince(sql, id, 90);
+      // Backdate well above any reasonable derived TTL — see runSweep
+      // header for the lockstep rationale.
+      await backdateEnrichingSince(sql, id, 600);
     }
 
     await runSweep(sql, ids);

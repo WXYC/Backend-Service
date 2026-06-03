@@ -72,13 +72,30 @@ const main = async (): Promise<void> => {
     console.log(`[enrichment-worker] received ${signal}; shutting down`);
     try {
       if (sweepTimer !== undefined) clearInterval(sweepTimer);
+      // Stop the CDC LISTEN socket BEFORE awaiting the in-flight sweep so
+      // new CDC events don't fire fresh `handleCandidate` dispatches during
+      // the 5-second sweep wait window (those would race
+      // closeDatabaseConnection below). In-flight handlers from before
+      // shutdown are not tracked — a pre-existing limitation of the C2
+      // worker — but at least we don't compound it here.
+      await stopCdcListener();
       // Await any in-flight sweep so closeDatabaseConnection doesn't tear
       // its connection mid-UPDATE. Bound the wait — PG could be hung; we'd
       // rather log a slow-shutdown warning than block the deploy forever.
+      // Capture the timeout id so we can clear it when activeSweep wins
+      // the race; otherwise the timer holds the libuv loop ref'd for the
+      // full SWEEP_SHUTDOWN_WAIT_MS even though we've moved on.
       if (activeSweep !== null) {
-        await Promise.race([activeSweep, new Promise<void>((resolve) => setTimeout(resolve, SWEEP_SHUTDOWN_WAIT_MS))]);
+        let timeoutHandle: NodeJS.Timeout | undefined;
+        await Promise.race([
+          activeSweep.finally(() => {
+            if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+          }),
+          new Promise<void>((resolve) => {
+            timeoutHandle = setTimeout(resolve, SWEEP_SHUTDOWN_WAIT_MS);
+          }),
+        ]);
       }
-      await stopCdcListener();
       await closeDatabaseConnection();
       await new Promise<void>((resolve) => healthServer.close(() => resolve()));
       // Flush pending Sentry spans/events so the last sweep tick's
