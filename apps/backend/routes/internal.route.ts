@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { eq, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, rotation, library, truncate } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
-import { fireAndForgetMetadataForRow } from '../services/metadata/index.js';
 import { mapProdEntryType, isMessageEntryType } from '../utils/flowsheet-transform.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
@@ -148,8 +147,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
         .onConflictDoNothing()
         .returning({ id: flowsheet.id });
 
-      let upsertedRow = inserted[0];
-      const created = !!upsertedRow;
+      const created = !!inserted[0];
 
       if (!created) {
         // Conflict path: refresh the mutable subset of fields on the row
@@ -157,7 +155,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
         // UPDATE set-list — show_id / play_order / segue / add_time stay
         // anchored to the first INSERT's values, mutable metadata-ish
         // fields move with the latest webhook payload.
-        const updated = await db
+        await db
           .update(flowsheet)
           .set({
             artist_name: artistName,
@@ -168,26 +166,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
             request_flag: !!entry.requestFlag,
             entry_type: entryType,
           })
-          .where(eq(flowsheet.legacy_entry_id, entry.id))
-          .returning({ id: flowsheet.id });
-        upsertedRow = updated[0];
-      }
-
-      // Trigger LML metadata enrichment for tracks. Fire-and-forget: errors
-      // are caught inside fireAndForgetMetadataForRow and reported to Sentry,
-      // never propagated. Only fires on the *fresh INSERT* branch so benign
-      // tubafrenzy retries don't trigger LML re-fetch + 10-column rewrite +
-      // CDC/index churn on every duplicate webhook delivery. The historical
-      // drain at jobs/flowsheet-metadata-backfill/ is the safety net for
-      // rows whose first INSERT enrichment returned null.
-      if (created && upsertedRow && entryType === 'track' && artistName) {
-        fireAndForgetMetadataForRow({
-          flowsheetId: upsertedRow.id,
-          albumId: albumId ?? undefined,
-          artistName,
-          albumTitle,
-          trackTitle,
-        });
+          .where(eq(flowsheet.legacy_entry_id, entry.id));
       }
     }
 

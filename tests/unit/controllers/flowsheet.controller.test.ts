@@ -38,13 +38,6 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   leaveShow: mockServiceLeaveShow,
 }));
 
-const mockFetchMetadata = jest.fn<() => Promise<void>>();
-const mockFireAndForgetMetadataForRow = jest.fn();
-jest.mock('../../../apps/backend/services/metadata/index', () => ({
-  fetchMetadata: mockFetchMetadata,
-  fireAndForgetMetadataForRow: mockFireAndForgetMetadataForRow,
-}));
-
 import {
   getEntries,
   getLatest,
@@ -416,48 +409,6 @@ describe('flowsheet.controller', () => {
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
-    // The Sentry/error path is owned by enrichment.service.ts and is
-    // covered in tests/unit/services/metadata.enrichment.test.ts. Here we
-    // verify only that the controller delegates to it with the right args.
-
-    it('delegates metadata enrichment with artistId from album lookup when album_id is provided', async () => {
-      const albumInfo = { artist_name: 'Autechre', album_title: 'Confield', record_label: 'Warp', artist_id: 5 };
-      mockGetAlbumFromDB.mockResolvedValue(albumInfo);
-      const completedEntry = {
-        id: 1,
-        show_id: activeShow.id,
-        artist_name: 'Autechre',
-        album_title: 'Confield',
-        track_title: 'VI Scose Poise',
-        album_id: 10,
-        rotation_id: null,
-        play_order: 1,
-        add_time: new Date(),
-      };
-      mockAddTrack.mockResolvedValue(completedEntry);
-
-      const req = createMockBodyReq({
-        artist_name: 'Autechre',
-        album_title: 'Confield',
-        track_title: 'VI Scose Poise',
-        record_label: 'Warp',
-        album_id: 10,
-      });
-      const res = createMockRes();
-
-      await addEntry(req as Request, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(201);
-      expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
-        flowsheetId: 1,
-        artistName: 'Autechre',
-        albumId: 10,
-        artistId: 5,
-        albumTitle: 'Confield',
-        trackTitle: 'VI Scose Poise',
-      });
-    });
-
     it('falls through to free-form path when album_id is explicitly null (BS#933)', async () => {
       // BS#689 made the rotation dropdown LEFT JOIN library so unlinked
       // rotation rows (album_id IS NULL) become selectable; their dropdown
@@ -511,42 +462,6 @@ describe('flowsheet.controller', () => {
       );
     });
 
-    it('delegates metadata enrichment without artistId for free-form inserts (no album_id)', async () => {
-      const completedEntry = {
-        id: 2,
-        show_id: activeShow.id,
-        artist_name: 'Juana Molina',
-        album_title: 'DOGA',
-        track_title: 'la paradoja',
-        record_label: 'Sonamos',
-        album_id: null,
-        rotation_id: null,
-        play_order: 2,
-        add_time: new Date(),
-      };
-      mockAddTrack.mockResolvedValue(completedEntry);
-
-      const req = createMockBodyReq({
-        artist_name: 'Juana Molina',
-        album_title: 'DOGA',
-        track_title: 'la paradoja',
-        record_label: 'Sonamos',
-      });
-      const res = createMockRes();
-
-      await addEntry(req as Request, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(201);
-      expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
-        flowsheetId: 2,
-        artistName: 'Juana Molina',
-        albumId: undefined,
-        artistId: undefined,
-        albumTitle: 'DOGA',
-        trackTitle: 'la paradoja',
-      });
-    });
-
     it('passes segue field through for library-linked tracks (album_id provided)', async () => {
       const albumInfo = {
         artist_name: 'Stereolab',
@@ -568,7 +483,6 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = createMockBodyReq({
         track_title: 'Crispy Duck',
@@ -610,7 +524,6 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = createMockBodyReq({
         track_title: 'Metal Heart',
@@ -757,7 +670,6 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = createMockBodyReq(trackBody);
       const res = createMockRes();
@@ -953,7 +865,6 @@ describe('flowsheet.controller', () => {
       // No album_id in the body — that's the discriminator that picks this
       // branch over the (safe) album_id branch above.
       mockAddTrack.mockResolvedValue({ id: 1, show_id: activeShow.id });
-      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = {
         body: {
