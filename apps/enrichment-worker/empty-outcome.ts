@@ -9,11 +9,10 @@
  * The 2026-05-19 data pull on BS#692 quantified the gap at ~50–500× undercount
  * against the actual prod degradation rate.
  *
- * This module exports a pure predicate + cause classifier so the worker can
- * fire a structured `Sentry.captureMessage('enrichment-empty-outcome', ...)`
- * on every empty outcome — caught throws AND finalized rows that landed
- * user-visibly blank — with a stable fingerprint that survives release tag
- * changes.
+ * This module exports a pure predicate + cause classifier. The handler in
+ * handler.ts uses both to decide whether to fire a structured
+ * `Sentry.captureMessage('enrichment-empty-outcome', ...)` on an empty
+ * outcome, with a stable fingerprint that survives release tag changes.
  *
  * "Empty outcome" is defined against the LML response, not the post-write
  * row state: the worker's write path always synthesizes fallback search URLs
@@ -21,6 +20,15 @@
  * columns IS NULL" predicate would never trigger after consumer writes. The
  * user-facing definition that matters is "no Discogs-derived artwork URL" —
  * that's what shows up as a blank cover tile on iOS / dj-site.
+ *
+ * Volume-control note (BS#1311): the call-site captureMessage in handler.ts
+ * fires only on `lml_degraded` outcomes this worker actually wrote. The
+ * `lml_no_match` cause is by-design Discogs miss (not a degradation) and is
+ * suppressed at the call site; `lml_timeout` lives on the catch arm and was
+ * dropped entirely (captureException there is the source of truth). The
+ * classifier here still returns `lml_no_match` so dashboard aggregation off
+ * the span attribute can split the classes; suppression is the caller's
+ * decision, not this module's.
  */
 
 import type { LookupResponse } from '@wxyc/lml-client';
