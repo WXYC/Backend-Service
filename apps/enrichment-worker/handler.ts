@@ -38,6 +38,7 @@ import type { CdcEvent } from '@wxyc/database';
 
 import { claimRowForEnrichment } from './claim.js';
 import { filterForEnrichment, type EnrichmentCandidate } from './cdc-subscriber.js';
+import { EMPTY_OUTCOME_FINGERPRINT, classifyEmptyCause, isEmptyOutcome } from './empty-outcome.js';
 import { finalizeRow, type FinalizeOutcome } from './enrich.js';
 
 /**
@@ -87,6 +88,7 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
         }
 
         let outcome: FinalizeOutcome;
+        let emptyCause: ReturnType<typeof classifyEmptyCause> | null = null;
         try {
           const response = await lookupMetadata(
             candidate.artist_name,
@@ -95,6 +97,13 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
             { budgetMs: ENRICHMENT_LML_BUDGET_MS, caller: 'enrichment-worker' }
           );
           outcome = await finalizeRow(candidate, response);
+          // G7 (BS#969): defer the captureMessage until after the
+          // span.setAttribute below, but compute the classification while the
+          // response is still in scope. `null` means the response was a real
+          // user-visible match; non-null means we need to fire.
+          if (isEmptyOutcome(response)) {
+            emptyCause = classifyEmptyCause(response);
+          }
         } catch (err) {
           // Row stays `enriching`. C6 stranded-claim sweep recovers it past
           // `enriching_since + 60s`. We do NOT revert to `pending` here —
@@ -106,6 +115,24 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
             tags: { component: 'enrichment-worker', step: 'lml_lookup' },
             extra: { flowsheet_id: candidate.id },
           });
+          // G7 (BS#969): also fold the throw into the aggregated
+          // enrichment-empty-outcome issue with cause=lml_timeout so the
+          // post-fix baseline + alert threshold see the throws alongside the
+          // degraded-success class. Sibling captureException above stays as
+          // the source-of-truth for the stack trace.
+          Sentry.captureMessage('enrichment-empty-outcome', {
+            level: 'warning',
+            tags: {
+              subsystem: 'metadata',
+              cause: 'lml_timeout',
+              transaction: 'enrichment.consumer.tick',
+            },
+            extra: {
+              flowsheet_id: candidate.id,
+              error_message: (err as Error).message,
+            },
+            fingerprint: EMPTY_OUTCOME_FINGERPRINT,
+          });
           console.error('[enrichment-worker] lml error; row left in enriching state', {
             id: candidate.id,
             artist: candidate.artist_name,
@@ -115,6 +142,28 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
         }
 
         span.setAttribute('enrichment.outcome', outcome);
+
+        // G7 (BS#969): emit the aggregated empty-outcome signal for rows that
+        // finalized with no user-visible artwork URL (the LML#408
+        // _resolve_fallback_artwork class, plus explicit no-match verdicts).
+        // Stable fingerprint so cause-tagged aggregation persists across
+        // releases.
+        if (emptyCause !== null) {
+          Sentry.captureMessage('enrichment-empty-outcome', {
+            level: 'warning',
+            tags: {
+              subsystem: 'metadata',
+              cause: emptyCause,
+              transaction: 'enrichment.consumer.tick',
+              outcome,
+            },
+            extra: {
+              flowsheet_id: candidate.id,
+              artist: candidate.artist_name,
+            },
+            fingerprint: EMPTY_OUTCOME_FINGERPRINT,
+          });
+        }
       } catch (err) {
         // DB error during claim or finalize. Same defensive posture: capture
         // + log, row state is whatever PG ended up with. C6 sweep handles
