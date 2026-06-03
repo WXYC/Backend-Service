@@ -5,9 +5,6 @@ import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/datab
 // play_order is computed by the service layer, not provided by controllers
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
-import { fireAndForgetMetadataForRow } from '../services/metadata/index.js';
-import { runLmlLinkage } from '../services/flowsheet-linkage.service.js';
-import { reportLinkageError } from '../services/linkage-metrics.service.js';
 import WxycError from '../utils/error.js';
 
 export type QueryParams = {
@@ -53,64 +50,6 @@ export interface IFSEntry extends Omit<
   rotation_bin: string | null;
   on_streaming: boolean | null;
   metadata: IFSEntryMetadata;
-}
-
-/**
- * Fire-and-forget: fetch metadata from LML and update the flowsheet row.
- *
- * Called after a track is inserted. Does not block the HTTP response.
- */
-/**
- * Fire-and-forget: resolve a canonical entity via LML and link the row to a
- * library album when there's a single high-confidence match (B-2.1). Only
- * fires for free-form inserts (no album_id) — bin-picks already carry an
- * album_id from the catalog click. Logs every non-link outcome at info level
- * so the operator can spot pattern shifts without a metric pipeline.
- */
-function fireAndForgetLinkage(completedEntry: FSEntry): void {
-  if (completedEntry.album_id !== null) return;
-  if (!completedEntry.artist_name) return;
-
-  runLmlLinkage({
-    flowsheetId: completedEntry.id,
-    artistName: completedEntry.artist_name,
-    albumTitle: completedEntry.album_title,
-  })
-    .then((outcome) => {
-      if (outcome.status === 'linked') return;
-      console.info(
-        `[Flowsheet] LML linkage outcome=${outcome.status} flowsheet_id=${completedEntry.id} artist="${completedEntry.artist_name}" album="${completedEntry.album_title ?? ''}"`
-      );
-    })
-    .catch((err) => {
-      // Safety net: runLmlLinkage handles LML errors itself (counter +
-      // Sentry tag), so this only fires on unexpected bugs in the linkage
-      // path (e.g., a DB write throwing). Route through the same surface so
-      // the operator sees one consistent `subsystem='lml-linkage'` filter.
-      console.error('[Flowsheet] LML linkage failed:', err);
-      reportLinkageError(
-        err,
-        {
-          flowsheetId: completedEntry.id,
-          artistName: completedEntry.artist_name,
-          albumTitle: completedEntry.album_title,
-        },
-        { path: 'forward' }
-      );
-    });
-}
-
-function fireAndForgetMetadata(completedEntry: FSEntry, artistId?: number): void {
-  if (!completedEntry.artist_name) return;
-
-  fireAndForgetMetadataForRow({
-    flowsheetId: completedEntry.id,
-    artistName: completedEntry.artist_name,
-    albumId: completedEntry.album_id ?? undefined,
-    artistId,
-    albumTitle: completedEntry.album_title ?? undefined,
-    trackTitle: completedEntry.track_title ?? undefined,
-  });
 }
 
 const MAX_ITEMS = 200;
@@ -273,7 +212,6 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    fireAndForgetMetadata(completedEntry, albumInfo.artist_id ?? undefined);
     res.status(201).json(completedEntry);
   } else if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
     throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
@@ -303,8 +241,6 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    fireAndForgetMetadata(completedEntry);
-    fireAndForgetLinkage(completedEntry);
     res.status(201).json(completedEntry);
   }
 };

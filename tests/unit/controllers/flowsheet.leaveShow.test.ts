@@ -6,11 +6,6 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLatestShow: mockGetLatestShow,
 }));
 
-jest.mock('../../../apps/backend/services/metadata/index', () => ({
-  fetchMetadata: jest.fn(),
-  fireAndForgetMetadataForRow: jest.fn(),
-}));
-
 jest.mock('async-mutex', () => ({
   Mutex: jest.fn().mockImplementation(() => ({
     acquire: jest.fn().mockResolvedValue(jest.fn()),
