@@ -473,12 +473,39 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
   return response[0];
 };
 
-export const startShow = async (dj_id: string, show_name?: string, specialty_id?: number): Promise<Show> => {
+/**
+ * Maximum width of `shows.legacy_dj_name` (varchar(128) — see schema.ts).
+ * The override field as a whole is capped at 255 (matching `auth_user.dj_name`)
+ * at the controller boundary; the narrower legacy column gets a defensive
+ * truncate to avoid a 22001 string-too-long error when a caller sends 129-255
+ * chars. Truncation matches the flowsheet-etl pattern in jobs/flowsheet-etl.
+ */
+const SHOWS_LEGACY_DJ_NAME_MAX_LENGTH = 128;
+
+export const startShow = async (
+  dj_id: string,
+  show_name?: string,
+  specialty_id?: number,
+  dj_name_override?: string
+): Promise<Show> => {
   const dj_info = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
   if (!dj_info) {
     throw new WxycError(`DJ with id '${dj_id}' not found`, 404);
   }
+
+  // BS#1295: per-show display-name override. The controller already trimmed
+  // and length-checked; re-trim here as a defense-in-depth (the service is
+  // also called directly from tests / future call sites that may bypass the
+  // controller). Empty / whitespace-only override falls through to the
+  // resolveDjDisplayName path — preserving today's behavior.
+  const trimmed_override = dj_name_override?.trim() ?? '';
+  const effective_override = trimmed_override.length > 0 ? trimmed_override : null;
+
+  // Truncate to the narrower shows.legacy_dj_name column width. The
+  // marker text and flowsheet.dj_name keep the full string; only the
+  // legacy mirror column is clipped.
+  const legacy_dj_name = effective_override ? effective_override.slice(0, SHOWS_LEGACY_DJ_NAME_MAX_LENGTH) : undefined;
 
   const new_show = await db
     .insert(shows)
@@ -486,6 +513,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
       primary_dj_id: dj_id,
       specialty_id: specialty_id,
       show_name: show_name,
+      legacy_dj_name: legacy_dj_name,
     })
     .returning();
 
@@ -497,7 +525,11 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
     })
     .returning();
 
-  const display_dj_name = resolveDjDisplayName(dj_info.djName ?? null, dj_info.name ?? null);
+  // Override (when present) wins outright over the helper-resolved name.
+  // When the override is absent, fall back to the centralized resolution
+  // helper that handles `auth_user.dj_name`, the "Anonymous" literal, and
+  // the `auth_user.name` fallback (WXYC/Backend-Service#1286, epic #1288).
+  const display_dj_name = effective_override ?? resolveDjDisplayName(dj_info.djName ?? null, dj_info.name ?? null);
   const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
   // Asymmetric fallback (epic #1288): when the DJ name is unresolvable we
   // still want a marker row so consumers know the show began. The wording

@@ -381,7 +381,25 @@ export type JoinRequestBody = {
   dj_id: string;
   show_name?: string;
   specialty_id?: number;
+  /**
+   * Optional per-show display-name override (BS#1295, epic #1288). When
+   * non-empty after trim, takes priority over `auth_user.dj_name` for the
+   * show_start marker, `flowsheet.dj_name`, and `shows.legacy_dj_name`.
+   * Capped at 255 chars to match the `auth_user.dj_name` column. Only
+   * honored on the new-show path; ignored on the co-host /join path
+   * (`addDJToShow`) because there's no per-co-host override surface today.
+   */
+  dj_name_override?: string;
 };
+
+/**
+ * Maximum length of `dj_name_override`. Matches the `auth_user.dj_name`
+ * varchar(255) ceiling — the override is semantically a per-show stand-in
+ * for that value. `shows.legacy_dj_name` is narrower (varchar(128)); the
+ * service-side write truncates rather than rejecting so the override stays
+ * a single soft cap from the caller's point of view.
+ */
+const DJ_NAME_OVERRIDE_MAX_LENGTH = 255;
 
 //POST
 export const joinShow: RequestHandler = async (req: Request<object, object, JoinRequestBody>, res) => {
@@ -398,15 +416,38 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     throw new WxycError('Forbidden: dj_id must match the authenticated user', 403);
   }
 
+  // Normalize dj_name_override (BS#1295): trim, treat empty / whitespace-only
+  // as absent, reject > 255 chars at the controller boundary. Length is
+  // measured against the trimmed value so trailing whitespace can't be used
+  // to game the limit downward.
+  const raw_override = req.body.dj_name_override;
+  let dj_name_override: string | undefined;
+  if (typeof raw_override === 'string') {
+    const trimmed = raw_override.trim();
+    if (trimmed.length === 0) {
+      dj_name_override = undefined;
+    } else if (trimmed.length > DJ_NAME_OVERRIDE_MAX_LENGTH) {
+      throw new WxycError(
+        `Bad Request: dj_name_override must be ${DJ_NAME_OVERRIDE_MAX_LENGTH} characters or fewer`,
+        400
+      );
+    } else {
+      dj_name_override = trimmed;
+    }
+  }
+
   if (current_show?.end_time !== null) {
     const show_session: Show = await flowsheet_service.startShow(
       req.body.dj_id,
       req.body.show_name,
-      req.body.specialty_id
+      req.body.specialty_id,
+      dj_name_override
     );
 
     res.status(200).json(show_session);
   } else {
+    // Override is only consumed on the new-show path. Co-host join uses the
+    // auth_user.dj_name resolution unchanged.
     const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
     res.status(200).json(show_dj_instance);
   }
