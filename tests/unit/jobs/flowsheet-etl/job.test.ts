@@ -156,6 +156,46 @@ describe('runIncremental', () => {
     expect(result.entriesUpdated).toBe(1);
   });
 
+  it('persists verbatim ARTIST_NAME for show_start markers (regression #1287)', async () => {
+    const marker = 'START OF SHOW: DJ Aubrey Hearst SIGNED ON at 7:43 PM (6/2/26)';
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([
+      makeEntry({ id: 2003, entryTypeCode: 9, artistName: marker }), // 9 = START_OF_SHOW
+    ]);
+
+    await runIncremental();
+
+    const insertCalls = chain.values.mock.calls;
+    const showStartInsert = insertCalls.find(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).legacy_entry_id === 2003
+    );
+    expect(showStartInsert).toBeDefined();
+    const values = showStartInsert![0] as Record<string, unknown>;
+    expect(values.entry_type).toBe('show_start');
+    expect(values.artist_name).toBe(marker);
+    expect(values.message).toBeNull();
+  });
+
+  it('persists verbatim ARTIST_NAME for show_end markers (regression #1287)', async () => {
+    const marker = 'END OF SHOW: Aubrey Hearst SIGNED OFF at 7:43 PM (6/2/26)';
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([
+      makeEntry({ id: 2004, entryTypeCode: 10, artistName: marker }), // 10 = END_OF_SHOW
+    ]);
+
+    await runIncremental();
+
+    const insertCalls = chain.values.mock.calls;
+    const showEndInsert = insertCalls.find(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).legacy_entry_id === 2004
+    );
+    expect(showEndInsert).toBeDefined();
+    const values = showEndInsert![0] as Record<string, unknown>;
+    expect(values.entry_type).toBe('show_end');
+    expect(values.artist_name).toBe(marker);
+    expect(values.message).toBeNull();
+  });
+
   // Shape check only — column coverage and PG semantics are pinned in
   // tests/integration/flowsheet-etl-setwhere.spec.js.
   it('passes setWhere on every onConflictDoUpdate call to skip no-op UPDATEs', async () => {

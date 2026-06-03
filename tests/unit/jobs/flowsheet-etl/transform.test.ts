@@ -3,7 +3,6 @@ import {
   mapProdEntryType,
   epochMsToDate,
   resolveEntryTimestamp,
-  parseShowEntryDJName,
   parseMySQLDatetime,
   truncate,
   transformShow,
@@ -104,32 +103,6 @@ describe('flowsheet-etl transform', () => {
 
     it('returns null when all timestamps are null', () => {
       expect(resolveEntryTimestamp(null, null, null)).toBeNull();
-    });
-  });
-
-  describe('parseShowEntryDJName', () => {
-    it('extracts DJ name from START OF SHOW message', () => {
-      expect(parseShowEntryDJName('START OF SHOW: DJ Bluejay SIGNED ON at 12:03 PM (4/4/26)')).toBe('DJ Bluejay');
-    });
-
-    it('extracts DJ name from END OF SHOW message', () => {
-      expect(parseShowEntryDJName('END OF SHOW: dj wilde SIGNED OFF at 12:03 PM (4/4/26)')).toBe('dj wilde');
-    });
-
-    it('handles anonymous DJ (just "DJ")', () => {
-      expect(parseShowEntryDJName('END OF SHOW: DJ SIGNED OFF at 11:54 PM (4/3/26)')).toBe('DJ');
-    });
-
-    it('handles multi-word DJ names', () => {
-      expect(parseShowEntryDJName('START OF SHOW: Xx_CoolSocc3r101_xX SIGNED ON at 9:02 PM (4/1/26)')).toBe(
-        'Xx_CoolSocc3r101_xX'
-      );
-    });
-
-    it('returns null for non-show entries', () => {
-      expect(parseShowEntryDJName('TALKSET')).toBeNull();
-      expect(parseShowEntryDJName('--- 1:00 PM BREAKPOINT ---')).toBeNull();
-      expect(parseShowEntryDJName('Autechre')).toBeNull();
     });
   });
 
