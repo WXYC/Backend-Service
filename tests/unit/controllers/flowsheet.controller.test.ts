@@ -1045,7 +1045,8 @@ describe('flowsheet.controller', () => {
 
       await joinShow(req, res as Response, mockNext);
 
-      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', 'My Show', 7);
+      // 4th arg is dj_name_override (BS#1295) — undefined when absent on the body.
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', 'My Show', 7, undefined);
       expect(res.status).toHaveBeenCalledWith(200);
     });
 
@@ -1075,6 +1076,103 @@ describe('flowsheet.controller', () => {
 
       await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
       expect(mockStartShow).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('joinShow dj_name_override (BS#1295)', () => {
+    it('forwards a trimmed dj_name_override to startShow when starting a new show', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', show_name: 'My Show', specialty_id: 7, dj_name_override: 'Aubrey Hearst' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', 'My Show', 7, 'Aubrey Hearst');
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('passes undefined to startShow when dj_name_override is an empty string', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: '' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', undefined, undefined, undefined);
+    });
+
+    it('passes undefined to startShow when dj_name_override is whitespace-only', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: '   ' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', undefined, undefined, undefined);
+    });
+
+    it('rejects with 400 when the trimmed dj_name_override exceeds 255 chars', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      const overflow = 'a'.repeat(256);
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: overflow },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      expect(mockStartShow).not.toHaveBeenCalled();
+    });
+
+    it('accepts exactly 255 chars at the boundary', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+      const exactly255 = 'a'.repeat(255);
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: exactly255 },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', undefined, undefined, exactly255);
+    });
+
+    it('does not forward dj_name_override when joining an existing show (co-host path)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null });
+      mockAddDJToShow.mockResolvedValue({ id: 99, dj_id: 'caller-dj' });
+
+      // Even if a client sends dj_name_override on a co-host /join, the
+      // service contract treats it as ignored — there's no per-co-host
+      // override path. Caller wired startShow only.
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: 'Aubrey Hearst' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).not.toHaveBeenCalled();
+      expect(mockAddDJToShow).toHaveBeenCalled();
     });
   });
 

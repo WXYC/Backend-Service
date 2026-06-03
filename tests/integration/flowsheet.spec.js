@@ -42,6 +42,100 @@ describe('Start Show', () => {
 });
 
 /*
+ * Start Show with dj_name_override (BS#1295 / epic #1288).
+ *
+ * Verifies the new per-show override path lands the supplied name in:
+ *   - the show_start marker `flowsheet.message` body
+ *   - the `flowsheet.dj_name` column
+ *   - the `shows.legacy_dj_name` column
+ * regardless of the caller's `auth_user.dj_name`. Also exercises the
+ * length-cap rejection and the empty-string / whitespace fallback.
+ */
+describe('Start Show with dj_name_override', () => {
+  let sql;
+
+  beforeAll(() => {
+    sql = makeSql();
+  });
+
+  afterAll(async () => {
+    if (sql) await sql.end({ timeout: 5 });
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('override populates flowsheet marker, flowsheet.dj_name, and shows.legacy_dj_name', async () => {
+    const overrideName = 'Aubrey Hearst';
+    const res = await request
+      .post('/flowsheet/join')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+        dj_name_override: overrideName,
+      })
+      .expect(200);
+
+    expect(res.body.id).toBeDefined();
+    const showId = res.body.id;
+
+    // Pull the show row and the show_start flowsheet entry from the DB.
+    const showRows = await sql`
+      SELECT legacy_dj_name FROM ${sql(SCHEMA)}.shows WHERE id = ${showId}
+    `;
+    expect(showRows.length).toBe(1);
+    expect(showRows[0].legacy_dj_name).toEqual(overrideName);
+
+    const markerRows = await sql`
+      SELECT dj_name, message
+        FROM ${sql(SCHEMA)}.flowsheet
+       WHERE show_id = ${showId} AND entry_type = 'show_start'
+       LIMIT 1
+    `;
+    expect(markerRows.length).toBe(1);
+    expect(markerRows[0].dj_name).toEqual(overrideName);
+    expect(markerRows[0].message).toMatch(new RegExp(`^Start of Show: ${overrideName} joined the set at `));
+    expect(markerRows[0].message).not.toMatch(/\bDJ\b/); // locked decision: no "DJ" prefix
+  });
+
+  test('whitespace-only override is ignored — no regression vs baseline', async () => {
+    const res = await request
+      .post('/flowsheet/join')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+        dj_name_override: '   ',
+      })
+      .expect(200);
+
+    const showId = res.body.id;
+
+    const showRows = await sql`
+      SELECT legacy_dj_name FROM ${sql(SCHEMA)}.shows WHERE id = ${showId}
+    `;
+    expect(showRows.length).toBe(1);
+    expect(showRows[0].legacy_dj_name).toBeNull();
+  });
+
+  test('override > 255 chars is rejected with 400', async () => {
+    const overflow = 'a'.repeat(256);
+    const res = await request
+      .post('/flowsheet/join')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+        dj_name_override: overflow,
+      })
+      .expect(400);
+
+    expect(res.body.message).toBeDefined();
+    // No show was created — exit the afterEach cleanly. The afterEach
+    // fires leave_show, which is a no-op when there's no active show.
+  });
+});
+
+/*
  * Join Show (Secondary dj(s) hits /flowsheet/join)
  */
 describe('Join Show', () => {
