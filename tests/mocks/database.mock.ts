@@ -80,7 +80,10 @@ export const library = {
   canonical_entity_confidence: 'canonical_entity_confidence',
   canonical_entity_resolved_at: 'canonical_entity_resolved_at',
 };
-export const artists = {};
+export const artists = {
+  id: 'id',
+  artist_name: 'artist_name',
+};
 export const genres = {};
 export const format = {};
 export const rotation = {
