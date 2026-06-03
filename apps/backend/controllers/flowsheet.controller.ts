@@ -330,6 +330,11 @@ export type UpdateRequestBody = {
   track_position?: string | null;
   record_label?: string;
   label_id?: number;
+  // First-class FKs the dj-site rotation/library pickers legitimately write
+  // (BS#1270). Not "internal columns"; the BS#1099 allowlist initially
+  // omitted them which silently stripped picker writes.
+  album_id?: number;
+  rotation_id?: number;
   request_flag?: boolean;
   segue?: boolean;
   message?: string;
@@ -351,6 +356,8 @@ function pickUpdateEntryFields(data: UpdateRequestBody): UpdateRequestBody {
   if (data.track_position !== undefined) picked.track_position = data.track_position;
   if (data.record_label !== undefined) picked.record_label = data.record_label;
   if (data.label_id !== undefined) picked.label_id = data.label_id;
+  if (data.album_id !== undefined) picked.album_id = data.album_id;
+  if (data.rotation_id !== undefined) picked.rotation_id = data.rotation_id;
   if (data.request_flag !== undefined) picked.request_flag = data.request_flag;
   if (data.segue !== undefined) picked.segue = data.segue;
   if (data.message !== undefined) picked.message = data.message;
