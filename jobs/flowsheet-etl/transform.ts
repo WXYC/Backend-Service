@@ -133,18 +133,6 @@ export const resolveEntryTimestamp = (
   return epochMsToDate(startTime) ?? epochMsToDate(timeCreated) ?? epochMsToDate(timeLastModified);
 };
 
-/**
- * Extract the DJ name from a START/END OF SHOW message in FLOWSHEET_ENTRY_PROD.
- * These entries store structured text in the ARTIST_NAME column:
- *   "START OF SHOW: DJ Bluejay SIGNED ON at 12:03 PM (4/4/26)"
- *   "END OF SHOW: dj wilde SIGNED OFF at 12:03 PM (4/4/26)"
- * Returns the DJ name or null if the text doesn't match the pattern.
- */
-export const parseShowEntryDJName = (artistName: string): string | null => {
-  const match = artistName.match(/^(?:START|END) OF SHOW: (.+?) SIGNED (?:ON|OFF)/);
-  return match ? match[1] : null;
-};
-
 // truncate is re-exported from @wxyc/database above
 
 export type TransformedShow = {

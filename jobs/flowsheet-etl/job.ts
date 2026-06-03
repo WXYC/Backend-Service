@@ -29,7 +29,7 @@ import {
   truncate,
 } from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
-import { mapProdEntryType, resolveEntryTimestamp, parseShowEntryDJName } from './transform.js';
+import { mapProdEntryType, resolveEntryTimestamp } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
@@ -113,16 +113,24 @@ const isMessageEntryType = (entryType: string): boolean =>
   entryType === 'breakpoint' || entryType === 'talkset' || entryType === 'message';
 
 /**
- * Resolve the artist_name for a flowsheet entry. For show_start/show_end entries,
- * parse the DJ name from the structured ARTIST_NAME text. For message-bearing types
- * (breakpoint, talkset, message), the text belongs in the message field instead.
+ * Resolve the artist_name for a flowsheet entry.
+ *
+ * For message-bearing types (breakpoint, talkset, message), the text belongs in
+ * the message field instead — return null here.
+ *
+ * For show_start / show_end markers, the ARTIST_NAME column in tubafrenzy holds
+ * the full marker text (e.g. "START OF SHOW: DJ Aubrey Hearst SIGNED ON at
+ * 7:43 PM (6/2/26)"). Preserve it verbatim — V1 surfaces (dj-site flowsheet,
+ * wxyc.info) render `artist_name` directly, and reducing it to the bare DJ
+ * name strips information the writer put there on purpose. The ETL stays
+ * shape-agnostic about marker templates; whatever TF holds is what BS persists,
+ * truncated to the 128-char column limit. See #1287 and epic #1288.
+ *
+ * Exported for unit testing.
  */
-const resolveArtistName = (rawArtistName: string | null, entryType: string): string | null => {
+export const resolveArtistName = (rawArtistName: string | null, entryType: string): string | null => {
   if (!rawArtistName) return null;
   if (isMessageEntryType(entryType)) return null;
-  if (entryType === 'show_start' || entryType === 'show_end') {
-    return truncate(parseShowEntryDJName(rawArtistName), 128) ?? truncate(rawArtistName, 128);
-  }
   return truncate(rawArtistName, 128);
 };
 
