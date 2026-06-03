@@ -98,15 +98,36 @@ export class LmlLookupCoordinator {
         return existing.promise;
       }
 
-      const promise = this.fetchUncached(artist, album, song, options).finally(() => {
-        this.inflight.delete(key);
-      });
-      this.inflight.set(key, { promise });
+      // Populate cache BEFORE releasing the in-flight entry. The naive
+      // `.finally(() => inflight.delete(key))` runs *before* the outer
+      // `await promise` resumes to set the cache, opening a microtask
+      // gap where a same-key caller arriving in the gap sees neither
+      // cache nor inflight and issues a redundant wire call. Sequencing
+      // cache.set → inflight.delete inside the settle chain itself
+      // closes the gap — an arriving caller always sees the cache hit
+      // by the next event-loop turn. Rejections skip the success arm
+      // and propagate through `.finally`; the in-flight entry is then
+      // cleared without caching the error, so the next request retries.
+      //
+      // **Read-only contract**: the cached `LookupResponse` is returned
+      // by reference to every coalesced + cache-hit caller for up to 5
+      // min. Callsites must NOT mutate the response or any nested field
+      // (`results`, `artwork`, etc.) — doing so poisons subsequent reads.
+      // All current callsites read-only; a deep freeze would be safer
+      // but costs O(n) per cache-set on every response. Tracked as a
+      // follow-up if mutation footguns appear.
+      const settle = this.fetchUncached(artist, album, song, options)
+        .then((result) => {
+          this.cache.set(key, result);
+          return result;
+        })
+        .finally(() => {
+          this.inflight.delete(key);
+        });
+      this.inflight.set(key, { promise: settle });
       this.setSpanAttrs(span, { hit: 'miss', caller });
 
-      const result = await promise;
-      this.cache.set(key, result);
-      return result;
+      return settle;
     });
   }
 
