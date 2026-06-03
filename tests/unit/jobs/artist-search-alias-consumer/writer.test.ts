@@ -195,6 +195,41 @@ describe('writeArtistVariants', () => {
     expect(allBinds).not.toContain('\t\n  ');
   });
 
+  it('coerces missing nullable fields (undefined) to SQL null — BS#1300 sparse-JSON regression', async () => {
+    // LML emits sparse JSON for `discogs_name_variation` rows: the
+    // upstream Discogs payload lacks the relationship columns
+    // (`related_artist_id`, `external_subject_id`, `external_object_id`)
+    // and the composer doesn't materialise them. `JSON.parse` of a
+    // missing key produces `undefined`, not `null`. Drizzle's `sql` tag
+    // interpolates `undefined` as an empty positional bind, producing
+    // `VALUES (…, , …)` which Postgres rejects with a syntax error and
+    // rolls the per-artist transaction back. Cost: 899 writer_errors
+    // (~20%) on the 2026-06-03 first prod run.
+    //
+    // The writer must coerce every nullable interpolation through
+    // `?? null` so the bind arrives at postgres-js as a JS `null`,
+    // which binds to SQL NULL.
+    const sparseVariant = {
+      source: 'discogs_name_variation',
+      variant: 'Sonic Yoof',
+      method: 'name_variation',
+      confidence: 0.95,
+      // related_artist_id / external_subject_id / external_object_id / active
+      // are absent — `v.x` is `undefined` at runtime.
+    } as unknown as ArtistSearchAliasVariant;
+
+    await writeArtistVariants(42, [sparseVariant], ['discogs_name_variation']);
+
+    const allBinds = sqlTagCalls.flatMap((c) => c.values);
+    // No `undefined` binds anywhere — every nullable slot must coerce
+    // through `?? null` before reaching the sql tag.
+    expect(allBinds).not.toContain(undefined);
+    // The coerced nullable slots show up as `null` binds (one per
+    // missing column).
+    const nullBindCount = allBinds.filter((v) => v === null).length;
+    expect(nullBindCount).toBeGreaterThanOrEqual(4);
+  });
+
   it('falls back to DELETE-only when every variant is blank-after-trim (treats filtered-out as variants=[])', async () => {
     // If the only variants supplied are all blank, the writer should
     // behave as if variants=[] was passed: scoped DELETE, no INSERT.
