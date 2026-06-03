@@ -22,6 +22,11 @@ jest.mock('@wxyc/lml-client', () => ({
   envInt: (_name: string, fallback: number) => fallback,
 }));
 
+// Backend code paths now route through the LmlLookupCoordinator (BS#885).
+jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
+  lmlLookupCoordinator: { lookup: mockLookupMetadata },
+}));
+
 import { DiscogsProvider } from '../../../apps/backend/services/artwork/providers/discogs';
 
 describe('artwork DiscogsProvider', () => {

@@ -14,7 +14,6 @@ import * as Sentry from '@sentry/node';
 import { getArtworkFinder } from '../services/artwork/finder.js';
 import { classify as classifyNSFW } from '../services/artwork/nsfw.js';
 import {
-  lookupMetadata,
   getRelease,
   getArtistDetails,
   resolveEntity as lmlResolveEntity,
@@ -23,6 +22,7 @@ import {
   LmlClientError,
 } from '@wxyc/lml-client';
 import type { DiscogsMatchResult, DiscogsReleaseMetadata, DiscogsTrackItem, LookupResponse } from '@wxyc/lml-client';
+import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
 import { filterSpacerGif, isSyntheticArtwork } from '../services/metadata/metadata.service.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
@@ -34,28 +34,6 @@ import WxycError from '../utils/error.js';
 // and the flowsheet-metadata-backfill job all produce identical URLs for
 // the same inputs (BS#889).
 const searchUrlProvider = new SearchUrlProvider();
-
-/**
- * Toggle the single-call /proxy/metadata/album path.
- *
- * When `'true'`, we pass `extended: true` to LML's `/api/v1/lookup` and read
- * the tracklist/genres/styles/label/full_release_date/discogs_artist_id off
- * the lookup response's `artwork` block directly — no follow-up
- * `/api/v1/discogs/release/{id}` call. Available since `@wxyc/shared@1.5.0`
- * + LML#335.
- *
- * Defaults off so the flag can ship before production traffic is cut over.
- * Flip in Railway env (`PROXY_METADATA_SINGLE_LOOKUP=true`) once staging
- * smoke-tests confirm response parity. Matches the env-var pattern used
- * for AUTH_BYPASS / TEST_RATE_LIMITING — there's no centralized
- * feature-flag module in this repo.
- *
- * After the cutover is stable, the flag and the legacy two-call branch get
- * deleted together (separate cleanup PR).
- */
-function singleLookupEnabled(): boolean {
-  return process.env.PROXY_METADATA_SINGLE_LOOKUP === 'true';
-}
 
 /**
  * Budget for the user-visible iOS playlist + dj-site cover-art path. Tight
@@ -231,6 +209,8 @@ function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork
 
   if (artwork.artist_bio) metadata.artistBio = artwork.artist_bio;
   if (artwork.wikipedia_url) metadata.artistWikipediaUrl = artwork.wikipedia_url;
+  if (artwork.artist_image_url) metadata.artistImageUrl = artwork.artist_image_url;
+  if (artwork.profile_tokens) metadata.bioTokens = artwork.profile_tokens;
 
   if (artwork.spotify_url) metadata.spotifyUrl = artwork.spotify_url;
   if (artwork.apple_music_url) metadata.appleMusicUrl = artwork.apple_music_url;
@@ -241,14 +221,12 @@ function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork
 
 /**
  * Populate the release-detail fields (tracklist, genres, styles, label,
- * full release date, discogs artist id, release year). Source-agnostic:
- * works the same on a `DiscogsMatchResult` with `extended=true` (new path)
- * or on a `DiscogsReleaseMetadata` from a separate `getRelease()` call
- * (legacy two-call path).
- *
- * On the extended path the release artwork URL is the same as the lookup
- * artwork URL, so the `prefer release artwork over lookup` logic is a no-op
- * but kept for symmetry with the legacy path.
+ * full release date, discogs artist id, release year) from the
+ * `DiscogsMatchResult.artwork` block — the coordinator forces `extended:
+ * true` on every lookup, so these fields are always present when LML
+ * matches a release. Shape kept generic so the `libraryTracks` path can
+ * reuse it with a `DiscogsReleaseMetadata` from a direct `getRelease()`
+ * call.
  */
 function populateReleaseMetadata(
   metadata: Record<string, unknown>,
@@ -294,46 +272,26 @@ function populateReleaseMetadata(
  * enriched streaming URLs (Spotify, Apple Music, YouTube Music, Bandcamp,
  * SoundCloud), so no direct calls to those APIs are needed.
  *
- * Two code paths, selected by `PROXY_METADATA_SINGLE_LOOKUP`:
- *
- * - **Single-call** (flag on, future default): LML `/api/v1/lookup` with
- *   `extended: true` returns release details inline on the top-1 artwork
- *   block. One round-trip iOS → BS → LML; the LML pipeline runs its release
- *   and artist fetches concurrently server-side. Subsecond p50 target.
- *
- * - **Legacy two-call** (flag off, current default): one lookup followed
- *   by a separate `/api/v1/discogs/release/{id}` for the release details
- *   we want to surface. Two LML round-trips, the second one re-fetching
- *   release data LML already loaded ~100ms earlier during enrichment.
- *
- * Sentry annotates the active span with
- * `proxy.metadata.album.upstream_calls` so the cutover can be graphed by
- * cohort in the trace explorer.
+ * Single-call path: the coordinator forces `extended: true`, so LML returns
+ * release details (tracklist/genres/styles/label/full_release_date/
+ * discogs_artist_id) inline on the top-1 artwork block. One round-trip
+ * iOS → BS → LML; LML runs its release + artist fetches concurrently
+ * server-side.
  */
 export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMetadataQuery> = async (req, res) => {
   const { artistName, releaseTitle, trackTitle } = req.query;
 
   if (!artistName) throw new WxycError('artistName query parameter is required', 400);
 
-  const useSingleLookup = singleLookupEnabled();
   const metadata: Record<string, unknown> = {};
   let upstreamCalls = 0;
 
   let artwork: DiscogsMatchResult | undefined;
   try {
-    let lookupResponse: LookupResponse;
-    if (useSingleLookup) {
-      lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle, {
-        extended: true,
-        budgetMs: PROXY_LML_BUDGET_MS,
-        caller: 'proxy-album-metadata',
-      });
-    } else {
-      lookupResponse = await lookupMetadata(artistName, releaseTitle, trackTitle, {
-        budgetMs: PROXY_LML_BUDGET_MS,
-        caller: 'proxy-album-metadata',
-      });
-    }
+    const lookupResponse: LookupResponse = await lmlLookupCoordinator.lookup(artistName, releaseTitle, trackTitle, {
+      budgetMs: PROXY_LML_BUDGET_MS,
+      caller: 'proxy-album-metadata',
+    });
     upstreamCalls += 1;
     artwork = lookupResponse.results?.[0]?.artwork;
   } catch (searchError) {
@@ -342,30 +300,16 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
 
   if (artwork) {
     populateCommonMetadataFields(metadata, artwork);
-
-    if (useSingleLookup) {
-      // The lookup response already carries the release-detail fields
-      // (`extended: true`); no follow-up call needed.
-      populateReleaseMetadata(metadata, {
-        year: artwork.release_year,
-        genres: artwork.genres,
-        styles: artwork.styles,
-        label: artwork.label,
-        artist_id: artwork.discogs_artist_id,
-        released: artwork.full_release_date,
-        tracklist: artwork.tracklist,
-        artwork_url: artwork.artwork_url,
-      });
-    } else {
-      // Legacy path: fetch enriched release details with a second LML call.
-      try {
-        const release = await getRelease(artwork.release_id);
-        upstreamCalls += 1;
-        populateReleaseMetadata(metadata, release);
-      } catch (releaseError) {
-        console.warn('[ProxyController] Failed to fetch release details from LML:', releaseError);
-      }
-    }
+    populateReleaseMetadata(metadata, {
+      year: artwork.release_year,
+      genres: artwork.genres,
+      styles: artwork.styles,
+      label: artwork.label,
+      artist_id: artwork.discogs_artist_id,
+      released: artwork.full_release_date,
+      tracklist: artwork.tracklist,
+      artwork_url: artwork.artwork_url,
+    });
   }
 
   // Fallback: construct search URLs for services without LML-provided URLs.
@@ -385,13 +329,12 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   if (!metadata.bandcampUrl) metadata.bandcampUrl = fallbackUrls.bandcampUrl;
   if (!metadata.soundcloudUrl) metadata.soundcloudUrl = fallbackUrls.soundcloudUrl;
 
-  // Project the upstream-call count + mode onto the active Sentry span so
-  // we can split p50/p95 by cohort in the trace explorer. Wrap in a
-  // try/except — observability must never break the request path.
+  // Project the upstream-call count onto the active Sentry span so we can
+  // split p50/p95 by cohort in the trace explorer. Wrap in a try/except —
+  // observability must never break the request path.
   try {
     Sentry.getActiveSpan()?.setAttributes({
       'proxy.metadata.album.upstream_calls': upstreamCalls,
-      'proxy.metadata.album.single_lookup': useSingleLookup,
     });
   } catch (err) {
     console.warn('[ProxyController] failed to project Sentry attrs', err);

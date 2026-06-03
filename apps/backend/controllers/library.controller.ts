@@ -13,7 +13,8 @@ import * as libraryService from '../services/library.service.js';
 import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
-import { checkStreamingAvailability, lookupMetadata, isLmlConfigured, envInt } from '@wxyc/lml-client';
+import { checkStreamingAvailability, isLmlConfigured, envInt } from '@wxyc/lml-client';
+import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
 
@@ -95,9 +96,10 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     const artistName = body.alternate_artist_name || body.artist_name || '';
     const [streamingResult, artworkResult] = await Promise.allSettled([
       checkStreamingAvailability(artistName, body.album_title),
-      lookupMetadata(artistName, body.album_title, undefined, {
+      lmlLookupCoordinator.lookup(artistName, body.album_title, undefined, {
         budgetMs: LIBRARY_LML_BUDGET_MS,
         caller: 'library-add-album',
+        warm_cache: true,
       }),
     ]);
 
@@ -146,10 +148,12 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 function fireAndForgetCanonicalEntity(libraryId: number, artistName: string | null, albumTitle: string): void {
   if (!artistName) return;
 
-  lookupMetadata(artistName, albumTitle, undefined, {
-    budgetMs: LIBRARY_LML_BUDGET_MS,
-    caller: 'library-canonical-entity',
-  })
+  lmlLookupCoordinator
+    .lookup(artistName, albumTitle, undefined, {
+      budgetMs: LIBRARY_LML_BUDGET_MS,
+      caller: 'library-canonical-entity',
+      warm_cache: true,
+    })
     .then(async (response) => {
       const linkage = libraryService.mapLookupToCanonicalEntity(response);
       if (!linkage) return;

@@ -35,6 +35,11 @@ jest.mock('@wxyc/lml-client', () => ({
   LmlClientError: MockLmlClientError,
 }));
 
+// Backend code paths now route through the LmlLookupCoordinator (BS#885).
+jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
+  lmlLookupCoordinator: { lookup: mockLookupMetadata },
+}));
+
 // Mock @sentry/node so we can assert that searchLibraryByTrack creates a
 // catalog.track_search span and projects per-search measurements onto it
 // without initializing Sentry. startSpan(opts, callback) wraps a span mock
@@ -2249,9 +2254,11 @@ describe('library.service', () => {
       // picker, which always passes real `(artist_name, album_title)` pairs
       // from rotation, the cascade's later strategies are exactly where the
       // match for obscure college rotation comes from.
+      // `extended: true` is no longer passed at the callsite — the
+      // LmlLookupCoordinator (BS#885) forces it on the wire. Coordinator
+      // mock receives the callsite args without it.
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
         timeoutMs: 10000,
-        extended: true,
         caller: 'library-rotation-picker',
       });
     });
@@ -2280,7 +2287,7 @@ describe('library.service', () => {
         undefined,
         'All the Young Droids: Junkshop Synth Pop 1978-1985',
         undefined,
-        { timeoutMs: 10000, extended: true, caller: 'library-rotation-picker' }
+        { timeoutMs: 10000, caller: 'library-rotation-picker' }
       );
     });
 
