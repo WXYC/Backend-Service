@@ -95,7 +95,10 @@ const main = async (): Promise<void> => {
   // tear the in-flight UPDATE's connection.
   let shuttingDown = false;
   let activeSweep: Promise<void> | null = null;
-  let sweepTimer: NodeJS.Timeout | undefined;
+  // Mutable holder so the shutdown closure (declared next) can clear the
+  // timer that's only assigned later, after the initial sweep. Holding via
+  // a ref keeps the binding `const` and survives `prefer-const`.
+  const sweepTimerRef: { current: NodeJS.Timeout | undefined } = { current: undefined };
 
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
@@ -103,7 +106,7 @@ const main = async (): Promise<void> => {
     healthState.cdcConnected = false;
     console.log(`[enrichment-worker] received ${signal}; shutting down`);
     try {
-      if (sweepTimer !== undefined) clearInterval(sweepTimer);
+      if (sweepTimerRef.current !== undefined) clearInterval(sweepTimerRef.current);
       // Each step is bounded + best-effort via runShutdownStep so a hang
       // or throw in one (e.g. a wedged CDC LISTEN socket — BS#1014 lists
       // the exact failure modes) doesn't skip the cleanup steps that
@@ -133,7 +136,7 @@ const main = async (): Promise<void> => {
 
   // Register signal handlers FIRST so they cover the initial sweep below.
   // `clearInterval(undefined)` is a Node-tolerated no-op, and `activeSweep`
-  // / `sweepTimer` are guarded with explicit null/undefined checks.
+  // / `sweepTimerRef.current` are guarded with explicit null/undefined checks.
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
 
@@ -170,7 +173,7 @@ const main = async (): Promise<void> => {
   // already covered by the `cdcConnected=false` healthcheck — and no new
   // strands are produced in that state anyway.
   await scheduleSweep();
-  sweepTimer = setInterval(() => {
+  sweepTimerRef.current = setInterval(() => {
     void scheduleSweep();
   }, SWEEP_INTERVAL_MS);
 
