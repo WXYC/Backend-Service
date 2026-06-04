@@ -18,31 +18,49 @@ import { jest } from '@jest/globals';
 //
 // Each `db.select(...)` call returns a fresh chain whose terminal awaitable
 // is the array of rows pushed via `mockRowsQueue`. Tests push step-1 rows
-// first, then step-2 rows; the helper consumes them in order.
+// first, then step-2 rows; the helper consumes them in order. The mock's
+// .from/.where/.orderBy/.limit are also captured on `chainSpy` so tests
+// can pin the SQL contract (`ORDER BY` on step 1, `eq()` on step 2).
 
 const mockRowsQueue: Array<Array<Record<string, unknown>>> = [];
+
+const mockSelect = jest.fn();
+const chainSpy = {
+  from: jest.fn(),
+  where: jest.fn(),
+  orderBy: jest.fn(),
+  limit: jest.fn(),
+};
 
 function makeChain() {
   let resolveValue: Array<Record<string, unknown>> = [];
   const chain = {
-    from: jest.fn().mockReturnThis(),
-    where: jest.fn().mockReturnThis(),
-    orderBy: jest.fn().mockReturnThis(),
-    limit: jest.fn(() => Promise.resolve(resolveValue)),
-  } as unknown as {
-    from: jest.Mock;
-    where: jest.Mock;
-    orderBy: jest.Mock;
-    limit: jest.Mock;
+    from: (...args: unknown[]) => {
+      chainSpy.from(...args);
+      return chain;
+    },
+    where: (...args: unknown[]) => {
+      chainSpy.where(...args);
+      return chain;
+    },
+    orderBy: (...args: unknown[]) => {
+      chainSpy.orderBy(...args);
+      return chain;
+    },
+    limit: (...args: unknown[]) => {
+      chainSpy.limit(...args);
+      return Promise.resolve(resolveValue);
+    },
   };
-  // Bind the next-queued result onto this chain's `limit` await.
   resolveValue = mockRowsQueue.shift() ?? [];
   return chain;
 }
 
+mockSelect.mockImplementation(() => makeChain());
+
 jest.mock('@wxyc/database', () => ({
   db: {
-    select: jest.fn(() => makeChain()),
+    select: (...args: unknown[]) => mockSelect(...args),
   },
   flowsheet: {
     artist_name: 'artist_name',
@@ -70,44 +88,57 @@ import { lookupAlbumMetadataByKey } from '../../../apps/backend/services/album-m
 describe('album-metadata-lookup.service', () => {
   beforeEach(() => {
     mockRowsQueue.length = 0;
+    mockSelect.mockClear();
+    chainSpy.from.mockClear();
+    chainSpy.where.mockClear();
+    chainSpy.orderBy.mockClear();
+    chainSpy.limit.mockClear();
   });
 
   describe('empty-key guard', () => {
+    // Pin the contract that the guard prevents *any* DB call: a regression
+    // that removes the guard would shift these from `select=0` to `select=1`,
+    // letting `'-'`-keyed requests reach the partial index.
     it('returns null without touching the DB when artistName is empty', async () => {
       const result = await lookupAlbumMetadataByKey('', 'Some Album');
       expect(result).toBeNull();
-      // No DB chain ever materialized — the rows queue stays empty
-      // because step 1 was never reached.
-      expect(mockRowsQueue.length).toBe(0);
+      expect(mockSelect).not.toHaveBeenCalled();
     });
 
     it('returns null when artistName is whitespace-only (matches no key meaningfully)', async () => {
       const result = await lookupAlbumMetadataByKey('   ', 'Some Album');
       expect(result).toBeNull();
+      expect(mockSelect).not.toHaveBeenCalled();
     });
 
     it('returns null when releaseTitle is undefined (artist-card surfaces fall through to LML)', async () => {
       const result = await lookupAlbumMetadataByKey('Some Artist', undefined);
       expect(result).toBeNull();
+      expect(mockSelect).not.toHaveBeenCalled();
     });
 
     it('returns null when releaseTitle is empty', async () => {
       const result = await lookupAlbumMetadataByKey('Some Artist', '');
       expect(result).toBeNull();
+      expect(mockSelect).not.toHaveBeenCalled();
     });
 
     it('returns null when releaseTitle is whitespace-only', async () => {
       const result = await lookupAlbumMetadataByKey('Some Artist', '\t  ');
       expect(result).toBeNull();
+      expect(mockSelect).not.toHaveBeenCalled();
     });
   });
 
   describe('two-step query', () => {
-    it('returns null when step 1 finds no matching flowsheet row (cold case)', async () => {
-      // Step 1 → empty rowset; step 2 should not run.
+    it('returns null when step 1 finds no matching flowsheet row (cold case) — step 2 short-circuits', async () => {
+      // Step 1 → empty rowset; pin that step 2 is skipped via select call count.
+      // A regression that removed the `albumId === undefined || albumId === null
+      // → return null` guard would shift this to `select=2`.
       mockRowsQueue.push([]);
       const result = await lookupAlbumMetadataByKey('Unknown Artist', 'Unknown Album');
       expect(result).toBeNull();
+      expect(mockSelect).toHaveBeenCalledTimes(1);
     });
 
     it('returns null when step 2 finds no album_metadata row (race window: flowsheet INSERT before worker UPSERT)', async () => {
@@ -116,6 +147,33 @@ describe('album-metadata-lookup.service', () => {
       mockRowsQueue.push([]);
       const result = await lookupAlbumMetadataByKey('In-Flight Artist', 'In-Flight Album');
       expect(result).toBeNull();
+      expect(mockSelect).toHaveBeenCalledTimes(2);
+    });
+
+    it('issues ORDER BY on step 1 for deterministic row-pick on multi-album_id keys', async () => {
+      // Pin BS#1331 round-2 review fix: dropping the ORDER BY here would
+      // re-introduce iOS-visible flapping between distinct album_metadata
+      // payloads when a lookup key resolves to multiple album_ids
+      // (V/A multi-format, dual-pressings, librarian duplicates — empirically
+      // present in the live `album_id` corpus).
+      mockRowsQueue.push([{ album_id: 1 }]);
+      mockRowsQueue.push([
+        {
+          artwork_url: null,
+          discogs_url: null,
+          release_year: null,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        },
+      ]);
+      await lookupAlbumMetadataByKey('Multi Artist', 'Same Title Different Pressings');
+      // Step 1 uses orderBy; step 2 (PK lookup) does not.
+      expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
     });
 
     it('returns the persisted 10-column projection on a hit', async () => {
