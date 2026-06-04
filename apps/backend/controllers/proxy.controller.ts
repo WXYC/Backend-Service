@@ -286,20 +286,33 @@ function populateReleaseMetadata(
  * sees the same response shape as it would from the LML-fallthrough path,
  * just sourced from `album_metadata` instead of a live LML lookup.
  *
- * Crucially, no `SearchUrlProvider` synthesis happens here. BS#1192's
- * verified-rejection signal is load-bearing: when LML's iTunes 80/80
- * floor rejects a release the catch arm persists `apple_music_url: NULL`,
- * and we must not launder that null into a keyword-search URL at the
- * proxy. The same reasoning extends to Spotify on persisted catch-arm
- * rows — a null on a row BS already attempted to enrich is signal,
- * not absence. The LML-fallthrough branch below retains today's
- * synthesis behavior for the no-row case (cold lookups) so the iOS
- * Tragic Magic surface still gets fallback URLs where there's no
- * persisted state to poison.
+ * `filterSpacerGif` scrubs the Discogs 1×1 placeholder URL on `artworkUrl`
+ * just as the LML-fallthrough path does (`populateCommonMetadataFields`).
+ * `album_metadata.artwork_url` can carry spacer.gif from the historical
+ * `album-metadata-backfill` job (`INSERT … SELECT FROM flowsheet`, no
+ * scrub) and from pre-#649 flowsheet rows; if it leaks to iOS, the
+ * "missing → placeholder" path on the client breaks.
+ *
+ * Search-URL synthesis happens at the caller (after this returns) using
+ * the same `SearchUrlProvider` chain the LML-fallthrough branch uses, so
+ * iOS V1 keeps seeing search-URL fallbacks when a column is null. The
+ * BS#1192 "verified rejection" invariant is a *write-path* concern —
+ * the catch arm in `enrichment.service.ts` doesn't persist synth URLs
+ * — but synthesizing at request time doesn't poison persisted state.
+ * The LML-fallthrough branch has always done this for Apple/Spotify
+ * and we match it on the local-hit branch for behavioral parity.
  */
 function buildLocalMetadataResponse(persisted: PersistedAlbumMetadata): Record<string, unknown> {
   const metadata: Record<string, unknown> = {};
-  if (persisted.artwork_url) metadata.artworkUrl = persisted.artwork_url;
+  // Same filterSpacerGif chokepoint the LML-fallthrough path uses
+  // (#649). `album_metadata.artwork_url` is populated by two writers
+  // that don't scrub: the runtime enrichment.service path filters at
+  // write time, but `album-metadata-backfill` (#898) copied flowsheet
+  // rows verbatim, and pre-#649 flowsheet rows persisted the placeholder.
+  // The check has to live on read because the historical writes are
+  // already on disk.
+  const scrubbedArtwork = filterSpacerGif(persisted.artwork_url);
+  if (scrubbedArtwork) metadata.artworkUrl = scrubbedArtwork;
   if (persisted.discogs_url) {
     metadata.discogsUrl = persisted.discogs_url;
     const releaseId = parseDiscogsReleaseIdFromUrl(persisted.discogs_url);
@@ -361,54 +374,54 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
 
   // Cache-first: consult BS's own persisted state before going to LML.
   // Catch-arm-shape rows (YT/BC/SC populated, Apple/Spotify/artwork null)
-  // count as hits; the persisted nulls reflect a real prior LML attempt
-  // and serving them faithfully is the whole point — re-running the
-  // lookup would just hit LML's verified-rejection again.
-  const persisted = await lookupAlbumMetadataByKey(artistName, releaseTitle);
-  if (persisted) {
-    const metadata = buildLocalMetadataResponse(persisted);
-    try {
-      Sentry.getActiveSpan()?.setAttributes({
-        'proxy.metadata.album.upstream_calls': 0,
-      });
-    } catch (err) {
-      console.warn('[ProxyController] failed to project Sentry attrs', err);
-    }
-    res.set('Cache-Control', 'private, max-age=600');
-    res.status(200).json(metadata);
-    return;
+  // count as hits; the persisted nulls are served, then `searchUrlProvider`
+  // fills missing streaming URLs at the bottom of the handler. iOS sees
+  // the same shape it would on the LML-fallthrough path.
+  //
+  // A thrown DB error here would propagate as 500 and regress availability
+  // versus the LML-fallthrough path (which catches LML errors and degrades
+  // to synthesized search URLs). Treat any DB failure as a cache miss and
+  // fall through to LML — the caller's worst-case latency goes up, but the
+  // request still completes with a 200.
+  let persisted: PersistedAlbumMetadata | null = null;
+  try {
+    persisted = await lookupAlbumMetadataByKey(artistName, releaseTitle);
+  } catch (lookupError) {
+    console.warn('[ProxyController] local metadata lookup failed; falling through to LML:', lookupError);
   }
 
-  const metadata: Record<string, unknown> = {};
+  const metadata: Record<string, unknown> = persisted ? buildLocalMetadataResponse(persisted) : {};
   let upstreamCalls = 0;
 
-  let artwork: DiscogsMatchResult | undefined;
-  try {
-    const lookupResponse: LookupResponse = await lmlLookupCoordinator.lookup(artistName, releaseTitle, trackTitle, {
-      budgetMs: PROXY_LML_BUDGET_MS,
-      caller: 'proxy-album-metadata',
-    });
-    upstreamCalls += 1;
-    artwork = lookupResponse.results?.[0]?.artwork;
-  } catch (searchError) {
-    console.warn('[ProxyController] LML lookup failed:', searchError);
+  if (!persisted) {
+    let artwork: DiscogsMatchResult | undefined;
+    try {
+      const lookupResponse: LookupResponse = await lmlLookupCoordinator.lookup(artistName, releaseTitle, trackTitle, {
+        budgetMs: PROXY_LML_BUDGET_MS,
+        caller: 'proxy-album-metadata',
+      });
+      upstreamCalls += 1;
+      artwork = lookupResponse.results?.[0]?.artwork;
+    } catch (searchError) {
+      console.warn('[ProxyController] LML lookup failed:', searchError);
+    }
+
+    if (artwork) {
+      populateCommonMetadataFields(metadata, artwork);
+      populateReleaseMetadata(metadata, {
+        year: artwork.release_year,
+        genres: artwork.genres,
+        styles: artwork.styles,
+        label: artwork.label,
+        artist_id: artwork.discogs_artist_id,
+        released: artwork.full_release_date,
+        tracklist: artwork.tracklist,
+        artwork_url: artwork.artwork_url,
+      });
+    }
   }
 
-  if (artwork) {
-    populateCommonMetadataFields(metadata, artwork);
-    populateReleaseMetadata(metadata, {
-      year: artwork.release_year,
-      genres: artwork.genres,
-      styles: artwork.styles,
-      label: artwork.label,
-      artist_id: artwork.discogs_artist_id,
-      released: artwork.full_release_date,
-      tracklist: artwork.tracklist,
-      artwork_url: artwork.artwork_url,
-    });
-  }
-
-  // Fallback: construct search URLs for services without LML-provided URLs.
+  // Fallback: construct search URLs for services without persisted/LML URLs.
   // Per-service semantics live in `SearchUrlProvider` (BS#889) — each
   // service uses a different field-fallback order, so the URLs are no
   // longer guaranteed to share a query string. Old behavior was a single
@@ -419,8 +432,11 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   // Post-BS#1185: Spotify and Apple Music also have search-URL fallbacks so
   // iOS doesn't show greyed buttons when LML fails or returns zero results.
   //
-  // Only the LML-fallthrough branch synthesizes — local-hit responses above
-  // serve persisted nulls faithfully (BS#1192).
+  // BS#1192's verified-rejection invariant is a *write-path* concern (don't
+  // persist synth URLs in album_metadata). Synthesizing at request time
+  // doesn't poison persisted state, and both the local-hit and LML
+  // branches synthesize here so iOS sees identical degradation behavior
+  // regardless of which branch served the request.
   const fallbackUrls = searchUrlProvider.getAllSearchUrls(artistName, releaseTitle, trackTitle);
   if (!metadata.spotifyUrl) metadata.spotifyUrl = fallbackUrls.spotifyUrl;
   if (!metadata.appleMusicUrl) metadata.appleMusicUrl = fallbackUrls.appleMusicUrl;
