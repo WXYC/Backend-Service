@@ -30,9 +30,16 @@
  *     pacing changes or schema changes. Cache is consulted before the
  *     LML call; on miss the call result is stored EXCEPT when LML
  *     signaled a cascade timeout (`response.timeout === true`) — those
- *     responses are NOT cached so the next run can retry under relaxed
- *     load instead of permanently sealing the (artist, album) as
- *     no-match. On hit, per-track URL fields are stripped at the
+ *     responses are NOT cached, so sibling rows of the same
+ *     `(artist, album)` later in the same run still each call LML
+ *     (each gets its own chance to land while LML recovers), and any
+ *     NEW flowsheet rows of that pair in future cron runs start with a
+ *     fresh cache and a fresh LML call. The originating row is still
+ *     drained as `enriched_no_match` by `applyEnrichment` (intentional
+ *     per the 35 s timeout budget above — the alternative is the row
+ *     loops every cron pass) so this guard does not save the row that
+ *     received the timeout body, only its peers in this run and any
+ *     successor rows in future runs. On hit, per-track URL fields are stripped at the
  *     cache boundary (BS#1185 search URLs + BS#1192 apple_music_url
  *     are track-aware on LML's side); enrich.ts's existing `??`
  *     fallback drops through to per-row synthesis for the search URLs.

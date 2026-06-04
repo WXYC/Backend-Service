@@ -99,7 +99,7 @@ Post-deploy verification reads these from EC2 container logs (no Sentry needed).
 | `tests/unit/jobs/flowsheet-metadata-backfill/lookup-cache.test.ts` | new    | ~140 | key normalization (including NFKC with real accented name), hit/miss accounting, NULL-vs-empty-vs-real-album disambiguation, streaming-URL stripping verification, original-cached-object-not-mutated |
 | `tests/unit/jobs/flowsheet-metadata-backfill/lml-fetch.test.ts`    | edit   | ~50  | cache miss → LML call + store; cache hit → no LML call; LML error → no cache store; cache hit returns response with streaming URLs blanked                                                            |
 
-**Total:** ~295 LOC including tests. One workspace, one job directory. `enrich.ts` is not touched — the existing `??` fallback already handles the cache-hit case correctly once the cache strips streaming URLs on `get()`.
+**Total:** ~310 LOC including tests. One workspace, one job directory. The four search URLs need no `enrich.ts` change — the existing `??` fallback drops through to per-row synthesis once the cache strips them on `get()`. `enrich.ts` adds a 1-line conditional spread for `apple_music_url` (BS#1192 — `null` is load-bearing, so writing `null` on a cache hit would clobber R1's verified URL via the album_metadata UPSERT; the spread omits the column when the cache stripped the key, preserving R1's value) plus the corresponding unit tests on linked and unlinked paths.
 
 ## Tests
 
