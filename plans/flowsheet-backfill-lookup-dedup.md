@@ -35,18 +35,22 @@ Where `normalize(s) = s.trim().normalize('NFKC').toLowerCase()`. The NUL separat
 
 The album-undefined case uses `''` as the album segment so all rows with NULL `album_title` for the same artist dedup against each other (matches LML's lookup semantics — undefined album falls back to artist-only search).
 
-### What gets cached: the full LookupResponse; streaming URLs stripped on read
+### What gets cached: the full LookupResponse; per-track URLs deleted on read; cascade-timeout responses NOT cached
 
-The cache stores the full `LookupResponse` object (~5KB JSON). The streaming-URL stripping is the **cache's** concern, not the orchestrator's or `enrich.ts`'s:
+The cache stores the full `LookupResponse` object (~5KB JSON). The per-track URL stripping is the **cache's** concern, not the orchestrator's or `enrich.ts`'s:
 
-- `LookupCache.set(artist, album, response)` stores the raw, unmodified response.
-- `LookupCache.get(artist, album)` returns the cached response with `results[i].artwork.spotify_url`, `youtube_music_url`, `bandcamp_url`, `soundcloud_url` rewritten to `undefined` before return. The original cached object is not mutated; a shallow-copy of the artwork block is returned per call.
+- `LookupCache.set(artist, album, response)` stores the raw, unmodified response. Misses are counted _here_ (not on `get()`'s not-found branch) — so an LML throw before `set()` does not inflate `cache_misses`. `overwrites` tracks the race-to-store case; under today's sequential orchestrator any non-zero value signals a concurrency regression.
+- `LookupCache.get(artist, album)` returns the cached response with **five** per-track URL fields _deleted_ (not assigned `undefined`) on the artwork block: `spotify_url`, `youtube_music_url`, `bandcamp_url`, `soundcloud_url`, and `apple_music_url`. The original cached object is not mutated; the cache returns a shallow-copy of the response, the results array, the result item, and the artwork block per call (including for the empty-results and no-artwork branches). `delete` matters for any consumer that uses `'field' in obj`, `Object.keys`, or `Object.assign` — the field is truly absent.
 
-This means `enrich.ts`'s existing `??` fallback (`artwork.spotify_url ?? searchUrls.spotify_url`) does the right thing untouched: on cache miss `lml-fetch.ts` returns LML's response as-is and the fallback's left side wins; on cache hit the streaming-URL fields are `undefined` and the fallback drops through to `synthesizeSearchUrls(row)`. **`enrich.ts` requires no changes.**
+This means `enrich.ts`'s existing `??` fallback (`artwork.spotify_url ?? searchUrls.spotify_url`) does the right thing untouched: on cache miss `lml-fetch.ts` returns LML's response as-is and the fallback's left side wins; on cache hit the per-track URL fields are absent so `??` drops through to `synthesizeSearchUrls(row)` for the four search URLs, and `apple_music_url` falls to `null` per the existing `?? null` fallback at `enrich.ts:154`. **`enrich.ts` requires no changes.**
 
-This matters because LML's streaming-search URLs are track-aware (per BS#1185 they are byte-equivalent to `synthesizeSearchUrls` when track is provided), so caching them at the album level and applying to a different track would surface a mismatched query. Stripping at the cache boundary contains the dedup-path semantics in one file.
+This matters because every URL in this set is track-aware on LML's side: the four search URLs are synthesized per `(artist, track)` (BS#1185), and `apple_music_url` is LML's per-track iTunes-verified URL via `find_track_url` returning `/song/<id>` URLs (BS#1192 — null is load-bearing because a wrong Apple URL claims a verified iTunes match for the wrong track). Caching them at the album level and applying to a different track would surface a mismatched search query, or — for Apple — a confidently-wrong track-direct link. Stripping at the cache boundary contains the dedup-path semantics in one file.
 
-The album-level fields safely copied from cache (passed through verbatim): `artwork_url`, `release_url`, `release_year`, `apple_music_url`, `artist_bio`, `wikipedia_url`. The per-row-synthesized fields (blanked on cache read, then resynthesized in `enrich.ts`): `spotify_url`, `youtube_music_url`, `bandcamp_url`, `soundcloud_url`.
+The album-level fields safely shared verbatim across rows with the same `(artist, album)`: `artwork_url`, `release_url`, `release_year`, `artist_bio`, `wikipedia_url`.
+
+**Cascade-timeout guard.** LML returns a 200 OK with `{timeout: true, results: []}` when its Discogs cascade exhausts the per-item budget (LML#370). The shape is indistinguishable from a real no-match at the `LookupResponse` type level (`timeout` is a runtime-only extension). The cache treats these as **transient signals about LML load, not answers**, and refuses to store them — `lml-fetch.ts:lookupMetadata` calls `activeCache.set` only when `response.timeout !== true`. Without this guard, the first cascade-timeout for an `(artist, album)` would lock in `enriched_no_match` for every subsequent row of the key for the rest of the run AND stamp them via `applyEnrichment`'s marker write, so the next cron tick also skips them — converting transient LML degradation into permanent metadata loss.
+
+**Per-row throttle skip on hit.** `LookupFn` returns `{ response, cacheHit }`; the orchestrator skips `BACKFILL_THROTTLE_MS` between rows when `cacheHit === true`. The throttle exists to pace LML calls, and a cache hit makes none — sleeping after one is pure wall-clock waste. At the documented 42% hit rate this recovers ~7.3h per run on top of the LML-call savings.
 
 **Caveat acknowledged:** caching on `(artist, album)` and applying to multiple tracks accepts a small risk that LML's track-presence verification would have returned a different release for a different track on the same album. For the backfill's use case (album-level metadata for historical flowsheet views), this is acceptable. Documented in code + plan.
 
@@ -56,7 +60,11 @@ Today's cron run processes ~14k rows in ~16h. Post-dedup at 1.74×, the cache fi
 
 ### Stats
 
-`LookupCache.stats()` returns `{ size, hits, misses }`. Wired into the existing `batch_done` log line as **three flat fields alongside the totals** — `cache_hits`, `cache_misses`, `cache_size` — matching the existing shape of `enriched_match`, `lml_error`, etc. Not a nested `cache: { ... }` object; the existing log consumers expect flat keys.
+`LookupCache.stats()` returns `{ size, hits, misses, overwrites }`. Wired into the existing `batch_done` log line as **four flat fields alongside the totals** — `cache_hits`, `cache_misses`, `cache_size`, `cache_overwrites` — matching the existing shape of `enriched_match`, `lml_error`, etc. Not a nested `cache: { ... }` object; the existing log consumers expect flat keys.
+
+`cache_misses` and `cache_size` are cumulative since process start, matching the cumulative shape of `scanned` / `enriched_match`. `cache_overwrites` flags the race-to-store case (two concurrent callers both went to LML and both wrote); under today's sequential orchestrator any non-zero value signals a concurrency regression.
+
+The `cacheStats()` callback is wrapped in try/catch by the orchestrator — an observability throw emits `cache_stats_error: <message>` on the log line instead of aborting the drain. A successful batch's per-row enrichments are already committed by the time `batch_done` logs; degrading observability is strictly better than dropping a batch from the deploy story.
 
 Updated `batch_done` log payload shape:
 
@@ -72,7 +80,8 @@ Updated `batch_done` log payload shape:
   "lml_error": …,
   "cache_hits": …,
   "cache_misses": …,
-  "cache_size": …
+  "cache_size": …,
+  "cache_overwrites": …
 }
 ```
 
@@ -139,9 +148,9 @@ No flag flip, no separate deploy gate, no LML-side change. Deploy lands → next
 
 - **Memory growth.** Unbounded Map fills over the run lifetime. Worst case at today's volume: ~40MB. Worst case if batch size or pacing changes: scales linearly with rows processed per run. Soft-warning log at `size > 50000` catches a regression where the cache would push past ~250MB. **Accepted risk** for the current daily-bounded shape; revisit if cron lifetime changes.
 
-- **Track-level URL mismatch.** Discussed in design. Synthesis per row preserves the streaming search URLs; only the album-level metadata is shared. The chance of LML returning a different release for the same (artist, album) but different track is low given LML's matching heuristic. **Accepted risk** — backfill values album-level metadata; per-row track verification was never the goal.
+- **Track-level URL mismatch.** Per-track URL fields (`spotify_url`, `youtube_music_url`, `bandcamp_url`, `soundcloud_url`, `apple_music_url`) are deleted from the cache's returned response so enrich.ts's `??` fallback resynthesizes them per row. Album-level metadata (release_id, artwork_url, release_year, artist_bio, wikipedia_url) is shared. The chance of LML returning a different release for the same (artist, album) but different track is low given LML's matching heuristic. **Accepted risk** for album-level metadata; **mitigated** for per-track URLs by the cache-boundary strip.
 
-- **Test isolation regression.** The `defaultLookupCache` singleton can leak state between tests if a test imports it. Mitigation: all unit tests construct their own `LookupCache` instance; the singleton is wire-only and not test-touched. Linter rule (already in place) flags any test file importing `defaultLookupCache` directly.
+- **Test isolation regression.** The `defaultLookupCache` singleton can leak state between tests if a test imports it directly. Mitigation pattern (convention, not lint-enforced): every test constructs its own `LookupCache` instance and wires it via `__setLookupCacheForTesting`, which itself throws when `NODE_ENV !== 'test'` so the seam can never accidentally swap a production singleton mid-run.
 
 - **Sentry cache_stats convention.** The existing `cache.*` semantic spans pattern (LML#433 / [project_lml_cache_semantic_spans](https://github.com/WXYC/Backend-Service/blob/main/MEMORY.md)) lives in LML. This dedup cache is in BS, not LML. **Decision:** do NOT add `cache.get` / `cache.put` spans — the per-batch log line is sufficient observability for a job we're retiring. Defer Sentry-style instrumentation to Epic C #892 if cache patterns proliferate.
 
@@ -156,7 +165,7 @@ No flag flip, no separate deploy gate, no LML-side change. Deploy lands → next
 - **LRU eviction.** Path C. Defensive complexity for a use case we don't have.
 - **LML bulk endpoint.** LML's `/api/v1/lookup/bulk` takes album_ids, not artist+album strings. Cross-repo change to add a string-keyed bulk endpoint is unbudgeted and out of scope.
 - **Runtime backend changes.** PR #1326 / BS#885 shipped `LmlLookupCoordinator` for the runtime backend. Different semantics (5-min LRU + in-flight coalescing for request-time traffic). Parallel cache, not unified.
-- **Apple Music URL synthesis.** BS#1192 — NULL is load-bearing. Leave alone.
+- **Apple Music URL synthesis.** BS#1192 — null is load-bearing. The cache deletes `apple_music_url` on hit (it's track-aware on LML's side, like the four search URLs); enrich.ts's existing `?? null` writes null when the cache hit's stripped artwork has no field. No synthesis is added.
 - **Worker dedup.** `apps/enrichment-worker` (BS#892) is in flight and has its own design surface for caching. Don't pre-empt.
 
 ## Dependencies

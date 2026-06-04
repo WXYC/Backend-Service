@@ -167,12 +167,15 @@ describe('LookupCache (run-scoped (artist, album) dedup)', () => {
     });
   });
 
-  describe('hit / miss accounting', () => {
-    it('counts misses on get() of unset keys', () => {
+  describe('hit / miss / overwrite accounting', () => {
+    it('does NOT count get() of unset keys as misses — miss is set()-time only', () => {
+      // A failed upstream call inflates `misses` if we count on get; we
+      // only count when we actually store, so an LML throw doesn't
+      // pollute the metric. See lml-fetch.ts's LML-error-path test.
       const cache = new LookupCache();
       expect(cache.get('Unknown', 'Album')).toBeUndefined();
       expect(cache.get('Unknown', 'Another')).toBeUndefined();
-      expect(cache.stats()).toEqual({ size: 0, hits: 0, misses: 2 });
+      expect(cache.stats()).toEqual({ size: 0, hits: 0, misses: 0, overwrites: 0 });
     });
 
     it('counts hits on get() of set keys', () => {
@@ -183,30 +186,38 @@ describe('LookupCache (run-scoped (artist, album) dedup)', () => {
       cache.get('Sonic Youth', 'Daydream Nation');
       cache.get('Sonic Youth', 'Daydream Nation');
 
-      expect(cache.stats()).toEqual({ size: 1, hits: 3, misses: 0 });
+      expect(cache.stats()).toEqual({ size: 1, hits: 3, misses: 1, overwrites: 0 });
     });
 
-    it('size grows monotonically; same key does not double-count', () => {
+    it('counts a miss on first set; counts an overwrite on subsequent set of the same key', () => {
       const cache = new LookupCache();
       cache.set('A', 'X', makeResponse());
       cache.set('B', 'X', makeResponse());
       cache.set('A', 'X', makeResponse()); // overwrite, not new slot
-      expect(cache.stats().size).toBe(2);
+      expect(cache.stats()).toEqual({ size: 2, hits: 0, misses: 2, overwrites: 1 });
     });
   });
 
-  describe('streaming URL stripping on get()', () => {
-    it('blanks all four streaming URL fields on the artwork block', () => {
+  describe('track-aware URL stripping on get()', () => {
+    it('DELETES all five track-aware URL fields (key absent, not just value undefined)', () => {
+      // delete-vs-undefined matters for any consumer using `'field' in obj`,
+      // `Object.keys`, or `Object.assign(target, artwork)`. JSON-serialization
+      // also distinguishes (undefined drops the key, but `in` still finds it).
       const cache = new LookupCache();
       cache.set('Sonic Youth', 'Daydream Nation', makeResponse());
 
       const hit = cache.get('Sonic Youth', 'Daydream Nation');
       expect(hit).toBeDefined();
       const artwork = hit?.results[0].artwork;
-      expect(artwork?.spotify_url).toBeUndefined();
-      expect(artwork?.youtube_music_url).toBeUndefined();
-      expect(artwork?.bandcamp_url).toBeUndefined();
-      expect(artwork?.soundcloud_url).toBeUndefined();
+      // 'in' must be false — the field is truly absent.
+      expect(artwork && 'spotify_url' in artwork).toBe(false);
+      expect(artwork && 'youtube_music_url' in artwork).toBe(false);
+      expect(artwork && 'bandcamp_url' in artwork).toBe(false);
+      expect(artwork && 'soundcloud_url' in artwork).toBe(false);
+      // apple_music_url is also track-aware per BS#1192 (LML's
+      // find_track_url returns /song/<id> URLs verified against iTunes
+      // for the specific track) — must also be deleted on cache hit.
+      expect(artwork && 'apple_music_url' in artwork).toBe(false);
     });
 
     it('preserves album-level metadata fields on the artwork block', () => {
@@ -219,7 +230,6 @@ describe('LookupCache (run-scoped (artist, album) dedup)', () => {
       expect(artwork?.release_url).toBe('https://www.discogs.com/release/999');
       expect(artwork?.artwork_url).toBe('https://discogs.example/cover.jpg');
       expect(artwork?.release_year).toBe(1969);
-      expect(artwork?.apple_music_url).toBe('https://music.apple.com/album/123');
       expect(artwork?.artist_bio).toBe('A rock band.');
       expect(artwork?.wikipedia_url).toBe('https://en.wikipedia.org/wiki/Example');
     });
@@ -239,9 +249,10 @@ describe('LookupCache (run-scoped (artist, album) dedup)', () => {
       expect(original.results[0].artwork?.youtube_music_url).toBe('https://music.youtube.com/playlist?list=OLAK');
       expect(original.results[0].artwork?.bandcamp_url).toBe('https://example.bandcamp.com/album/abc');
       expect(original.results[0].artwork?.soundcloud_url).toBe('https://soundcloud.com/example/sets/abc');
+      expect(original.results[0].artwork?.apple_music_url).toBe('https://music.apple.com/album/123');
     });
 
-    it('tolerates an empty results array (no-match LML response)', () => {
+    it('returns a fresh response shell for empty-results responses (no shared identity)', () => {
       const cache = new LookupCache();
       const noMatch: LookupResponse = {
         results: [],
@@ -255,9 +266,13 @@ describe('LookupCache (run-scoped (artist, album) dedup)', () => {
       expect(hit).toBeDefined();
       expect(hit?.results).toEqual([]);
       expect(hit?.song_not_found).toBe(true);
+      // Critical: the returned object MUST NOT be the same reference as
+      // the cached entry. Otherwise a future mutation on the no-match
+      // path corrupts the cache for every subsequent hit.
+      expect(hit).not.toBe(noMatch);
     });
 
-    it('tolerates a result with no artwork field (LML no-match shape)', () => {
+    it('returns fresh item shells when a result has no artwork (no shared identity)', () => {
       const cache = new LookupCache();
       const noArtwork: LookupResponse = {
         results: [
@@ -279,6 +294,68 @@ describe('LookupCache (run-scoped (artist, album) dedup)', () => {
       const hit = cache.get('A', 'B');
       expect(hit).toBeDefined();
       expect(hit?.results[0].artwork).toBeUndefined();
+      // The result item must also not share identity with the cached
+      // item, so a future mutation on the no-artwork path can't poison.
+      expect(hit).not.toBe(noArtwork);
+      expect(hit?.results[0]).not.toBe(noArtwork.results[0]);
+    });
+  });
+
+  describe('SIZE_WARN_THRESHOLD soft-warn (operational backstop)', () => {
+    // The 50_000-entry warn is the operator's only signal that the
+    // unbounded cache is approaching the ~250MB memory headroom.
+    // Pin (a) it fires past threshold, (b) the latch prevents re-firing,
+    // (c) the payload carries cache_size + threshold.
+    const initLogger = jest.requireActual<typeof import('../../../../jobs/flowsheet-metadata-backfill/logger')>(
+      '../../../../jobs/flowsheet-metadata-backfill/logger'
+    ).initLogger;
+    const closeLogger = jest.requireActual<typeof import('../../../../jobs/flowsheet-metadata-backfill/logger')>(
+      '../../../../jobs/flowsheet-metadata-backfill/logger'
+    ).closeLogger;
+
+    afterEach(async () => {
+      await closeLogger();
+    });
+
+    it('fires exactly once when size first crosses the threshold and carries cache_size + threshold', () => {
+      initLogger({ repo: 'Backend-Service', tool: 'lookup-cache-test', runId: 'warn-1' });
+
+      const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      try {
+        const cache = new LookupCache();
+        for (let i = 0; i <= 50_000; i += 1) {
+          // 50_001 entries → size > SIZE_WARN_THRESHOLD on the last set.
+          cache.set(`artist-${i}`, 'album', {
+            results: [],
+            search_type: 'none',
+            song_not_found: false,
+            found_on_compilation: false,
+          } as LookupResponse);
+        }
+
+        const warns = writeSpy.mock.calls
+          .map((args) => String(args[0]))
+          .filter((line) => line.includes('"step":"lookup_cache_oversize"'));
+        expect(warns).toHaveLength(1);
+        const parsed = JSON.parse(warns[0].trim());
+        expect(parsed.cache_size).toBe(50_001);
+        expect(parsed.threshold).toBe(50_000);
+        expect(parsed.level).toBe('warn');
+
+        // A subsequent set() must NOT re-fire the warn (latched).
+        cache.set('artist-extra', 'album', {
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        } as LookupResponse);
+        const warnsAfter = writeSpy.mock.calls
+          .map((args) => String(args[0]))
+          .filter((line) => line.includes('"step":"lookup_cache_oversize"'));
+        expect(warnsAfter).toHaveLength(1);
+      } finally {
+        writeSpy.mockRestore();
+      }
     });
   });
 });

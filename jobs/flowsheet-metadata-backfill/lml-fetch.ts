@@ -28,11 +28,16 @@
  *     rows resolve to 362,258 distinct (artist, album) pairs — a 1.74×
  *     multiplier. The cache cuts the LML call budget by ~42% without
  *     pacing changes or schema changes. Cache is consulted before the
- *     LML call; on miss the call result is stored; on hit, streaming
- *     URL fields are blanked at the cache boundary so enrich.ts's
- *     existing `??` fallback drops through to per-row search-URL
- *     synthesis (BS#1185 — LML's streaming URLs are track-aware). See
- *     `lookup-cache.ts` for the dedup design.
+ *     LML call; on miss the call result is stored EXCEPT when LML
+ *     signaled a cascade timeout (`response.timeout === true`) — those
+ *     responses are NOT cached so the next run can retry under relaxed
+ *     load instead of permanently sealing the (artist, album) as
+ *     no-match. On hit, per-track URL fields are stripped at the
+ *     cache boundary (BS#1185 search URLs + BS#1192 apple_music_url
+ *     are track-aware on LML's side); enrich.ts's existing `??`
+ *     fallback drops through to per-row synthesis for the search URLs
+ *     and to `null` for apple_music_url. See `lookup-cache.ts` for the
+ *     dedup design.
  *
  * The third parameter is named `track` (not `song`) to match the orchestrator's
  * `EnrichRow.track_title` field. It's plumbed through to LML's `body.song` by
@@ -61,11 +66,14 @@ const TIMEOUT_MS = envInt('BACKFILL_LML_PER_CALL_TIMEOUT_MS', 35_000);
 let activeCache: LookupCache = defaultLookupCache;
 
 /**
- * Test-only seam. Production code wires `defaultLookupCache` at module
- * load; tests construct a fresh `LookupCache` per test so state doesn't
- * leak between cases.
+ * Test-only seam. Production must never reach this — flipping the cache
+ * mid-run would silently zero accumulated hit state. Guarded against
+ * accidental import by checking `NODE_ENV === 'test'` at call time.
  */
 export const __setLookupCacheForTesting = (cache: LookupCache): void => {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('__setLookupCacheForTesting must not be called outside NODE_ENV=test');
+  }
   activeCache = cache;
 };
 
@@ -75,9 +83,34 @@ export const __setLookupCacheForTesting = (cache: LookupCache): void => {
  */
 export const getLookupCache = (): LookupCache => activeCache;
 
-export const lookupMetadata = async (artist: string, album?: string, track?: string): Promise<LookupResponse> => {
+/**
+ * LML can return a 200 OK with `{timeout: true, results: []}` when its
+ * Discogs cascade exhausts the per-item budget (LML#370). The shape is
+ * indistinguishable from a real no-match at the type level (timeout isn't
+ * in the OpenAPI-generated LookupResponse), so we detect it as a runtime
+ * extension. These responses are transient signals about LML load, not
+ * answers about (artist, album), so they must not be cached — caching
+ * one would lock in `enriched_no_match` for every subsequent row of the
+ * same key for the rest of the run AND stamp the rows so future cron
+ * passes also skip them.
+ */
+const hasUpstreamTimeout = (response: LookupResponse): boolean =>
+  (response as unknown as { timeout?: boolean }).timeout === true;
+
+/**
+ * Result of a lookup, with provenance: did we serve from cache?
+ * The orchestrator uses `cacheHit` to skip the per-row throttle on
+ * hits (the throttle exists to space LML calls; a cache hit makes no
+ * LML call so the sleep is wall-clock waste). Pre-cache, lookupMetadata
+ * returned a bare LookupResponse; bumping the shape to an object lets
+ * us thread the hit signal back to the orchestrator without recomputing
+ * cache stats deltas around every row.
+ */
+export type LookupResult = { response: LookupResponse; cacheHit: boolean };
+
+export const lookupMetadata = async (artist: string, album?: string, track?: string): Promise<LookupResult> => {
   const cached = activeCache.get(artist, album);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return { response: cached, cacheHit: true };
 
   const response = await sharedLookupMetadata(artist, album, track, {
     limiter: defaultLmlLimiter,
@@ -85,6 +118,8 @@ export const lookupMetadata = async (artist: string, album?: string, track?: str
     caller: 'flowsheet-metadata-backfill',
   });
 
-  activeCache.set(artist, album, response);
-  return response;
+  if (!hasUpstreamTimeout(response)) {
+    activeCache.set(artist, album, response);
+  }
+  return { response, cacheHit: false };
 };

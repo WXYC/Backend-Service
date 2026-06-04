@@ -13,22 +13,31 @@
  * at `size > 50000` so a regression that would push past ~250MB surfaces
  * in logs.
  *
- * Streaming URL stripping is the cache's concern, not the orchestrator's.
- * `get()` returns a shallow-copied response with `artwork.spotify_url`,
- * `youtube_music_url`, `bandcamp_url`, `soundcloud_url` rewritten to
- * `undefined`. enrich.ts's existing `??` fallback then drops through to
- * per-row `synthesizeSearchUrls(row)`. Required because LML's streaming
- * URLs are track-aware (BS#1185) — caching album-level search URLs and
- * applying to a different track would surface a mismatched query.
+ * Per-track URL stripping is the cache's concern, not the orchestrator's.
+ * `get()` returns a shallow-copied response with five per-track URL fields
+ * deleted: `spotify_url`, `youtube_music_url`, `bandcamp_url`,
+ * `soundcloud_url`, and `apple_music_url`. enrich.ts's existing `??`
+ * fallback then drops through to per-row `synthesizeSearchUrls(row)` for
+ * the four search URLs; `apple_music_url` falls to `null` (BS#1192:
+ * null is load-bearing — a wrong Apple URL is worse than null because it
+ * claims a verified iTunes match for the wrong track).
+ *
+ * Stripping is required because every URL in this set is track-aware on
+ * LML's side: the four search URLs are synthesized per (artist, track)
+ * (BS#1185), and `apple_music_url` is per-track verified by LML's
+ * `find_track_url` returning `/song/<id>` URLs. Caching them at the
+ * album level and applying to a different track would surface a
+ * mismatched query (search URLs) or, worse, a confidently-wrong
+ * track-direct link (Apple Music).
  *
  * The non-stripped, album-level metadata is shared verbatim across rows
  * sharing the same (artist, album): `release_id`, `release_url`,
- * `artwork_url`, `release_year`, `apple_music_url`, `artist_bio`,
- * `wikipedia_url`. Caveat acknowledged: caching on (artist, album) and
- * applying to multiple tracks accepts a small risk that LML's
- * track-presence verification would have returned a different release
- * for a different track. For the backfill's use case (album-level
- * metadata for historical flowsheet views), this is acceptable.
+ * `artwork_url`, `release_year`, `artist_bio`, `wikipedia_url`. Caveat
+ * acknowledged: caching on (artist, album) and applying to multiple
+ * tracks accepts a small risk that LML's track-presence verification
+ * would have returned a different release for a different track. For
+ * the backfill's use case (album-level metadata for historical
+ * flowsheet views), this is acceptable.
  */
 
 import type { LookupResponse } from '@wxyc/lml-client';
@@ -43,48 +52,71 @@ const makeKey = (artist: string, album: string | null | undefined): string =>
   normalize(artist) + '\0' + normalize(album ?? '');
 
 /**
- * The fields blanked when reading from the cache. These are per-row search
- * URLs (track-aware on LML's side); enrich.ts synthesizes its own copies
- * via `synthesizeSearchUrls(row)` and its `??` fallback applies them.
+ * Per-track URL fields deleted when reading from the cache. The four
+ * search URLs (spotify/youtube_music/bandcamp/soundcloud) are
+ * track-aware synthesized URLs (BS#1185); `apple_music_url` is
+ * LML's per-track iTunes-verified URL (BS#1192). Both classes must
+ * be regenerated per-row to avoid one track's URL leaking onto
+ * another row sharing the same (artist, album).
+ *
+ * Fields are deleted (not reassigned to `undefined`) so downstream
+ * consumers using `'field' in obj`, `Object.keys`, or `Object.assign`
+ * see them as truly absent — matching JSON-serialization semantics.
  */
-const STREAMING_URL_FIELDS = ['spotify_url', 'youtube_music_url', 'bandcamp_url', 'soundcloud_url'] as const;
+const TRACK_AWARE_URL_FIELDS = [
+  'spotify_url',
+  'youtube_music_url',
+  'bandcamp_url',
+  'soundcloud_url',
+  'apple_music_url',
+] as const;
 
 type ArtworkBlock = NonNullable<LookupResponse['results'][number]['artwork']>;
 
-const stripStreamingUrls = (response: LookupResponse): LookupResponse => {
-  if (response.results.length === 0) return response;
-  return {
-    ...response,
-    results: response.results.map((item) => {
-      if (!item.artwork) return item;
-      const stripped: ArtworkBlock = { ...item.artwork };
-      for (const field of STREAMING_URL_FIELDS) {
-        stripped[field] = undefined;
-      }
-      return { ...item, artwork: stripped };
-    }),
-  };
-};
+const stripTrackAwareUrls = (response: LookupResponse): LookupResponse => ({
+  ...response,
+  results: response.results.map((item) => {
+    if (!item.artwork) return { ...item };
+    const stripped: ArtworkBlock = { ...item.artwork };
+    for (const field of TRACK_AWARE_URL_FIELDS) {
+      delete stripped[field];
+    }
+    return { ...item, artwork: stripped };
+  }),
+});
 
 export class LookupCache {
   private readonly store = new Map<string, LookupResponse>();
   private hits = 0;
   private misses = 0;
+  private overwrites = 0;
   private warnedOversize = false;
 
   get(artist: string, album?: string | null): LookupResponse | undefined {
     const key = makeKey(artist, album);
     const entry = this.store.get(key);
-    if (entry === undefined) {
-      this.misses += 1;
-      return undefined;
-    }
+    if (entry === undefined) return undefined;
     this.hits += 1;
-    return stripStreamingUrls(entry);
+    return stripTrackAwareUrls(entry);
   }
 
+  /**
+   * Store a response and count the miss it represents. Misses are counted
+   * here (not in `get()` on the not-found branch) so that an LML error
+   * doesn't inflate `misses` — the caller must successfully fetch and
+   * decide to store before the miss counts. `overwrites` tracks the
+   * race-to-store case (two concurrent callers raced past `get()`, both
+   * went to LML, both call `set()`); under today's sequential
+   * orchestrator this is always zero, so any non-zero value signals a
+   * concurrency regression.
+   */
   set(artist: string, album: string | null | undefined, response: LookupResponse): void {
     const key = makeKey(artist, album);
+    if (this.store.has(key)) {
+      this.overwrites += 1;
+    } else {
+      this.misses += 1;
+    }
     this.store.set(key, response);
     if (!this.warnedOversize && this.store.size > SIZE_WARN_THRESHOLD) {
       this.warnedOversize = true;
@@ -95,13 +127,16 @@ export class LookupCache {
     }
   }
 
-  stats(): { size: number; hits: number; misses: number } {
-    return { size: this.store.size, hits: this.hits, misses: this.misses };
+  stats(): { size: number; hits: number; misses: number; overwrites: number } {
+    return { size: this.store.size, hits: this.hits, misses: this.misses, overwrites: this.overwrites };
   }
 }
 
 /**
  * Module-level singleton wired into `lml-fetch.ts`. Tests construct their
- * own `LookupCache` instance; they do not touch this singleton.
+ * own `LookupCache` instance via `__setLookupCacheForTesting`; production
+ * code reads via `getLookupCache()`. Importing this singleton directly
+ * from a test is convention-discouraged but not lint-enforced — keep
+ * cache-touching tests local to their own `LookupCache` instances.
  */
 export const defaultLookupCache = new LookupCache();
