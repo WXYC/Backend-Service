@@ -62,6 +62,11 @@ const makeKey = (artist: string, album: string | null | undefined): string =>
  * Fields are deleted (not reassigned to `undefined`) so downstream
  * consumers using `'field' in obj`, `Object.keys`, or `Object.assign`
  * see them as truly absent — matching JSON-serialization semantics.
+ * `enrich.ts` relies on this: for `apple_music_url` (BS#1192) it uses
+ * `'apple_music_url' in artwork` as the witness for "LML decided" vs
+ * "cache stripped", and OMITS the column from the album_metadata
+ * UPSERT on stripped hits so a prior verified URL isn't clobbered
+ * with null via the `updated_at < NOW()` setWhere guard.
  */
 const TRACK_AWARE_URL_FIELDS = [
   'spotify_url',
