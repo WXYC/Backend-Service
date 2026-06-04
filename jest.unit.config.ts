@@ -40,7 +40,14 @@ const config: Config = {
   // resolver finds it.
   moduleDirectories: ['node_modules', 'apps/backend/node_modules', 'shared/authentication/node_modules'],
   collectCoverageFrom: ['apps/backend/**/*.ts', 'jobs/**/*.ts', '!**/*.d.ts', '!**/dist/**'],
-  modulePathIgnorePatterns: ['<rootDir>/.claude/worktrees'],
+  // Ignore worktree paths so Jest's haste map doesn't collide on duplicate
+  // workspace `package.json` files (e.g. `@wxyc/database`, `@wxyc/lml-client`)
+  // when multiple worktrees are active. Patterns are `<rootDir>`-anchored so a
+  // jest run from inside a worktree (where rootDir resolves to the worktree
+  // itself) doesn't accidentally exclude its own files. From the parent repo
+  // these patterns match both worktree conventions; from inside a worktree,
+  // siblings aren't under rootDir and therefore aren't haste-mapped anyway.
+  modulePathIgnorePatterns: ['<rootDir>/.claude/worktrees/', '<rootDir>/.worktrees/'],
   clearMocks: true,
 };
 
