@@ -394,13 +394,17 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   let upstreamCalls = 0;
 
   if (!persisted) {
+    // Count the LML attempt before awaiting it — counting on success only
+    // would conflate the LML-failure cohort with the local-hit cohort on
+    // the trace explorer's `upstream_calls=0` split, masking LML incidents
+    // as healthy cache-hit growth.
+    upstreamCalls += 1;
     let artwork: DiscogsMatchResult | undefined;
     try {
       const lookupResponse: LookupResponse = await lmlLookupCoordinator.lookup(artistName, releaseTitle, trackTitle, {
         budgetMs: PROXY_LML_BUDGET_MS,
         caller: 'proxy-album-metadata',
       });
-      upstreamCalls += 1;
       artwork = lookupResponse.results?.[0]?.artwork;
     } catch (searchError) {
       console.warn('[ProxyController] LML lookup failed:', searchError);

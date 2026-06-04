@@ -49,12 +49,18 @@ jest.mock('../../../apps/backend/services/album-metadata-lookup.service', () => 
 }));
 
 // BS#1331 acceptance: the cohort split for trace explorer turns on
-// `proxy.metadata.album.upstream_calls`. Mock Sentry's `getActiveSpan` so
-// the cache-first test can assert the attribute lands as a number; outside
-// a tracing context `getActiveSpan()` is null and the call short-circuits.
+// `proxy.metadata.album.upstream_calls`. Override only `getActiveSpan`
+// from the real `@sentry/node` module so the cache-first test can assert
+// the attribute lands as a number; outside a tracing context the real
+// `getActiveSpan()` is null and the call short-circuits. Preserving the
+// rest of the module surface lets future controller hardening (e.g.
+// `Sentry.captureException` on the cache-first DB-error catch arm)
+// continue to load without a confusing "X is not a function" TypeError
+// far from the change site.
 const mockSpanSetAttributes = jest.fn();
 const mockGetActiveSpan = jest.fn(() => ({ setAttributes: mockSpanSetAttributes }));
 jest.mock('@sentry/node', () => ({
+  ...jest.requireActual<object>('@sentry/node'),
   getActiveSpan: mockGetActiveSpan,
 }));
 
