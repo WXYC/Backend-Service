@@ -84,18 +84,18 @@ export const __setLookupCacheForTesting = (cache: LookupCache): void => {
 export const getLookupCache = (): LookupCache => activeCache;
 
 /**
- * LML can return a 200 OK with `{timeout: true, results: []}` when its
- * Discogs cascade exhausts the per-item budget (LML#370). The shape is
- * indistinguishable from a real no-match at the type level (timeout isn't
- * in the OpenAPI-generated LookupResponse), so we detect it as a runtime
- * extension. These responses are transient signals about LML load, not
+ * LML returns a 200 OK with `{timeout: true, results: []}` when its
+ * server-side hard cap fires and the search pipeline is abandoned
+ * mid-execution (LML#370). The `timeout` boolean is on the typed
+ * `LookupResponse` (see `@wxyc/shared` DTOs); we check it explicitly
+ * because at the `results` level the shape is identical to a real
+ * no-match. These responses are transient signals about LML load, not
  * answers about (artist, album), so they must not be cached — caching
- * one would lock in `enriched_no_match` for every subsequent row of the
- * same key for the rest of the run AND stamp the rows so future cron
- * passes also skip them.
+ * one would lock in `enriched_no_match` for every subsequent row of
+ * the same key for the rest of the run AND stamp the rows so future
+ * cron passes also skip them.
  */
-const hasUpstreamTimeout = (response: LookupResponse): boolean =>
-  (response as unknown as { timeout?: boolean }).timeout === true;
+const hasUpstreamTimeout = (response: LookupResponse): boolean => response.timeout === true;
 
 /**
  * Result of a lookup, with provenance: did we serve from cache?

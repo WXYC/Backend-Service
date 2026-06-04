@@ -12,6 +12,7 @@ const emptyResponse = {
   search_type: 'none',
   song_not_found: true,
   found_on_compilation: false,
+  timeout: false,
 };
 
 describe('jobs/flowsheet-metadata-backfill/lml-fetch (BS#994 / BS#1180 timeout knob)', () => {
