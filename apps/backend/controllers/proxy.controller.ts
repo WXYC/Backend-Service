@@ -281,18 +281,25 @@ function populateReleaseMetadata(
 }
 
 /**
- * Build the proxy-album response from BS's own persisted state. Mirrors the
- * existing controller's "omit when falsy" wire-contract convention so iOS
- * decoders that use `decodeIfPresent` see a decode-compatible shape — but
- * the wire shape is NOT byte-for-byte identical to the LML-fallthrough path:
- * the LML branch unconditionally emits `discogsArtistId`, `genres`, `styles`,
- * `label`, `fullReleaseDate`, `tracklist`, `artistImageUrl`, `bioTokens`
- * (each with `?? null` when LML returned no value), whereas this branch
- * omits those keys entirely because `album_metadata` doesn't store them.
- * Consumers that distinguish "key absent" from "key=null" see different
- * payloads across cohorts. iOS V1 and dj-site `AlbumDetailPanel` gate the
- * artist sub-panel on `discogsArtistId`, so cache-hit cohorts silently lose
- * the artist subtree until the follow-up in #1336 extends the schema.
+ * Build the proxy-album response from BS's own persisted state.
+ *
+ * Wire-shape parity with the LML-fallthrough path is *almost* but not
+ * exact. Eight LML-only fields aren't on `album_metadata`:
+ * `discogsArtistId`, `genres`, `styles`, `label`, `fullReleaseDate`,
+ * `tracklist`, `artistImageUrl`, `bioTokens`. Seven of those are
+ * assigned `?? undefined` / `|| undefined` / conditional-when-non-empty
+ * on the LML branch and dropped by `JSON.stringify`, so the wire output
+ * is the same as this branch's "key omitted" shape. The one real
+ * divergence is `discogsArtistId`, which the LML branch assigns as
+ * `?? null` (always present, sometimes literal `null`) and this branch
+ * omits entirely. iOS V1 and dj-site `AlbumDetailPanel` gate the
+ * artist sub-panel on a truthy `discogsArtistId`, so cache-hit cohorts
+ * silently lose the artist subtree until #1336 extends the
+ * `album_metadata` schema to carry the LML-only enrichment fields.
+ *
+ * iOS decoders that use `decodeIfPresent` (and frontend code that
+ * uses optional chaining) see a decode-compatible shape on both
+ * branches.
  *
  * `filterSpacerGif` scrubs the Discogs 1×1 placeholder URL on `artworkUrl`
  * just as the LML-fallthrough path does (`populateCommonMetadataFields`).
