@@ -42,7 +42,7 @@ Full reference. CLAUDE.md links here. Variables marked _required_ have no defaul
 
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`
 - `SES_FROM_EMAIL`
-- `SES_CONFIGURATION_SET_NAME` — Configuration set passed on every `SendEmailCommand`. Optional. Required in production for the event-destination on `my-first-configuration-set` to actually capture transactional sends — SES picks the most-specific identity for `From:`, and the `no-reply@wxyc.org` email-level identity has no config set attached, so the domain-level default never applies. Passing this explicitly bypasses the identity-precedence trap. Production value: `my-first-configuration-set`.
+- `SES_CONFIGURATION_SET_NAME` — Configuration set passed on every `SendEmailCommand`. Optional. Production value: `my-first-configuration-set`. The `wxyc.org` domain identity lists this as its default, so sends from `hello@wxyc.org` (or any other `*@wxyc.org` without its own email-level identity) pick it up automatically. Passing it explicitly here is belt-and-suspenders against the identity-precedence trap — if a future email-level identity for the from address is added without the config set attached, the EventDestination would silently stop seeing OTP / verification / reset traffic, the trap BS#1070 fixed for the legacy `no-reply@wxyc.org` email-level identity.
 - `PASSWORD_RESET_REDIRECT_URL`, `EMAIL_VERIFICATION_REDIRECT_URL`
 
 ### SES delivery events (`POST /internal/ses-events`)

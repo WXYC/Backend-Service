@@ -113,13 +113,18 @@ const buildEmailHtml = ({ title, intro, actionText, actionUrl, footer }: Omit<Em
 `.trim();
 
 /**
- * SES picks the most-specific identity for an outbound `From:`. Because
- * `no-reply@wxyc.org` is verified as an email-level identity, sends from
- * that address use the email-level identity even though `wxyc.org` (the
- * domain) has `my-first-configuration-set` set as its default. The
- * email-level identity has no `ConfigurationSetName` attached, so without
- * passing it explicitly here the EventDestination on the config set never
- * sees the OTP / verification / reset traffic (BS#1070).
+ * SES picks the most-specific identity for an outbound `From:`. The
+ * `wxyc.org` domain identity has `my-first-configuration-set` set as its
+ * default, so sends that resolve to the domain identity (e.g., the current
+ * `hello@wxyc.org` sender, which has no email-level identity) pick up the
+ * config set automatically.
+ *
+ * Passing `SES_CONFIGURATION_SET_NAME` here explicitly is belt-and-
+ * suspenders: if a future email-level identity for the from address is
+ * added without the config set attached, the EventDestination on the
+ * config set would silently stop seeing OTP / verification / reset
+ * traffic — the trap BS#1070 fixed for the legacy `no-reply@wxyc.org`
+ * email-level identity.
  *
  * `SES_CONFIGURATION_SET_NAME` is optional: when unset, no config set is
  * passed and behavior matches pre-#1070 — useful locally, where there is
