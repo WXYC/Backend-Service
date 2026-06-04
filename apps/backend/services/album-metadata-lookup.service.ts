@@ -38,7 +38,7 @@
  * targets the linked-row cohort (the steady state for entries old enough
  * to be of interest to a detail-view fetch).
  */
-import { sql, eq } from 'drizzle-orm';
+import { sql, eq, desc } from 'drizzle-orm';
 import { db, flowsheet, album_metadata } from '@wxyc/database';
 
 const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
@@ -108,19 +108,21 @@ export async function lookupAlbumMetadataByKey(
 
   // Step 1: find the album_id via the partial functional index. Explicit
   // `flowsheet.album_id IS NOT NULL` predicate matches the index's WHERE
-  // clause verbatim so the planner uses the partial index regardless of
-  // whether the SELECT projection happens to materialize the album_id.
-  // LIMIT 1 short-circuits the index scan as soon as the first match
-  // lands. The choice of "first" within a multi-album_id key is
-  // unspecified (e.g. two physical formats of the same album sharing
-  // artist+title text); the answer is degenerate for the common case
-  // where album_metadata exists for the album_id and is fine for the
-  // V/A multi-format edge — the proxy response is per-album anyway and
-  // either album_id's metadata is a reasonable hit.
+  // clause verbatim so the planner uses the partial index. `ORDER BY
+  // flowsheet.id DESC LIMIT 1` makes the row-pick deterministic on
+  // multi-album_id keys (V/A multi-format, dual-pressing, librarian
+  // duplicates — verified to exist in the live `album_id` corpus). Two
+  // requests for the same lookup key resolve to the same row, eliminating
+  // a flapping-response edge that would otherwise let iOS see two
+  // different artworks/streaming URLs for the same album across polls.
+  // Sort cost is bounded: the most-popular key has hundreds of matches,
+  // not thousands; the index returns sorted-by-key but the post-filter
+  // `id DESC` sort on the small match set is sub-ms in practice.
   const candidate = await db
     .select({ album_id: flowsheet.album_id })
     .from(flowsheet)
     .where(sql`${flowsheetLookupKey} = ${key} AND ${flowsheet.album_id} IS NOT NULL`)
+    .orderBy(desc(flowsheet.id))
     .limit(1);
 
   const albumId = candidate[0]?.album_id;
