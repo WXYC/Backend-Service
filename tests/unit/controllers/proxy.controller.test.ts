@@ -864,14 +864,16 @@ describe('proxy.controller', () => {
         expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');
       });
 
-      it('returns catch-arm row faithfully — YT/BC/SC populated, Apple/Spotify/artwork/discogs absent (no request-time synthesis)', async () => {
+      it('catch-arm-shape row: persisted YT/BC/SC win, missing Apple/Spotify synthesized at request time (no LML)', async () => {
         // BS#873 catch arm at enrichment.service.ts writes only the three
         // synth-able streaming URLs on LML failure (no Apple, no Spotify,
-        // no artwork, no Discogs). BS#1192 says we must preserve those
-        // nulls — synthesizing an Apple Music search URL at request time
-        // launders LML's verified-rejection signal (the iTunes 80/80 floor
-        // explicitly rejected the candidates). Same reasoning rules out
-        // request-time Spotify synthesis for persisted catch-arm rows.
+        // no artwork, no Discogs). The persisted URLs win — request-time
+        // synthesis only fills the keys the persisted row left null. The
+        // BS#1192 "verified rejection" invariant is a write-path concern
+        // (don't persist synth URLs in album_metadata); synthesizing at
+        // request time doesn't poison persisted state, and matching the
+        // LML-fallthrough branch's behavior means iOS sees the same
+        // degraded-but-usable shape regardless of cohort.
         mockLookupAlbumMetadataByKey.mockResolvedValue({
           artwork_url: null,
           discogs_url: null,
@@ -896,17 +898,127 @@ describe('proxy.controller', () => {
         expect(res.status).toHaveBeenCalledWith(200);
 
         const result = (res.json as jest.Mock).mock.calls[0][0];
+        // Persisted catch-arm URLs win over synthesis.
         expect(result.youtubeMusicUrl).toBe(
           'https://music.youtube.com/search?q=Bill%20Orcutt%20Music%20For%20Four%20Guitars'
         );
         expect(result.bandcampUrl).toBe('https://bandcamp.com/search?q=Bill%20Orcutt%20Music%20For%20Four%20Guitars');
         expect(result.soundcloudUrl).toBe('https://soundcloud.com/search?q=Bill%20Orcutt');
-        // Nulls preserved — no synthesis at request time.
-        expect(result.appleMusicUrl).toBeUndefined();
-        expect(result.spotifyUrl).toBeUndefined();
+        // Missing Apple/Spotify get synthesized — same fallback the
+        // LML-fallthrough branch has used since BS#1185.
+        expect(result.appleMusicUrl).toContain('music.apple.com/search');
+        expect(result.spotifyUrl).toContain('open.spotify.com/search');
+        // Persisted nulls on the non-URL fields stay absent.
         expect(result.artworkUrl).toBeUndefined();
         expect(result.discogsUrl).toBeUndefined();
         expect(result.discogsReleaseId).toBeUndefined();
+      });
+
+      it('all-null persisted row: every streaming URL gets a synthesized search-URL fallback (no LML)', async () => {
+        // The success-no-match write path at enrichment.service.ts:114-148
+        // persists `metadata.album?.X ?? null` for every column, so an
+        // LML success with no Discogs/Spotify/iTunes match produces a row
+        // with all 10 columns null. Without request-time synthesis the
+        // handler would return `{}` to iOS — every streaming button greys
+        // out. Synthesizing here matches the cold-path behavior.
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: null,
+          discogs_url: null,
+          release_year: null,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        });
+
+        const req = {
+          query: { artistName: 'No Match Artist', releaseTitle: 'No Match Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.spotifyUrl).toContain('open.spotify.com/search');
+        expect(result.appleMusicUrl).toContain('music.apple.com/search');
+        expect(result.youtubeMusicUrl).toContain('music.youtube.com');
+        expect(result.bandcampUrl).toContain('bandcamp.com');
+        expect(result.soundcloudUrl).toContain('soundcloud.com');
+      });
+
+      it('strips Discogs spacer.gif from persisted artwork_url on local hit (#649)', async () => {
+        // album_metadata.artwork_url can carry spacer.gif from the
+        // historical album-metadata-backfill (verbatim INSERT…SELECT) or
+        // pre-#649 flowsheet rows. The local-hit path must scrub via
+        // filterSpacerGif so iOS's "missing → placeholder" fallback
+        // doesn't render the 1×1 tracking pixel as cover art.
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: 'https://s.discogs.com/images/spacer.gif',
+          discogs_url: 'https://www.discogs.com/release/777',
+          release_year: 2015,
+          spotify_url: 'https://open.spotify.com/album/spacer',
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        });
+
+        const req = {
+          query: { artistName: 'Spacer Artist', releaseTitle: 'Spacer Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.artworkUrl).toBeUndefined();
+        // Other persisted fields still surface.
+        expect(result.discogsUrl).toBe('https://www.discogs.com/release/777');
+        expect(result.discogsReleaseId).toBe(777);
+      });
+
+      it('falls through to LML when the local lookup throws (DB blip should not 500 the request)', async () => {
+        // Without this guard a transient pool-exhaust / statement_timeout
+        // / RDS failover would propagate to the global error handler and
+        // return 500, regressing availability versus the pre-PR endpoint
+        // (which had zero DB-failure surface). The graceful degradation
+        // matches the LML-fallthrough path's own try/catch.
+        mockLookupAlbumMetadataByKey.mockRejectedValue(new Error('asyncpg: connection refused'));
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: { id: 1, title: 'Album', artist: 'Artist', call_number: '', library_url: '' },
+              artwork: {
+                release_id: 11,
+                release_url: 'https://www.discogs.com/release/11',
+                artwork_url: 'https://i.discogs.com/a.jpg',
+                album: 'Album',
+                artist: 'Artist',
+                confidence: 0.9,
+              },
+            },
+          ],
+          search_type: 'direct',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = { query: { artistName: 'Artist', releaseTitle: 'Album' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.upstream_calls': 1 });
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.discogsReleaseId).toBe(11);
       });
 
       it('falls through to LML when no local row matches (true cold case)', async () => {
