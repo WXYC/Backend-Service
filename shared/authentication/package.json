@@ -23,7 +23,7 @@
     "@sentry/node": "^10.53.1",
     "@wxyc/database": "^1.0.0",
     "@wxyc/shared": "^1.11.0",
-    "better-auth": "^1.6.11",
+    "better-auth": "^1.6.14",
     "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.9"
   },
