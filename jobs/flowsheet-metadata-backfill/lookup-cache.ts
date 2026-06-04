@@ -16,11 +16,15 @@
  * Per-track URL stripping is the cache's concern, not the orchestrator's.
  * `get()` returns a shallow-copied response with five per-track URL fields
  * deleted: `spotify_url`, `youtube_music_url`, `bandcamp_url`,
- * `soundcloud_url`, and `apple_music_url`. enrich.ts's existing `??`
- * fallback then drops through to per-row `synthesizeSearchUrls(row)` for
- * the four search URLs; `apple_music_url` falls to `null` (BS#1192:
- * null is load-bearing — a wrong Apple URL is worse than null because it
- * claims a verified iTunes match for the wrong track).
+ * `soundcloud_url`, and `apple_music_url`. For the four search URLs,
+ * enrich.ts's existing `??` fallback then drops through to per-row
+ * `synthesizeSearchUrls(row)`. For `apple_music_url` (BS#1192: null is
+ * load-bearing — a wrong Apple URL is worse than null because it claims
+ * a verified iTunes match for the wrong track), enrich.ts uses a
+ * conditional spread on the `'apple_music_url' in artwork` witness and
+ * OMITS the column from the album_metadata UPSERT / inline UPDATE on
+ * cache-hit so a prior verified URL is preserved instead of being
+ * clobbered to null via the UPSERT's `updated_at < NOW()` setWhere.
  *
  * Stripping is required because every URL in this set is track-aware on
  * LML's side: the four search URLs are synthesized per (artist, track)
