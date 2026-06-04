@@ -35,9 +35,15 @@
  *     no-match. On hit, per-track URL fields are stripped at the
  *     cache boundary (BS#1185 search URLs + BS#1192 apple_music_url
  *     are track-aware on LML's side); enrich.ts's existing `??`
- *     fallback drops through to per-row synthesis for the search URLs
- *     and to `null` for apple_music_url. See `lookup-cache.ts` for the
- *     dedup design.
+ *     fallback drops through to per-row synthesis for the search URLs.
+ *     For apple_music_url (BS#1192 — `null` is load-bearing "no
+ *     verified iTunes match"), enrich.ts uses a conditional spread on
+ *     the `'apple_music_url' in artwork` witness: present means LML
+ *     decided (string or null) so we record it; absent means the
+ *     cache stripped it, so we OMIT the column from the album_metadata
+ *     UPSERT and inline flowsheet UPDATE so a prior verified URL on
+ *     the album is preserved instead of being overwritten with null.
+ *     See `lookup-cache.ts` for the dedup design.
  *
  * The third parameter is named `track` (not `song`) to match the orchestrator's
  * `EnrichRow.track_title` field. It's plumbed through to LML's `body.song` by

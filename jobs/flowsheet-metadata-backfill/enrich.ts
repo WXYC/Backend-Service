@@ -151,7 +151,20 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
       // Apple Music has no fallback — null is load-bearing "no verified
       // iTunes match" signal (BS#1192).
       spotify_url: artwork.spotify_url ?? searchUrls.spotify_url,
-      apple_music_url: artwork.apple_music_url ?? null,
+      // BS#1192: apple_music_url has no synthesized fallback because `null`
+      // is load-bearing ("no verified iTunes match"). On a cache hit, the
+      // run-scoped LookupCache deletes the key from the artwork object
+      // (lookup-cache.ts:TRACK_AWARE_URL_FIELDS) since LML returns this
+      // per-track and the row that populated the cache wasn't necessarily
+      // the same track. Writing `null` here on hits would CLOBBER a prior
+      // verified URL via the album_metadata UPSERT's
+      // `setWhere updated_at < NOW()` guard — that predicate always passes
+      // within a single backfill batch, so R2's null write would destroy
+      // R1's verified Apple URL. Conditional-spread on the `in` witness
+      // (matching the strip-deletes-keys contract documented at
+      // lookup-cache.ts:62-64) preserves the prior value on cache hits
+      // and still records LML's decision (string or null) on misses.
+      ...('apple_music_url' in artwork ? { apple_music_url: artwork.apple_music_url ?? null } : {}),
       youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
       bandcamp_url: artwork.bandcamp_url ?? searchUrls.bandcamp_url,
       soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,

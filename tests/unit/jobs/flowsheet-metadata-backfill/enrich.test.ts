@@ -179,6 +179,43 @@ describe('applyEnrichment', () => {
     expect(setArgs.artwork_url).toBeNull();
   });
 
+  it('cache-hit shape (apple_music_url key absent on artwork): inline UPDATE omits apple_music_url so the row preserves any prior value', async () => {
+    // Reproduces the artwork shape after lookup-cache.ts's
+    // `stripTrackAwareUrls` deletes per-track URL fields on cache hits.
+    // BS#1192: apple_music_url is track-aware on LML's side and `null`
+    // is load-bearing. Including `apple_music_url: null` here would
+    // overwrite any prior value on the flowsheet row's column —
+    // unlikely to matter on first-attempt rows (typically NULL already)
+    // but a real loss if an out-of-band path had stamped a value.
+    const artworkSansApple = { ...matchedResponse.results[0].artwork! };
+    delete artworkSansApple.apple_music_url;
+    const responseFromCache: LookupResponse = {
+      ...matchedResponse,
+      results: [{ ...matchedResponse.results[0], artwork: artworkSansApple }],
+    };
+
+    await applyEnrichment(baseRow, responseFromCache);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect('apple_music_url' in setArgs).toBe(false);
+  });
+
+  it("LML returned apple_music_url: null (no verified iTunes match): inline UPDATE writes null (records LML's decision)", async () => {
+    // Distinct from cache-hit: here LML's response explicitly carries
+    // `apple_music_url: null`, meaning "no verified Apple match". The
+    // `in` witness fires (key present), so the conditional spread
+    // records the decision rather than omitting the field.
+    const artworkAppleNull = { ...matchedResponse.results[0].artwork!, apple_music_url: null };
+    const responseAppleNull: LookupResponse = {
+      ...matchedResponse,
+      results: [{ ...matchedResponse.results[0], artwork: artworkAppleNull }],
+    };
+
+    await applyEnrichment(baseRow, responseAppleNull);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect('apple_music_url' in setArgs).toBe(true);
+    expect(setArgs.apple_music_url).toBeNull();
+  });
+
   it('idempotency guard: WHERE narrows by id AND metadata_attempt_at IS NULL', async () => {
     // The WHERE makes the UPDATE a no-op against rows the runtime path
     // already stamped. Verify .where() was called once with a single
@@ -290,6 +327,36 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     expect(setArgs).not.toHaveProperty('soundcloud_url');
     expect(setArgs).not.toHaveProperty('artist_bio');
     expect(setArgs).not.toHaveProperty('artist_wikipedia_url');
+  });
+
+  it('on cache-hit (apple_music_url absent on artwork): album_metadata UPSERT omits apple_music_url from INSERT and SET so a prior verified URL is preserved', async () => {
+    // The destructive scenario this guards: R1 misses cache, calls LML for
+    // (artist, album, track A), receives apple_music_url='/song/123',
+    // UPSERTs album_metadata with that value. Cache stores R1's response.
+    // R2 same (artist, album) but track B; hits cache; stripped artwork
+    // has no apple_music_url key. Without the conditional spread, R2's
+    // payload would carry `apple_music_url: null`; the UPSERT's
+    // `setWhere updated_at < NOW()` predicate always passes within a
+    // batch (R1's updated_at is microseconds in the past), so the UPDATE
+    // would overwrite R1's '/song/123' with null. The conditional spread
+    // means R2's set clause omits the column entirely, preserving R1's
+    // verified URL on album_metadata. Mirror to BS#1192.
+    const artworkSansApple = { ...matchedResponse.results[0].artwork! };
+    delete artworkSansApple.apple_music_url;
+    const responseFromCache: LookupResponse = {
+      ...matchedResponse,
+      results: [{ ...matchedResponse.results[0], artwork: artworkSansApple }],
+    };
+
+    await applyEnrichment(linkedRow, responseFromCache);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect('apple_music_url' in insertPayload).toBe(false);
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as {
+      set: Record<string, unknown>;
+    };
+    expect('apple_music_url' in conflictCfg.set).toBe(false);
   });
 
   it('on match: flowsheet WHERE still uses the marker-IS-NULL race detector (one where call, non-empty predicate)', async () => {

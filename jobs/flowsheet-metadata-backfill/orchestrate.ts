@@ -197,9 +197,11 @@ export type ProcessOutcome = EnrichOutcome | 'lml_error';
 
 /**
  * Outcome plus cache provenance, so the per-row loop can skip the LML
- * throttle on hits. `cacheHit` is undefined for the `lml_error` branch
- * (we never called the cache successfully) and false for `enriched_*`
- * outcomes that went to the upstream.
+ * throttle on hits. `cacheHit` is false for the `lml_error` branch (we
+ * threw before the cache had a chance to record a hit, so the throttle
+ * still runs to space the next LML attempt) and false for `enriched_*`
+ * outcomes that came from a cache miss (lookup-cache.ts:set was called).
+ * True only when lookup-cache.ts:get returned a stored response.
  */
 export type ProcessResult = { outcome: ProcessOutcome; cacheHit: boolean };
 
