@@ -40,6 +40,24 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   lmlLookupCoordinator: { lookup: mockLookupMetadata },
 }));
 
+// BS#1331: getAlbumMetadata now consults local persisted state first via
+// `lookupAlbumMetadataByKey` before falling through to LML. Mocked here so
+// each test can set local-hit, catch-arm-row, or cold-miss explicitly.
+const mockLookupAlbumMetadataByKey = jest.fn<(artist: string, release?: string) => Promise<unknown>>();
+jest.mock('../../../apps/backend/services/album-metadata-lookup.service', () => ({
+  lookupAlbumMetadataByKey: mockLookupAlbumMetadataByKey,
+}));
+
+// BS#1331 acceptance: the cohort split for trace explorer turns on
+// `proxy.metadata.album.upstream_calls`. Mock Sentry's `getActiveSpan` so
+// the cache-first test can assert the attribute lands as a number; outside
+// a tracing context `getActiveSpan()` is null and the call short-circuits.
+const mockSpanSetAttributes = jest.fn();
+const mockGetActiveSpan = jest.fn(() => ({ setAttributes: mockSpanSetAttributes }));
+jest.mock('@sentry/node', () => ({
+  getActiveSpan: mockGetActiveSpan,
+}));
+
 // library.service mock — only the helper libraryTracks consumes.
 const mockGetDiscogsReleaseIdByLegacyId = jest.fn<(legacyId: number) => Promise<number | null>>();
 
@@ -215,6 +233,12 @@ describe('proxy.controller', () => {
   // --- getAlbumMetadata ---
 
   describe('getAlbumMetadata', () => {
+    beforeEach(() => {
+      // Default to cold case: no local row, so existing tests fall through
+      // to LML. Local-hit tests override below. BS#1331.
+      mockLookupAlbumMetadataByKey.mockResolvedValue(null);
+    });
+
     it('throws WxycError 400 when artistName is missing', async () => {
       const req = { query: {} } as unknown as Request;
       const res = createMockRes();
@@ -784,6 +808,172 @@ describe('proxy.controller', () => {
         // Other release fields still preserved.
         expect(result.discogsReleaseId).toBe(8888);
         expect(result.label).toBe('Sonamos');
+      });
+    });
+
+    // --- Cache-first local-lookup path (BS#1331) ---
+    //
+    // The handler now consults persisted state (album_metadata joined to
+    // flowsheet by the normalized `lower(trim(artist))-lower(trim(album))`
+    // lookup key, partial-indexed by `flowsheet_album_link_lookup_idx`)
+    // before going to LML. On a local hit it serves what BS already knows
+    // — no LML round-trip, no Discogs rate-limiter wait, no request-time
+    // search-URL synthesis (which would launder LML's verified-rejection
+    // signal; BS#1192). Sentry `proxy.metadata.album.upstream_calls` reads
+    // 0 on local hit so the cohort split survives in the trace explorer.
+    describe('cache-first local lookup (BS#1331)', () => {
+      it('serves persisted state without invoking LML when local row is enriched', async () => {
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: 'https://i.discogs.com/cached.jpg',
+          discogs_url: 'https://www.discogs.com/release/54321',
+          release_year: 2024,
+          spotify_url: 'https://open.spotify.com/album/cachedspot',
+          apple_music_url: 'https://music.apple.com/album/cachedapple',
+          youtube_music_url: 'https://music.youtube.com/playlist?list=cachedyt',
+          bandcamp_url: 'https://artist.bandcamp.com/album/cached',
+          soundcloud_url: 'https://soundcloud.com/artist/cached-album',
+          artist_bio: 'A cached bio of the artist.',
+          artist_wikipedia_url: 'https://en.wikipedia.org/wiki/CachedArtist',
+        });
+
+        const req = {
+          query: { artistName: 'Cached Artist', releaseTitle: 'Cached Album', trackTitle: 'Cached Track' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupAlbumMetadataByKey).toHaveBeenCalledWith('Cached Artist', 'Cached Album');
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.artworkUrl).toBe('https://i.discogs.com/cached.jpg');
+        expect(result.discogsUrl).toBe('https://www.discogs.com/release/54321');
+        // Derived from discogs_url so iOS V1 callers keep getting the
+        // release id field they previously read off LML's artwork block.
+        expect(result.discogsReleaseId).toBe(54321);
+        expect(result.releaseYear).toBe(2024);
+        expect(result.spotifyUrl).toBe('https://open.spotify.com/album/cachedspot');
+        expect(result.appleMusicUrl).toBe('https://music.apple.com/album/cachedapple');
+        expect(result.youtubeMusicUrl).toBe('https://music.youtube.com/playlist?list=cachedyt');
+        expect(result.bandcampUrl).toBe('https://artist.bandcamp.com/album/cached');
+        expect(result.soundcloudUrl).toBe('https://soundcloud.com/artist/cached-album');
+        expect(result.artistBio).toBe('A cached bio of the artist.');
+        expect(result.artistWikipediaUrl).toBe('https://en.wikipedia.org/wiki/CachedArtist');
+        expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');
+      });
+
+      it('returns catch-arm row faithfully — YT/BC/SC populated, Apple/Spotify/artwork/discogs absent (no request-time synthesis)', async () => {
+        // BS#873 catch arm at enrichment.service.ts writes only the three
+        // synth-able streaming URLs on LML failure (no Apple, no Spotify,
+        // no artwork, no Discogs). BS#1192 says we must preserve those
+        // nulls — synthesizing an Apple Music search URL at request time
+        // launders LML's verified-rejection signal (the iTunes 80/80 floor
+        // explicitly rejected the candidates). Same reasoning rules out
+        // request-time Spotify synthesis for persisted catch-arm rows.
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: null,
+          discogs_url: null,
+          release_year: null,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: 'https://music.youtube.com/search?q=Bill%20Orcutt%20Music%20For%20Four%20Guitars',
+          bandcamp_url: 'https://bandcamp.com/search?q=Bill%20Orcutt%20Music%20For%20Four%20Guitars',
+          soundcloud_url: 'https://soundcloud.com/search?q=Bill%20Orcutt',
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        });
+
+        const req = {
+          query: { artistName: 'Bill Orcutt', releaseTitle: 'Music For Four Guitars' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.youtubeMusicUrl).toBe(
+          'https://music.youtube.com/search?q=Bill%20Orcutt%20Music%20For%20Four%20Guitars'
+        );
+        expect(result.bandcampUrl).toBe('https://bandcamp.com/search?q=Bill%20Orcutt%20Music%20For%20Four%20Guitars');
+        expect(result.soundcloudUrl).toBe('https://soundcloud.com/search?q=Bill%20Orcutt');
+        // Nulls preserved — no synthesis at request time.
+        expect(result.appleMusicUrl).toBeUndefined();
+        expect(result.spotifyUrl).toBeUndefined();
+        expect(result.artworkUrl).toBeUndefined();
+        expect(result.discogsUrl).toBeUndefined();
+        expect(result.discogsReleaseId).toBeUndefined();
+      });
+
+      it('falls through to LML when no local row matches (true cold case)', async () => {
+        mockLookupAlbumMetadataByKey.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: { id: 1, title: 'Cold Album', artist: 'Cold Artist', call_number: '', library_url: '' },
+              artwork: {
+                release_id: 99,
+                release_url: 'https://www.discogs.com/release/99',
+                artwork_url: 'https://i.discogs.com/cold.jpg',
+                album: 'Cold Album',
+                artist: 'Cold Artist',
+                confidence: 0.9,
+                spotify_url: 'https://open.spotify.com/album/cold',
+              },
+            },
+          ],
+          search_type: 'direct',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = {
+          query: { artistName: 'Cold Artist', releaseTitle: 'Cold Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupAlbumMetadataByKey).toHaveBeenCalledWith('Cold Artist', 'Cold Album');
+        // LML was consulted because the local lookup returned null.
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+        expect(res.status).toHaveBeenCalledWith(200);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.discogsReleaseId).toBe(99);
+        expect(result.artworkUrl).toBe('https://i.discogs.com/cold.jpg');
+      });
+
+      it('projects upstream_calls=0 onto the active Sentry span on local hit', async () => {
+        // The hook here is the trace-explorer cohort split: anything > 0
+        // is a fallthrough, 0 is a steady-state hit. Without this signal
+        // we can't distinguish "the cache-first path saved 5s" from "we
+        // never reached the cache-first path" in the prod p95.
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: 'https://i.discogs.com/x.jpg',
+          discogs_url: 'https://www.discogs.com/release/1',
+          release_year: 2020,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        });
+
+        const req = {
+          query: { artistName: 'Local Artist', releaseTitle: 'Local Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.upstream_calls': 0 });
       });
     });
   });

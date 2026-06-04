@@ -26,6 +26,7 @@ import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
 import { filterSpacerGif, isSyntheticArtwork } from '../services/metadata/metadata.service.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
+import { lookupAlbumMetadataByKey, type PersistedAlbumMetadata } from '../services/album-metadata-lookup.service.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
 
@@ -280,22 +281,103 @@ function populateReleaseMetadata(
 }
 
 /**
+ * Build the proxy-album response from BS's own persisted state. Mirrors the
+ * existing controller's "omit when falsy" wire-contract convention so iOS
+ * sees the same response shape as it would from the LML-fallthrough path,
+ * just sourced from `album_metadata` instead of a live LML lookup.
+ *
+ * Crucially, no `SearchUrlProvider` synthesis happens here. BS#1192's
+ * verified-rejection signal is load-bearing: when LML's iTunes 80/80
+ * floor rejects a release the catch arm persists `apple_music_url: NULL`,
+ * and we must not launder that null into a keyword-search URL at the
+ * proxy. The same reasoning extends to Spotify on persisted catch-arm
+ * rows — a null on a row BS already attempted to enrich is signal,
+ * not absence. The LML-fallthrough branch below retains today's
+ * synthesis behavior for the no-row case (cold lookups) so the iOS
+ * Tragic Magic surface still gets fallback URLs where there's no
+ * persisted state to poison.
+ */
+function buildLocalMetadataResponse(persisted: PersistedAlbumMetadata): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {};
+  if (persisted.artwork_url) metadata.artworkUrl = persisted.artwork_url;
+  if (persisted.discogs_url) {
+    metadata.discogsUrl = persisted.discogs_url;
+    const releaseId = parseDiscogsReleaseIdFromUrl(persisted.discogs_url);
+    if (releaseId !== undefined) metadata.discogsReleaseId = releaseId;
+  }
+  // Discogs returns 0 as "year unknown"; the write path persists either a
+  // real year or null, but check for both shapes defensively (mirrors
+  // populateReleaseMetadata + extractAlbumMetadata, #1002).
+  if (persisted.release_year) metadata.releaseYear = persisted.release_year;
+  if (persisted.spotify_url) metadata.spotifyUrl = persisted.spotify_url;
+  if (persisted.apple_music_url) metadata.appleMusicUrl = persisted.apple_music_url;
+  if (persisted.youtube_music_url) metadata.youtubeMusicUrl = persisted.youtube_music_url;
+  if (persisted.bandcamp_url) metadata.bandcampUrl = persisted.bandcamp_url;
+  if (persisted.soundcloud_url) metadata.soundcloudUrl = persisted.soundcloud_url;
+  if (persisted.artist_bio) metadata.artistBio = persisted.artist_bio;
+  if (persisted.artist_wikipedia_url) metadata.artistWikipediaUrl = persisted.artist_wikipedia_url;
+  return metadata;
+}
+
+/**
+ * Extract the Discogs release id from a canonical release URL
+ * (`https://www.discogs.com/release/{id}` or
+ * `https://www.discogs.com/release/{id}-{slug}`). Returns `undefined`
+ * for unparseable URLs so iOS V1 callers that key on `discogsReleaseId`
+ * silently degrade to the URL field instead of crashing on a synthetic 0.
+ */
+function parseDiscogsReleaseIdFromUrl(url: string): number | undefined {
+  const match = url.match(/\/release\/(\d+)/);
+  if (!match) return undefined;
+  const id = parseInt(match[1], 10);
+  return Number.isFinite(id) && id > 0 ? id : undefined;
+}
+
+/**
  * GET /proxy/metadata/album
  *
- * Fetches album metadata from LML. The LML search response already includes
- * enriched streaming URLs (Spotify, Apple Music, YouTube Music, Bandcamp,
- * SoundCloud), so no direct calls to those APIs are needed.
+ * Cache-first (BS#1331). The handler consults persisted state — the
+ * `album_metadata` JOIN to `flowsheet` via the normalized `(artist,
+ * album)` lookup key, partial-indexed by `flowsheet_album_link_lookup_idx`
+ * — before going to LML. On a local hit it serves what BS already knows,
+ * skipping the multi-second `lml.discogs.rate_limiter` queue (the prod
+ * trace span dominating the p95 baseline). LML is reached only when no
+ * matching `album_id`-bearing flowsheet row exists for the key — the
+ * true cold case.
  *
- * Single-call path: the coordinator forces `extended: true`, so LML returns
- * release details (tracklist/genres/styles/label/full_release_date/
- * discogs_artist_id) inline on the top-1 artwork block. One round-trip
- * iOS → BS → LML; LML runs its release + artist fetches concurrently
- * server-side.
+ * On the LML-fallthrough path, the coordinator forces `extended: true`,
+ * so LML returns release details (tracklist/genres/styles/label/
+ * full_release_date/discogs_artist_id) inline on the top-1 artwork
+ * block. One round-trip iOS → BS → LML.
+ *
+ * `proxy.metadata.album.upstream_calls` Sentry attribute reads 0 on
+ * local hit, 1 on cold fallthrough — splittable in the trace explorer
+ * so the p50/p95 cohort distinction stays visible.
  */
 export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMetadataQuery> = async (req, res) => {
   const { artistName, releaseTitle, trackTitle } = req.query;
 
   if (!artistName) throw new WxycError('artistName query parameter is required', 400);
+
+  // Cache-first: consult BS's own persisted state before going to LML.
+  // Catch-arm-shape rows (YT/BC/SC populated, Apple/Spotify/artwork null)
+  // count as hits; the persisted nulls reflect a real prior LML attempt
+  // and serving them faithfully is the whole point — re-running the
+  // lookup would just hit LML's verified-rejection again.
+  const persisted = await lookupAlbumMetadataByKey(artistName, releaseTitle);
+  if (persisted) {
+    const metadata = buildLocalMetadataResponse(persisted);
+    try {
+      Sentry.getActiveSpan()?.setAttributes({
+        'proxy.metadata.album.upstream_calls': 0,
+      });
+    } catch (err) {
+      console.warn('[ProxyController] failed to project Sentry attrs', err);
+    }
+    res.set('Cache-Control', 'private, max-age=600');
+    res.status(200).json(metadata);
+    return;
+  }
 
   const metadata: Record<string, unknown> = {};
   let upstreamCalls = 0;
@@ -336,6 +418,9 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   //
   // Post-BS#1185: Spotify and Apple Music also have search-URL fallbacks so
   // iOS doesn't show greyed buttons when LML fails or returns zero results.
+  //
+  // Only the LML-fallthrough branch synthesizes — local-hit responses above
+  // serve persisted nulls faithfully (BS#1192).
   const fallbackUrls = searchUrlProvider.getAllSearchUrls(artistName, releaseTitle, trackTitle);
   if (!metadata.spotifyUrl) metadata.spotifyUrl = fallbackUrls.spotifyUrl;
   if (!metadata.appleMusicUrl) metadata.appleMusicUrl = fallbackUrls.appleMusicUrl;
