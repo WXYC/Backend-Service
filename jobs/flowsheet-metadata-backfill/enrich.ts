@@ -150,24 +150,35 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
       // Streaming search URLs: prefer LML's, fall back to synthesized.
       // Apple Music has no fallback — null is load-bearing "no verified
       // iTunes match" signal (BS#1192).
-      spotify_url: artwork.spotify_url ?? searchUrls.spotify_url,
-      // BS#1192: apple_music_url has no synthesized fallback because `null`
-      // is load-bearing ("no verified iTunes match"). On a cache hit, the
-      // run-scoped LookupCache deletes the key from the artwork object
-      // (lookup-cache.ts:TRACK_AWARE_URL_FIELDS) since LML returns this
+      //
+      // All five track-aware URL columns use a conditional spread on the
+      // `'<field>' in artwork` witness to preserve R1's verified value on
+      // cache hits (BS#1338). The run-scoped LookupCache deletes each of
+      // the five keys from the artwork object on hit
+      // (lookup-cache.ts:TRACK_AWARE_URL_FIELDS) because LML returns them
       // per-track and the row that populated the cache wasn't necessarily
-      // the same track. Writing `null` here on hits would CLOBBER a prior
-      // verified URL via the album_metadata UPSERT's
-      // `setWhere updated_at < NOW()` guard — that predicate always passes
-      // within a single backfill batch, so R2's null write would destroy
-      // R1's verified Apple URL. Conditional-spread on the `in` witness
-      // (matching the strip-deletes-keys contract documented at
-      // lookup-cache.ts:62-64) preserves the prior value on cache hits
-      // and still records LML's decision (string or null) on misses.
+      // the same track. Without the witness, the `??` fallback would
+      // synthesize a search URL (or write null, for apple_music_url) on
+      // R2, then the album_metadata UPSERT's `setWhere updated_at < NOW()`
+      // guard would happily apply it — that predicate always passes
+      // within a single batch (R1's updated_at is microseconds in the
+      // past), so R2's per-row write clobbers R1's verified deep-link
+      // (apple_music_url: BS#1192 destructive null; the four search URLs:
+      // BS#1338 verified→synthesized degradation). The conditional spread
+      // OMITS the column from both the album_metadata UPSERT
+      // (INSERT + onConflictDoUpdate.set) and the inline unlinked UPDATE
+      // on cache-stripped hits, so the prior value survives untouched.
+      // Present-in-artwork still records LML's decision (string for the
+      // four search URLs; string or null for apple_music_url) on misses.
+      // Mirrors the strip-deletes-keys contract documented at
+      // lookup-cache.ts:62-73.
+      ...('spotify_url' in artwork ? { spotify_url: artwork.spotify_url ?? searchUrls.spotify_url } : {}),
       ...('apple_music_url' in artwork ? { apple_music_url: artwork.apple_music_url ?? null } : {}),
-      youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
-      bandcamp_url: artwork.bandcamp_url ?? searchUrls.bandcamp_url,
-      soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,
+      ...('youtube_music_url' in artwork
+        ? { youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url }
+        : {}),
+      ...('bandcamp_url' in artwork ? { bandcamp_url: artwork.bandcamp_url ?? searchUrls.bandcamp_url } : {}),
+      ...('soundcloud_url' in artwork ? { soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url } : {}),
       artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
       artist_wikipedia_url: artwork.wikipedia_url ?? null,
     };

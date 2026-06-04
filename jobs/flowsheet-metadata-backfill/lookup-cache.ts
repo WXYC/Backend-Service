@@ -16,15 +16,25 @@
  * Per-track URL stripping is the cache's concern, not the orchestrator's.
  * `get()` returns a shallow-copied response with five per-track URL fields
  * deleted: `spotify_url`, `youtube_music_url`, `bandcamp_url`,
- * `soundcloud_url`, and `apple_music_url`. For the four search URLs,
- * enrich.ts's existing `??` fallback then drops through to per-row
- * `synthesizeSearchUrls(row)`. For `apple_music_url` (BS#1192: null is
- * load-bearing — a wrong Apple URL is worse than null because it claims
- * a verified iTunes match for the wrong track), enrich.ts uses a
- * conditional spread on the `'apple_music_url' in artwork` witness and
- * OMITS the column from the album_metadata UPSERT / inline UPDATE on
- * cache-hit so a prior verified URL is preserved instead of being
- * clobbered to null via the UPSERT's `updated_at < NOW()` setWhere.
+ * `soundcloud_url`, and `apple_music_url`. All FIVE columns are
+ * track-aware URL columns on `album_metadata`; on a cache hit, enrich.ts
+ * uses a conditional spread on the `'<field>' in artwork` witness for
+ * each one and OMITS the column from the album_metadata UPSERT (both
+ * INSERT and onConflictDoUpdate.set) AND the inline unlinked flowsheet
+ * UPDATE so a prior verified value is preserved instead of being
+ * clobbered via the UPSERT's `updated_at < NOW()` setWhere — that guard
+ * always passes within a single backfill batch because R1's `updated_at`
+ * is microseconds in the past when R2's statement evaluates `NOW()`.
+ *
+ * The strip MUST use `delete` (never assignment to `undefined`). enrich.ts
+ * uses `'<field>' in artwork` as the witness for "LML decided" vs "cache
+ * stripped"; the `in` operator still returns `true` for a key whose value
+ * is `undefined`, so reassigning would silently break the contract and
+ * re-introduce the cache-hit overwrite. See enrich.ts payload comment for
+ * the full reasoning. Both classes documented at BS#1192 (apple_music_url
+ * — `null` is load-bearing) and BS#1338 (the four search URLs — verified
+ * deep-link would otherwise be replaced by R2's per-row synthesized
+ * search URL).
  *
  * Stripping is required because every URL in this set is track-aware on
  * LML's side: the four search URLs are synthesized per (artist, track)
@@ -66,11 +76,17 @@ const makeKey = (artist: string, album: string | null | undefined): string =>
  * Fields are deleted (not reassigned to `undefined`) so downstream
  * consumers using `'field' in obj`, `Object.keys`, or `Object.assign`
  * see them as truly absent — matching JSON-serialization semantics.
- * `enrich.ts` relies on this: for `apple_music_url` (BS#1192) it uses
- * `'apple_music_url' in artwork` as the witness for "LML decided" vs
- * "cache stripped", and OMITS the column from the album_metadata
- * UPSERT on stripped hits so a prior verified URL isn't clobbered
- * with null via the `updated_at < NOW()` setWhere guard.
+ * `enrich.ts` relies on this for ALL FIVE track-aware URL columns
+ * (apple_music_url + the four search URLs): it uses `'<field>' in
+ * artwork` as the witness for "LML decided" vs "cache stripped" and
+ * OMITS the column from both the album_metadata UPSERT (INSERT +
+ * onConflictDoUpdate.set) and the inline unlinked flowsheet UPDATE on
+ * stripped hits so a prior verified URL isn't clobbered via the
+ * `updated_at < NOW()` setWhere guard. The strip MUST use `delete`;
+ * assigning `undefined` would leave `'<field>' in artwork === true` and
+ * silently break the contract — re-introducing R2's per-row
+ * search-URL/null overwrite of R1's verified deep-link. See enrich.ts
+ * payload comment for the full reasoning (BS#1192 + BS#1338).
  */
 const TRACK_AWARE_URL_FIELDS = [
   'spotify_url',
