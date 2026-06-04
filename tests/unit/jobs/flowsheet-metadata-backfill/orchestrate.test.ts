@@ -509,60 +509,65 @@ describe('runBackfill', () => {
       }
     });
 
-    it('catches throws from cacheStats and emits cache_stats_error instead of aborting the run', async () => {
-      // Observability failure must not wipe a successful batch.
-      // applyEnrichment has already committed; we want a degraded
-      // batch_done log line, not an exit 1.
-      const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
-      const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
-      initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-3' });
-      const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    it.each<[string, unknown, string]>([
+      ['Error', new Error('cache stats are unavailable'), 'cache stats are unavailable'],
+      ['plain string', 'cache stats string thrown', 'cache stats string thrown'],
+      ['plain object', { code: 'X' }, '[object Object]'],
+    ])(
+      'catches %s throws from cacheStats and emits cache_stats_error instead of aborting',
+      async (_label, thrown, expectedMessage) => {
+        // Observability failure must not wipe a successful batch.
+        // applyEnrichment has already committed; we want a degraded
+        // batch_done log line, not an exit 1. Non-Error throws must also
+        // surface a message — `(err as Error).message` would emit
+        // undefined and JSON.stringify would drop the key.
+        const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+        const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+        initLogger({ repo: 'Backend-Service', tool: 'test', runId: `run-id-throw-${_label}` });
+        const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
-      try {
-        const batch = [{ id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null }];
-        (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+        try {
+          const batch = [{ id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null }];
+          (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
 
-        const cacheStats = jest.fn<() => CacheStats>().mockImplementation(() => {
-          throw new Error('cache stats are unavailable');
-        });
+          const cacheStats = jest.fn<() => CacheStats>().mockImplementation(() => {
+            throw thrown;
+          });
 
-        const result = await runBackfill({
-          lookup,
-          enrich,
-          throttleMs: 0,
-          liveActivityLookbackSeconds: 0,
-          cacheStats,
-        });
+          const result = await runBackfill({
+            lookup,
+            enrich,
+            throttleMs: 0,
+            liveActivityLookbackSeconds: 0,
+            cacheStats,
+          });
 
-        // Run completes normally; totals were committed per row.
-        expect(result.totals.scanned).toBe(1);
-        expect(result.totals.enriched_match).toBe(1);
+          // Run completes normally; totals were committed per row.
+          expect(result.totals.scanned).toBe(1);
+          expect(result.totals.enriched_match).toBe(1);
 
-        const batchDoneLine = writeSpy.mock.calls
-          .map((args) => String(args[0]))
-          .find((l) => l.includes('"step":"batch_done"'));
-        if (!batchDoneLine) throw new Error('expected a batch_done log line even when cacheStats throws');
-        const parsed = JSON.parse(batchDoneLine.trim());
-        expect(parsed.cache_stats_error).toBe('cache stats are unavailable');
-        // The hit/miss/size fields are absent on the error path; operators
-        // notice the error key and investigate.
-        expect(parsed.cache_hits).toBeUndefined();
-      } finally {
-        writeSpy.mockRestore();
-        await closeLogger();
+          const batchDoneLine = writeSpy.mock.calls
+            .map((args) => String(args[0]))
+            .find((l) => l.includes('"step":"batch_done"'));
+          if (!batchDoneLine) throw new Error('expected a batch_done log line even when cacheStats throws');
+          const parsed = JSON.parse(batchDoneLine.trim());
+          expect(parsed.cache_stats_error).toBe(expectedMessage);
+          expect(parsed.cache_hits).toBeUndefined();
+        } finally {
+          writeSpy.mockRestore();
+          await closeLogger();
+        }
       }
-    });
+    );
 
-    it('skips THROTTLE_MS sleep on cache hits (recovers wall-clock budget the cache otherwise wastes)', async () => {
+    it('skips THROTTLE_MS sleep on cache hits (counted by setTimeout invocations, no wall-clock)', async () => {
       // The throttle exists to space LML calls. A cache hit makes no LML
-      // call, so sleeping after one is wall-clock waste. This test pins
-      // the behavior by mixing hit and miss rows in one batch and
-      // verifying total elapsed time reflects only the misses.
-      const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
-      const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
-      initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-4' });
-      const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
-
+      // call, so sleeping after one is wall-clock waste. Pinned by
+      // counting setTimeout(_, throttleMs) invocations rather than
+      // measuring elapsed time, so the test is deterministic regardless
+      // of CI load / event-loop jitter / fake-vs-real-timer interactions
+      // in sibling tests.
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
       try {
         const batch = [
           { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
@@ -572,8 +577,7 @@ describe('runBackfill', () => {
         ];
         (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
 
-        // 1 miss + 3 hits → 1 throttle sleep, not 4. With throttleMs=200 the
-        // total LML-driven wait is ~200ms instead of ~800ms.
+        // 1 miss + 3 hits → exactly 1 throttle sleep, not 4.
         const mixedLookup = jest
           .fn<LookupFn>()
           .mockResolvedValueOnce(matchedResult(false))
@@ -581,22 +585,18 @@ describe('runBackfill', () => {
           .mockResolvedValueOnce(matchedResult(true))
           .mockResolvedValueOnce(matchedResult(true));
 
-        const start = Date.now();
+        const THROTTLE = 7; // unique value so we can filter the spy
         await runBackfill({
           lookup: mixedLookup,
           enrich,
-          throttleMs: 200,
+          throttleMs: THROTTLE,
           liveActivityLookbackSeconds: 0,
         });
-        const elapsed = Date.now() - start;
 
-        // 1 miss → 1 sleep of 200ms; 3 hits → 0 sleeps. Generous upper
-        // bound to absorb test-runner jitter. Pre-fix this would be ~800ms.
-        expect(elapsed).toBeGreaterThanOrEqual(150);
-        expect(elapsed).toBeLessThan(600);
+        const throttleCalls = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === THROTTLE);
+        expect(throttleCalls).toHaveLength(1);
       } finally {
-        writeSpy.mockRestore();
-        await closeLogger();
+        setTimeoutSpy.mockRestore();
       }
     });
   });

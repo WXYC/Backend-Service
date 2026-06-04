@@ -375,6 +375,10 @@ const readCacheFields = (
     const { size, hits, misses, overwrites } = cacheStats();
     return { cache_hits: hits, cache_misses: misses, cache_size: size, cache_overwrites: overwrites };
   } catch (error) {
-    return { cache_stats_error: (error as Error).message };
+    // Defend against non-Error throws (`throw 'string'`, `throw { code: x }`) —
+    // `(err as Error).message` would emit undefined and the JSON logger
+    // would drop the key, leaving operators with no signal at all.
+    const message = error instanceof Error ? error.message : String(error);
+    return { cache_stats_error: message };
   }
 };
