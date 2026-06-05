@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/venue-events-scraper",
+  "cron-schedule": "0 5 * * *",
+  "version": "1.0.0",
+  "description": "WXYC daily scraper: pull upcoming concerts from Rockhouse Partners-powered Triangle venue sites (catscradle.com, local506.com) by parsing schema.org Event JSON-LD; UPSERT into the concerts table by (source, source_id). First source for the touring-events feature.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_venue_events_scraper:ci -f ../../Dockerfile.venue-events-scraper ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.53.1",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
