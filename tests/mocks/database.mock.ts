@@ -120,6 +120,30 @@ export const artist_search_alias = {
   confidence: 'confidence',
   last_verified_at: 'last_verified_at',
 };
+export const venues = {
+  id: 'id',
+  slug: 'slug',
+  name: 'name',
+  city: 'city',
+  state: 'state',
+  address: 'address',
+};
+export const concerts = {
+  id: 'id',
+  source: 'source',
+  source_id: 'source_id',
+  venue_id: 'venue_id',
+  starts_at: 'starts_at',
+  headlining_artist_raw: 'headlining_artist_raw',
+  headlining_artist_id: 'headlining_artist_id',
+  supporting_artists_raw: 'supporting_artists_raw',
+  ticket_url: 'ticket_url',
+  image_url: 'image_url',
+  status: 'status',
+  raw_data: 'raw_data',
+  scraped_at: 'scraped_at',
+  last_modified: 'last_modified',
+};
 export const album_plays = {
   album_id: 'album_id',
   plays: 'plays',
