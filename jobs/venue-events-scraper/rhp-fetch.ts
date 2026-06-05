@@ -1,0 +1,91 @@
+/**
+ * IO wrappers for fetching RHP venue HTML. Pure parsing is in `parse.ts`.
+ *
+ * Conventions:
+ *   - Always send a descriptive User-Agent. Anonymous scrapes are the
+ *     fastest way to get rate-limited by a partner venue; "WXYCEventsBot
+ *     (+contact)" lets the venue ops team reach out if anything looks
+ *     off rather than blocking outright.
+ *   - 15s per-request timeout via AbortSignal. Most pages return in
+ *     under a second; anything past 15s is almost always a problem.
+ *   - One retry on transient failures (timeout / 5xx). No retry on 4xx —
+ *     the URL is wrong, retrying doesn't help.
+ *   - Concurrency cap on the per-event fetch handled by the orchestrator
+ *     (`mapConcurrent`) so this module stays single-request shaped and
+ *     easy to unit-test.
+ */
+
+const USER_AGENT = 'WXYCEventsBot/1.0 (+https://wxyc.org/about; contact@wxyc.org)';
+const REQUEST_TIMEOUT_MS = 15_000;
+
+class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly url: string,
+    public readonly body: string | null
+  ) {
+    super(`HTTP ${status} fetching ${url}`);
+    this.name = 'HttpError';
+  }
+}
+
+/**
+ * GET a URL with a polite UA + per-request timeout. Throws HttpError on
+ * non-2xx. Retries once on AbortError or 5xx; never retries on 4xx.
+ */
+export const fetchHtml = async (url: string, attempt = 0): Promise<string> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml' },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => null);
+      if (res.status >= 500 && attempt === 0) {
+        return fetchHtml(url, attempt + 1);
+      }
+      throw new HttpError(res.status, url, body);
+    }
+    return await res.text();
+  } catch (err) {
+    if ((err as Error).name === 'AbortError' && attempt === 0) {
+      return fetchHtml(url, attempt + 1);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+/**
+ * Per-task concurrency runner that doesn't barrel-drop unhandled errors
+ * — failed tasks resolve to `null` so the caller can `.filter(Boolean)`
+ * and continue.
+ */
+export const mapConcurrent = async <T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>
+): Promise<(R | null)[]> => {
+  const out: (R | null)[] = new Array<R | null>(items.length).fill(null);
+  let i = 0;
+  const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      try {
+        out[idx] = await fn(items[idx]);
+      } catch {
+        // The caller logs + captures; we suppress here so a single bad
+        // page never wedges the whole batch.
+        out[idx] = null;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return out;
+};
+
+export { HttpError };
