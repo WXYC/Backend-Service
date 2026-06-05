@@ -20,6 +20,7 @@ import {
   uuid,
   primaryKey,
   check,
+  jsonb,
 } from 'drizzle-orm/pg-core';
 
 // PostgreSQL tsvector. Drizzle has no first-class tsvector type, but we only
@@ -1524,3 +1525,104 @@ export const artist_search_alias = wxyc_schema.table(
 
 export type ArtistSearchAlias = InferSelectModel<typeof artist_search_alias>;
 export type NewArtistSearchAlias = InferInsertModel<typeof artist_search_alias>;
+
+/**
+ * Where a concert record came from. New values land when we add a new
+ * ingestion path (Bandsintown live-fetch is kept OUT of this table because
+ * its ToS forbids persistent caching — only sources we own go here).
+ */
+export const concertSourceEnum = wxyc_schema.enum('concert_source_enum', [
+  'rhp_scrape', // Rockhouse Partners venue sites (catscradle.com, local506.com, ...)
+]);
+
+/**
+ * Lifecycle state of a concert. Listener-facing surfaces (the iOS app's
+ * "Touring Soon" tab, the dj-site weekly digest) read this to grey out /
+ * hide / strike through. The scraper writes `on_sale` by default and
+ * promotes to `sold_out` / `cancelled` when the source page says so.
+ */
+export const concertStatusEnum = wxyc_schema.enum('concert_status_enum', [
+  'on_sale',
+  'sold_out',
+  'cancelled',
+  'rescheduled',
+]);
+
+/**
+ * Live-music venues whose calendars we ingest. Seeded by each scraper's
+ * venue config at first run; admin-editable thereafter (the seed key is
+ * `slug`, which the scraper looks up to attach a `venue_id` to each
+ * concert). Held separately from `concerts` because we want venue-level
+ * facts (name, address, coords if we add them later) to live in one place
+ * even when no upcoming concert references the venue.
+ */
+export const venues = wxyc_schema.table(
+  'venues',
+  {
+    id: serial('id').primaryKey(),
+    slug: varchar('slug', { length: 64 }).notNull(),
+    name: varchar('name', { length: 128 }).notNull(),
+    city: varchar('city', { length: 64 }).notNull(),
+    state: varchar('state', { length: 32 }).notNull(),
+    address: varchar('address', { length: 256 }),
+    added_at: timestamp('added_at', { withTimezone: true }).defaultNow().notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex('venues_slug_idx').on(table.slug)]
+);
+
+export type Venue = InferSelectModel<typeof venues>;
+export type NewVenue = InferInsertModel<typeof venues>;
+
+/**
+ * One row per known upcoming or recent concert, multi-source.
+ *
+ * The same logical concert can have rows from multiple `source`s (e.g., an
+ * `rhp_scrape` row plus a future `submission` row from a promoter). Dedup
+ * is intentionally deferred to a read-time view so we keep an audit trail
+ * of who told us what and when. Per-source uniqueness is enforced via
+ * `(source, source_id)` so re-scrapes UPSERT in place.
+ *
+ * `headlining_artist_id` is best-effort — LML's canonical-entity coverage
+ * is ~24% (see [[project_lml_entity_identity_state]]) so most rows ship
+ * with a NULL id and just the raw name. A future artist-resolver pass
+ * backfills the id without changing the raw column.
+ *
+ * `raw_data` carries the source's original payload (the parsed schema.org
+ * `Event` object for `rhp_scrape`) so we can forensically diff when the
+ * source's format changes.
+ */
+export const concerts = wxyc_schema.table(
+  'concerts',
+  {
+    id: serial('id').primaryKey(),
+    source: concertSourceEnum('source').notNull(),
+    source_id: varchar('source_id', { length: 256 }).notNull(),
+    venue_id: integer('venue_id')
+      .notNull()
+      .references(() => venues.id, { onDelete: 'restrict' }),
+    starts_at: timestamp('starts_at', { withTimezone: true }).notNull(),
+    headlining_artist_raw: varchar('headlining_artist_raw', { length: 256 }).notNull(),
+    headlining_artist_id: integer('headlining_artist_id').references(() => artists.id, {
+      onDelete: 'set null',
+    }),
+    supporting_artists_raw: text('supporting_artists_raw')
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    ticket_url: text('ticket_url'),
+    image_url: text('image_url'),
+    status: concertStatusEnum('status').notNull().default('on_sale'),
+    raw_data: jsonb('raw_data').notNull(),
+    scraped_at: timestamp('scraped_at', { withTimezone: true }).notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('concerts_source_source_id_idx').on(table.source, table.source_id),
+    index('concerts_venue_starts_at_idx').on(table.venue_id, table.starts_at),
+    index('concerts_headlining_artist_starts_at_idx').on(table.headlining_artist_id, table.starts_at),
+  ]
+);
+
+export type Concert = InferSelectModel<typeof concerts>;
+export type NewConcert = InferInsertModel<typeof concerts>;
