@@ -4,13 +4,13 @@ Replaces the current `markedMissingAt` / `markedFoundAt` two-timestamp model on 
 
 Authorization is role-gated at our boundary (iOS gates the UI based on the JWT `role` claim — see [`JWTPayload.swift`](https://github.com/WXYC/wxyc-dj-tool-ios/blob/main/Packages/WXYCAPI/Sources/WXYCAPI/JWTPayload.swift) — but we enforce):
 
-| Transition | Required role |
-|---|---|
-| `in_library` ↔ `missing` (both directions) | `dj` and above |
-| `in_library` → `damaged` | `musicDirector` and above |
-| `damaged` → `in_repair` | `musicDirector` and above |
-| `in_repair` → `in_library` | `musicDirector` and above |
-| Any other transition | Not allowed |
+| Transition                                 | Required role             |
+| ------------------------------------------ | ------------------------- |
+| `in_library` ↔ `missing` (both directions) | `dj` and above            |
+| `in_library` → `damaged`                   | `musicDirector` and above |
+| `damaged` → `in_repair`                    | `musicDirector` and above |
+| `in_repair` → `in_library`                 | `musicDirector` and above |
+| Any other transition                       | Not allowed               |
 
 Endpoint shape: replace `PATCH /library/{id}/missing` and `PATCH /library/{id}/found` with one `PATCH /library/{id}/condition` taking `{ to_state, note? }`. Server validates the transition is in the allowed set above.
 
