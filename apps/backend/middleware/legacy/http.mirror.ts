@@ -43,6 +43,34 @@ interface MirrorEntry {
 }
 
 /**
+ * Capture a mirror call failure to Sentry. Grouping is by `operation` (in
+ * the message) and sub-tagged by `status` so a sustained outage rolls up
+ * into a single issue with an occurrence count rather than fanning out
+ * per-row. `mirrorCreateShow` had this since its 5-retry path; the entry
+ * and signoff paths previously logged to console only, which is how the
+ * 2026-06-05 tubafrenzy auth-config drift (missing `MIRROR_API_KEY` on the
+ * tubafrenzy side) ran silent through a full DJ's show.
+ */
+function captureMirrorFailure(
+  operation: 'create_entry' | 'update_entry' | 'signoff_show',
+  details: { status?: number; responseBody?: string; error?: unknown }
+): void {
+  Sentry.captureMessage(`Mirror: ${operation} failed`, {
+    level: 'error',
+    tags: {
+      subsystem: 'legacy-mirror',
+      operation,
+      ...(details.status != null ? { status: String(details.status) } : {}),
+    },
+    extra: {
+      ...(details.status != null ? { status: details.status } : {}),
+      ...(details.responseBody != null ? { responseBody: details.responseBody.slice(0, 500) } : {}),
+      ...(details.error != null ? { error: String(details.error) } : {}),
+    },
+  });
+}
+
+/**
  * POST a new entry to tubafrenzy. Returns the created entry's ID, or null on failure.
  * Never throws — errors are logged and swallowed (fire-and-forget).
  */
@@ -59,12 +87,14 @@ export async function mirrorCreateEntry(body: Record<string, unknown>): Promise<
     if (!response.ok) {
       const text = await response.text();
       console.error(`[mirror] POST failed: ${response.status} ${text}`);
+      captureMirrorFailure('create_entry', { status: response.status, responseBody: text });
       return null;
     }
     const json = (await response.json()) as { id?: number | null };
     return json.id ?? null;
   } catch (e) {
     console.error('[mirror] POST error:', e);
+    captureMirrorFailure('create_entry', { error: e });
     return null;
   }
 }
@@ -86,9 +116,11 @@ export async function mirrorUpdateEntry(tubafrenzyId: number, body: Record<strin
     if (!response.ok) {
       const text = await response.text();
       console.error(`[mirror] PATCH failed: ${response.status} ${text}`);
+      captureMirrorFailure('update_entry', { status: response.status, responseBody: text });
     }
   } catch (e) {
     console.error('[mirror] PATCH error:', e);
+    captureMirrorFailure('update_entry', { error: e });
   }
 }
 
@@ -273,9 +305,11 @@ export async function mirrorSignoffShow(radioShowId: number, signoffTime: number
     if (!response.ok) {
       const text = await response.text();
       console.error(`[mirror] POST radioShow/signoff failed: ${response.status} ${text}`);
+      captureMirrorFailure('signoff_show', { status: response.status, responseBody: text });
     }
   } catch (e) {
     console.error('[mirror] POST radioShow/signoff error:', e);
+    captureMirrorFailure('signoff_show', { error: e });
   }
 }
 

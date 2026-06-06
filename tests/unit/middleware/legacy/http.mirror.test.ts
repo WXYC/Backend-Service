@@ -9,6 +9,9 @@
 const mockFetch = jest.fn();
 global.fetch = mockFetch as any;
 
+const mockCaptureMessage = jest.fn();
+jest.mock('@sentry/node', () => ({ captureMessage: (...args: unknown[]) => mockCaptureMessage(...args) }));
+
 import {
   mirrorCreateEntry,
   mirrorUpdateEntry,
@@ -27,6 +30,7 @@ import {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  mockCaptureMessage.mockReset();
   clearEntryIdMap();
   clearShowIdMap();
 });
@@ -577,6 +581,108 @@ describe('http.mirror', () => {
       mockFetch.mockRejectedValue(new Error('ECONNREFUSED'));
 
       await expect(mirrorSignoffShow(171500, 1773799200000)).resolves.toBeUndefined();
+    });
+  });
+
+  describe('Sentry reporting on failure', () => {
+    it('mirrorCreateEntry captures HTTP error with status tag and truncated body', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: () => Promise.resolve('{"error":"Invalid or missing credentials"}'),
+      });
+
+      await mirrorCreateEntry({ radioHour: 0 });
+
+      expect(mockCaptureMessage).toHaveBeenCalledWith(
+        'Mirror: create_entry failed',
+        expect.objectContaining({
+          level: 'error',
+          tags: expect.objectContaining({
+            subsystem: 'legacy-mirror',
+            operation: 'create_entry',
+            status: '401',
+          }),
+          extra: expect.objectContaining({
+            status: 401,
+            responseBody: expect.stringContaining('Invalid or missing credentials'),
+          }),
+        })
+      );
+    });
+
+    it('mirrorCreateEntry captures network error without status tag', async () => {
+      const err = new Error('ECONNREFUSED');
+      mockFetch.mockRejectedValue(err);
+
+      await mirrorCreateEntry({ radioHour: 0 });
+
+      expect(mockCaptureMessage).toHaveBeenCalledWith(
+        'Mirror: create_entry failed',
+        expect.objectContaining({
+          level: 'error',
+          tags: expect.objectContaining({ subsystem: 'legacy-mirror', operation: 'create_entry' }),
+          extra: expect.objectContaining({ error: expect.stringContaining('ECONNREFUSED') }),
+        })
+      );
+      const call = mockCaptureMessage.mock.calls[0][1];
+      expect(call.tags).not.toHaveProperty('status');
+    });
+
+    it('mirrorUpdateEntry captures HTTP error', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 404,
+        text: () => Promise.resolve('not found'),
+      });
+
+      await mirrorUpdateEntry(42, { songTitle: 'x' });
+
+      expect(mockCaptureMessage).toHaveBeenCalledWith(
+        'Mirror: update_entry failed',
+        expect.objectContaining({
+          tags: expect.objectContaining({ operation: 'update_entry', status: '404' }),
+        })
+      );
+    });
+
+    it('mirrorSignoffShow captures HTTP error', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 409,
+        text: () => Promise.resolve('already signed off'),
+      });
+
+      await mirrorSignoffShow(171500, 1773799200000);
+
+      expect(mockCaptureMessage).toHaveBeenCalledWith(
+        'Mirror: signoff_show failed',
+        expect.objectContaining({
+          tags: expect.objectContaining({ operation: 'signoff_show', status: '409' }),
+        })
+      );
+    });
+
+    it('truncates large response bodies to 500 chars', async () => {
+      const huge = 'x'.repeat(2000);
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve(huge),
+      });
+
+      await mirrorCreateEntry({ radioHour: 0 });
+
+      const call = mockCaptureMessage.mock.calls[0][1];
+      expect(call.extra.responseBody.length).toBe(500);
+    });
+
+    it('mirrorCreateEntry does not capture on success', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ id: 1 }) });
+
+      await mirrorCreateEntry({ radioHour: 0 });
+
+      expect(mockCaptureMessage).not.toHaveBeenCalled();
     });
   });
 
