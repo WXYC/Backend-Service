@@ -802,9 +802,29 @@ describe('rotation_bin read-path fallback (dj-site#750)', () => {
   // When the picker emit path doesn't persist flowsheet.rotation_id (the
   // 2026-06-04 regression cohort), the primary FK join leaves rotation_bin
   // NULL and dj-site's badge disappears. The read path's COALESCE fallback
-  // recovers the bin via (a) album_id match, (b) denorm artist/album match,
-  // or (c) library+artists JOIN match. Seed has rotation row 1 = album_id 1
-  // (Built to Spill — Keep it Like a Secret) in bin 'L'.
+  // recovers the bin via (a) album_id match, (b) denorm artist/album match
+  // on the rotation row itself (NULL album_id, library-unlinked snapshot),
+  // or (c) library+artists JOIN match via the rotation row's album_id.
+  // Seed has rotation row 1 = album_id 1 (Built to Spill — Keep it Like a
+  // Secret) in bin 'L'. The cohort-(b) test below provisions an extra
+  // library-unlinked rotation row inline; the kill_date test provisions a
+  // killed rotation row. Both are torn down in afterAll.
+
+  let sql;
+  const extraRotationIds = [];
+
+  beforeAll(() => {
+    sql = makeSql();
+  });
+
+  afterAll(async () => {
+    if (extraRotationIds.length > 0) {
+      await sql`
+        DELETE FROM ${sql(SCHEMA)}.rotation WHERE id IN ${sql(extraRotationIds)}
+      `;
+    }
+    if (sql) await sql.end({ timeout: 5 });
+  });
 
   beforeEach(async () => {
     await fls_util.join_show(global.primary_dj_id, global.access_token);
@@ -887,6 +907,68 @@ describe('rotation_bin read-path fallback (dj-site#750)', () => {
 
     const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
     const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Venom');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toBeNull();
+  });
+
+  test('rotation_bin populated via cohort (b): rotation row with NULL album_id + denorm artist/album snapshot', async () => {
+    // Cohort (b) per the SQL: library-unlinked rotation rows (NULL album_id)
+    // that hold the (artist_name, album_title) snapshot directly. The
+    // schema's source-shape comment explicitly permits NULL album_id on
+    // rotation. Provision such a row inline so the (b) OR-arm is exercised
+    // — the seeded fixture only covers album_id-bearing rows ((a)/(c)).
+    const inserted = await sql`
+      INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title)
+      VALUES (NULL, 'H', 'Phantom Artist', 'Phantom Album')
+      RETURNING id
+    `;
+    extraRotationIds.push(inserted[0].id);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Phantom Artist',
+        album_title: 'Phantom Album',
+        track_title: 'Ghost Track',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Ghost Track');
+    expect(track).toBeDefined();
+    expect(track.album_id).toBeNull();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toEqual('H');
+  });
+
+  test('rotation_bin stays NULL when rotation row was killed before flowsheet add_time', async () => {
+    // Regression pin: kill_date filter must exclude rotation rows whose
+    // kill_date is on/before the flowsheet entry's add_time. Provision a
+    // killed library-unlinked rotation row dated well in the past so the
+    // freshly-added flowsheet row falls strictly after kill_date.
+    const inserted = await sql`
+      INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title, add_date, kill_date)
+      VALUES (NULL, 'H', 'Killed Artist', 'Killed Album', '2024-01-01', '2024-02-01')
+      RETURNING id
+    `;
+    extraRotationIds.push(inserted[0].id);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Killed Artist',
+        album_title: 'Killed Album',
+        track_title: 'Posthumous Track',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Posthumous Track');
     expect(track).toBeDefined();
     expect(track.rotation_id).toBeNull();
     expect(track.rotation_bin).toBeNull();
