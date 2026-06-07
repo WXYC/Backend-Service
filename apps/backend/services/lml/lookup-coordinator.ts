@@ -61,7 +61,18 @@ import { lookupMetadata, type LookupOptions, type LookupResponse } from '@wxyc/l
 export type CoordinatorLookupOptions = Pick<
   LookupOptions,
   'budgetMs' | 'timeoutMs' | 'caller' | 'warm_cache' | 'limiter'
->;
+> & {
+  /**
+   * When set, the coordinator returns `null` if the resolved response's
+   * `search_type` doesn't match, after projecting
+   * `lml.coordinator.trust_reject_reason` onto the per-lookup span. The
+   * raw response is still cached — the gate runs per-call so a permissive
+   * caller and a strict caller can share a cached payload and reach
+   * different verdicts. Used by librarian-typed write paths where
+   * non-direct results would persist the wrong release. BS#1355.
+   */
+  requireSearchType?: 'direct';
+};
 
 interface InFlightEntry {
   promise: Promise<LookupResponse>;
@@ -84,14 +95,28 @@ export class LmlLookupCoordinator {
   /**
    * Look up metadata for an artist/album/song triple. Coalesces concurrent
    * same-key calls; serves cached responses within TTL. Errors are not
-   * cached.
+   * cached. When `requireSearchType` is set, returns `null` on mismatch
+   * after projecting `lml.coordinator.trust_reject_reason` onto the span;
+   * otherwise the return is the raw `LookupResponse`.
    */
   async lookup(
     artist: string | undefined,
     album: string | undefined,
     song: string | undefined,
+    options: CoordinatorLookupOptions & { requireSearchType: 'direct' }
+  ): Promise<LookupResponse | null>;
+  async lookup(
+    artist: string | undefined,
+    album: string | undefined,
+    song: string | undefined,
+    options?: Omit<CoordinatorLookupOptions, 'requireSearchType'>
+  ): Promise<LookupResponse>;
+  async lookup(
+    artist: string | undefined,
+    album: string | undefined,
+    song: string | undefined,
     options?: CoordinatorLookupOptions
-  ): Promise<LookupResponse> {
+  ): Promise<LookupResponse | null> {
     const key = this.cacheKey(artist, album, song);
     const caller = options?.caller ?? 'unknown';
 
@@ -99,13 +124,13 @@ export class LmlLookupCoordinator {
       const cached = this.cache.get(key);
       if (cached) {
         this.setSpanAttrs(span, { hit: 'cache', caller });
-        return cached;
+        return this.applyTrustGate(cached, options, span);
       }
 
       const existing = this.inflight.get(key);
       if (existing) {
         this.setSpanAttrs(span, { hit: 'inflight', caller });
-        return existing.promise;
+        return this.applyTrustGate(await existing.promise, options, span);
       }
 
       // Populate cache BEFORE releasing the in-flight entry. The naive
@@ -141,8 +166,31 @@ export class LmlLookupCoordinator {
       this.inflight.set(key, { promise: settle });
       this.setSpanAttrs(span, { hit: 'miss', caller });
 
-      return settle;
+      return this.applyTrustGate(await settle, options, span);
     });
+  }
+
+  /**
+   * Per-call gate: cached responses are stored raw so a permissive caller
+   * and a strict caller can share one cached payload and reach different
+   * verdicts. The rejection attribute lands on the per-lookup span,
+   * co-located with `lml.coordinator.hit` and `.caller`.
+   */
+  private applyTrustGate(
+    response: LookupResponse,
+    options: CoordinatorLookupOptions | undefined,
+    span: ReturnType<typeof Sentry.getActiveSpan>
+  ): LookupResponse | null {
+    if (!options?.requireSearchType) return response;
+    if (response.search_type === options.requireSearchType) return response;
+    if (span) {
+      try {
+        span.setAttribute('lml.coordinator.trust_reject_reason', `search_type:${response.search_type}`);
+      } catch (err) {
+        console.warn('lml.coordinator: failed to project trust_reject_reason onto span', err);
+      }
+    }
+    return null;
   }
 
   private async fetchUncached(

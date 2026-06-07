@@ -100,6 +100,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
         budgetMs: LIBRARY_LML_BUDGET_MS,
         caller: 'library-add-album',
         warm_cache: true,
+        requireSearchType: 'direct',
       }),
     ]);
 
@@ -113,7 +114,9 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
       console.warn('Streaming check failed for new album:', streamingResult.reason);
     }
 
-    if (artworkResult.status === 'fulfilled') {
+    if (artworkResult.status === 'rejected') {
+      console.warn('Artwork fetch failed for new album:', artworkResult.reason);
+    } else if (artworkResult.value !== null) {
       const artworkUrl = filterSpacerGif(artworkResult.value.results?.[0]?.artwork?.artwork_url);
       if (artworkUrl) {
         try {
@@ -123,8 +126,6 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
           console.warn('Failed to persist artwork URL:', (e as Error).message);
         }
       }
-    } else {
-      console.warn('Artwork fetch failed for new album:', artworkResult.reason);
     }
 
     // Fire-and-forget canonical-entity resolution (Epic B.1.3). The library
@@ -153,8 +154,10 @@ function fireAndForgetCanonicalEntity(libraryId: number, artistName: string | nu
       budgetMs: LIBRARY_LML_BUDGET_MS,
       caller: 'library-canonical-entity',
       warm_cache: true,
+      requireSearchType: 'direct',
     })
     .then(async (response) => {
+      if (response === null) return;
       const linkage = libraryService.mapLookupToCanonicalEntity(response);
       if (!linkage) return;
       await libraryService.updateCanonicalEntity(libraryId, linkage.id, linkage.confidence);
