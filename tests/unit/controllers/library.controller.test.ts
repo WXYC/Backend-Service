@@ -518,7 +518,7 @@ describe('library.controller', () => {
         { position: '1', title: 'Tragic Magic', duration: '6:01', artists: ['Julianna Barwick & Mary Lattimore'] },
         { position: '2', title: 'For Mariko', duration: '4:18', artists: ['Julianna Barwick & Mary Lattimore'] },
       ];
-      mockResolveRotationPickerSource.mockResolvedValue({ releaseId: 0, inlineTracklist });
+      mockResolveRotationPickerSource.mockResolvedValue({ releaseId: null, inlineTracklist });
       const req = { params: { rotation_id: '42' } } as unknown as Request;
       const res = mockResponse();
 
