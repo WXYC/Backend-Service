@@ -125,6 +125,14 @@ const FSEntryFieldsRaw = {
   // status is preserved — mirrors how tubafrenzy classifies at mirror time (WXYC/dj-site#750).
   // Subquery only fires per-row on a missed FK join; on rows with a populated rotation_id
   // COALESCE short-circuits and the subquery is not evaluated.
+  //
+  // Tie-break (`ORDER BY r2.id`): the schema source comment at `rotation` explicitly
+  // permits multiple active rows per (album_id, rotation_bin) over an album's lifecycle
+  // (re-bins, re-adds, label-driven re-promotes). Picking the lowest `id` (oldest active
+  // row) is a deliberate, stable choice for the badge UX — when an album has been re-binned
+  // L → M, the badge reports its original cohort rather than flipping retroactively. This
+  // matches the historical-correctness story above (kill_date filtering against add_time).
+  // The primary FK join via flowsheet.rotation_id remains canonical when present.
   rotation_bin: sql<string | null>`
     COALESCE(
       ${rotation.rotation_bin},
