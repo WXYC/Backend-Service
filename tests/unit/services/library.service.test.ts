@@ -2473,9 +2473,10 @@ describe('library.service', () => {
     it('carries an inline tracklist when LML synth-rescues with release_id=0 (MB rescue)', async () => {
       // LML#427 MusicBrainz rescue: when Discogs misses, LML synthesizes a
       // result with `release_id: 0` (the BS#1185 sentinel) and a tracklist
-      // sourced from musicbrainz-cache. The picker still gets a tracklist
-      // and skips `getRelease(0)` (which would 404). releaseId=0 short-circuits
-      // the controller via `inlineTracklist !== null`.
+      // sourced from musicbrainz-cache. The picker still gets a tracklist;
+      // BS#1351 normalizes the sentinel id to `null` so the controller's
+      // follow-up release fetch is skipped via `releaseId === null` rather
+      // than racing the inline-tracklist short-circuit.
       mockRow({
         direct: null,
         fallback: null,
@@ -2500,7 +2501,7 @@ describe('library.service', () => {
       const result = await resolveRotationPickerSource(42);
 
       expect(result).toEqual({
-        releaseId: 0,
+        releaseId: null,
         inlineTracklist: [
           { position: '1', title: 'Tragic Magic', duration: '6:01', artists: ['Julianna Barwick & Mary Lattimore'] },
           { position: '2', title: 'For Mariko', duration: '4:18', artists: ['Julianna Barwick & Mary Lattimore'] },
@@ -2618,81 +2619,52 @@ describe('library.service', () => {
     });
 
     describe('search_type gate (BS#1351)', () => {
-      // Pre-fix behaviour blindly trusted `results[0].artwork` regardless of
-      // `search_type`. For the Yenbett rotation row LML returned a
-      // `search_type: "alternative"` artist-fallback response whose top
-      // result was Tzenni — and the picker happily handed Tzenni's
-      // tracklist back as if it belonged to Yenbett. The fix gates the
-      // tier-3 acceptance on `search_type === "direct"`; everything else
-      // returns null so the picker degrades to free-text. The full LML
-      // enum is `{direct, compilation, none, fallback, alternative,
-      // song_as_artist}`; we already pin `direct` (happy path) and `none`
-      // (empty results) above — the remaining four must reject even when
-      // `results[0].artwork.release_id` is set.
-
-      it('rejects search_type=alternative even with a non-empty artwork (the Yenbett bug-pin)', async () => {
-        mockRow({
-          direct: null,
-          fallback: null,
-          artist_name: 'Noura Mint Seymali',
-          album_title: 'Yenbett',
-        });
-        // The actual prod response that caused the bug: top result is
-        // Tzenni (a different album by the same artist), surfaced as an
-        // artist-fallback after LML's album-match floor dropped both
-        // candidates.
-        mockLookupMetadata.mockResolvedValue({
-          results: [
-            { artwork: { release_id: 7727849, album: 'Tzenni' } },
-            { artwork: { release_id: 9239170, album: 'Arbina' } },
-          ],
-          search_type: 'alternative',
-        });
-
-        const result = await resolveRotationPickerSource(42);
-
-        expect(result).toBeNull();
-      });
-
-      it.each([['compilation'], ['fallback'], ['song_as_artist']] as const)(
-        'rejects search_type=%s even with a non-empty artwork',
+      // The Yenbett rotation row repro: LML returned `search_type: "alternative"`
+      // with Tzenni at results[0]. Pre-fix BS handed Tzenni's tracklist back as
+      // Yenbett's. The happy path (`search_type: "direct"`) is already pinned by
+      // the test above; this block pins the rejection of every non-direct value.
+      it.each(['alternative', 'compilation', 'fallback', 'song_as_artist', 'none'] as const)(
+        'rejects search_type=%s even with non-empty artwork',
         async (searchType) => {
           mockRow({
             direct: null,
             fallback: null,
-            artist_name: 'Some Artist',
-            album_title: 'Some Album',
+            artist_name: 'Noura Mint Seymali',
+            album_title: 'Yenbett',
           });
           mockLookupMetadata.mockResolvedValue({
-            results: [{ artwork: { release_id: 12345, album: 'Some Other Album' } }],
+            results: [{ artwork: { release_id: 7727849, album: 'Tzenni' } }],
             search_type: searchType,
           });
+          const updateSetMock = jest.fn().mockReturnThis();
+          const updateWhereMock = jest.fn().mockResolvedValue(undefined);
+          db.update.mockReturnValue({ set: updateSetMock, where: updateWhereMock });
+          updateSetMock.mockReturnValue({ where: updateWhereMock });
 
           const result = await resolveRotationPickerSource(42);
+          await new Promise((r) => setImmediate(r));
 
           expect(result).toBeNull();
         }
       );
 
-      it('accepts search_type=direct (happy-path regression pin)', async () => {
-        // LML already enforces the 80/80 album-title floor inside
-        // `fetch_one` (LML PR #483), so every `direct` response carries
-        // artwork that has already cleared the album-title check. BS can
-        // therefore trust `direct` without re-doing the comparison.
-        mockRow({
-          direct: null,
-          fallback: null,
-          artist_name: 'Autechre',
-          album_title: 'Confield',
-        });
+      it('treats LML release_id=0 (MusicBrainz-synth sentinel) as no Discogs id', async () => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Some Artist', album_title: 'Some Album' });
         mockLookupMetadata.mockResolvedValue({
-          results: [{ artwork: { release_id: 4080, album: 'Confield' } }],
+          results: [{ artwork: { release_id: 0, album: 'Some Album' } }],
           search_type: 'direct',
         });
+        const updateSetMock = jest.fn().mockReturnThis();
+        const updateWhereMock = jest.fn().mockResolvedValue(undefined);
+        db.update.mockReturnValue({ set: updateSetMock, where: updateWhereMock });
+        updateSetMock.mockReturnValue({ where: updateWhereMock });
 
         const result = await resolveRotationPickerSource(42);
+        await new Promise((r) => setImmediate(r));
 
-        expect(result).toEqual({ releaseId: 4080, inlineTracklist: null });
+        // No tracklist and no real release id → degrades to free-text. The
+        // controller never calls `/discogs/release/0`.
+        expect(result).toBeNull();
       });
     });
   });

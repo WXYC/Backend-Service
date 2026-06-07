@@ -629,32 +629,24 @@ async function resolveRotationDiscogsReleaseViaLml(
 
   let source: RotationPickerSource | null;
   try {
-    // `extended: true` opts the top-1 result's `artwork` block into the
-    // extra payload LML already has during enrichment (LML#414) — including
-    // `tracklist`, which lets the picker skip the follow-up
-    // `getRelease(id)` round-trip and (for the MusicBrainz-rescued
-    // synth-result path on LML#427) get a tracklist for releases Discogs
-    // doesn't carry. Same `(artist, album)` call as before; the request body
-    // only gains the `extended` flag.
     const response = await lmlLookupCoordinator.lookup(lookupArtist, albumTitle, undefined, {
       timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
       caller: 'library-rotation-picker',
     });
-    // BS#1351: only trust `search_type === "direct"`. Everything else
-    // (`alternative`, `compilation`, `fallback`, `song_as_artist`, `none`)
-    // is LML signalling a non-album-match — including artist-fallback
-    // candidates whose `artwork` carries a different release than the
-    // typed album. Accepting those handed the rotation picker the wrong
-    // tracklist (the Yenbett → Tzenni regression). LML's `fetch_one`
-    // already enforces the 80/80 album-title floor for direct matches
-    // (LML PR #483), so this check is sufficient — no additional
-    // normalize/compare needed on the BS side. Falling through to null
-    // degrades the picker to free-text, which is the correct UX.
+    // BS#1351: non-direct `search_type` values surface candidates for the wrong
+    // album (Yenbett → Tzenni). LML's `fetch_one` enforces the 80/80 album-title
+    // floor for `direct` matches, so this is sufficient — the picker falls
+    // through to free-text on rejection.
     if (response.search_type !== 'direct') {
       source = null;
     } else {
       const artwork = response.results?.[0]?.artwork ?? null;
-      const releaseId = artwork?.release_id ?? null;
+      // `release_id: 0` is LML's MusicBrainz-rescued synth sentinel
+      // (orchestrator.py emits it when ARTIST_PLUS_ALBUM hits but Discogs
+      // carries no artwork). Treat as "no Discogs id" so the controller
+      // doesn't follow up with `/discogs/release/0`.
+      const rawReleaseId = artwork?.release_id ?? null;
+      const releaseId = rawReleaseId !== null && rawReleaseId > 0 ? rawReleaseId : null;
       const inlineTracklist = projectInlineTracklist(artwork?.tracklist, artistName);
       source = releaseId !== null || inlineTracklist !== null ? { releaseId, inlineTracklist } : null;
     }
