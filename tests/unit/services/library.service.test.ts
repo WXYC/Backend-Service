@@ -2616,6 +2616,85 @@ describe('library.service', () => {
         expect(db.update).not.toHaveBeenCalled();
       });
     });
+
+    describe('search_type gate (BS#1351)', () => {
+      // Pre-fix behaviour blindly trusted `results[0].artwork` regardless of
+      // `search_type`. For the Yenbett rotation row LML returned a
+      // `search_type: "alternative"` artist-fallback response whose top
+      // result was Tzenni — and the picker happily handed Tzenni's
+      // tracklist back as if it belonged to Yenbett. The fix gates the
+      // tier-3 acceptance on `search_type === "direct"`; everything else
+      // returns null so the picker degrades to free-text. The full LML
+      // enum is `{direct, compilation, none, fallback, alternative,
+      // song_as_artist}`; we already pin `direct` (happy path) and `none`
+      // (empty results) above — the remaining four must reject even when
+      // `results[0].artwork.release_id` is set.
+
+      it('rejects search_type=alternative even with a non-empty artwork (the Yenbett bug-pin)', async () => {
+        mockRow({
+          direct: null,
+          fallback: null,
+          artist_name: 'Noura Mint Seymali',
+          album_title: 'Yenbett',
+        });
+        // The actual prod response that caused the bug: top result is
+        // Tzenni (a different album by the same artist), surfaced as an
+        // artist-fallback after LML's album-match floor dropped both
+        // candidates.
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            { artwork: { release_id: 7727849, album: 'Tzenni' } },
+            { artwork: { release_id: 9239170, album: 'Arbina' } },
+          ],
+          search_type: 'alternative',
+        });
+
+        const result = await resolveRotationPickerSource(42);
+
+        expect(result).toBeNull();
+      });
+
+      it.each([['compilation'], ['fallback'], ['song_as_artist']] as const)(
+        'rejects search_type=%s even with a non-empty artwork',
+        async (searchType) => {
+          mockRow({
+            direct: null,
+            fallback: null,
+            artist_name: 'Some Artist',
+            album_title: 'Some Album',
+          });
+          mockLookupMetadata.mockResolvedValue({
+            results: [{ artwork: { release_id: 12345, album: 'Some Other Album' } }],
+            search_type: searchType,
+          });
+
+          const result = await resolveRotationPickerSource(42);
+
+          expect(result).toBeNull();
+        }
+      );
+
+      it('accepts search_type=direct (happy-path regression pin)', async () => {
+        // LML already enforces the 80/80 album-title floor inside
+        // `fetch_one` (LML PR #483), so every `direct` response carries
+        // artwork that has already cleared the album-title check. BS can
+        // therefore trust `direct` without re-doing the comparison.
+        mockRow({
+          direct: null,
+          fallback: null,
+          artist_name: 'Autechre',
+          album_title: 'Confield',
+        });
+        mockLookupMetadata.mockResolvedValue({
+          results: [{ artwork: { release_id: 4080, album: 'Confield' } }],
+          search_type: 'direct',
+        });
+
+        const result = await resolveRotationPickerSource(42);
+
+        expect(result).toEqual({ releaseId: 4080, inlineTracklist: null });
+      });
+    });
   });
 
   describe('getRotationTracksFromRelease', () => {
