@@ -20,6 +20,22 @@ jest.mock('@wxyc/lml-client', () => ({
   envInt: (_name: string, fallback: number) => fallback,
 }));
 
+// Capture span attribute writes so the requireSearchType tests can assert
+// `lml.coordinator.trust_reject_reason` lands on the per-lookup span. The
+// real Sentry SDK is uninitialized in unit tests and `startSpan` would pass
+// a no-op span — useless for verifying observability output.
+const mockSpanSetAttribute = jest.fn();
+const mockSpanSetAttributes = jest.fn();
+type StartSpanCallback<T> = (span: {
+  setAttribute: typeof mockSpanSetAttribute;
+  setAttributes: typeof mockSpanSetAttributes;
+}) => T | Promise<T>;
+jest.mock('@sentry/node', () => ({
+  ...jest.requireActual<object>('@sentry/node'),
+  startSpan: <T>(_opts: unknown, cb: StartSpanCallback<T>) =>
+    cb({ setAttribute: mockSpanSetAttribute, setAttributes: mockSpanSetAttributes }),
+}));
+
 import {
   LmlLookupCoordinator,
   _resetLmlLookupCoordinatorForTest,
@@ -302,6 +318,103 @@ describe('LmlLookupCoordinator', () => {
         'Confield',
         undefined,
         expect.objectContaining({ warm_cache: true })
+      );
+    });
+  });
+
+  describe('requireSearchType gate', () => {
+    // The BS-side trust policy for librarian-typed write paths: LML's `direct`
+    // search_type is the only result shape that confirms the typed (artist,
+    // album) exists in Discogs as typed. Non-direct values (alternative,
+    // compilation, fallback, song_as_artist, none) are candidate matches LML
+    // returned when the typed album wasn't found; persisting them off a
+    // librarian-typed row writes the wrong release. Gate lives at the
+    // coordinator so the rejection attribute lands on the per-lookup span
+    // co-located with `lml.coordinator.hit` and `.caller`. BS#1355.
+
+    function withSearchType(search_type: LookupResponse['search_type']): LookupResponse {
+      return { ...fakeResponse(), search_type };
+    }
+
+    it('returns the response unchanged when requireSearchType is not set (legacy callers)', async () => {
+      mockLookupMetadata.mockResolvedValue(withSearchType('alternative'));
+
+      const result = await lmlLookupCoordinator.lookup('Noura', 'Yenbett', undefined, {
+        caller: 'metadata-service',
+      });
+
+      expect(result).not.toBeNull();
+      expect(result?.search_type).toBe('alternative');
+    });
+
+    it('returns null and emits trust_reject_reason when search_type does not match', async () => {
+      mockLookupMetadata.mockResolvedValue(withSearchType('alternative'));
+
+      const result = await lmlLookupCoordinator.lookup('Noura', 'Yenbett', undefined, {
+        caller: 'library-rotation-picker',
+        requireSearchType: 'direct',
+      });
+
+      expect(result).toBeNull();
+      expect(mockSpanSetAttribute).toHaveBeenCalledWith(
+        'lml.coordinator.trust_reject_reason',
+        'search_type:alternative'
+      );
+    });
+
+    it('passes the response through when search_type matches and emits no reject attribute', async () => {
+      mockLookupMetadata.mockResolvedValue(withSearchType('direct'));
+
+      const result = await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, {
+        caller: 'library-rotation-picker',
+        requireSearchType: 'direct',
+      });
+
+      expect(result).not.toBeNull();
+      expect(result?.search_type).toBe('direct');
+      expect(mockSpanSetAttribute).not.toHaveBeenCalledWith('lml.coordinator.trust_reject_reason', expect.anything());
+    });
+
+    it.each<LookupResponse['search_type']>(['alternative', 'compilation', 'fallback', 'song_as_artist', 'none'])(
+      'rejects %s with the expected reason string',
+      async (search_type) => {
+        mockLookupMetadata.mockResolvedValue(withSearchType(search_type));
+
+        const result = await lmlLookupCoordinator.lookup('Noura', 'Yenbett', undefined, {
+          caller: 'library-rotation-picker',
+          requireSearchType: 'direct',
+        });
+
+        expect(result).toBeNull();
+        expect(mockSpanSetAttribute).toHaveBeenCalledWith(
+          'lml.coordinator.trust_reject_reason',
+          `search_type:${search_type}`
+        );
+      }
+    );
+
+    it('caches the raw response — a strict caller after a permissive caller still gates per-call', async () => {
+      mockLookupMetadata.mockResolvedValue(withSearchType('alternative'));
+
+      // First caller has no gate — receives the response.
+      const permissive = await lmlLookupCoordinator.lookup('Noura', 'Yenbett', undefined, {
+        caller: 'metadata-service',
+      });
+      expect(permissive?.search_type).toBe('alternative');
+
+      mockLookupMetadata.mockClear();
+
+      // Second caller wants direct — gets null off the cached response,
+      // without a fresh wire fetch.
+      const strict = await lmlLookupCoordinator.lookup('Noura', 'Yenbett', undefined, {
+        caller: 'library-rotation-picker',
+        requireSearchType: 'direct',
+      });
+      expect(strict).toBeNull();
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
+      expect(mockSpanSetAttribute).toHaveBeenCalledWith(
+        'lml.coordinator.trust_reject_reason',
+        'search_type:alternative'
       );
     });
   });

@@ -36,8 +36,23 @@ jest.mock('@wxyc/lml-client', () => ({
 }));
 
 // Backend code paths now route through the LmlLookupCoordinator (BS#885).
+// The mock stub mirrors the real coordinator's `requireSearchType` gate
+// (BS#1355) so per-callsite migrations are validated end-to-end: a test
+// that supplies `search_type: 'alternative'` and a caller that passes
+// `requireSearchType: 'direct'` produces the same `null` the real
+// coordinator would.
 jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
-  lmlLookupCoordinator: { lookup: mockLookupMetadata },
+  lmlLookupCoordinator: {
+    lookup: async (artist: unknown, album: unknown, song: unknown, opts: Record<string, unknown> | undefined) => {
+      const response = (await mockLookupMetadata(artist as never, album as never, song as never, opts as never)) as {
+        search_type?: string;
+      } | null;
+      if (response && opts?.requireSearchType && response.search_type !== opts.requireSearchType) {
+        return null;
+      }
+      return response;
+    },
+  },
 }));
 
 // Mock @sentry/node so we can assert that searchLibraryByTrack creates a
@@ -1905,6 +1920,7 @@ describe('library.service', () => {
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
         budgetMs: 5000,
         caller: 'library-enrich-artwork',
+        requireSearchType: 'direct',
       });
       expect(db.update).toHaveBeenCalled();
     });
@@ -1996,6 +2012,7 @@ describe('library.service', () => {
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, {
         budgetMs: 5000,
         caller: 'library-enrich-artwork',
+        requireSearchType: 'direct',
       });
     });
 
@@ -2260,6 +2277,7 @@ describe('library.service', () => {
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
         timeoutMs: 10000,
         caller: 'library-rotation-picker',
+        requireSearchType: 'direct',
       });
     });
 
@@ -2287,7 +2305,7 @@ describe('library.service', () => {
         undefined,
         'All the Young Droids: Junkshop Synth Pop 1978-1985',
         undefined,
-        { timeoutMs: 10000, caller: 'library-rotation-picker' }
+        { timeoutMs: 10000, caller: 'library-rotation-picker', requireSearchType: 'direct' }
       );
     });
 

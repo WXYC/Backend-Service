@@ -72,8 +72,21 @@ jest.mock('@wxyc/lml-client', () => ({
 }));
 
 // Backend code paths now route through the LmlLookupCoordinator (BS#885).
+// The mock stub mirrors the real coordinator's `requireSearchType` gate
+// (BS#1355) so the addAlbum + fireAndForgetCanonicalEntity migrations are
+// validated end-to-end.
 jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
-  lmlLookupCoordinator: { lookup: mockLookupMetadata },
+  lmlLookupCoordinator: {
+    lookup: async (artist: unknown, album: unknown, song: unknown, opts: Record<string, unknown> | undefined) => {
+      const response = (await mockLookupMetadata(artist as never, album as never, song as never, opts as never)) as {
+        search_type?: string;
+      } | null;
+      if (response && opts?.requireSearchType && response.search_type !== opts.requireSearchType) {
+        return null;
+      }
+      return response;
+    },
+  },
 }));
 
 import {
@@ -411,6 +424,7 @@ describe('library.controller', () => {
           budgetMs: 5000,
           caller: 'library-canonical-entity',
           warm_cache: true,
+          requireSearchType: 'direct',
         });
       });
 

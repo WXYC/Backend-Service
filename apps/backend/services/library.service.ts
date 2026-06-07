@@ -629,22 +629,26 @@ async function resolveRotationDiscogsReleaseViaLml(
 
   let source: RotationPickerSource | null;
   try {
+    // BS#1351: non-direct `search_type` values surface candidates for the wrong
+    // album (Yenbett → Tzenni). The coordinator enforces the gate via
+    // `requireSearchType: 'direct'` and projects `lml.coordinator.trust_reject_reason`
+    // on the per-lookup span. LML's `fetch_one` enforces the 80/80 album-title
+    // floor for `direct` matches, so this is sufficient — the picker falls
+    // through to free-text on rejection.
     const response = await lmlLookupCoordinator.lookup(lookupArtist, albumTitle, undefined, {
       timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
       caller: 'library-rotation-picker',
+      requireSearchType: 'direct',
     });
-    // BS#1351: non-direct `search_type` values surface candidates for the wrong
-    // album (Yenbett → Tzenni). LML's `fetch_one` enforces the 80/80 album-title
-    // floor for `direct` matches, so this is sufficient — the picker falls
-    // through to free-text on rejection.
-    if (response.search_type !== 'direct') {
+    if (response === null) {
       source = null;
     } else {
       const artwork = response.results?.[0]?.artwork ?? null;
       // `release_id: 0` is LML's MusicBrainz-rescued synth sentinel
       // (orchestrator.py emits it when ARTIST_PLUS_ALBUM hits but Discogs
       // carries no artwork). Treat as "no Discogs id" so the controller
-      // doesn't follow up with `/discogs/release/0`.
+      // doesn't follow up with `/discogs/release/0`. The tracklist on the
+      // synth result is still valid and is what the picker hands to the DJ.
       const rawReleaseId = artwork?.release_id ?? null;
       const releaseId = rawReleaseId !== null && rawReleaseId > 0 ? rawReleaseId : null;
       const inlineTracklist = projectInlineTracklist(artwork?.tracklist, artistName);
@@ -829,6 +833,14 @@ export const updateArtworkUrl = async (id: number, artwork_url: string | null) =
  * so the link-time value stored on `library.canonical_entity_confidence` is
  * a coarse band kept around so future analyses can re-judge weak matches
  * once LML exposes a real signal.
+ *
+ * The non-direct rows are load-bearing for `flowsheet-linkage.service.ts`,
+ * which calls `mapLookupToCanonicalEntity` on the raw (non-gated) lookup
+ * response and uses the band to gate auto-link vs. gray-zone-review.
+ * `library.controller.fireAndForgetCanonicalEntity` gates with
+ * `requireSearchType: 'direct'` at the coordinator (BS#1355) and only
+ * reaches this map with `search_type === 'direct'`, so its caller-side
+ * behavior is unchanged.
  */
 const SEARCH_TYPE_CONFIDENCE: Record<LookupResponse['search_type'], number | null> = {
   direct: 0.9,
@@ -898,7 +910,9 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
       const lookupResult = await lmlLookupCoordinator.lookup(row.artist_name, row.album_title, undefined, {
         budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS,
         caller: 'library-enrich-artwork',
+        requireSearchType: 'direct',
       });
+      if (lookupResult === null) return;
       const artworkUrl = filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url);
       if (!artworkUrl) return;
       row.artwork_url = artworkUrl;
