@@ -113,7 +113,47 @@ const FSEntryFieldsRaw = {
   record_label: flowsheet.record_label,
   label_id: flowsheet.label_id,
   rotation_id: flowsheet.rotation_id,
-  rotation_bin: rotation.rotation_bin,
+  // Primary source is the FK join (`leftJoin(rotation, rotation.id = flowsheet.rotation_id)`).
+  // Fallback fires only when that join misses (rotation.rotation_bin IS NULL) and the entry
+  // looks like a real track with non-empty artist+album. Three match cohorts:
+  //   (a) flowsheet.album_id matches an active rotation.album_id (library-linked rotation rows);
+  //   (b) (artist, album) snapshot matches active rotation row's denormalized fields
+  //       (library-unlinked rotation rows hold the snapshot directly);
+  //   (c) (artist, album) matches the library+artists join on an active rotation row's
+  //       album_id (library-linked rows whose denorm fields are NULL).
+  // kill_date is compared against the flowsheet entry's add_time so historical rotation
+  // status is preserved — mirrors how tubafrenzy classifies at mirror time (WXYC/dj-site#750).
+  // Subquery only fires per-row on a missed FK join; on rows with a populated rotation_id
+  // COALESCE short-circuits and the subquery is not evaluated.
+  rotation_bin: sql<string | null>`
+    COALESCE(
+      ${rotation.rotation_bin},
+      CASE WHEN ${flowsheet.rotation_id} IS NULL
+        AND coalesce(${flowsheet.artist_name}, '') <> ''
+        AND coalesce(${flowsheet.album_title}, '') <> ''
+      THEN (
+        SELECT r2.rotation_bin
+        FROM ${rotation} r2
+        LEFT JOIN ${library} l2 ON l2.id = r2.album_id
+        LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
+        WHERE (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
+          AND (
+            (${flowsheet.album_id} IS NOT NULL AND r2.album_id = ${flowsheet.album_id})
+            OR (
+              lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
+              AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
+            )
+            OR (
+              lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
+              AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
+            )
+          )
+        ORDER BY r2.id
+        LIMIT 1
+      )
+      END
+    )
+  `,
   request_flag: flowsheet.request_flag,
   segue: flowsheet.segue,
   message: flowsheet.message,

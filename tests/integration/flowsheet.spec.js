@@ -798,6 +798,101 @@ describe('Retrieve Flowsheet Entries', () => {
   });
 });
 
+describe('rotation_bin read-path fallback (dj-site#750)', () => {
+  // When the picker emit path doesn't persist flowsheet.rotation_id (the
+  // 2026-06-04 regression cohort), the primary FK join leaves rotation_bin
+  // NULL and dj-site's badge disappears. The read path's COALESCE fallback
+  // recovers the bin via (a) album_id match, (b) denorm artist/album match,
+  // or (c) library+artists JOIN match. Seed has rotation row 1 = album_id 1
+  // (Built to Spill — Keep it Like a Secret) in bin 'L'.
+
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('rotation_bin populated via primary FK join when rotation_id is set (baseline)', async () => {
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1,
+        rotation_id: 1,
+        track_title: 'Carry the Zero',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Carry the Zero');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toEqual(1);
+    expect(track.rotation_bin).toEqual('L');
+  });
+
+  test('rotation_bin populated via album_id fallback when rotation_id is NULL', async () => {
+    // Simulates the regression cohort: picker preserved album_id but lost rotation_id.
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1,
+        track_title: 'Carry the Zero',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Carry the Zero');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toEqual('L');
+  });
+
+  test('rotation_bin populated via library+artists denorm fallback when album_id and rotation_id are both NULL', async () => {
+    // Simulates the worst case: snapshot branch wrote no album_id and no rotation_id,
+    // only the typed/picker-seeded artist+album strings.
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Built to Spill',
+        album_title: 'Keep it Like a Secret',
+        track_title: 'Carry the Zero',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Carry the Zero');
+    expect(track).toBeDefined();
+    expect(track.album_id).toBeNull();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toEqual('L');
+  });
+
+  test('rotation_bin stays NULL when (artist, album) does not match any active rotation row', async () => {
+    // Regression pin: fallback must not match on artist alone or album alone, and
+    // must not silently classify random tracks as rotation. "Ravyn Lenae — Crush"
+    // is in the library (album_id 2) but is NOT in the seeded rotation set.
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 2,
+        track_title: 'Venom',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Venom');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toBeNull();
+  });
+});
+
 describe('Delete Flowsheet Entries', () => {
   beforeEach(async () => {
     await fls_util.join_show(global.primary_dj_id, global.access_token);
