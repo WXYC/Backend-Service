@@ -169,13 +169,15 @@ describe('rotation-tracks-cache-warm.service', () => {
       expect(mockGetRotationTracksFromRelease).not.toHaveBeenCalled();
     });
 
-    test('does not call getRotationTracksFromRelease when releaseId is the BS#1185 sentinel zero with inline tracklist', async () => {
-      // MB-rescue rows carry releaseId=0 + inline tracklist; the picker
-      // short-circuits on inline tracks, so the warmer must too — calling
-      // getRotationTracksFromRelease(0) would 404 and waste a semaphore slot.
+    test('does not call getRotationTracksFromRelease when the resolver returns a null releaseId with inline tracklist', async () => {
+      // MB-rescue rows project to `releaseId: null` (BS#1351 normalizes the
+      // LML sentinel `release_id: 0`) and carry the inline tracklist. The
+      // warmer must skip the release fetch in this shape — a fetch with a
+      // null id is a no-op and a fetch with 0 would 404, in either case
+      // wasting a semaphore slot.
       mockActiveRotationRows([10]);
       mockResolveRotationPickerSource.mockResolvedValue(
-        inlineSource(0, [{ position: '1', title: 'T', duration: null, artists: ['A'] }])
+        inlineSource(null, [{ position: '1', title: 'T', duration: null, artists: ['A'] }])
       );
 
       await warmRotationTracksCache();

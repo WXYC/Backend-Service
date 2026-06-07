@@ -2624,7 +2624,7 @@ describe('library.service', () => {
       // Yenbett's. The happy path (`search_type: "direct"`) is already pinned by
       // the test above; this block pins the rejection of every non-direct value.
       it.each(['alternative', 'compilation', 'fallback', 'song_as_artist', 'none'] as const)(
-        'rejects search_type=%s even with non-empty artwork',
+        'rejects search_type=%s even with non-empty artwork and stamps the persistent negative marker',
         async (searchType) => {
           mockRow({
             direct: null,
@@ -2645,6 +2645,12 @@ describe('library.service', () => {
           await new Promise((r) => setImmediate(r));
 
           expect(result).toBeNull();
+          // The persistent stamp is what feeds the 7-day skip on cold cache —
+          // a refactor that moves the stamp into the LML-error branch only
+          // would silently re-introduce cascade-exhaustion on the Yenbett
+          // cohort.
+          expect(db.update).toHaveBeenCalledWith(rotation);
+          expect(updateSetMock).toHaveBeenCalled();
         }
       );
 
