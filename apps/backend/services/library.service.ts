@@ -640,10 +640,24 @@ async function resolveRotationDiscogsReleaseViaLml(
       timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
       caller: 'library-rotation-picker',
     });
-    const artwork = response.results?.[0]?.artwork ?? null;
-    const releaseId = artwork?.release_id ?? null;
-    const inlineTracklist = projectInlineTracklist(artwork?.tracklist, artistName);
-    source = releaseId !== null || inlineTracklist !== null ? { releaseId, inlineTracklist } : null;
+    // BS#1351: only trust `search_type === "direct"`. Everything else
+    // (`alternative`, `compilation`, `fallback`, `song_as_artist`, `none`)
+    // is LML signalling a non-album-match — including artist-fallback
+    // candidates whose `artwork` carries a different release than the
+    // typed album. Accepting those handed the rotation picker the wrong
+    // tracklist (the Yenbett → Tzenni regression). LML's `fetch_one`
+    // already enforces the 80/80 album-title floor for direct matches
+    // (LML PR #483), so this check is sufficient — no additional
+    // normalize/compare needed on the BS side. Falling through to null
+    // degrades the picker to free-text, which is the correct UX.
+    if (response.search_type !== 'direct') {
+      source = null;
+    } else {
+      const artwork = response.results?.[0]?.artwork ?? null;
+      const releaseId = artwork?.release_id ?? null;
+      const inlineTracklist = projectInlineTracklist(artwork?.tracklist, artistName);
+      source = releaseId !== null || inlineTracklist !== null ? { releaseId, inlineTracklist } : null;
+    }
   } catch (err) {
     console.warn(
       '[library.service] LML /lookup for rotation_id=%d failed; degrading picker to free-text: %s',
