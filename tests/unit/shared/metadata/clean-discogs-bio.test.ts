@@ -37,8 +37,15 @@ describe('cleanDiscogsBio', () => {
       ['a', 'Co-founder of duo, [a8390436].', 'Co-founder of duo.'],
       ['l', 'Released on [l123] in 2003.', 'Released on in 2003.'],
       ['r', 'See [r45] for details.', 'See for details.'],
-      ['m', 'Master release: [m999].', 'Master release:.'],
+      ['m', 'Master release: [m999].', 'Master release.'],
     ])('strips [%s<id>] numeric-id references', (_letter, input, expected) => {
+      expect(cleanDiscogsBio(input)).toBe(expected);
+    });
+
+    it.each([
+      [':', 'Producer: [a8390436].', 'Producer.'],
+      [';', 'duo; [l123].', 'duo.'],
+    ])('eats leading "%s" punctuation along with the numeric-id token', (_punct, input, expected) => {
       expect(cleanDiscogsBio(input)).toBe(expected);
     });
 

@@ -19,6 +19,6 @@ export const cleanDiscogsBio = (bio: string): string =>
     .replace(/\[r=([^\]]+)\]/g, '$1')
     .replace(/\[m=([^\]]+)\]/g, '$1')
     .replace(/\[url=([^\]]+)\]([^[]*)\[\/url\]/g, '$2')
-    .replace(/,?\s*\[(?:a|l|r|m)\d+\]/g, '')
+    .replace(/[,:;]?\s*\[(?:a|l|r|m)\d+\]/g, '')
     .replace(/ +/g, ' ')
     .trim();
