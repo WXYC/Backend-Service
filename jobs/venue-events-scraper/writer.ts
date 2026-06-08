@@ -111,8 +111,16 @@ export const makeVenueCache = (): VenueCache => {
 /**
  * UPSERT one parsed concert. Idempotent on (source, source_id):
  * re-scraping the same URL updates the existing row rather than
- * creating a duplicate. `starts_at`, `status`, `ticket_url`, etc. all
- * refresh on each pass so cancellations / time-changes propagate.
+ * creating a duplicate. `starts_at`, `ticket_url`, the supporting-acts
+ * array, image, and raw payload all refresh on each pass so
+ * reschedule / lineup-change / artwork-swap edits propagate.
+ *
+ * `status` is intentionally NOT touched on UPDATE. The schema defaults
+ * a fresh row to `on_sale`, and the column is admin-managed thereafter
+ * (sold_out / cancelled / rescheduled). The RHP JSON-LD's `Offer.availability`
+ * isn't reliable enough to drive automated status transitions — adding
+ * that pipeline is queued behind real cancellation data from the source
+ * (tracked separately from this PR).
  *
  * `scraped_at` is set per-call so the orchestrator can distinguish
  * "stamped this run" from "missed this run". A row that disappears from

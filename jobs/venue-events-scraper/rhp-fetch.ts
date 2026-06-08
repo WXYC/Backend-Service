@@ -15,6 +15,8 @@
  *     easy to unit-test.
  */
 
+import { captureError, log } from './logger.js';
+
 const USER_AGENT = 'WXYCEventsBot/1.0 (+https://wxyc.org/about; contact@wxyc.org)';
 const REQUEST_TIMEOUT_MS = 15_000;
 
@@ -64,6 +66,13 @@ export const fetchHtml = async (url: string, attempt = 0): Promise<string> => {
  * Per-task concurrency runner that doesn't barrel-drop unhandled errors
  * — failed tasks resolve to `null` so the caller can `.filter(Boolean)`
  * and continue.
+ *
+ * The orchestrator's `processOneEvent` catches each pipeline step and
+ * returns a tagged result, so under normal operation the worker's `fn`
+ * never throws. The catch below is the safety net for *unexpected*
+ * exceptions (programmer error, a future refactor that drops a try, etc.) —
+ * we log + Sentry-capture them rather than silently swallowing so a real
+ * defect surfaces in the dashboards instead of disappearing.
  */
 export const mapConcurrent = async <T, R>(
   items: readonly T[],
@@ -77,9 +86,16 @@ export const mapConcurrent = async <T, R>(
       const idx = i++;
       try {
         out[idx] = await fn(items[idx]);
-      } catch {
-        // The caller logs + captures; we suppress here so a single bad
-        // page never wedges the whole batch.
+      } catch (error) {
+        // Unexpected: `fn` (processOneEvent) is supposed to handle its own
+        // errors. If we land here, something went wrong outside the
+        // pipeline's known paths — surface it loudly so it doesn't get
+        // lost to the null filter in the caller.
+        log('error', 'unexpected_worker_error', `unexpected exception in mapConcurrent worker`, {
+          item_index: idx,
+          error_message: (error as Error).message,
+        });
+        captureError(error, 'unexpected_worker_error', { item_index: idx });
         out[idx] = null;
       }
     }
