@@ -15,6 +15,7 @@ import type {
   UpsertConcertFn,
   MapConcurrentFn,
 } from '../../../../jobs/venue-events-scraper/orchestrate';
+import { initLogger, closeLogger } from '../../../../jobs/venue-events-scraper/logger';
 import type { ParsedConcert } from '../../../../jobs/venue-events-scraper/rhp-types';
 import type { RhpVenueConfig } from '../../../../jobs/venue-events-scraper/rhp-venues';
 
@@ -121,6 +122,61 @@ describe('runScraper — happy path', () => {
       upserts_updated: 0,
       write_errors: 0,
     });
+  });
+
+  it('site_done log line reports per-site counters, not cumulative totals', async () => {
+    // Two sites with disjoint event counts. The second site's site_done
+    // log line must NOT include the first site's events_seen / upserts_total.
+    const writes: string[] = [];
+    // Replace the beforeEach's no-op stdout spy with a capture spy.
+    jest.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      return true;
+    });
+    initLogger({ repo: 'Backend-Service', tool: 'venue-events-scraper-test' });
+    try {
+      const fetchHtml = jest.fn<ReturnType<FetchHtmlFn>, Parameters<FetchHtmlFn>>().mockResolvedValue('html');
+      const extractEventLinks = jest
+        .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
+        // Three events on the first site, one on the second.
+        .mockReturnValueOnce([
+          'https://test.example/event/a/',
+          'https://test.example/event/b/',
+          'https://test.example/event/c/',
+        ])
+        .mockReturnValueOnce(['https://test-b.example/event/x/']);
+      const parseEventPage = jest
+        .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
+        .mockImplementation((_, url) => fakeParsedConcert(url));
+      const resolveVenueId = jest.fn<ReturnType<ResolveVenueIdFn>, Parameters<ResolveVenueIdFn>>().mockResolvedValue(1);
+      const upsertConcert = jest
+        .fn<ReturnType<UpsertConcertFn>, Parameters<UpsertConcertFn>>()
+        .mockResolvedValue({ concert_id: 7, inserted: true });
+
+      await runScraper({
+        sites: [TEST_VENUE, TEST_VENUE_B],
+        concurrency: 1,
+        fetchHtml,
+        extractEventLinks,
+        parseEventPage,
+        resolveVenueId,
+        upsertConcert,
+        mapConcurrent: realMapConcurrent,
+      });
+
+      const siteDoneLines = writes
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((obj) => obj.step === 'site_done');
+
+      expect(siteDoneLines).toHaveLength(2);
+      expect(siteDoneLines[0]).toMatchObject({ site_slug: 'test-site', events_seen: 3, upserts_total: 3 });
+      // Second site reports just its own one event, NOT cumulative four.
+      expect(siteDoneLines[1]).toMatchObject({ site_slug: 'test-site-b', events_seen: 1, upserts_total: 1 });
+    } finally {
+      await closeLogger();
+    }
   });
 
   it('distinguishes inserted vs updated rows', async () => {
