@@ -195,6 +195,18 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     //backfill album info from library before adding to flowsheet
     const albumInfo = await flowsheet_service.getAlbumFromDB(body.album_id);
 
+    // `getAlbumFromDB` returns undefined when `body.album_id` points to a row
+    // that doesn't exist in `library` — possible when the dj-site picker
+    // payload references a library row that's been deleted, or when a
+    // rotation→library FK has desynced. BS#933 covered the explicit-null
+    // case; this guards the equally-reachable not-found case. Without it the
+    // following `albumInfo.record_label = ...` / `...albumInfo` spread throws
+    // a bare TypeError that the centralized errorHandler maps to 500 — the
+    // signal at the root of BS#1271's POST /flowsheet internal_error bursts.
+    if (!albumInfo) {
+      throw new WxycError(`Album ${body.album_id} not found in library`, 404);
+    }
+
     if (body.record_label !== undefined) {
       albumInfo.record_label = body.record_label;
     }

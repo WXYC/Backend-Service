@@ -462,6 +462,36 @@ describe('flowsheet.controller', () => {
       );
     });
 
+    it('throws WxycError 404 when a positive album_id is not found in library (BS#1271)', async () => {
+      // BS#933 narrowed the lookup-branch predicate from `!== undefined` to
+      // `!= null`, fixing the explicit-null case. A positive `album_id` that
+      // doesn't match any `library.id` (deleted between dj-site picker fetch
+      // and POST, or rotation→library FK desync) still slipped through and
+      // produced a bare TypeError on the next line — captured as a 500 with
+      // no Sentry exception, the signal at the root of BS#1271's POST
+      // /flowsheet internal_error bursts. The guard now turns the not-found
+      // case into a clean 404 WxycError.
+      // Mock the not-found case explicitly: real `getAlbumFromDB` returns
+      // `undefined` on no match (see library.service.test.ts:1759).
+      mockGetAlbumFromDB.mockResolvedValue(undefined);
+
+      const req = createMockBodyReq({
+        album_id: 9999,
+        track_title: 'Crispy Duck',
+        record_label: 'Duophonic',
+      });
+      const res = createMockRes();
+
+      await expect(addEntry(req as Request, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      await expect(addEntry(req as Request, res as Response, mockNext)).rejects.toMatchObject({
+        statusCode: 404,
+        message: expect.stringContaining('9999'),
+      });
+      expect(mockGetAlbumFromDB).toHaveBeenCalledWith(9999);
+      // INSERT must not run when the album lookup misses.
+      expect(mockAddTrack).not.toHaveBeenCalled();
+    });
+
     it('passes segue field through for library-linked tracks (album_id provided)', async () => {
       const albumInfo = {
         artist_name: 'Stereolab',
