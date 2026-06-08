@@ -837,10 +837,14 @@ export const updateArtworkUrl = async (id: number, artwork_url: string | null) =
  * The non-direct rows are load-bearing for `flowsheet-linkage.service.ts`,
  * which calls `mapLookupToCanonicalEntity` on the raw (non-gated) lookup
  * response and uses the band to gate auto-link vs. gray-zone-review.
- * `library.controller.fireAndForgetCanonicalEntity` gates with
- * `requireSearchType: 'direct'` at the coordinator (BS#1355) and only
- * reaches this map with `search_type === 'direct'`, so its caller-side
- * behavior is unchanged.
+ * `library.controller.fireAndForgetCanonicalEntity` instead gates with
+ * `requireSearchType: 'direct'` at the coordinator (BS#1355) — a deliberate
+ * tightening, not a refactor: the old caller path persisted canonical
+ * entities for non-direct matches (fallback / alternative / compilation /
+ * song_as_artist) with their banded confidence; the gated path persists
+ * only `search_type === 'direct'` (band 0.9). The non-direct bands stay
+ * here for flowsheet-linkage; do not reuse them on the librarian-write
+ * path without re-opening the BS#1355 decision.
  */
 const SEARCH_TYPE_CONFIDENCE: Record<LookupResponse['search_type'], number | null> = {
   direct: 0.9,
