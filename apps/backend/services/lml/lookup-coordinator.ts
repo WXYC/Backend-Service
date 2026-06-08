@@ -155,7 +155,20 @@ export class LmlLookupCoordinator {
       // wire span's `lml.caller` attribute matches what we projected onto
       // the coordinator span — single source of truth for the "unknown"
       // default. The other options forward as-is.
-      const settle = this.fetchUncached(artist, album, song, { ...options, caller })
+      // Strip `requireSearchType` before crossing the wire boundary — it's
+      // a coordinator-layer gate, not an LML wire param. Currently
+      // `fetchUncached` cherry-picks fields so a leak is impossible today,
+      // but typing `wireOptions` as `Omit<..., 'requireSearchType'>` keeps
+      // the boundary explicit so a future `...options` refactor of
+      // `fetchUncached` can't accidentally forward the gate to LML.
+      const wireOptions: Omit<CoordinatorLookupOptions, 'requireSearchType'> = {
+        caller,
+        budgetMs: options?.budgetMs,
+        timeoutMs: options?.timeoutMs,
+        warm_cache: options?.warm_cache,
+        limiter: options?.limiter,
+      };
+      const settle = this.fetchUncached(artist, album, song, wireOptions)
         .then((result) => {
           this.cache.set(key, result);
           return result;
@@ -183,13 +196,7 @@ export class LmlLookupCoordinator {
   ): LookupResponse | null {
     if (!options?.requireSearchType) return response;
     if (response.search_type === options.requireSearchType) return response;
-    if (span) {
-      try {
-        span.setAttribute('lml.coordinator.trust_reject_reason', `search_type:${response.search_type}`);
-      } catch (err) {
-        console.warn('lml.coordinator: failed to project trust_reject_reason onto span', err);
-      }
-    }
+    this.setSpanAttrs(span, { trust_reject_reason: `search_type:${response.search_type}` });
     return null;
   }
 
@@ -197,7 +204,7 @@ export class LmlLookupCoordinator {
     artist: string | undefined,
     album: string | undefined,
     song: string | undefined,
-    options: CoordinatorLookupOptions | undefined
+    options: Omit<CoordinatorLookupOptions, 'requireSearchType'> | undefined
   ): Promise<LookupResponse> {
     return lookupMetadata(artist, album, song, {
       extended: true,
@@ -221,14 +228,21 @@ export class LmlLookupCoordinator {
 
   private setSpanAttrs(
     span: ReturnType<typeof Sentry.getActiveSpan>,
-    attrs: { hit: 'cache' | 'inflight' | 'miss'; caller: string }
+    attrs: Partial<{
+      hit: 'cache' | 'inflight' | 'miss';
+      caller: string;
+      trust_reject_reason: string;
+    }>
   ): void {
     if (!span) return;
+    const payload: Record<string, string> = {};
+    if (attrs.hit !== undefined) payload['lml.coordinator.hit'] = attrs.hit;
+    if (attrs.caller !== undefined) payload['lml.coordinator.caller'] = attrs.caller;
+    if (attrs.trust_reject_reason !== undefined) {
+      payload['lml.coordinator.trust_reject_reason'] = attrs.trust_reject_reason;
+    }
     try {
-      span.setAttributes({
-        'lml.coordinator.hit': attrs.hit,
-        'lml.coordinator.caller': attrs.caller,
-      });
+      span.setAttributes(payload);
     } catch (err) {
       console.warn('lml.coordinator: failed to project attrs onto span', err);
     }

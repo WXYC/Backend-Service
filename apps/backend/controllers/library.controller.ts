@@ -126,6 +126,12 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
           console.warn('Failed to persist artwork URL:', (e as Error).message);
         }
       }
+    } else {
+      // Coordinator gate-rejected a non-direct LML response. Breadcrumb so
+      // log tailing can separate 'LML returned no candidate' from 'LML
+      // returned non-direct, gate-rejected' without grepping Sentry spans.
+      // The structured reason lives on lml.coordinator.trust_reject_reason.
+      console.debug('[Library] Artwork lookup gate-rejected (non-direct):', body.album_title);
     }
 
     // Fire-and-forget canonical-entity resolution (Epic B.1.3). The library
@@ -157,7 +163,12 @@ function fireAndForgetCanonicalEntity(libraryId: number, artistName: string | nu
       requireSearchType: 'direct',
     })
     .then(async (response) => {
-      if (response === null) return;
+      if (response === null) {
+        // Gate-rejected non-direct response — log so debugging "why no
+        // canonical_entity_id on this row?" doesn't require Sentry spelunking.
+        console.debug('[Library] Canonical-entity lookup gate-rejected (non-direct):', albumTitle);
+        return;
+      }
       const linkage = libraryService.mapLookupToCanonicalEntity(response);
       if (!linkage) return;
       await libraryService.updateCanonicalEntity(libraryId, linkage.id, linkage.confidence);

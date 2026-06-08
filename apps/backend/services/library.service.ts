@@ -641,6 +641,14 @@ async function resolveRotationDiscogsReleaseViaLml(
       requireSearchType: 'direct',
     });
     if (response === null) {
+      // Coordinator gate rejected a non-direct response — log so
+      // 'rotation row stayed in negative-cache' triage doesn't require
+      // Sentry. Structured reason lives on lml.coordinator.trust_reject_reason.
+      console.debug(
+        '[library.service] Rotation picker gate-rejected (non-direct) rotation_id=%d album=%s',
+        rotationId,
+        albumTitle
+      );
       source = null;
     } else {
       const artwork = response.results?.[0]?.artwork ?? null;
@@ -916,7 +924,17 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
         caller: 'library-enrich-artwork',
         requireSearchType: 'direct',
       });
-      if (lookupResult === null) return;
+      if (lookupResult === null) {
+        // Gate-rejected non-direct response — breadcrumb so log tailing
+        // can separate this from 'LML had no candidate'. The structured
+        // reason lives on lml.coordinator.trust_reject_reason.
+        console.debug(
+          '[library.service] Artwork enrichment gate-rejected (non-direct) library_id=%d album=%s',
+          row.id,
+          row.album_title
+        );
+        return;
+      }
       const artworkUrl = filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url);
       if (!artworkUrl) return;
       row.artwork_url = artworkUrl;

@@ -37,20 +37,17 @@ jest.mock('@wxyc/lml-client', () => ({
 
 // Backend code paths now route through the LmlLookupCoordinator (BS#885).
 // The mock stub mirrors the real coordinator's `requireSearchType` gate
-// (BS#1355) so per-callsite migrations are validated end-to-end: a test
-// that supplies `search_type: 'alternative'` and a caller that passes
-// `requireSearchType: 'direct'` produces the same `null` the real
-// coordinator would.
+// (BS#1355) so per-callsite migrations are validated end-to-end. The gate
+// logic lives in mockApplyTrustGate (tests/mocks/lml-lookup-coordinator.mock.ts)
+// so this file and library.controller.test.ts share one source of truth.
+import { mockApplyTrustGate } from '../../mocks/lml-lookup-coordinator.mock';
 jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   lmlLookupCoordinator: {
     lookup: async (artist: unknown, album: unknown, song: unknown, opts: Record<string, unknown> | undefined) => {
       const response = (await mockLookupMetadata(artist as never, album as never, song as never, opts as never)) as {
         search_type?: string;
       } | null;
-      if (response && opts?.requireSearchType && response.search_type !== opts.requireSearchType) {
-        return null;
-      }
-      return response;
+      return mockApplyTrustGate(response, opts);
     },
   },
 }));
@@ -2016,10 +2013,15 @@ describe('library.service', () => {
       });
     });
 
-    it('handles LML returning no results', async () => {
+    it('handles LML returning a direct response with empty results', async () => {
+      // Use search_type='direct' so the mock gate (BS#1355) lets the
+      // response through and the empty-results branch is what skips the
+      // artwork persist. Previously this case used search_type='none' —
+      // the gate intercepted before the empty-results branch ran, so the
+      // test name lied about what it pinned.
       mockLookupMetadata.mockResolvedValue({
         results: [],
-        search_type: 'none',
+        search_type: 'direct',
         found_on_compilation: false,
         song_not_found: false,
       });
@@ -2031,6 +2033,45 @@ describe('library.service', () => {
       expect(enriched[0].artwork_url).toBeNull();
       expect(db.update).not.toHaveBeenCalled();
     });
+
+    // BS#1355 gate negative pinning. If a refactor accidentally drops
+    // `requireSearchType: 'direct'` from the enrichWithArtwork callsite,
+    // these tests fail loudly: a non-direct response carrying a populated
+    // artwork URL (the Yenbett → Tzenni shape) would persist again.
+    it.each<'alternative' | 'compilation' | 'fallback' | 'song_as_artist' | 'none'>([
+      'alternative',
+      'compilation',
+      'fallback',
+      'song_as_artist',
+      'none',
+    ])(
+      'gate-rejects %s — does not persist artwork even when LML carries a populated artwork_url',
+      async (search_type) => {
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: { id: 99, title: 'Tzenni', artist: 'Noura', call_number: '', library_url: '' },
+              artwork: {
+                release_id: 7727849,
+                release_url: 'https://www.discogs.com/release/7727849',
+                artwork_url: 'https://i.discogs.com/tzenni.jpg',
+                confidence: 0.5,
+              },
+            },
+          ],
+          search_type,
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const results = [{ id: 1, artist_name: 'Noura', album_title: 'Yenbett', artwork_url: null }];
+
+        const enriched = await enrichWithArtwork(results);
+
+        expect(enriched[0].artwork_url).toBeNull();
+        expect(db.update).not.toHaveBeenCalled();
+      }
+    );
   });
 
   describe('searchLibraryByCTA', () => {

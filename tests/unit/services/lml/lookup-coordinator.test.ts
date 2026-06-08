@@ -24,16 +24,35 @@ jest.mock('@wxyc/lml-client', () => ({
 // `lml.coordinator.trust_reject_reason` lands on the per-lookup span. The
 // real Sentry SDK is uninitialized in unit tests and `startSpan` would pass
 // a no-op span — useless for verifying observability output.
+//
+// The mock implements the subset of @sentry/node Span the coordinator uses
+// today (setAttribute, setAttributes) PLUS the next-most-likely methods
+// (setStatus, recordException, end) as no-ops. The extras don't move any
+// test assertions, but they keep every test in this file from crashing
+// with TypeError when a future coordinator change calls one of them — the
+// surgical assertion that should drive the failure can survive instead.
 const mockSpanSetAttribute = jest.fn();
 const mockSpanSetAttributes = jest.fn();
+const mockSpanSetStatus = jest.fn();
+const mockSpanRecordException = jest.fn();
+const mockSpanEnd = jest.fn();
 type StartSpanCallback<T> = (span: {
   setAttribute: typeof mockSpanSetAttribute;
   setAttributes: typeof mockSpanSetAttributes;
+  setStatus: typeof mockSpanSetStatus;
+  recordException: typeof mockSpanRecordException;
+  end: typeof mockSpanEnd;
 }) => T | Promise<T>;
 jest.mock('@sentry/node', () => ({
   ...jest.requireActual<object>('@sentry/node'),
   startSpan: <T>(_opts: unknown, cb: StartSpanCallback<T>) =>
-    cb({ setAttribute: mockSpanSetAttribute, setAttributes: mockSpanSetAttributes }),
+    cb({
+      setAttribute: mockSpanSetAttribute,
+      setAttributes: mockSpanSetAttributes,
+      setStatus: mockSpanSetStatus,
+      recordException: mockSpanRecordException,
+      end: mockSpanEnd,
+    }),
 }));
 
 import {
@@ -356,9 +375,8 @@ describe('LmlLookupCoordinator', () => {
       });
 
       expect(result).toBeNull();
-      expect(mockSpanSetAttribute).toHaveBeenCalledWith(
-        'lml.coordinator.trust_reject_reason',
-        'search_type:alternative'
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith(
+        expect.objectContaining({ 'lml.coordinator.trust_reject_reason': 'search_type:alternative' })
       );
     });
 
@@ -372,7 +390,9 @@ describe('LmlLookupCoordinator', () => {
 
       expect(result).not.toBeNull();
       expect(result?.search_type).toBe('direct');
-      expect(mockSpanSetAttribute).not.toHaveBeenCalledWith('lml.coordinator.trust_reject_reason', expect.anything());
+      expect(mockSpanSetAttributes).not.toHaveBeenCalledWith(
+        expect.objectContaining({ 'lml.coordinator.trust_reject_reason': expect.anything() })
+      );
     });
 
     it.each<LookupResponse['search_type']>(['alternative', 'compilation', 'fallback', 'song_as_artist', 'none'])(
@@ -386,9 +406,8 @@ describe('LmlLookupCoordinator', () => {
         });
 
         expect(result).toBeNull();
-        expect(mockSpanSetAttribute).toHaveBeenCalledWith(
-          'lml.coordinator.trust_reject_reason',
-          `search_type:${search_type}`
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith(
+          expect.objectContaining({ 'lml.coordinator.trust_reject_reason': `search_type:${search_type}` })
         );
       }
     );
@@ -412,10 +431,37 @@ describe('LmlLookupCoordinator', () => {
       });
       expect(strict).toBeNull();
       expect(mockLookupMetadata).not.toHaveBeenCalled();
-      expect(mockSpanSetAttribute).toHaveBeenCalledWith(
-        'lml.coordinator.trust_reject_reason',
-        'search_type:alternative'
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith(
+        expect.objectContaining({ 'lml.coordinator.trust_reject_reason': 'search_type:alternative' })
       );
+    });
+
+    it('caches the raw response when the strict caller arrives first — permissive caller within TTL still receives it', async () => {
+      // Inverse of the prior test: pin that the cache stores the RAW
+      // response on a strict-first wire call, so a later permissive caller
+      // still gets the non-direct response back. Guards against a refactor
+      // that accidentally caches the gated null (e.g. moves cache.set after
+      // applyTrustGate) — which would silently lock all subsequent callers,
+      // including permissive ones, into null for the LRU TTL.
+      mockLookupMetadata.mockResolvedValue(withSearchType('alternative'));
+
+      // Strict first — gets null off the wire response.
+      const strict = await lmlLookupCoordinator.lookup('Noura', 'Yenbett', undefined, {
+        caller: 'library-rotation-picker',
+        requireSearchType: 'direct',
+      });
+      expect(strict).toBeNull();
+
+      mockLookupMetadata.mockClear();
+
+      // Permissive after — still receives the raw alternative response off
+      // the cache, no fresh wire fetch.
+      const permissive = await lmlLookupCoordinator.lookup('Noura', 'Yenbett', undefined, {
+        caller: 'metadata-service',
+      });
+      expect(permissive).not.toBeNull();
+      expect(permissive?.search_type).toBe('alternative');
+      expect(mockLookupMetadata).not.toHaveBeenCalled();
     });
   });
 

@@ -13,6 +13,7 @@ const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number) => Promise<number
 const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
 const mockUpdateCanonicalEntity = jest.fn<(id: number, entityId: string, confidence: number) => Promise<unknown>>();
 const mockMapLookupToCanonicalEntity = jest.fn<(response: unknown) => { id: string; confidence: number } | null>();
+const mockUpdateArtworkUrl = jest.fn<(id: number, url: string) => Promise<unknown>>();
 type PickerSourceMock = {
   releaseId: number | null;
   inlineTracklist: Array<{ position: string; title: string; duration: string | null; artists: string[] }> | null;
@@ -37,7 +38,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   addToRotation: jest.fn(),
   killRotationInDB: jest.fn(),
   insertAlbum: mockInsertAlbum,
-  updateArtworkUrl: jest.fn(),
+  updateArtworkUrl: mockUpdateArtworkUrl,
   updateOnStreaming: jest.fn(),
   updateCanonicalEntity: mockUpdateCanonicalEntity,
   mapLookupToCanonicalEntity: mockMapLookupToCanonicalEntity,
@@ -74,17 +75,17 @@ jest.mock('@wxyc/lml-client', () => ({
 // Backend code paths now route through the LmlLookupCoordinator (BS#885).
 // The mock stub mirrors the real coordinator's `requireSearchType` gate
 // (BS#1355) so the addAlbum + fireAndForgetCanonicalEntity migrations are
-// validated end-to-end.
+// validated end-to-end. The gate logic itself lives in mockApplyTrustGate
+// (tests/mocks/lml-lookup-coordinator.mock.ts) so this file and
+// library.service.test.ts share one source of truth.
+import { mockApplyTrustGate } from '../../mocks/lml-lookup-coordinator.mock';
 jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   lmlLookupCoordinator: {
     lookup: async (artist: unknown, album: unknown, song: unknown, opts: Record<string, unknown> | undefined) => {
       const response = (await mockLookupMetadata(artist as never, album as never, song as never, opts as never)) as {
         search_type?: string;
       } | null;
-      if (response && opts?.requireSearchType && response.search_type !== opts.requireSearchType) {
-        return null;
-      }
-      return response;
+      return mockApplyTrustGate(response, opts);
     },
   },
 }));
@@ -448,13 +449,19 @@ describe('library.controller', () => {
       });
 
       it('does not write canonical entity when the mapper returns null (no linkable result)', async () => {
-        mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
+        // Use search_type='direct' so the mock gate (BS#1355) lets the
+        // response through to the mapper — pinning the "mapper returns null"
+        // contract, not the gate-rejection path. Previously this fixture
+        // used search_type='none', which the gate intercepted before the
+        // mapper ran, so the assertion passed for the wrong reason.
+        mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'direct' });
         mockMapLookupToCanonicalEntity.mockReturnValue(null);
 
         const res = mockResponse();
         await addAlbum(req(), res, next);
         await new Promise((r) => setImmediate(r));
 
+        expect(mockMapLookupToCanonicalEntity).toHaveBeenCalled();
         expect(mockUpdateCanonicalEntity).not.toHaveBeenCalled();
       });
 
@@ -468,6 +475,98 @@ describe('library.controller', () => {
         expect(mockLookupMetadata).not.toHaveBeenCalled();
         expect(mockUpdateCanonicalEntity).not.toHaveBeenCalled();
       });
+
+      // BS#1355 gate negative pinning. A refactor that accidentally drops
+      // `requireSearchType: 'direct'` from fireAndForgetCanonicalEntity
+      // would let non-direct responses through to the mapper, persisting
+      // wrong linkages. Each non-direct value here would silently regress
+      // the gate; the assertion that updateCanonicalEntity was NOT called
+      // catches it.
+      it.each<'alternative' | 'compilation' | 'fallback' | 'song_as_artist' | 'none'>([
+        'alternative',
+        'compilation',
+        'fallback',
+        'song_as_artist',
+        'none',
+      ])(
+        'gate-rejects %s — does not call mapper or write canonical entity even with linkable results',
+        async (search_type) => {
+          mockLookupMetadata.mockResolvedValue({
+            results: [{ artwork: { release_id: 7727849 } }],
+            search_type,
+          });
+          // If the gate is ever silently dropped, this mock would convert
+          // the linkable result into a 'discogs:release:7727849' linkage.
+          mockMapLookupToCanonicalEntity.mockReturnValue({
+            id: 'discogs:release:7727849',
+            confidence: 0.5,
+          });
+
+          const res = mockResponse();
+          await addAlbum(req(), res, next);
+          await new Promise((r) => setImmediate(r));
+
+          expect(mockMapLookupToCanonicalEntity).not.toHaveBeenCalled();
+          expect(mockUpdateCanonicalEntity).not.toHaveBeenCalled();
+        }
+      );
+    });
+
+    // BS#1355 gate negative pinning for the addAlbum ARTWORK branch. Mirror
+    // of the fireAndForgetCanonicalEntity pinning above. A refactor that
+    // drops `requireSearchType: 'direct'` from the artwork lookup would
+    // persist Tzenni's artwork onto a 'Yenbett' library row. The mock for
+    // checkStreamingAvailability is set so streaming-result settles
+    // independently and doesn't interfere with the artwork branch.
+    describe('artwork gate (BS#1355)', () => {
+      beforeEach(() => {
+        mockGetArtistNameById.mockResolvedValue('Noura');
+        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 501, ...album }));
+        mockIsLmlConfigured.mockReturnValue(true);
+        mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: null });
+      });
+
+      const req = () =>
+        ({
+          body: {
+            album_title: 'Yenbett',
+            artist_id: 42,
+            label: 'Glitterbeat',
+            genre_id: 11,
+            format_id: 1,
+          },
+        }) as unknown as Request;
+
+      it.each<'alternative' | 'compilation' | 'fallback' | 'song_as_artist' | 'none'>([
+        'alternative',
+        'compilation',
+        'fallback',
+        'song_as_artist',
+        'none',
+      ])(
+        'gate-rejects %s — does not call updateArtworkUrl even when LML carries a populated artwork URL',
+        async (search_type) => {
+          mockLookupMetadata.mockResolvedValue({
+            results: [
+              {
+                artwork: {
+                  release_id: 7727849,
+                  release_url: 'https://www.discogs.com/release/7727849',
+                  artwork_url: 'https://i.discogs.com/tzenni.jpg',
+                  confidence: 0.5,
+                },
+              },
+            ],
+            search_type,
+          });
+
+          const res = mockResponse();
+          await addAlbum(req(), res, next);
+          await new Promise((r) => setImmediate(r));
+
+          expect(mockUpdateArtworkUrl).not.toHaveBeenCalled();
+        }
+      );
     });
   });
 
