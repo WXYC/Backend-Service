@@ -81,6 +81,22 @@ const emptyTotals = (): Totals => ({
   write_errors: 0,
 });
 
+/** Per-site counters logged on `site_done`. Mirrors the per-event-tag fields
+ *  of `Totals` without the run-level ones (sites_attempted, sites_succeeded,
+ *  index_errors) — those are not meaningful per-site. */
+type SiteTotals = Omit<Totals, 'sites_attempted' | 'sites_succeeded' | 'index_errors'>;
+
+const emptySiteTotals = (): SiteTotals => ({
+  events_seen: 0,
+  fetch_errors: 0,
+  parse_errors: 0,
+  pages_without_event_block: 0,
+  upserts_total: 0,
+  upserts_inserted: 0,
+  upserts_updated: 0,
+  write_errors: 0,
+});
+
 export type RunOptions = {
   sites: readonly RhpVenueConfig[];
   concurrency: number;
@@ -131,24 +147,36 @@ export const runScraper = async (opts: RunOptions): Promise<Totals> => {
       processOneEvent(site, url, opts, now())
     );
 
+    // Tally per-site so the site_done line reports just this site's work,
+    // not the cumulative totals carried across sites. Cumulative totals
+    // still surface in the final `finished` log.
+    const siteTotals = emptySiteTotals();
+    siteTotals.events_seen = eventUrls.length;
     for (const r of results) {
       if (r === null) continue;
-      if (r.kind === 'fetch_error') totals.fetch_errors += 1;
-      else if (r.kind === 'parse_error') totals.parse_errors += 1;
-      else if (r.kind === 'no_event_block') totals.pages_without_event_block += 1;
-      else if (r.kind === 'write_error') totals.write_errors += 1;
+      if (r.kind === 'fetch_error') siteTotals.fetch_errors += 1;
+      else if (r.kind === 'parse_error') siteTotals.parse_errors += 1;
+      else if (r.kind === 'no_event_block') siteTotals.pages_without_event_block += 1;
+      else if (r.kind === 'write_error') siteTotals.write_errors += 1;
       else if (r.kind === 'upserted') {
-        totals.upserts_total += 1;
-        if (r.inserted) totals.upserts_inserted += 1;
-        else totals.upserts_updated += 1;
+        siteTotals.upserts_total += 1;
+        if (r.inserted) siteTotals.upserts_inserted += 1;
+        else siteTotals.upserts_updated += 1;
       }
     }
+    totals.fetch_errors += siteTotals.fetch_errors;
+    totals.parse_errors += siteTotals.parse_errors;
+    totals.pages_without_event_block += siteTotals.pages_without_event_block;
+    totals.write_errors += siteTotals.write_errors;
+    totals.upserts_total += siteTotals.upserts_total;
+    totals.upserts_inserted += siteTotals.upserts_inserted;
+    totals.upserts_updated += siteTotals.upserts_updated;
 
     totals.sites_succeeded += 1;
     log('info', 'site_done', `${site.site_slug} done in ${Date.now() - siteStart}ms`, {
       site_slug: site.site_slug,
       elapsed_ms: Date.now() - siteStart,
-      ...totals,
+      ...siteTotals,
     });
   }
 
