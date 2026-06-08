@@ -463,6 +463,49 @@ describe('LmlLookupCoordinator', () => {
       expect(permissive?.search_type).toBe('alternative');
       expect(mockLookupMetadata).not.toHaveBeenCalled();
     });
+
+    it('applies the gate to in-flight coalescers — strict waiter on a permissive originator gets null', async () => {
+      // Pins that applyTrustGate runs on the in-flight branch
+      // (lookup-coordinator.ts:133). Without this test, a refactor that
+      // shortened the inflight path to `if (existing) return existing.promise;`
+      // would let non-direct responses leak to strict in-flight waiters
+      // without projecting `trust_reject_reason`. Real-world race: a
+      // permissive read-path call and a strict write-path call on the same
+      // key concurrently — the strict caller must still see the gate.
+      let resolveFn: (r: LookupResponse) => void = () => {};
+      mockLookupMetadata.mockImplementation(
+        () =>
+          new Promise<LookupResponse>((resolve) => {
+            resolveFn = resolve;
+          })
+      );
+
+      // Permissive caller starts the wire call — no gate.
+      const permissivePromise = lmlLookupCoordinator.lookup('Noura', 'Yenbett', undefined, {
+        caller: 'metadata-service',
+      });
+      // Strict caller arrives while wire is in flight — coalesces onto the
+      // same promise, but its own per-call span should still see the gate.
+      const strictPromise = lmlLookupCoordinator.lookup('Noura', 'Yenbett', undefined, {
+        caller: 'library-rotation-picker',
+        requireSearchType: 'direct',
+      });
+
+      // Only one wire call for both.
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+
+      // Resolve the wire with an alternative-type response.
+      resolveFn(withSearchType('alternative'));
+      const [permissive, strict] = await Promise.all([permissivePromise, strictPromise]);
+
+      expect(permissive).not.toBeNull();
+      expect(permissive?.search_type).toBe('alternative');
+      expect(strict).toBeNull();
+      // trust_reject_reason landed on the strict waiter's per-call span.
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith(
+        expect.objectContaining({ 'lml.coordinator.trust_reject_reason': 'search_type:alternative' })
+      );
+    });
   });
 
   describe('first-caller-wins on the wire', () => {

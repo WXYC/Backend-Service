@@ -412,12 +412,17 @@ describe('library.controller', () => {
         }) as unknown as Request;
 
       it('kicks off an LML lookup for canonical entity resolution after insert', async () => {
-        const lookupResponse = { results: [], search_type: 'none' };
+        // search_type='direct' so the mock gate (BS#1355) lets the response
+        // reach the mapper — pinning that the lookup-then-mapper flow ran,
+        // not the gate-rejection short-circuit. Sibling tests were swept in
+        // iter 2; this one was missed.
+        const lookupResponse = { results: [], search_type: 'direct' };
         mockLookupMetadata.mockResolvedValue(lookupResponse);
         mockMapLookupToCanonicalEntity.mockReturnValue(null);
 
         const res = mockResponse();
         await addAlbum(req(), res, next);
+        await new Promise((r) => setImmediate(r));
 
         // Controller returns 201 immediately, before fire-and-forget completes.
         expect(res.status).toHaveBeenCalledWith(201);
@@ -427,6 +432,8 @@ describe('library.controller', () => {
           warm_cache: true,
           requireSearchType: 'direct',
         });
+        // Mapper reached (proves gate let the direct response through).
+        expect(mockMapLookupToCanonicalEntity).toHaveBeenCalledWith(lookupResponse);
       });
 
       it('writes canonical_entity_id back to the inserted row when the lookup yields a match', async () => {

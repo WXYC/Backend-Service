@@ -131,7 +131,13 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
       // log tailing can separate 'LML returned no candidate' from 'LML
       // returned non-direct, gate-rejected' without grepping Sentry spans.
       // The structured reason lives on lml.coordinator.trust_reject_reason.
-      console.debug('[Library] Artwork lookup gate-rejected (non-direct):', body.album_title);
+      // library_id included so multi-row triage (re-adds, multi-format
+      // entries) can pin the breadcrumb to a specific row.
+      console.debug(
+        '[Library] Artwork lookup gate-rejected (non-direct) library_id=%d album=%s',
+        inserted_album.id,
+        body.album_title
+      );
     }
 
     // Fire-and-forget canonical-entity resolution (Epic B.1.3). The library
@@ -166,7 +172,12 @@ function fireAndForgetCanonicalEntity(libraryId: number, artistName: string | nu
       if (response === null) {
         // Gate-rejected non-direct response — log so debugging "why no
         // canonical_entity_id on this row?" doesn't require Sentry spelunking.
-        console.debug('[Library] Canonical-entity lookup gate-rejected (non-direct):', albumTitle);
+        // library_id included so multi-row triage can pin to a specific row.
+        console.debug(
+          '[Library] Canonical-entity lookup gate-rejected (non-direct) library_id=%d album=%s',
+          libraryId,
+          albumTitle
+        );
         return;
       }
       const linkage = libraryService.mapLookupToCanonicalEntity(response);

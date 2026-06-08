@@ -31,8 +31,14 @@ export function mockApplyTrustGate(
   opts: Record<string, unknown> | undefined
 ): { search_type?: string } | null {
   if (!response) return null;
-  const requireSearchType = opts?.requireSearchType;
-  if (typeof requireSearchType === 'string' && response.search_type !== requireSearchType) {
+  // Mirror production's truthy check (`if (!options?.requireSearchType)
+  // return response`) exactly, not just `typeof === 'string'`. The
+  // distinction matters for empty-string / 0 / null inputs: production
+  // treats them as permissive (gate disabled), so the mock must too —
+  // otherwise a test that passes `requireSearchType: ''` via the untyped
+  // factory would see the mock reject while prod would pass through.
+  const gate = opts?.requireSearchType;
+  if (gate && response.search_type !== gate) {
     return null;
   }
   return response;
