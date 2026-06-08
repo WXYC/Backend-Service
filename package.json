@@ -67,11 +67,11 @@
     "shared/*"
   ],
   "devDependencies": {
-    "@dotenvx/dotenvx": "^1.71.0",
+    "@dotenvx/dotenvx": "^1.71.1",
     "@eslint/js": "^10.0.1",
     "@types/eventsource": "^3.0.0",
     "@types/jest": "^30.0.0",
-    "@types/node": "^25.9.1",
+    "@types/node": "^25.9.2",
     "@types/pg": "^8.20.0",
     "@types/ssh2": "^1.15.5",
     "@types/supertest": "^7.2.0",
@@ -87,7 +87,7 @@
     "husky": "^9.1.7",
     "jest": "^30.4.2",
     "jest-html-reporters": "^3.1.7",
-    "mysql2": "^3.22.4",
+    "mysql2": "^3.22.5",
     "nodemon": "^3.1.14",
     "postgres": "^3.4.9",
     "prettier": "^3.8.3",
@@ -98,7 +98,7 @@
     "tsx": "^4.22.4",
     "turbo": "^2.9.16",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.60.1",
+    "typescript-eslint": "^8.61.0",
     "wait-on": "^9.0.10",
     "ws": "^8.21.0"
   },
