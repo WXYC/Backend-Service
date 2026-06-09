@@ -258,4 +258,36 @@ describe('runBackfill', () => {
     // Both non-throwing siblings completed (no orphaning).
     expect(completed.sort((a, b) => a - b)).toEqual([10, 30]);
   });
+
+  it('aggregates multiple task failures into an AggregateError so 2nd+ rejections are not silently dropped', async () => {
+    // With Promise.all's first-rejection-wins semantics, a run where
+    // three tasks throw at slightly different times would lose two of
+    // the three failures. The aggregator surfaces all of them so the
+    // shared root cause (e.g. a decoder regression hitting many calls)
+    // is visible in the stack instead of hiding behind a single victim.
+    const loadReleaseIds = jest.fn().mockResolvedValue([1]);
+    const fetchReleaseFn = jest.fn(() => Promise.resolve(ok(makeRelease([10, 20, 30], 1))));
+    const fetchArtistFn = jest.fn(async (id: number) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      throw new Error(`task ${id} failed`);
+    });
+
+    let caught: unknown;
+    try {
+      await runBackfill({
+        loadReleaseIds,
+        fetchReleaseFn,
+        fetchArtistFn,
+        concurrency: 3,
+      });
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    const aggregate = caught as AggregateError;
+    expect(aggregate.errors).toHaveLength(3);
+    const messages = aggregate.errors.map((e: Error) => e.message).sort();
+    expect(messages).toEqual(['task 10 failed', 'task 20 failed', 'task 30 failed']);
+  });
 });
