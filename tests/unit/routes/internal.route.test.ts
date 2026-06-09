@@ -443,6 +443,113 @@ describe('POST /internal/flowsheet-webhook', () => {
     );
   });
 
+  // -- ON CONFLICT UPDATE dj_name refresh (BS#1371 defense-in-depth) --
+  //
+  // The fresh-INSERT path writes `dj_name` for marker entry types. The
+  // conflict-UPDATE path now refreshes it when the resolver returned a
+  // non-null value, so a stub-show first-delivery that landed dj_name=NULL
+  // can heal on a later redelivery once the ETL has filled
+  // shows.legacy_dj_name. We never overwrite a non-NULL stored value with
+  // NULL — that would regress rows the live path or a prior delivery
+  // already resolved.
+
+  const mockUpdate = (db as unknown as { update: jest.Mock }).update;
+  const lastUpdateSet = (): Record<string, unknown> => {
+    const setMock = (mockChain as unknown as { set: jest.Mock }).set;
+    return setMock.mock.calls[0]![0] as Record<string, unknown>;
+  };
+
+  it('UPDATE on conflict refreshes dj_name for a marker entry when the show resolves to a non-null name', async () => {
+    // resolveShow → {id:9999, dj_name:'Aubrey'}; INSERT conflict (empty
+    // returning); handler falls through to UPDATE.
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Aubrey' }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockReturning.mockResolvedValueOnce([]); // conflict signal
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9 } });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).toHaveBeenCalled();
+    expect(lastUpdateSet()).toEqual(expect.objectContaining({ entry_type: 'show_start', dj_name: 'Aubrey' }));
+  });
+
+  it('UPDATE on conflict OMITS dj_name when the show resolves to null (never overwrite non-NULL with NULL)', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: null }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockReturning.mockResolvedValueOnce([]); // conflict signal
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9 } });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).toHaveBeenCalled();
+    const setClause = lastUpdateSet();
+    expect(setClause).not.toHaveProperty('dj_name');
+    expect(setClause).toEqual(expect.objectContaining({ entry_type: 'show_start' }));
+  });
+
+  it('UPDATE on conflict OMITS dj_name on a track entry (non-marker entry types never set dj_name)', async () => {
+    mockReturning.mockResolvedValueOnce([]); // conflict signal
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', entry: validEntry });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).toHaveBeenCalled();
+    const setClause = lastUpdateSet();
+    expect(setClause).not.toHaveProperty('dj_name');
+    expect(setClause).toEqual(expect.objectContaining({ entry_type: 'track' }));
+  });
+
+  it('INSERT trims whitespace-only resolved dj_name to null on a marker entry', async () => {
+    // shows.legacy_dj_name='   ' (whitespace) — without normalizeMarkerName
+    // this would persist as '   ' and v2 wire would emit whitespace.
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: '   ' }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'show_start', dj_name: null }));
+  });
+
+  it('INSERT trims surrounding whitespace from resolved dj_name on a marker entry', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: '  Aubrey  ' }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'show_start', dj_name: 'Aubrey' }));
+  });
+
   // -- Delete --
 
   it('returns 200 for valid delete', async () => {
