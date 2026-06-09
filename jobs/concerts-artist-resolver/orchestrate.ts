@@ -40,15 +40,20 @@ export type Candidate = {
 };
 
 /**
- * Per-row callback the orchestrator uses to surface a resolver failure
- * with concert-level context. Production wires this to a log + Sentry
- * capture in `job.ts`; tests pass a no-op spy so the loop semantics
- * (counter increment, `continue`) can be exercised without observability
- * coupling. Reports the concert id and the underlying error message so
- * dashboards triaging a `resolver.error` spike can pivot from the
- * counter to the failing rows in one click.
+ * Per-row callback the orchestrator uses to surface a failure (resolver
+ * OR writer) with concert-level context. Production wires this to a log
+ * + Sentry capture in `job.ts`; tests pass a no-op spy so the loop
+ * semantics (counter increment, `continue`) can be exercised without
+ * observability coupling. Reports the concert id and the underlying
+ * error message so dashboards triaging a `resolver.error` spike can
+ * pivot from the counter to the failing rows in one click.
+ *
+ * The return type permits `Promise<void>` so async sinks (Slack, an
+ * external logger) compose cleanly — the orchestrator awaits the call
+ * and swallows any throw/rejection so a misbehaving sink can never
+ * abort the batch.
  */
-export type OnResolverErrorFn = (candidate: Candidate, error: unknown) => void;
+export type OnRowErrorFn = (candidate: Candidate, error: unknown) => void | Promise<void>;
 
 export type ResolveOutcome =
   | { kind: 'strict'; artist_id: number }
@@ -86,14 +91,30 @@ const emptyTotals = (): Totals => ({
   raced: 0,
 });
 
+/**
+ * Invoke an `onError` sink without letting it abort the batch. A sync
+ * throw OR an async rejection from the sink is caught and discarded —
+ * the orchestrator's counter is the durable record. The dispatcher
+ * normalizes both shapes through `Promise.resolve` so a sink that
+ * returns void and a sink that returns Promise<void> are handled
+ * identically.
+ */
+const safeNotifyError = async (onError: OnRowErrorFn, candidate: Candidate, error: unknown): Promise<void> => {
+  try {
+    await onError(candidate, error);
+  } catch {
+    /* sink must never break the loop */
+  }
+};
+
 export const runResolver = async (deps: {
   loadCandidates: LoadCandidatesFn;
   resolve: ResolveFn;
   write: WriteFn;
-  onError?: OnResolverErrorFn;
+  onError?: OnRowErrorFn;
 }): Promise<RunResult> => {
   const totals = emptyTotals();
-  const onError: OnResolverErrorFn = deps.onError ?? (() => {});
+  const onError: OnRowErrorFn = deps.onError ?? (() => {});
 
   const candidates = await deps.loadCandidates();
   for (const candidate of candidates) {
@@ -108,45 +129,42 @@ export const runResolver = async (deps: {
     try {
       outcome = await deps.resolve(candidate.headlining_artist_raw);
     } catch (error) {
-      // Transient resolver failure (e.g. PG statement timeout). The row
-      // stays `headlining_artist_id IS NULL`, so the next run picks it
-      // up again. Surface the concert id + error via `onError` so the
-      // run-scope dashboard's `resolver.error` counter pivots to the
-      // failing rows (without it, a spike of N errors is opaque).
-      onError(candidate, error);
+      // Transient resolver failure (e.g. PG statement timeout). Bump
+      // the counter FIRST so totals stay accurate even if the sink
+      // misbehaves, then notify observers. The row stays NULL; the
+      // next cron run picks it up via the IS-NULL gate.
       totals.error += 1;
+      await safeNotifyError(onError, candidate, error);
       continue;
     }
 
     switch (outcome.kind) {
       case 'strict':
       case 'alias': {
-        let writeResult: { written: boolean };
         try {
-          writeResult = await deps.write(candidate.id, outcome.artist_id);
+          const { written } = await deps.write(candidate.id, outcome.artist_id);
+          if (written) {
+            totals.resolved += 1;
+            if (outcome.kind === 'strict') {
+              totals.resolved_strict += 1;
+            } else {
+              totals.resolved_alias += 1;
+            }
+          } else {
+            // The writer's WHERE clause guards on
+            // `headlining_artist_id IS NULL`. A 0-row UPDATE means a
+            // concurrent run beat us (the cron is rerun-safe, but two
+            // ETL pods could both pick the same row up mid-scan).
+            totals.raced += 1;
+          }
         } catch (error) {
           // Symmetric with the resolver-error path: a transient write
           // failure (PG outage, FK race against a parallel artist
           // delete, etc.) must not terminate the loop and leave the
           // remaining candidates unprocessed. The row stays NULL and
           // the next cron run drains it.
-          onError(candidate, error);
           totals.error += 1;
-          break;
-        }
-        if (writeResult.written) {
-          totals.resolved += 1;
-          if (outcome.kind === 'strict') {
-            totals.resolved_strict += 1;
-          } else {
-            totals.resolved_alias += 1;
-          }
-        } else {
-          // The writer's WHERE clause guards on
-          // `headlining_artist_id IS NULL`. A 0-row UPDATE means a
-          // concurrent run beat us (the cron is rerun-safe, but two
-          // ETL pods could both pick the same row up mid-scan).
-          totals.raced += 1;
+          await safeNotifyError(onError, candidate, error);
         }
         break;
       }

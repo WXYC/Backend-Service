@@ -89,7 +89,8 @@ const main = async (): Promise<void> => {
       );
     });
   } catch (error) {
-    log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
+    const message = error instanceof Error ? error.message : String(error);
+    log('error', 'failed', `${JOB_NAME} failed`, { error_message: message });
     captureError(error, 'failed');
     process.exitCode = 1;
   } finally {

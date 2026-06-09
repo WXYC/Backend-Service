@@ -277,6 +277,63 @@ describe('runResolver', () => {
     expect(result.totals.resolved).toBe(0);
   });
 
+  test('synchronous onError throw does NOT abort the loop; counter still bumps and next candidate proceeds', async () => {
+    // Defensive: if a future caller wires an onError that synchronously
+    // throws (e.g., a misbehaving log adapter), the orchestrator must
+    // contain the throw. The counter is the durable record — bumped
+    // before the sink is called for this exact reason.
+    const loadCandidates = makeLoad([
+      { id: 80, headlining_artist_raw: 'Resolver Throws' },
+      { id: 81, headlining_artist_raw: 'Pavement' },
+    ]);
+    const resolve = jest
+      .fn<ResolveFn>()
+      .mockRejectedValueOnce(new Error('PG statement timeout'))
+      .mockResolvedValueOnce({ kind: 'strict', artist_id: 9081 });
+    const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const onError = jest.fn(() => {
+      throw new Error('EPIPE: stdout closed');
+    });
+
+    const result = await runResolver({ loadCandidates, resolve, write, onError });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledWith(81, 9081);
+    expect(result.totals.error).toBe(1);
+    expect(result.totals.resolved).toBe(1);
+  });
+
+  test('async onError rejection does NOT abort the loop or surface as unhandledRejection', async () => {
+    // The OnRowErrorFn type permits Promise<void>; callers like a Slack
+    // or DataDog sink commonly return promises. The orchestrator must
+    // await the call and swallow rejections so a flaky sink doesn't
+    // cascade into batch abort or process-level unhandledRejection.
+    const loadCandidates = makeLoad([
+      { id: 90, headlining_artist_raw: 'Writer Throws' },
+      { id: 91, headlining_artist_raw: 'Pavement' },
+    ]);
+    const resolve = makeResolver({
+      'Writer Throws': { kind: 'strict', artist_id: 9090 },
+      Pavement: { kind: 'strict', artist_id: 9091 },
+    });
+    const write = jest
+      .fn<WriteFn>()
+      .mockRejectedValueOnce(new Error('PG: write failed'))
+      .mockResolvedValueOnce({ written: true });
+    // Return a rejected promise directly so this is genuinely async (per
+    // ESLint @typescript-eslint/require-await: bare `throw` inside an
+    // async arrow gets flagged as a throw-not-reject equivalent).
+    const onError = jest.fn(() => Promise.reject(new Error('slack: 429 rate limited')));
+
+    const result = await runResolver({ loadCandidates, resolve, write, onError });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(result.totals.error).toBe(1);
+    expect(result.totals.resolved).toBe(1);
+    expect(result.totals.resolved_strict).toBe(1);
+  });
+
   test('writer reports written:false → row was raced (FK already set between SELECT and UPDATE)', async () => {
     // The writer's WHERE clause guards on `headlining_artist_id IS NULL`.
     // A 0-row UPDATE means a concurrent run beat us (the recurring drain
