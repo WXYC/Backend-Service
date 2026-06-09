@@ -57,21 +57,28 @@ internal_route.post('/flowsheet-sync-notify', (req, res) => {
 interface ResolvedShow {
   id: number;
   /**
-   * COALESCE(auth_user.dj_name, shows.legacy_dj_name, auth_user.name) —
-   * matches the ETL / dj-name-backfill SQL. The `resolveDjDisplayName`
-   * helper (services/flowsheet.service.ts) can't be reused here because
-   * its signature is `(djName, name) => string | null` — it has no
-   * `legacy_dj_name` parameter. Picking the same 3-column COALESCE the
+   * COALESCE(auth_user.dj_name, shows.legacy_dj_name) — matches the
+   * ETL / dj-name-backfill SQL. The `resolveDjDisplayName` helper
+   * (services/flowsheet.service.ts) can't be reused here because its
+   * signature is `(djName) => string | null` — it has no
+   * `legacy_dj_name` parameter. Picking the same 2-column COALESCE the
    * ETL (jobs/flowsheet-etl/job.ts:97) and backfill
-   * (jobs/flowsheet-dj-name-backfill/job.ts:66) already use means a row
-   * later re-resolved by either job lands the identical value — no
-   * writer drift. The known consequence — neither writer filters the
-   * literal 'Anonymous' the live path strips — is shared with both
-   * jobs by design (BS#1371 spec).
+   * (jobs/flowsheet-dj-name-backfill/job.ts:66) use means a row later
+   * re-resolved by either job lands the identical value — no writer
+   * drift. The known consequence — neither writer filters the literal
+   * 'Anonymous' the live path strips — is shared with both jobs by
+   * design (BS#1371 spec).
    *
-   * Null when the show has no resolvable name from any of the three
-   * sources (stub shows pre-ETL-fill; legacy rows with no primary_dj_id
-   * and no legacy_dj_name).
+   * `auth_user.name` is intentionally NOT in the chain — dj-site
+   * provisioning writes the user's real name into that column
+   * (`name: realName || username` in the roster UI), and surfacing real
+   * names on the public v2 wire would be PII exposure. The live path's
+   * asymmetric-fallback policy already handles null gracefully
+   * (degraded `Start of show: ${time}` instead of leaking a real name).
+   *
+   * Null when the show has no resolvable name from either source
+   * (stub shows pre-ETL-fill; legacy rows with no primary_dj_id and no
+   * legacy_dj_name).
    */
   dj_name: string | null;
 }
@@ -92,7 +99,7 @@ async function resolveShow(legacyShowId: number): Promise<ResolvedShow | null> {
     db
       .select({
         id: shows.id,
-        dj_name: sql<string | null>`COALESCE(${user.djName}, ${shows.legacy_dj_name}, ${user.name})`,
+        dj_name: sql<string | null>`COALESCE(${user.djName}, ${shows.legacy_dj_name})`,
       })
       .from(shows)
       .leftJoin(user, eq(user.id, shows.primary_dj_id))

@@ -49,13 +49,13 @@ describe('endShow', () => {
     );
   });
 
-  it('falls back to user.name when djName is null', async () => {
+  it('persists null dj_name when djName is null — never leaks auth_user.name (BS#1371 PII)', async () => {
     const remainingDjsSelect = createMockQueryChain();
     remainingDjsSelect.where.mockResolvedValue([]);
     db.select.mockReturnValueOnce(remainingDjsSelect);
 
     const userSelect = createMockQueryChain();
-    userSelect.limit.mockResolvedValue([{ djName: null, name: 'Riley Owens' }]);
+    userSelect.limit.mockResolvedValue([{ djName: null, name: 'Riley Owens (real name)' }]);
     db.select.mockReturnValueOnce(userSelect);
 
     db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(0));
@@ -71,6 +71,8 @@ describe('endShow', () => {
     await endShow({ id: 42, primary_dj_id: 'user-1' } as unknown as Parameters<typeof endShow>[0]);
 
     const flowsheetValues = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(flowsheetValues.dj_name).toBe('Riley Owens');
+    // show_end row is kept (the show ended) but dj_name is null; endShow's
+    // asymmetric-fallback emits the degraded message body.
+    expect(flowsheetValues.dj_name).toBeNull();
   });
 });

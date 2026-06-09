@@ -425,7 +425,7 @@ export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = asy
 export const getDJList: RequestHandler = async (req, res) => {
   const currentDJs = await flowsheet_service.getDJsInCurrentShow();
   const cleanDJList = currentDJs.map((dj) => {
-    return { id: dj.id, dj_name: flowsheet_service.resolveDjDisplayName(dj.djName ?? null, dj.name ?? null) };
+    return { id: dj.id, dj_name: flowsheet_service.resolveDjDisplayName(dj.djName ?? null) };
   });
   res.status(200).json(cleanDJList);
 };

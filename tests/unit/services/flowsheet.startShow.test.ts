@@ -54,9 +54,9 @@ describe('startShow', () => {
     );
   });
 
-  it('falls back to user.name when djName is null', async () => {
+  it('persists null dj_name when djName is null — never leaks auth_user.name (BS#1371 PII)', async () => {
     const userSelect = createMockQueryChain();
-    userSelect.limit.mockResolvedValue([{ djName: null, name: 'Alex Stardust' }]);
+    userSelect.limit.mockResolvedValue([{ djName: null, name: 'Alex Stardust (real name)' }]);
     db.select.mockReturnValueOnce(userSelect);
 
     db.insert.mockReturnValueOnce(createMockQueryChain([{ id: 42 }]));
@@ -69,7 +69,9 @@ describe('startShow', () => {
     await startShow('user-1');
 
     const flowsheetValues = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(flowsheetValues.dj_name).toBe('Alex Stardust');
+    // The show_start row is kept (the show happened) but dj_name is null;
+    // startShow's asymmetric-fallback emits the degraded message body.
+    expect(flowsheetValues.dj_name).toBeNull();
   });
 
   it('persists null dj_name when the user has neither djName nor name', async () => {

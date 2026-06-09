@@ -82,8 +82,11 @@ const resolveAlbumIds = async () => {
  * cron's `docker rm -f` killed the container the orphaned PostgreSQL backend
  * kept holding row locks, blocking the next tick. See issue #511.
  *
- * The COALESCE order matches the search service's DJ_NAME_EXPR so future
- * modern-DJ ETL imports pick up auth_user.dj_name automatically.
+ * The COALESCE chain — `auth_user.dj_name` then `shows.legacy_dj_name` —
+ * matches the webhook, backfill, and live insert path. `auth_user.name`
+ * is intentionally NOT in the chain: dj-site provisioning writes the
+ * user's real name into that column, and surfacing real names on the
+ * public v2 wire would be PII exposure.
  */
 const resolveDjNames = async (legacyEntryIds: number[]) => {
   if (legacyEntryIds.length === 0) return;
@@ -94,7 +97,7 @@ const resolveDjNames = async (legacyEntryIds: number[]) => {
   // get populated for the row I just inserted?" steady-state questions.
   const result = await db.execute(sql`
     UPDATE "wxyc_schema"."flowsheet" AS f
-    SET "dj_name" = COALESCE(u."dj_name", s."legacy_dj_name", u."name")
+    SET "dj_name" = COALESCE(u."dj_name", s."legacy_dj_name")
     FROM "wxyc_schema"."shows" AS s
     LEFT JOIN "auth_user" AS u ON u."id" = s."primary_dj_id"
     WHERE f."show_id" = s."id"
