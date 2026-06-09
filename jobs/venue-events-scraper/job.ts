@@ -65,6 +65,18 @@ const main = async (): Promise<void> => {
     if (totals.sites_succeeded === 0 && totals.sites_attempted > 0) {
       throw new Error('all sites failed at the index-fetch step; aborting with non-zero exit');
     }
+    // Index fetches succeeded but every per-event step failed — without
+    // this guard the job would exit 0 and cron-success monitoring would
+    // stay green even though no fresh rows landed. Treat as a wholesale
+    // failure when at least one site had events to process.
+    if (totals.events_seen > 0 && totals.upserts_total === 0) {
+      throw new Error(
+        `${totals.events_seen} events discovered but 0 upserted ` +
+          `(fetch_errors=${totals.fetch_errors}, parse_errors=${totals.parse_errors}, ` +
+          `venue_resolve_errors=${totals.venue_resolve_errors}, upsert_errors=${totals.upsert_errors}); ` +
+          `aborting with non-zero exit`
+      );
+    }
   } catch (error) {
     log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
     captureError(error, 'failed');

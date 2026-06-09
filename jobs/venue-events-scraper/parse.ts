@@ -27,10 +27,14 @@ const EVENT_LD_RE =
   /<!--\s*Event Markup for Official Venue Sites\s*-->\s*<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i;
 
 /**
- * Matches every `/event/<slug>/` link in the events-index page. Used to
- * enumerate which event detail pages to fetch.
+ * Captures any href whose path contains `/event/`. We intentionally
+ * accept the full unquoted segment (including trailing `?query` and
+ * `#fragment`) and let the URL parser in `extractEventLinks` normalize
+ * to the canonical `…/event/<slug>/` form. Anything more restrictive
+ * silently drops links with uppercase, underscore, non-ASCII, or
+ * tracking-querystring slugs with no diagnostic signal.
  */
-const EVENT_INDEX_LINK_RE = /href=["'](https?:\/\/[^"'\s]+\/event\/[a-z0-9-]+\/?)["']/g;
+const EVENT_INDEX_LINK_RE = /href=["']([^"']+\/event\/[^"']+)["']/gi;
 
 /**
  * Etix URL pattern: extract the numeric event id between `/p/` and the
@@ -72,11 +76,40 @@ const ENTITY_RE = new RegExp(Object.keys(ENTITY_MAP).join('|'), 'g');
 export const decodeHtmlEntities = (raw: string | null | undefined): string =>
   raw == null ? '' : raw.replace(ENTITY_RE, (m) => ENTITY_MAP[m] ?? m);
 
-/** All upcoming `/event/<slug>/` URLs found on an /events/ index page. */
-export const extractEventLinks = (indexHtml: string): string[] => {
+/**
+ * All upcoming `/event/<slug>/` URLs found on an /events/ index page,
+ * scoped to the site's own `baseUrl`. Cross-site cross-promo / sister-
+ * venue links to other origins are dropped so they don't get pulled into
+ * the wrong site's loop and mis-attributed.
+ *
+ * Query strings and fragments are stripped before the trailing slash is
+ * normalized so e.g. `/event/the-band?ref=homepage` becomes
+ * `/event/the-band/` rather than `/event/the-band?ref=homepage/` (which
+ * would 404).
+ */
+export const extractEventLinks = (indexHtml: string, baseUrl: string): string[] => {
   const out = new Set<string>();
+  const baseOrigin = ((): string | null => {
+    try {
+      return new URL(baseUrl).origin;
+    } catch {
+      return null;
+    }
+  })();
   for (const m of indexHtml.matchAll(EVENT_INDEX_LINK_RE)) {
-    out.add(m[1].replace(/\/?$/, '/'));
+    const href = m[1];
+    let resolved: URL;
+    try {
+      resolved = new URL(href, baseUrl);
+    } catch {
+      continue;
+    }
+    if (baseOrigin !== null && resolved.origin !== baseOrigin) continue;
+    const segments = resolved.pathname.split('/').filter((s) => s.length > 0);
+    if (segments[0] !== 'event' || segments.length < 2) continue;
+    const slug = segments[1];
+    if (!slug) continue;
+    out.add(`${resolved.origin}/event/${slug}/`);
   }
   return Array.from(out);
 };
@@ -92,43 +125,20 @@ export const extractEventJsonLd = (eventPageHtml: string): SchemaEvent | null =>
   const m = eventPageHtml.match(EVENT_LD_RE);
   if (!m) return null;
   const parsed = JSON.parse(m[1].trim()) as unknown;
-  if (parsed === null || typeof parsed !== 'object' || (parsed as { '@type'?: unknown })['@type'] !== 'Event') {
-    throw new Error(
-      `extractEventJsonLd: unexpected @type for Event block: ${JSON.stringify(
-        (parsed as { '@type'?: unknown })['@type']
-      )}`
-    );
+  const ty = (parsed as { '@type'?: unknown } | null)?.['@type'];
+  if (parsed === null || typeof parsed !== 'object' || (ty !== 'Event' && ty !== 'MusicEvent')) {
+    throw new Error(`extractEventJsonLd: unexpected @type for Event block: ${JSON.stringify(ty)}`);
   }
   return parsed as SchemaEvent;
 };
 
-/**
- * Recover the supporting-act names from the Etix ticket URL.
- *
- * RHP's `name` field gives a clean headliner ("Aaron Lee Tasjan"), but
- * the Etix slug encodes the full bill: `aaron-lee-tasjanwith-madeleine-
- * kelson-carrboro-cats-cradle-back-room`. Each `with-` segment marks a
- * support act; the trailing `-<city>-<venue>` chunk is location. We
- * trim the city/venue tail from the last segment, then humanize.
- *
- * Returns [] when the URL isn't Etix or when no `with-` separator is
- * present — both are common for sold-out shows and tickets-at-door
- * events, neither is an error.
- */
-export const extractSupportingActsFromEtix = (ticketUrl: string | null | undefined): string[] => {
-  if (!ticketUrl) return [];
-  if (!ETIX_EVENT_ID_RE.test(ticketUrl)) return [];
+const slugifyGeneric = (name: string): string =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
 
-  let path: string;
-  try {
-    path = new URL(ticketUrl).pathname;
-  } catch {
-    return [];
-  }
-  const slug = path.split('/').pop() ?? '';
-  const segments = slug.split('with-').slice(1);
-  if (segments.length === 0) return [];
-
+const humanizeEtixSegments = (segments: string[]): string[] => {
   const out: string[] = [];
   for (let i = 0; i < segments.length; i += 1) {
     const cleaned = i === segments.length - 1 ? segments[i].replace(CITY_TRAIL_RE, '') : segments[i];
@@ -143,11 +153,55 @@ export const extractSupportingActsFromEtix = (ticketUrl: string | null | undefin
   return out;
 };
 
-const slugifyGeneric = (name: string): string =>
-  name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
+/**
+ * Recover the supporting-act names from the Etix ticket URL.
+ *
+ * RHP's `name` field gives a clean headliner ("Aaron Lee Tasjan"), but
+ * the Etix slug encodes the full bill: `aaron-lee-tasjanwith-madeleine-
+ * kelson-carrboro-cats-cradle-back-room`. Each `with-` segment marks a
+ * support act; the trailing `-<city>-<venue>` chunk is location. We
+ * trim the city/venue tail from the last segment, then humanize.
+ *
+ * `headlinerName` (when supplied) anchors the split: we strip the
+ * slugified headliner prefix BEFORE splitting on `with-`, so a headliner
+ * whose name contains "with" as a word (e.g. "Out With My Friends")
+ * doesn't produce phantom support acts.
+ *
+ * Returns [] when the URL isn't Etix or when no `with-` separator is
+ * present — both are common for sold-out shows and tickets-at-door
+ * events, neither is an error.
+ */
+export const extractSupportingActsFromEtix = (
+  ticketUrl: string | null | undefined,
+  headlinerName?: string
+): string[] => {
+  if (!ticketUrl) return [];
+  if (!ETIX_EVENT_ID_RE.test(ticketUrl)) return [];
+
+  let path: string;
+  try {
+    path = new URL(ticketUrl).pathname;
+  } catch {
+    return [];
+  }
+  const slug = path.split('/').pop() ?? '';
+
+  if (headlinerName) {
+    const headlinerSlug = slugifyGeneric(headlinerName);
+    if (headlinerSlug && slug.startsWith(headlinerSlug)) {
+      const remainder = slug.slice(headlinerSlug.length);
+      if (!remainder.startsWith('with-')) return [];
+      const segments = remainder.split('with-').filter((s) => s.length > 0);
+      return segments.length === 0 ? [] : humanizeEtixSegments(segments);
+    }
+  }
+  // Fall back to the legacy split when we don't have (or can't match)
+  // the headliner name. Still buggy when the headliner contains "with"
+  // as a word, but parseEventPage always passes the headliner so the
+  // primary code path is the headliner-anchored branch above.
+  const segs = slug.split('with-').slice(1);
+  return segs.length === 0 ? [] : humanizeEtixSegments(segs);
+};
 
 /** Resolve a venue display-name to a stable slug, falling back to generic. */
 export const resolveVenueSlug = (venue: RhpVenueConfig, displayName: string | null): string => {
@@ -177,11 +231,15 @@ const extractAddress = (location: SchemaEvent['location']): string | null => {
   return decodeHtmlEntities(addr.streetAddress ?? '');
 };
 
+/** The longest `headlining_artist_raw` we'll send to a varchar(256). */
+const MAX_HEADLINING_ARTIST_LEN = 256;
+
 /**
  * The top-level pure parser: convert a fetched event page into a
  * ParsedConcert ready for write. Throws on missing required fields
- * (name, startDate, location) so a source-format regression fails the
- * batch loudly instead of writing garbage rows.
+ * (name, startDate, location, valid event-page URL) and on a startDate
+ * that can't be parsed into a real Date — so a source-format regression
+ * fails the batch loudly instead of writing garbage rows downstream.
  */
 export const parseEventPage = (
   venue: RhpVenueConfig,
@@ -193,24 +251,40 @@ export const parseEventPage = (
 
   const name = decodeHtmlEntities(raw.name).trim();
   if (!name) throw new Error(`parseEventPage: empty Event.name at ${eventPageUrl}`);
+  if (name.length > MAX_HEADLINING_ARTIST_LEN) {
+    throw new Error(
+      `parseEventPage: Event.name exceeds ${MAX_HEADLINING_ARTIST_LEN} chars (got ${name.length}) at ${eventPageUrl}`
+    );
+  }
   if (!raw.startDate) throw new Error(`parseEventPage: missing Event.startDate at ${eventPageUrl}`);
+  // Reject malformed date strings at the parse layer so the writer
+  // doesn't later hand postgres an `Invalid Date` and crash with an
+  // unhelpful "invalid input syntax for type timestamp" tagged as a
+  // generic write_error.
+  if (Number.isNaN(new Date(raw.startDate).getTime())) {
+    throw new Error(`parseEventPage: unparseable Event.startDate '${raw.startDate}' at ${eventPageUrl}`);
+  }
+  if (!raw.location) {
+    throw new Error(`parseEventPage: missing Event.location at ${eventPageUrl}`);
+  }
 
   const offer = extractFirstOffer(raw.offers);
-  const supporting = extractSupportingActsFromEtix(offer.url);
+  const supporting = extractSupportingActsFromEtix(offer.url, name);
 
-  const venueDisplayName = raw.location?.name ? decodeHtmlEntities(raw.location.name) : null;
-  const venueSlug = resolveVenueSlug(venue, raw.location?.name ?? null);
+  const venueDisplayName = raw.location.name ? decodeHtmlEntities(raw.location.name) : null;
+  const venueSlug = resolveVenueSlug(venue, raw.location.name ?? null);
 
-  let pathname: string;
-  try {
-    pathname = new URL(eventPageUrl).pathname;
-  } catch {
-    pathname = eventPageUrl;
-  }
+  // Event-page URL MUST parse — every code path that constructs source_id
+  // assumes a real URL. Anything else is a programming error upstream
+  // (we shouldn't be calling parseEventPage with a junk URL).
+  const pageUrl = new URL(eventPageUrl);
 
   return {
     site_slug: venue.site_slug,
-    source_id: pathname,
+    // source_id includes the site_slug so two RHP sites sharing the same
+    // /event/<slug>/ pathname don't collide on the (source, source_id)
+    // unique key and silently overwrite each other on UPSERT.
+    source_id: `${venue.site_slug}:${pageUrl.pathname}`,
     event_page_url: eventPageUrl,
     venue_slug: venueSlug,
     venue_name: venueDisplayName,

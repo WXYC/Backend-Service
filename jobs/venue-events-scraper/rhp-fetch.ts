@@ -19,6 +19,19 @@ import { captureError, log } from './logger.js';
 
 const USER_AGENT = 'WXYCEventsBot/1.0 (+https://wxyc.org/about; contact@wxyc.org)';
 const REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * Base back-off + jitter for the single 5xx/timeout retry. Concurrency=8
+ * with an immediate retry doubles the request rate the upstream sees on
+ * a flap, which is enough to trip a WAF; a ~0.5-1s pause spaces the
+ * retries out so a struggling origin can recover.
+ */
+const RETRY_BACKOFF_BASE_MS = 500;
+const RETRY_BACKOFF_JITTER_MS = 500;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Jitter doesn't need cryptographic randomness; Math.random is fine.
+const jitterMs = (): number => Math.floor(Math.random() * RETRY_BACKOFF_JITTER_MS);
 
 class HttpError extends Error {
   constructor(
@@ -47,6 +60,8 @@ export const fetchHtml = async (url: string, attempt = 0): Promise<string> => {
     if (!res.ok) {
       const body = await res.text().catch(() => null);
       if (res.status >= 500 && attempt === 0) {
+        clearTimeout(timeout);
+        await sleep(RETRY_BACKOFF_BASE_MS + jitterMs());
         return fetchHtml(url, attempt + 1);
       }
       throw new HttpError(res.status, url, body);
@@ -54,6 +69,8 @@ export const fetchHtml = async (url: string, attempt = 0): Promise<string> => {
     return await res.text();
   } catch (err) {
     if ((err as Error).name === 'AbortError' && attempt === 0) {
+      clearTimeout(timeout);
+      await sleep(RETRY_BACKOFF_BASE_MS + jitterMs());
       return fetchHtml(url, attempt + 1);
     }
     throw err;

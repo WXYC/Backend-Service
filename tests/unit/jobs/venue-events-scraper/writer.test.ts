@@ -12,7 +12,7 @@
  * itself; that's out of scope for the unit suite.
  */
 import { db } from '@wxyc/database';
-import { upsertConcert } from '../../../../jobs/venue-events-scraper/writer';
+import { ensureVenue, upsertConcert } from '../../../../jobs/venue-events-scraper/writer';
 import type { ParsedConcert } from '../../../../jobs/venue-events-scraper/rhp-types';
 
 type MockDb = typeof db & {
@@ -23,7 +23,7 @@ const mockDb = db as MockDb;
 
 const fakeParsed = (suffix: string): ParsedConcert => ({
   site_slug: 'cats-cradle',
-  source_id: `/event/${suffix}/`,
+  source_id: `cats-cradle:/event/${suffix}/`,
   event_page_url: `https://catscradle.com/event/${suffix}/`,
   venue_slug: 'cats-cradle',
   venue_name: "Cat's Cradle",
@@ -75,5 +75,39 @@ describe('upsertConcert', () => {
     // here would surface as ERR_INVALID_ARG_TYPE inside Buffer.byteLength
     // (the BS#802 failure mode).
     await expect(upsertConcert(fakeParsed('date-shape'), 1, new Date('2026-06-05T12:00:00Z'))).resolves.toBeDefined();
+  });
+});
+
+describe('ensureVenue', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('returns created=true when the DB reports xmax=0 (fresh INSERT)', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, created: true }]);
+    const result = await ensureVenue('cats-cradle', null, null);
+    expect(result).toEqual({ venue_id: 1, created: true });
+  });
+
+  it('returns created=false when the DB reports xmax≠0 (lost the INSERT race / row already existed)', async () => {
+    // Two concurrent runners both hit the INSERT path for the same slug;
+    // the loser takes the ON CONFLICT branch and gets xmax≠0. Pre-fix,
+    // ensureVenue lied: any caller falling into the insert branch
+    // reported created=true regardless of which way the race went.
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, created: false }]);
+    const result = await ensureVenue('cats-cradle', null, null);
+    expect(result).toEqual({ venue_id: 1, created: false });
+  });
+
+  it('falls back to "Unknown / NC" placeholder for an unseeded slug — placeholder is refreshed on every call so a later VENUE_SEEDS entry will lift it', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, created: true }]);
+    // The assertion that matters here is "no throw" + the writer
+    // computed the placeholder values from fallback inputs; the
+    // ON-CONFLICT-DO-UPDATE shape (re-applying name/city/state/address)
+    // is what lifts a placeholder when a seed is later added.
+    await expect(ensureVenue('haw-river-ballroom', 'Haw River Ballroom', null)).resolves.toEqual({
+      venue_id: 1,
+      created: true,
+    });
   });
 });

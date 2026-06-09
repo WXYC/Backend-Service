@@ -15,7 +15,7 @@
  */
 
 import { db, venues, concerts } from '@wxyc/database';
-import { eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 
 import type { ParsedConcert } from './rhp-types.js';
 import { VENUE_SEEDS, type VenueSeed } from './rhp-venues.js';
@@ -34,12 +34,24 @@ export type WriteConcertOutcome = {
 };
 
 /**
- * Resolve a venue slug to a numeric id, creating the row if missing.
+ * Resolve a venue slug to a numeric id, creating the row if missing AND
+ * refreshing name/city/state/address on every call.
  *
  * On first sight of an unknown slug we synthesize a placeholder row from
  * the concert's `venue_name` / `venue_address` fields (filled by the
- * parser from the JSON-LD `location` block). The row is editable in the
- * DB afterwards — an admin can put proper city/state on it later.
+ * parser from the JSON-LD `location` block). When VENUE_SEEDS later gains
+ * an entry for the slug — or the JSON-LD location updates — the ON
+ * CONFLICT branch overwrites the placeholder so the venues row converges
+ * to the latest seed/scrape values rather than getting stuck on stale
+ * placeholder data. There is no admin-edit protection at this layer yet
+ * (no `is_admin_edited` flag in the schema); if/when manual venue
+ * editing becomes a documented workflow this will need to gate the SET
+ * clause on a flag.
+ *
+ * `created` is computed from PG's `xmax` system column (0 on a fresh
+ * INSERT, non-zero on the ON CONFLICT UPDATE branch) so the value is
+ * truthful under concurrent runners rather than a "we took the INSERT
+ * code path" sentinel.
  *
  * Callers should cache the (slug → id) map across a single run to avoid
  * one round-trip per concert in the steady state.
@@ -50,7 +62,7 @@ export const ensureVenue = async (
   fallbackAddress: string | null
 ): Promise<WriteVenueOutcome> => {
   const seed = VENUE_SEEDS.find((s) => s.slug === slug);
-  const seedValues: VenuesValue = seed
+  const values: VenuesValue = seed
     ? {
         slug: seed.slug,
         name: seed.name,
@@ -66,21 +78,26 @@ export const ensureVenue = async (
         address: fallbackAddress,
       };
 
-  const existing = await db.select({ id: venues.id }).from(venues).where(eq(venues.slug, slug)).limit(1);
-  if (existing.length > 0) {
-    return { venue_id: existing[0].id, created: false };
-  }
-
-  const inserted = await db
+  const result = await db
     .insert(venues)
-    .values(seedValues)
+    .values(values)
     .onConflictDoUpdate({
       target: venues.slug,
-      set: { last_modified: sql`now()` },
+      set: {
+        name: values.name,
+        city: values.city,
+        state: values.state,
+        address: values.address,
+        last_modified: sql`now()`,
+      },
     })
-    .returning({ id: venues.id });
+    .returning({
+      id: venues.id,
+      created: sql<boolean>`xmax = 0`,
+    });
 
-  return { venue_id: inserted[0].id, created: true };
+  const row = result[0];
+  return { venue_id: row.id, created: row.created };
 };
 
 /**
@@ -170,9 +187,9 @@ export const upsertConcert = async (
       id: concerts.id,
       // Postgres system column `xmax` is 0 on the row that this transaction
       // INSERTed, and the deleter's xid (non-zero) on the row this
-      // transaction UPDATEd via ON CONFLICT. The Number(...) cast normalizes
-      // postgres-js's `string|number` return for system columns to a number
-      // we can compare in one place.
+      // transaction UPDATEd via ON CONFLICT. The `xmax = 0` comparison
+      // returns a real boolean and postgres-js parses bool to JS boolean,
+      // so no driver-side cast is needed here.
       inserted: sql<boolean>`xmax = 0`,
     });
 

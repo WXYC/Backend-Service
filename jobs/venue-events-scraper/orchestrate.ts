@@ -30,7 +30,7 @@ export type ParseEventPageFn = (
   eventPageUrl: string,
   eventPageHtml: string
 ) => ParsedConcert | null;
-export type ExtractEventLinksFn = (indexHtml: string) => string[];
+export type ExtractEventLinksFn = (indexHtml: string, baseUrl: string) => string[];
 export type ResolveVenueIdFn = (
   slug: string,
   fallbackName: string | null,
@@ -63,8 +63,12 @@ export type Totals = {
   upserts_total: number;
   upserts_inserted: number;
   upserts_updated: number;
-  /** UPSERT-step failures (DB-write errors). */
-  write_errors: number;
+  /** Venue-resolution failures (DB lookup of venues row). Split out from
+   *  `upsert_errors` so a DB-connectivity / FK / venue-table incident
+   *  doesn't look like an INSERT-path / enum-drift incident in dashboards. */
+  venue_resolve_errors: number;
+  /** Concert UPSERT failures (INSERT/ON CONFLICT into concerts). */
+  upsert_errors: number;
 };
 
 const emptyTotals = (): Totals => ({
@@ -78,7 +82,8 @@ const emptyTotals = (): Totals => ({
   upserts_total: 0,
   upserts_inserted: 0,
   upserts_updated: 0,
-  write_errors: 0,
+  venue_resolve_errors: 0,
+  upsert_errors: 0,
 });
 
 /** Per-site counters logged on `site_done`. Mirrors the per-event-tag fields
@@ -94,7 +99,8 @@ const emptySiteTotals = (): SiteTotals => ({
   upserts_total: 0,
   upserts_inserted: 0,
   upserts_updated: 0,
-  write_errors: 0,
+  venue_resolve_errors: 0,
+  upsert_errors: 0,
 });
 
 export type RunOptions = {
@@ -136,7 +142,7 @@ export const runScraper = async (opts: RunOptions): Promise<Totals> => {
       continue;
     }
 
-    const eventUrls = opts.extractEventLinks(indexHtml);
+    const eventUrls = opts.extractEventLinks(indexHtml, site.base_url);
     totals.events_seen += eventUrls.length;
     log('info', 'index_done', `discovered ${eventUrls.length} event pages on ${site.site_slug}`, {
       site_slug: site.site_slug,
@@ -157,7 +163,8 @@ export const runScraper = async (opts: RunOptions): Promise<Totals> => {
       if (r.kind === 'fetch_error') siteTotals.fetch_errors += 1;
       else if (r.kind === 'parse_error') siteTotals.parse_errors += 1;
       else if (r.kind === 'no_event_block') siteTotals.pages_without_event_block += 1;
-      else if (r.kind === 'write_error') siteTotals.write_errors += 1;
+      else if (r.kind === 'venue_resolve_error') siteTotals.venue_resolve_errors += 1;
+      else if (r.kind === 'upsert_error') siteTotals.upsert_errors += 1;
       else if (r.kind === 'upserted') {
         siteTotals.upserts_total += 1;
         if (r.inserted) siteTotals.upserts_inserted += 1;
@@ -167,7 +174,8 @@ export const runScraper = async (opts: RunOptions): Promise<Totals> => {
     totals.fetch_errors += siteTotals.fetch_errors;
     totals.parse_errors += siteTotals.parse_errors;
     totals.pages_without_event_block += siteTotals.pages_without_event_block;
-    totals.write_errors += siteTotals.write_errors;
+    totals.venue_resolve_errors += siteTotals.venue_resolve_errors;
+    totals.upsert_errors += siteTotals.upsert_errors;
     totals.upserts_total += siteTotals.upserts_total;
     totals.upserts_inserted += siteTotals.upserts_inserted;
     totals.upserts_updated += siteTotals.upserts_updated;
@@ -189,7 +197,8 @@ type OneEventResult =
   | { kind: 'fetch_error' }
   | { kind: 'parse_error' }
   | { kind: 'no_event_block' }
-  | { kind: 'write_error' };
+  | { kind: 'venue_resolve_error' }
+  | { kind: 'upsert_error' };
 
 const processOneEvent = async (
   site: RhpVenueConfig,
@@ -231,30 +240,30 @@ const processOneEvent = async (
   try {
     venueId = await opts.resolveVenueId(parsed.venue_slug, parsed.venue_name, parsed.venue_address);
   } catch (error) {
-    log('warn', 'write_error', `failed to resolve venue for ${eventPageUrl}`, {
+    log('warn', 'venue_resolve_error', `failed to resolve venue for ${eventPageUrl}`, {
       site_slug: site.site_slug,
       url: eventPageUrl,
       venue_slug: parsed.venue_slug,
       error_message: (error as Error).message,
     });
-    captureError(error, 'write_error', {
+    captureError(error, 'venue_resolve_error', {
       site_slug: site.site_slug,
       url: eventPageUrl,
       venue_slug: parsed.venue_slug,
     });
-    return { kind: 'write_error' };
+    return { kind: 'venue_resolve_error' };
   }
 
   try {
     const { inserted } = await opts.upsertConcert(parsed, venueId, scrapedAt);
     return { kind: 'upserted', inserted };
   } catch (error) {
-    log('warn', 'write_error', `failed to upsert concert for ${eventPageUrl}`, {
+    log('warn', 'upsert_error', `failed to upsert concert for ${eventPageUrl}`, {
       site_slug: site.site_slug,
       url: eventPageUrl,
       error_message: (error as Error).message,
     });
-    captureError(error, 'write_error', { site_slug: site.site_slug, url: eventPageUrl });
-    return { kind: 'write_error' };
+    captureError(error, 'upsert_error', { site_slug: site.site_slug, url: eventPageUrl });
+    return { kind: 'upsert_error' };
   }
 };
