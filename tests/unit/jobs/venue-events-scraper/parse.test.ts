@@ -256,6 +256,16 @@ describe('extractSupportingActsFromEtix', () => {
     expect(extractSupportingActsFromEtix(url, 'Big')).toEqual(['Real Support']);
   });
 
+  it('strips a Raleigh city/venue tail (regression: iter-3 dropped raleigh when CITY_TOKENS was derived from VENUE_SEEDS)', () => {
+    // Cat's Cradle Presents co-promoted at a Raleigh venue (e.g. Lincoln
+    // Theatre) — the Etix slug carries `-raleigh-<venue>` even though
+    // VENUE_SEEDS doesn't host a Raleigh seed. CITY_TOKENS must keep
+    // raleigh as a baseline city, else the trailing city/venue chunk
+    // gets concatenated into the support-act name.
+    const url = 'https://www.etix.com/ticket/p/77/the-bandwith-real-support-raleigh-lincoln-theatre?partner_id=100';
+    expect(extractSupportingActsFromEtix(url, 'The Band')).toEqual(['Real Support']);
+  });
+
   it.each([
     // Non-decomposable Latin letters NFKD treats as atomic — without the
     // explicit transliteration map these would slugify to lossy forms
@@ -391,6 +401,17 @@ describe('parseEventPage', () => {
     const html =
       '<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"X","startDate":"2026-11-06T20:00:00-0500"}</script>';
     expect(() => parseEventPage(CATS_CRADLE, 'https://x/event/y/', html)).toThrow(/missing Event\.location/);
+  });
+
+  it('throws if Event.location.name decodes to whitespace-only (e.g. JSON-LD name = "&nbsp;")', () => {
+    // `&nbsp;` decodes to U+00A0 which is truthy but renders blank in
+    // the UI; without a trim+empty-check the writer would happily insert
+    // venues with a one-space name.
+    const html =
+      '<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"Band","startDate":"2026-11-06T20:00:00-0500","location":{"@type":"Place","name":"&nbsp;"}}</script>';
+    expect(() => parseEventPage(CATS_CRADLE, 'https://x/event/y/', html)).toThrow(
+      /Event\.location\.name decodes to empty\/whitespace/
+    );
   });
 
   it('throws if Event.location.name is missing (regression: iter-1 only caught fully-absent location)', () => {

@@ -89,13 +89,13 @@ describe('ensureVenue (seeded path)', () => {
 
   it('returns created=true when the DB reports xmax=0 (fresh INSERT)', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, created: true }]);
-    const result = await ensureVenue('cats-cradle', null, null);
+    const result = await ensureVenue('cats-cradle', "Cat's Cradle", null);
     expect(result).toEqual({ venue_id: 1, created: true });
   });
 
   it('returns created=false when the DB reports xmax≠0 (ON CONFLICT UPDATE branch fired)', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, created: false }]);
-    const result = await ensureVenue('cats-cradle', null, null);
+    const result = await ensureVenue('cats-cradle', "Cat's Cradle", null);
     expect(result).toEqual({ venue_id: 1, created: false });
   });
 
@@ -107,7 +107,7 @@ describe('ensureVenue (seeded path)', () => {
     // an honest audit signal — it only bumps when something changed.
     mockDb._chain.returning.mockResolvedValueOnce([]); // insert.onConflictDoUpdate.returning empty
     mockDb._chain.limit.mockResolvedValueOnce([{ id: 1 }]); // follow-up SELECT
-    const result = await ensureVenue('cats-cradle', null, null);
+    const result = await ensureVenue('cats-cradle', "Cat's Cradle", null);
     expect(result).toEqual({ venue_id: 1, created: false });
   });
 });
