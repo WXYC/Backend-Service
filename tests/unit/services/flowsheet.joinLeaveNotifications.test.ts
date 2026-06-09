@@ -62,7 +62,12 @@ describe('createJoinNotification (via addDJToShow)', () => {
     );
   });
 
-  it('falls back to user.name when djName is null', async () => {
+  it('suppresses the flowsheet row when djName is null — never leaks auth_user.name (BS#1371 PII)', async () => {
+    // Pre-BS#1371 PII fix: the resolver fell back to auth_user.name and the
+    // join marker landed with the user's real name on the public wire.
+    // Post-fix: a null djName is unresolvable; the marker is suppressed
+    // (Sentry warning fires; see flowsheet.markerText.test.ts) regardless
+    // of what auth_user.name holds.
     const showDjsSelect = createMockQueryChain();
     showDjsSelect.limit.mockResolvedValue([]);
     db.select.mockReturnValueOnce(showDjsSelect);
@@ -70,18 +75,13 @@ describe('createJoinNotification (via addDJToShow)', () => {
     db.insert.mockReturnValueOnce(createMockQueryChain([{ show_id: 42, dj_id: 'user-2', active: true }]));
 
     const userSelect = createMockQueryChain();
-    userSelect.limit.mockResolvedValue([{ djName: null, name: 'Sam Blue' }]);
+    userSelect.limit.mockResolvedValue([{ djName: null, name: 'Sam Blue (real name)' }]);
     db.select.mockReturnValueOnce(userSelect);
-
-    db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(0));
-
-    const flowsheetInsert = createMockQueryChain([{ id: 999 }]);
-    db.insert.mockReturnValueOnce(flowsheetInsert);
 
     await addDJToShow('user-2', { id: 42 } as unknown as Parameters<typeof addDJToShow>[1]);
 
-    const flowsheetValues = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(flowsheetValues.dj_name).toBe('Sam Blue');
+    // Exactly one db.insert call — the show_djs membership row. No flowsheet row.
+    expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
   it('suppresses the flowsheet row when the user has neither djName nor name (#1286)', async () => {
@@ -139,21 +139,18 @@ describe('createLeaveNotification (via leaveShow service)', () => {
     );
   });
 
-  it('falls back to user.name when djName is null', async () => {
+  it('suppresses the flowsheet row when djName is null — never leaks auth_user.name (BS#1371 PII)', async () => {
     db.update.mockReturnValueOnce(createMockQueryChain([{ show_id: 42, dj_id: 'user-2', active: false }]));
 
     const userSelect = createMockQueryChain();
-    userSelect.limit.mockResolvedValue([{ djName: null, name: 'Josh Davis' }]);
+    userSelect.limit.mockResolvedValue([{ djName: null, name: 'Josh Davis (real name)' }]);
     db.select.mockReturnValueOnce(userSelect);
-
-    db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(0));
-
-    const flowsheetInsert = createMockQueryChain([{ id: 999 }]);
-    db.insert.mockReturnValueOnce(flowsheetInsert);
 
     await leaveShow('user-2', { id: 42 } as unknown as Parameters<typeof leaveShow>[1]);
 
-    const flowsheetValues = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(flowsheetValues.dj_name).toBe('Josh Davis');
+    // No flowsheet INSERT — the createLeaveNotification path suppresses the
+    // marker when the resolved name is null instead of falling back to the
+    // user's real name.
+    expect(db.insert).not.toHaveBeenCalled();
   });
 });

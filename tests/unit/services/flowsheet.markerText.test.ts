@@ -136,24 +136,29 @@ describe('startShow marker text', () => {
     expect(values.message).not.toMatch(/Start of Show: DJ DJ /);
   });
 
-  it('strips literal "Anonymous" djName and falls back to user.name for the marker (Aubrey Hearst incident regression)', async () => {
-    const flowsheetInsert = setUpUserAndPlayOrderForStartShow('Anonymous', 'Aubrey Hearst');
+  it('strips literal "Anonymous" djName and degrades the marker — never leaks auth_user.name (BS#1371 PII)', async () => {
+    const flowsheetInsert = setUpUserAndPlayOrderForStartShow('Anonymous', 'Aubrey Hearst (real name)');
     await startShow('user-1');
 
     const values = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(values.dj_name).toBe('Aubrey Hearst');
-    expect(values.message).toMatch(/^Start of Show: Aubrey Hearst joined the set at /);
+    // Pre-#1371 the marker fell back to auth_user.name and rendered the real
+    // name on the public on-air playlist. Now: dj_name is null and the message
+    // degrades to bare "Start of show: ${time}". No leak of 'Aubrey Hearst'.
+    expect(values.dj_name).toBeNull();
+    expect(values.message).toMatch(/^Start of show: /);
     expect(values.message).not.toMatch(/Anonymous/);
+    expect(values.message).not.toMatch(/Aubrey Hearst/);
   });
 
-  it('case- and whitespace-insensitive "  anonymous  " is still treated as Anonymous', async () => {
-    const flowsheetInsert = setUpUserAndPlayOrderForStartShow('  anonymous  ', 'Aubrey Hearst');
+  it('case- and whitespace-insensitive "  anonymous  " is still treated as Anonymous and degrades the marker', async () => {
+    const flowsheetInsert = setUpUserAndPlayOrderForStartShow('  anonymous  ', 'Aubrey Hearst (real name)');
     await startShow('user-1');
 
     const values = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(values.dj_name).toBe('Aubrey Hearst');
-    expect(values.message).toMatch(/^Start of Show: Aubrey Hearst joined the set at /);
+    expect(values.dj_name).toBeNull();
+    expect(values.message).toMatch(/^Start of show: /);
     expect((values.message as string | null)?.toLowerCase() ?? '').not.toContain('anonymous');
+    expect(values.message).not.toMatch(/Aubrey Hearst/);
   });
 
   it('degrades to "Start of show: <time>" (lowercase "show", no DJ name) when name is unresolvable', async () => {
@@ -195,13 +200,15 @@ describe('endShow marker text', () => {
     expect(values.message).not.toMatch(/End of Show: DJ DJ /);
   });
 
-  it('strips literal "Anonymous" djName and falls back to user.name for the marker', async () => {
-    const flowsheetInsert = setUpForEndShow('Anonymous', 'Aubrey Hearst');
+  it('strips literal "Anonymous" djName and degrades the marker — never leaks auth_user.name (BS#1371 PII)', async () => {
+    const flowsheetInsert = setUpForEndShow('Anonymous', 'Aubrey Hearst (real name)');
     await endShow({ id: 42, primary_dj_id: 'user-1' } as unknown as Parameters<typeof endShow>[0]);
 
     const values = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(values.dj_name).toBe('Aubrey Hearst');
-    expect(values.message).toMatch(/^End of Show: Aubrey Hearst left the set at /);
+    expect(values.dj_name).toBeNull();
+    expect(values.message).toMatch(/^End of show: /);
+    expect(values.message).not.toMatch(/Anonymous/);
+    expect(values.message).not.toMatch(/Aubrey Hearst/);
   });
 
   it('degrades to "End of show: <time>" when both djName and name are null', async () => {
@@ -232,13 +239,21 @@ describe('createJoinNotification (via addDJToShow) marker text', () => {
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });
 
-  it('strips literal "Anonymous" djName and falls back to user.name', async () => {
-    const flowsheetInsert = setUpForAddDJ('Anonymous', 'Aubrey Hearst');
+  it('suppresses the marker when djName is "Anonymous" — never leaks auth_user.name (BS#1371 PII)', async () => {
+    // Suppression path takes the same shape as the "neither djName nor name"
+    // case below — no flowsheet INSERT mock queued, since none should fire.
+    const showDjsSelect = createMockQueryChain();
+    showDjsSelect.limit.mockResolvedValue([]);
+    db.select.mockReturnValueOnce(showDjsSelect);
+    db.insert.mockReturnValueOnce(createMockQueryChain([{ show_id: 42, dj_id: 'user-2', active: true }]));
+    const userSelect = createMockQueryChain();
+    userSelect.limit.mockResolvedValue([{ djName: 'Anonymous', name: 'Aubrey Hearst (real name)' }]);
+    db.select.mockReturnValueOnce(userSelect);
+
     await addDJToShow('user-2', { id: 42 } as unknown as Parameters<typeof addDJToShow>[1]);
 
-    const values = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(values.dj_name).toBe('Aubrey Hearst');
-    expect(values.message).toBe('Aubrey Hearst joined the set!');
+    expect(db.insert).toHaveBeenCalledTimes(1); // show_djs membership only
+    expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
   });
 
   it('suppresses the marker AND logs to Sentry when name is unresolvable', async () => {
@@ -298,13 +313,16 @@ describe('createLeaveNotification (via leaveShow) marker text', () => {
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });
 
-  it('strips literal "Anonymous" djName and falls back to user.name', async () => {
-    const flowsheetInsert = setUpForLeaveShow('Anonymous', 'Aubrey Hearst');
+  it('suppresses the marker when djName is "Anonymous" — never leaks auth_user.name (BS#1371 PII)', async () => {
+    db.update.mockReturnValueOnce(createMockQueryChain([{ show_id: 42, dj_id: 'user-2', active: false }]));
+    const userSelect = createMockQueryChain();
+    userSelect.limit.mockResolvedValue([{ djName: 'Anonymous', name: 'Aubrey Hearst (real name)' }]);
+    db.select.mockReturnValueOnce(userSelect);
+
     await leaveShow('user-2', { id: 42 } as unknown as Parameters<typeof leaveShow>[1]);
 
-    const values = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(values.dj_name).toBe('Aubrey Hearst');
-    expect(values.message).toBe('Aubrey Hearst left the set!');
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
   });
 
   it('suppresses the marker AND logs to Sentry when name is unresolvable', async () => {

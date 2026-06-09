@@ -2,11 +2,16 @@
  * Unit tests for the resolveDjNameForShow helper used by the live insert path
  * (step 5b.2) to denormalize the resolved DJ name onto each new flowsheet row.
  *
- * Priority after BS#1321 (migration 0090):
- *   1. shows.dj_name_override (per-show operator-intent override)
+ * Priority (post-BS#1371 PII fix):
+ *   1. shows.dj_name_override (per-show operator-intent override, BS#1321)
  *   2. auth_user.dj_name (Anonymous-filtered)
  *   3. shows.legacy_dj_name (tubafrenzy-owned fallback)
- *   4. auth_user.name
+ *
+ * `auth_user.name` is intentionally NOT in the chain — dj-site provisioning
+ * writes the user's real name into that column, so surfacing it on the
+ * public v2 wire would leak PII. When neither djName nor legacy_dj_name
+ * resolves, the resolver returns null and the caller's asymmetric-fallback
+ * policy degrades the marker template.
  */
 import { jest } from '@jest/globals';
 
@@ -16,8 +21,12 @@ import { resolveDjNameForShow } from '../../../apps/backend/services/flowsheet.s
 const mockDb = db as unknown as { _chain: Record<string, jest.Mock> };
 const chain = mockDb._chain;
 
-const setUserLookupResult = (rows: Array<{ djName: string | null; name: string | null }>) => {
+const setUserLookupResult = (rows: Array<{ djName: string | null; name?: string | null }>) => {
   // The user lookup ends in `.limit(1)`; configure it to resolve to `rows`.
+  // `name` is accepted on the row shape but ignored by the resolver — the
+  // SELECT now only projects `djName` (post-BS#1371 PII fix). Keep accepting
+  // `name` in test rows so existing tests that pass it as documentation
+  // of the underlying auth_user state don't have to be rewritten.
   chain.limit.mockResolvedValueOnce(rows);
 };
 
@@ -60,14 +69,24 @@ describe('resolveDjNameForShow', () => {
     expect(result).toBe('Legacy DJ Name');
   });
 
-  it('falls back to user.name when both djName and legacy_dj_name are null', async () => {
-    setUserLookupResult([{ djName: null, name: 'Alex Stardust' }]);
+  it('returns null when both djName and legacy_dj_name are unresolvable — never leaks auth_user.name (BS#1371 PII)', async () => {
+    setUserLookupResult([{ djName: null, name: 'Alex Stardust (real name)' }]);
     const result = await resolveDjNameForShow({
       id: 1,
       primary_dj_id: 'user-1',
       legacy_dj_name: null,
     } as any);
-    expect(result).toBe('Alex Stardust');
+    expect(result).toBeNull();
+  });
+
+  it('returns null when djName is "Anonymous" and legacy_dj_name is null — never leaks auth_user.name (BS#1371 PII)', async () => {
+    setUserLookupResult([{ djName: 'Anonymous', name: 'Aubrey Hearst (real name)' }]);
+    const result = await resolveDjNameForShow({
+      id: 1,
+      primary_dj_id: 'user-1',
+      legacy_dj_name: null,
+    } as any);
+    expect(result).toBeNull();
   });
 
   it('returns legacy_dj_name when the user lookup yields no row', async () => {

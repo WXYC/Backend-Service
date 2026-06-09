@@ -24,33 +24,37 @@ import { IFSEntry, ShowInfo, ShowMetadata, UpdateRequestBody } from '../controll
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 /**
- * Resolve the DJ display name shown to listeners on the public flowsheet,
- * applying the rules locked by the 2026-06-02 Aubrey Hearst on-air incident
- * (WXYC/Backend-Service#1286, epic #1288):
+ * Resolve the DJ display name shown to listeners on the public flowsheet.
  *
- *   1. Prefer `djName` (the user's stage handle on `auth_user.dj_name`).
- *   2. Fall back to `name` (better-auth `auth_user.name`).
- *   3. Treat the literal string "Anonymous" (case- and whitespace-insensitive)
+ * Rules:
+ *   1. Use `djName` (the user's stage handle on `auth_user.dj_name`).
+ *   2. Treat the literal string "Anonymous" (case- and whitespace-insensitive)
  *      as if `djName` were absent. The better-auth anonymous plugin and a
  *      since-corrected onboarding default were both observed writing the
- *      literal "Anonymous" into `auth_user.dj_name`; rendering that string to
- *      the public on-air playlist confuses listeners and the wxyc.info playlist.
- *   4. Trim returned values; return `null` if both inputs are blank or
- *      Anonymous-with-no-fallback.
+ *      literal "Anonymous" into `auth_user.dj_name`; rendering that string
+ *      to the public on-air playlist confused listeners and the wxyc.info
+ *      playlist (BS#1286, epic #1288, 2026-06-02 Aubrey Hearst on-air
+ *      incident).
+ *   3. Trim the returned value; return `null` if blank or Anonymous.
+ *
+ * Why this no longer falls back to `auth_user.name`: dj-site's admin
+ * provisioning flow writes the user's real name into `auth_user.name`
+ * (`name: newAccount.realName || newAccount.username` in roster UI), so
+ * surfacing `name` on the public v2 flowsheet wire would leak PII —
+ * exactly the same class of incident BS#1286 fixed for the 'Anonymous'
+ * literal. Real names are appropriate for DJ-to-DJ internal views; they
+ * are not appropriate for the public on-air playlist.
  *
  * Callers should treat `null` as "name is unresolvable" and either degrade
- * the marker template (show_start / show_end keep a row but drop the name) or
- * suppress the row entirely and log to Sentry (dj_join / dj_leave) — see
- * `startShow`, `endShow`, `createJoinNotification`, `createLeaveNotification`.
+ * the marker template (show_start / show_end keep a row but drop the name)
+ * or suppress the row entirely and log to Sentry (dj_join / dj_leave) —
+ * see `startShow`, `endShow`, `createJoinNotification`,
+ * `createLeaveNotification`.
  */
-export const resolveDjDisplayName = (djName: string | null, name: string | null): string | null => {
+export const resolveDjDisplayName = (djName: string | null): string | null => {
   const trimmedDjName = djName?.trim() ?? '';
   if (trimmedDjName.length > 0 && trimmedDjName.toLowerCase() !== 'anonymous') {
     return trimmedDjName;
-  }
-  const trimmedName = name?.trim() ?? '';
-  if (trimmedName.length > 0) {
-    return trimmedName;
   }
   return null;
 };
@@ -297,7 +301,6 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
  *      `resolveDjDisplayName`)
  *   3. `shows.legacy_dj_name` (tubafrenzy-owned; "DJ name at time of the
  *      show for shows whose primary_dj_id couldn't be resolved")
- *   4. `auth_user.name`
  *
  * Used by the live insert path (step 5b.2) to denormalize the resolved value
  * onto each new flowsheet row so search no longer needs to join shows -> auth_user.
@@ -319,6 +322,11 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
  * on purpose. The pre-existing `auth_user.dj_name` filter was a workaround
  * for an upstream onboarding bug that wrote "Anonymous" automatically;
  * the override is operator-supplied, so we trust it verbatim.
+ *
+ * `auth_user.name` is intentionally NOT in the chain — it typically stores
+ * the user's real name (set from realName at provision time), which is PII
+ * and must not leak onto the public on-air playlist. See
+ * `resolveDjDisplayName`'s docstring.
  */
 export const resolveDjNameForShow = async (show: Show): Promise<string | null> => {
   const override = ((show.dj_name_override as string | null | undefined) ?? '').trim();
@@ -329,20 +337,13 @@ export const resolveDjNameForShow = async (show: Show): Promise<string | null> =
 
   if (primaryDjId == null) return legacy;
 
-  const rows = await db
-    .select({ djName: user.djName, name: user.name })
-    .from(user)
-    .where(eq(user.id, primaryDjId))
-    .limit(1);
+  const rows = await db.select({ djName: user.djName }).from(user).where(eq(user.id, primaryDjId)).limit(1);
   const dj = rows[0];
   if (!dj) return legacy;
-  // Apply the same Anonymous / blank filtering used everywhere else, but
-  // splice the legacy_dj_name in as a middle priority so existing imports
-  // continue to surface on shows whose auth_user has no usable handle.
-  const filteredDjName = resolveDjDisplayName(dj.djName ?? null, null);
+  const filteredDjName = resolveDjDisplayName(dj.djName ?? null);
   if (filteredDjName) return filteredDjName;
   if (legacy && legacy.trim().length > 0) return legacy.trim();
-  return resolveDjDisplayName(null, dj.name ?? null);
+  return null;
 };
 
 /**
@@ -595,7 +596,7 @@ export const startShow = async (
   // When the override is absent, fall back to the centralized resolution
   // helper that handles `auth_user.dj_name`, the "Anonymous" literal, and
   // the `auth_user.name` fallback (WXYC/Backend-Service#1286, epic #1288).
-  const display_dj_name = effective_override ?? resolveDjDisplayName(dj_info.djName ?? null, dj_info.name ?? null);
+  const display_dj_name = effective_override ?? resolveDjDisplayName(dj_info.djName ?? null);
   const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
   // Asymmetric fallback (epic #1288): when the DJ name is unresolvable we
   // still want a marker row so consumers know the show began. The wording
@@ -657,7 +658,7 @@ export const addDJToShow = async (dj_id: string, current_show: Show): Promise<Sh
 const createJoinNotification = async (id: string, show_id: number): Promise<FSEntry | null> => {
   const dj = (await db.select().from(user).where(eq(user.id, id)).limit(1))[0];
 
-  const display_dj_name = resolveDjDisplayName(dj?.djName ?? null, dj?.name ?? null);
+  const display_dj_name = resolveDjDisplayName(dj?.djName ?? null);
 
   // Asymmetric fallback (epic #1288): a nameless mid-show join is a degraded
   // state. The marker is suppressed rather than written — better logged than
@@ -710,7 +711,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   );
 
   const dj_information = (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0];
-  const display_dj_name = resolveDjDisplayName(dj_information?.djName ?? null, dj_information?.name ?? null);
+  const display_dj_name = resolveDjDisplayName(dj_information?.djName ?? null);
   const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
   // Symmetric to startShow: keep the row, degrade the wording to bare
   // "End of show: ${time}" when the name is unresolvable (epic #1288).
@@ -754,7 +755,7 @@ export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowD
 const createLeaveNotification = async (dj_id: string, show_id: number): Promise<FSEntry | null> => {
   const dj = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
-  const display_dj_name = resolveDjDisplayName(dj?.djName ?? null, dj?.name ?? null);
+  const display_dj_name = resolveDjDisplayName(dj?.djName ?? null);
 
   // Symmetric to createJoinNotification: suppress the row and log a Sentry
   // warning when the DJ name is unresolvable (epic #1288).
@@ -924,7 +925,7 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> =>
 
   const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({
     id: dj.id,
-    dj_name: resolveDjDisplayName(dj.djName ?? null, dj.name ?? null),
+    dj_name: resolveDjDisplayName(dj.djName ?? null),
   }));
 
   let specialty_show_name = '';
