@@ -45,8 +45,13 @@ jobs:
 
       - name: Install dependencies (postgres only)
         # We don't need the full workspace install for this script — the
-        # `postgres` client is the only runtime dep. Keep it cheap.
-        run: npm install --no-audit --no-fund --no-save postgres@^3.4.9
+        # `postgres` client is the only runtime dep. `--no-package-lock`
+        # skips the lockfile walk so npm doesn't try to resolve the
+        # repo's `@wxyc/shared` entry against GitHub Packages, which
+        # would 401 here (this step intentionally doesn't expose
+        # NPM_TOKEN — observed on PR #1348 / run 27185185058). Keep it
+        # cheap.
+        run: npm install --no-audit --no-fund --no-save --no-package-lock postgres@^3.4.9
 
       - name: Compute diff
         id: diff
