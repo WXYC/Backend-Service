@@ -44,7 +44,10 @@ export type WriteConcertOutcome = {
  *   the table (via `setWhere`). This lifts a placeholder row that was
  *   inserted before the seed existed AND keeps `last_modified` truthful
  *   ("this row hasn't changed since X") instead of bumping it every
- *   nightly run.
+ *   nightly run. **Admin edits on a seeded slug WILL be reverted** the
+ *   next time the scraper runs, because the setWhere predicate treats
+ *   any divergence from the seed as "needs refresh". The workaround is
+ *   to update the seed in `rhp-venues.ts`, not the row in the table.
  *
  * - **Unseeded** (a brand-new room the scraper hasn't been told about):
  *   INSERT if missing, otherwise DO NOTHING. We never overwrite an
@@ -54,7 +57,10 @@ export type WriteConcertOutcome = {
  *   that this scrape's JSON-LD omits) and because there's no
  *   admin-edit-protection flag on the table yet — so any operator who
  *   hand-corrects city/state/address must not lose their edit on the
- *   next nightly run.
+ *   next nightly run. Recovery when a placeholder is just plain wrong
+ *   (parser typo, location.name confused with headliner): either fix
+ *   the row by manual SQL (it'll be preserved going forward) or promote
+ *   the slug into VENUE_SEEDS so the seeded-path refresh takes over.
  *
  * `created` is computed from PG's `xmax = 0` predicate in the
  * seeded path (truthful under concurrent runners) and from the
@@ -66,7 +72,7 @@ export type WriteConcertOutcome = {
  */
 export const ensureVenue = async (
   slug: string,
-  fallbackName: string | null,
+  fallbackName: string,
   fallbackAddress: string | null
 ): Promise<WriteVenueOutcome> => {
   const seed = VENUE_SEEDS.find((s) => s.slug === slug);
@@ -112,7 +118,9 @@ export const ensureVenue = async (
     // INSERT happened (row already existed). Lookup the existing id.
     const existing = await db.select({ id: venues.id }).from(venues).where(eq(venues.slug, slug)).limit(1);
     if (existing.length === 0) {
-      throw new Error(`ensureVenue: seeded slug '${slug}' missing after upsert with no-op setWhere`);
+      throw new Error(
+        `ensureVenue: seeded slug '${slug}' missing after upsert with no-op setWhere (row may have been deleted concurrently)`
+      );
     }
     return { venue_id: existing[0].id, created: false };
   }
@@ -121,7 +129,7 @@ export const ensureVenue = async (
   // own with potentially-weaker scrape inputs.
   const placeholderValues: VenuesValue = {
     slug,
-    name: fallbackName ?? slug,
+    name: fallbackName,
     city: 'Unknown',
     state: 'NC',
     address: fallbackAddress,
@@ -136,7 +144,9 @@ export const ensureVenue = async (
   }
   const existing = await db.select({ id: venues.id }).from(venues).where(eq(venues.slug, slug)).limit(1);
   if (existing.length === 0) {
-    throw new Error(`ensureVenue: unseeded slug '${slug}' missing after INSERT DO NOTHING`);
+    throw new Error(
+      `ensureVenue: unseeded slug '${slug}' missing after INSERT DO NOTHING (row may have been deleted concurrently)`
+    );
   }
   return { venue_id: existing[0].id, created: false };
 };
@@ -146,7 +156,7 @@ export const ensureVenue = async (
  * per-concert DB round-trips from 1 to 0 once the cache is warm.
  */
 export type VenueCache = {
-  get: (slug: string, fallbackName: string | null, fallbackAddress: string | null) => Promise<number>;
+  get: (slug: string, fallbackName: string, fallbackAddress: string | null) => Promise<number>;
   size: () => number;
 };
 

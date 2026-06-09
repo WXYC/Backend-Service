@@ -255,6 +255,30 @@ describe('extractSupportingActsFromEtix', () => {
     const url = 'https://www.etix.com/ticket/p/55555/big-thiefwith-real-support-carrboro-cats-cradle?partner_id=100';
     expect(extractSupportingActsFromEtix(url, 'Big')).toEqual(['Real Support']);
   });
+
+  it.each([
+    // Non-decomposable Latin letters NFKD treats as atomic — without the
+    // explicit transliteration map these would slugify to lossy forms
+    // (e.g. 'Mø' → 'm', 'Łódź' → 'odz') and the headliner-prefix match
+    // would silently fall back to the legacy buggy split.
+    [
+      'Mø',
+      'https://www.etix.com/ticket/p/77/mowith-real-support-carrboro-cats-cradle?partner_id=100',
+      ['Real Support'],
+    ],
+    [
+      'Sigur Roß',
+      'https://www.etix.com/ticket/p/77/sigur-rosswith-real-support-carrboro-cats-cradle?partner_id=100',
+      ['Real Support'],
+    ],
+    [
+      'Łukasz',
+      'https://www.etix.com/ticket/p/77/lukaszwith-real-support-carrboro-cats-cradle?partner_id=100',
+      ['Real Support'],
+    ],
+  ])('handles non-decomposable headliner %p without falling back to the buggy legacy split', (name, url, expected) => {
+    expect(extractSupportingActsFromEtix(url, name)).toEqual(expected);
+  });
 });
 
 describe('resolveVenueSlug', () => {
@@ -350,6 +374,16 @@ describe('parseEventPage', () => {
     expect(() => parseEventPage(CATS_CRADLE, 'https://x/event/y/', august)).toThrow(/non-ISO-8601 Event\.startDate/);
   });
 
+  it('rejects ISO-8601 datetime without a timezone (regression: silent local-time interpretation)', () => {
+    // Without a TZ, V8 interprets the datetime as the SERVER's local
+    // time per the ES spec — on a UTC-4 host, `2026-11-06T20:00:00`
+    // becomes `2026-11-07T00:00:00.000Z` in postgres. Mandate an
+    // explicit `Z` / `+HH:MM` / `+HHMM` offset.
+    const html =
+      '<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"X","startDate":"2026-11-06T20:00:00","location":{"@type":"Place","name":"Cat\'s Cradle"}}</script>';
+    expect(() => parseEventPage(CATS_CRADLE, 'https://x/event/y/', html)).toThrow(/non-ISO-8601 Event\.startDate/);
+  });
+
   it('throws if Event.location is missing (was: silently attributed to default venue)', () => {
     // The docstring promises throw on missing location; before this fix
     // the code only validated name/startDate, so a location-less Event
@@ -380,6 +414,14 @@ describe('parseEventPage', () => {
     const html = `<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"Band","startDate":"2026-11-06T20:00:00-0500","location":{"@type":"Place","name":"${longVenueName}"}}</script>`;
     expect(() => parseEventPage(CATS_CRADLE, 'https://catscradle.com/event/foo/', html)).toThrow(
       /venue slug exceeds 64 chars/
+    );
+  });
+
+  it('throws if the derived venue address would overflow venues.address varchar(256)', () => {
+    const longAddr = 'A'.repeat(260);
+    const html = `<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"Band","startDate":"2026-11-06T20:00:00-0500","location":{"@type":"Place","name":"Cat's Cradle","address":"${longAddr}"}}</script>`;
+    expect(() => parseEventPage(CATS_CRADLE, 'https://catscradle.com/event/foo/', html)).toThrow(
+      /venue_address exceeds 256 chars/
     );
   });
 
