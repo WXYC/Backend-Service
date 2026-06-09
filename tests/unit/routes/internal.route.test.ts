@@ -26,7 +26,8 @@ import { internal_route } from '../../../apps/backend/routes/internal.route';
 
 // Make the DB mock chain's terminal methods resolve appropriately for the
 // webhook handler. Three chain shapes feed through `mockReturning`:
-//   1. Show resolution `select.from.where.limit` → returns [{ id }] or [].
+//   1. Show resolution `select.from.leftJoin.where.limit` → returns
+//      [{ id, dj_name }] (dj_name resolved via the COALESCE expression) or [].
 //   2. Flowsheet INSERT ... ON CONFLICT DO NOTHING RETURNING { id }
 //      → returns [{ id }] when a fresh row was inserted, [] on conflict.
 //   3. Flowsheet UPDATE ... WHERE ... RETURNING { id } (taken only after a
@@ -107,16 +108,19 @@ describe('POST /internal/flowsheet-webhook', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     // Each webhook call issues three .limit(1) SELECTs in `Promise.all`:
-    // resolveShowId, resolveAlbumId, resolveRotationId. They dispatch in
+    // resolveShow, resolveAlbumId, resolveRotationId. They dispatch in
     // declaration order and the mocked driver resolves them FIFO. Default
-    // queue resolves the show but not the album or rotation (unlinked
-    // path); tests that need a resolved album_id or rotation_id queue
-    // their own values before triggering the request.
+    // queue resolves the show (with a resolved dj_name) but not the album
+    // or rotation (unlinked path); tests that need a resolved album_id or
+    // rotation_id queue their own values before triggering the request.
+    // The show row's `dj_name` is the COALESCE expression evaluated by the
+    // mocked driver; tests covering BS#1371 marker-name resolution control
+    // it by queuing their own values.
     mockReturning.mockReset();
     mockReturning.mockResolvedValue([{ id: 5555 }]);
     mockLimit.mockReset();
     mockLimit
-      .mockResolvedValueOnce([{ id: 9999 }])
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Default Test DJ' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValue([]);
@@ -222,7 +226,7 @@ describe('POST /internal/flowsheet-webhook', () => {
   it('writes the resolved album_id into the row when libraryReleaseId matches a library row', async () => {
     mockLimit.mockReset();
     mockLimit
-      .mockResolvedValueOnce([{ id: 9999 }])
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Default Test DJ' }])
       .mockResolvedValueOnce([{ id: 7777 }])
       .mockResolvedValueOnce([]);
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
@@ -262,10 +266,10 @@ describe('POST /internal/flowsheet-webhook', () => {
   });
 
   it('forwards the resolved rotation_id when rotationReleaseId matches a rotation row', async () => {
-    // resolveShowId → 9999, resolveAlbumId → unlinked, resolveRotationId → 4242.
+    // resolveShow → 9999, resolveAlbumId → unlinked, resolveRotationId → 4242.
     mockLimit.mockReset();
     mockLimit
-      .mockResolvedValueOnce([{ id: 9999 }])
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Default Test DJ' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ id: 4242 }]);
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
@@ -309,7 +313,7 @@ describe('POST /internal/flowsheet-webhook', () => {
   it('coexists with libraryReleaseId — both album_id and rotation_id are populated when both resolve', async () => {
     mockLimit.mockReset();
     mockLimit
-      .mockResolvedValueOnce([{ id: 9999 }])
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Default Test DJ' }])
       .mockResolvedValueOnce([{ id: 7777 }])
       .mockResolvedValueOnce([{ id: 4242 }]);
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
@@ -321,6 +325,122 @@ describe('POST /internal/flowsheet-webhook', () => {
 
     expect(res.status).toBe(200);
     expect(lastInsertValues()).toEqual(expect.objectContaining({ album_id: 7777, rotation_id: 4242 }));
+  });
+
+  // -- dj_name resolution on marker entry types (BS#1371) --
+  //
+  // The v2 wire surfaces dj_name on show_start / show_end / dj_join / dj_leave
+  // (FLOWSHEET_DJ_NAME_NON_NULL contract in wxyc-shared). Pre-#1371 the
+  // webhook handler wrote dj_name=NULL on every row regardless of entry type,
+  // leaving the v2 endpoint to emit `''` and iOS to render an empty handle.
+  // The fix: resolve dj_name via the same COALESCE expression the ETL +
+  // flowsheet-dj-name-backfill use and write it on marker INSERTs.
+
+  it('writes resolved dj_name on a show_start INSERT (flowsheetEntryType=9)', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: "T'mia Powell" }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'show_start', dj_name: "T'mia Powell" }));
+  });
+
+  it('writes resolved dj_name on a show_end INSERT (flowsheetEntryType=10)', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Iman Amadou' }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 10 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'show_end', dj_name: 'Iman Amadou' }));
+  });
+
+  it('writes dj_name: null on a show_start INSERT when the show has no resolvable name', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: null }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'show_start', dj_name: null }));
+  });
+
+  it('writes dj_name: null on a track INSERT even when the show has a resolved dj_name', async () => {
+    // Track rows have their own dj_name population path (search hot path,
+    // populated by the flowsheet ETL + live insert). The webhook leaves
+    // dj_name null on track INSERTs so the ETL / backfill stays the single
+    // writer for that column on track rows.
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: "T'mia Powell" }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'track', dj_name: null }));
+  });
+
+  it('writes dj_name: null on a talkset INSERT (flowsheetEntryType=7) regardless of show name', async () => {
+    // talkset / breakpoint / message rows aren't attributed to a DJ. The
+    // webhook leaves dj_name null so the v2 wire emits the message body.
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: "T'mia Powell" }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 7 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'talkset', dj_name: null }));
+  });
+
+  it('writes dj_name: null on a marker INSERT when radioShowId is 0 (no show)', async () => {
+    // radioShowId=0 short-circuits resolveShow, mirroring resolveAlbumId.
+    // The marker row lands without a show or a dj_name; no SELECT issued.
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9, radioShowId: 0 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(
+      expect.objectContaining({ entry_type: 'show_start', show_id: null, dj_name: null })
+    );
   });
 
   // -- Delete --

@@ -1,10 +1,15 @@
 import { Router } from 'express';
 import { eq, sql } from 'drizzle-orm';
-import { db, flowsheet, shows, rotation, library, truncate } from '@wxyc/database';
+import { db, flowsheet, shows, rotation, library, truncate, user } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
 import { mapProdEntryType, isMessageEntryType } from '../utils/flowsheet-transform.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
+
+// Marker entry types that surface `dj_name` on the v2 wire (and so must be
+// resolved on the webhook insert path — BS#1371). Track + message-typed rows
+// follow other rules and are intentionally excluded.
+const MARKER_ENTRY_TYPES = new Set(['show_start', 'show_end', 'dj_join', 'dj_leave']);
 
 export const internal_route = Router();
 
@@ -37,21 +42,56 @@ internal_route.post('/flowsheet-sync-notify', (req, res) => {
   res.json({ ok: true });
 });
 
+interface ResolvedShow {
+  id: number;
+  /**
+   * COALESCE(auth_user.dj_name, shows.legacy_dj_name, auth_user.name) —
+   * matches the ETL / dj-name-backfill convention. Raw COALESCE (not the
+   * `resolveDjDisplayName` helper) on purpose: the live `startShow` /
+   * `endShow` path filters the literal 'Anonymous'; the ETL + backfill
+   * jobs do not. If the webhook used the helper and the same row were
+   * later re-resolved by the ETL or backfill, the two writers would
+   * disagree — drift instead of fix. See jobs/flowsheet-etl/job.ts:84-86
+   * and jobs/flowsheet-dj-name-backfill/job.ts for the convention.
+   *
+   * Null when the show has no resolvable name from any of the three
+   * sources (stub shows pre-ETL-fill; legacy rows with no primary_dj_id
+   * and no legacy_dj_name).
+   */
+  dj_name: string | null;
+}
+
 /**
  * Look up a show by legacy_show_id, creating a stub if it doesn't exist.
  * Uses onConflictDoNothing + re-select for concurrent-insert safety.
+ *
+ * Also resolves the show's display dj_name via a LEFT JOIN to auth_user on
+ * `shows.primary_dj_id` — same query path, no extra round-trip. The webhook
+ * INSERT writes this onto marker rows so the v2 wire honours the
+ * FLOWSHEET_DJ_NAME_NON_NULL contract (BS#1371).
  */
-async function resolveShowId(legacyShowId: number): Promise<number | null> {
+async function resolveShow(legacyShowId: number): Promise<ResolvedShow | null> {
   if (!legacyShowId) return null;
 
-  const existing = await db.select({ id: shows.id }).from(shows).where(eq(shows.legacy_show_id, legacyShowId)).limit(1);
-  if (existing.length > 0) return existing[0].id;
+  const selectShow = () =>
+    db
+      .select({
+        id: shows.id,
+        dj_name: sql<string | null>`COALESCE(${user.djName}, ${shows.legacy_dj_name}, ${user.name})`,
+      })
+      .from(shows)
+      .leftJoin(user, eq(user.id, shows.primary_dj_id))
+      .where(eq(shows.legacy_show_id, legacyShowId))
+      .limit(1);
+
+  const existing = await selectShow();
+  if (existing.length > 0) return { id: existing[0].id, dj_name: existing[0].dj_name };
 
   // Create a stub show — the ETL will fill in details (end_time, show_name) later.
   await db.insert(shows).values({ legacy_show_id: legacyShowId, start_time: new Date() }).onConflictDoNothing();
 
-  const [row] = await db.select({ id: shows.id }).from(shows).where(eq(shows.legacy_show_id, legacyShowId)).limit(1);
-  return row?.id ?? null;
+  const [row] = await selectShow();
+  return row ? { id: row.id, dj_name: row.dj_name } : null;
 }
 
 const VALID_ACTIONS = new Set(['create', 'update', 'delete']);
@@ -107,11 +147,25 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // fires from this route — CDC drives the consumer.
       const rawLibraryId = entry.libraryReleaseId ?? 0;
       const rawRotationId = entry.rotationReleaseId ?? 0;
-      const [showId, albumId, rotationId] = await Promise.all([
-        resolveShowId(entry.radioShowId),
+      const [show, albumId, rotationId] = await Promise.all([
+        resolveShow(entry.radioShowId),
         resolveAlbumId(rawLibraryId),
         resolveRotationId(rawRotationId),
       ]);
+      const showId = show?.id ?? null;
+      // For show_start / show_end / dj_join / dj_leave the v2 wire surfaces
+      // dj_name (FLOWSHEET_DJ_NAME_NON_NULL contract). Other entry types
+      // either denormalize dj_name differently (track) or don't surface it
+      // (talkset, breakpoint, message), so we leave them null and let the
+      // existing population paths handle them.
+      //
+      // dj_join / dj_leave caveat (BS#1371): the webhook payload has no
+      // per-event DJ id, only radioShowId — so guest-join markers attribute
+      // to shows.primary_dj_id, not the joining guest. Same known limitation
+      // as flowsheet-dj-name-backfill (`jobs/flowsheet-dj-name-backfill/job.ts`);
+      // the live createJoinNotification path is the only one that gets guest
+      // attribution right.
+      const markerDjName = MARKER_ENTRY_TYPES.has(entryType) ? (show?.dj_name ?? null) : null;
 
       // INSERT ... ON CONFLICT DO NOTHING RETURNING { id }: either we win
       // the insert and PG hands back exactly one row, or a concurrent
@@ -142,6 +196,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           track_title: trackTitle,
           record_label: truncate(entry.labelName, 128),
           message: isMsgType ? truncate(entry.artistName, 250) : null,
+          dj_name: markerDjName,
           request_flag: !!entry.requestFlag,
           segue: false,
           play_order: entry.sequenceWithinShow ?? 0,
