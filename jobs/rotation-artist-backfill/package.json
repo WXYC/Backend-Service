@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/rotation-artist-backfill",
+  "cron-schedule": "30 4 * * *",
+  "version": "1.0.0",
+  "description": "WXYC daily cron: refresh LML's artist cache rows for artists credited on releases currently in BS rotation. Uses LML's fetched_at-stub discriminator (LML#503) and tombstone-on-404 (LML#510) so re-runs become PG hits. Closes BS#1361.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_rotation_artist_backfill:ci -f ../../Dockerfile.rotation-artist-backfill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.53.1",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
