@@ -44,14 +44,19 @@ type IdRow = { artist_id: number };
  * job into a healthy-looking zero-work no-op (counters all 0, dashboards
  * green) while real candidates pile up unresolved.
  */
+const describeShape = (result: unknown): string => {
+  if (result === null) return 'null';
+  if (result === undefined) return 'undefined';
+  if (typeof result !== 'object') return typeof result;
+  return `object{${Object.keys(result).join(',')}}`;
+};
+
 const unwrapRows = <T>(result: unknown): T[] => {
   if (Array.isArray(result)) return result as T[];
   if (result && typeof result === 'object' && Array.isArray((result as { rows?: unknown }).rows)) {
     return (result as { rows: T[] }).rows;
   }
-  throw new Error(
-    `concerts-artist-resolver: unrecognized db.execute() result shape: ${typeof result === 'object' ? JSON.stringify(Object.keys(result ?? {})) : typeof result}`
-  );
+  throw new Error(`concerts-artist-resolver: unrecognized db.execute() result shape: ${describeShape(result)}`);
 };
 
 /**
