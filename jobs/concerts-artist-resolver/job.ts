@@ -42,14 +42,22 @@ const JOB_NAME = 'concerts-artist-resolver';
 
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
-  await Sentry.startSpan({ name: `${JOB_NAME}.run`, op: 'job.run' }, async () => {
-    try {
+  try {
+    await Sentry.startSpan({ name: `${JOB_NAME}.run`, op: 'job.run' }, async () => {
       log('info', 'init', `${JOB_NAME} initialized`);
 
       const { totals } = await runResolver({
         loadCandidates,
         resolve: resolveArtistId,
         write: writeArtistId,
+        onError: (candidate, error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          log('warn', 'row_error', `resolver row failed for concert ${candidate.id}`, {
+            concert_id: candidate.id,
+            error_message: message,
+          });
+          captureError(error, 'row_error', { concert_id: candidate.id });
+        },
       });
 
       log('info', 'finished', `${JOB_NAME} done`, { ...totals });
@@ -79,15 +87,22 @@ const main = async (): Promise<void> => {
           /* attributes set at creation; nothing else to do */
         }
       );
-    } catch (error) {
-      log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
-      captureError(error, 'failed');
-      process.exitCode = 1;
-    } finally {
-      await closeDatabaseConnection();
-      await closeLogger();
-    }
-  });
+    });
+  } catch (error) {
+    log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
+    captureError(error, 'failed');
+    process.exitCode = 1;
+  } finally {
+    // Cleanup runs OUTSIDE the `Sentry.startSpan` callback so the parent
+    // `${JOB_NAME}.run` span's end event fires through a live transport.
+    // `closeLogger` calls `Sentry.close(2000)`, which disables the SDK —
+    // if we ran it in the span callback's finally, the parent span's
+    // terminal event would land on an already-disabled client and the
+    // whole transaction (including the .totals child span) would be
+    // dropped silently.
+    await closeDatabaseConnection();
+    await closeLogger();
+  }
 };
 
 void main();

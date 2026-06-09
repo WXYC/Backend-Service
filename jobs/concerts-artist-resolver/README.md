@@ -21,6 +21,10 @@ The conservative bias matches the substrate intent: NULL is the documented stead
 - UPDATE WHERE clause: `id = ? AND headlining_artist_id IS NULL`. A concurrent pod or a scraper write that lands between SELECT and UPDATE manifests as a 0-row UPDATE which the orchestrator counts as `raced` rather than `resolved`.
 - A later alias-substrate refresh that would now resolve a previously-unmatched row picks it up on the next cron run. A later alias-substrate refresh that would now produce a _different_ singleton for an already-resolved row does **not** self-heal — that's the conservative-singleton-only trade.
 
+### Known limitation: scraper raw-name updates don't invalidate the FK
+
+The `venue-events-scraper` UPSERT writes a fresh `headlining_artist_raw` on every re-scrape (see `jobs/venue-events-scraper/writer.ts` — the `set` clause includes the raw column). If a venue upgrades an opener to headliner before show date — common when a pre-sale promo gets bumped — the raw column changes but `headlining_artist_id` doesn't (this resolver's WHERE clause skips non-NULL FK rows). The concert ends up with raw="Spoon" pointing at the artist row for Pavement. Follow-up captured separately; the safe fix is for the scraper to NULL the FK when it overwrites the raw, but that crosses substrate boundaries and is out of scope here.
+
 ## Recurring drain
 
 Cron schedule `15 5 * * *` UTC, registered via the `cron-schedule` field in `package.json` and picked up by `.github/workflows/deploy-base.yml` on merge to main.

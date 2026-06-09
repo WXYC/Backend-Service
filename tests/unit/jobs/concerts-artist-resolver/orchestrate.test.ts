@@ -220,6 +220,63 @@ describe('runResolver', () => {
     expect(result.totals.resolved).toBe(1);
   });
 
+  test('resolver throws → onError invoked with the failing candidate and the underlying error', async () => {
+    const boom = new Error('PG statement timeout');
+    const loadCandidates = makeLoad([{ id: 50, headlining_artist_raw: 'Resolver Throws' }]);
+    const resolve = jest.fn<ResolveFn>().mockRejectedValue(boom);
+    const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const onError = jest.fn();
+
+    const result = await runResolver({ loadCandidates, resolve, write, onError });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith({ id: 50, headlining_artist_raw: 'Resolver Throws' }, boom);
+    expect(result.totals.error).toBe(1);
+  });
+
+  test('writer throws → error counter; FK stays NULL; loop continues for the next candidate (symmetric with resolver)', async () => {
+    // A transient writer failure (PG outage, FK race against a parallel
+    // artist delete) must not abort the entire batch. The current
+    // candidate stays unresolved (FK NULL) and the next cron run
+    // re-drains it via the idempotent IS-NULL gate.
+    const loadCandidates = makeLoad([
+      { id: 60, headlining_artist_raw: 'Writer Throws' },
+      { id: 61, headlining_artist_raw: 'Pavement' },
+    ]);
+    const resolve = makeResolver({
+      'Writer Throws': { kind: 'strict', artist_id: 9060 },
+      Pavement: { kind: 'strict', artist_id: 9061 },
+    });
+    const write = jest
+      .fn<WriteFn>()
+      .mockRejectedValueOnce(new Error('PG: relation "concerts" did not exist'))
+      .mockResolvedValueOnce({ written: true });
+
+    const result = await runResolver({ loadCandidates, resolve, write });
+
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(result.totals.error).toBe(1);
+    expect(result.totals.resolved).toBe(1);
+    expect(result.totals.resolved_strict).toBe(1);
+  });
+
+  test('writer throws → onError invoked with the failing candidate and the underlying error', async () => {
+    const boom = new Error('FK violation: artist 9070 not found');
+    const loadCandidates = makeLoad([{ id: 70, headlining_artist_raw: 'Writer Throws' }]);
+    const resolve = makeResolver({
+      'Writer Throws': { kind: 'strict', artist_id: 9070 },
+    });
+    const write = jest.fn<WriteFn>().mockRejectedValue(boom);
+    const onError = jest.fn();
+
+    const result = await runResolver({ loadCandidates, resolve, write, onError });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith({ id: 70, headlining_artist_raw: 'Writer Throws' }, boom);
+    expect(result.totals.error).toBe(1);
+    expect(result.totals.resolved).toBe(0);
+  });
+
   test('writer reports written:false → row was raced (FK already set between SELECT and UPDATE)', async () => {
     // The writer's WHERE clause guards on `headlining_artist_id IS NULL`.
     // A 0-row UPDATE means a concurrent run beat us (the recurring drain

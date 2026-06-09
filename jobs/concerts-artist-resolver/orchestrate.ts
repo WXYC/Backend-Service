@@ -28,13 +28,27 @@
 export type Candidate = {
   id: number;
   /**
-   * The raw venue-scraped artist name. The production SELECT filters
-   * NULL out, but the type permits NULL so the orchestrator can stay
-   * defensive (counted as `null_raw_skipped`, the resolver is never
-   * called).
+   * The raw venue-scraped artist name. The DB column is `NOT NULL` and
+   * the production SELECT additionally filters `IS NOT NULL`, so this
+   * branch is unreachable in prod today. The type intentionally permits
+   * NULL as a forward-compat seam: a future editorial-submission source
+   * (#1347's note on multi-source ingest) may relax the constraint, and
+   * the orchestrator's `null_raw_skipped` counter is the tripwire that
+   * tells operators when that change reaches the resolver.
    */
   headlining_artist_raw: string | null;
 };
+
+/**
+ * Per-row callback the orchestrator uses to surface a resolver failure
+ * with concert-level context. Production wires this to a log + Sentry
+ * capture in `job.ts`; tests pass a no-op spy so the loop semantics
+ * (counter increment, `continue`) can be exercised without observability
+ * coupling. Reports the concert id and the underlying error message so
+ * dashboards triaging a `resolver.error` spike can pivot from the
+ * counter to the failing rows in one click.
+ */
+export type OnResolverErrorFn = (candidate: Candidate, error: unknown) => void;
 
 export type ResolveOutcome =
   | { kind: 'strict'; artist_id: number }
@@ -76,8 +90,10 @@ export const runResolver = async (deps: {
   loadCandidates: LoadCandidatesFn;
   resolve: ResolveFn;
   write: WriteFn;
+  onError?: OnResolverErrorFn;
 }): Promise<RunResult> => {
   const totals = emptyTotals();
+  const onError: OnResolverErrorFn = deps.onError ?? (() => {});
 
   const candidates = await deps.loadCandidates();
   for (const candidate of candidates) {
@@ -91,11 +107,13 @@ export const runResolver = async (deps: {
     let outcome: ResolveOutcome;
     try {
       outcome = await deps.resolve(candidate.headlining_artist_raw);
-    } catch {
+    } catch (error) {
       // Transient resolver failure (e.g. PG statement timeout). The row
       // stays `headlining_artist_id IS NULL`, so the next run picks it
-      // up again. The entrypoint wraps the loop in Sentry's run-scope
-      // so captureError isn't needed at this unit boundary.
+      // up again. Surface the concert id + error via `onError` so the
+      // run-scope dashboard's `resolver.error` counter pivots to the
+      // failing rows (without it, a spike of N errors is opaque).
+      onError(candidate, error);
       totals.error += 1;
       continue;
     }
@@ -103,8 +121,20 @@ export const runResolver = async (deps: {
     switch (outcome.kind) {
       case 'strict':
       case 'alias': {
-        const { written } = await deps.write(candidate.id, outcome.artist_id);
-        if (written) {
+        let writeResult: { written: boolean };
+        try {
+          writeResult = await deps.write(candidate.id, outcome.artist_id);
+        } catch (error) {
+          // Symmetric with the resolver-error path: a transient write
+          // failure (PG outage, FK race against a parallel artist
+          // delete, etc.) must not terminate the loop and leave the
+          // remaining candidates unprocessed. The row stays NULL and
+          // the next cron run drains it.
+          onError(candidate, error);
+          totals.error += 1;
+          break;
+        }
+        if (writeResult.written) {
           totals.resolved += 1;
           if (outcome.kind === 'strict') {
             totals.resolved_strict += 1;
