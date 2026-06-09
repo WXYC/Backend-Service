@@ -91,16 +91,32 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
   // auth_user.name). Pre-fix, every webhook-delivered show_start /
   // show_end / dj_join / dj_leave row landed with dj_name=NULL and the v2
   // wire emitted '' (iOS rendered an empty handle for ~119k historical
-  // rows). This test seeds a stub show with a `legacy_dj_name`, delivers a
-  // show_start (flowsheetEntryType=9) for it, and asserts the inserted row
-  // picked the legacy_dj_name from the COALESCE.
+  // rows). The three cases below cover the three resolution arms.
+  //
+  // `seedShow` pre-DELETEs (defensive against a prior crashed test leaving
+  // a polluted row that would otherwise survive a naive INSERT...ON
+  // CONFLICT DO NOTHING and produce a confusing false pass/fail). `clearShow`
+  // clears the flowsheet row before the show (FK ordering — shows is not
+  // ON DELETE CASCADE).
+  const seedShow = async (legacyShowId, { legacyDjName = null, primaryDjId = null } = {}) => {
+    await sql.unsafe(
+      `DELETE FROM ${SCHEMA}.flowsheet WHERE show_id IN (SELECT id FROM ${SCHEMA}.shows WHERE legacy_show_id = $1)`,
+      [legacyShowId]
+    );
+    await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [legacyShowId]);
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.shows (legacy_show_id, legacy_dj_name, primary_dj_id, start_time) VALUES ($1, $2, $3, NOW())`,
+      [legacyShowId, legacyDjName, primaryDjId]
+    );
+  };
+  const clearShow = async (legacyShowId) => {
+    await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [LEGACY_ENTRY_ID]);
+    await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [legacyShowId]);
+  };
+
   test('show_start webhook resolves dj_name from shows.legacy_dj_name (BS#1371)', async () => {
     const LEGACY_SHOW_ID = 9_999_990;
-    await sql.unsafe(
-      `INSERT INTO ${SCHEMA}.shows (legacy_show_id, legacy_dj_name, start_time) VALUES ($1, $2, NOW())
-       ON CONFLICT DO NOTHING`,
-      [LEGACY_SHOW_ID, "T'mia Powell"]
-    );
+    await seedShow(LEGACY_SHOW_ID, { legacyDjName: "T'mia Powell" });
 
     try {
       const entry = buildEntry({ flowsheetEntryType: 9, radioShowId: LEGACY_SHOW_ID });
@@ -117,12 +133,36 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
       expect(rows[0].entry_type).toBe('show_start');
       expect(rows[0].dj_name).toBe("T'mia Powell");
     } finally {
-      // Clear the flowsheet row before the show — flowsheet.show_id is an
-      // FK to shows.id and not ON DELETE CASCADE, so the show DELETE would
-      // otherwise fail. afterEach also clears the flowsheet row by
-      // legacy_entry_id (idempotent), but it runs after this finally.
-      await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [LEGACY_ENTRY_ID]);
-      await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [LEGACY_SHOW_ID]);
+      await clearShow(LEGACY_SHOW_ID);
+    }
+  });
+
+  // Highest-priority COALESCE arm. Seeds an auth_user, points shows.primary_dj_id
+  // at it, and asserts the resolver picked user.dj_name over legacy_dj_name.
+  // Without this case the LEFT JOIN to auth_user is never exercised against real
+  // Postgres; a schema rename of auth_user.dj_name would leave the legacy_dj_name
+  // case (above) green while production silently regressed on the primary arm.
+  test('show_start webhook prefers auth_user.dj_name over legacy_dj_name (BS#1371)', async () => {
+    const LEGACY_SHOW_ID = 9_999_988;
+    const PRIMARY_DJ_ID = 'test-dj1-id-00000000000000000001'; // seeded in dev_env/seed_db.sql with dj_name='Test dj1'
+    await seedShow(LEGACY_SHOW_ID, { legacyDjName: 'Legacy Override Loser', primaryDjId: PRIMARY_DJ_ID });
+
+    try {
+      const entry = buildEntry({ flowsheetEntryType: 9, radioShowId: LEGACY_SHOW_ID });
+      const res = await request
+        .post('/internal/flowsheet-webhook')
+        .set('X-Internal-Key', INTERNAL_KEY)
+        .send({ action: 'create', entry });
+      expect(res.status).toBe(200);
+
+      const rows = await sql.unsafe(`SELECT entry_type, dj_name FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
+        LEGACY_ENTRY_ID,
+      ]);
+      expect(rows.length).toBe(1);
+      expect(rows[0].entry_type).toBe('show_start');
+      expect(rows[0].dj_name).toBe('Test dj1');
+    } finally {
+      await clearShow(LEGACY_SHOW_ID);
     }
   });
 
@@ -131,11 +171,7 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
     // The webhook must NOT write dj_name on track rows so we don't double-
     // write and risk drift between the webhook and the ETL writer.
     const LEGACY_SHOW_ID = 9_999_989;
-    await sql.unsafe(
-      `INSERT INTO ${SCHEMA}.shows (legacy_show_id, legacy_dj_name, start_time) VALUES ($1, $2, NOW())
-       ON CONFLICT DO NOTHING`,
-      [LEGACY_SHOW_ID, 'Some Resolvable Name']
-    );
+    await seedShow(LEGACY_SHOW_ID, { legacyDjName: 'Some Resolvable Name' });
 
     try {
       const entry = buildEntry({ flowsheetEntryType: 6, radioShowId: LEGACY_SHOW_ID });
@@ -152,8 +188,7 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
       expect(rows[0].entry_type).toBe('track');
       expect(rows[0].dj_name).toBeNull();
     } finally {
-      await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [LEGACY_ENTRY_ID]);
-      await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [LEGACY_SHOW_ID]);
+      await clearShow(LEGACY_SHOW_ID);
     }
   });
 
