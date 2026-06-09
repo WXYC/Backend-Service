@@ -117,7 +117,11 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
       expect(rows[0].entry_type).toBe('show_start');
       expect(rows[0].dj_name).toBe("T'mia Powell");
     } finally {
-      // Clean up the stub show only — the flowsheet row is cleared by afterEach.
+      // Clear the flowsheet row before the show — flowsheet.show_id is an
+      // FK to shows.id and not ON DELETE CASCADE, so the show DELETE would
+      // otherwise fail. afterEach also clears the flowsheet row by
+      // legacy_entry_id (idempotent), but it runs after this finally.
+      await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [LEGACY_ENTRY_ID]);
       await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [LEGACY_SHOW_ID]);
     }
   });
@@ -148,6 +152,7 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
       expect(rows[0].entry_type).toBe('track');
       expect(rows[0].dj_name).toBeNull();
     } finally {
+      await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [LEGACY_ENTRY_ID]);
       await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [LEGACY_SHOW_ID]);
     }
   });
