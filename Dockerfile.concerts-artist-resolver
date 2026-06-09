@@ -1,0 +1,30 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+WORKDIR /concerts-artist-resolver-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/concerts-artist-resolver ./jobs/concerts-artist-resolver
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/concerts-artist-resolver
+
+#Production stage
+FROM node:24-alpine AS prod
+
+WORKDIR /concerts-artist-resolver
+
+ENV DB_STATEMENT_TIMEOUT_MS=60000
+ENV DB_APPLICATION_NAME=wxyc-concerts-artist-resolver
+
+COPY ./package* ./
+COPY ./jobs/concerts-artist-resolver/package* ./jobs/concerts-artist-resolver/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./concerts-artist-resolver-builder/jobs/concerts-artist-resolver/dist ./jobs/concerts-artist-resolver/dist
+COPY --from=builder ./concerts-artist-resolver-builder/shared/database/dist ./shared/database/dist
+
+CMD ["npm", "start", "--workspace=@wxyc/concerts-artist-resolver"]
