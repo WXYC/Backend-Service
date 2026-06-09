@@ -28,6 +28,22 @@
 -- makes the function total on NULL input — the indexes below depend on
 -- this to avoid emitting NULL keys for rows whose `artist_name` is NULL.
 --
+-- Separator class: the regex `^the[ \t\n\r\f\v]+` uses an explicit POSIX
+-- whitespace class instead of `\s`. PG ARE `\s` is ASCII-only; JS `\s`
+-- matches the full Unicode whitespace class. The TS twin
+-- (`shared/database/src/normalize-artist-name.ts`) uses the same explicit
+-- class so the contract is byte-identical regardless of regex-engine
+-- differences — NBSP / narrow no-break / U+2028 inputs are NOT stripped
+-- by either side. The venue-events scraper already decodes `&nbsp;` to
+-- ASCII space before this function runs, so the narrow class is fine in
+-- practice.
+--
+-- Collation note: PG's `lower()` is catalog-marked IMMUTABLE but is
+-- actually lc_ctype-dependent — the well-known foot-gun. The functional
+-- indexes below freeze whatever lc_ctype the cluster has at build time.
+-- WXYC RDS runs `en_US.UTF-8`; if that ever changes (or a restore
+-- targets a different lc_ctype), REINDEX both functional indexes.
+--
 -- Index choices:
 --
 --   - `artists_normalized_name_idx` supports the strict-match arm. ~120k
@@ -43,11 +59,15 @@
 --     similarity, not equality on the normalized form; the alias arm
 --     here is an equality predicate, so it needs its own btree.
 --
---   - `concerts_headlining_artist_id_null_idx` is a partial index on
---     `concerts.id WHERE headlining_artist_id IS NULL`. The recurring
---     drain (cron at "15 5 * * *") runs `SELECT ... WHERE
---     headlining_artist_id IS NULL` daily; once most rows are resolved,
---     the partial index keeps that read cheap.
+--   - `concerts_headlining_artist_id_null_idx` is a partial COVERING
+--     index on `concerts (id) INCLUDE (headlining_artist_raw)
+--     WHERE headlining_artist_id IS NULL`. The recurring drain
+--     (cron at "15 5 * * *") runs
+--       SELECT id, headlining_artist_raw FROM concerts
+--       WHERE headlining_artist_id IS NULL ...
+--     daily; the INCLUDE column lets PG serve the loader as an Index
+--     Only Scan and avoid a heap fetch per match. Pattern mirrors
+--     migration 0074's covering partial on flowsheet metadata-attempt.
 --
 -- Concurrency: per `docs/migrations.md`'s `if-not-exists-index` rule,
 -- the runbook for prod is to first build the three indexes out-of-band
@@ -67,14 +87,14 @@
 --     ON "wxyc_schema"."artist_search_alias" (wxyc_schema.normalize_artist_name("variant"));
 --
 --   CREATE INDEX CONCURRENTLY IF NOT EXISTS "concerts_headlining_artist_id_null_idx"
---     ON "wxyc_schema"."concerts" ("id") WHERE "headlining_artist_id" IS NULL;
+--     ON "wxyc_schema"."concerts" ("id") INCLUDE ("headlining_artist_raw") WHERE "headlining_artist_id" IS NULL;
 --
 -- Companion job: jobs/concerts-artist-resolver/ (this PR).
 
 CREATE OR REPLACE FUNCTION wxyc_schema.normalize_artist_name(input text) RETURNS text
   LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
-  SELECT lower(regexp_replace(coalesce(input, ''), '^the\s+', '', 'i'));
+  SELECT lower(regexp_replace(coalesce(input, ''), '^the[ \t\n\r\f\v]+', '', 'i'));
 $$;--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "artists_normalized_name_idx" ON "wxyc_schema"."artists" USING btree (wxyc_schema.normalize_artist_name("artist_name"));--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "artist_search_alias_normalized_variant_idx" ON "wxyc_schema"."artist_search_alias" USING btree (wxyc_schema.normalize_artist_name("variant"));--> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "concerts_headlining_artist_id_null_idx" ON "wxyc_schema"."concerts" USING btree ("id") WHERE "headlining_artist_id" IS NULL;
+CREATE INDEX IF NOT EXISTS "concerts_headlining_artist_id_null_idx" ON "wxyc_schema"."concerts" USING btree ("id") INCLUDE ("headlining_artist_raw") WHERE "headlining_artist_id" IS NULL;

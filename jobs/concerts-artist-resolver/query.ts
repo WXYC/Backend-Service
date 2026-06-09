@@ -34,16 +34,34 @@ const ARTISTS_TABLE = sql.raw(`"${SCHEMA}"."artists"`);
 const ARTIST_SEARCH_ALIAS_TABLE = sql.raw(`"${SCHEMA}"."artist_search_alias"`);
 const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
 
-type DistinctIdRow = { artist_id: number };
+type IdRow = { artist_id: number };
 
+/**
+ * Normalize `db.execute(sql\`...\`)` results across drizzle-orm driver
+ * shapes. postgres-js returns an array; node-postgres returns `{ rows }`.
+ * Anything else means the driver contract changed under us, in which
+ * case we want a LOUD failure — a silent `[]` fallback would turn the
+ * job into a healthy-looking zero-work no-op (counters all 0, dashboards
+ * green) while real candidates pile up unresolved.
+ */
 const unwrapRows = <T>(result: unknown): T[] => {
   if (Array.isArray(result)) return result as T[];
   if (result && typeof result === 'object' && Array.isArray((result as { rows?: unknown }).rows)) {
     return (result as { rows: T[] }).rows;
   }
-  return [];
+  throw new Error(
+    `concerts-artist-resolver: unrecognized db.execute() result shape: ${typeof result === 'object' ? JSON.stringify(Object.keys(result ?? {})) : typeof result}`
+  );
 };
 
+/**
+ * Volume assumption: ~16 venues × ~10 shows/wk × 52 wk ≈ ~8k rows/yr,
+ * but steady-state the SELECT returns only the unresolved tail (most
+ * rows have a FK). Pulling the full eligible set into memory is fine at
+ * current scale; if the substrate expands (new sources, a one-time
+ * resolver-rule change requires a re-drain), revisit with id-cursor
+ * batching à la `jobs/library-identity-consumer/select.ts`.
+ */
 export const loadCandidates = async (): Promise<Candidate[]> => {
   const result: unknown = await db.execute(sql`
     SELECT "id", "headlining_artist_raw"
@@ -56,13 +74,19 @@ export const loadCandidates = async (): Promise<Candidate[]> => {
 };
 
 export const resolveArtistId: ResolveFn = async (raw: string): Promise<ResolveOutcome> => {
+  // No DISTINCT: `artists.id` is the PK so the result set is already
+  // unique. DISTINCT here would force a Unique node on top of the
+  // IndexScan against `artists_normalized_name_idx` and inhibit
+  // `LIMIT 2` pushdown. The alias arm below DOES need DISTINCT —
+  // `artist_search_alias.artist_id` is non-unique by design (multiple
+  // variants per artist).
   const strict: unknown = await db.execute(sql`
-    SELECT DISTINCT a."id" AS artist_id
+    SELECT a."id" AS artist_id
     FROM ${ARTISTS_TABLE} a
     WHERE ${NORMALIZE_FN}(a."artist_name") = ${NORMALIZE_FN}(${raw})
     LIMIT 2
   `);
-  const strictRows = unwrapRows<DistinctIdRow>(strict);
+  const strictRows = unwrapRows<IdRow>(strict);
   if (strictRows.length === 1) {
     return { kind: 'strict', artist_id: strictRows[0].artist_id };
   }
@@ -76,7 +100,7 @@ export const resolveArtistId: ResolveFn = async (raw: string): Promise<ResolveOu
     WHERE ${NORMALIZE_FN}(asa."variant") = ${NORMALIZE_FN}(${raw})
     LIMIT 2
   `);
-  const aliasRows = unwrapRows<DistinctIdRow>(alias);
+  const aliasRows = unwrapRows<IdRow>(alias);
   if (aliasRows.length === 1) {
     return { kind: 'alias', artist_id: aliasRows[0].artist_id };
   }
