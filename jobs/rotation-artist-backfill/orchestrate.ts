@@ -13,10 +13,9 @@
  * responses tombstone the row server-side). So a re-run after this cron
  * lands is steady-state PG hits.
  *
- * dryRun:
- *   - The release fan-out still runs (we need it to enumerate artist ids).
- *   - Artist calls are skipped; counters report `artists_planned` so an
- *     operator can sanity-check cardinality before scheduling.
+ * dryRun: the release fan-out still runs (we need it to enumerate artist
+ * ids) but the artist tier is skipped. `artists_planned` is populated
+ * either way, and the totals Sentry span fires in both modes.
  *
  * Idempotency:
  *   - The same release id appearing twice (across re-runs, or in the same
@@ -28,23 +27,21 @@
  *     now produces a non-null `fetched_at` in LML's PG cache, so a
  *     re-run sees PG hits with no API egress.
  *
- * Interruptibility:
- *   - The outer loop checkpoints nothing — there is no BS-local state to
- *     advance. A kill mid-run drops in-flight work; the next run picks
- *     up where the cache is cold and finishes what we didn't.
- *
  * Concurrency:
- *   - Caller-supplied; defaults to 3. We don't gate concurrency here on
- *     the runtime side — the `lml-limiter` semaphore caps in-flight LML
- *     calls regardless of how many promises we kick off from this layer.
- *     The local Sema lets us bound the number of *pending* promises so
- *     we don't materialize 10k+ Promise objects for a long rotation set.
- *   - Per the issue, 30s read timeout. Since lml-client owns its own
- *     timeout (30s default), and we don't override it here, the BS-side
- *     wall-clock per call is bounded.
+ *   - Caller-supplied; defaults to 3. We don't gate egress here on the
+ *     runtime side — the `lml-limiter` Semaphore caps in-flight LML
+ *     calls (and `TokenBucket` caps attempted-call rate) regardless of
+ *     how many promises we kick off from this layer. The local
+ *     `Semaphore` here bounds the number of *materialized* pending
+ *     promises so a 10k-rotation set doesn't pile up Promise objects
+ *     and so the same primitive used inside the limiter handles
+ *     orphan-on-throw cancellation: if a task throws, sibling tasks
+ *     finish their current `await` and then exit the loop instead of
+ *     continuing forever.
  */
 
 import * as Sentry from '@sentry/node';
+import { Semaphore } from '@wxyc/lml-client';
 
 import { extractPhase1ArtistIds, fetchArtist, fetchRelease, type FetchOutcome } from './lml-fetch.js';
 import { log } from './logger.js';
@@ -84,36 +81,79 @@ export type RunBackfillDeps = {
 export type RunResult = { totals: Totals };
 
 /**
- * Run N tasks with at most `limit` in-flight at any moment. Resolves once
- * every task has settled. Errors thrown by a task propagate out of the
- * wrapper — callers should catch inside the task body and translate to a
- * counter bump instead, so one bad row can't tear down the whole run.
+ * Map `items` through `run` with at most `limit` in-flight at any moment.
+ *
+ * Uses `Promise.allSettled` so one task throwing does NOT cause sibling
+ * tasks to be orphaned mid-flight: if a callback throws, the other
+ * tasks still drain to completion (releasing their semaphore permits)
+ * and the wrapper rethrows the first failure once everything is done.
+ * Without this, a `Promise.all([w1, w2, w3])` rejection on w2 would
+ * leave w1/w3 mid-`await` and their LML responses unobserved — wasting
+ * rate-limit budget and risking writes after the caller has moved on.
  */
 const runWithConcurrency = async <T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> => {
   if (limit < 1) throw new Error(`concurrency must be >= 1, got ${limit}`);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (true) {
-      const idx = cursor++;
-      if (idx >= items.length) return;
-      await run(items[idx]);
+  if (items.length === 0) return;
+  const sem = new Semaphore(Math.min(limit, items.length));
+  const tasks = items.map(async (item) => {
+    await sem.acquire();
+    try {
+      await run(item);
+    } finally {
+      sem.release();
     }
   });
-  await Promise.all(workers);
+  const settled = await Promise.allSettled(tasks);
+  for (const result of settled) {
+    if (result.status === 'rejected') {
+      throw result.reason instanceof Error ? result.reason : new Error(String(result.reason));
+    }
+  }
 };
 
-const tallyRelease = <T>(totals: Totals, outcome: FetchOutcome<T>): void => {
-  totals.releases_scanned += 1;
-  if (outcome.kind === 'ok') totals.releases_ok += 1;
-  else if (outcome.kind === 'not_found') totals.releases_not_found += 1;
-  else totals.releases_error += 1;
+const tally = <T>(totals: Totals, phase: 'releases' | 'artists', outcome: FetchOutcome<T>): void => {
+  if (phase === 'releases') {
+    totals.releases_scanned += 1;
+    if (outcome.kind === 'ok') totals.releases_ok += 1;
+    else if (outcome.kind === 'not_found') totals.releases_not_found += 1;
+    else totals.releases_error += 1;
+  } else {
+    totals.artists_attempted += 1;
+    if (outcome.kind === 'ok') totals.artists_ok += 1;
+    else if (outcome.kind === 'not_found') totals.artists_not_found += 1;
+    else totals.artists_error += 1;
+  }
 };
 
-const tallyArtist = <T>(totals: Totals, outcome: FetchOutcome<T>): void => {
-  totals.artists_attempted += 1;
-  if (outcome.kind === 'ok') totals.artists_ok += 1;
-  else if (outcome.kind === 'not_found') totals.artists_not_found += 1;
-  else totals.artists_error += 1;
+/**
+ * Project the run totals onto a Sentry span with numeric attributes set
+ * at creation time (per the BS#1081 convention — late `setAttribute`
+ * calls index numbers as strings and break sum/avg/p95 aggregation).
+ * Fires on every code path including dryRun so a dry invocation produces
+ * the same observability surface as a real one.
+ */
+const projectTotalsSpan = (totals: Totals, dryRun: boolean): void => {
+  Sentry.startSpan(
+    {
+      name: 'rotation-artist-backfill.totals',
+      op: 'job.tally',
+      attributes: {
+        'backfill.dry_run': dryRun ? 1 : 0,
+        'backfill.releases_scanned': totals.releases_scanned,
+        'backfill.releases_ok': totals.releases_ok,
+        'backfill.releases_not_found': totals.releases_not_found,
+        'backfill.releases_error': totals.releases_error,
+        'backfill.artists_planned': totals.artists_planned,
+        'backfill.artists_attempted': totals.artists_attempted,
+        'backfill.artists_ok': totals.artists_ok,
+        'backfill.artists_not_found': totals.artists_not_found,
+        'backfill.artists_error': totals.artists_error,
+      },
+    },
+    () => {
+      /* observability-only span; attributes set at creation */
+    }
+  );
 };
 
 export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => {
@@ -130,15 +170,14 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
     dry_run: dryRun,
   });
 
-  // Phase 1 of the two-tier loop: fan out the release fetches. Each release
-  // result feeds an artist-id set into the second tier. Artist-id dedup is
-  // global across the run.
+  // Phase 1 of the two-tier loop: fan out the release fetches. Each
+  // release result feeds an artist-id set into the second tier; dedup
+  // is global across the run.
   const seenArtistIds = new Set<number>();
-  const artistIds: number[] = [];
 
   await runWithConcurrency(releaseIds, concurrency, async (releaseId) => {
     const outcome = await fetchReleaseFn(releaseId);
-    tallyRelease(totals, outcome);
+    tally(totals, 'releases', outcome);
     if (outcome.kind !== 'ok') {
       if (outcome.kind === 'error') {
         log('warn', 'release_error', `release ${releaseId} fetch failed`, {
@@ -150,12 +189,14 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
       return;
     }
     for (const artistId of extractPhase1ArtistIds(outcome.value)) {
-      if (seenArtistIds.has(artistId)) continue;
       seenArtistIds.add(artistId);
-      artistIds.push(artistId);
     }
   });
 
+  // Sort for deterministic iteration order (and so dry-run log lines are
+  // stable across runs). The Set was populated in release-completion
+  // order, which is non-deterministic under concurrency > 1.
+  const artistIds = Array.from(seenArtistIds).sort((a, b) => a - b);
   totals.artists_planned = artistIds.length;
   log('info', 'plan_artists', `release fan-out produced ${artistIds.length} distinct artist ids`, {
     artists_planned: artistIds.length,
@@ -163,6 +204,7 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
 
   if (dryRun) {
     log('info', 'dry_run', 'dry-run mode: skipping artist fan-out', { artists_planned: artistIds.length });
+    projectTotalsSpan(totals, true);
     return { totals };
   }
 
@@ -171,7 +213,7 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
   // (LML#503), or tombstones a 404 (LML#510).
   await runWithConcurrency(artistIds, concurrency, async (artistId) => {
     const outcome = await fetchArtistFn(artistId);
-    tallyArtist(totals, outcome);
+    tally(totals, 'artists', outcome);
     if (outcome.kind === 'error') {
       log('warn', 'artist_error', `artist ${artistId} fetch failed`, {
         artist_id: artistId,
@@ -181,27 +223,6 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
     }
   });
 
-  // Project the run totals onto a Sentry span with numeric attributes set
-  // at creation time (per the BS#1081 convention).
-  Sentry.startSpan(
-    {
-      name: 'rotation-artist-backfill.totals',
-      attributes: {
-        'backfill.releases_scanned': totals.releases_scanned,
-        'backfill.releases_ok': totals.releases_ok,
-        'backfill.releases_not_found': totals.releases_not_found,
-        'backfill.releases_error': totals.releases_error,
-        'backfill.artists_planned': totals.artists_planned,
-        'backfill.artists_attempted': totals.artists_attempted,
-        'backfill.artists_ok': totals.artists_ok,
-        'backfill.artists_not_found': totals.artists_not_found,
-        'backfill.artists_error': totals.artists_error,
-      },
-    },
-    () => {
-      /* observability-only span; attributes set at creation */
-    }
-  );
-
+  projectTotalsSpan(totals, false);
   return { totals };
 };

@@ -28,6 +28,7 @@
  */
 
 import * as Sentry from '@sentry/node';
+import { envInt } from '@wxyc/lml-client';
 
 import { closeDatabaseConnection } from '@wxyc/database';
 
@@ -44,17 +45,48 @@ const requireLmlConfigured = (): void => {
   }
 };
 
-const envInt = (name: string, fallback: number): number => {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  const parsed = Number(raw);
-  if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  return fallback;
-};
-
+/**
+ * Accept `1`, `true`, `True`, `TRUE`. Conservative on purpose — common
+ * mistakes like Python's `True` capitalization and shell-style yes
+ * should not silently fall through to the false branch.
+ */
 const envBool = (name: string): boolean => {
   const raw = process.env[name];
-  return raw === '1' || raw === 'true' || raw === 'TRUE';
+  if (raw === undefined) return false;
+  return raw === '1' || raw.toLowerCase() === 'true';
+};
+
+/**
+ * Pull a usable error message off `unknown` so a `throw 'string'` or
+ * `throw null` from upstream code doesn't crash the catch block via
+ * `(error as Error).message`.
+ */
+const errorMessage = (e: unknown): string => {
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'string') return e;
+  try {
+    return JSON.stringify(e) ?? String(e);
+  } catch {
+    return String(e);
+  }
+};
+
+const errorName = (e: unknown): string => (e instanceof Error ? e.name : typeof e);
+
+/**
+ * Run `fn` and log+swallow any throw. Used for the two close calls in
+ * the finally block so a failure in one doesn't prevent the other from
+ * running and dropping a buffered Sentry event or leaving a PG pool open.
+ */
+const safeFinalize = async (step: string, fn: () => Promise<void>): Promise<void> => {
+  try {
+    await fn();
+  } catch (e) {
+    log('error', step, `${JOB_NAME} cleanup step failed`, {
+      error_message: errorMessage(e),
+      error_name: errorName(e),
+    });
+  }
 };
 
 const main = async (): Promise<void> => {
@@ -86,16 +118,36 @@ const main = async (): Promise<void> => {
     } catch (error) {
       const step = error instanceof DeployGuardError ? 'deploy_guard' : 'failed';
       log('error', step, `${JOB_NAME} failed`, {
-        error_message: (error as Error).message,
-        error_name: (error as Error).name,
+        error_message: errorMessage(error),
+        error_name: errorName(error),
       });
       captureError(error, step);
       process.exitCode = 1;
     } finally {
-      await closeDatabaseConnection();
-      await closeLogger();
+      await safeFinalize('teardown_db', closeDatabaseConnection);
+      await safeFinalize('teardown_logger', closeLogger);
     }
   });
 };
 
-void main();
+/**
+ * Top-level run guard. `void main()` would swallow a rejection from the
+ * finally block (closeDatabaseConnection / closeLogger) as an unhandled
+ * promise rejection. Catching here means the cron always exits with a
+ * meaningful code instead of relying on Node's unhandledRejection
+ * default behavior — which has changed between Node major versions.
+ */
+main().catch((error: unknown) => {
+  // Logger may be closed by this point; write directly to stderr.
+  process.stderr.write(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: 'error',
+      step: 'unhandled',
+      message: `${JOB_NAME} terminated with an unhandled error`,
+      error_message: errorMessage(error),
+      error_name: errorName(error),
+    }) + '\n'
+  );
+  process.exitCode = 1;
+});

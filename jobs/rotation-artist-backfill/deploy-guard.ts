@@ -118,7 +118,13 @@ export const isDescendantOnGithub = async (
     const headers: Record<string, string> = { Accept: 'application/vnd.github+json' };
     const token = process.env.GITHUB_TOKEN;
     if (token) headers.Authorization = `Bearer ${token}`;
-    const response = await fetchImpl(`https://api.github.com/repos/${LML_REPO}/compare/${base}...${head}`, {
+    // URL-encode `base` and `head` so a malformed sha containing `?`, `#`,
+    // `/`, or `..` can't change the request path semantics. `compare`
+    // treats the basehead range as opaque ref strings — encoding is safe
+    // for the all-hex case AND defensive against an LML /health regression
+    // that emits a non-sha value.
+    const range = `${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
+    const response = await fetchImpl(`https://api.github.com/repos/${LML_REPO}/compare/${range}`, {
       headers,
       signal: controller.signal,
     });

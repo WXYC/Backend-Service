@@ -22,20 +22,22 @@
  * Override via `BACKFILL_LML_MAX_CONCURRENT` / `BACKFILL_LML_RATE_PER_MIN`
  * so ops can dial these down without a redeploy if foreground traffic
  * patterns change.
+ *
+ * `envInt` is re-exported from `@wxyc/lml-client` rather than redefined
+ * locally so a future tightening of env validation (e.g. reject fractional
+ * values, add an upper bound) lives in one place across every BS workload
+ * that talks to LML.
  */
 
-import { type LmlLimiter, Semaphore, TokenBucket, createLmlLimiter as createSharedLmlLimiter } from '@wxyc/lml-client';
+import {
+  type LmlLimiter,
+  Semaphore,
+  TokenBucket,
+  createLmlLimiter as createSharedLmlLimiter,
+  envInt,
+} from '@wxyc/lml-client';
 
 export { type LmlLimiter, Semaphore, TokenBucket };
-
-const envInt = (name: string, fallback: number): number => {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  const parsed = Number(raw);
-  if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  console.warn(`lml-limiter: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`);
-  return fallback;
-};
 
 export const createLmlLimiter = (config?: { maxConcurrent?: number; ratePerMinute?: number }): LmlLimiter =>
   createSharedLmlLimiter({
@@ -44,9 +46,9 @@ export const createLmlLimiter = (config?: { maxConcurrent?: number; ratePerMinut
   });
 
 /**
- * Module-level singleton consumed by lml-fetch.ts. Reads BACKFILL_LML_* from
- * env at module load — see the matching note on the rotation-release-id
- * backfill's limiter for why mutation of `process.env` after import does
- * NOT reconfigure this singleton.
+ * Module-level singleton consumed by lml-fetch.ts. Reads BACKFILL_LML_*
+ * from env at module load — mutation of `process.env` after import does
+ * NOT reconfigure this singleton. Tests that exercise different limits
+ * must call `createLmlLimiter()` directly with explicit config.
  */
 export const defaultLmlLimiter: LmlLimiter = createLmlLimiter();

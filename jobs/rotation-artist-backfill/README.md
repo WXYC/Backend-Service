@@ -33,17 +33,21 @@ Local dev: set `LOCAL_DEV=1` to skip the gate when `commit_sha` is null (Railway
 
 ## Configuration
 
-| Env var                       | Default    | Purpose                                                                       |
-| ----------------------------- | ---------- | ----------------------------------------------------------------------------- |
-| `LIBRARY_METADATA_URL`        | (required) | LML base URL.                                                                 |
-| `LML_API_KEY`                 | unset      | Bearer token; sent when set.                                                  |
-| `BACKFILL_LML_MAX_CONCURRENT` | `3`        | Local semaphore + orchestrator concurrency.                                   |
-| `BACKFILL_LML_RATE_PER_MIN`   | `20`       | Token bucket refill rate per minute.                                          |
-| `DRY_RUN`                     | unset      | When `1`/`true`: enumerate release + artist cardinality, skip artist calls.   |
-| `LOCAL_DEV`                   | unset      | When `1`: permit null `commit_sha` on `/health`.                              |
-| `GITHUB_TOKEN`                | unset      | Sent on the GitHub compare API call for the deploy gate (60→5000 req/h tier). |
+| Env var                       | Default    | Purpose                                                                                                                                                                   |
+| ----------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LIBRARY_METADATA_URL`        | (required) | LML base URL.                                                                                                                                                             |
+| `LML_API_KEY`                 | (required) | Bearer token for LML's `_lml_protected` endpoints. Optional in local dev where LML's `LML_REQUIRE_AUTH` is off; required in staging/prod (matches sibling backfill jobs). |
+| `BACKFILL_LML_MAX_CONCURRENT` | `3`        | Local semaphore + orchestrator concurrency.                                                                                                                               |
+| `BACKFILL_LML_RATE_PER_MIN`   | `20`       | Token bucket refill rate per minute.                                                                                                                                      |
+| `DRY_RUN`                     | unset      | When `1`/`true`/`True`/`TRUE`: enumerate release + artist cardinality, skip artist calls.                                                                                 |
+| `LOCAL_DEV`                   | unset      | When `1`: permit null `commit_sha` on `/health`.                                                                                                                          |
+| `GITHUB_TOKEN`                | unset      | Sent on the GitHub compare API call for the deploy gate (60→5000 req/h tier).                                                                                             |
 
-Rate-limit ceiling defaults pair with LML's own per-replica `discogs_rate_limit=50` cap: 20 req/min from this cron leaves >30 req/min for foreground LML traffic during the run.
+Rate-limit ceiling defaults pair with LML's own per-replica `discogs_rate_limit=50` cap: this cron caps **attempted** egress at 20 req/min (failed calls also consume a token), so foreground LML traffic gets at least 30 req/min of headroom during the run window.
+
+### Known caveat: BS-side timeout < LML's retry budget
+
+The shared `@wxyc/lml-client.lmlFetch` enforces a 30 s timeout on every LML call, and `getRelease`/`getArtistDetails` do not currently accept a `timeoutMs` override (unlike `lookupMetadata`). LML server-side can hold a Discogs round-trip up to ~62 s during a 429-retry storm (`discogs_max_retries=5`, jittered exponential capped at 60 s). So a BS-side 30 s timeout can return `kind: 'error'` while LML's background completes and writes back the row — the next day's run picks it up as a PG hit. Counters undercount the actual back-fill rate during 429-heavy windows; fix is to thread `timeoutMs`/`budgetMs` through the lml-client release/artist endpoints (out of scope for this PR).
 
 ## Run procedure
 
