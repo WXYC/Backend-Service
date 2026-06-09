@@ -74,8 +74,18 @@ const envBool = (name: string): boolean => {
  * Pull a usable error message off `unknown` so a `throw 'string'` or
  * `throw null` from upstream code doesn't crash the catch block via
  * `(error as Error).message`.
+ *
+ * For an AggregateError (the multi-task failure case from
+ * runWithConcurrency), the wrapper message alone (`"3 tasks failed..."`)
+ * loses the leaf failures from the JSON log line. Ops triaging through
+ * container logs without Sentry access would otherwise see only the
+ * count. Join the leaf messages so the log line is self-contained.
  */
 const errorMessage = (e: unknown): string => {
+  if (e instanceof AggregateError) {
+    const leaves = e.errors.map((leaf: unknown) => (leaf instanceof Error ? leaf.message : String(leaf))).join('; ');
+    return `${e.message} [${leaves}]`;
+  }
   if (e instanceof Error) return e.message;
   if (typeof e === 'string') return e;
   try {
@@ -141,6 +151,13 @@ const main = async (): Promise<void> => {
           error_name: errorName(error),
         });
         captureError(error, step);
+        // Mark the wrapping `${JOB_NAME}.run` span as failed so OTLP /
+        // Sentry error-rate alerts keyed on `op:job.run` actually fire.
+        // The catch swallows the throw (we set process.exitCode = 1 and
+        // let the cron exit cleanly so safeFinalize still runs), which
+        // would otherwise leave the parent span resolving OK and hide
+        // the failure from dashboards. Codes: 0 = unset, 1 = OK, 2 = ERROR.
+        Sentry.getActiveSpan()?.setStatus({ code: 2, message: step });
         process.exitCode = 1;
       }
     });

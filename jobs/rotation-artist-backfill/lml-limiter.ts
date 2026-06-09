@@ -23,8 +23,8 @@
  * so ops can dial these down without a redeploy if foreground traffic
  * patterns change.
  *
- * `envInt` is re-exported from `@wxyc/lml-client` rather than redefined
- * locally so a future tightening of env validation (e.g. reject fractional
+ * `envInt` is imported from `@wxyc/lml-client` (not redefined locally)
+ * so a future tightening of env validation (e.g. reject fractional
  * values, add an upper bound) lives in one place across every BS workload
  * that talks to LML.
  */

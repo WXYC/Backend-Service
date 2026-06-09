@@ -287,7 +287,29 @@ describe('runBackfill', () => {
     expect(caught).toBeInstanceOf(AggregateError);
     const aggregate = caught as AggregateError;
     expect(aggregate.errors).toHaveLength(3);
-    const messages = aggregate.errors.map((e: Error) => e.message).sort();
+    const messages = (aggregate.errors as Error[]).map((e) => e.message).sort();
     expect(messages).toEqual(['task 10 failed', 'task 20 failed', 'task 30 failed']);
+  });
+
+  it('does not fire the totals span when loadReleaseIds throws (avoids all-zero counter span on guard-level failure)', async () => {
+    // If loadReleaseIds rejects before any tier runs, the totals are
+    // all-zero by construction. Firing the span anyway would be
+    // indistinguishable from a legitimate empty-rotation day on the
+    // dashboard. The orchestrator gates on a `didLoadIds` sentinel.
+    const loadReleaseIds = jest.fn().mockRejectedValue(new Error('PG pool exhausted'));
+    const fetchReleaseFn = jest.fn();
+    const fetchArtistFn = jest.fn();
+
+    await expect(
+      runBackfill({
+        loadReleaseIds,
+        fetchReleaseFn,
+        fetchArtistFn,
+        concurrency: 3,
+      })
+    ).rejects.toThrow('PG pool exhausted');
+
+    expect(fetchReleaseFn).not.toHaveBeenCalled();
+    expect(fetchArtistFn).not.toHaveBeenCalled();
   });
 });
