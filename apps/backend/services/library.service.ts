@@ -1494,11 +1494,7 @@ export const updateAlbumInDB = async (
     set.canonical_entity_confidence = null;
     set.canonical_entity_resolved_at = null;
   }
-  const result = await db
-    .update(library)
-    .set(set)
-    .where(eq(library.id, album_id))
-    .returning({ id: library.id });
+  const result = await db.update(library).set(set).where(eq(library.id, album_id)).returning({ id: library.id });
   return result[0];
 };
 

@@ -461,7 +461,10 @@ describe('GET /library/query — review-feedback regressions (PR #1154)', () => 
     // 'Bioluminescence' is a CTA-cascade trigger when unfiltered. Cascade rows
     // carry no date_lost/date_found, so with missing=true the cascade must be
     // skipped entirely instead of leaking CTA/LML rows into the missing view.
-    const res = await auth.get('/library/query').query({ q: 'Bioluminescence', missing: 'true', limit: 10 }).expect(200);
+    const res = await auth
+      .get('/library/query')
+      .query({ q: 'Bioluminescence', missing: 'true', limit: 10 })
+      .expect(200);
 
     expect(res.body.results.length).toBe(0);
     expect(res.body.total).toBe(0);

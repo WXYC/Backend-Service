@@ -1,13 +1,6 @@
 import * as Sentry from '@sentry/node';
 import { inArray, sql, type SQL } from 'drizzle-orm';
-import {
-  db,
-  library,
-  library_artist_view,
-  genres,
-  format as formatTable,
-  artist_search_alias,
-} from '@wxyc/database';
+import { db, library, library_artist_view, genres, format as formatTable, artist_search_alias } from '@wxyc/database';
 import type { TrackMatchHint } from '@wxyc/shared/dtos';
 import {
   parseSearchQuery,
