@@ -1,9 +1,7 @@
 jest.mock('@wxyc/database', () => ({
   db: {
-    select: jest.fn(),
     insert: jest.fn(),
   },
-  user: { id: 'user.id' },
   user_activity: {
     userId: 'user_activity.userId',
     requestCount: 'user_activity.requestCount',
@@ -23,14 +21,6 @@ import { recordActivity } from '../../../apps/backend/services/activityTracking.
 
 const mockDb = db as jest.Mocked<typeof db>;
 
-function mockUserLookup(rows: { id: string }[]) {
-  const limit = jest.fn().mockResolvedValue(rows);
-  const where = jest.fn().mockReturnValue({ limit });
-  const from = jest.fn().mockReturnValue({ where });
-  mockDb.select.mockReturnValue({ from } as never);
-  return { from, where, limit };
-}
-
 function mockActivityUpsert() {
   const onConflictDoUpdate = jest.fn().mockResolvedValue(undefined);
   const values = jest.fn().mockReturnValue({ onConflictDoUpdate });
@@ -43,16 +33,21 @@ describe('activityTracking.service', () => {
     jest.clearAllMocks();
   });
 
-  it('skips upsert when user id is not in auth_user', async () => {
-    mockUserLookup([]);
+  it('upserts without a user existence pre-check', async () => {
+    const { values, onConflictDoUpdate } = mockActivityUpsert();
 
     await recordActivity('opaque-bearer-token');
 
-    expect(mockDb.insert).not.toHaveBeenCalled();
+    expect(values).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'opaque-bearer-token',
+        requestCount: 1,
+      })
+    );
+    expect(onConflictDoUpdate).toHaveBeenCalled();
   });
 
-  it('upserts activity when user exists', async () => {
-    mockUserLookup([{ id: 'user-123' }]);
+  it('upserts activity for a known user id', async () => {
     const { values, onConflictDoUpdate } = mockActivityUpsert();
 
     await recordActivity('user-123');
