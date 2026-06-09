@@ -15,7 +15,7 @@
  */
 
 import { db, venues, concerts } from '@wxyc/database';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import type { ParsedConcert } from './rhp-types.js';
 import { VENUE_SEEDS, type VenueSeed } from './rhp-venues.js';
@@ -34,24 +34,32 @@ export type WriteConcertOutcome = {
 };
 
 /**
- * Resolve a venue slug to a numeric id, creating the row if missing AND
- * refreshing name/city/state/address on every call.
+ * Resolve a venue slug to a numeric id, creating the row if missing.
  *
- * On first sight of an unknown slug we synthesize a placeholder row from
- * the concert's `venue_name` / `venue_address` fields (filled by the
- * parser from the JSON-LD `location` block). When VENUE_SEEDS later gains
- * an entry for the slug — or the JSON-LD location updates — the ON
- * CONFLICT branch overwrites the placeholder so the venues row converges
- * to the latest seed/scrape values rather than getting stuck on stale
- * placeholder data. There is no admin-edit protection at this layer yet
- * (no `is_admin_edited` flag in the schema); if/when manual venue
- * editing becomes a documented workflow this will need to gate the SET
- * clause on a flag.
+ * Two distinct policies depending on whether the slug is in VENUE_SEEDS:
  *
- * `created` is computed from PG's `xmax` system column (0 on a fresh
- * INSERT, non-zero on the ON CONFLICT UPDATE branch) so the value is
- * truthful under concurrent runners rather than a "we took the INSERT
- * code path" sentinel.
+ * - **Seeded** (canonical static data lives in `rhp-venues.ts`): on
+ *   conflict, refresh name/city/state/address from the seed BUT only
+ *   when at least one column actually differs from the row already in
+ *   the table (via `setWhere`). This lifts a placeholder row that was
+ *   inserted before the seed existed AND keeps `last_modified` truthful
+ *   ("this row hasn't changed since X") instead of bumping it every
+ *   nightly run.
+ *
+ * - **Unseeded** (a brand-new room the scraper hasn't been told about):
+ *   INSERT if missing, otherwise DO NOTHING. We never overwrite an
+ *   existing unseeded row from scrape inputs, because the scrape's
+ *   `fallbackName / fallbackAddress` can be weaker than what the row
+ *   already has (e.g. an earlier scrape captured a full street address
+ *   that this scrape's JSON-LD omits) and because there's no
+ *   admin-edit-protection flag on the table yet — so any operator who
+ *   hand-corrects city/state/address must not lose their edit on the
+ *   next nightly run.
+ *
+ * `created` is computed from PG's `xmax = 0` predicate in the
+ * seeded path (truthful under concurrent runners) and from the
+ * presence/absence of a row in the unseeded INSERT … DO NOTHING
+ * RETURNING result.
  *
  * Callers should cache the (slug → id) map across a single run to avoid
  * one round-trip per concert in the steady state.
@@ -62,42 +70,75 @@ export const ensureVenue = async (
   fallbackAddress: string | null
 ): Promise<WriteVenueOutcome> => {
   const seed = VENUE_SEEDS.find((s) => s.slug === slug);
-  const values: VenuesValue = seed
-    ? {
-        slug: seed.slug,
-        name: seed.name,
-        city: seed.city,
-        state: seed.state,
-        address: seed.address,
-      }
-    : {
-        slug,
-        name: fallbackName ?? slug,
-        city: 'Unknown',
-        state: 'NC',
-        address: fallbackAddress,
-      };
 
-  const result = await db
+  if (seed) {
+    const seedValues: VenuesValue = {
+      slug: seed.slug,
+      name: seed.name,
+      city: seed.city,
+      state: seed.state,
+      address: seed.address,
+    };
+    const result = await db
+      .insert(venues)
+      .values(seedValues)
+      .onConflictDoUpdate({
+        target: venues.slug,
+        set: {
+          name: seed.name,
+          city: seed.city,
+          state: seed.state,
+          address: seed.address,
+          last_modified: sql`now()`,
+        },
+        // Skip the UPDATE when nothing actually changed so `last_modified`
+        // stays meaningful as an audit signal ('hasn't been touched
+        // since X') rather than ticking every nightly run.
+        setWhere: sql`${venues.name} IS DISTINCT FROM ${seed.name}
+            OR ${venues.city} IS DISTINCT FROM ${seed.city}
+            OR ${venues.state} IS DISTINCT FROM ${seed.state}
+            OR ${venues.address} IS DISTINCT FROM ${seed.address}`,
+      })
+      .returning({
+        id: venues.id,
+        created: sql<boolean>`xmax = 0`,
+      });
+
+    if (result.length > 0) {
+      const row = result[0];
+      return { venue_id: row.id, created: row.created };
+    }
+    // setWhere predicate suppressed the UPDATE (nothing changed) AND no
+    // INSERT happened (row already existed). Lookup the existing id.
+    const existing = await db.select({ id: venues.id }).from(venues).where(eq(venues.slug, slug)).limit(1);
+    if (existing.length === 0) {
+      throw new Error(`ensureVenue: seeded slug '${slug}' missing after upsert with no-op setWhere`);
+    }
+    return { venue_id: existing[0].id, created: false };
+  }
+
+  // Unseeded path: INSERT-or-preserve. Never overwrite a row we don't
+  // own with potentially-weaker scrape inputs.
+  const placeholderValues: VenuesValue = {
+    slug,
+    name: fallbackName ?? slug,
+    city: 'Unknown',
+    state: 'NC',
+    address: fallbackAddress,
+  };
+  const inserted = await db
     .insert(venues)
-    .values(values)
-    .onConflictDoUpdate({
-      target: venues.slug,
-      set: {
-        name: values.name,
-        city: values.city,
-        state: values.state,
-        address: values.address,
-        last_modified: sql`now()`,
-      },
-    })
-    .returning({
-      id: venues.id,
-      created: sql<boolean>`xmax = 0`,
-    });
-
-  const row = result[0];
-  return { venue_id: row.id, created: row.created };
+    .values(placeholderValues)
+    .onConflictDoNothing({ target: venues.slug })
+    .returning({ id: venues.id });
+  if (inserted.length > 0) {
+    return { venue_id: inserted[0].id, created: true };
+  }
+  const existing = await db.select({ id: venues.id }).from(venues).where(eq(venues.slug, slug)).limit(1);
+  if (existing.length === 0) {
+    throw new Error(`ensureVenue: unseeded slug '${slug}' missing after INSERT DO NOTHING`);
+  }
+  return { venue_id: existing[0].id, created: false };
 };
 
 /**

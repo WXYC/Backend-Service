@@ -27,7 +27,9 @@ export type SchemaOffer = {
 /** Minimal subset of schema.org `Event` we read from. */
 export type SchemaEvent = {
   '@context'?: string;
-  '@type': 'Event' | 'MusicEvent';
+  // schema.org permits `@type` to be a single string OR an array of
+  // strings (multi-typing pattern, e.g. `["Event","MusicEvent"]`).
+  '@type': 'Event' | 'MusicEvent' | ReadonlyArray<string>;
   name: string;
   startDate: string;
   url?: string;
