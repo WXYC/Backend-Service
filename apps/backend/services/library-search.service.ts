@@ -60,18 +60,21 @@ const FIELD_COLUMNS: Record<CatalogField, SQL> = {
   label: sql`${library_artist_view.label}`,
 };
 
-const SORT_COLUMNS: Record<CatalogSort, SQL> = {
-  artist: sql`${library_artist_view.artist_name}`,
-  album: sql`${library_artist_view.album_title}`,
-  plays: sql`${library_artist_view.plays}`,
-  date: sql`${library_artist_view.add_date}`,
+// Plain identifiers (not view-qualified column refs) because the data query
+// sorts the deduped subquery's projection, where qualified names would not
+// resolve. Keys come from the fixed CatalogSort union, never user input.
+const SORT_IDENT: Record<CatalogSort, string> = {
+  artist: 'artist_name',
+  album: 'album_title',
+  plays: 'plays',
+  date: 'add_date',
 };
 
-const SECONDARY_SORT: Record<CatalogSort, SQL> = {
-  artist: sql`${library_artist_view.album_title}`,
-  album: sql`${library_artist_view.artist_name}`,
-  plays: sql`${library_artist_view.artist_name}`,
-  date: sql`${library_artist_view.artist_name}`,
+const SECONDARY_SORT_IDENT: Record<CatalogSort, string> = {
+  artist: 'album_title',
+  album: 'artist_name',
+  plays: 'artist_name',
+  date: 'artist_name',
 };
 
 export const MIN_CASCADE_QUERY_LENGTH = 4;
@@ -108,14 +111,22 @@ export async function searchLibrary(
 
   const where = combineWhere(queryWhere, filterWhere);
 
-  const orderDirection = params.order === 'asc' ? sql`ASC` : sql`DESC`;
-  const orderBy = sql`${SORT_COLUMNS[params.sort]} ${orderDirection}, ${SECONDARY_SORT[params.sort]} ASC, ${library_artist_view.id} ASC`;
+  const orderDirection = params.order === 'asc' ? 'ASC' : 'DESC';
+  const orderBy = sql.raw(
+    `"${SORT_IDENT[params.sort]}" ${orderDirection}, "${SECONDARY_SORT_IDENT[params.sort]}" ASC, "id" ASC`
+  );
 
   const offset = params.page * params.limit;
   const fromClause = where ? sql`FROM ${library_artist_view} WHERE ${where}` : sql`FROM ${library_artist_view}`;
 
-  const dataQuery = sql`
-    SELECT
+  // DISTINCT ON dedupes albums carrying multiple active rotation rows — the
+  // rotation table explicitly permits several unkilled rows per
+  // (album_id, rotation_bin) across re-bins/re-promotes, and the view's LEFT
+  // JOIN emits one row per rotation row (review issue 15). The inner ORDER BY
+  // picks a deterministic rotation_bin per album; the outer query applies
+  // the caller's sort over the deduped set.
+  const dedupedSelect = sql`
+    SELECT DISTINCT ON (${library_artist_view.id})
       ${library_artist_view.id} AS id,
       ${library_artist_view.add_date} AS add_date,
       ${library_artist_view.album_title} AS album_title,
@@ -132,10 +143,14 @@ export async function searchLibrary(
       ${library_artist_view.on_streaming} AS on_streaming,
       ${library_artist_view.album_artist} AS album_artist
     ${fromClause}
+    ORDER BY ${library_artist_view.id} ASC, ${library_artist_view.rotation_bin} ASC
+  `;
+  const dataQuery = sql`
+    SELECT * FROM (${dedupedSelect}) AS deduped
     ORDER BY ${orderBy}
     LIMIT ${params.limit} OFFSET ${offset}
   `;
-  const countQuery = sql`SELECT COUNT(*)::int AS total ${fromClause}`;
+  const countQuery = sql`SELECT COUNT(DISTINCT ${library_artist_view.id})::int AS total ${fromClause}`;
 
   const [dataRows, countRows] = await Promise.all([db.execute(dataQuery), db.execute(countQuery)]);
 
@@ -149,6 +164,11 @@ export async function searchLibrary(
   // LML's `Semaphore(5) + TokenBucket(50/min)` chokepoint; pagination beyond
   // page 0 stays empty so clients don't scroll a bounded fallback list.
   if (params.page !== 0) return { results, total };
+  // Cascade rows (`TaggedLibraryViewEntry`) carry no date_lost/date_found, so
+  // neither `missing=true` nor `missing=false` can be honored in-memory —
+  // skip the cascade entirely rather than leak CTA/LML rows into the
+  // librarian-facing missing view.
+  if (params.missing !== undefined) return { results, total };
   const trimmed = params.q.trim();
   if (!passesCascadeGate(trimmed, conditions)) return { results, total };
 
@@ -346,6 +366,15 @@ function buildFilterClause(params: LibraryQueryParams): SQL | null {
         AND ${library.date_lost} IS NOT NULL
         AND (${library.date_found} IS NULL OR ${library.date_found} < ${library.date_lost})
     )`);
+  } else if (params.missing === false) {
+    // Inverse arm so a UI toggle that round-trips both states filters in both
+    // directions instead of silently no-opping on false (review issue 9).
+    parts.push(sql`NOT EXISTS (
+      SELECT 1 FROM ${library}
+      WHERE ${library.id} = ${library_artist_view.id}
+        AND ${library.date_lost} IS NOT NULL
+        AND (${library.date_found} IS NULL OR ${library.date_found} < ${library.date_lost})
+    )`);
   }
   if (params.genres !== undefined && params.genres.length > 0) {
     parts.push(inArray(library_artist_view.genre_name, params.genres));
@@ -428,7 +457,9 @@ async function validateEnumFilters(genres?: string[], formats?: string[]): Promi
 }
 
 /** Parse comma-separated rotation bin codes; validates against active bins. */
-export function parseRotationBinsQueryList(...raw: (string | undefined)[]): CatalogRotationBin[] | undefined {
+export function parseRotationBinsQueryList(
+  ...raw: (string | string[] | undefined)[]
+): CatalogRotationBin[] | undefined {
   const parsed = parseEnumQueryList(...raw);
   if (!parsed) return undefined;
   const valid = new Set<string>(VALID_ROTATION_BINS);
@@ -440,17 +471,24 @@ export function parseRotationBinsQueryList(...raw: (string | undefined)[]): Cata
   return parsed as CatalogRotationBin[];
 }
 
-/** Parse comma-separated enum query values; trims and dedupes. */
-export function parseEnumQueryList(...raw: (string | undefined)[]): string[] | undefined {
+/**
+ * Parse comma-separated enum query values; trims and dedupes. Accepts
+ * `string[]` per value because Express's `simple` query parser yields arrays
+ * for repeated keys (`?genres=Rock&genres=Jazz`).
+ */
+export function parseEnumQueryList(...raw: (string | string[] | undefined)[]): string[] | undefined {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const value of raw) {
     if (!value) continue;
-    for (const part of value.split(',')) {
-      const trimmed = part.trim();
-      if (!trimmed || seen.has(trimmed)) continue;
-      seen.add(trimmed);
-      out.push(trimmed);
+    for (const piece of Array.isArray(value) ? value : [value]) {
+      if (typeof piece !== 'string') continue;
+      for (const part of piece.split(',')) {
+        const trimmed = part.trim();
+        if (!trimmed || seen.has(trimmed)) continue;
+        seen.add(trimmed);
+        out.push(trimmed);
+      }
     }
   }
   return out.length > 0 ? out : undefined;

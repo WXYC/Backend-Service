@@ -388,3 +388,98 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     expect(res.body.results.length).toBe(0);
   });
 });
+
+/**
+ * Regressions from the PR #1154 review: repeated-query-key crashes (Express
+ * `simple` parser yields string[]), the missing=false inverse filter, the
+ * cascade leak into the missing view, and rotation-driven row duplication.
+ */
+describe('GET /library/query — review-feedback regressions (PR #1154)', () => {
+  let auth;
+  let album;
+  const uniq = Date.now();
+
+  beforeAll(async () => {
+    auth = createAuthRequest(request, global.access_token);
+    const res = await auth
+      .post('/library')
+      .send({
+        album_title: `Query Fixture ${uniq}`,
+        artist_name: 'Built to Spill',
+        label: 'Query Fixture Label',
+        genre_id: 11,
+        format_id: 1,
+      })
+      .expect(201);
+    album = res.body;
+  });
+
+  test('repeated genres keys are merged instead of crashing', async () => {
+    const res = await auth.get('/library/query?genres=Rock&genres=Jazz&limit=100').expect(200);
+    expect(res.body.results.length).toBeGreaterThan(0);
+    for (const row of res.body.results) {
+      expect(['Rock', 'Jazz']).toContain(row.genre_name);
+    }
+  });
+
+  test('repeated rotation_bins keys are merged instead of crashing', async () => {
+    const res = await auth.get('/library/query?rotation_bins=H&rotation_bins=M&limit=100').expect(200);
+    for (const row of res.body.results) {
+      expect(['H', 'M']).toContain(row.rotation_bin);
+    }
+  });
+
+  test('repeated q keys return 400 instead of 500', async () => {
+    await auth.get('/library/query?q=Bu&q=lt').expect(400);
+  });
+
+  test('missing=true and missing=false partition the catalog', async () => {
+    await auth.patch(`/library/${album.id}/missing`).expect(200);
+
+    const missingRes = await auth
+      .get('/library/query')
+      .query({ q: `Query Fixture ${uniq}`, missing: 'true', limit: 50 })
+      .expect(200);
+    expect(missingRes.body.results.some((r) => r.id === album.id)).toBe(true);
+
+    const notMissingRes = await auth
+      .get('/library/query')
+      .query({ q: `Query Fixture ${uniq}`, missing: 'false', limit: 50 })
+      .expect(200);
+    expect(notMissingRes.body.results.some((r) => r.id === album.id)).toBe(false);
+
+    await auth.patch(`/library/${album.id}/found`).expect(200);
+
+    const foundRes = await auth
+      .get('/library/query')
+      .query({ q: `Query Fixture ${uniq}`, missing: 'false', limit: 50 })
+      .expect(200);
+    expect(foundRes.body.results.some((r) => r.id === album.id)).toBe(true);
+  });
+
+  test('cascade is skipped when the missing filter is present', async () => {
+    // 'Bioluminescence' is a CTA-cascade trigger when unfiltered. Cascade rows
+    // carry no date_lost/date_found, so with missing=true the cascade must be
+    // skipped entirely instead of leaking CTA/LML rows into the missing view.
+    const res = await auth.get('/library/query').query({ q: 'Bioluminescence', missing: 'true', limit: 10 }).expect(200);
+
+    expect(res.body.results.length).toBe(0);
+    expect(res.body.total).toBe(0);
+  });
+
+  test('an album with multiple active rotation rows appears once', async () => {
+    await auth.post('/library/rotation').send({ album_id: album.id, rotation_bin: 'H' }).expect(201);
+    await auth.post('/library/rotation').send({ album_id: album.id, rotation_bin: 'M' }).expect(201);
+
+    const res = await auth
+      .get('/library/query')
+      .query({ q: `Query Fixture ${uniq}`, limit: 50 })
+      .expect(200);
+    const rows = res.body.results.filter((r) => r.id === album.id);
+    expect(rows.length).toBe(1);
+
+    const binFiltered = await auth.get('/library/query').query({ rotation_bins: 'H,M', limit: 100 }).expect(200);
+    const binRows = binFiltered.body.results.filter((r) => r.id === album.id);
+    expect(binRows.length).toBe(1);
+  });
+});

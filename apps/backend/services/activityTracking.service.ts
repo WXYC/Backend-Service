@@ -1,18 +1,18 @@
-import { db, user, user_activity } from '@wxyc/database';
+import { db, user_activity } from '@wxyc/database';
 import { eq, sql } from 'drizzle-orm';
 
 /**
  * Records activity for a user, incrementing their request count and updating lastSeenAt.
  * Uses upsert to handle both new and existing users.
  *
+ * No existence pre-check: it cost a SELECT round-trip on every authenticated
+ * request, and silently swallowing orphaned user IDs masked the FK-violation
+ * signal. A 23503 on the insert propagates to trackActivity's fire-and-forget
+ * catch, which logs and reports to Sentry without failing the request.
+ *
  * @param userId - The user ID to record activity for
  */
 export async function recordActivity(userId: string): Promise<void> {
-  const existingUser = await db.select({ id: user.id }).from(user).where(eq(user.id, userId)).limit(1);
-  if (existingUser.length === 0) {
-    return;
-  }
-
   await db
     .insert(user_activity)
     .values({
