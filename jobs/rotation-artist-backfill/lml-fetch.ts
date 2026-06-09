@@ -70,14 +70,22 @@ const classifyError = (e: unknown): FetchOutcome<never> => {
  * is the queryable signal for error-rate dashboards — without this,
  * every span comes back `ok` even when classifyError returned
  * `kind: 'error'` (because the throw was caught and converted to a
- * return value). One per finding from review pass.
+ * return value).
+ *
+ * `not_found` is NOT an error: a 404 here means LML#510 correctly
+ * tombstoned the row server-side and re-runs will surface it as a
+ * pure PG hit. Treating it as code=2 (ERROR) would inflate
+ * `op:http.client` error-rate alerts on every steady-state run.
+ * Annotate with code=1 (OK) + message='not_found' instead.
+ *
+ * Status codes: 0 = unset, 1 = OK, 2 = ERROR (OTLP / @sentry/core).
  */
 const markSpanOutcome = <T>(outcome: FetchOutcome<T>): void => {
   if (outcome.kind === 'ok') return;
   const span = Sentry.getActiveSpan();
   if (!span) return;
   if (outcome.kind === 'not_found') {
-    span.setStatus({ code: 2, message: 'not_found' });
+    span.setStatus({ code: 1, message: 'not_found' });
   } else {
     span.setStatus({ code: 2, message: outcome.retryable ? 'retryable_error' : 'permanent_error' });
   }

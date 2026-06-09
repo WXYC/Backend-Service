@@ -86,15 +86,25 @@ export type RunResult = { totals: Totals };
  * Uses `Promise.allSettled` so one task throwing does NOT cause sibling
  * tasks to be orphaned mid-flight: if a callback throws, the other
  * tasks still drain to completion (releasing their semaphore permits)
- * and the wrapper rethrows the first failure once everything is done.
- * Without this, a `Promise.all([w1, w2, w3])` rejection on w2 would
- * leave w1/w3 mid-`await` and their LML responses unobserved — wasting
- * rate-limit budget and risking writes after the caller has moved on.
+ * and the wrapper rethrows once everything is done.
+ *
+ * When MULTIPLE tasks reject, every rejection is sent to Sentry via
+ * `captureException` before the wrapper rethrows. The rethrow itself
+ * is wrapped in `AggregateError` so the caller's catch block sees the
+ * full set, not just the first — losing 2nd+3rd failures would hide
+ * real bugs (e.g., a shared decoder regression affecting many calls).
+ *
+ * Memory note: this materializes `items.length` Promise objects (each
+ * blocked on `sem.acquire()`) up front. The Semaphore caps the IN-FLIGHT
+ * subset, not the materialized total. For active rotation (hundreds of
+ * releases, low thousands of distinct artists) the eager materialization
+ * is negligible; if this is ever applied to 10k+ inputs, switch to a
+ * cursor-based worker pool whose Promise count is bounded by `limit`.
  */
 const runWithConcurrency = async <T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> => {
   if (limit < 1) throw new Error(`concurrency must be >= 1, got ${limit}`);
   if (items.length === 0) return;
-  const sem = new Semaphore(Math.min(limit, items.length));
+  const sem = new Semaphore(limit);
   const tasks = items.map(async (item) => {
     await sem.acquire();
     try {
@@ -104,11 +114,16 @@ const runWithConcurrency = async <T>(items: T[], limit: number, run: (item: T) =
     }
   });
   const settled = await Promise.allSettled(tasks);
+  const errors: Error[] = [];
   for (const result of settled) {
     if (result.status === 'rejected') {
-      throw result.reason instanceof Error ? result.reason : new Error(String(result.reason));
+      const e = result.reason instanceof Error ? result.reason : new Error(String(result.reason));
+      Sentry.captureException(e, { tags: { step: 'runWithConcurrency' } });
+      errors.push(e);
     }
   }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, `${errors.length} tasks failed in runWithConcurrency`);
 };
 
 const tally = <T>(totals: Totals, phase: 'releases' | 'artists', outcome: FetchOutcome<T>): void => {
@@ -126,17 +141,17 @@ const tally = <T>(totals: Totals, phase: 'releases' | 'artists', outcome: FetchO
 };
 
 /**
- * Project the run totals onto a Sentry span with numeric attributes set
- * at creation time (per the BS#1081 convention — late `setAttribute`
+ * Project the run totals onto a Sentry child span with numeric attributes
+ * set at creation time (per the BS#1081 convention — late `setAttribute`
  * calls index numbers as strings and break sum/avg/p95 aggregation).
- * Fires on every code path including dryRun so a dry invocation produces
- * the same observability surface as a real one.
+ * Span name follows the sibling artist-search-alias-consumer's
+ * `${JOB_NAME}.run.totals` shape so dashboards filtering by span name
+ * pattern can group all backfill totals consistently.
  */
 const projectTotalsSpan = (totals: Totals, dryRun: boolean): void => {
   Sentry.startSpan(
     {
-      name: 'rotation-artist-backfill.totals',
-      op: 'job.tally',
+      name: 'rotation-artist-backfill.run.totals',
       attributes: {
         'backfill.dry_run': dryRun ? 1 : 0,
         'backfill.releases_scanned': totals.releases_scanned,
@@ -163,66 +178,72 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
   const dryRun = deps.dryRun ?? false;
   const totals = initialTotals();
 
-  const releaseIds = await deps.loadReleaseIds();
-  log('info', 'plan', `loaded ${releaseIds.length} active rotation release ids`, {
-    release_count: releaseIds.length,
-    concurrency,
-    dry_run: dryRun,
-  });
+  // Fire the totals span no matter how the run ends: success, dryRun,
+  // or fan-out throw. The accumulated counters are real and the
+  // dashboard pulling on them shouldn't go blank because one task
+  // rejected near the end of the run.
+  try {
+    const releaseIds = await deps.loadReleaseIds();
+    log('info', 'plan', `loaded ${releaseIds.length} active rotation release ids`, {
+      release_count: releaseIds.length,
+      concurrency,
+      dry_run: dryRun,
+    });
 
-  // Phase 1 of the two-tier loop: fan out the release fetches. Each
-  // release result feeds an artist-id set into the second tier; dedup
-  // is global across the run.
-  const seenArtistIds = new Set<number>();
+    // Phase 1 of the two-tier loop: fan out the release fetches. Each
+    // release result feeds an artist-id set into the second tier; dedup
+    // is global across the run.
+    const seenArtistIds = new Set<number>();
 
-  await runWithConcurrency(releaseIds, concurrency, async (releaseId) => {
-    const outcome = await fetchReleaseFn(releaseId);
-    tally(totals, 'releases', outcome);
-    if (outcome.kind !== 'ok') {
+    await runWithConcurrency(releaseIds, concurrency, async (releaseId) => {
+      const outcome = await fetchReleaseFn(releaseId);
+      tally(totals, 'releases', outcome);
+      if (outcome.kind !== 'ok') {
+        if (outcome.kind === 'error') {
+          log('warn', 'release_error', `release ${releaseId} fetch failed`, {
+            release_id: releaseId,
+            error_message: outcome.error.message,
+            retryable: outcome.retryable,
+          });
+        }
+        return;
+      }
+      for (const artistId of extractPhase1ArtistIds(outcome.value)) {
+        seenArtistIds.add(artistId);
+      }
+    });
+
+    // Sort for deterministic iteration order (and so dry-run log lines
+    // are stable across runs). The Set was populated in release-
+    // completion order, which is non-deterministic under concurrency > 1.
+    const artistIds = Array.from(seenArtistIds).sort((a, b) => a - b);
+    totals.artists_planned = artistIds.length;
+    log('info', 'plan_artists', `release fan-out produced ${artistIds.length} distinct artist ids`, {
+      artists_planned: artistIds.length,
+    });
+
+    if (dryRun) {
+      log('info', 'dry_run', 'dry-run mode: skipping artist fan-out', { artists_planned: artistIds.length });
+      return { totals };
+    }
+
+    // Phase 2 of the two-tier loop: fan out the artist fetches. Each
+    // LML call either returns the cached row, fires `_api_fetch` +
+    // write-back (LML#503), or tombstones a 404 (LML#510).
+    await runWithConcurrency(artistIds, concurrency, async (artistId) => {
+      const outcome = await fetchArtistFn(artistId);
+      tally(totals, 'artists', outcome);
       if (outcome.kind === 'error') {
-        log('warn', 'release_error', `release ${releaseId} fetch failed`, {
-          release_id: releaseId,
+        log('warn', 'artist_error', `artist ${artistId} fetch failed`, {
+          artist_id: artistId,
           error_message: outcome.error.message,
           retryable: outcome.retryable,
         });
       }
-      return;
-    }
-    for (const artistId of extractPhase1ArtistIds(outcome.value)) {
-      seenArtistIds.add(artistId);
-    }
-  });
+    });
 
-  // Sort for deterministic iteration order (and so dry-run log lines are
-  // stable across runs). The Set was populated in release-completion
-  // order, which is non-deterministic under concurrency > 1.
-  const artistIds = Array.from(seenArtistIds).sort((a, b) => a - b);
-  totals.artists_planned = artistIds.length;
-  log('info', 'plan_artists', `release fan-out produced ${artistIds.length} distinct artist ids`, {
-    artists_planned: artistIds.length,
-  });
-
-  if (dryRun) {
-    log('info', 'dry_run', 'dry-run mode: skipping artist fan-out', { artists_planned: artistIds.length });
-    projectTotalsSpan(totals, true);
     return { totals };
+  } finally {
+    projectTotalsSpan(totals, dryRun);
   }
-
-  // Phase 2 of the two-tier loop: fan out the artist fetches. Each LML
-  // call either returns the cached row, fires `_api_fetch` + write-back
-  // (LML#503), or tombstones a 404 (LML#510).
-  await runWithConcurrency(artistIds, concurrency, async (artistId) => {
-    const outcome = await fetchArtistFn(artistId);
-    tally(totals, 'artists', outcome);
-    if (outcome.kind === 'error') {
-      log('warn', 'artist_error', `artist ${artistId} fetch failed`, {
-        artist_id: artistId,
-        error_message: outcome.error.message,
-        retryable: outcome.retryable,
-      });
-    }
-  });
-
-  projectTotalsSpan(totals, false);
-  return { totals };
 };

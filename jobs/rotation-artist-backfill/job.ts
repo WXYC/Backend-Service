@@ -39,9 +39,23 @@ import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'rotation-artist-backfill';
 
+/**
+ * Fail closed before any rows are scanned if the LML transport surface
+ * is misconfigured. LML_API_KEY is required in staging/prod where
+ * `LML_REQUIRE_AUTH` is on — without it every release/artist call would
+ * silently 401, the run would look like a transient outage in
+ * dashboards, and the daily cron would re-run with the same fault
+ * indefinitely. LOCAL_DEV=1 keeps the local-dev escape hatch the
+ * README documents.
+ */
 const requireLmlConfigured = (): void => {
   if (!process.env.LIBRARY_METADATA_URL) {
     throw new Error('LIBRARY_METADATA_URL is not configured; aborting before any rows are scanned.');
+  }
+  if (!process.env.LML_API_KEY && process.env.LOCAL_DEV !== '1') {
+    throw new Error(
+      'LML_API_KEY is not configured; aborting before any rows are scanned. Set LOCAL_DEV=1 to override in dev / CI.'
+    );
   }
 };
 
@@ -91,43 +105,49 @@ const safeFinalize = async (step: string, fn: () => Promise<void>): Promise<void
 
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
-  await Sentry.startSpan({ name: `${JOB_NAME}.run`, op: 'job.run' }, async () => {
-    try {
-      requireLmlConfigured();
-      log('info', 'init', `${JOB_NAME} initialized`);
+  // The wrapping Sentry span MUST end before `closeLogger` runs — that
+  // call invokes `Sentry.close(2000)`, which shuts down the transport.
+  // If the close fires from inside the startSpan callback, the
+  // wrapping span itself gets dropped by the now-closed transport.
+  try {
+    await Sentry.startSpan({ name: `${JOB_NAME}.run`, op: 'job.run' }, async () => {
+      try {
+        requireLmlConfigured();
+        log('info', 'init', `${JOB_NAME} initialized`);
 
-      const guard = await enforceDeployGuard();
-      log('info', 'deploy_guard', 'LML deploy gate passed', {
-        commit_sha: guard.commit_sha,
-        reason: guard.reason,
-      });
+        const guard = await enforceDeployGuard();
+        log('info', 'deploy_guard', 'LML deploy gate passed', {
+          commit_sha: guard.commit_sha,
+          reason: guard.reason,
+        });
 
-      const concurrency = envInt('BACKFILL_LML_MAX_CONCURRENT', 3);
-      const dryRun = envBool('DRY_RUN');
+        const concurrency = envInt('BACKFILL_LML_MAX_CONCURRENT', 3);
+        const dryRun = envBool('DRY_RUN');
 
-      const result = await runBackfill({
-        loadReleaseIds: loadActiveRotationReleaseIds,
-        concurrency,
-        dryRun,
-      });
+        const result = await runBackfill({
+          loadReleaseIds: loadActiveRotationReleaseIds,
+          concurrency,
+          dryRun,
+        });
 
-      log('info', 'done', `${JOB_NAME} completed`, {
-        ...result.totals,
-        dry_run: dryRun,
-      });
-    } catch (error) {
-      const step = error instanceof DeployGuardError ? 'deploy_guard' : 'failed';
-      log('error', step, `${JOB_NAME} failed`, {
-        error_message: errorMessage(error),
-        error_name: errorName(error),
-      });
-      captureError(error, step);
-      process.exitCode = 1;
-    } finally {
-      await safeFinalize('teardown_db', closeDatabaseConnection);
-      await safeFinalize('teardown_logger', closeLogger);
-    }
-  });
+        log('info', 'done', `${JOB_NAME} completed`, {
+          ...result.totals,
+          dry_run: dryRun,
+        });
+      } catch (error) {
+        const step = error instanceof DeployGuardError ? 'deploy_guard' : 'failed';
+        log('error', step, `${JOB_NAME} failed`, {
+          error_message: errorMessage(error),
+          error_name: errorName(error),
+        });
+        captureError(error, step);
+        process.exitCode = 1;
+      }
+    });
+  } finally {
+    await safeFinalize('teardown_db', closeDatabaseConnection);
+    await safeFinalize('teardown_logger', closeLogger);
+  }
 };
 
 /**
