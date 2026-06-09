@@ -204,4 +204,58 @@ describe('runBackfill', () => {
     expect(fetchReleaseFn).not.toHaveBeenCalled();
     expect(fetchArtistFn).not.toHaveBeenCalled();
   });
+
+  it('emits artist ids in sorted order so dry-run output is stable across runs', async () => {
+    // Release-completion order under concurrency > 1 is non-deterministic;
+    // the orchestrator sorts before the Phase-2 fan-out so artist log lines
+    // and totals projection are byte-identical across re-runs.
+    const loadReleaseIds = jest.fn().mockResolvedValue([1, 2, 3]);
+    const fetchReleaseFn = jest.fn((id: number) => {
+      const ids = id === 1 ? [300, 100] : id === 2 ? [50, 200] : [25, 75];
+      return Promise.resolve(ok(makeRelease(ids, id)));
+    });
+    const calledArtists: number[] = [];
+    const fetchArtistFn = jest.fn((id: number) => {
+      calledArtists.push(id);
+      return Promise.resolve(ok(makeArtist(id)));
+    });
+
+    await runBackfill({
+      loadReleaseIds,
+      fetchReleaseFn,
+      fetchArtistFn,
+      concurrency: 1,
+    });
+
+    expect(calledArtists).toEqual([25, 50, 75, 100, 200, 300]);
+  });
+
+  it('one bad task in the artist tier does not orphan sibling in-flight tasks (Promise.allSettled semantics)', async () => {
+    // If `runWithConcurrency` used `Promise.all` directly, a worker rejection
+    // would let the wrapper resolve while siblings are mid-`await`, leaking
+    // promise resolutions after the caller has moved on. The new
+    // semaphore-based pool waits for every task to settle so the rethrow
+    // happens AFTER all permits are released.
+    const loadReleaseIds = jest.fn().mockResolvedValue([1]);
+    const fetchReleaseFn = jest.fn(() => Promise.resolve(ok(makeRelease([10, 20, 30], 1))));
+    const completed: number[] = [];
+    const fetchArtistFn = jest.fn(async (id: number) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (id === 20) throw new Error('synthetic task failure');
+      completed.push(id);
+      return ok(makeArtist(id));
+    });
+
+    await expect(
+      runBackfill({
+        loadReleaseIds,
+        fetchReleaseFn,
+        fetchArtistFn,
+        concurrency: 3,
+      })
+    ).rejects.toThrow('synthetic task failure');
+
+    // Both non-throwing siblings completed (no orphaning).
+    expect(completed.sort((a, b) => a - b)).toEqual([10, 30]);
+  });
 });

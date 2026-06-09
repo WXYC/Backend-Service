@@ -71,28 +71,47 @@ describe('jobs/rotation-artist-backfill/lml-fetch', () => {
       const { fetchRelease } = await loadModule({ getRelease });
       const result = await fetchRelease(1);
       expect(result.kind).toBe('error');
-      if (result.kind === 'error') expect(result.retryable).toBe(true);
+      if (result.kind !== 'error') throw new Error('expected error');
+      expect(result.retryable).toBe(true);
     });
 
     it('maps a 504 LmlClientError to {kind: "error", retryable: true}', async () => {
       const getRelease = jest.fn().mockRejectedValue(new LmlClientError('timed out', 504));
       const { fetchRelease } = await loadModule({ getRelease });
       const result = await fetchRelease(1);
-      if (result.kind === 'error') expect(result.retryable).toBe(true);
+      expect(result.kind).toBe('error');
+      if (result.kind !== 'error') throw new Error('expected error');
+      expect(result.retryable).toBe(true);
+    });
+
+    it('maps a 429 LmlClientError to {kind: "error", retryable: true}', async () => {
+      // 429 is rate-limit; LML may surface it when its own per-replica
+      // Discogs cap collides with foreground traffic. Treating it as
+      // permanent would hide the collision from ops triage.
+      const getRelease = jest.fn().mockRejectedValue(new LmlClientError('rate limited', 429));
+      const { fetchRelease } = await loadModule({ getRelease });
+      const result = await fetchRelease(1);
+      expect(result.kind).toBe('error');
+      if (result.kind !== 'error') throw new Error('expected error');
+      expect(result.retryable).toBe(true);
     });
 
     it('maps a 401/403 LmlClientError to {kind: "error", retryable: false}', async () => {
       const getRelease = jest.fn().mockRejectedValue(new LmlClientError('unauthorized', 401));
       const { fetchRelease } = await loadModule({ getRelease });
       const result = await fetchRelease(1);
-      if (result.kind === 'error') expect(result.retryable).toBe(false);
+      expect(result.kind).toBe('error');
+      if (result.kind !== 'error') throw new Error('expected error');
+      expect(result.retryable).toBe(false);
     });
 
     it('maps a non-LmlClientError to {kind: "error", retryable: true}', async () => {
       const getRelease = jest.fn().mockRejectedValue(new Error('socket hang up'));
       const { fetchRelease } = await loadModule({ getRelease });
       const result = await fetchRelease(1);
-      if (result.kind === 'error') expect(result.retryable).toBe(true);
+      expect(result.kind).toBe('error');
+      if (result.kind !== 'error') throw new Error('expected error');
+      expect(result.retryable).toBe(true);
     });
   });
 
@@ -172,6 +191,60 @@ describe('jobs/rotation-artist-backfill/lml-fetch', () => {
     it('tolerates missing artists array', async () => {
       const { extractPhase1ArtistIds } = await loadModule();
       expect(extractPhase1ArtistIds({} as unknown as Parameters<typeof extractPhase1ArtistIds>[0])).toEqual([]);
+    });
+
+    it('skips artist_id=0 (Discogs sentinel for unknown — would poison LML#510 tombstone cache)', async () => {
+      const { extractPhase1ArtistIds } = await loadModule();
+      const release = {
+        artist_id: 0,
+        artists: [
+          { artist_id: 0, name: 'Unknown Artist', join: '' },
+          { artist_id: 100, name: 'Real Artist', join: '' },
+        ],
+      };
+      expect(extractPhase1ArtistIds(release as unknown as Parameters<typeof extractPhase1ArtistIds>[0])).toEqual([100]);
+    });
+
+    it('skips NaN artist_id (typeof NaN === "number" but it is not a real id)', async () => {
+      const { extractPhase1ArtistIds } = await loadModule();
+      const release = {
+        artist_id: Number.NaN,
+        artists: [{ artist_id: 100, name: 'A', join: '' }],
+      };
+      expect(extractPhase1ArtistIds(release as unknown as Parameters<typeof extractPhase1ArtistIds>[0])).toEqual([100]);
+    });
+
+    it('skips Infinity artist_id', async () => {
+      const { extractPhase1ArtistIds } = await loadModule();
+      const release = {
+        artists: [
+          { artist_id: Number.POSITIVE_INFINITY, name: 'Inf', join: '' },
+          { artist_id: 100, name: 'A', join: '' },
+        ],
+      };
+      expect(extractPhase1ArtistIds(release as unknown as Parameters<typeof extractPhase1ArtistIds>[0])).toEqual([100]);
+    });
+
+    it('skips negative artist_id', async () => {
+      const { extractPhase1ArtistIds } = await loadModule();
+      const release = {
+        artists: [
+          { artist_id: -1, name: 'Bad', join: '' },
+          { artist_id: 100, name: 'A', join: '' },
+        ],
+      };
+      expect(extractPhase1ArtistIds(release as unknown as Parameters<typeof extractPhase1ArtistIds>[0])).toEqual([100]);
+    });
+
+    it('skips non-integer artist_id (e.g. fractional)', async () => {
+      const { extractPhase1ArtistIds } = await loadModule();
+      const release = {
+        artists: [
+          { artist_id: 3.14, name: 'Pi', join: '' },
+          { artist_id: 100, name: 'A', join: '' },
+        ],
+      };
+      expect(extractPhase1ArtistIds(release as unknown as Parameters<typeof extractPhase1ArtistIds>[0])).toEqual([100]);
     });
   });
 });

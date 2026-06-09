@@ -133,6 +133,18 @@ describe('isDescendantOnGithub', () => {
     await isDescendantOnGithub('a', 'b', fetchImpl as unknown as typeof fetch);
     expect(seenHeaders.Authorization).toBeUndefined();
   });
+
+  it('URL-encodes base and head so a malformed sha cannot reshape the request path', async () => {
+    let seenUrl = '';
+    const fetchImpl = jest.fn().mockImplementation((url: string) => {
+      seenUrl = url;
+      return Promise.resolve(makeResponse({ status: 'ahead' }));
+    });
+    // `?` would otherwise start a query string; `/` would shift the path.
+    await isDescendantOnGithub('3e54907', 'abc?foo=bar', fetchImpl as unknown as typeof fetch);
+    expect(seenUrl).toContain('3e54907...abc%3Ffoo%3Dbar');
+    expect(seenUrl).not.toContain('?foo=bar');
+  });
 });
 
 describe('enforceDeployGuard', () => {
