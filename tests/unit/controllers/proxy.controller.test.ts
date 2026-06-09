@@ -35,6 +35,35 @@ jest.mock('@wxyc/lml-client', () => ({
   LmlClientError: MockLmlClientError,
 }));
 
+// Backend code paths now route through the LmlLookupCoordinator (BS#885).
+jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
+  lmlLookupCoordinator: { lookup: mockLookupMetadata },
+}));
+
+// BS#1331: getAlbumMetadata now consults local persisted state first via
+// `lookupAlbumMetadataByKey` before falling through to LML. Mocked here so
+// each test can set local-hit, catch-arm-row, or cold-miss explicitly.
+const mockLookupAlbumMetadataByKey = jest.fn<(artist: string, release?: string) => Promise<unknown>>();
+jest.mock('../../../apps/backend/services/album-metadata-lookup.service', () => ({
+  lookupAlbumMetadataByKey: mockLookupAlbumMetadataByKey,
+}));
+
+// BS#1331 acceptance: the cohort split for trace explorer turns on
+// `proxy.metadata.album.upstream_calls`. Override only `getActiveSpan`
+// from the real `@sentry/node` module so the cache-first test can assert
+// the attribute lands as a number; outside a tracing context the real
+// `getActiveSpan()` is null and the call short-circuits. Preserving the
+// rest of the module surface lets future controller hardening (e.g.
+// `Sentry.captureException` on the cache-first DB-error catch arm)
+// continue to load without a confusing "X is not a function" TypeError
+// far from the change site.
+const mockSpanSetAttributes = jest.fn();
+const mockGetActiveSpan = jest.fn(() => ({ setAttributes: mockSpanSetAttributes }));
+jest.mock('@sentry/node', () => ({
+  ...jest.requireActual<object>('@sentry/node'),
+  getActiveSpan: mockGetActiveSpan,
+}));
+
 // library.service mock — only the helper libraryTracks consumes.
 const mockGetDiscogsReleaseIdByLegacyId = jest.fn<(legacyId: number) => Promise<number | null>>();
 
@@ -210,6 +239,12 @@ describe('proxy.controller', () => {
   // --- getAlbumMetadata ---
 
   describe('getAlbumMetadata', () => {
+    beforeEach(() => {
+      // Default to cold case: no local row, so existing tests fall through
+      // to LML. Local-hit tests override below. BS#1331.
+      mockLookupAlbumMetadataByKey.mockResolvedValue(null);
+    });
+
     it('throws WxycError 400 when artistName is missing', async () => {
       const req = { query: {} } as unknown as Request;
       const res = createMockRes();
@@ -220,6 +255,10 @@ describe('proxy.controller', () => {
     });
 
     it('returns merged metadata from LML lookup + release details', async () => {
+      // Post-BS#885: the coordinator forces `extended: true` on every
+      // lookup, so the artwork block carries the release-detail fields
+      // (year/label/genres/styles/tracklist/discogs_artist_id/released)
+      // inline. No separate `getRelease()` call.
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
@@ -242,32 +281,22 @@ describe('proxy.controller', () => {
               youtube_music_url: 'https://music.youtube.com/search?q=Autechre+Confield',
               bandcamp_url: 'https://bandcamp.com/search?q=Autechre+Confield',
               soundcloud_url: 'https://soundcloud.com/search?q=Autechre+Confield',
+              release_year: 2001,
+              label: 'Warp',
+              discogs_artist_id: 3840,
+              genres: ['Electronic'],
+              styles: ['IDM', 'Abstract'],
+              tracklist: [
+                { position: '1', title: 'VI Scose Poise', duration: '6:45' },
+                { position: '2', title: 'Cfern', duration: '7:01' },
+              ],
+              full_release_date: '2001-04-30',
             },
           },
         ],
         search_type: 'direct',
         song_not_found: false,
         found_on_compilation: false,
-      });
-
-      mockGetRelease.mockResolvedValue({
-        release_id: 12345,
-        title: 'Confield',
-        artist: 'Autechre',
-        year: 2001,
-        label: 'Warp',
-        artist_id: 3840,
-        genres: ['Electronic'],
-        styles: ['IDM', 'Abstract'],
-        tracklist: [
-          { position: '1', title: 'VI Scose Poise', duration: '6:45', artists: [] },
-          { position: '2', title: 'Cfern', duration: '7:01', artists: [] },
-        ],
-        artwork_url: 'https://i.discogs.com/art.jpg',
-        release_url: 'https://www.discogs.com/release/12345',
-        released: '2001-04-30',
-        cached: false,
-        artists: [{ artist_id: 3840, name: 'Autechre', join: '', role: null }],
       });
 
       const req = {
@@ -405,7 +434,16 @@ describe('proxy.controller', () => {
       expect(result.soundcloudUrl).toBe('https://soundcloud.com/search?q=Stereolab');
     });
 
-    it('returns search-only metadata when release fetch fails', async () => {
+    it('omits enriched fields when the lookup artwork has no extended metadata', async () => {
+      // The artwork block carries release-detail fields when LML's
+      // extended pipeline finds them (`release_year`, `genres`, `styles`,
+      // `tracklist`, `discogs_artist_id`, `full_release_date`). When the
+      // artwork lacks those fields (LML matched the release but the
+      // extended pipeline returned no enrichment), the proxy response
+      // surfaces the search-only metadata (Discogs IDs + streaming URLs)
+      // and omits the missing enriched fields rather than fabricating
+      // them. No follow-up `getRelease()` call happens — the coordinator
+      // forces `extended: true` on the single lookup.
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
@@ -436,8 +474,6 @@ describe('proxy.controller', () => {
         found_on_compilation: false,
       });
 
-      mockGetRelease.mockRejectedValue(new Error('Release fetch failed'));
-
       const req = {
         query: { artistName: 'Cat Power', releaseTitle: 'Moon Pix' },
       } as unknown as Request;
@@ -449,11 +485,13 @@ describe('proxy.controller', () => {
       const result = (res.json as jest.Mock).mock.calls[0][0];
       expect(result.discogsReleaseId).toBe(99999);
       expect(result.artworkUrl).toBe('https://i.discogs.com/art.jpg');
-      // Streaming URLs from search result still present
+      // Streaming URLs from search result still present.
       expect(result.spotifyUrl).toBe('https://open.spotify.com/album/moonpix');
-      // No enriched fields since release fetch failed
+      // Enriched fields are omitted when the artwork doesn't carry them.
       expect(result.genres).toBeUndefined();
       expect(result.tracklist).toBeUndefined();
+      // getRelease is never called on the album path post-BS#885.
+      expect(mockGetRelease).not.toHaveBeenCalled();
     });
 
     it('strips Discogs spacer.gif placeholder from artworkUrl (#649)', async () => {
@@ -462,6 +500,8 @@ describe('proxy.controller', () => {
       // release has no real cover art; passing that through results in a
       // broken/blank image on iOS. Drop it at this callsite the same way
       // metadata.service.ts does.
+      // Post-BS#885: release-detail fields come back inline on the
+      // artwork block (coordinator forces `extended: true`).
       mockLookupMetadata.mockResolvedValue({
         results: [
           {
@@ -484,29 +524,19 @@ describe('proxy.controller', () => {
               youtube_music_url: null,
               bandcamp_url: null,
               soundcloud_url: null,
+              release_year: 2015,
+              label: 'Drag City',
+              discogs_artist_id: 5555,
+              genres: ['Rock'],
+              styles: [],
+              tracklist: [],
+              full_release_date: '2015-02-03',
             },
           },
         ],
         search_type: 'direct',
         song_not_found: false,
         found_on_compilation: false,
-      });
-
-      mockGetRelease.mockResolvedValue({
-        release_id: 7777,
-        title: 'On Your Own Love Again',
-        artist: 'Jessica Pratt',
-        year: 2015,
-        label: 'Drag City',
-        artist_id: 5555,
-        genres: ['Rock'],
-        styles: [],
-        tracklist: [],
-        artwork_url: 'https://s.discogs.com/images/spacer.gif',
-        release_url: 'https://www.discogs.com/release/7777',
-        released: '2015-02-03',
-        cached: false,
-        artists: [{ artist_id: 5555, name: 'Jessica Pratt', join: '', role: null }],
       });
 
       const req = {
@@ -552,26 +582,15 @@ describe('proxy.controller', () => {
       expect(mockGetRelease).not.toHaveBeenCalled();
     });
 
-    // --- Single-call path (PROXY_METADATA_SINGLE_LOOKUP=true) ---
+    // --- Single-call path (the only path post-BS#885) ---
     //
-    // When the flag is on, `getAlbumMetadata` calls LML once with
-    // `extended: true` and reads the release-detail fields off the lookup
-    // response's `artwork` block. The follow-up `getRelease()` call goes
-    // away. These tests pin the new path's contract; the legacy path's
-    // tests above remain to cover the pre-cutover behavior.
+    // The coordinator forces `extended: true`, so LML returns the
+    // release-detail fields inline on the lookup response's `artwork`
+    // block. No follow-up `getRelease()` call. (The `PROXY_METADATA_SINGLE_LOOKUP`
+    // env flag and its legacy two-call branch were removed when this
+    // coordinator landed; BS#918 cleanup folded here.)
 
-    describe('PROXY_METADATA_SINGLE_LOOKUP=true', () => {
-      const originalFlag = process.env.PROXY_METADATA_SINGLE_LOOKUP;
-
-      beforeEach(() => {
-        process.env.PROXY_METADATA_SINGLE_LOOKUP = 'true';
-      });
-
-      afterEach(() => {
-        if (originalFlag === undefined) delete process.env.PROXY_METADATA_SINGLE_LOOKUP;
-        else process.env.PROXY_METADATA_SINGLE_LOOKUP = originalFlag;
-      });
-
+    describe('extended-mode response shape', () => {
       it('reads release-detail fields off the lookup artwork and skips getRelease', async () => {
         mockLookupMetadata.mockResolvedValue({
           results: [
@@ -644,10 +663,11 @@ describe('proxy.controller', () => {
         // The whole point of this PR: no follow-up LML call.
         expect(mockGetRelease).not.toHaveBeenCalled();
 
-        // Lookup was called with `extended: true` so LML knows to populate
-        // the new fields.
+        // Post-BS#885: callsite no longer passes `extended` — the
+        // LmlLookupCoordinator forces it on the wire. The coordinator
+        // mock receives the callsite args; `extended` is applied inside
+        // the (real) coordinator's fetchUncached path.
         expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
-          extended: true,
           budgetMs: 5000,
           caller: 'proxy-album-metadata',
         });
@@ -794,6 +814,284 @@ describe('proxy.controller', () => {
         // Other release fields still preserved.
         expect(result.discogsReleaseId).toBe(8888);
         expect(result.label).toBe('Sonamos');
+      });
+    });
+
+    // --- Cache-first local-lookup path (BS#1331) ---
+    //
+    // The handler now consults persisted state (album_metadata joined to
+    // flowsheet by the normalized `lower(trim(artist))-lower(trim(album))`
+    // lookup key, partial-indexed by `flowsheet_album_link_lookup_idx`)
+    // before going to LML. On a local hit it serves what BS already knows
+    // — no LML round-trip, no Discogs rate-limiter wait, no request-time
+    // search-URL synthesis (which would launder LML's verified-rejection
+    // signal; BS#1192). Sentry `proxy.metadata.album.upstream_calls` reads
+    // 0 on local hit so the cohort split survives in the trace explorer.
+    describe('cache-first local lookup (BS#1331)', () => {
+      it('serves persisted state without invoking LML when local row is enriched', async () => {
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: 'https://i.discogs.com/cached.jpg',
+          discogs_url: 'https://www.discogs.com/release/54321',
+          release_year: 2024,
+          spotify_url: 'https://open.spotify.com/album/cachedspot',
+          apple_music_url: 'https://music.apple.com/album/cachedapple',
+          youtube_music_url: 'https://music.youtube.com/playlist?list=cachedyt',
+          bandcamp_url: 'https://artist.bandcamp.com/album/cached',
+          soundcloud_url: 'https://soundcloud.com/artist/cached-album',
+          artist_bio: 'A cached bio of the artist.',
+          artist_wikipedia_url: 'https://en.wikipedia.org/wiki/CachedArtist',
+        });
+
+        const req = {
+          query: { artistName: 'Cached Artist', releaseTitle: 'Cached Album', trackTitle: 'Cached Track' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupAlbumMetadataByKey).toHaveBeenCalledWith('Cached Artist', 'Cached Album');
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.artworkUrl).toBe('https://i.discogs.com/cached.jpg');
+        expect(result.discogsUrl).toBe('https://www.discogs.com/release/54321');
+        // Derived from discogs_url so iOS V1 callers keep getting the
+        // release id field they previously read off LML's artwork block.
+        expect(result.discogsReleaseId).toBe(54321);
+        expect(result.releaseYear).toBe(2024);
+        expect(result.spotifyUrl).toBe('https://open.spotify.com/album/cachedspot');
+        expect(result.appleMusicUrl).toBe('https://music.apple.com/album/cachedapple');
+        expect(result.youtubeMusicUrl).toBe('https://music.youtube.com/playlist?list=cachedyt');
+        expect(result.bandcampUrl).toBe('https://artist.bandcamp.com/album/cached');
+        expect(result.soundcloudUrl).toBe('https://soundcloud.com/artist/cached-album');
+        expect(result.artistBio).toBe('A cached bio of the artist.');
+        expect(result.artistWikipediaUrl).toBe('https://en.wikipedia.org/wiki/CachedArtist');
+        expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');
+      });
+
+      it('catch-arm-shape row: persisted YT/BC/SC win, missing Apple/Spotify synthesized at request time (no LML)', async () => {
+        // BS#873 catch arm at enrichment.service.ts writes only the three
+        // synth-able streaming URLs on LML failure (no Apple, no Spotify,
+        // no artwork, no Discogs). The persisted URLs win — request-time
+        // synthesis only fills the keys the persisted row left null. The
+        // BS#1192 "verified rejection" invariant is a write-path concern
+        // (don't persist synth URLs in album_metadata); synthesizing at
+        // request time doesn't poison persisted state, and matching the
+        // LML-fallthrough branch's behavior means iOS sees the same
+        // degraded-but-usable shape regardless of cohort.
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: null,
+          discogs_url: null,
+          release_year: null,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: 'https://music.youtube.com/search?q=Bill%20Orcutt%20Music%20For%20Four%20Guitars',
+          bandcamp_url: 'https://bandcamp.com/search?q=Bill%20Orcutt%20Music%20For%20Four%20Guitars',
+          soundcloud_url: 'https://soundcloud.com/search?q=Bill%20Orcutt',
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        });
+
+        const req = {
+          query: { artistName: 'Bill Orcutt', releaseTitle: 'Music For Four Guitars' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        // Persisted catch-arm URLs win over synthesis.
+        expect(result.youtubeMusicUrl).toBe(
+          'https://music.youtube.com/search?q=Bill%20Orcutt%20Music%20For%20Four%20Guitars'
+        );
+        expect(result.bandcampUrl).toBe('https://bandcamp.com/search?q=Bill%20Orcutt%20Music%20For%20Four%20Guitars');
+        expect(result.soundcloudUrl).toBe('https://soundcloud.com/search?q=Bill%20Orcutt');
+        // Missing Apple/Spotify get synthesized — same fallback the
+        // LML-fallthrough branch has used since BS#1185.
+        expect(result.appleMusicUrl).toContain('music.apple.com/search');
+        expect(result.spotifyUrl).toContain('open.spotify.com/search');
+        // Persisted nulls on the non-URL fields stay absent.
+        expect(result.artworkUrl).toBeUndefined();
+        expect(result.discogsUrl).toBeUndefined();
+        expect(result.discogsReleaseId).toBeUndefined();
+      });
+
+      it('all-null persisted row: every streaming URL gets a synthesized search-URL fallback (no LML)', async () => {
+        // The success-no-match write path at enrichment.service.ts:114-148
+        // persists `metadata.album?.X ?? null` for every column, so an
+        // LML success with no Discogs/Spotify/iTunes match produces a row
+        // with all 10 columns null. Without request-time synthesis the
+        // handler would return `{}` to iOS — every streaming button greys
+        // out. Synthesizing here matches the cold-path behavior.
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: null,
+          discogs_url: null,
+          release_year: null,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        });
+
+        const req = {
+          query: { artistName: 'No Match Artist', releaseTitle: 'No Match Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.spotifyUrl).toContain('open.spotify.com/search');
+        expect(result.appleMusicUrl).toContain('music.apple.com/search');
+        expect(result.youtubeMusicUrl).toContain('music.youtube.com');
+        expect(result.bandcampUrl).toContain('bandcamp.com');
+        expect(result.soundcloudUrl).toContain('soundcloud.com');
+      });
+
+      it('strips Discogs spacer.gif from persisted artwork_url on local hit (#649)', async () => {
+        // album_metadata.artwork_url can carry spacer.gif from the
+        // historical album-metadata-backfill (verbatim INSERT…SELECT) or
+        // pre-#649 flowsheet rows. The local-hit path must scrub via
+        // filterSpacerGif so iOS's "missing → placeholder" fallback
+        // doesn't render the 1×1 tracking pixel as cover art.
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: 'https://s.discogs.com/images/spacer.gif',
+          discogs_url: 'https://www.discogs.com/release/777',
+          release_year: 2015,
+          spotify_url: 'https://open.spotify.com/album/spacer',
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        });
+
+        const req = {
+          query: { artistName: 'Spacer Artist', releaseTitle: 'Spacer Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.artworkUrl).toBeUndefined();
+        // Other persisted fields still surface.
+        expect(result.discogsUrl).toBe('https://www.discogs.com/release/777');
+        expect(result.discogsReleaseId).toBe(777);
+      });
+
+      it('falls through to LML when the local lookup throws (DB blip should not 500 the request)', async () => {
+        // Without this guard a transient pool-exhaust / statement_timeout
+        // / RDS failover would propagate to the global error handler and
+        // return 500, regressing availability versus the pre-PR endpoint
+        // (which had zero DB-failure surface). The graceful degradation
+        // matches the LML-fallthrough path's own try/catch.
+        mockLookupAlbumMetadataByKey.mockRejectedValue(new Error('asyncpg: connection refused'));
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: { id: 1, title: 'Album', artist: 'Artist', call_number: '', library_url: '' },
+              artwork: {
+                release_id: 11,
+                release_url: 'https://www.discogs.com/release/11',
+                artwork_url: 'https://i.discogs.com/a.jpg',
+                album: 'Album',
+                artist: 'Artist',
+                confidence: 0.9,
+              },
+            },
+          ],
+          search_type: 'direct',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = { query: { artistName: 'Artist', releaseTitle: 'Album' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.upstream_calls': 1 });
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.discogsReleaseId).toBe(11);
+      });
+
+      it('falls through to LML when no local row matches (true cold case)', async () => {
+        mockLookupAlbumMetadataByKey.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: { id: 1, title: 'Cold Album', artist: 'Cold Artist', call_number: '', library_url: '' },
+              artwork: {
+                release_id: 99,
+                release_url: 'https://www.discogs.com/release/99',
+                artwork_url: 'https://i.discogs.com/cold.jpg',
+                album: 'Cold Album',
+                artist: 'Cold Artist',
+                confidence: 0.9,
+                spotify_url: 'https://open.spotify.com/album/cold',
+              },
+            },
+          ],
+          search_type: 'direct',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = {
+          query: { artistName: 'Cold Artist', releaseTitle: 'Cold Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupAlbumMetadataByKey).toHaveBeenCalledWith('Cold Artist', 'Cold Album');
+        // LML was consulted because the local lookup returned null.
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+        expect(res.status).toHaveBeenCalledWith(200);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.discogsReleaseId).toBe(99);
+        expect(result.artworkUrl).toBe('https://i.discogs.com/cold.jpg');
+      });
+
+      it('projects upstream_calls=0 onto the active Sentry span on local hit', async () => {
+        // The hook here is the trace-explorer cohort split: anything > 0
+        // is a fallthrough, 0 is a steady-state hit. Without this signal
+        // we can't distinguish "the cache-first path saved 5s" from "we
+        // never reached the cache-first path" in the prod p95.
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: 'https://i.discogs.com/x.jpg',
+          discogs_url: 'https://www.discogs.com/release/1',
+          release_year: 2020,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        });
+
+        const req = {
+          query: { artistName: 'Local Artist', releaseTitle: 'Local Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.upstream_calls': 0 });
       });
     });
   });

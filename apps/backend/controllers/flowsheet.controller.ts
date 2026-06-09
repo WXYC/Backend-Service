@@ -5,9 +5,6 @@ import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/datab
 // play_order is computed by the service layer, not provided by controllers
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
-import { fireAndForgetMetadataForRow } from '../services/metadata/index.js';
-import { runLmlLinkage } from '../services/flowsheet-linkage.service.js';
-import { reportLinkageError } from '../services/linkage-metrics.service.js';
 import WxycError from '../utils/error.js';
 
 export type QueryParams = {
@@ -53,64 +50,6 @@ export interface IFSEntry extends Omit<
   rotation_bin: string | null;
   on_streaming: boolean | null;
   metadata: IFSEntryMetadata;
-}
-
-/**
- * Fire-and-forget: fetch metadata from LML and update the flowsheet row.
- *
- * Called after a track is inserted. Does not block the HTTP response.
- */
-/**
- * Fire-and-forget: resolve a canonical entity via LML and link the row to a
- * library album when there's a single high-confidence match (B-2.1). Only
- * fires for free-form inserts (no album_id) — bin-picks already carry an
- * album_id from the catalog click. Logs every non-link outcome at info level
- * so the operator can spot pattern shifts without a metric pipeline.
- */
-function fireAndForgetLinkage(completedEntry: FSEntry): void {
-  if (completedEntry.album_id !== null) return;
-  if (!completedEntry.artist_name) return;
-
-  runLmlLinkage({
-    flowsheetId: completedEntry.id,
-    artistName: completedEntry.artist_name,
-    albumTitle: completedEntry.album_title,
-  })
-    .then((outcome) => {
-      if (outcome.status === 'linked') return;
-      console.info(
-        `[Flowsheet] LML linkage outcome=${outcome.status} flowsheet_id=${completedEntry.id} artist="${completedEntry.artist_name}" album="${completedEntry.album_title ?? ''}"`
-      );
-    })
-    .catch((err) => {
-      // Safety net: runLmlLinkage handles LML errors itself (counter +
-      // Sentry tag), so this only fires on unexpected bugs in the linkage
-      // path (e.g., a DB write throwing). Route through the same surface so
-      // the operator sees one consistent `subsystem='lml-linkage'` filter.
-      console.error('[Flowsheet] LML linkage failed:', err);
-      reportLinkageError(
-        err,
-        {
-          flowsheetId: completedEntry.id,
-          artistName: completedEntry.artist_name,
-          albumTitle: completedEntry.album_title,
-        },
-        { path: 'forward' }
-      );
-    });
-}
-
-function fireAndForgetMetadata(completedEntry: FSEntry, artistId?: number): void {
-  if (!completedEntry.artist_name) return;
-
-  fireAndForgetMetadataForRow({
-    flowsheetId: completedEntry.id,
-    artistName: completedEntry.artist_name,
-    albumId: completedEntry.album_id ?? undefined,
-    artistId,
-    albumTitle: completedEntry.album_title ?? undefined,
-    trackTitle: completedEntry.track_title ?? undefined,
-  });
 }
 
 const MAX_ITEMS = 200;
@@ -256,6 +195,18 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     //backfill album info from library before adding to flowsheet
     const albumInfo = await flowsheet_service.getAlbumFromDB(body.album_id);
 
+    // `getAlbumFromDB` returns undefined when `body.album_id` points to a row
+    // that doesn't exist in `library` — possible when the dj-site picker
+    // payload references a library row that's been deleted, or when a
+    // rotation→library FK has desynced. BS#933 covered the explicit-null
+    // case; this guards the equally-reachable not-found case. Without it the
+    // following `albumInfo.record_label = ...` / `...albumInfo` spread throws
+    // a bare TypeError that the centralized errorHandler maps to 500 — the
+    // signal at the root of BS#1271's POST /flowsheet internal_error bursts.
+    if (!albumInfo) {
+      throw new WxycError(`Album ${body.album_id} not found in library`, 404);
+    }
+
     if (body.record_label !== undefined) {
       albumInfo.record_label = body.record_label;
     }
@@ -273,7 +224,6 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    fireAndForgetMetadata(completedEntry, albumInfo.artist_id ?? undefined);
     res.status(201).json(completedEntry);
   } else if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
     throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
@@ -303,8 +253,6 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    fireAndForgetMetadata(completedEntry);
-    fireAndForgetLinkage(completedEntry);
     res.status(201).json(completedEntry);
   }
 };
@@ -330,6 +278,11 @@ export type UpdateRequestBody = {
   track_position?: string | null;
   record_label?: string;
   label_id?: number;
+  // First-class FKs the dj-site rotation/library pickers legitimately write
+  // (BS#1270). Not "internal columns"; the BS#1099 allowlist initially
+  // omitted them which silently stripped picker writes.
+  album_id?: number;
+  rotation_id?: number;
   request_flag?: boolean;
   segue?: boolean;
   message?: string;
@@ -351,6 +304,8 @@ function pickUpdateEntryFields(data: UpdateRequestBody): UpdateRequestBody {
   if (data.track_position !== undefined) picked.track_position = data.track_position;
   if (data.record_label !== undefined) picked.record_label = data.record_label;
   if (data.label_id !== undefined) picked.label_id = data.label_id;
+  if (data.album_id !== undefined) picked.album_id = data.album_id;
+  if (data.rotation_id !== undefined) picked.rotation_id = data.rotation_id;
   if (data.request_flag !== undefined) picked.request_flag = data.request_flag;
   if (data.segue !== undefined) picked.segue = data.segue;
   if (data.message !== undefined) picked.message = data.message;
@@ -374,7 +329,22 @@ export type JoinRequestBody = {
   dj_id: string;
   show_name?: string;
   specialty_id?: number;
+  /**
+   * Optional per-show display-name override (BS#1295, epic #1288). When
+   * non-empty after trim, takes priority over `auth_user.dj_name` for the
+   * show_start marker, `flowsheet.dj_name`, and `shows.dj_name_override`.
+   * Capped at 255 chars to match the `auth_user.dj_name` column. Only
+   * honored on the new-show path; ignored on the co-host /join path
+   * (`addDJToShow`) because there's no per-co-host override surface today.
+   */
+  dj_name_override?: string;
 };
+
+/**
+ * Maximum length of `dj_name_override`. Absolute ceiling matching both the
+ * `auth_user.dj_name` and `shows.dj_name_override` varchar(255) columns.
+ */
+const DJ_NAME_OVERRIDE_MAX_LENGTH = 255;
 
 //POST
 export const joinShow: RequestHandler = async (req: Request<object, object, JoinRequestBody>, res) => {
@@ -391,15 +361,38 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     throw new WxycError('Forbidden: dj_id must match the authenticated user', 403);
   }
 
+  // Normalize dj_name_override (BS#1295): trim, treat empty / whitespace-only
+  // as absent, reject > 255 chars at the controller boundary. Length is
+  // measured against the trimmed value so trailing whitespace can't be used
+  // to game the limit downward.
+  const raw_override = req.body.dj_name_override;
+  let dj_name_override: string | undefined;
+  if (typeof raw_override === 'string') {
+    const trimmed = raw_override.trim();
+    if (trimmed.length === 0) {
+      dj_name_override = undefined;
+    } else if (trimmed.length > DJ_NAME_OVERRIDE_MAX_LENGTH) {
+      throw new WxycError(
+        `Bad Request: dj_name_override must be ${DJ_NAME_OVERRIDE_MAX_LENGTH} characters or fewer`,
+        400
+      );
+    } else {
+      dj_name_override = trimmed;
+    }
+  }
+
   if (current_show?.end_time !== null) {
     const show_session: Show = await flowsheet_service.startShow(
       req.body.dj_id,
       req.body.show_name,
-      req.body.specialty_id
+      req.body.specialty_id,
+      dj_name_override
     );
 
     res.status(200).json(show_session);
   } else {
+    // Override is only consumed on the new-show path. Co-host join uses the
+    // auth_user.dj_name resolution unchanged.
     const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
     res.status(200).json(show_dj_instance);
   }
@@ -432,7 +425,7 @@ export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = asy
 export const getDJList: RequestHandler = async (req, res) => {
   const currentDJs = await flowsheet_service.getDJsInCurrentShow();
   const cleanDJList = currentDJs.map((dj) => {
-    return { id: dj.id, dj_name: dj.djName || dj.name };
+    return { id: dj.id, dj_name: flowsheet_service.resolveDjDisplayName(dj.djName ?? null) };
   });
   res.status(200).json(cleanDJList);
 };

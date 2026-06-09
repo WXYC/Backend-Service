@@ -25,7 +25,7 @@
 
 import { closeDatabaseConnection } from '@wxyc/database';
 import { runBackfill } from './orchestrate.js';
-import { lookupMetadata } from './lml-fetch.js';
+import { lookupMetadata, getLookupCache } from './lml-fetch.js';
 import { applyEnrichment } from './enrich.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
@@ -48,7 +48,11 @@ const main = async () => {
   try {
     requireLmlConfigured();
     log('info', 'init', `${JOB_NAME} initialized`);
-    await runBackfill({ lookup: lookupMetadata, enrich: applyEnrichment });
+    await runBackfill({
+      lookup: lookupMetadata,
+      enrich: applyEnrichment,
+      cacheStats: () => getLookupCache().stats(),
+    });
   } catch (error) {
     log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
     captureError(error, 'failed');

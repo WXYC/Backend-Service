@@ -42,6 +42,177 @@ describe('Start Show', () => {
 });
 
 /*
+ * Start Show with dj_name_override (BS#1295 → BS#1321 / epic #1288).
+ *
+ * Verifies the new per-show override path lands the supplied name in:
+ *   - the show_start marker `flowsheet.message` body
+ *   - the `flowsheet.dj_name` column on the marker
+ *   - the `shows.dj_name_override` column (BS#1321 — was `legacy_dj_name`
+ *     in BS#1295; redirected here because `legacy_dj_name` is owned by
+ *     the tubafrenzy ETL upsert)
+ *   - the `flowsheet.dj_name` column on every TRACK row added after join
+ *     (BS#1321 — pre-fix, track rows reverted to `auth_user.dj_name` and
+ *     produced within-show inconsistency)
+ * regardless of the caller's `auth_user.dj_name`. Also exercises the
+ * length-cap rejection and the empty-string / whitespace fallback.
+ */
+describe('Start Show with dj_name_override', () => {
+  let sql;
+
+  beforeAll(() => {
+    sql = makeSql();
+  });
+
+  afterAll(async () => {
+    if (sql) await sql.end({ timeout: 5 });
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('override populates flowsheet marker, flowsheet.dj_name, and shows.dj_name_override', async () => {
+    const overrideName = 'Aubrey Hearst';
+    const res = await request
+      .post('/flowsheet/join')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+        dj_name_override: overrideName,
+      })
+      .expect(200);
+
+    expect(res.body.id).toBeDefined();
+    const showId = res.body.id;
+
+    // Pull the show row and the show_start flowsheet entry from the DB.
+    // BS#1321: override lives in dj_name_override; legacy_dj_name is left
+    // alone so the tubafrenzy ETL upsert is not surprised by it.
+    const showRows = await sql`
+      SELECT dj_name_override, legacy_dj_name FROM ${sql(SCHEMA)}.shows WHERE id = ${showId}
+    `;
+    expect(showRows.length).toBe(1);
+    expect(showRows[0].dj_name_override).toEqual(overrideName);
+    expect(showRows[0].legacy_dj_name).toBeNull();
+
+    const markerRows = await sql`
+      SELECT dj_name, message
+        FROM ${sql(SCHEMA)}.flowsheet
+       WHERE show_id = ${showId} AND entry_type = 'show_start'
+       LIMIT 1
+    `;
+    expect(markerRows.length).toBe(1);
+    expect(markerRows[0].dj_name).toEqual(overrideName);
+    expect(markerRows[0].message).toMatch(new RegExp(`^Start of Show: ${overrideName} joined the set at `));
+    expect(markerRows[0].message).not.toMatch(/\bDJ\b/); // locked decision: no "DJ" prefix
+  });
+
+  test('override propagates to track rows added after join (BS#1321)', async () => {
+    // This is the C1 fix from issue #1321: pre-fix the override only landed
+    // on the show_start marker row, and any subsequent /flowsheet POST went
+    // through `resolveDjNameForShow` which prefers `auth_user.dj_name` over
+    // the override. The result was within-show inconsistency — marker says
+    // "Aubrey Hearst", track rows say "DJ Stardust" (or whatever the
+    // operator's auth_user.dj_name happens to be — for the seeded test DJ
+    // it's "Test dj1").
+    //
+    // Post-#1321 every track row inserted during a show whose
+    // dj_name_override is non-null reflects the override on `flowsheet.dj_name`.
+    const overrideName = 'Aubrey Hearst';
+    const join = await request
+      .post('/flowsheet/join')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+        dj_name_override: overrideName,
+      })
+      .expect(200);
+
+    const showId = join.body.id;
+
+    // Add a from-library track
+    const track1 = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1, // Built to Spill - Keep it Like a Secret
+        track_title: 'Carry the Zero',
+      })
+      .expect(201);
+
+    // Add a free-form track to cover both branches of the addEntry controller
+    const track2 = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+        record_label: 'Sonamos',
+      })
+      .expect(201);
+
+    // Add a message entry — the override should reach those too since
+    // addEntry plumbs dj_name through every branch.
+    const msg = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        message: 'Top of the hour',
+      })
+      .expect(201);
+
+    const rows = await sql`
+      SELECT id, entry_type, dj_name
+        FROM ${sql(SCHEMA)}.flowsheet
+       WHERE show_id = ${showId} AND id IN (${track1.body.id}, ${track2.body.id}, ${msg.body.id})
+       ORDER BY id ASC
+    `;
+
+    expect(rows.length).toBe(3);
+    for (const row of rows) {
+      expect(row.dj_name).toEqual(overrideName);
+    }
+  });
+
+  test('whitespace-only override is ignored — no regression vs baseline', async () => {
+    const res = await request
+      .post('/flowsheet/join')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+        dj_name_override: '   ',
+      })
+      .expect(200);
+
+    const showId = res.body.id;
+
+    const showRows = await sql`
+      SELECT dj_name_override, legacy_dj_name FROM ${sql(SCHEMA)}.shows WHERE id = ${showId}
+    `;
+    expect(showRows.length).toBe(1);
+    expect(showRows[0].dj_name_override).toBeNull();
+    expect(showRows[0].legacy_dj_name).toBeNull();
+  });
+
+  test('override > 255 chars is rejected with 400', async () => {
+    const overflow = 'a'.repeat(256);
+    const res = await request
+      .post('/flowsheet/join')
+      .set('Authorization', global.access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+        dj_name_override: overflow,
+      })
+      .expect(400);
+
+    expect(res.body.message).toBeDefined();
+    // No show was created — exit the afterEach cleanly. The afterEach
+    // fires leave_show, which is a no-op when there's no active show.
+  });
+});
+
+/*
  * Join Show (Secondary dj(s) hits /flowsheet/join)
  */
 describe('Join Show', () => {
@@ -330,6 +501,37 @@ describe('Add to Flowsheet', () => {
     expect(res.body.record_label).toEqual('Mini Records');
   });
 
+  test('With album_id null + rotation_id + snapshot fields (BS#1308)', async () => {
+    // Rotation albums that aren't in the WXYC library catalog (LEFT JOIN to
+    // library yields id: null on /library/rotation) need to preserve rotation
+    // linkage on the wire so the V2 read path can JOIN back to rotation for
+    // rotation_bin and the iOS rotation-artwork resolver can find the entry.
+    // Pre-fix, dj-site either synthesized a negative album_id (defect class
+    // #564/#608/#698/#701) or fell back to FlowsheetCreateSongFreeform and
+    // dropped rotation_id on the wire. wxyc-shared#158 added rotation_id to
+    // the freeform variant; this pins that BS persists it through the
+    // snapshot/else branch alongside album_id IS NULL.
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        rotation_id: 1, // Built to Spill — Keep it Like a Secret (seed rotation row)
+        artist_name: 'Noura Mint Seymali',
+        album_title: 'Tzenni',
+        track_title: 'Tzenni',
+        record_label: 'Glitterbeat',
+      })
+      .expect(201);
+
+    expect(res.body).toBeDefined();
+    expect(res.body.album_id).toBeNull();
+    expect(res.body.rotation_id).toEqual(1);
+    expect(res.body.artist_name).toEqual('Noura Mint Seymali');
+    expect(res.body.album_title).toEqual('Tzenni');
+    expect(res.body.track_title).toEqual('Tzenni');
+  });
+
   test('With track_position (BS#943, album_id branch)', async () => {
     // The dj-site flowsheet picker (E6-6) calls /proxy/library/{id}/tracks
     // after a release pick, then submits the chosen track with the library
@@ -593,6 +795,183 @@ describe('Retrieve Flowsheet Entries', () => {
     await request.get('/flowsheet').query({ shows_limit: -1 }).send().expect(400);
 
     await request.get('/flowsheet').query({ shows_limit: 0 }).send().expect(400);
+  });
+});
+
+describe('rotation_bin read-path fallback (dj-site#750)', () => {
+  // When the picker emit path doesn't persist flowsheet.rotation_id (the
+  // 2026-06-04 regression cohort), the primary FK join leaves rotation_bin
+  // NULL and dj-site's badge disappears. The read path's COALESCE fallback
+  // recovers the bin via (a) album_id match, (b) denorm artist/album match
+  // on the rotation row itself (NULL album_id, library-unlinked snapshot),
+  // or (c) library+artists JOIN match via the rotation row's album_id.
+  // Seed has rotation row 1 = album_id 1 (Built to Spill — Keep it Like a
+  // Secret) in bin 'L'. The cohort-(b) test below provisions an extra
+  // library-unlinked rotation row inline; the kill_date test provisions a
+  // killed rotation row. Both are torn down in afterAll.
+
+  let sql;
+  const extraRotationIds = [];
+
+  beforeAll(() => {
+    sql = makeSql();
+  });
+
+  afterAll(async () => {
+    if (extraRotationIds.length > 0) {
+      await sql`
+        DELETE FROM ${sql(SCHEMA)}.rotation WHERE id IN ${sql(extraRotationIds)}
+      `;
+    }
+    if (sql) await sql.end({ timeout: 5 });
+  });
+
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('rotation_bin populated via primary FK join when rotation_id is set (baseline)', async () => {
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1,
+        rotation_id: 1,
+        track_title: 'Carry the Zero',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Carry the Zero');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toEqual(1);
+    expect(track.rotation_bin).toEqual('L');
+  });
+
+  test('rotation_bin populated via album_id fallback when rotation_id is NULL', async () => {
+    // Simulates the regression cohort: picker preserved album_id but lost rotation_id.
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1,
+        track_title: 'Carry the Zero',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Carry the Zero');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toEqual('L');
+  });
+
+  test('rotation_bin populated via library+artists denorm fallback when album_id and rotation_id are both NULL', async () => {
+    // Simulates the worst case: snapshot branch wrote no album_id and no rotation_id,
+    // only the typed/picker-seeded artist+album strings.
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Built to Spill',
+        album_title: 'Keep it Like a Secret',
+        track_title: 'Carry the Zero',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Carry the Zero');
+    expect(track).toBeDefined();
+    expect(track.album_id).toBeNull();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toEqual('L');
+  });
+
+  test('rotation_bin stays NULL when (artist, album) does not match any active rotation row', async () => {
+    // Regression pin: fallback must not match on artist alone or album alone, and
+    // must not silently classify random tracks as rotation. "Ravyn Lenae — Crush"
+    // is in the library (album_id 2) but is NOT in the seeded rotation set.
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 2,
+        track_title: 'Venom',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Venom');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toBeNull();
+  });
+
+  test('rotation_bin populated via cohort (b): rotation row with NULL album_id + denorm artist/album snapshot', async () => {
+    // Cohort (b) per the SQL: library-unlinked rotation rows (NULL album_id)
+    // that hold the (artist_name, album_title) snapshot directly. The
+    // schema's source-shape comment explicitly permits NULL album_id on
+    // rotation. Provision such a row inline so the (b) OR-arm is exercised
+    // — the seeded fixture only covers album_id-bearing rows ((a)/(c)).
+    const inserted = await sql`
+      INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title)
+      VALUES (NULL, 'H', 'Phantom Artist', 'Phantom Album')
+      RETURNING id
+    `;
+    extraRotationIds.push(inserted[0].id);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Phantom Artist',
+        album_title: 'Phantom Album',
+        track_title: 'Ghost Track',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Ghost Track');
+    expect(track).toBeDefined();
+    expect(track.album_id).toBeNull();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toEqual('H');
+  });
+
+  test('rotation_bin stays NULL when rotation row was killed before flowsheet add_time', async () => {
+    // Regression pin: kill_date filter must exclude rotation rows whose
+    // kill_date is on/before the flowsheet entry's add_time. Provision a
+    // killed library-unlinked rotation row dated well in the past so the
+    // freshly-added flowsheet row falls strictly after kill_date.
+    const inserted = await sql`
+      INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title, add_date, kill_date)
+      VALUES (NULL, 'H', 'Killed Artist', 'Killed Album', '2024-01-01', '2024-02-01')
+      RETURNING id
+    `;
+    extraRotationIds.push(inserted[0].id);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Killed Artist',
+        album_title: 'Killed Album',
+        track_title: 'Posthumous Track',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Posthumous Track');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toBeNull();
   });
 });
 

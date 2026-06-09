@@ -507,10 +507,16 @@ jobs:
         # all torn down in the always-run steps below.
         run: |
           set -euo pipefail
+          # Filter to Status==available so we don't pick up a snapshot
+          # AWS is still mid-creating (RDS's automated-backup window
+          # raced this step on PR #1348 / run 27185185066 → exit 254
+          # 'DBSnapshot must have state available but actually has
+          # creating'). The trailing `[-1]` then gives the most-recent
+          # *available* snapshot.
           SNAPSHOT_ID=$(aws rds describe-db-snapshots \
             --db-instance-identifier "${{ secrets.PROD_DB_ID }}" \
             --snapshot-type automated \
-            --query 'sort_by(DBSnapshots, &SnapshotCreateTime)[-1].DBSnapshotIdentifier' \
+            --query 'sort_by(DBSnapshots[?Status==`available`], &SnapshotCreateTime)[-1].DBSnapshotIdentifier' \
             --output text)
           SANDBOX_ID="dryrun-${{ github.run_id }}"
           echo "SANDBOX_ID=$SANDBOX_ID" >> "$GITHUB_ENV"

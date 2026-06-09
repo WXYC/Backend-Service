@@ -1,4 +1,5 @@
 import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
+import * as Sentry from '@sentry/node';
 import WxycError from '../utils/error.js';
 import {
   db,
@@ -21,6 +22,42 @@ import {
 } from '@wxyc/database';
 import { IFSEntry, ShowInfo, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
+
+/**
+ * Resolve the DJ display name shown to listeners on the public flowsheet.
+ *
+ * Rules:
+ *   1. Use `djName` (the user's stage handle on `auth_user.dj_name`).
+ *   2. Treat the literal string "Anonymous" (case- and whitespace-insensitive)
+ *      as if `djName` were absent. The better-auth anonymous plugin and a
+ *      since-corrected onboarding default were both observed writing the
+ *      literal "Anonymous" into `auth_user.dj_name`; rendering that string
+ *      to the public on-air playlist confused listeners and the wxyc.info
+ *      playlist (BS#1286, epic #1288, 2026-06-02 Aubrey Hearst on-air
+ *      incident).
+ *   3. Trim the returned value; return `null` if blank or Anonymous.
+ *
+ * Why this no longer falls back to `auth_user.name`: dj-site's admin
+ * provisioning flow writes the user's real name into `auth_user.name`
+ * (`name: newAccount.realName || newAccount.username` in roster UI), so
+ * surfacing `name` on the public v2 flowsheet wire would leak PII —
+ * exactly the same class of incident BS#1286 fixed for the 'Anonymous'
+ * literal. Real names are appropriate for DJ-to-DJ internal views; they
+ * are not appropriate for the public on-air playlist.
+ *
+ * Callers should treat `null` as "name is unresolvable" and either degrade
+ * the marker template (show_start / show_end keep a row but drop the name)
+ * or suppress the row entirely and log to Sentry (dj_join / dj_leave) —
+ * see `startShow`, `endShow`, `createJoinNotification`,
+ * `createLeaveNotification`.
+ */
+export const resolveDjDisplayName = (djName: string | null): string | null => {
+  const trimmedDjName = djName?.trim() ?? '';
+  if (trimmedDjName.length > 0 && trimmedDjName.toLowerCase() !== 'anonymous') {
+    return trimmedDjName;
+  }
+  return null;
+};
 
 /**
  * Compute the next play_order value for a new flowsheet entry within a given
@@ -80,7 +117,55 @@ const FSEntryFieldsRaw = {
   record_label: flowsheet.record_label,
   label_id: flowsheet.label_id,
   rotation_id: flowsheet.rotation_id,
-  rotation_bin: rotation.rotation_bin,
+  // Primary source is the FK join (`leftJoin(rotation, rotation.id = flowsheet.rotation_id)`).
+  // Fallback fires only when that join misses (rotation.rotation_bin IS NULL) and the entry
+  // looks like a real track with non-empty artist+album. Three match cohorts:
+  //   (a) flowsheet.album_id matches an active rotation.album_id (library-linked rotation rows);
+  //   (b) (artist, album) snapshot matches active rotation row's denormalized fields
+  //       (library-unlinked rotation rows hold the snapshot directly);
+  //   (c) (artist, album) matches the library+artists join on an active rotation row's
+  //       album_id (library-linked rows whose denorm fields are NULL).
+  // kill_date is compared against the flowsheet entry's add_time so historical rotation
+  // status is preserved — mirrors how tubafrenzy classifies at mirror time (WXYC/dj-site#750).
+  // Subquery only fires per-row on a missed FK join; on rows with a populated rotation_id
+  // COALESCE short-circuits and the subquery is not evaluated.
+  //
+  // Tie-break (`ORDER BY r2.id`): the schema source comment at `rotation` explicitly
+  // permits multiple active rows per (album_id, rotation_bin) over an album's lifecycle
+  // (re-bins, re-adds, label-driven re-promotes). Picking the lowest `id` (oldest active
+  // row) is a deliberate, stable choice for the badge UX — when an album has been re-binned
+  // L → M, the badge reports its original cohort rather than flipping retroactively. This
+  // matches the historical-correctness story above (kill_date filtering against add_time).
+  // The primary FK join via flowsheet.rotation_id remains canonical when present.
+  rotation_bin: sql<string | null>`
+    COALESCE(
+      ${rotation.rotation_bin},
+      CASE WHEN ${flowsheet.rotation_id} IS NULL
+        AND coalesce(${flowsheet.artist_name}, '') <> ''
+        AND coalesce(${flowsheet.album_title}, '') <> ''
+      THEN (
+        SELECT r2.rotation_bin
+        FROM ${rotation} r2
+        LEFT JOIN ${library} l2 ON l2.id = r2.album_id
+        LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
+        WHERE (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
+          AND (
+            (${flowsheet.album_id} IS NOT NULL AND r2.album_id = ${flowsheet.album_id})
+            OR (
+              lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
+              AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
+            )
+            OR (
+              lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
+              AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
+            )
+          )
+        ORDER BY r2.id
+        LIMIT 1
+      )
+      END
+    )
+  `,
   request_flag: flowsheet.request_flag,
   segue: flowsheet.segue,
   message: flowsheet.message,
@@ -210,26 +295,55 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
 });
 
 /**
- * Resolve the DJ name for a show using the same priority as the search
- * service's DJ_NAME_EXPR and migration 0053:
- *   COALESCE(auth_user.dj_name, shows.legacy_dj_name, auth_user.name).
+ * Resolve the DJ name for a show using the priority:
+ *   1. `shows.dj_name_override` (per-show operator-intent override, BS#1321)
+ *   2. `auth_user.dj_name` (filtered for the literal "Anonymous", see
+ *      `resolveDjDisplayName`)
+ *   3. `shows.legacy_dj_name` (tubafrenzy-owned; "DJ name at time of the
+ *      show for shows whose primary_dj_id couldn't be resolved")
  *
  * Used by the live insert path (step 5b.2) to denormalize the resolved value
  * onto each new flowsheet row so search no longer needs to join shows -> auth_user.
+ *
+ * The override is at the top of the chain because operators set it on the
+ * join body when they want a per-show display name (guest hosts, alumni
+ * one-offs, on-air name corrections) — they expect it to take effect for
+ * the whole show, not just the show_start marker. Pre-BS#1321 the override
+ * only landed on the marker row + `shows.legacy_dj_name`, and any subsequent
+ * track row for a DJ with a non-Anonymous `auth_user.dj_name` reverted to
+ * `auth_user.dj_name` (priority 1 won), producing within-show inconsistency.
+ *
+ * Filters the literal "Anonymous" out of `auth_user.dj_name` via
+ * `resolveDjDisplayName`. See #1286/#1288 for the Anonymous filtering
+ * rationale; #1321 for the override-precedence promotion.
+ *
+ * The override itself is not "Anonymous"-filtered: an operator who types
+ * the literal "Anonymous" into the override surface has chosen that string
+ * on purpose. The pre-existing `auth_user.dj_name` filter was a workaround
+ * for an upstream onboarding bug that wrote "Anonymous" automatically;
+ * the override is operator-supplied, so we trust it verbatim.
+ *
+ * `auth_user.name` is intentionally NOT in the chain — it typically stores
+ * the user's real name (set from realName at provision time), which is PII
+ * and must not leak onto the public on-air playlist. See
+ * `resolveDjDisplayName`'s docstring.
  */
 export const resolveDjNameForShow = async (show: Show): Promise<string | null> => {
+  const override = ((show.dj_name_override as string | null | undefined) ?? '').trim();
+  if (override.length > 0) return override;
+
   const legacy = (show.legacy_dj_name as string | null | undefined) ?? null;
   const primaryDjId = (show.primary_dj_id as string | null | undefined) ?? null;
 
   if (primaryDjId == null) return legacy;
 
-  const rows = await db
-    .select({ djName: user.djName, name: user.name })
-    .from(user)
-    .where(eq(user.id, primaryDjId))
-    .limit(1);
+  const rows = await db.select({ djName: user.djName }).from(user).where(eq(user.id, primaryDjId)).limit(1);
   const dj = rows[0];
-  return dj?.djName ?? legacy ?? dj?.name ?? null;
+  if (!dj) return legacy;
+  const filteredDjName = resolveDjDisplayName(dj.djName ?? null);
+  if (filteredDjName) return filteredDjName;
+  if (legacy && legacy.trim().length > 0) return legacy.trim();
+  return null;
 };
 
 /**
@@ -420,6 +534,8 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
   if (entry.track_position !== undefined) updateSet.track_position = entry.track_position;
   if (entry.record_label !== undefined) updateSet.record_label = entry.record_label;
   if (entry.label_id !== undefined) updateSet.label_id = entry.label_id;
+  if (entry.album_id !== undefined) updateSet.album_id = entry.album_id;
+  if (entry.rotation_id !== undefined) updateSet.rotation_id = entry.rotation_id;
   if (entry.request_flag !== undefined) updateSet.request_flag = entry.request_flag;
   if (entry.segue !== undefined) updateSet.segue = entry.segue;
   if (entry.message !== undefined) updateSet.message = entry.message;
@@ -428,12 +544,35 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
   return response[0];
 };
 
-export const startShow = async (dj_id: string, show_name?: string, specialty_id?: number): Promise<Show> => {
+export const startShow = async (
+  dj_id: string,
+  show_name?: string,
+  specialty_id?: number,
+  dj_name_override?: string
+): Promise<Show> => {
   const dj_info = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
   if (!dj_info) {
     throw new WxycError(`DJ with id '${dj_id}' not found`, 404);
   }
+
+  // BS#1295/BS#1321: per-show display-name override. The controller already
+  // trimmed and length-checked; re-trim here as a defense-in-depth (the
+  // service is also called directly from tests / future call sites that may
+  // bypass the controller). Empty / whitespace-only override falls through
+  // to the resolveDjDisplayName path — preserving today's behavior.
+  //
+  // BS#1321 redirects the persistence target from `shows.legacy_dj_name` to
+  // a dedicated `shows.dj_name_override` column. `legacy_dj_name` is owned
+  // by jobs/flowsheet-etl (it gets overwritten on every tubafrenzy upsert
+  // tick — see job.ts line 346), so an override that lived there only
+  // survived until the next sync window. The new column is
+  // Backend-Service-only and is checked at the top of
+  // `resolveDjNameForShow`'s precedence chain so every subsequent track
+  // row reflects it for the rest of the show. See migration 0090 for the
+  // full rationale.
+  const trimmed_override = dj_name_override?.trim() ?? '';
+  const effective_override = trimmed_override.length > 0 ? trimmed_override : null;
 
   const new_show = await db
     .insert(shows)
@@ -441,6 +580,7 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
       primary_dj_id: dj_id,
       specialty_id: specialty_id,
       show_name: show_name,
+      dj_name_override: effective_override ?? undefined,
     })
     .returning();
 
@@ -452,17 +592,26 @@ export const startShow = async (dj_id: string, show_name?: string, specialty_id?
     })
     .returning();
 
+  // Override (when present) wins outright over the helper-resolved name.
+  // When the override is absent, fall back to the centralized resolution
+  // helper that handles `auth_user.dj_name`, the "Anonymous" literal, and
+  // the `auth_user.name` fallback (WXYC/Backend-Service#1286, epic #1288).
+  const display_dj_name = effective_override ?? resolveDjDisplayName(dj_info.djName ?? null);
+  const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+  // Asymmetric fallback (epic #1288): when the DJ name is unresolvable we
+  // still want a marker row so consumers know the show began. The wording
+  // degrades from "Start of Show: <name> joined the set at ${time}" to a
+  // bare "Start of show: ${time}".
+  const message = display_dj_name
+    ? `Start of Show: ${display_dj_name} joined the set at ${now}`
+    : `Start of show: ${now}`;
+
   await db.insert(flowsheet).values({
     show_id: new_show[0].id,
     entry_type: 'show_start',
-    dj_name: dj_info.djName || dj_info.name || null,
+    dj_name: display_dj_name,
     play_order: await nextPlayOrder(new_show[0].id),
-    message: `Start of Show: DJ ${dj_info.djName || dj_info.name} joined the set at ${new Date().toLocaleString(
-      'en-US',
-      {
-        timeZone: 'America/New_York',
-      }
-    )}`,
+    message,
   });
 
   return new_show[0];
@@ -506,22 +655,32 @@ export const addDJToShow = async (dj_id: string, current_show: Show): Promise<Sh
   return show_dj_instance[0];
 };
 
-const createJoinNotification = async (id: string, show_id: number): Promise<FSEntry> => {
+const createJoinNotification = async (id: string, show_id: number): Promise<FSEntry | null> => {
   const dj = (await db.select().from(user).where(eq(user.id, id)).limit(1))[0];
 
-  const persisted_dj_name = dj?.djName || dj?.name || null;
-  const display_dj_name = persisted_dj_name ?? 'A DJ';
+  const display_dj_name = resolveDjDisplayName(dj?.djName ?? null);
 
-  const message = `${display_dj_name} joined the set!`;
+  // Asymmetric fallback (epic #1288): a nameless mid-show join is a degraded
+  // state. The marker is suppressed rather than written — better logged than
+  // rendered to the public on-air playlist — and a Sentry warning carries
+  // dj_id + show_id so the cause is debuggable.
+  if (!display_dj_name) {
+    Sentry.captureMessage('Suppressed dj_join marker: DJ display name unresolvable', {
+      level: 'warning',
+      tags: { tool: 'flowsheet', entry_type: 'dj_join' },
+      extra: { dj_id: id, show_id },
+    });
+    return null;
+  }
 
   const notification = await db
     .insert(flowsheet)
     .values({
       show_id: show_id,
       entry_type: 'dj_join',
-      dj_name: persisted_dj_name,
+      dj_name: display_dj_name,
       play_order: await nextPlayOrder(show_id),
-      message: message,
+      message: `${display_dj_name} joined the set!`,
     })
     .returning();
 
@@ -552,17 +711,18 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   );
 
   const dj_information = (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0];
-  const persisted_dj_name = dj_information?.djName || dj_information?.name || null;
-  const display_dj_name = persisted_dj_name ?? 'A DJ';
+  const display_dj_name = resolveDjDisplayName(dj_information?.djName ?? null);
+  const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+  // Symmetric to startShow: keep the row, degrade the wording to bare
+  // "End of show: ${time}" when the name is unresolvable (epic #1288).
+  const message = display_dj_name ? `End of Show: ${display_dj_name} left the set at ${now}` : `End of show: ${now}`;
 
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
     entry_type: 'show_end',
-    dj_name: persisted_dj_name,
+    dj_name: display_dj_name,
     play_order: await nextPlayOrder(currentShow.id),
-    message: `End of Show: ${display_dj_name} left the set at ${new Date().toLocaleString('en-US', {
-      timeZone: 'America/New_York',
-    })}`,
+    message,
   });
 
   await db.update(shows).set({ end_time: new Date() }).where(eq(shows.id, currentShow.id));
@@ -592,22 +752,30 @@ export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowD
   return update_result;
 };
 
-const createLeaveNotification = async (dj_id: string, show_id: number): Promise<FSEntry> => {
+const createLeaveNotification = async (dj_id: string, show_id: number): Promise<FSEntry | null> => {
   const dj = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
-  const persisted_dj_name = dj?.djName || dj?.name || null;
-  const display_dj_name = persisted_dj_name ?? 'A DJ';
+  const display_dj_name = resolveDjDisplayName(dj?.djName ?? null);
 
-  const message = `${display_dj_name} left the set!`;
+  // Symmetric to createJoinNotification: suppress the row and log a Sentry
+  // warning when the DJ name is unresolvable (epic #1288).
+  if (!display_dj_name) {
+    Sentry.captureMessage('Suppressed dj_leave marker: DJ display name unresolvable', {
+      level: 'warning',
+      tags: { tool: 'flowsheet', entry_type: 'dj_leave' },
+      extra: { dj_id, show_id },
+    });
+    return null;
+  }
 
   const notification = await db
     .insert(flowsheet)
     .values({
       show_id: show_id,
       entry_type: 'dj_leave',
-      dj_name: persisted_dj_name,
+      dj_name: display_dj_name,
       play_order: await nextPlayOrder(show_id),
-      message: message,
+      message: `${display_dj_name} left the set!`,
     })
     .returning();
 
@@ -755,7 +923,10 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
 export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
 
-  const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({ id: dj.id, dj_name: dj.djName || dj.name }));
+  const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({
+    id: dj.id,
+    dj_name: resolveDjDisplayName(dj.djName ?? null),
+  }));
 
   let specialty_show_name = '';
   if (show[0].specialty_id != null) {

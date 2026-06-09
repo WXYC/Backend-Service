@@ -1,233 +1,28 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
-const fls_util = require('../utils/flowsheet_util');
 const { signInAnonymous } = require('../utils/anonymous_auth');
-const { isMockApiAvailable, resetMockApi, getMockRequests, simulateError } = require('../utils/mock_api');
+const { isMockApiAvailable, resetMockApi, simulateError } = require('../utils/mock_api');
 
 /**
- * Metadata LML Integration Tests
+ * Proxy LML Integration Tests
  *
- * Verifies the end-to-end metadata pipeline when the backend routes through
- * a mock LML server (LIBRARY_METADATA_URL). Requires the mock-api-server
- * to be running with LML fixture data.
+ * Verifies the iOS proxy path through the backend's `proxy.controller` to a
+ * mock LML server (LIBRARY_METADATA_URL). Requires the mock-api-server to be
+ * running with LML fixture data.
  *
- * Uses secondary_dj_id to avoid conflicts with other flowsheet tests.
+ * The historical flowsheet-insert enrichment specs that used to live here
+ * exercised the inline fire-and-forget path; they were removed in #894 once
+ * the CDC consumer worker (`apps/enrichment-worker/`) became the canonical
+ * enrichment path. Worker behavior is covered by the unit suites under
+ * `tests/unit/apps/enrichment-worker/` and `tests/unit/services/`.
  */
 
 let mockApiAvailable = false;
-const getTestDjId = () => global.secondary_dj_id;
-
-/**
- * Poll GET /flowsheet until a metadata field is non-null on a given entry,
- * or timeout after `ms` milliseconds.
- */
-async function waitForMetadata(entryId, field, ms = 2000) {
-  const start = Date.now();
-  while (Date.now() - start < ms) {
-    const res = await request.get('/flowsheet').query({ limit: 20 }).send();
-    if (res.status === 200) {
-      const entry = res.body.entries?.find((e) => e.id === entryId);
-      if (entry && entry[field] != null) return entry;
-    }
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  const res = await request.get('/flowsheet').query({ limit: 20 }).send();
-  return res.body.entries?.find((e) => e.id === entryId) ?? null;
-}
 
 beforeAll(async () => {
   mockApiAvailable = await isMockApiAvailable();
   if (!mockApiAvailable) {
     console.warn('Skipping metadata-lml tests: mock API server not available');
   }
-});
-
-describe('Metadata via LML (Mock API)', () => {
-  beforeEach(async () => {
-    if (!mockApiAvailable) return;
-    await resetMockApi();
-    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
-  });
-
-  afterEach(async () => {
-    if (!mockApiAvailable) return;
-    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
-  });
-
-  describe('Fire-and-forget LML calls on flowsheet insert', () => {
-    test('adding a non-library track triggers LML search', async () => {
-      if (!mockApiAvailable) return;
-
-      await request
-        .post('/flowsheet')
-        .set('Authorization', global.access_token)
-        .send({
-          artist_name: 'Autechre',
-          album_title: 'Confield',
-          track_title: 'VI Scose Poise',
-        })
-        .expect(201);
-
-      // Give fire-and-forget a moment to execute
-      await new Promise((r) => setTimeout(r, 300));
-
-      const lmlRequests = await getMockRequests('lml');
-      const lookupCalls = lmlRequests.filter((r) => r.path === '/api/v1/lookup');
-      expect(lookupCalls.length).toBeGreaterThanOrEqual(1);
-      expect(lookupCalls[0].body.artist).toBe('Autechre');
-    });
-
-    test('messages do not trigger LML calls for the message content', async () => {
-      if (!mockApiAvailable) return;
-
-      await request
-        .post('/flowsheet')
-        .set('Authorization', global.access_token)
-        .send({ message: 'Station ID at the top of the hour' })
-        .expect(201);
-
-      await new Promise((r) => setTimeout(r, 300));
-
-      // Check that no LML search was made with the message text as artist.
-      // We can't assert on total count because fire-and-forget from previous
-      // tests may still be completing.
-      const lmlRequests = await getMockRequests('lml');
-      const lookupCalls = lmlRequests.filter(
-        (r) => r.path === '/api/v1/lookup' && r.body?.artist === 'Station ID at the top of the hour'
-      );
-      expect(lookupCalls.length).toBe(0);
-    });
-  });
-
-  describe('Metadata populated from LML fixture data', () => {
-    test('artwork_url and discogs_url populated for known artist', async () => {
-      if (!mockApiAvailable) return;
-
-      const addRes = await request
-        .post('/flowsheet')
-        .set('Authorization', global.access_token)
-        .send({
-          artist_name: 'Autechre',
-          album_title: 'Confield',
-          track_title: 'VI Scose Poise',
-        })
-        .expect(201);
-
-      const entry = await waitForMetadata(addRes.body.id, 'artwork_url');
-      expect(entry).not.toBeNull();
-      expect(entry.artwork_url).toBeDefined();
-      expect(entry.discogs_url).toContain('discogs.com');
-    });
-
-    test('streaming URLs populated from LML enrichment', async () => {
-      if (!mockApiAvailable) return;
-
-      const addRes = await request
-        .post('/flowsheet')
-        .set('Authorization', global.access_token)
-        .send({
-          artist_name: 'Autechre',
-          album_title: 'Confield',
-          track_title: 'VI Scose Poise',
-        })
-        .expect(201);
-
-      const entry = await waitForMetadata(addRes.body.id, 'spotify_url');
-      expect(entry).not.toBeNull();
-      expect(entry.spotify_url).toContain('spotify.com');
-      expect(entry.apple_music_url).toContain('apple.com');
-    });
-
-    test('artist bio and wikipedia populated from LML artist details', async () => {
-      if (!mockApiAvailable) return;
-
-      const addRes = await request
-        .post('/flowsheet')
-        .set('Authorization', global.access_token)
-        .send({
-          artist_name: 'Autechre',
-          album_title: 'Confield',
-          track_title: 'Cfern',
-        })
-        .expect(201);
-
-      const entry = await waitForMetadata(addRes.body.id, 'artist_bio');
-      expect(entry).not.toBeNull();
-      expect(entry.artist_bio).toContain('electronic music duo');
-      expect(entry.artist_wikipedia_url).toContain('wikipedia.org');
-    });
-
-    test('search URLs present even for unknown artist', async () => {
-      if (!mockApiAvailable) return;
-
-      const addRes = await request
-        .post('/flowsheet')
-        .set('Authorization', global.access_token)
-        .send({
-          artist_name: 'Nonexistent Artist XYZ',
-          album_title: 'No Album',
-          track_title: 'No Track',
-        })
-        .expect(201);
-
-      const entry = await waitForMetadata(addRes.body.id, 'youtube_music_url', 500);
-      expect(entry).not.toBeNull();
-      expect(entry.youtube_music_url).toContain('music.youtube.com');
-      expect(entry.bandcamp_url).toContain('bandcamp.com');
-    });
-  });
-
-  describe('LML failure handling', () => {
-    test('LML 500 error: entry created, synthesized search URLs populated, attempt stamp left NULL (BS#873)', async () => {
-      if (!mockApiAvailable) return;
-
-      // Wait for any in-flight fire-and-forget to settle, then reset + simulate
-      await new Promise((r) => setTimeout(r, 500));
-      await resetMockApi();
-      await simulateError('lml', '/api/v1/lookup', 500);
-
-      const addRes = await request
-        .post('/flowsheet')
-        .set('Authorization', global.access_token)
-        .send({
-          artist_name: 'Nonexistent Error Test',
-          album_title: 'No Album',
-          track_title: 'No Track',
-        })
-        .expect(201);
-
-      // Entry should be created regardless of LML failure — the HTTP path
-      // doesn't depend on metadata enrichment.
-      expect(addRes.body.id).toBeDefined();
-
-      // BS#873: fetchMetadata re-throws on LML failure (per #639). The
-      // .catch branch in enrichment.service.ts now writes the three free
-      // synthesized YouTube/Bandcamp/SoundCloud search URLs so the listener
-      // isn't left with a fully blank row while the LML cascade recovers.
-      // Crucially, metadata_attempt_at stays NULL — the row remains
-      // eligible for the recurring drift-repair sweep so the real
-      // artwork/Discogs/Spotify/Apple match can land on a future attempt.
-      // Give the fire-and-forget enough time to settle into the .catch.
-      await new Promise((r) => setTimeout(r, 500));
-      const res = await request.get('/flowsheet').query({ limit: 20 }).send();
-      const entry = res.body.entries?.find((e) => e.id === addRes.body.id);
-      expect(entry).toBeDefined();
-      // Synthesized search URLs ARE populated on the catch path.
-      expect(entry.youtube_music_url).toContain('music.youtube.com');
-      expect(entry.bandcamp_url).toContain('bandcamp.com');
-      expect(entry.soundcloud_url).toContain('soundcloud.com');
-      // LML-dependent URLs remain NULL — they can't be synthesized client-side.
-      expect(entry.artwork_url).toBeNull();
-      expect(entry.discogs_url).toBeNull();
-      expect(entry.spotify_url).toBeNull();
-      expect(entry.apple_music_url).toBeNull();
-      expect(entry.artist_bio).toBeNull();
-      expect(entry.artist_wikipedia_url).toBeNull();
-      // The retryability invariant (`metadata_attempt_at IS NULL`) is asserted
-      // at the SQL chunk level by `tests/unit/services/metadata.enrichment.test.ts`
-      // — `flowsheet.controller.ts:40` deliberately omits the column from
-      // `IFSEntry` so we can't see it from the HTTP response.
-    });
-  });
 });
 
 describe('Proxy endpoints via LML (Mock API)', () => {
@@ -291,20 +86,23 @@ describe('Proxy endpoints via LML (Mock API)', () => {
     expect(res.body.id).toBe(3391);
   });
 
-  test('LML 500 translates to 502 on proxy endpoint', async () => {
+  test('LML 500 falls back to synthesized search URLs on /proxy/metadata/album', async () => {
     if (!mockApiAvailable || !anonToken) return;
 
-    // Permanent error (no count) — affects all subsequent LML search calls
+    // Permanent error (no count) — affects all subsequent LML search calls.
     await simulateError('lml', '/api/v1/lookup', 500);
 
-    // Make the proxy call immediately before any fire-and-forget can consume the rule
     const res = await request
       .get('/proxy/metadata/album')
       .set('Authorization', `Bearer ${anonToken}`)
-      .query({ artistName: 'Autechre' });
+      .query({ artistName: 'Autechre' })
+      .expect(200);
 
-    // Accept either 502 (LML error mapped) or 200 (if a background request consumed the rule)
-    // The important thing is the server doesn't crash
-    expect([200, 502]).toContain(res.status);
+    // SearchUrlProvider-backed fallback (BS#889 + BS#1185) — when LML lookup
+    // fails, the endpoint still returns 200 with synthesized service URLs so
+    // iOS doesn't show greyed buttons.
+    expect(res.body.youtubeMusicUrl).toContain('music.youtube.com');
+    expect(res.body.bandcampUrl).toContain('bandcamp.com');
+    expect(res.body.soundcloudUrl).toContain('soundcloud.com');
   });
 });

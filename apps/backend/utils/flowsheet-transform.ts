@@ -5,7 +5,7 @@
  * entry type codes or truncation rules change.
  */
 
-type BackendEntryType =
+export type BackendEntryType =
   | 'track'
   | 'show_start'
   | 'show_end'

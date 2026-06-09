@@ -55,6 +55,7 @@ import {
 } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import type { EnrichRow, EnrichOutcome } from './enrich.js';
+import type { LookupResult } from './lml-fetch.js';
 import { captureError, log } from './logger.js';
 
 const JOB_NAME = 'flowsheet-metadata-backfill';
@@ -157,9 +158,31 @@ export const resolvePartitionFilter = (
   };
 };
 
-export type LookupFn = (artist: string, album?: string, track?: string) => Promise<LookupResponse>;
+/**
+ * Lookup contract: returns the LML response (or its cached substitute)
+ * plus a `cacheHit` flag the orchestrator uses to skip the per-row LML
+ * throttle on hits. Pre-cache the return was just `LookupResponse`;
+ * the wrapper-shape change is required so the orchestrator can recover
+ * the wall-clock budget the throttle would otherwise spend waiting after
+ * a no-op cache return.
+ */
+export type LookupFn = (artist: string, album?: string, track?: string) => Promise<LookupResult>;
 
 export type EnrichFn = (row: EnrichRow, response: LookupResponse) => Promise<EnrichOutcome>;
+
+/**
+ * Read the current (artist, album) lookup-dedup cache state. Wired by
+ * `job.ts` to `getLookupCache().stats()`; tests inject a stub. Returns
+ * undefined when the orchestrator is driven without a cache (synthetic
+ * tests that don't care about dedup observability).
+ *
+ * `overwrites` flags the race-to-store case (two concurrent callers
+ * both went to LML and both wrote); the sequential orchestrator never
+ * triggers this, so any non-zero value in the log signals a regression.
+ *
+ * See plans/flowsheet-backfill-lookup-dedup.md and `lookup-cache.ts`.
+ */
+export type CacheStatsFn = () => { size: number; hits: number; misses: number; overwrites: number };
 
 export type Totals = {
   scanned: number;
@@ -171,6 +194,16 @@ export type Totals = {
 };
 
 export type ProcessOutcome = EnrichOutcome | 'lml_error';
+
+/**
+ * Outcome plus cache provenance, so the per-row loop can skip the LML
+ * throttle on hits. `cacheHit` is false for the `lml_error` branch (we
+ * threw before the cache had a chance to record a hit, so the throttle
+ * still runs to space the next LML attempt) and false for `enriched_*`
+ * outcomes that came from a cache miss (lookup-cache.ts:set was called).
+ * True only when lookup-cache.ts:get returned a stored response.
+ */
+export type ProcessResult = { outcome: ProcessOutcome; cacheHit: boolean };
 
 export type RunResult = {
   totals: Totals;
@@ -187,24 +220,25 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 export const processRow = async (
   row: EnrichRow,
   deps: { lookup: LookupFn; enrich: EnrichFn }
-): Promise<ProcessOutcome> => {
+): Promise<ProcessResult> => {
   const artist = row.artist_name;
   const album = row.album_title ?? undefined;
   const track = row.track_title ?? undefined;
 
-  let response: LookupResponse;
+  let result: LookupResult;
   try {
-    response = await deps.lookup(artist, album, track);
+    result = await deps.lookup(artist, album, track);
   } catch (error) {
     log('warn', 'lml_error', `LML lookup failed for flowsheet.id=${row.id}`, {
       flowsheet_id: row.id,
       error_message: (error as Error).message,
     });
     captureError(error, 'lml_error', { flowsheet_id: row.id, artist, album, track });
-    return 'lml_error';
+    return { outcome: 'lml_error', cacheHit: false };
   }
 
-  return deps.enrich(row, response);
+  const outcome = await deps.enrich(row, result.response);
+  return { outcome, cacheHit: result.cacheHit };
 };
 
 /**
@@ -255,6 +289,7 @@ export const runBackfill = async (opts: {
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
+  cacheStats?: CacheStatsFn;
 }): Promise<RunResult> => {
   const batchSize = opts.batchSize ?? resolveBatchSize();
   const throttleMs = opts.throttleMs ?? resolveThrottleMs();
@@ -298,20 +333,54 @@ export const runBackfill = async (opts: {
 
     batchIndex += 1;
     for (const row of rows) {
-      const status = await processRow(row, { lookup: opts.lookup, enrich: opts.enrich });
+      const { outcome, cacheHit } = await processRow(row, { lookup: opts.lookup, enrich: opts.enrich });
       totals.scanned += 1;
-      totals[status] += 1;
+      totals[outcome] += 1;
       lastId = row.id;
-      if (throttleMs > 0) await sleep(throttleMs);
+      // Throttle exists to pace LML calls (BACKFILL_THROTTLE_MS docstring
+      // above). A cache hit makes no LML call, so sleeping after one is
+      // wall-clock waste — at the documented 42% hit rate over ~628k
+      // rows that's ~7.3h per run recovered.
+      if (throttleMs > 0 && !cacheHit) await sleep(throttleMs);
     }
+
+    const cacheFields = readCacheFields(opts.cacheStats);
 
     log('info', 'batch_done', `batch ${batchIndex} done`, {
       batch_index: batchIndex,
       last_id: lastId,
       ...totals,
+      ...cacheFields,
     });
   }
 
-  log('info', 'finished', `${JOB_NAME} done. ${formatTotals(totals)}`, { ...totals });
+  const finalCacheFields = readCacheFields(opts.cacheStats);
+  log('info', 'finished', `${JOB_NAME} done. ${formatTotals(totals)}`, { ...totals, ...finalCacheFields });
   return { totals };
+};
+
+/**
+ * Read the optional cache-stats injection and project it into flat log
+ * fields. Wrapped in try/catch so an observability throw can never abort
+ * the drain — the per-row work is already committed by the time
+ * `batch_done` logs, and a degraded log line is strictly better than an
+ * `exit 1` that wipes a successful batch from the deploy story.
+ */
+const readCacheFields = (
+  cacheStats: CacheStatsFn | undefined
+):
+  | { cache_hits: number; cache_misses: number; cache_size: number; cache_overwrites: number }
+  | { cache_stats_error: string }
+  | Record<string, never> => {
+  if (!cacheStats) return {};
+  try {
+    const { size, hits, misses, overwrites } = cacheStats();
+    return { cache_hits: hits, cache_misses: misses, cache_size: size, cache_overwrites: overwrites };
+  } catch (error) {
+    // Defend against non-Error throws (`throw 'string'`, `throw { code: x }`) —
+    // `(err as Error).message` would emit undefined and the JSON logger
+    // would drop the key, leaving operators with no signal at all.
+    const message = error instanceof Error ? error.message : String(error);
+    return { cache_stats_error: message };
+  }
 };

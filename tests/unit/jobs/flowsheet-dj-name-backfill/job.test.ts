@@ -46,9 +46,13 @@ describe('flowsheet-dj-name-backfill: applyBatch', () => {
     jest.clearAllMocks();
   });
 
-  it('builds an UPDATE that COALESCEs auth_user.dj_name → shows.legacy_dj_name → auth_user.name', async () => {
-    // Match the same precedence the search service and live insert path use.
-    // Drift here would silently change which name appears for legacy rows.
+  it('builds an UPDATE that COALESCEs auth_user.dj_name → shows.legacy_dj_name (and does NOT fall back to auth_user.name)', async () => {
+    // Match the same precedence the webhook and live insert path use. The
+    // chain stops at shows.legacy_dj_name on purpose — `auth_user.name`
+    // stores the user's real name (dj-site admin provisioning writes
+    // `name: realName || username`), so surfacing it on the public v2 wire
+    // would be PII exposure. Drift here would re-introduce the leak BS#1371
+    // closed.
     (db.execute as jest.Mock).mockResolvedValueOnce({ count: 5000 });
 
     await applyBatch(5000);
@@ -56,7 +60,9 @@ describe('flowsheet-dj-name-backfill: applyBatch', () => {
     const call = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet[\s\S]*dj_name[\s\S]*COALESCE/i);
     expect(call).toBeDefined();
     const sqlText = renderSql(call?.[0]);
-    expect(sqlText).toMatch(/COALESCE\(\s*u\."dj_name",\s*s\."legacy_dj_name",\s*u\."name"\s*\)/);
+    expect(sqlText).toMatch(/COALESCE\(\s*u\."dj_name",\s*s\."legacy_dj_name"\s*\)/);
+    // Negative assertion: u."name" must NOT appear in the SET expression.
+    expect(sqlText).not.toMatch(/u\."name"/);
   });
 
   it('restricts the UPDATE to track + marker rows with NULL dj_name within a bounded batch', async () => {

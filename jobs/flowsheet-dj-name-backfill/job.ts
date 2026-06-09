@@ -8,9 +8,12 @@
  * `dj_name IS NULL` filter (re-running picks up exactly the rows the previous
  * run did not finish).
  *
- * The COALESCE order matches the search service's DJ_NAME_EXPR and the live
- * insert path, so every row carries the same resolved name regardless of
- * which subsystem populated it.
+ * The COALESCE chain — `auth_user.dj_name` then `shows.legacy_dj_name` —
+ * matches the webhook + live insert path. `auth_user.name` is intentionally
+ * NOT in the chain: dj-site provisioning writes the user's real name into
+ * that column, and surfacing real names on the public v2 wire would be PII
+ * exposure. Rows where neither source resolves stay NULL; the live path's
+ * asymmetric-fallback policy degrades gracefully.
  *
  * Covered entry types (#952): track (search hot path) plus the four marker
  * types — show_start, show_end, dj_join, dj_leave — which surface dj_name in
@@ -63,7 +66,7 @@ const PROGRESS_LOG_EVERY = 1; // every batch; the operation is rare enough that 
 const applyBatch = async (batchSize: number): Promise<number> => {
   const result = await db.execute(sql`
     UPDATE "wxyc_schema"."flowsheet" AS f
-    SET "dj_name" = COALESCE(u."dj_name", s."legacy_dj_name", u."name")
+    SET "dj_name" = COALESCE(u."dj_name", s."legacy_dj_name")
     FROM "wxyc_schema"."shows" AS s
     LEFT JOIN "auth_user" AS u ON u."id" = s."primary_dj_id"
     WHERE f."show_id" = s."id"

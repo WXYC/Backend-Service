@@ -18,9 +18,10 @@
  *      in `@wxyc/metadata`.
  */
 import { MetadataRequest, AlbumMetadataResult, ArtistMetadataResult, FlowsheetMetadata } from './metadata.types.js';
-import { lookupMetadata, envInt } from '@wxyc/lml-client';
+import { envInt } from '@wxyc/lml-client';
 import type { DiscogsMatchResult } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
+import { lmlLookupCoordinator } from '../lml/index.js';
 import { SearchUrlProvider } from './providers/search-urls.provider.js';
 
 export { filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
@@ -64,7 +65,7 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
   const { artistName, albumTitle, trackTitle } = request;
   const result: FlowsheetMetadata = {};
 
-  const lookupResponse = await lookupMetadata(artistName, albumTitle, trackTitle, {
+  const lookupResponse = await lmlLookupCoordinator.lookup(artistName, albumTitle, trackTitle, {
     caller: 'metadata-service',
     budgetMs: METADATA_SERVICE_LML_BUDGET_MS,
   });

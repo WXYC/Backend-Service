@@ -71,6 +71,24 @@ jest.mock('@wxyc/lml-client', () => ({
   envInt: (_name: string, fallback: number) => fallback,
 }));
 
+// Backend code paths now route through the LmlLookupCoordinator (BS#885).
+// The mock stub mirrors the real coordinator's `requireSearchType` gate
+// (BS#1355) so the addAlbum + fireAndForgetCanonicalEntity migrations are
+// validated end-to-end.
+jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
+  lmlLookupCoordinator: {
+    lookup: async (artist: unknown, album: unknown, song: unknown, opts: Record<string, unknown> | undefined) => {
+      const response = (await mockLookupMetadata(artist as never, album as never, song as never, opts as never)) as {
+        search_type?: string;
+      } | null;
+      if (response && opts?.requireSearchType && response.search_type !== opts.requireSearchType) {
+        return null;
+      }
+      return response;
+    },
+  },
+}));
+
 import {
   markMissing,
   markFound,
@@ -405,6 +423,8 @@ describe('library.controller', () => {
         expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, {
           budgetMs: 5000,
           caller: 'library-canonical-entity',
+          warm_cache: true,
+          requireSearchType: 'direct',
         });
       });
 
@@ -512,7 +532,7 @@ describe('library.controller', () => {
         { position: '1', title: 'Tragic Magic', duration: '6:01', artists: ['Julianna Barwick & Mary Lattimore'] },
         { position: '2', title: 'For Mariko', duration: '4:18', artists: ['Julianna Barwick & Mary Lattimore'] },
       ];
-      mockResolveRotationPickerSource.mockResolvedValue({ releaseId: 0, inlineTracklist });
+      mockResolveRotationPickerSource.mockResolvedValue({ releaseId: null, inlineTracklist });
       const req = { params: { rotation_id: '42' } } as unknown as Request;
       const res = mockResponse();
 

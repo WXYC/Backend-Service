@@ -237,6 +237,12 @@ services:
       # via its `songLookup` fixture map (BS#825).
       - CATALOG_TRACK_SEARCH_CTA_ENABLED=${CATALOG_TRACK_SEARCH_CTA_ENABLED:-true}
       - CATALOG_TRACK_SEARCH_DISCOGS_ENABLED=${CATALOG_TRACK_SEARCH_DISCOGS_ENABLED:-true}
+      # Catalog Search Alias: activate the alias-aware LATERAL JOIN for
+      # integration tests. Plan: Backend-Service/plans/artist-search-alias.md
+      # §PR 5. Defaults to off in prod; CI flips it on so
+      # tests/integration/library-search-alias.spec.js exercises the LATERAL
+      # against a seeded artist_search_alias variant ('Thee Oh Sees' → OHSEES).
+      - CATALOG_SEARCH_ALIAS_ENABLED=${CATALOG_SEARCH_ALIAS_ENABLED:-true}
     ports:
       - '${CI_PORT:-8081}:8080'
 

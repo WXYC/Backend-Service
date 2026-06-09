@@ -38,6 +38,7 @@ import { sql } from 'drizzle-orm';
 import { album_metadata, db, closeDatabaseConnection, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
 import { bulkLookupMetadata, type BulkLookupItem, type LookupResponse } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
+import * as Sentry from '@sentry/node';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'album-level-backfill';
@@ -346,6 +347,13 @@ export interface BatchResult {
   no_match: number;
   error: number;
   upserts: number;
+  /** Count of per-result rows where LML's `result.index` did not equal the
+   * position we sent in `items[i]`. LML's bulk handler honors the input-
+   * order contract today (`asyncio.gather` over `_run_one(index=i)`), so a
+   * non-zero value here means a future LML refactor silently dropped that
+   * invariant — we skip the write rather than UPSERT against the wrong
+   * `album_id`. Regression-pin for BS#1088. */
+  unexpected_index: number;
 }
 
 /** Run one chunk end-to-end: resolve → bulk call → UPSERT matches. The
@@ -368,11 +376,11 @@ export const runBatch = async (
       resolved: resolved.length,
       items: items.length,
     });
-    return { batchSize: items.length, match: 0, no_match: 0, error: 0, upserts: 0 };
+    return { batchSize: items.length, match: 0, no_match: 0, error: 0, upserts: 0, unexpected_index: 0 };
   }
 
   if (items.length === 0) {
-    return { batchSize: 0, match: 0, no_match: 0, error: 0, upserts: 0 };
+    return { batchSize: 0, match: 0, no_match: 0, error: 0, upserts: 0, unexpected_index: 0 };
   }
 
   // Isolate HTTP-level failures (timeout, 5xx, network) so a single bad
@@ -399,29 +407,61 @@ export const runBatch = async (
       error_message: errorMessage,
     });
     captureError(err, 'lml_batch_failed', extra);
-    return { batchSize: items.length, match: 0, no_match: 0, error: items.length, upserts: 0 };
+    return { batchSize: items.length, match: 0, no_match: 0, error: items.length, upserts: 0, unexpected_index: 0 };
   }
-  // resolved[i] corresponds to items[i] which corresponds to response.results[i].
-  // LML guarantees input-order results.
-  let match = 0;
-  let no_match = 0;
-  let error = 0;
-
+  // Iterate by *position* and assert `result.index === i`. LML's bulk
+  // handler honors the input-order contract today (`asyncio.gather` over
+  // `_run_one(index=i)`), so this is a regression-pin (BS#1088) — a future
+  // partial-failure isolation change that filters mid-batch (`try/except`
+  // skip) would cause `resolved[result.index]` to look up the *wrong*
+  // album_id and silently UPSERT `album_metadata` against it (same failure
+  // class as BS#1051 in a different code path). Position lookup is O(1);
+  // `find()` would be O(N²) over the batch and the ticket flags that
+  // explicitly.
+  //
   // `upsertAlbumMatch` is race-guarded by `updated_at < NOW()` and
   // `enumeratePendingAlbumIds` returns distinct album_ids per batch, so
   // ordering within a batch is irrelevant — safe to issue concurrently.
+  let match = 0;
+  let no_match = 0;
+  let error = 0;
+  let unexpected_index = 0;
+  // BS#1316 gap 3: accumulate first-mismatch context inside the loop and
+  // emit ONE breadcrumb per batch after, instead of one per row. Sentry's
+  // default `maxBreadcrumbs` is 100 FIFO; per-row emission under a full
+  // contract break would evict legitimate upstream context (LML HTTP span,
+  // DB query trail) before the NEXT captured event could attach to them.
+  let firstMismatchIndex: number | null = null;
+  let firstMismatchGot: number | null = null;
+  let firstMismatchAlbumId: number | null = null;
   const upsertPromises: Array<Promise<boolean>> = [];
-  for (const result of response.results) {
+  for (let i = 0; i < items.length; i++) {
+    const result = response.results[i];
+    if (!result || result.index !== i) {
+      unexpected_index += 1;
+      const album = resolved[i];
+      if (firstMismatchIndex === null) {
+        firstMismatchIndex = i;
+        firstMismatchGot = result?.index ?? null;
+        firstMismatchAlbumId = album?.album_id ?? null;
+      }
+      log('warn', 'unexpected_result_index', `LML result.index mismatch at position ${i}; skipping write`, {
+        expected_index: i,
+        got_index: result?.index ?? null,
+        album_id: album?.album_id ?? null,
+      });
+      continue;
+    }
     if (result.status === 'match' && result.lookup) {
       match += 1;
-      const album = resolved[result.index];
+      const album = resolved[i];
       if (!album) continue; // shouldn't happen given input-order guarantee
       upsertPromises.push(upsertAlbumMatch(album.album_id, result.lookup));
     } else if (result.status === 'no_match') {
       no_match += 1;
     } else {
       error += 1;
-      const album = resolved[result.index];
+      const album = resolved[i];
       log('warn', 'lml_error', `LML per-item error for album_id=${album?.album_id ?? '?'}`, {
         album_id: album?.album_id ?? null,
         error_message: result.message ?? null,
@@ -429,7 +469,40 @@ export const runBatch = async (
     }
   }
   const upserts = (await Promise.all(upsertPromises)).filter(Boolean).length;
-  return { batchSize: items.length, match, no_match, error, upserts };
+
+  // BS#1316 gaps 2 + 3: surface the non-zero `unexpected_index` signal.
+  // Without this, the per-row counter aggregates correctly in the
+  // `batch_done` log + `BackfillSummary` but evaporates from the Sentry
+  // Issues view at process exit (no captured event → orphaned breadcrumbs).
+  // One breadcrumb per batch caps FIFO pressure; one `captureMessage` per
+  // non-zero batch surfaces the signal with a stable fingerprint so an
+  // alert rule can hang off the issue and cause-aggregation persists across
+  // deploys.
+  if (unexpected_index > 0) {
+    Sentry.addBreadcrumb({
+      category: 'album-level-backfill',
+      message: 'unexpected_result_index',
+      level: 'warning',
+      data: {
+        mismatch_count: unexpected_index,
+        first_mismatch_index: firstMismatchIndex,
+        first_mismatch_got: firstMismatchGot,
+        first_mismatch_album_id: firstMismatchAlbumId,
+      },
+    });
+    Sentry.captureMessage('album-level-backfill.unexpected_index', {
+      level: 'warning',
+      tags: { source: 'album-level-backfill' },
+      extra: {
+        unexpected_index,
+        scanned: items.length,
+        batch_first_id: resolved[0]?.album_id ?? null,
+      },
+      fingerprint: ['album-level-backfill', 'unexpected_index'],
+    });
+  }
+
+  return { batchSize: items.length, match, no_match, error, upserts, unexpected_index };
 };
 
 // -- Top-level orchestration -------------------------------------------------
@@ -442,6 +515,10 @@ export interface BackfillSummary {
   error: number;
   upserts: number;
   flipped: number;
+  /** Aggregate of `BatchResult.unexpected_index` across all batches. The
+   * BS#1088 acceptance bar is 0 on a 24-h prod run; non-zero means a
+   * future LML refactor dropped the input-order contract. */
+  unexpected_index: number;
 }
 
 export interface BackfillOptions {
@@ -515,6 +592,7 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
       error: 0,
       upserts: 0,
       flipped: 0,
+      unexpected_index: 0,
     };
   }
 
@@ -525,6 +603,7 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
   let totalNoMatch = 0;
   let totalError = 0;
   let totalUpserts = 0;
+  let totalUnexpectedIndex = 0;
 
   for (let i = 0; i < batches.length; i += 1) {
     await awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs);
@@ -541,6 +620,7 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
     totalNoMatch += result.no_match;
     totalError += result.error;
     totalUpserts += result.upserts;
+    totalUnexpectedIndex += result.unexpected_index;
 
     // Field names are pinned to the BS#1078 Phase 3 runbook's `jq` watchdog
     // (`docs/ops-album-level-backfill-phase3.md`). The watchdog filters on
@@ -548,6 +628,9 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
     // probe sums `.scanned` and `.lml_error`. Don't rename these without
     // updating the runbook in lockstep — silent rename will leave the
     // watchdog matching nothing again (BS#1179).
+    // `unexpected_index` is the BS#1088 acceptance signal; the runbook
+    // grep adds it as a new aggregate field, so the log shape stays
+    // backward-compatible with the existing `jq` watchdog.
     log('info', 'batch_done', `batch ${i + 1}/${batches.length} done`, {
       batch_index: i + 1,
       batches: batches.length,
@@ -556,6 +639,7 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
       no_match: result.no_match,
       lml_error: result.error,
       upserts: result.upserts,
+      unexpected_index: result.unexpected_index,
       wall_clock_ms: wallClockMs,
     });
 
@@ -591,6 +675,7 @@ export const runBackfill = async (options: BackfillOptions): Promise<BackfillSum
     error: totalError,
     upserts: totalUpserts,
     flipped,
+    unexpected_index: totalUnexpectedIndex,
   };
 };
 

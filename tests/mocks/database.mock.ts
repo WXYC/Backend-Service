@@ -80,7 +80,10 @@ export const library = {
   canonical_entity_confidence: 'canonical_entity_confidence',
   canonical_entity_resolved_at: 'canonical_entity_resolved_at',
 };
-export const artists = {};
+export const artists = {
+  id: 'id',
+  artist_name: 'artist_name',
+};
 export const genres = {};
 export const format = {};
 export const rotation = {
@@ -116,6 +119,32 @@ export const artist_search_alias = {
   method: 'method',
   confidence: 'confidence',
   last_verified_at: 'last_verified_at',
+};
+export const venues = {
+  id: 'id',
+  slug: 'slug',
+  name: 'name',
+  city: 'city',
+  state: 'state',
+  address: 'address',
+  added_at: 'added_at',
+  last_modified: 'last_modified',
+};
+export const concerts = {
+  id: 'id',
+  source: 'source',
+  source_id: 'source_id',
+  venue_id: 'venue_id',
+  starts_at: 'starts_at',
+  headlining_artist_raw: 'headlining_artist_raw',
+  headlining_artist_id: 'headlining_artist_id',
+  supporting_artists_raw: 'supporting_artists_raw',
+  ticket_url: 'ticket_url',
+  image_url: 'image_url',
+  status: 'status',
+  raw_data: 'raw_data',
+  scraped_at: 'scraped_at',
+  last_modified: 'last_modified',
 };
 export const album_plays = {
   album_id: 'album_id',
@@ -195,6 +224,7 @@ export const shows = {
   legacy_dj_name: 'legacy_dj_name',
   legacy_dj_id: 'legacy_dj_id',
   legacy_show_id: 'legacy_show_id',
+  dj_name_override: 'dj_name_override',
   start_time: 'start_time',
   end_time: 'end_time',
   show_name: 'show_name',

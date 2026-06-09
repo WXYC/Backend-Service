@@ -62,6 +62,12 @@ const noMatchResponse: LookupResponse = {
   search_type: 'none',
 };
 
+// LookupFn now returns `{ response, cacheHit }` (LookupResult) instead of
+// the bare LookupResponse — so the orchestrator can skip the per-row LML
+// throttle on hits. Tests wrap the responses with these helpers.
+const matchedResult = (cacheHit = false) => ({ response: matchedResponse, cacheHit });
+const noMatchResult = (cacheHit = false) => ({ response: noMatchResponse, cacheHit });
+
 describe('resolvePartitionFilter', () => {
   it('returns no-op when neither env var set', () => {
     const got = resolvePartitionFilter(undefined, undefined);
@@ -193,24 +199,33 @@ describe('processRow', () => {
     album_id: null,
   };
 
-  it('returns enriched_match and calls enrich on LML success-with-match', async () => {
-    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResponse);
+  it('returns enriched_match + cacheHit=false on LML success-with-match (miss path)', async () => {
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
     const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
 
-    const outcome = await processRow(row, { lookup, enrich });
+    const result = await processRow(row, { lookup, enrich });
 
-    expect(outcome).toBe('enriched_match');
+    expect(result).toEqual({ outcome: 'enriched_match', cacheHit: false });
     expect(lookup).toHaveBeenCalledWith('Autechre', 'Confield', 'VI Scose Poise');
     expect(enrich).toHaveBeenCalledWith(row, matchedResponse);
   });
 
+  it('forwards cacheHit=true from the lookup result so the orchestrator can skip throttle', async () => {
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(true));
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
+
+    const result = await processRow(row, { lookup, enrich });
+
+    expect(result).toEqual({ outcome: 'enriched_match', cacheHit: true });
+  });
+
   it('returns enriched_no_match and calls enrich on LML no-match', async () => {
-    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResponse);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult(false));
     const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_no_match');
 
-    const outcome = await processRow(row, { lookup, enrich });
+    const result = await processRow(row, { lookup, enrich });
 
-    expect(outcome).toBe('enriched_no_match');
+    expect(result).toEqual({ outcome: 'enriched_no_match', cacheHit: false });
     expect(enrich).toHaveBeenCalledWith(row, noMatchResponse);
   });
 
@@ -218,9 +233,9 @@ describe('processRow', () => {
     const lookup = jest.fn<LookupFn>().mockRejectedValue(new Error('LML 502'));
     const enrich = jest.fn<EnrichFn>();
 
-    const outcome = await processRow(row, { lookup, enrich });
+    const result = await processRow(row, { lookup, enrich });
 
-    expect(outcome).toBe('lml_error');
+    expect(result).toEqual({ outcome: 'lml_error', cacheHit: false });
     // Critical: the row's metadata_attempt_at stays NULL because we never
     // call enrich. This is what makes #639 Phase 2's recurring sweep able
     // to re-attempt transient LML failures.
@@ -228,7 +243,7 @@ describe('processRow', () => {
   });
 
   it('forwards undefined for null album_title / track_title (matches lml-fetch.ts contract)', async () => {
-    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResponse);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult(false));
     const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_no_match');
     const sparseRow = { id: 1, artist_name: 'Lone Anonymous', album_title: null, track_title: null, album_id: null };
 
@@ -243,7 +258,7 @@ describe('runBackfill', () => {
     jest.clearAllMocks();
   });
 
-  const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResponse);
+  const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
   const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
 
   it('issues a SELECT carrying the canonical WHERE filter (entry_type, artist_name, marker, race guard, cursor, ORDER BY, LIMIT)', async () => {
@@ -308,9 +323,9 @@ describe('runBackfill', () => {
 
     const lookupFlaky = jest
       .fn<LookupFn>()
-      .mockResolvedValueOnce(matchedResponse)
+      .mockResolvedValueOnce(matchedResult(false))
       .mockRejectedValueOnce(new Error('LML 502'))
-      .mockResolvedValueOnce(noMatchResponse);
+      .mockResolvedValueOnce(noMatchResult(false));
     const enrichLocal = jest
       .fn<EnrichFn>()
       .mockResolvedValueOnce('enriched_match')
@@ -406,6 +421,184 @@ describe('runBackfill', () => {
     });
 
     expect(checkLiveActivity).toHaveBeenCalledWith(120);
+  });
+
+  describe('cache stats injection + cache-hit throttle skip (peer ticket to BS#1011)', () => {
+    // The (artist, album) dedup cache lives in lml-fetch.ts; the orchestrator
+    // gets a `cacheStats` injection so the batch_done log line can emit
+    // `cache_hits` / `cache_misses` / `cache_size` / `cache_overwrites` as
+    // flat fields alongside the totals.
+    //
+    // The cache-hit signal flows BACK from the lookup (LookupResult.cacheHit)
+    // up through processRow so the per-row loop can skip THROTTLE_MS on hits.
+    //
+    // All tests put their spyOn(process.stdout, 'write').mockRestore() in
+    // finally so a failed assertion can't leak the spy into subsequent tests.
+
+    type CacheStats = { size: number; hits: number; misses: number; overwrites: number };
+
+    it('emits cache_* fields in batch_done when cacheStats is provided', async () => {
+      const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+      const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+      initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-1' });
+      const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      try {
+        const batch = [
+          { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
+          { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
+        ];
+        (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+
+        const cacheStats = jest.fn<() => CacheStats>().mockReturnValue({ size: 1, hits: 1, misses: 1, overwrites: 0 });
+
+        await runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0, cacheStats });
+
+        const stdoutLines = writeSpy.mock.calls.map((args) => String(args[0]));
+        const batchDoneLine = stdoutLines.find((l) => l.includes('"step":"batch_done"'));
+        if (!batchDoneLine) throw new Error('expected a batch_done log line');
+        const parsed = JSON.parse(batchDoneLine.trim());
+        expect(parsed.cache_hits).toBe(1);
+        expect(parsed.cache_misses).toBe(1);
+        expect(parsed.cache_size).toBe(1);
+        expect(parsed.cache_overwrites).toBe(0);
+        // Existing totals are still flat keys, not nested under a `cache` object.
+        expect(parsed.scanned).toBe(2);
+        expect(parsed.enriched_match).toBe(2);
+
+        const finishedLine = stdoutLines.find((l) => l.includes('"step":"finished"'));
+        if (!finishedLine) throw new Error('expected a finished log line');
+        const parsedFinished = JSON.parse(finishedLine.trim());
+        expect(parsedFinished.cache_hits).toBe(1);
+        expect(parsedFinished.cache_misses).toBe(1);
+        expect(parsedFinished.cache_size).toBe(1);
+        expect(parsedFinished.cache_overwrites).toBe(0);
+
+        // cacheStats should be invoked once per batch_done plus once on finished.
+        expect(cacheStats).toHaveBeenCalledTimes(2);
+      } finally {
+        writeSpy.mockRestore();
+        await closeLogger();
+      }
+    });
+
+    it('omits cache_* fields when cacheStats is not provided (back-compat)', async () => {
+      const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+      const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+      initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-2' });
+      const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      try {
+        const batch = [{ id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null }];
+        (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+
+        await runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0 });
+
+        const batchDoneLine = writeSpy.mock.calls
+          .map((args) => String(args[0]))
+          .find((l) => l.includes('"step":"batch_done"'));
+        if (!batchDoneLine) throw new Error('expected a batch_done log line');
+        const parsed = JSON.parse(batchDoneLine.trim());
+        expect(parsed.cache_hits).toBeUndefined();
+        expect(parsed.cache_misses).toBeUndefined();
+        expect(parsed.cache_size).toBeUndefined();
+        expect(parsed.cache_overwrites).toBeUndefined();
+      } finally {
+        writeSpy.mockRestore();
+        await closeLogger();
+      }
+    });
+
+    it.each<[string, unknown, string]>([
+      ['Error', new Error('cache stats are unavailable'), 'cache stats are unavailable'],
+      ['plain string', 'cache stats string thrown', 'cache stats string thrown'],
+      ['plain object', { code: 'X' }, '[object Object]'],
+    ])(
+      'catches %s throws from cacheStats and emits cache_stats_error instead of aborting',
+      async (_label, thrown, expectedMessage) => {
+        // Observability failure must not wipe a successful batch.
+        // applyEnrichment has already committed; we want a degraded
+        // batch_done log line, not an exit 1. Non-Error throws must also
+        // surface a message — `(err as Error).message` would emit
+        // undefined and JSON.stringify would drop the key.
+        const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+        const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+        initLogger({ repo: 'Backend-Service', tool: 'test', runId: `run-id-throw-${_label}` });
+        const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+        try {
+          const batch = [{ id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null }];
+          (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+
+          const cacheStats = jest.fn<() => CacheStats>().mockImplementation(() => {
+            throw thrown;
+          });
+
+          const result = await runBackfill({
+            lookup,
+            enrich,
+            throttleMs: 0,
+            liveActivityLookbackSeconds: 0,
+            cacheStats,
+          });
+
+          // Run completes normally; totals were committed per row.
+          expect(result.totals.scanned).toBe(1);
+          expect(result.totals.enriched_match).toBe(1);
+
+          const batchDoneLine = writeSpy.mock.calls
+            .map((args) => String(args[0]))
+            .find((l) => l.includes('"step":"batch_done"'));
+          if (!batchDoneLine) throw new Error('expected a batch_done log line even when cacheStats throws');
+          const parsed = JSON.parse(batchDoneLine.trim());
+          expect(parsed.cache_stats_error).toBe(expectedMessage);
+          expect(parsed.cache_hits).toBeUndefined();
+        } finally {
+          writeSpy.mockRestore();
+          await closeLogger();
+        }
+      }
+    );
+
+    it('skips THROTTLE_MS sleep on cache hits (counted by setTimeout invocations, no wall-clock)', async () => {
+      // The throttle exists to space LML calls. A cache hit makes no LML
+      // call, so sleeping after one is wall-clock waste. Pinned by
+      // counting setTimeout(_, throttleMs) invocations rather than
+      // measuring elapsed time, so the test is deterministic regardless
+      // of CI load / event-loop jitter / fake-vs-real-timer interactions
+      // in sibling tests.
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      try {
+        const batch = [
+          { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
+          { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
+          { id: 30, artist_name: 'c', album_title: null, track_title: null, album_id: null },
+          { id: 40, artist_name: 'd', album_title: null, track_title: null, album_id: null },
+        ];
+        (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+
+        // 1 miss + 3 hits → exactly 1 throttle sleep, not 4.
+        const mixedLookup = jest
+          .fn<LookupFn>()
+          .mockResolvedValueOnce(matchedResult(false))
+          .mockResolvedValueOnce(matchedResult(true))
+          .mockResolvedValueOnce(matchedResult(true))
+          .mockResolvedValueOnce(matchedResult(true));
+
+        const THROTTLE = 7; // unique value so we can filter the spy
+        await runBackfill({
+          lookup: mixedLookup,
+          enrich,
+          throttleMs: THROTTLE,
+          liveActivityLookbackSeconds: 0,
+        });
+
+        const throttleCalls = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === THROTTLE);
+        expect(throttleCalls).toHaveLength(1);
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    });
   });
 
   it('counts enriched_match_raced separately from enriched_match', async () => {

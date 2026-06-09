@@ -13,7 +13,8 @@ import * as libraryService from '../services/library.service.js';
 import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
-import { checkStreamingAvailability, lookupMetadata, isLmlConfigured, envInt } from '@wxyc/lml-client';
+import { checkStreamingAvailability, isLmlConfigured, envInt } from '@wxyc/lml-client';
+import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
 
@@ -100,9 +101,11 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     const artistName = body.alternate_artist_name || body.artist_name || '';
     const [streamingResult, artworkResult] = await Promise.allSettled([
       checkStreamingAvailability(artistName, body.album_title),
-      lookupMetadata(artistName, body.album_title, undefined, {
+      lmlLookupCoordinator.lookup(artistName, body.album_title, undefined, {
         budgetMs: LIBRARY_LML_BUDGET_MS,
         caller: 'library-add-album',
+        warm_cache: true,
+        requireSearchType: 'direct',
       }),
     ]);
 
@@ -116,7 +119,9 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
       console.warn('Streaming check failed for new album:', streamingResult.reason);
     }
 
-    if (artworkResult.status === 'fulfilled') {
+    if (artworkResult.status === 'rejected') {
+      console.warn('Artwork fetch failed for new album:', artworkResult.reason);
+    } else if (artworkResult.value !== null) {
       const artworkUrl = filterSpacerGif(artworkResult.value.results?.[0]?.artwork?.artwork_url);
       if (artworkUrl) {
         try {
@@ -126,8 +131,6 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
           console.warn('Failed to persist artwork URL:', (e as Error).message);
         }
       }
-    } else {
-      console.warn('Artwork fetch failed for new album:', artworkResult.reason);
     }
 
     // Fire-and-forget canonical-entity resolution (Epic B.1.3). The library
@@ -151,11 +154,15 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 function fireAndForgetCanonicalEntity(libraryId: number, artistName: string | null, albumTitle: string): void {
   if (!artistName) return;
 
-  lookupMetadata(artistName, albumTitle, undefined, {
-    budgetMs: LIBRARY_LML_BUDGET_MS,
-    caller: 'library-canonical-entity',
-  })
+  lmlLookupCoordinator
+    .lookup(artistName, albumTitle, undefined, {
+      budgetMs: LIBRARY_LML_BUDGET_MS,
+      caller: 'library-canonical-entity',
+      warm_cache: true,
+      requireSearchType: 'direct',
+    })
     .then(async (response) => {
+      if (response === null) return;
       const linkage = libraryService.mapLookupToCanonicalEntity(response);
       if (!linkage) return;
       await libraryService.updateCanonicalEntity(libraryId, linkage.id, linkage.confidence);
@@ -702,9 +709,11 @@ async function enrichAlbumAfterIdentityChange(
 
   const [streamingResult, artworkResult] = await Promise.allSettled([
     checkStreamingAvailability(displayArtistName, albumTitle),
-    lookupMetadata(displayArtistName, albumTitle, undefined, {
+    lmlLookupCoordinator.lookup(displayArtistName, albumTitle, undefined, {
       budgetMs: LIBRARY_LML_BUDGET_MS,
       caller: 'library-update-album',
+      warm_cache: true,
+      requireSearchType: 'direct',
     }),
   ]);
 
@@ -718,7 +727,9 @@ async function enrichAlbumAfterIdentityChange(
     console.warn('Streaming check failed for updated album:', streamingResult.reason);
   }
 
-  if (artworkResult.status === 'fulfilled') {
+  if (artworkResult.status === 'rejected') {
+    console.warn('Artwork fetch failed for updated album:', artworkResult.reason);
+  } else if (artworkResult.value !== null) {
     const artworkUrl = filterSpacerGif(artworkResult.value.results?.[0]?.artwork?.artwork_url);
     if (artworkUrl) {
       try {
@@ -727,8 +738,6 @@ async function enrichAlbumAfterIdentityChange(
         console.warn('Failed to persist artwork URL after album update:', (e as Error).message);
       }
     }
-  } else {
-    console.warn('Artwork fetch failed for updated album:', artworkResult.reason);
   }
 
   fireAndForgetCanonicalEntity(albumId, canonicalArtistName, albumTitle);

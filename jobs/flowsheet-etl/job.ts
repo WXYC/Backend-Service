@@ -29,7 +29,7 @@ import {
   truncate,
 } from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
-import { mapProdEntryType, resolveEntryTimestamp, parseShowEntryDJName } from './transform.js';
+import { mapProdEntryType, resolveEntryTimestamp } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
@@ -82,8 +82,11 @@ const resolveAlbumIds = async () => {
  * cron's `docker rm -f` killed the container the orphaned PostgreSQL backend
  * kept holding row locks, blocking the next tick. See issue #511.
  *
- * The COALESCE order matches the search service's DJ_NAME_EXPR so future
- * modern-DJ ETL imports pick up auth_user.dj_name automatically.
+ * The COALESCE chain — `auth_user.dj_name` then `shows.legacy_dj_name` —
+ * matches the webhook, backfill, and live insert path. `auth_user.name`
+ * is intentionally NOT in the chain: dj-site provisioning writes the
+ * user's real name into that column, and surfacing real names on the
+ * public v2 wire would be PII exposure.
  */
 const resolveDjNames = async (legacyEntryIds: number[]) => {
   if (legacyEntryIds.length === 0) return;
@@ -94,7 +97,7 @@ const resolveDjNames = async (legacyEntryIds: number[]) => {
   // get populated for the row I just inserted?" steady-state questions.
   const result = await db.execute(sql`
     UPDATE "wxyc_schema"."flowsheet" AS f
-    SET "dj_name" = COALESCE(u."dj_name", s."legacy_dj_name", u."name")
+    SET "dj_name" = COALESCE(u."dj_name", s."legacy_dj_name")
     FROM "wxyc_schema"."shows" AS s
     LEFT JOIN "auth_user" AS u ON u."id" = s."primary_dj_id"
     WHERE f."show_id" = s."id"
@@ -113,16 +116,24 @@ const isMessageEntryType = (entryType: string): boolean =>
   entryType === 'breakpoint' || entryType === 'talkset' || entryType === 'message';
 
 /**
- * Resolve the artist_name for a flowsheet entry. For show_start/show_end entries,
- * parse the DJ name from the structured ARTIST_NAME text. For message-bearing types
- * (breakpoint, talkset, message), the text belongs in the message field instead.
+ * Resolve the artist_name for a flowsheet entry.
+ *
+ * For message-bearing types (breakpoint, talkset, message), the text belongs in
+ * the message field instead — return null here.
+ *
+ * For show_start / show_end markers, the ARTIST_NAME column in tubafrenzy holds
+ * the full marker text (e.g. "START OF SHOW: DJ Aubrey Hearst SIGNED ON at
+ * 7:43 PM (6/2/26)"). Preserve it verbatim — V1 surfaces (dj-site flowsheet,
+ * wxyc.info) render `artist_name` directly, and reducing it to the bare DJ
+ * name strips information the writer put there on purpose. The ETL stays
+ * shape-agnostic about marker templates; whatever TF holds is what BS persists,
+ * truncated to the 128-char column limit. See #1287 and epic #1288.
+ *
+ * Exported for unit testing.
  */
-const resolveArtistName = (rawArtistName: string | null, entryType: string): string | null => {
+export const resolveArtistName = (rawArtistName: string | null, entryType: string): string | null => {
   if (!rawArtistName) return null;
   if (isMessageEntryType(entryType)) return null;
-  if (entryType === 'show_start' || entryType === 'show_end') {
-    return truncate(parseShowEntryDJName(rawArtistName), 128) ?? truncate(rawArtistName, 128);
-  }
   return truncate(rawArtistName, 128);
 };
 

@@ -6,7 +6,8 @@
 
 import { ArtworkProvider } from './base.js';
 import { ArtworkRequest, ArtworkSearchResult } from '../../requestLine/types.js';
-import { lookupMetadata, searchTrackReleases, validateTrackOnRelease, isLmlConfigured } from '@wxyc/lml-client';
+import { searchTrackReleases, validateTrackOnRelease, isLmlConfigured } from '@wxyc/lml-client';
+import { lmlLookupCoordinator } from '../../lml/index.js';
 import { filterSpacerGif } from '../../metadata/metadata.service.js';
 
 /**
@@ -31,7 +32,7 @@ export class DiscogsProvider implements ArtworkProvider {
 
     let lookupResponse;
     try {
-      lookupResponse = await lookupMetadata(request.artist || '', request.album, request.song, {
+      lookupResponse = await lmlLookupCoordinator.lookup(request.artist || '', request.album, request.song, {
         caller: 'artwork-discogs-fallback',
       });
     } catch (error) {

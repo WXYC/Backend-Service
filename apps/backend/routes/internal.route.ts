@@ -1,11 +1,27 @@
 import { Router } from 'express';
 import { eq, sql } from 'drizzle-orm';
-import { db, flowsheet, shows, rotation, library, truncate } from '@wxyc/database';
+import { db, flowsheet, shows, rotation, library, truncate, user } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
-import { fireAndForgetMetadataForRow } from '../services/metadata/index.js';
-import { mapProdEntryType, isMessageEntryType } from '../utils/flowsheet-transform.js';
+import { mapProdEntryType, isMessageEntryType, type BackendEntryType } from '../utils/flowsheet-transform.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
+
+// Marker entry types that surface `dj_name` on the v2 wire (and so must be
+// resolved on the webhook insert path — BS#1371). Track + message-typed rows
+// follow other rules and are intentionally excluded.
+//
+// `dj_join` / `dj_leave` are kept defensively even though `mapProdEntryType`
+// currently doesn't emit them (the tubafrenzy PROD code map covers 0-10 only,
+// none of which resolve to join/leave). If tubafrenzy ever extends the PROD
+// table with join/leave codes, the gate is ready and the attribution caveat
+// below applies. Typed as `Set<BackendEntryType>` so a typo'd literal would
+// fail to compile rather than silently match no entry at runtime.
+const MARKER_ENTRY_TYPES: ReadonlySet<BackendEntryType> = new Set<BackendEntryType>([
+  'show_start',
+  'show_end',
+  'dj_join',
+  'dj_leave',
+]);
 
 export const internal_route = Router();
 
@@ -38,21 +54,78 @@ internal_route.post('/flowsheet-sync-notify', (req, res) => {
   res.json({ ok: true });
 });
 
+interface ResolvedShow {
+  id: number;
+  /**
+   * COALESCE(auth_user.dj_name, shows.legacy_dj_name) — matches the
+   * ETL / dj-name-backfill SQL. The `resolveDjDisplayName` helper
+   * (services/flowsheet.service.ts) can't be reused here because its
+   * signature is `(djName) => string | null` — it has no
+   * `legacy_dj_name` parameter. Picking the same 2-column COALESCE the
+   * ETL (jobs/flowsheet-etl/job.ts:97) and backfill
+   * (jobs/flowsheet-dj-name-backfill/job.ts:66) use means a row later
+   * re-resolved by either job lands the identical value — no writer
+   * drift. The known consequence — neither writer filters the literal
+   * 'Anonymous' the live path strips — is shared with both jobs by
+   * design (BS#1371 spec).
+   *
+   * `auth_user.name` is intentionally NOT in the chain — dj-site
+   * provisioning writes the user's real name into that column
+   * (`name: realName || username` in the roster UI), and surfacing real
+   * names on the public v2 wire would be PII exposure. The live path's
+   * asymmetric-fallback policy already handles null gracefully
+   * (degraded `Start of show: ${time}` instead of leaking a real name).
+   *
+   * Null when the show has no resolvable name from either source
+   * (stub shows pre-ETL-fill; legacy rows with no primary_dj_id and no
+   * legacy_dj_name).
+   */
+  dj_name: string | null;
+}
+
 /**
  * Look up a show by legacy_show_id, creating a stub if it doesn't exist.
  * Uses onConflictDoNothing + re-select for concurrent-insert safety.
+ *
+ * Also resolves the show's display dj_name via a LEFT JOIN to auth_user on
+ * `shows.primary_dj_id` — same query path, no extra round-trip. The webhook
+ * INSERT writes this onto marker rows so the v2 wire honours the
+ * FLOWSHEET_DJ_NAME_NON_NULL contract (BS#1371).
  */
-async function resolveShowId(legacyShowId: number): Promise<number | null> {
+async function resolveShow(legacyShowId: number): Promise<ResolvedShow | null> {
   if (!legacyShowId) return null;
 
-  const existing = await db.select({ id: shows.id }).from(shows).where(eq(shows.legacy_show_id, legacyShowId)).limit(1);
-  if (existing.length > 0) return existing[0].id;
+  const selectShow = () =>
+    db
+      .select({
+        id: shows.id,
+        dj_name: sql<string | null>`COALESCE(${user.djName}, ${shows.legacy_dj_name})`,
+      })
+      .from(shows)
+      .leftJoin(user, eq(user.id, shows.primary_dj_id))
+      .where(eq(shows.legacy_show_id, legacyShowId))
+      .limit(1);
+
+  const existing = await selectShow();
+  if (existing.length > 0) return { id: existing[0].id, dj_name: existing[0].dj_name };
 
   // Create a stub show — the ETL will fill in details (end_time, show_name) later.
   await db.insert(shows).values({ legacy_show_id: legacyShowId, start_time: new Date() }).onConflictDoNothing();
 
-  const [row] = await db.select({ id: shows.id }).from(shows).where(eq(shows.legacy_show_id, legacyShowId)).limit(1);
-  return row?.id ?? null;
+  const [row] = await selectShow();
+  return row ? { id: row.id, dj_name: row.dj_name } : null;
+}
+
+/**
+ * Trim a COALESCE-resolved dj_name and coerce blank/whitespace to null so
+ * the v2 wire never serves a string of spaces. Mirrors the live writer's
+ * `resolveDjDisplayName` shape — same input, same null normalization —
+ * minus the 'Anonymous' literal filter (kept consistent with the ETL +
+ * backfill convention; see ResolvedShow.dj_name docstring).
+ */
+function normalizeMarkerName(raw: string | null | undefined): string | null {
+  const trimmed = raw?.trim();
+  return trimmed ? trimmed : null;
 }
 
 const VALID_ACTIONS = new Set(['create', 'update', 'delete']);
@@ -100,12 +173,41 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       const albumTitle = truncate(entry.releaseTitle, 128);
       const trackTitle = truncate(entry.songTitle, 128);
 
-      // Resolve linkage at INSERT so enrichment fires with album_id already
-      // set; without this, D3's writer takes the unlinked branch and writes
+      // Resolve linkage at INSERT so the CDC consumer worker sees
+      // `album_id` already set and takes the linked enrichment branch;
+      // without this, the worker takes the unlinked branch and writes
       // inline metadata that never reaches album_metadata until the next
-      // flowsheet-etl cycle (#1028).
+      // flowsheet-etl cycle (#1028). Post-#894 inline enrichment no longer
+      // fires from this route — CDC drives the consumer.
       const rawLibraryId = entry.libraryReleaseId ?? 0;
-      const [showId, albumId] = await Promise.all([resolveShowId(entry.radioShowId), resolveAlbumId(rawLibraryId)]);
+      const rawRotationId = entry.rotationReleaseId ?? 0;
+      const [show, albumId, rotationId] = await Promise.all([
+        resolveShow(entry.radioShowId),
+        resolveAlbumId(rawLibraryId),
+        resolveRotationId(rawRotationId),
+      ]);
+      const showId = show?.id ?? null;
+      // For show_start / show_end / dj_join / dj_leave the v2 wire surfaces
+      // dj_name (FLOWSHEET_DJ_NAME_NON_NULL contract). Other entry types
+      // either denormalize dj_name differently (track) or don't surface it
+      // (talkset, breakpoint, message), so we leave them null and let the
+      // existing population paths handle them.
+      //
+      // Trim whitespace and treat blank as null so the wire doesn't surface
+      // a string of spaces (the live writer's `resolveDjDisplayName` does
+      // the same — without it, a `shows.legacy_dj_name='   '` from a
+      // tubafrenzy edit would persist into flowsheet.dj_name and the v2
+      // wire would emit whitespace, defeating the BS#1371 fix via a
+      // different path).
+      //
+      // dj_join / dj_leave caveat (BS#1371): when those codes do enter via
+      // the webhook path (currently they don't — see MARKER_ENTRY_TYPES
+      // above), the payload has no per-event DJ id, only radioShowId — so
+      // guest-join markers would attribute to shows.primary_dj_id, not the
+      // joining guest. Same known limitation as flowsheet-dj-name-backfill;
+      // the live createJoinNotification path is the only one that gets
+      // guest attribution right today.
+      const markerDjName = MARKER_ENTRY_TYPES.has(entryType) ? normalizeMarkerName(show?.dj_name) : null;
 
       // INSERT ... ON CONFLICT DO NOTHING RETURNING { id }: either we win
       // the insert and PG hands back exactly one row, or a concurrent
@@ -114,13 +216,21 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // signal replaces the previous `(xmax = 0)` system-column trick
       // (BS#909): same correctness, no MVCC-internal dependency, race-
       // safe under concurrent webhook delivery (acceptance criterion (c)
-      // — exactly one delivery fires enrichment per legacy_entry_id).
+      // — exactly one fresh-INSERT row per legacy_entry_id, so the CDC
+      // consumer worker sees exactly one INSERT event per logical row).
+      //
+      // `rotation_id` (BS#1268) is set on INSERT only — like `album_id`,
+      // linkage is anchored to the first delivery and not refreshed on
+      // ON CONFLICT updates. Tubafrenzy is the source of truth for the
+      // linkage; if the operator re-binds a flowsheet entry to a different
+      // rotation row, that's a new legacy_entry_id, not an UPDATE.
       const inserted = await db
         .insert(flowsheet)
         .values({
           legacy_entry_id: entry.id,
           legacy_release_id: rawLibraryId || null,
           album_id: albumId,
+          rotation_id: rotationId,
           show_id: showId,
           entry_type: entryType,
           artist_name: artistName,
@@ -128,6 +238,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           track_title: trackTitle,
           record_label: truncate(entry.labelName, 128),
           message: isMsgType ? truncate(entry.artistName, 250) : null,
+          dj_name: markerDjName,
           request_flag: !!entry.requestFlag,
           segue: false,
           play_order: entry.sequenceWithinShow ?? 0,
@@ -136,8 +247,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
         .onConflictDoNothing()
         .returning({ id: flowsheet.id });
 
-      let upsertedRow = inserted[0];
-      const created = !!upsertedRow;
+      const created = !!inserted[0];
 
       if (!created) {
         // Conflict path: refresh the mutable subset of fields on the row
@@ -145,37 +255,28 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
         // UPDATE set-list — show_id / play_order / segue / add_time stay
         // anchored to the first INSERT's values, mutable metadata-ish
         // fields move with the latest webhook payload.
-        const updated = await db
-          .update(flowsheet)
-          .set({
-            artist_name: artistName,
-            album_title: albumTitle,
-            track_title: trackTitle,
-            record_label: truncate(entry.labelName, 128),
-            message: isMsgType ? truncate(entry.artistName, 250) : null,
-            request_flag: !!entry.requestFlag,
-            entry_type: entryType,
-          })
-          .where(eq(flowsheet.legacy_entry_id, entry.id))
-          .returning({ id: flowsheet.id });
-        upsertedRow = updated[0];
-      }
-
-      // Trigger LML metadata enrichment for tracks. Fire-and-forget: errors
-      // are caught inside fireAndForgetMetadataForRow and reported to Sentry,
-      // never propagated. Only fires on the *fresh INSERT* branch so benign
-      // tubafrenzy retries don't trigger LML re-fetch + 10-column rewrite +
-      // CDC/index churn on every duplicate webhook delivery. The historical
-      // drain at jobs/flowsheet-metadata-backfill/ is the safety net for
-      // rows whose first INSERT enrichment returned null.
-      if (created && upsertedRow && entryType === 'track' && artistName) {
-        fireAndForgetMetadataForRow({
-          flowsheetId: upsertedRow.id,
-          albumId: albumId ?? undefined,
-          artistName,
-          albumTitle,
-          trackTitle,
-        });
+        //
+        // `dj_name` is conditionally refreshed only when the resolver
+        // produced a non-null value (defense-in-depth for the stub-then-
+        // fill race: webhook may have inserted with dj_name=NULL when the
+        // stub `shows` row had no resolvable name yet; a later redelivery
+        // after the ETL fills shows.legacy_dj_name will heal the row).
+        // We never overwrite a non-NULL stored value with NULL — that
+        // would regress a row the live path or a prior delivery already
+        // resolved.
+        const refresh: Record<string, unknown> = {
+          artist_name: artistName,
+          album_title: albumTitle,
+          track_title: trackTitle,
+          record_label: truncate(entry.labelName, 128),
+          message: isMsgType ? truncate(entry.artistName, 250) : null,
+          request_flag: !!entry.requestFlag,
+          entry_type: entryType,
+        };
+        if (markerDjName !== null) {
+          refresh.dj_name = markerDjName;
+        }
+        await db.update(flowsheet).set(refresh).where(eq(flowsheet.legacy_entry_id, entry.id));
       }
     }
 
@@ -250,6 +351,26 @@ async function resolveAlbumId(legacyLibraryReleaseId: number): Promise<number | 
 }
 
 /**
+ * Resolve a Backend-Service rotation_id from a tubafrenzy ROTATION_RELEASE_ID
+ * (the `entry.rotationReleaseId` field on the flowsheet webhook payload, set
+ * by tubafrenzy's `FlowsheetEntryAddServlet.populateRotationRelease()`).
+ * Returns null if the legacy id is 0 / unset or no rotation row matches.
+ *
+ * Single indexed SELECT via `rotation_legacy_rotation_id_idx` (unique by the
+ * tubafrenzy invariant — one rotation row per legacy_rotation_id). BS#1268.
+ */
+async function resolveRotationId(legacyRotationId: number): Promise<number | null> {
+  if (!legacyRotationId) return null;
+
+  const [row] = await db
+    .select({ id: rotation.id })
+    .from(rotation)
+    .where(eq(rotation.legacy_rotation_id, legacyRotationId))
+    .limit(1);
+  return row?.id ?? null;
+}
+
+/**
  * POST /internal/rotation-webhook
  *
  * Receives rotation release events from tubafrenzy. Called by tubafrenzy's
@@ -307,6 +428,35 @@ internal_route.post('/rotation-webhook', async (req, res) => {
       const killDate =
         release.killDate && release.killDate !== 0 ? new Date(release.killDate).toISOString().split('T')[0] : null;
 
+      // BS#1082 + BS#1312: tubafrenzy's sendRotationLinked posts only {id,
+      // libraryReleaseId, action: 'update'} on linkage. Including any of the
+      // payload-derived denorm fields in SET unconditionally would clobber
+      // the existing row's values with the JS defaults computed above for
+      // missing payload fields ('N' for rotation_bin, null for kill_date,
+      // null for artist_name / album_title / record_label when albumId is
+      // null). Presence-gate the SET so partial updates leave them alone.
+      // The INSERT path keeps the JS-default values so the create branch
+      // still populates these columns on first delivery.
+      const setClause: Record<string, unknown> = {
+        album_id: sql`excluded.album_id`,
+        legacy_library_release_id: sql`excluded.legacy_library_release_id`,
+      };
+      if (release.rotationType !== undefined) {
+        setClause.rotation_bin = sql`excluded.rotation_bin`;
+      }
+      if (release.killDate !== undefined) {
+        setClause.kill_date = sql`excluded.kill_date`;
+      }
+      if (release.artistName !== undefined) {
+        setClause.artist_name = sql`excluded.artist_name`;
+      }
+      if (release.albumTitle !== undefined) {
+        setClause.album_title = sql`excluded.album_title`;
+      }
+      if (release.labelName !== undefined) {
+        setClause.record_label = sql`excluded.record_label`;
+      }
+
       await db
         .insert(rotation)
         .values({
@@ -322,15 +472,7 @@ internal_route.post('/rotation-webhook', async (req, res) => {
         })
         .onConflictDoUpdate({
           target: rotation.legacy_rotation_id,
-          set: {
-            album_id: sql`excluded.album_id`,
-            legacy_library_release_id: sql`excluded.legacy_library_release_id`,
-            rotation_bin: sql`excluded.rotation_bin`,
-            kill_date: sql`excluded.kill_date`,
-            artist_name: sql`excluded.artist_name`,
-            album_title: sql`excluded.album_title`,
-            record_label: sql`excluded.record_label`,
-          },
+          set: setClause,
         });
     }
 

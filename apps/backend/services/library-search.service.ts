@@ -1,6 +1,13 @@
 import * as Sentry from '@sentry/node';
 import { inArray, sql, type SQL } from 'drizzle-orm';
-import { db, library, library_artist_view, genres, format as formatTable } from '@wxyc/database';
+import {
+  db,
+  library,
+  library_artist_view,
+  genres,
+  format as formatTable,
+  artist_search_alias,
+} from '@wxyc/database';
 import type { TrackMatchHint } from '@wxyc/shared/dtos';
 import {
   parseSearchQuery,
@@ -9,6 +16,8 @@ import {
   type SearchCondition,
 } from './search-parser.service.js';
 import { runCatalogTrackSearchCascade, type TaggedLibraryViewEntry } from './library.service.js';
+import type { ArtistMatchHint, ArtistSearchAliasSource } from './requestLine/types.js';
+import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import WxycError from '../utils/error.js';
 
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
@@ -52,6 +61,7 @@ export type AlbumSearchResultRow = {
   on_streaming: boolean | null;
   album_artist: string | null;
   matched_via?: TrackMatchHint[];
+  matched_via_alias?: ArtistMatchHint[];
 };
 
 const FIELD_COLUMNS: Record<CatalogField, SQL> = {
@@ -106,7 +116,21 @@ export async function searchLibrary(
   await validateEnumFilters(params.genres, params.formats);
 
   const conditions = parseSearchQuery(params.q, CATALOG_PARSER_CONFIG);
-  const queryWhere = buildWhereClause(conditions);
+  // Alias is keyed on the raw `q` (matched as a single string by the LATERAL).
+  // Read once per request so a `getConfig()` invalidation mid-call doesn't
+  // give the SELECT projection and the WHERE predicate different views of
+  // the flag — alias rows would surface in the SELECT but get re-filtered
+  // out by the WHERE.
+  //
+  // Also gate on `hasAllField`: only `field === 'all'` conditions ever inject
+  // the alias OR predicate via buildAllFieldMatch. A pure field-specific
+  // query (`artist:foo`, `album:bar`) would otherwise still pay the LATERAL
+  // cost per candidate row with no chance of an alias-only hit surviving
+  // WHERE. The result set is identical to the flag-off path in that case, so
+  // skip the join entirely.
+  const hasAllFieldCondition = conditions.some((c) => c.field === 'all');
+  const aliasActive = getCatalogSearchAliasConfig().enabled && params.q.trim().length > 0 && hasAllFieldCondition;
+  const queryWhere = buildWhereClause(conditions, aliasActive);
   const filterWhere = buildFilterClause(params);
 
   const where = combineWhere(queryWhere, filterWhere);
@@ -117,7 +141,26 @@ export async function searchLibrary(
   );
 
   const offset = params.page * params.limit;
-  const fromClause = where ? sql`FROM ${library_artist_view} WHERE ${where}` : sql`FROM ${library_artist_view}`;
+  const aliasJoin = aliasActive
+    ? sql`LEFT JOIN LATERAL (
+        SELECT MAX(similarity(asa.variant, ${params.q})) AS max_sim,
+               (array_agg(asa.variant ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_variant,
+               (array_agg(asa.source ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_source
+        FROM ${artist_search_alias} asa
+        WHERE asa.artist_id = ${library_artist_view.artist_id}
+          AND asa.variant % ${params.q}
+      ) alias_hit ON true`
+    : sql``;
+  const fromClause = where
+    ? sql`FROM ${library_artist_view} ${aliasJoin} WHERE ${where}`
+    : sql`FROM ${library_artist_view} ${aliasJoin}`;
+
+  const aliasProjection = aliasActive
+    ? sql`,
+      alias_hit.max_sim AS alias_max_sim,
+      alias_hit.matched_variant AS alias_matched_variant,
+      alias_hit.matched_source AS alias_matched_source`
+    : sql``;
 
   // DISTINCT ON dedupes albums carrying multiple active rotation rows — the
   // rotation table explicitly permits several unkilled rows per
@@ -142,6 +185,7 @@ export async function searchLibrary(
       ${library_artist_view.plays} AS plays,
       ${library_artist_view.on_streaming} AS on_streaming,
       ${library_artist_view.album_artist} AS album_artist
+      ${aliasProjection}
     ${fromClause}
     ORDER BY ${library_artist_view.id} ASC, ${library_artist_view.rotation_bin} ASC
   `;
@@ -270,6 +314,7 @@ function taggedRowToAlbumSearchResultRow(row: TaggedLibraryViewEntry): AlbumSear
     album_artist: row.album_artist,
   };
   if (row.matched_via) projected.matched_via = row.matched_via;
+  if (row.matched_via_alias) projected.matched_via_alias = row.matched_via_alias;
   return projected;
 }
 
@@ -283,6 +328,9 @@ type RawRow = {
   code_artist_number: number;
   format_name: string;
   genre_name: string;
+  alias_max_sim?: number | null;
+  alias_matched_variant?: string | null;
+  alias_matched_source?: string | null;
   label: string | null;
   label_id: number | null;
   rotation_bin: string | null;
@@ -292,7 +340,7 @@ type RawRow = {
 };
 
 function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
-  return {
+  const projected: AlbumSearchResultRow = {
     id: row.id,
     add_date: row.add_date instanceof Date ? row.add_date.toISOString() : String(row.add_date ?? ''),
     album_title: row.album_title,
@@ -309,13 +357,24 @@ function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
     on_streaming: row.on_streaming,
     album_artist: row.album_artist,
   };
+  if (
+    row.alias_max_sim !== null &&
+    row.alias_max_sim !== undefined &&
+    row.alias_matched_variant &&
+    row.alias_matched_source
+  ) {
+    projected.matched_via_alias = [
+      { matched_variant: row.alias_matched_variant, source: row.alias_matched_source as ArtistSearchAliasSource },
+    ];
+  }
+  return projected;
 }
 
-function buildWhereClause(conditions: SearchCondition<CatalogField>[]): SQL | null {
+function buildWhereClause(conditions: SearchCondition<CatalogField>[], aliasActive: boolean): SQL | null {
   if (conditions.length === 0) return null;
 
   const fragments = conditions
-    .map((c) => ({ operator: c.operator, fragment: buildConditionFragment(c) }))
+    .map((c) => ({ operator: c.operator, fragment: buildConditionFragment(c, aliasActive) }))
     .filter((f): f is { operator: 'AND' | 'OR'; fragment: SQL } => f.fragment !== null);
 
   if (fragments.length === 0) return null;
@@ -328,9 +387,10 @@ function buildWhereClause(conditions: SearchCondition<CatalogField>[]): SQL | nu
   return sql`(${result})`;
 }
 
-function buildConditionFragment(condition: SearchCondition<CatalogField>): SQL | null {
+function buildConditionFragment(condition: SearchCondition<CatalogField>, aliasActive: boolean): SQL | null {
   const { field, value, exact, negated } = condition;
-  const fragment = field === 'all' ? buildAllFieldMatch(value, exact) : buildColumnMatch(field, value, exact);
+  const fragment =
+    field === 'all' ? buildAllFieldMatch(value, exact, aliasActive) : buildColumnMatch(field, value, exact);
   return negated ? sql`NOT (${fragment})` : fragment;
 }
 
@@ -342,8 +402,10 @@ function buildColumnMatch(field: CatalogField, value: string, exact: boolean): S
   return sql`${col} ILIKE ${'%' + value + '%'}`;
 }
 
-function buildAllFieldMatch(value: string, exact: boolean): SQL {
+function buildAllFieldMatch(value: string, exact: boolean, aliasActive: boolean): SQL {
   if (exact) {
+    // Exact matching skips the alias path — alias variants are normalized
+    // strings, not exact matches against the canonical name.
     return sql`(${library_artist_view.artist_name} = ${value} OR ${library_artist_view.album_title} = ${value} OR ${library_artist_view.label} = ${value})`;
   }
   // Trigram-backed ILIKE across artist/album/label. Tsvector ranking is the
@@ -351,7 +413,11 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
   // first, then route this branch through it); v1 stays correct and reviewable
   // with the same path the flowsheet trigram fallback uses.
   const pattern = '%' + value + '%';
-  return sql`(${library_artist_view.artist_name} ILIKE ${pattern} OR ${library_artist_view.album_title} ILIKE ${pattern} OR ${library_artist_view.label} ILIKE ${pattern})`;
+  // When alias is active the LATERAL JOIN in the FROM clause exposes
+  // `alias_hit.max_sim`; OR it into the all-field branch so an alias-only
+  // hit (variant trigram match but no canonical-name match) still surfaces.
+  const aliasOr = aliasActive ? sql` OR alias_hit.max_sim IS NOT NULL` : sql``;
+  return sql`(${library_artist_view.artist_name} ILIKE ${pattern} OR ${library_artist_view.album_title} ILIKE ${pattern} OR ${library_artist_view.label} ILIKE ${pattern}${aliasOr})`;
 }
 
 function buildFilterClause(params: LibraryQueryParams): SQL | null {

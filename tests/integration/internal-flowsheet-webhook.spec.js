@@ -86,6 +86,129 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
     expect(rows[0].artist_name).toBe('Chuquimamani-Condori');
   });
 
+  // BS#1371: marker entry types delivered via the webhook must carry
+  // `dj_name` resolved via COALESCE(auth_user.dj_name, shows.legacy_dj_name,
+  // auth_user.name). Pre-fix, every webhook-delivered show_start /
+  // show_end / dj_join / dj_leave row landed with dj_name=NULL and the v2
+  // wire emitted '' (iOS rendered an empty handle for ~119k historical
+  // rows). The three cases below cover the three resolution arms.
+  //
+  // `seedShow` pre-DELETEs (defensive against a prior crashed test leaving
+  // a polluted row that would otherwise survive a naive INSERT...ON
+  // CONFLICT DO NOTHING and produce a confusing false pass/fail). `clearShow`
+  // clears the flowsheet row before the show (FK ordering — shows is not
+  // ON DELETE CASCADE).
+  const seedShow = async (legacyShowId, { legacyDjName = null, primaryDjId = null } = {}) => {
+    await sql.unsafe(
+      `DELETE FROM ${SCHEMA}.flowsheet WHERE show_id IN (SELECT id FROM ${SCHEMA}.shows WHERE legacy_show_id = $1)`,
+      [legacyShowId]
+    );
+    await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [legacyShowId]);
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.shows (legacy_show_id, legacy_dj_name, primary_dj_id, start_time) VALUES ($1, $2, $3, NOW())`,
+      [legacyShowId, legacyDjName, primaryDjId]
+    );
+  };
+  const clearShow = async (legacyShowId) => {
+    await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [LEGACY_ENTRY_ID]);
+    await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [legacyShowId]);
+  };
+
+  test('show_start webhook resolves dj_name from shows.legacy_dj_name (BS#1371)', async () => {
+    const LEGACY_SHOW_ID = 9_999_990;
+    await seedShow(LEGACY_SHOW_ID, { legacyDjName: "T'mia Powell" });
+
+    try {
+      const entry = buildEntry({ flowsheetEntryType: 9, radioShowId: LEGACY_SHOW_ID });
+      const res = await request
+        .post('/internal/flowsheet-webhook')
+        .set('X-Internal-Key', INTERNAL_KEY)
+        .send({ action: 'create', entry });
+      expect(res.status).toBe(200);
+
+      const rows = await sql.unsafe(`SELECT entry_type, dj_name FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
+        LEGACY_ENTRY_ID,
+      ]);
+      expect(rows.length).toBe(1);
+      expect(rows[0].entry_type).toBe('show_start');
+      expect(rows[0].dj_name).toBe("T'mia Powell");
+    } finally {
+      await clearShow(LEGACY_SHOW_ID);
+    }
+  });
+
+  // Highest-priority COALESCE arm. Points shows.primary_dj_id at a seeded
+  // auth_user and asserts the resolver picked auth_user.dj_name over
+  // legacy_dj_name. Without this case the LEFT JOIN to auth_user is never
+  // exercised against real Postgres; a schema rename of auth_user.dj_name
+  // would leave the legacy_dj_name case (above) green while production
+  // silently regressed on the primary arm.
+  //
+  // The expected name is fetched at runtime from the seed row rather than
+  // hardcoded, so a future rename of the seeded dj_name in dev_env/seed_db.sql
+  // doesn't break this test for an unrelated reason. We do hard-code the
+  // user id (a stable seed key) — if the row itself is removed from the
+  // seed the upfront SELECT throws with a clear "seeded user missing"
+  // message instead of a confusing equality failure on the dj_name.
+  test('show_start webhook prefers auth_user.dj_name over legacy_dj_name (BS#1371)', async () => {
+    const LEGACY_SHOW_ID = 9_999_988;
+    const PRIMARY_DJ_ID = 'test-dj1-id-00000000000000000001'; // seeded in dev_env/seed_db.sql
+    const [seededUser] = await sql.unsafe(`SELECT dj_name FROM auth_user WHERE id = $1`, [PRIMARY_DJ_ID]);
+    if (!seededUser?.dj_name) {
+      throw new Error(
+        `Seeded auth_user ${PRIMARY_DJ_ID} is missing or has no dj_name; cannot run BS#1371 auth_user-arm test`
+      );
+    }
+    const expectedDjName = seededUser.dj_name;
+    await seedShow(LEGACY_SHOW_ID, { legacyDjName: 'Legacy Override Loser', primaryDjId: PRIMARY_DJ_ID });
+
+    try {
+      const entry = buildEntry({ flowsheetEntryType: 9, radioShowId: LEGACY_SHOW_ID });
+      const res = await request
+        .post('/internal/flowsheet-webhook')
+        .set('X-Internal-Key', INTERNAL_KEY)
+        .send({ action: 'create', entry });
+      expect(res.status).toBe(200);
+
+      const rows = await sql.unsafe(`SELECT entry_type, dj_name FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
+        LEGACY_ENTRY_ID,
+      ]);
+      expect(rows.length).toBe(1);
+      expect(rows[0].entry_type).toBe('show_start');
+      expect(rows[0].dj_name).toBe(expectedDjName);
+      // Negative assertion: the lower-priority legacy_dj_name must NOT win.
+      expect(rows[0].dj_name).not.toBe('Legacy Override Loser');
+    } finally {
+      await clearShow(LEGACY_SHOW_ID);
+    }
+  });
+
+  test('track webhook leaves dj_name NULL even when the show has a resolved name (BS#1371)', async () => {
+    // Track rows have their own dj_name population path (ETL + live insert).
+    // The webhook must NOT write dj_name on track rows so we don't double-
+    // write and risk drift between the webhook and the ETL writer.
+    const LEGACY_SHOW_ID = 9_999_989;
+    await seedShow(LEGACY_SHOW_ID, { legacyDjName: 'Some Resolvable Name' });
+
+    try {
+      const entry = buildEntry({ flowsheetEntryType: 6, radioShowId: LEGACY_SHOW_ID });
+      const res = await request
+        .post('/internal/flowsheet-webhook')
+        .set('X-Internal-Key', INTERNAL_KEY)
+        .send({ action: 'create', entry });
+      expect(res.status).toBe(200);
+
+      const rows = await sql.unsafe(`SELECT entry_type, dj_name FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
+        LEGACY_ENTRY_ID,
+      ]);
+      expect(rows.length).toBe(1);
+      expect(rows[0].entry_type).toBe('track');
+      expect(rows[0].dj_name).toBeNull();
+    } finally {
+      await clearShow(LEGACY_SHOW_ID);
+    }
+  });
+
   test('a second delivery with different mutable fields refreshes those fields', async () => {
     // First delivery: fresh INSERT — the row carries the initial payload.
     const initial = buildEntry({ artistName: 'Juana Molina', songTitle: 'la paradoja', releaseTitle: 'DOGA' });

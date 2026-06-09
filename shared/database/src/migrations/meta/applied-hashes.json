@@ -86,5 +86,7 @@
   "0086_rotation-discogs-direct-backfill-source": "e3d4856c856bc658fe24f4740a9626c5c7d1adebc42e8d6b9aa2586c2595aab9",
   "0087_rotation-tracklist-lookup-attempted-at": "1f053e1810e805820eb760b7ba8100da7b6c29f3e779cd8c49a2b2407da94799",
   "0088_banned-fingerprints": "fc26aef561df95cfa32e09892440b7a9ba614c1cb648a251708ced5e7419b059",
-  "0089_artist-search-alias": "267ecc41f1b0a0cc16805cbff13ad865a06bf430ba440b7441b57fdb6977068b"
+  "0089_artist-search-alias": "267ecc41f1b0a0cc16805cbff13ad865a06bf430ba440b7441b57fdb6977068b",
+  "0090_shows-dj-name-override": "bcbfc0a86ec437c1f11246192d67bfbc291e3f1194014d8bcec718f344c8ed6f",
+  "0091_venues-and-concerts": "e738de9bdb0ab762c982a6e31f664f88705bc2b7336bbd57a15efe3b250e6e87"
 }

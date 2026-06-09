@@ -35,6 +35,26 @@ jest.mock('@wxyc/lml-client', () => ({
   LmlClientError: MockLmlClientError,
 }));
 
+// Backend code paths now route through the LmlLookupCoordinator (BS#885).
+// The mock stub mirrors the real coordinator's `requireSearchType` gate
+// (BS#1355) so per-callsite migrations are validated end-to-end: a test
+// that supplies `search_type: 'alternative'` and a caller that passes
+// `requireSearchType: 'direct'` produces the same `null` the real
+// coordinator would.
+jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
+  lmlLookupCoordinator: {
+    lookup: async (artist: unknown, album: unknown, song: unknown, opts: Record<string, unknown> | undefined) => {
+      const response = (await mockLookupMetadata(artist as never, album as never, song as never, opts as never)) as {
+        search_type?: string;
+      } | null;
+      if (response && opts?.requireSearchType && response.search_type !== opts.requireSearchType) {
+        return null;
+      }
+      return response;
+    },
+  },
+}));
+
 // Mock @sentry/node so we can assert that searchLibraryByTrack creates a
 // catalog.track_search span and projects per-search measurements onto it
 // without initializing Sentry. startSpan(opts, callback) wraps a span mock
@@ -1900,6 +1920,7 @@ describe('library.service', () => {
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
         budgetMs: 5000,
         caller: 'library-enrich-artwork',
+        requireSearchType: 'direct',
       });
       expect(db.update).toHaveBeenCalled();
     });
@@ -1991,6 +2012,7 @@ describe('library.service', () => {
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, {
         budgetMs: 5000,
         caller: 'library-enrich-artwork',
+        requireSearchType: 'direct',
       });
     });
 
@@ -2249,10 +2271,13 @@ describe('library.service', () => {
       // picker, which always passes real `(artist_name, album_title)` pairs
       // from rotation, the cascade's later strategies are exactly where the
       // match for obscure college rotation comes from.
+      // `extended: true` is no longer passed at the callsite — the
+      // LmlLookupCoordinator (BS#885) forces it on the wire. Coordinator
+      // mock receives the callsite args without it.
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
         timeoutMs: 10000,
-        extended: true,
         caller: 'library-rotation-picker',
+        requireSearchType: 'direct',
       });
     });
 
@@ -2280,7 +2305,7 @@ describe('library.service', () => {
         undefined,
         'All the Young Droids: Junkshop Synth Pop 1978-1985',
         undefined,
-        { timeoutMs: 10000, extended: true, caller: 'library-rotation-picker' }
+        { timeoutMs: 10000, caller: 'library-rotation-picker', requireSearchType: 'direct' }
       );
     });
 
@@ -2466,9 +2491,10 @@ describe('library.service', () => {
     it('carries an inline tracklist when LML synth-rescues with release_id=0 (MB rescue)', async () => {
       // LML#427 MusicBrainz rescue: when Discogs misses, LML synthesizes a
       // result with `release_id: 0` (the BS#1185 sentinel) and a tracklist
-      // sourced from musicbrainz-cache. The picker still gets a tracklist
-      // and skips `getRelease(0)` (which would 404). releaseId=0 short-circuits
-      // the controller via `inlineTracklist !== null`.
+      // sourced from musicbrainz-cache. The picker still gets a tracklist;
+      // BS#1351 normalizes the sentinel id to `null` so the controller's
+      // follow-up release fetch is skipped via `releaseId === null` rather
+      // than racing the inline-tracklist short-circuit.
       mockRow({
         direct: null,
         fallback: null,
@@ -2493,7 +2519,7 @@ describe('library.service', () => {
       const result = await resolveRotationPickerSource(42);
 
       expect(result).toEqual({
-        releaseId: 0,
+        releaseId: null,
         inlineTracklist: [
           { position: '1', title: 'Tragic Magic', duration: '6:01', artists: ['Julianna Barwick & Mary Lattimore'] },
           { position: '2', title: 'For Mariko', duration: '4:18', artists: ['Julianna Barwick & Mary Lattimore'] },
@@ -2607,6 +2633,62 @@ describe('library.service', () => {
         await new Promise((r) => setImmediate(r));
 
         expect(db.update).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('search_type gate (BS#1351)', () => {
+      // The Yenbett rotation row repro: LML returned `search_type: "alternative"`
+      // with Tzenni at results[0]. Pre-fix BS handed Tzenni's tracklist back as
+      // Yenbett's. The happy path (`search_type: "direct"`) is already pinned by
+      // the test above; this block pins the rejection of every non-direct value.
+      it.each(['alternative', 'compilation', 'fallback', 'song_as_artist', 'none'] as const)(
+        'rejects search_type=%s even with non-empty artwork and stamps the persistent negative marker',
+        async (searchType) => {
+          mockRow({
+            direct: null,
+            fallback: null,
+            artist_name: 'Noura Mint Seymali',
+            album_title: 'Yenbett',
+          });
+          mockLookupMetadata.mockResolvedValue({
+            results: [{ artwork: { release_id: 7727849, album: 'Tzenni' } }],
+            search_type: searchType,
+          });
+          const updateSetMock = jest.fn().mockReturnThis();
+          const updateWhereMock = jest.fn().mockResolvedValue(undefined);
+          db.update.mockReturnValue({ set: updateSetMock, where: updateWhereMock });
+          updateSetMock.mockReturnValue({ where: updateWhereMock });
+
+          const result = await resolveRotationPickerSource(42);
+          await new Promise((r) => setImmediate(r));
+
+          expect(result).toBeNull();
+          // The persistent stamp is what feeds the 7-day skip on cold cache —
+          // a refactor that moves the stamp into the LML-error branch only
+          // would silently re-introduce cascade-exhaustion on the Yenbett
+          // cohort.
+          expect(db.update).toHaveBeenCalledWith(rotation);
+          expect(updateSetMock).toHaveBeenCalled();
+        }
+      );
+
+      it('treats LML release_id=0 (MusicBrainz-synth sentinel) as no Discogs id', async () => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Some Artist', album_title: 'Some Album' });
+        mockLookupMetadata.mockResolvedValue({
+          results: [{ artwork: { release_id: 0, album: 'Some Album' } }],
+          search_type: 'direct',
+        });
+        const updateSetMock = jest.fn().mockReturnThis();
+        const updateWhereMock = jest.fn().mockResolvedValue(undefined);
+        db.update.mockReturnValue({ set: updateSetMock, where: updateWhereMock });
+        updateSetMock.mockReturnValue({ where: updateWhereMock });
+
+        const result = await resolveRotationPickerSource(42);
+        await new Promise((r) => setImmediate(r));
+
+        // No tracklist and no real release id → degrades to free-text. The
+        // controller never calls `/discogs/release/0`.
+        expect(result).toBeNull();
       });
     });
   });

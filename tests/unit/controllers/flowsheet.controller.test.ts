@@ -38,13 +38,6 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   leaveShow: mockServiceLeaveShow,
 }));
 
-const mockFetchMetadata = jest.fn<() => Promise<void>>();
-const mockFireAndForgetMetadataForRow = jest.fn();
-jest.mock('../../../apps/backend/services/metadata/index', () => ({
-  fetchMetadata: mockFetchMetadata,
-  fireAndForgetMetadataForRow: mockFireAndForgetMetadataForRow,
-}));
-
 import {
   getEntries,
   getLatest,
@@ -416,48 +409,6 @@ describe('flowsheet.controller', () => {
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
-    // The Sentry/error path is owned by enrichment.service.ts and is
-    // covered in tests/unit/services/metadata.enrichment.test.ts. Here we
-    // verify only that the controller delegates to it with the right args.
-
-    it('delegates metadata enrichment with artistId from album lookup when album_id is provided', async () => {
-      const albumInfo = { artist_name: 'Autechre', album_title: 'Confield', record_label: 'Warp', artist_id: 5 };
-      mockGetAlbumFromDB.mockResolvedValue(albumInfo);
-      const completedEntry = {
-        id: 1,
-        show_id: activeShow.id,
-        artist_name: 'Autechre',
-        album_title: 'Confield',
-        track_title: 'VI Scose Poise',
-        album_id: 10,
-        rotation_id: null,
-        play_order: 1,
-        add_time: new Date(),
-      };
-      mockAddTrack.mockResolvedValue(completedEntry);
-
-      const req = createMockBodyReq({
-        artist_name: 'Autechre',
-        album_title: 'Confield',
-        track_title: 'VI Scose Poise',
-        record_label: 'Warp',
-        album_id: 10,
-      });
-      const res = createMockRes();
-
-      await addEntry(req as Request, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(201);
-      expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
-        flowsheetId: 1,
-        artistName: 'Autechre',
-        albumId: 10,
-        artistId: 5,
-        albumTitle: 'Confield',
-        trackTitle: 'VI Scose Poise',
-      });
-    });
-
     it('falls through to free-form path when album_id is explicitly null (BS#933)', async () => {
       // BS#689 made the rotation dropdown LEFT JOIN library so unlinked
       // rotation rows (album_id IS NULL) become selectable; their dropdown
@@ -511,40 +462,34 @@ describe('flowsheet.controller', () => {
       );
     });
 
-    it('delegates metadata enrichment without artistId for free-form inserts (no album_id)', async () => {
-      const completedEntry = {
-        id: 2,
-        show_id: activeShow.id,
-        artist_name: 'Juana Molina',
-        album_title: 'DOGA',
-        track_title: 'la paradoja',
-        record_label: 'Sonamos',
-        album_id: null,
-        rotation_id: null,
-        play_order: 2,
-        add_time: new Date(),
-      };
-      mockAddTrack.mockResolvedValue(completedEntry);
+    it('throws WxycError 404 when a positive album_id is not found in library (BS#1271)', async () => {
+      // BS#933 narrowed the lookup-branch predicate from `!== undefined` to
+      // `!= null`, fixing the explicit-null case. A positive `album_id` that
+      // doesn't match any `library.id` (deleted between dj-site picker fetch
+      // and POST, or rotation→library FK desync) still slipped through and
+      // produced a bare TypeError on the next line — captured as a 500 with
+      // no Sentry exception, the signal at the root of BS#1271's POST
+      // /flowsheet internal_error bursts. The guard now turns the not-found
+      // case into a clean 404 WxycError.
+      // Mock the not-found case explicitly: real `getAlbumFromDB` returns
+      // `undefined` on no match (see library.service.test.ts:1759).
+      mockGetAlbumFromDB.mockResolvedValue(undefined);
 
       const req = createMockBodyReq({
-        artist_name: 'Juana Molina',
-        album_title: 'DOGA',
-        track_title: 'la paradoja',
-        record_label: 'Sonamos',
+        album_id: 9999,
+        track_title: 'Crispy Duck',
+        record_label: 'Duophonic',
       });
       const res = createMockRes();
 
-      await addEntry(req as Request, res as Response, mockNext);
-
-      expect(res.status).toHaveBeenCalledWith(201);
-      expect(mockFireAndForgetMetadataForRow).toHaveBeenCalledWith({
-        flowsheetId: 2,
-        artistName: 'Juana Molina',
-        albumId: undefined,
-        artistId: undefined,
-        albumTitle: 'DOGA',
-        trackTitle: 'la paradoja',
+      await expect(addEntry(req as Request, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      await expect(addEntry(req as Request, res as Response, mockNext)).rejects.toMatchObject({
+        statusCode: 404,
+        message: expect.stringContaining('9999'),
       });
+      expect(mockGetAlbumFromDB).toHaveBeenCalledWith(9999);
+      // INSERT must not run when the album lookup misses.
+      expect(mockAddTrack).not.toHaveBeenCalled();
     });
 
     it('passes segue field through for library-linked tracks (album_id provided)', async () => {
@@ -568,7 +513,6 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = createMockBodyReq({
         track_title: 'Crispy Duck',
@@ -610,7 +554,6 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = createMockBodyReq({
         track_title: 'Metal Heart',
@@ -757,7 +700,6 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
-      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = createMockBodyReq(trackBody);
       const res = createMockRes();
@@ -813,6 +755,10 @@ describe('flowsheet.controller', () => {
       // mirror loop; `show_id` reattaches the row to another show; `play_order`
       // collides with the per-show sequence (#693). The controller must drop
       // these fields before they reach `db.update().set()`.
+      //
+      // `album_id` and `rotation_id` are explicitly NOT on this list — they
+      // are first-class FKs the picker writes (BS#1270). They're covered by
+      // the dedicated positive test below.
       mockUpdateEntry.mockResolvedValue({ id: 99, track_title: 'ok' });
 
       const req = {
@@ -832,7 +778,6 @@ describe('flowsheet.controller', () => {
             metadata_attempt_at: new Date(),
             enriching_since: new Date(),
             dj_name: 'evil-dj',
-            album_id: 123,
             artwork_url: 'https://example.com/x.jpg',
             discogs_url: 'https://discogs.com/x',
             release_year: 1999,
@@ -860,13 +805,40 @@ describe('flowsheet.controller', () => {
         'metadata_attempt_at',
         'enriching_since',
         'dj_name',
-        'album_id',
         'artwork_url',
         'discogs_url',
         'release_year',
       ]) {
         expect(passedData).not.toHaveProperty(internalKey);
       }
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('forwards album_id and rotation_id from data to the service (BS#1270)', async () => {
+      // BS#1099 originally omitted `album_id` and `rotation_id` from the
+      // controller allowlist, which silently stripped them from every
+      // PATCH the dj-site rotation/library picker issued. This caused
+      // rotation-listed but library-unlinked albums (Yenbett class) to
+      // render without artwork on iOS / dj-site. Both are first-class FKs
+      // the picker legitimately writes; restore them to the allowlist and
+      // pin the contract here.
+      mockUpdateEntry.mockResolvedValue({ id: 99, album_id: 42, rotation_id: 7 });
+
+      const req = {
+        body: {
+          entry_id: 99,
+          data: {
+            album_id: 42,
+            rotation_id: 7,
+          },
+        },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await updateEntry(req, res as Response, mockNext);
+
+      expect(mockUpdateEntry).toHaveBeenCalledTimes(1);
+      expect(mockUpdateEntry).toHaveBeenCalledWith(99, expect.objectContaining({ album_id: 42, rotation_id: 7 }));
       expect(res.status).toHaveBeenCalledWith(200);
     });
 
@@ -883,6 +855,8 @@ describe('flowsheet.controller', () => {
         track_position: 'A1',
         record_label: 'Sonamos',
         label_id: 99,
+        album_id: 100,
+        rotation_id: 5,
         request_flag: true,
         segue: false,
         message: 'corrected DJ note',
@@ -921,7 +895,6 @@ describe('flowsheet.controller', () => {
       // No album_id in the body — that's the discriminator that picks this
       // branch over the (safe) album_id branch above.
       mockAddTrack.mockResolvedValue({ id: 1, show_id: activeShow.id });
-      mockFetchMetadata.mockResolvedValue(undefined);
 
       const req = {
         body: {
@@ -1013,7 +986,8 @@ describe('flowsheet.controller', () => {
 
       await joinShow(req, res as Response, mockNext);
 
-      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', 'My Show', 7);
+      // 4th arg is dj_name_override (BS#1295) — undefined when absent on the body.
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', 'My Show', 7, undefined);
       expect(res.status).toHaveBeenCalledWith(200);
     });
 
@@ -1043,6 +1017,103 @@ describe('flowsheet.controller', () => {
 
       await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
       expect(mockStartShow).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('joinShow dj_name_override (BS#1295)', () => {
+    it('forwards a trimmed dj_name_override to startShow when starting a new show', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', show_name: 'My Show', specialty_id: 7, dj_name_override: 'Aubrey Hearst' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', 'My Show', 7, 'Aubrey Hearst');
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('passes undefined to startShow when dj_name_override is an empty string', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: '' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', undefined, undefined, undefined);
+    });
+
+    it('passes undefined to startShow when dj_name_override is whitespace-only', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: '   ' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', undefined, undefined, undefined);
+    });
+
+    it('rejects with 400 when the trimmed dj_name_override exceeds 255 chars', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      const overflow = 'a'.repeat(256);
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: overflow },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      expect(mockStartShow).not.toHaveBeenCalled();
+    });
+
+    it('accepts exactly 255 chars at the boundary', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+      const exactly255 = 'a'.repeat(255);
+
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: exactly255 },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).toHaveBeenCalledWith('caller-dj', undefined, undefined, exactly255);
+    });
+
+    it('does not forward dj_name_override when joining an existing show (co-host path)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null });
+      mockAddDJToShow.mockResolvedValue({ id: 99, dj_id: 'caller-dj' });
+
+      // Even if a client sends dj_name_override on a co-host /join, the
+      // service contract treats it as ignored — there's no per-co-host
+      // override path. Caller wired startShow only.
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: 'Aubrey Hearst' },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockStartShow).not.toHaveBeenCalled();
+      expect(mockAddDJToShow).toHaveBeenCalled();
     });
   });
 

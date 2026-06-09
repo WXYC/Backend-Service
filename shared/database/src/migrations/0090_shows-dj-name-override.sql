@@ -1,0 +1,59 @@
+-- precondition-guard: not-required (ADD COLUMN of a nullable varchar with no
+--   DEFAULT is metadata-only on PG11+; no row rewrite, no NOT NULL invariant
+--   to violate. No existing row state to inspect.)
+-- 0090 — per-show DJ display-name override (BS#1321, epic #1288).
+--
+-- Backstory: BS#1295 (PR #1320) shipped a `dj_name_override` body param on
+-- `POST /flowsheet/join` and persisted it onto the `show_start` marker row
+-- + `shows.legacy_dj_name`. Code-review pass surfaced C1: track rows added
+-- *after* the join still run through `resolveDjNameForShow`, which prefers
+-- `auth_user.dj_name` over `shows.legacy_dj_name` — so a DJ with a
+-- non-Anonymous `auth_user.dj_name` whose override differed from it would
+-- see the marker say one name and every subsequent track row say another
+-- within the same show. The override was a one-shot stamp, not durable.
+--
+-- Why a new column instead of reusing `shows.legacy_dj_name`:
+--
+--   1. `legacy_dj_name` is upstream-owned. `jobs/flowsheet-etl/job.ts` runs
+--      a periodic UPSERT against tubafrenzy with `legacy_dj_name =
+--      excluded.legacy_dj_name` (line 346), so any value the override writer
+--      lands gets overwritten on the next ETL tick for any show that
+--      round-trips through tubafrenzy. The override survives at most until
+--      the next sync window.
+--
+--   2. The semantic of `legacy_dj_name` per CONTEXT (schema.ts comment + the
+--      flowsheet-etl `truncate(show.djName, 128)` line) is "DJ name from the
+--      time of the show for tubafrenzy-originated shows whose primary_dj_id
+--      could not be resolved" — a fallback for missing-user shape, not a
+--      durable operator-intent override.
+--
+--   3. Bumping `legacy_dj_name` to precedence-1 in `resolveDjNameForShow`
+--      would, for every tubafrenzy-originated show in history (the dominant
+--      population), make `legacy_dj_name` (which the ETL writes from the
+--      tubafrenzy djName) shadow `auth_user.dj_name` retroactively. That's
+--      not the intent.
+--
+-- A dedicated `dj_name_override` column has clean semantics: Backend-Service
+-- owns it, nothing on the ETL or webhook side writes it, and the live
+-- insert path (resolveDjNameForShow) can put it at the top of the
+-- precedence chain without affecting `legacy_dj_name` semantics.
+--
+-- Width: varchar(255) matches the `dj_name_override` request parameter cap
+-- (which itself matches the `auth_user.dj_name` width). Wider than
+-- `legacy_dj_name` (varchar(128)) on purpose; the override is semantically
+-- a stand-in for `auth_user.dj_name`, not for the legacy tubafrenzy name.
+--
+-- Nullable: NULL is the steady state for every existing show row. NULL
+-- means "no override; use the standard resolveDjDisplayName fallback chain
+-- (auth_user.dj_name -> auth_user.name)". The startShow path sets it only
+-- when a non-empty `dj_name_override` rides in on the join body.
+--
+-- DDL-only — no row backfill. ALTER TABLE ADD COLUMN with no DEFAULT on
+-- PG11+ is metadata-only and instant; the column is virtually NULL for
+-- existing rows. Same pattern as 0076 (track_position) and 0069
+-- (metadata_attempt_at).
+--
+-- @no-analyze-needed: ADD COLUMN with no default doesn't rewrite rows on
+-- PG11+. No planner stats to refresh.
+
+ALTER TABLE "wxyc_schema"."shows" ADD COLUMN "dj_name_override" varchar(255);
