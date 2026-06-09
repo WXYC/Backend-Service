@@ -52,8 +52,12 @@ export type ParsedConcert = {
   event_page_url: string;
   /** Slug into `venues` table. */
   venue_slug: string;
-  /** Display name from JSON-LD `location.name` (HTML-decoded). */
-  venue_name: string | null;
+  /**
+   * Display name from JSON-LD `location.name` (HTML-decoded).
+   * Always non-null: parseEventPage throws when location.name is missing,
+   * because a missing name causes silent attribution to default_venue_slug.
+   */
+  venue_name: string;
   /** Free-text address from JSON-LD `location.address`. */
   venue_address: string | null;
   headlining_artist: string;

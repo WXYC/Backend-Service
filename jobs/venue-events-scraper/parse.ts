@@ -16,7 +16,7 @@
  */
 
 import type { ParsedConcert, SchemaEvent } from './rhp-types.js';
-import type { RhpVenueConfig } from './rhp-venues.js';
+import { VENUE_SEEDS, type RhpVenueConfig } from './rhp-venues.js';
 
 /**
  * Regex over the literal comment marker followed by the next ld+json
@@ -43,10 +43,25 @@ const EVENT_INDEX_LINK_RE = /(?<![a-z-])href=["']([^"']+\/event\/[^"']+)["']/gi;
 const ETIX_EVENT_ID_RE = /etix\.com\/ticket\/p\/(\d+)/;
 
 /**
- * Cities that may appear as the trailing token in an Etix slug. Used to
- * trim the city + venue suffix from a support-act slug.
+ * Slugify (city-style): the cheap lowercase + non-alphanum-to-`-` collapse
+ * used to match city tokens in the Etix slug. Intentionally separate from
+ * the headliner slugifier (which adds NFKD + diacritic strip +
+ * transliteration) — city names are ASCII NC town names and don't need
+ * the extra passes.
  */
-const CITY_TOKENS = ['carrboro', 'chapel-hill', 'durham', 'saxapahaw', 'raleigh'];
+const citySlug = (s: string): string =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+
+/**
+ * Cities that may appear as the trailing token in an Etix slug. Derived
+ * from VENUE_SEEDS so adding a new venue automatically extends the
+ * token list — keeps the single-act `extractSupportingActsFromEtix`
+ * fast-path correct for any city we've seeded.
+ */
+const CITY_TOKENS = Array.from(new Set(VENUE_SEEDS.map((v) => citySlug(v.city))));
 const CITY_TRAIL_RE = new RegExp(`-(${CITY_TOKENS.join('|')})-[a-z0-9-]+$`, 'i');
 
 /**
@@ -141,17 +156,51 @@ export const extractEventJsonLd = (eventPageHtml: string): SchemaEvent | null =>
 };
 
 /**
- * NFKD-normalize then strip diacritic combining marks before the ASCII
- * collapse — so accented names like 'Sigur Rós' slugify to 'sigur-ros'
- * (matching the form Etix and most slugifiers produce) rather than
- * 'sigur-r-s' (which would silently miss the headliner-anchored prefix
- * match in `extractSupportingActsFromEtix` and degrade to the legacy
- * buggy split).
+ * Transliteration map for non-decomposable Latin letters — characters
+ * NFKD treats as atomic (no `base + combining-mark` decomposition).
+ * Without this, `Mø` would slugify to `m`, `Łódź` to `odz`, `Sigur Roß`
+ * to `sigur-ro` — and the headliner-anchored prefix match in
+ * `extractSupportingActsFromEtix` would silently fall back to the
+ * legacy buggy split for these artists. Etix slugifies these to their
+ * conventional romanizations (ø → o, ł → l, ß → ss, etc.), so we
+ * mirror that here.
+ */
+const NON_DECOMPOSABLE_TRANSLIT: Record<string, string> = {
+  ø: 'o',
+  Ø: 'o',
+  ł: 'l',
+  Ł: 'l',
+  ß: 'ss',
+  đ: 'd',
+  Đ: 'd',
+  ð: 'd',
+  Ð: 'd',
+  þ: 'th',
+  Þ: 'th',
+  æ: 'ae',
+  Æ: 'ae',
+  œ: 'oe',
+  Œ: 'oe',
+  ı: 'i',
+};
+
+const NON_DECOMPOSABLE_RE = new RegExp(`[${Object.keys(NON_DECOMPOSABLE_TRANSLIT).join('')}]`, 'g');
+
+/**
+ * NFKD-normalize, strip diacritic combining marks, apply the explicit
+ * transliteration map, then ASCII-collapse — so accented or non-Latin
+ * Latin-extended headliners ('Sigur Rós', 'Mø', 'Sigur Roß') slugify to
+ * the conventional romanized form ('sigur-ros', 'mo', 'sigur-ross')
+ * that Etix's own slugifier produces. Without this normalization, the
+ * headliner-anchored prefix check in `extractSupportingActsFromEtix`
+ * silently misses for those artists and degrades to the legacy buggy
+ * split.
  */
 const slugifyGeneric = (name: string): string =>
   name
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '') // strip diacritic combining marks
+    .replace(/\p{M}/gu, '') // strip combining marks (covers all Unicode Mark blocks, not just U+0300–U+036F)
+    .replace(NON_DECOMPOSABLE_RE, (m) => NON_DECOMPOSABLE_TRANSLIT[m] ?? m)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
@@ -271,14 +320,21 @@ const MAX_SOURCE_ID_LEN = 256;
 const MAX_VENUE_NAME_LEN = 128;
 /** Matches the schema's `venues.slug varchar(64)` ceiling. */
 const MAX_VENUE_SLUG_LEN = 64;
+/** Matches the schema's `venues.address varchar(256)` ceiling. */
+const MAX_VENUE_ADDRESS_LEN = 256;
 /**
- * Strict ISO-8601 datetime: required for startDate.  JS Date is too liberal —
- * `new Date('August 15')` returns a valid Date pinned to the current year via
- * V8's legacy fallback, which silently lets format-drift junk through. The
- * trailing timezone may be `Z`, `+HH:MM`, or `+HHMM` (RHP emits the colonless
- * variant).
+ * Strict ISO-8601 datetime: required for startDate. JS Date is too
+ * liberal — `new Date('August 15')` returns a valid Date pinned to the
+ * current year via V8's legacy fallback, silently letting format-drift
+ * junk through.
+ *
+ * The timezone is REQUIRED. Without it, `new Date('2026-11-06T20:00:00')`
+ * is interpreted as LOCAL time per the ES spec — on a UTC-4 server that
+ * yields `2026-11-07T00:00:00.000Z`. Postgres then stores the wrong
+ * wall-clock time with no signal. Mandate `Z`, `+HH:MM`, or `+HHMM`
+ * (RHP currently emits the colonless variant).
  */
-const ISO_8601_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?$/;
+const ISO_8601_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})$/;
 
 /**
  * The top-level pure parser: convert a fetched event page into a
@@ -352,6 +408,13 @@ export const parseEventPage = (
     );
   }
 
+  const venueAddress = extractAddress(raw.location);
+  if (venueAddress !== null && venueAddress.length > MAX_VENUE_ADDRESS_LEN) {
+    throw new Error(
+      `parseEventPage: derived venue_address exceeds ${MAX_VENUE_ADDRESS_LEN} chars (got ${venueAddress.length}) at ${eventPageUrl}`
+    );
+  }
+
   return {
     site_slug: venue.site_slug,
     // source_id includes the site_slug so two RHP sites sharing the same
@@ -361,7 +424,7 @@ export const parseEventPage = (
     event_page_url: eventPageUrl,
     venue_slug: venueSlug,
     venue_name: venueDisplayName,
-    venue_address: extractAddress(raw.location),
+    venue_address: venueAddress,
     headlining_artist: name,
     supporting_artists: supporting,
     starts_at: raw.startDate,

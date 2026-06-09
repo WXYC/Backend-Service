@@ -33,7 +33,9 @@ export type ParseEventPageFn = (
 export type ExtractEventLinksFn = (indexHtml: string, baseUrl: string) => string[];
 export type ResolveVenueIdFn = (
   slug: string,
-  fallbackName: string | null,
+  /** Always non-null: ParsedConcert.venue_name is required (the parser
+   *  throws on missing JSON-LD `location.name`). */
+  fallbackName: string,
   fallbackAddress: string | null
 ) => Promise<number>;
 export type UpsertConcertFn = (
