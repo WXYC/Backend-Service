@@ -137,14 +137,29 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
     }
   });
 
-  // Highest-priority COALESCE arm. Seeds an auth_user, points shows.primary_dj_id
-  // at it, and asserts the resolver picked user.dj_name over legacy_dj_name.
-  // Without this case the LEFT JOIN to auth_user is never exercised against real
-  // Postgres; a schema rename of auth_user.dj_name would leave the legacy_dj_name
-  // case (above) green while production silently regressed on the primary arm.
+  // Highest-priority COALESCE arm. Points shows.primary_dj_id at a seeded
+  // auth_user and asserts the resolver picked auth_user.dj_name over
+  // legacy_dj_name. Without this case the LEFT JOIN to auth_user is never
+  // exercised against real Postgres; a schema rename of auth_user.dj_name
+  // would leave the legacy_dj_name case (above) green while production
+  // silently regressed on the primary arm.
+  //
+  // The expected name is fetched at runtime from the seed row rather than
+  // hardcoded, so a future rename of the seeded dj_name in dev_env/seed_db.sql
+  // doesn't break this test for an unrelated reason. We do hard-code the
+  // user id (a stable seed key) — if the row itself is removed from the
+  // seed the upfront SELECT throws with a clear "seeded user missing"
+  // message instead of a confusing equality failure on the dj_name.
   test('show_start webhook prefers auth_user.dj_name over legacy_dj_name (BS#1371)', async () => {
     const LEGACY_SHOW_ID = 9_999_988;
-    const PRIMARY_DJ_ID = 'test-dj1-id-00000000000000000001'; // seeded in dev_env/seed_db.sql with dj_name='Test dj1'
+    const PRIMARY_DJ_ID = 'test-dj1-id-00000000000000000001'; // seeded in dev_env/seed_db.sql
+    const [seededUser] = await sql.unsafe(`SELECT dj_name FROM auth_user WHERE id = $1`, [PRIMARY_DJ_ID]);
+    if (!seededUser?.dj_name) {
+      throw new Error(
+        `Seeded auth_user ${PRIMARY_DJ_ID} is missing or has no dj_name; cannot run BS#1371 auth_user-arm test`
+      );
+    }
+    const expectedDjName = seededUser.dj_name;
     await seedShow(LEGACY_SHOW_ID, { legacyDjName: 'Legacy Override Loser', primaryDjId: PRIMARY_DJ_ID });
 
     try {
@@ -160,7 +175,9 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
       ]);
       expect(rows.length).toBe(1);
       expect(rows[0].entry_type).toBe('show_start');
-      expect(rows[0].dj_name).toBe('Test dj1');
+      expect(rows[0].dj_name).toBe(expectedDjName);
+      // Negative assertion: the lower-priority legacy_dj_name must NOT win.
+      expect(rows[0].dj_name).not.toBe('Legacy Override Loser');
     } finally {
       await clearShow(LEGACY_SHOW_ID);
     }

@@ -428,19 +428,36 @@ describe('POST /internal/flowsheet-webhook', () => {
   });
 
   it('writes dj_name: null on a marker INSERT when radioShowId is 0 (no show)', async () => {
-    // radioShowId=0 short-circuits resolveShow, mirroring resolveAlbumId.
-    // The marker row lands without a show or a dj_name; no SELECT issued.
+    // All three resolvers short-circuit: radioShowId=0 → resolveShow returns
+    // null without a SELECT; libraryReleaseId=0 → resolveAlbumId same;
+    // rotationReleaseId=0 → resolveRotationId same. Pin all three explicitly
+    // (vs. inheriting the beforeEach default queue, which would survive only
+    // because none of the limits are consumed) so a future regression that
+    // restored the SELECT call would fail loudly rather than silently consume
+    // the wrong mock entry.
+    mockLimit.mockReset();
+    mockReturning.mockReset();
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
 
     const res = await request(app)
       .post('/internal/flowsheet-webhook')
       .set('X-Internal-Key', 'test-secret-key')
-      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9, radioShowId: 0 } });
+      .send({
+        action: 'create',
+        entry: { ...validEntry, flowsheetEntryType: 9, radioShowId: 0, libraryReleaseId: 0, rotationReleaseId: 0 },
+      });
 
     expect(res.status).toBe(200);
     expect(lastInsertValues()).toEqual(
-      expect.objectContaining({ entry_type: 'show_start', show_id: null, dj_name: null })
+      expect.objectContaining({
+        entry_type: 'show_start',
+        show_id: null,
+        album_id: null,
+        rotation_id: null,
+        dj_name: null,
+      })
     );
+    expect(mockLimit).not.toHaveBeenCalled();
   });
 
   // -- ON CONFLICT UPDATE dj_name refresh (BS#1371 defense-in-depth) --
