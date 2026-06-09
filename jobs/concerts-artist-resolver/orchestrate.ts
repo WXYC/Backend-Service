@@ -101,15 +101,34 @@ const emptyTotals = (): Totals => ({
  * down, log throws EPIPE, etc.) is at least visible in container logs
  * instead of silently disappearing.
  */
+// Keep this prefix in sync with `JOB_NAME` in job.ts. Hardcoded so the
+// helper stays orchestrator-local (job.ts → orchestrate.ts already);
+// a rename of either side would surface in this file's tests.
+const SINK_FAILURE_PREFIX = 'concerts-artist-resolver';
+
+/**
+ * Stringify a value that's already been thrown without re-throwing. We
+ * cannot trust the value's `.message` getter, `toString`, `Symbol.
+ * toPrimitive`, or any other coercion path — a pathological sink might
+ * throw values whose stringification itself throws. Default to a
+ * constant so the outer catch's "never re-raises" contract holds.
+ */
+const safeStringifyThrown = (value: unknown): string => {
+  try {
+    if (value instanceof Error) return value.message;
+    return String(value);
+  } catch {
+    return '<unrepresentable sink error>';
+  }
+};
+
 const safeNotifyError = async (onError: OnRowErrorFn, candidate: Candidate, error: unknown): Promise<void> => {
   try {
     await onError(candidate, error);
   } catch (sinkError) {
-    const sinkMessage = sinkError instanceof Error ? sinkError.message : String(sinkError);
+    const sinkMessage = safeStringifyThrown(sinkError);
     try {
-      process.stderr.write(
-        `concerts-artist-resolver: onError sink failed for concert ${candidate.id}: ${sinkMessage}\n`
-      );
+      process.stderr.write(`${SINK_FAILURE_PREFIX}: onError sink failed for concert ${candidate.id}: ${sinkMessage}\n`);
     } catch {
       /* even stderr is gone — there is nothing else we can do */
     }
