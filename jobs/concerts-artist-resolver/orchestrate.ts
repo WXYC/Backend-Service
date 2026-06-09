@@ -92,18 +92,27 @@ const emptyTotals = (): Totals => ({
 });
 
 /**
- * Invoke an `onError` sink without letting it abort the batch. A sync
- * throw OR an async rejection from the sink is caught and discarded —
- * the orchestrator's counter is the durable record. The dispatcher
- * normalizes both shapes through `Promise.resolve` so a sink that
- * returns void and a sink that returns Promise<void> are handled
- * identically.
+ * Invoke an `onError` sink without letting it abort the batch. `await`
+ * accepts both `void` and `Promise<void>` returns; a sync throw or an
+ * async rejection from the sink is caught and never re-raised, so a
+ * misbehaving sink can never break the loop. The counter is the durable
+ * record of failures, not the sink — but we still write a single stderr
+ * line on sink failure so a broken observability path (Sentry transport
+ * down, log throws EPIPE, etc.) is at least visible in container logs
+ * instead of silently disappearing.
  */
 const safeNotifyError = async (onError: OnRowErrorFn, candidate: Candidate, error: unknown): Promise<void> => {
   try {
     await onError(candidate, error);
-  } catch {
-    /* sink must never break the loop */
+  } catch (sinkError) {
+    const sinkMessage = sinkError instanceof Error ? sinkError.message : String(sinkError);
+    try {
+      process.stderr.write(
+        `concerts-artist-resolver: onError sink failed for concert ${candidate.id}: ${sinkMessage}\n`
+      );
+    } catch {
+      /* even stderr is gone — there is nothing else we can do */
+    }
   }
 };
 
