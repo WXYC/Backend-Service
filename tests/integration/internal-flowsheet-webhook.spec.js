@@ -86,6 +86,72 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
     expect(rows[0].artist_name).toBe('Chuquimamani-Condori');
   });
 
+  // BS#1371: marker entry types delivered via the webhook must carry
+  // `dj_name` resolved via COALESCE(auth_user.dj_name, shows.legacy_dj_name,
+  // auth_user.name). Pre-fix, every webhook-delivered show_start /
+  // show_end / dj_join / dj_leave row landed with dj_name=NULL and the v2
+  // wire emitted '' (iOS rendered an empty handle for ~119k historical
+  // rows). This test seeds a stub show with a `legacy_dj_name`, delivers a
+  // show_start (flowsheetEntryType=9) for it, and asserts the inserted row
+  // picked the legacy_dj_name from the COALESCE.
+  test('show_start webhook resolves dj_name from shows.legacy_dj_name (BS#1371)', async () => {
+    const LEGACY_SHOW_ID = 9_999_990;
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.shows (legacy_show_id, legacy_dj_name, start_time) VALUES ($1, $2, NOW())
+       ON CONFLICT DO NOTHING`,
+      [LEGACY_SHOW_ID, "T'mia Powell"]
+    );
+
+    try {
+      const entry = buildEntry({ flowsheetEntryType: 9, radioShowId: LEGACY_SHOW_ID });
+      const res = await request
+        .post('/internal/flowsheet-webhook')
+        .set('X-Internal-Key', INTERNAL_KEY)
+        .send({ action: 'create', entry });
+      expect(res.status).toBe(200);
+
+      const rows = await sql.unsafe(`SELECT entry_type, dj_name FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
+        LEGACY_ENTRY_ID,
+      ]);
+      expect(rows.length).toBe(1);
+      expect(rows[0].entry_type).toBe('show_start');
+      expect(rows[0].dj_name).toBe("T'mia Powell");
+    } finally {
+      // Clean up the stub show only — the flowsheet row is cleared by afterEach.
+      await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [LEGACY_SHOW_ID]);
+    }
+  });
+
+  test('track webhook leaves dj_name NULL even when the show has a resolved name (BS#1371)', async () => {
+    // Track rows have their own dj_name population path (ETL + live insert).
+    // The webhook must NOT write dj_name on track rows so we don't double-
+    // write and risk drift between the webhook and the ETL writer.
+    const LEGACY_SHOW_ID = 9_999_989;
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.shows (legacy_show_id, legacy_dj_name, start_time) VALUES ($1, $2, NOW())
+       ON CONFLICT DO NOTHING`,
+      [LEGACY_SHOW_ID, 'Some Resolvable Name']
+    );
+
+    try {
+      const entry = buildEntry({ flowsheetEntryType: 6, radioShowId: LEGACY_SHOW_ID });
+      const res = await request
+        .post('/internal/flowsheet-webhook')
+        .set('X-Internal-Key', INTERNAL_KEY)
+        .send({ action: 'create', entry });
+      expect(res.status).toBe(200);
+
+      const rows = await sql.unsafe(`SELECT entry_type, dj_name FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
+        LEGACY_ENTRY_ID,
+      ]);
+      expect(rows.length).toBe(1);
+      expect(rows[0].entry_type).toBe('track');
+      expect(rows[0].dj_name).toBeNull();
+    } finally {
+      await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [LEGACY_SHOW_ID]);
+    }
+  });
+
   test('a second delivery with different mutable fields refreshes those fields', async () => {
     // First delivery: fresh INSERT — the row carries the initial payload.
     const initial = buildEntry({ artistName: 'Juana Molina', songTitle: 'la paradoja', releaseTitle: 'DOGA' });
