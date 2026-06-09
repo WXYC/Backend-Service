@@ -56,12 +56,20 @@ const citySlug = (s: string): string =>
     .replace(/^-|-$/g, '');
 
 /**
- * Cities that may appear as the trailing token in an Etix slug. Derived
- * from VENUE_SEEDS so adding a new venue automatically extends the
- * token list — keeps the single-act `extractSupportingActsFromEtix`
- * fast-path correct for any city we've seeded.
+ * Cities that may appear as the trailing token in an Etix slug. We take
+ * the UNION of:
+ *
+ * - A baseline of Triangle-area cities that historically appear in
+ *   RHP-promoted Etix URLs (including co-promoted shows at venues we
+ *   don't host in `VENUE_SEEDS` ourselves — e.g. Raleigh). Without this
+ *   floor, a Cat's Cradle Presents show at a Raleigh venue whose Etix
+ *   slug ends `-raleigh-<venue>` would have its city/venue tail mis-
+ *   parsed as a phantom supporting act.
+ * - The cities of every venue currently in `VENUE_SEEDS`, so adding a
+ *   new seeded venue automatically extends the list.
  */
-const CITY_TOKENS = Array.from(new Set(VENUE_SEEDS.map((v) => citySlug(v.city))));
+const BASE_CITY_TOKENS = ['carrboro', 'chapel-hill', 'durham', 'saxapahaw', 'raleigh'];
+const CITY_TOKENS = Array.from(new Set([...BASE_CITY_TOKENS, ...VENUE_SEEDS.map((v) => citySlug(v.city))]));
 const CITY_TRAIL_RE = new RegExp(`-(${CITY_TOKENS.join('|')})-[a-z0-9-]+$`, 'i');
 
 /**
@@ -184,7 +192,7 @@ const NON_DECOMPOSABLE_TRANSLIT: Record<string, string> = {
   ı: 'i',
 };
 
-const NON_DECOMPOSABLE_RE = new RegExp(`[${Object.keys(NON_DECOMPOSABLE_TRANSLIT).join('')}]`, 'g');
+const NON_DECOMPOSABLE_RE = new RegExp(`[${Object.keys(NON_DECOMPOSABLE_TRANSLIT).join('')}]`, 'gu');
 
 /**
  * NFKD-normalize, strip diacritic combining marks, apply the explicit
@@ -384,7 +392,12 @@ export const parseEventPage = (
   const offer = extractFirstOffer(raw.offers);
   const supporting = extractSupportingActsFromEtix(offer.url, name);
 
-  const venueDisplayName = decodeHtmlEntities(raw.location.name);
+  const venueDisplayName = decodeHtmlEntities(raw.location.name).trim();
+  if (!venueDisplayName) {
+    // `&nbsp;` decodes to U+00A0 / ' ' which is truthy but visually
+    // empty; treat as missing so we don't write a blank-named venue row.
+    throw new Error(`parseEventPage: Event.location.name decodes to empty/whitespace at ${eventPageUrl}`);
+  }
   if (venueDisplayName.length > MAX_VENUE_NAME_LEN) {
     throw new Error(
       `parseEventPage: Event.location.name exceeds ${MAX_VENUE_NAME_LEN} chars (got ${venueDisplayName.length}) at ${eventPageUrl}`
