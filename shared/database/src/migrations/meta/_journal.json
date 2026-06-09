@@ -631,6 +631,13 @@
       "when": 1780667256173,
       "tag": "0091_venues-and-concerts",
       "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1780667256174,
+      "tag": "0092_normalize-artist-name",
+      "breakpoints": true
     }
   ]
 }

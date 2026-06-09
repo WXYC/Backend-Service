@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/concerts-artist-resolver",
+  "cron-schedule": "15 5 * * *",
+  "version": "1.0.0",
+  "description": "WXYC daily ETL: resolve concerts.headlining_artist_raw → concerts.headlining_artist_id via strict-then-alias local matching against artists + artist_search_alias, using migration 0092's normalize_artist_name(text) function. No LML round-trip; conservative singleton-only writes. Unblocks BS#1368 Path B JOIN. BS#1372.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_concerts_artist_resolver:ci -f ../../Dockerfile.concerts-artist-resolver ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.53.1",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
