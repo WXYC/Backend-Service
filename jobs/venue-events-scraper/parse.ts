@@ -316,8 +316,11 @@ const extractAddress = (location: SchemaEvent['location']): string | null => {
   if (!location) return null;
   const addr = location.address;
   if (!addr) return null;
-  if (typeof addr === 'string') return decodeHtmlEntities(addr);
-  return decodeHtmlEntities(addr.streetAddress ?? '');
+  if (typeof addr === 'string') return decodeHtmlEntities(addr) || null;
+  // PostalAddress with no streetAddress — return null (not '') so callers
+  // querying `venues.address IS NULL` can find venues that need manual
+  // address backfill rather than scanning for empty-string sentinel.
+  return addr.streetAddress ? decodeHtmlEntities(addr.streetAddress) || null : null;
 };
 
 /** The longest `headlining_artist_raw` we'll send to a varchar(256). */
@@ -403,7 +406,14 @@ export const parseEventPage = (
       `parseEventPage: Event.location.name exceeds ${MAX_VENUE_NAME_LEN} chars (got ${venueDisplayName.length}) at ${eventPageUrl}`
     );
   }
-  const venueSlug = resolveVenueSlug(venue, raw.location.name);
+  // Pass the already-trimmed/decoded display name to resolveVenueSlug
+  // so the venue_name_to_slug lookup sees the same string the rest of
+  // the parser uses. Without this, JSON-LD like '&nbsp;Cat's Cradle'
+  // decodes to ' Cat's Cradle' inside resolveVenueSlug, the
+  // venue_name_to_slug['Cat's Cradle'] lookup misses, slugifyGeneric
+  // produces 'cat-s-cradle', and the event is silently attributed to a
+  // brand-new unseeded venue instead of the canonical seeded row.
+  const venueSlug = resolveVenueSlug(venue, venueDisplayName);
   if (venueSlug.length > MAX_VENUE_SLUG_LEN) {
     throw new Error(
       `parseEventPage: derived venue slug exceeds ${MAX_VENUE_SLUG_LEN} chars (got ${venueSlug.length}) at ${eventPageUrl}`

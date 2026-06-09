@@ -403,6 +403,20 @@ describe('parseEventPage', () => {
     expect(() => parseEventPage(CATS_CRADLE, 'https://x/event/y/', html)).toThrow(/missing Event\.location/);
   });
 
+  it('matches the venue_name_to_slug map after trimming leading/trailing whitespace introduced by HTML entities (regression: trim divergence)', () => {
+    // Iter-4 trimmed venueDisplayName for the writer but still passed the
+    // raw (un-trimmed) location.name to resolveVenueSlug, causing the
+    // `venue_name_to_slug['Cat’s Cradle Back Room']` lookup to miss
+    // when JSON-LD had a leading `&nbsp;`. Fix: pass the trimmed value
+    // to resolveVenueSlug too so both sides see the same string.
+    const html =
+      '<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"X","startDate":"2026-11-06T20:00:00-0500","location":{"@type":"Place","name":"&nbsp;Cat’s Cradle Back Room"}}</script>';
+    const parsed = parseEventPage(CATS_CRADLE, 'https://catscradle.com/event/x/', html);
+    if (parsed === null) throw new Error('expected fixture to parse');
+    expect(parsed.venue_slug).toBe('cats-cradle-back-room');
+    expect(parsed.venue_name).toBe('Cat’s Cradle Back Room');
+  });
+
   it('throws if Event.location.name decodes to whitespace-only (e.g. JSON-LD name = "&nbsp;")', () => {
     // `&nbsp;` decodes to U+00A0 which is truthy but renders blank in
     // the UI; without a trim+empty-check the writer would happily insert
