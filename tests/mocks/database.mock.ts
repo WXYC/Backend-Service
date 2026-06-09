@@ -127,6 +127,8 @@ export const venues = {
   city: 'city',
   state: 'state',
   address: 'address',
+  added_at: 'added_at',
+  last_modified: 'last_modified',
 };
 export const concerts = {
   id: 'id',

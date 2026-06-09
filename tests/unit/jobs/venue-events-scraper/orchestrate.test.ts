@@ -35,7 +35,7 @@ const TEST_VENUE_B: RhpVenueConfig = {
 
 const fakeParsedConcert = (suffix: string): ParsedConcert => ({
   site_slug: 'test-site',
-  source_id: `/event/${suffix}/`,
+  source_id: `test-site:/event/${suffix}/`,
   event_page_url: `https://test.example/event/${suffix}/`,
   venue_slug: 'test-venue',
   venue_name: 'Test Venue',
@@ -120,7 +120,8 @@ describe('runScraper — happy path', () => {
       upserts_total: 3,
       upserts_inserted: 3,
       upserts_updated: 0,
-      write_errors: 0,
+      venue_resolve_errors: 0,
+      upsert_errors: 0,
     });
   });
 
@@ -353,7 +354,7 @@ describe('runScraper — error containment', () => {
     expect(resolveVenueId).not.toHaveBeenCalled();
   });
 
-  it('write-step errors are counted and do not abort the run', async () => {
+  it('upsert-step errors are counted as upsert_errors (not venue_resolve_errors) and do not abort the run', async () => {
     const fetchHtml = jest.fn<ReturnType<FetchHtmlFn>, Parameters<FetchHtmlFn>>().mockResolvedValue('<event>');
     const extractEventLinks = jest
       .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
@@ -378,7 +379,40 @@ describe('runScraper — error containment', () => {
       mapConcurrent: realMapConcurrent,
     });
 
-    expect(totals.write_errors).toBe(1);
+    expect(totals.upsert_errors).toBe(1);
+    expect(totals.venue_resolve_errors).toBe(0);
     expect(totals.upserts_total).toBe(1);
+  });
+
+  it('venue-resolve errors are counted as venue_resolve_errors (not upsert_errors) so dashboards can distinguish DB-down from enum-drift', async () => {
+    const fetchHtml = jest.fn<ReturnType<FetchHtmlFn>, Parameters<FetchHtmlFn>>().mockResolvedValue('<event>');
+    const extractEventLinks = jest
+      .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
+      .mockReturnValue(['https://test.example/event/a/']);
+    const parseEventPage = jest
+      .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
+      .mockImplementation((_, url) => fakeParsedConcert(url));
+    const resolveVenueId = jest
+      .fn<ReturnType<ResolveVenueIdFn>, Parameters<ResolveVenueIdFn>>()
+      .mockRejectedValueOnce(new Error('pool exhausted'));
+    const upsertConcert = jest
+      .fn<ReturnType<UpsertConcertFn>, Parameters<UpsertConcertFn>>()
+      .mockResolvedValue({ concert_id: 7, inserted: true });
+
+    const totals = await runScraper({
+      sites: [TEST_VENUE],
+      concurrency: 1,
+      fetchHtml,
+      extractEventLinks,
+      parseEventPage,
+      resolveVenueId,
+      upsertConcert,
+      mapConcurrent: realMapConcurrent,
+    });
+
+    expect(totals.venue_resolve_errors).toBe(1);
+    expect(totals.upsert_errors).toBe(0);
+    expect(totals.upserts_total).toBe(0);
+    expect(upsertConcert).not.toHaveBeenCalled();
   });
 });
