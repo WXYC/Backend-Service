@@ -115,6 +115,20 @@ describe('extractEventLinks', () => {
     expect(links).toContain('https://catscradle.com/event/Sleater_Kinney/');
     expect(links).toContain('https://catscradle.com/event/Mixed-Case-Slug/');
   });
+
+  it('does NOT match data-href= / aria-href= attributes (SPA hover-preview noise)', () => {
+    // RHP themes use `data-href` for hover-preview SPA links; the
+    // legacy regex matched bare `href=` anywhere in the source string,
+    // including inside `data-href` / `aria-href` attribute names, and
+    // pulled in duplicate / staging URLs that 404 on fetch.
+    const html = `
+      <div data-href="https://catscradle.com/event/preview-only/">Preview</div>
+      <span aria-href="https://catscradle.com/event/aria-only/">Aria</span>
+      <a href="https://catscradle.com/event/real-link/">Real</a>
+    `;
+    const links = extractEventLinks(html, BASE);
+    expect(links).toEqual(['https://catscradle.com/event/real-link/']);
+  });
 });
 
 describe('extractEventJsonLd', () => {
@@ -158,6 +172,16 @@ describe('extractEventJsonLd', () => {
     const event = extractEventJsonLd(html);
     if (event === null) throw new Error('expected MusicEvent JSON-LD to parse');
     expect(event['@type']).toBe('MusicEvent');
+  });
+
+  it('accepts @type as an array (schema.org multi-typing pattern)', () => {
+    // `["Event","MusicEvent"]` is valid schema.org JSON-LD — common when
+    // a publisher wants to claim both the parent type and the subtype.
+    const html =
+      '<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":["Event","MusicEvent"],"name":"Test","startDate":"2026-11-06T20:00:00-0500","location":{"@type":"Place","name":"Test Venue"}}</script>';
+    const event = extractEventJsonLd(html);
+    if (event === null) throw new Error('expected multi-typed Event JSON-LD to parse');
+    expect(Array.isArray(event['@type'])).toBe(true);
   });
 });
 
@@ -212,6 +236,24 @@ describe('extractSupportingActsFromEtix', () => {
     const url =
       'https://www.etix.com/ticket/p/79604526/aaron-lee-tasjanwith-madeleine-kelson-carrboro-cats-cradle-back-room?partner_id=100';
     expect(extractSupportingActsFromEtix(url)).toEqual(['Madeleine Kelson']);
+  });
+
+  it('extracts the support act for a non-ASCII headliner (regression: NFKD slug fold)', () => {
+    // `slugifyGeneric('Sigur Rós')` must produce 'sigur-ros' (matching
+    // the Etix URL slug) — not 'sigur-r-s' (which the legacy
+    // ASCII-strip produced, dropping the prefix match and silently
+    // falling back to the legacy buggy split).
+    const url = 'https://www.etix.com/ticket/p/12345/sigur-roswith-real-support-carrboro-cats-cradle?partner_id=100';
+    expect(extractSupportingActsFromEtix(url, 'Sigur Rós')).toEqual(['Real Support']);
+  });
+
+  it('does NOT mis-match a short common-word headliner against a longer URL slug (regression: prefix word boundary)', () => {
+    // Headliner 'Big' must not accidentally match `big-thiefwith-…`:
+    // before the word-boundary fix, the headliner-anchored branch saw
+    // remainder='-thiefwith-…', failed the `with-` check, and returned
+    // [] without falling back — silently dropping the real support.
+    const url = 'https://www.etix.com/ticket/p/55555/big-thiefwith-real-support-carrboro-cats-cradle?partner_id=100';
+    expect(extractSupportingActsFromEtix(url, 'Big')).toEqual(['Real Support']);
   });
 });
 
@@ -296,12 +338,16 @@ describe('parseEventPage', () => {
   });
 
   it('throws if Event.startDate is unparseable as a Date (TBA / "August 15" etc.)', () => {
-    // Without this check the writer hands `Invalid Date` to postgres-js
-    // and the run trips a cryptic "invalid input syntax for type
-    // timestamp" tagged as a generic write/upsert error.
-    const html =
+    // The ISO-8601 regex rejects non-ISO inputs before we even hand
+    // them to `new Date()` — important because V8's legacy fallback
+    // happily parses 'August 15' as a Date pinned to the current year,
+    // letting format-drift junk through if we only checked Invalid Date.
+    const tba =
       '<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"X","startDate":"TBA","location":{"@type":"Place","name":"Cat\'s Cradle"}}</script>';
-    expect(() => parseEventPage(CATS_CRADLE, 'https://x/event/y/', html)).toThrow(/unparseable Event\.startDate/);
+    expect(() => parseEventPage(CATS_CRADLE, 'https://x/event/y/', tba)).toThrow(/non-ISO-8601 Event\.startDate/);
+    const august =
+      '<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"X","startDate":"August 15","location":{"@type":"Place","name":"Cat\'s Cradle"}}</script>';
+    expect(() => parseEventPage(CATS_CRADLE, 'https://x/event/y/', august)).toThrow(/non-ISO-8601 Event\.startDate/);
   });
 
   it('throws if Event.location is missing (was: silently attributed to default venue)', () => {
@@ -311,6 +357,41 @@ describe('parseEventPage', () => {
     const html =
       '<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"X","startDate":"2026-11-06T20:00:00-0500"}</script>';
     expect(() => parseEventPage(CATS_CRADLE, 'https://x/event/y/', html)).toThrow(/missing Event\.location/);
+  });
+
+  it('throws if Event.location.name is missing (regression: iter-1 only caught fully-absent location)', () => {
+    // Same failure mode as missing-location: without a `name`,
+    // resolveVenueSlug falls through to `default_venue_slug` and
+    // silently attributes the event to the home room.
+    const html =
+      '<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"X","startDate":"2026-11-06T20:00:00-0500","location":{"@type":"Place","address":"300 E Main St."}}</script>';
+    expect(() => parseEventPage(CATS_CRADLE, 'https://x/event/y/', html)).toThrow(/missing Event\.location\.name/);
+  });
+
+  it('throws if the derived source_id would overflow the varchar(256) column', () => {
+    const longPath = '/event/' + 'a'.repeat(260) + '/';
+    const url = `https://catscradle.com${longPath}`;
+    const html = `<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"X","startDate":"2026-11-06T20:00:00-0500","location":{"@type":"Place","name":"Cat's Cradle"}}</script>`;
+    expect(() => parseEventPage(CATS_CRADLE, url, html)).toThrow(/source_id exceeds 256 chars/);
+  });
+
+  it('throws if the derived venue slug would overflow venues.slug varchar(64)', () => {
+    const longVenueName = 'X'.repeat(80);
+    const html = `<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"Band","startDate":"2026-11-06T20:00:00-0500","location":{"@type":"Place","name":"${longVenueName}"}}</script>`;
+    expect(() => parseEventPage(CATS_CRADLE, 'https://catscradle.com/event/foo/', html)).toThrow(
+      /venue slug exceeds 64 chars/
+    );
+  });
+
+  it('throws if the derived venue display name would overflow venues.name varchar(128)', () => {
+    // A 200-char name slugifies down (consecutive non-alphanums collapse
+    // to one '-') but the decoded display name itself still trips the
+    // 128-char ceiling. Either way the parser MUST guard before postgres
+    // throws — varchar overflow surfaces as a generic venue_resolve_error
+    // tag, hiding the real (parser-side) root cause.
+    const longName = 'A' + '&amp;'.repeat(200);
+    const html = `<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">{"@type":"Event","name":"Band","startDate":"2026-11-06T20:00:00-0500","location":{"@type":"Place","name":"${longName}"}}</script>`;
+    expect(() => parseEventPage(CATS_CRADLE, 'https://catscradle.com/event/foo/', html)).toThrow(/exceeds/);
   });
 
   it('throws if Event.name exceeds the headlining_artist varchar(256) ceiling', () => {

@@ -16,7 +16,7 @@ import { ensureVenue, upsertConcert } from '../../../../jobs/venue-events-scrape
 import type { ParsedConcert } from '../../../../jobs/venue-events-scraper/rhp-types';
 
 type MockDb = typeof db & {
-  _chain: { returning: jest.Mock };
+  _chain: { returning: jest.Mock; limit: jest.Mock };
 };
 
 const mockDb = db as MockDb;
@@ -78,9 +78,13 @@ describe('upsertConcert', () => {
   });
 });
 
-describe('ensureVenue', () => {
+describe('ensureVenue (seeded path)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Make the SELECT chain's terminal `.limit()` thenable so the
+    // ON-CONFLICT-no-op fallback can resolve. Default empty; per-test
+    // mockResolvedValueOnce queues specific responses.
+    mockDb._chain.limit.mockResolvedValue([]);
   });
 
   it('returns created=true when the DB reports xmax=0 (fresh INSERT)', async () => {
@@ -89,25 +93,45 @@ describe('ensureVenue', () => {
     expect(result).toEqual({ venue_id: 1, created: true });
   });
 
-  it('returns created=false when the DB reports xmax≠0 (lost the INSERT race / row already existed)', async () => {
-    // Two concurrent runners both hit the INSERT path for the same slug;
-    // the loser takes the ON CONFLICT branch and gets xmax≠0. Pre-fix,
-    // ensureVenue lied: any caller falling into the insert branch
-    // reported created=true regardless of which way the race went.
+  it('returns created=false when the DB reports xmax≠0 (ON CONFLICT UPDATE branch fired)', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, created: false }]);
     const result = await ensureVenue('cats-cradle', null, null);
     expect(result).toEqual({ venue_id: 1, created: false });
   });
 
-  it('falls back to "Unknown / NC" placeholder for an unseeded slug — placeholder is refreshed on every call so a later VENUE_SEEDS entry will lift it', async () => {
-    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, created: true }]);
-    // The assertion that matters here is "no throw" + the writer
-    // computed the placeholder values from fallback inputs; the
-    // ON-CONFLICT-DO-UPDATE shape (re-applying name/city/state/address)
-    // is what lifts a placeholder when a seed is later added.
-    await expect(ensureVenue('haw-river-ballroom', 'Haw River Ballroom', null)).resolves.toEqual({
-      venue_id: 1,
-      created: true,
-    });
+  it('falls back to SELECT when the setWhere predicate suppressed the UPDATE (no-op convergence)', async () => {
+    // Seeded slug, row already matches seed exactly. setWhere
+    // (`IS DISTINCT FROM` chain) makes the UPDATE a no-op, so PG
+    // returns zero rows from RETURNING. ensureVenue then SELECTs the
+    // id from the existing row. This is what makes `last_modified`
+    // an honest audit signal — it only bumps when something changed.
+    mockDb._chain.returning.mockResolvedValueOnce([]); // insert.onConflictDoUpdate.returning empty
+    mockDb._chain.limit.mockResolvedValueOnce([{ id: 1 }]); // follow-up SELECT
+    const result = await ensureVenue('cats-cradle', null, null);
+    expect(result).toEqual({ venue_id: 1, created: false });
+  });
+});
+
+describe('ensureVenue (unseeded path)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb._chain.limit.mockResolvedValue([]);
+  });
+
+  it('INSERTs a placeholder when the unseeded slug is brand new', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 7 }]);
+    const result = await ensureVenue('kings-raleigh', 'Kings of Raleigh', null);
+    expect(result).toEqual({ venue_id: 7, created: true });
+  });
+
+  it('preserves the existing row (DO NOTHING) when the unseeded slug already has a venues row — never overwrites with potentially-weaker fallback values', async () => {
+    // The scrape's `fallbackAddress=null` would have clobbered any
+    // prior good address (admin-edited OR earlier-scrape-richer) under
+    // the iteration-1 ON CONFLICT DO UPDATE shape. The new code never
+    // overwrites unseeded rows; it SELECTs the existing id and returns.
+    mockDb._chain.returning.mockResolvedValueOnce([]); // insert.onConflictDoNothing.returning empty
+    mockDb._chain.limit.mockResolvedValueOnce([{ id: 7 }]); // follow-up SELECT
+    const result = await ensureVenue('kings-raleigh', 'Kings of Raleigh', null);
+    expect(result).toEqual({ venue_id: 7, created: false });
   });
 });

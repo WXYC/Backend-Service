@@ -73,6 +73,7 @@ const main = async (): Promise<void> => {
       throw new Error(
         `${totals.events_seen} events discovered but 0 upserted ` +
           `(fetch_errors=${totals.fetch_errors}, parse_errors=${totals.parse_errors}, ` +
+          `pages_without_event_block=${totals.pages_without_event_block}, ` +
           `venue_resolve_errors=${totals.venue_resolve_errors}, upsert_errors=${totals.upsert_errors}); ` +
           `aborting with non-zero exit`
       );
