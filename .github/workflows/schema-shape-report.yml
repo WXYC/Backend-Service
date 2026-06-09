@@ -43,15 +43,21 @@ jobs:
           node-version: '24'
           cache: 'npm'
 
-      - name: Install dependencies (postgres only)
+      - name: Install postgres client (isolated from workspace)
         # We don't need the full workspace install for this script — the
-        # `postgres` client is the only runtime dep. `--no-package-lock`
-        # skips the lockfile walk so npm doesn't try to resolve the
-        # repo's `@wxyc/shared` entry against GitHub Packages, which
-        # would 401 here (this step intentionally doesn't expose
-        # NPM_TOKEN — observed on PR #1348 / run 27185185058). Keep it
-        # cheap.
-        run: npm install --no-audit --no-fund --no-save --no-package-lock postgres@^3.4.9
+        # `postgres` client is the only runtime dep. We install into a
+        # throwaway dir OUTSIDE the workspace root so npm has no
+        # `package.json`/`.npmrc` context to walk — otherwise npm hits
+        # GitHub Packages for `@wxyc/shared` metadata and 401s since
+        # this step intentionally doesn't expose NPM_TOKEN. The previous
+        # `--no-package-lock` workaround (PR #1377) didn't suffice
+        # because npm still consults the root manifest. Observed on PR
+        # #1348 / runs 27185185058 + 27222288445.
+        run: |
+          mkdir -p .cache/pg-client
+          cd .cache/pg-client
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund postgres@^3.4.9
 
       - name: Compute diff
         id: diff
@@ -71,6 +77,10 @@ jobs:
           STAGING_DATABASE_URL_RO: ${{ secrets.STAGING_DATABASE_URL_RO }}
           STAGING_SCHEMA_NAME: ${{ vars.STAGING_SCHEMA_NAME }}
           STAGING_SNAPSHOT_LABEL: ${{ vars.STAGING_SNAPSHOT_LABEL }}
+          # `postgres` is installed in the isolated dir above; the script
+          # does a bare `import postgres from 'postgres'` and resolves it
+          # via NODE_PATH.
+          NODE_PATH: .cache/pg-client/node_modules
         run: |
           set -uo pipefail
           # The script itself never throws — it always emits a comment-shaped
