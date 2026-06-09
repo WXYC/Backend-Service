@@ -88,11 +88,15 @@ export type RunResult = { totals: Totals };
  * tasks still drain to completion (releasing their semaphore permits)
  * and the wrapper rethrows once everything is done.
  *
- * When MULTIPLE tasks reject, every rejection is sent to Sentry via
- * `captureException` before the wrapper rethrows. The rethrow itself
- * is wrapped in `AggregateError` so the caller's catch block sees the
- * full set, not just the first — losing 2nd+3rd failures would hide
- * real bugs (e.g., a shared decoder regression affecting many calls).
+ * When MULTIPLE tasks reject, the rethrow is wrapped in `AggregateError`
+ * so the caller's catch block sees the full set, not just the first —
+ * losing 2nd+3rd failures would hide real bugs (e.g., a shared decoder
+ * regression affecting many calls). Sentry capture is the caller's
+ * responsibility: capturing here AND in the top-level catch would
+ * double-fire events (N leaves + 1 wrapper = N+1 issues per failed run)
+ * and fragment grouping across step tags. `@sentry/core`'s default
+ * exception serialization walks `AggregateError.errors[]`, so a single
+ * outer capture preserves the leaves.
  *
  * Memory note: this materializes `items.length` Promise objects (each
  * blocked on `sem.acquire()`) up front. The Semaphore caps the IN-FLIGHT
@@ -118,7 +122,6 @@ const runWithConcurrency = async <T>(items: T[], limit: number, run: (item: T) =
   for (const result of settled) {
     if (result.status === 'rejected') {
       const e = result.reason instanceof Error ? result.reason : new Error(String(result.reason));
-      Sentry.captureException(e, { tags: { step: 'runWithConcurrency' } });
       errors.push(e);
     }
   }
@@ -177,13 +180,18 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
   const concurrency = deps.concurrency ?? 3;
   const dryRun = deps.dryRun ?? false;
   const totals = initialTotals();
+  // Sentinel so we don't fire an all-zero totals span when loadReleaseIds
+  // itself throws — that span shape is indistinguishable from a clean
+  // empty-rotation day on the dashboard.
+  let didLoadIds = false;
 
-  // Fire the totals span no matter how the run ends: success, dryRun,
-  // or fan-out throw. The accumulated counters are real and the
-  // dashboard pulling on them shouldn't go blank because one task
-  // rejected near the end of the run.
+  // Fire the totals span no matter how the run ends past loadReleaseIds:
+  // success, dryRun, or fan-out throw. The accumulated counters are
+  // real and the dashboard pulling on them shouldn't go blank because
+  // one task rejected near the end of the run.
   try {
     const releaseIds = await deps.loadReleaseIds();
+    didLoadIds = true;
     log('info', 'plan', `loaded ${releaseIds.length} active rotation release ids`, {
       release_count: releaseIds.length,
       concurrency,
@@ -244,6 +252,18 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
 
     return { totals };
   } finally {
-    projectTotalsSpan(totals, dryRun);
+    if (didLoadIds) {
+      // Wrap in its own try/catch so a Sentry SDK fault here can't
+      // shadow the original error from the try block — the orchestrator
+      // paid AggregateError-construction cost specifically so failures
+      // surface, and finally-clause swallowing would undo that.
+      try {
+        projectTotalsSpan(totals, dryRun);
+      } catch (e) {
+        log('warn', 'totals_span_failed', 'projectTotalsSpan threw; original error preserved', {
+          error_message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
   }
 };

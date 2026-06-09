@@ -33,15 +33,18 @@ Local dev: set `LOCAL_DEV=1` to skip the gate when `commit_sha` is null (Railway
 
 ## Configuration
 
-| Env var                       | Default    | Purpose                                                                                                                                                                   |
-| ----------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LIBRARY_METADATA_URL`        | (required) | LML base URL.                                                                                                                                                             |
-| `LML_API_KEY`                 | (required) | Bearer token for LML's `_lml_protected` endpoints. Optional in local dev where LML's `LML_REQUIRE_AUTH` is off; required in staging/prod (matches sibling backfill jobs). |
-| `BACKFILL_LML_MAX_CONCURRENT` | `3`        | Local semaphore + orchestrator concurrency.                                                                                                                               |
-| `BACKFILL_LML_RATE_PER_MIN`   | `20`       | Token bucket refill rate per minute.                                                                                                                                      |
-| `DRY_RUN`                     | unset      | When `1`/`true`/`True`/`TRUE`: enumerate release + artist cardinality, skip artist calls.                                                                                 |
-| `LOCAL_DEV`                   | unset      | When `1`: permit null `commit_sha` on `/health`.                                                                                                                          |
-| `GITHUB_TOKEN`                | unset      | Sent on the GitHub compare API call for the deploy gate (60→5000 req/h tier).                                                                                             |
+| Env var                       | Default    | Purpose                                                                                                                                                                    |
+| ----------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LIBRARY_METADATA_URL`        | (required) | LML base URL.                                                                                                                                                              |
+| `LML_API_KEY`                 | (required) | Bearer token for LML's `_lml_protected` endpoints. Required in staging/prod (matches sibling backfill jobs); `LOCAL_DEV=1` is the BS-side escape hatch for dev/CI.         |
+| `BACKFILL_LML_MAX_CONCURRENT` | `3`        | Local semaphore + orchestrator concurrency.                                                                                                                                |
+| `BACKFILL_LML_RATE_PER_MIN`   | `20`       | Token bucket refill rate per minute.                                                                                                                                       |
+| `DRY_RUN`                     | unset      | When `1`/`true`/`True`/`TRUE`: enumerate release + artist cardinality, skip artist calls.                                                                                  |
+| `LOCAL_DEV`                   | unset      | When `1`: permits null `commit_sha` on `/health` AND skips the `LML_API_KEY` pre-flight check (single dev/CI escape hatch for both gates).                                 |
+| `GITHUB_TOKEN`                | unset      | Sent on the GitHub compare API call for the deploy gate (60→5000 req/h tier).                                                                                              |
+| `SENTRY_DSN`                  | unset      | When set, observability + error capture surface. The `${JOB_NAME}.run` parent span, per-call `lml.get_*` spans, and the `${JOB_NAME}.run.totals` summary span all need it. |
+| `SENTRY_RELEASE`              | unset      | Forwarded to `Sentry.init` so issues group by deploy.                                                                                                                      |
+| `SENTRY_TRACES_SAMPLE_RATE`   | `0`        | Default 0 means spans are **not** sent. Set to `1` (or a fraction) for the totals span and the per-call `op:http.client` spans to surface in Sentry / OTLP dashboards.     |
 
 Rate-limit ceiling defaults pair with LML's own per-replica `discogs_rate_limit=50` cap: this cron caps **attempted** egress at 20 req/min (failed calls also consume a token), so foreground LML traffic gets at least 30 req/min of headroom during the run window.
 
