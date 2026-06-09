@@ -101,9 +101,10 @@ const emptyTotals = (): Totals => ({
  * down, log throws EPIPE, etc.) is at least visible in container logs
  * instead of silently disappearing.
  */
-// Keep this prefix in sync with `JOB_NAME` in job.ts. Hardcoded so the
-// helper stays orchestrator-local (job.ts → orchestrate.ts already);
-// a rename of either side would surface in this file's tests.
+// Keep this prefix in sync with `JOB_NAME` in job.ts — a rename of either
+// side requires a manual matching edit on the other. Hardcoded so the
+// helper stays orchestrator-local (job.ts already imports from here, so
+// pulling JOB_NAME back over would invert the dependency direction).
 const SINK_FAILURE_PREFIX = 'concerts-artist-resolver';
 
 /**
