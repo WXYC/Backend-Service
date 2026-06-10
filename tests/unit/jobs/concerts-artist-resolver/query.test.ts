@@ -7,17 +7,24 @@
  * not a synonym signal. Folding it into the FK-write path produced the
  * Geordie Greep → black midi mislabel surfaced by the BS#1368 frequency
  * audit (Greep is touring solo, not in WXYC's library; only black midi's
- * records are). The fix filters `source <> 'discogs_member'` from the
- * alias subquery so the resolver returns `unmatched` for `discogs_member`-
- * only hits — the FK stays NULL and the row is never mislabeled.
+ * records are).
  *
- * Negative-form filter (`<>`) is forward-compatible against a future
- * fifth source: any new relational signal LML adds (collaborator,
- * featured-on, side-project) is also excluded by default until we
- * explicitly opt it in. The catalog-search sites take the opposite
- * tack — they DO want `discogs_member` matches surfaced as a "related
- * artist" UX hint — but those sites have a wire-shape seam for `source`
- * and the resolver does not.
+ * The fix restricts the alias arm to the synonym-class sources via a
+ * positive allowlist: `source IN ('discogs_name_variation',
+ * 'discogs_alias', 'wxyc_library_alt')`. Positive form is safe-by-
+ * default — a future LML source (collaborator, featured-on, side-project)
+ * stays out of the FK-write path until we explicitly opt it in. The
+ * catalog-search sites take the opposite tack: they DO want relational
+ * rows surfaced for a "related artist" UX hint and propagate `source`
+ * end-to-end. The resolver has no wire-shape seam for `source` so the
+ * partition is enforced in SQL.
+ *
+ * The mocked `db.execute` returns the post-filter row set the SQL would
+ * have produced. The SQL-contract test pins the allowlist literal; the
+ * positive- and negative-source tests pin which sources survive and which
+ * do not; the ambiguity-disambiguation test pins the semantic shift the
+ * filter introduces (pre-filter ambiguous → post-filter singleton
+ * resolves).
  */
 import { jest } from '@jest/globals';
 
@@ -46,57 +53,131 @@ const renderSql = (value: unknown): string => {
   return '';
 };
 
+// `mockClear` rather than `mockReset` preserves the database mock's
+// default `mockResolvedValue([])` so that a test forgetting one
+// `mockResolvedValueOnce` fails with a clean assertion mismatch rather
+// than the loud "unrecognized db.execute() result shape: undefined" the
+// unwrapRows guard throws for safety.
 const executeMock = db.execute;
 
-describe('resolveArtistId — discogs_member filter (BS#1383)', () => {
+const SYNONYM_SOURCES = ['discogs_name_variation', 'discogs_alias', 'wxyc_library_alt'] as const;
+const RELATIONAL_SOURCES = ['discogs_member'] as const;
+
+describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
   beforeEach(() => {
-    executeMock.mockReset();
+    executeMock.mockClear();
   });
 
-  it("excludes 'discogs_member' rows from the alias arm at SQL time", async () => {
-    // Both arms return [] — we're inspecting the SQL contract, not the
-    // result handling. The behaviour assertion (filtered-out → unmatched)
-    // lives in the next test.
-    executeMock.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+  describe('SQL contract', () => {
+    it('the alias arm allowlists exactly the synonym-class sources', async () => {
+      executeMock.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
-    await resolveArtistId('Geordie Greep');
+      await resolveArtistId('Geordie Greep');
 
-    expect(executeMock).toHaveBeenCalledTimes(2);
-    const aliasSql = renderSql(executeMock.mock.calls[1][0]);
-    // Negative form is forward-compatible against a future fifth source.
-    expect(aliasSql).toMatch(/"?source"?\s*<>\s*'discogs_member'/i);
+      expect(executeMock).toHaveBeenCalledTimes(2);
+      const aliasSql = renderSql(executeMock.mock.calls[1][0]);
+
+      // Pin the positive-allowlist contract: SOURCE IN (...) — not a
+      // negative-form predicate. A negative form would silently admit
+      // every future LML source.
+      for (const source of SYNONYM_SOURCES) {
+        expect(aliasSql).toContain(`'${source}'`);
+      }
+      expect(aliasSql).toMatch(/"?source"?\s+IN\s*\(/i);
+    });
+
+    it('the alias arm does NOT name any relational-class source as a filter literal', async () => {
+      // Closes the gap a positive allowlist would otherwise leave: a
+      // maintainer who reads only the SQL and reverts the allowlist to a
+      // negative `source <> 'discogs_member'` shape silently re-admits
+      // any future relational source. This test fails fast on that revert
+      // by asserting no relational-class source name appears in the SQL.
+      executeMock.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+      await resolveArtistId('Geordie Greep');
+
+      const aliasSql = renderSql(executeMock.mock.calls[1][0]);
+      for (const source of RELATIONAL_SOURCES) {
+        expect(aliasSql).not.toContain(`'${source}'`);
+      }
+    });
   });
 
-  it("returns { kind: 'unmatched' } when the only matching alias row is a 'discogs_member' (filtered out by the SQL)", async () => {
-    // The SQL filter is what removes the row; the mock simulates the
-    // filtered result set — empty, because the only candidate variant
-    // was a discogs_member row.
-    executeMock.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+  describe('behaviour against the post-filter result set', () => {
+    it.each(SYNONYM_SOURCES)(
+      "returns { kind: 'alias' } when the alias arm surfaces a row for source=%s",
+      async (source) => {
+        // The mocked row carries `source` so the per-source coverage
+        // claim is honest: each synonym-class source independently
+        // produces an alias outcome. If a future change drops one source
+        // from the allowlist the SQL would return [] for that source —
+        // the contract tests above catch the SQL change, this test
+        // documents the per-source semantic.
+        executeMock.mockResolvedValueOnce([]).mockResolvedValueOnce([{ artist_id: 42, source }]);
 
-    const result = await resolveArtistId('Geordie Greep');
+        const result = await resolveArtistId('Thee Oh Sees');
 
-    expect(result).toEqual({ kind: 'unmatched' });
+        expect(result).toEqual({ kind: 'alias', artist_id: 42 });
+      }
+    );
+
+    it("returns { kind: 'unmatched' } when the only candidate row was a discogs_member (filtered out at SQL time)", async () => {
+      // Production shape: a single `discogs_member` row exists for the
+      // variant. The SQL allowlist excludes it server-side; the mock
+      // simulates the empty post-filter result. The orchestrator writes
+      // NULL and the row falls to manual review — never mislabeled.
+      executeMock.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+      const result = await resolveArtistId('Geordie Greep');
+
+      expect(result).toEqual({ kind: 'unmatched' });
+    });
+
+    it('collapses pre-filter ambiguity to a single resolved alias when only one synonym row survives', async () => {
+      // Production shape from the BS#1368 audit: the same variant
+      // ("Geordie Greep") points at two artists via two sources — a
+      // `discogs_member` row at artist X (the old band) and a
+      // `discogs_alias` row at artist Y (the legitimate synonym). Pre-
+      // fix the alias arm saw both rows and returned `ambiguous`; the FK
+      // stayed NULL. Post-fix the SQL strips the member row server-side
+      // so the orchestrator sees only the synonym row and resolves to
+      // Y. This is the semantic the BS#1383 filter introduces and the
+      // test pins it so a future revert is caught.
+      executeMock.mockResolvedValueOnce([]).mockResolvedValueOnce([{ artist_id: 9999, source: 'discogs_alias' }]);
+
+      const result = await resolveArtistId('Geordie Greep');
+
+      expect(result).toEqual({ kind: 'alias', artist_id: 9999 });
+    });
+
+    it('still returns ambiguous when two synonym-class rows point at different artists', async () => {
+      // Negative twin of the disambiguation test: when the allowlist
+      // does NOT collapse the result set to a singleton, the resolver
+      // must still drop to `ambiguous` and leave the FK NULL. Otherwise
+      // a future change that loosens the SELECT could silently start
+      // picking one of two equally-good matches.
+      executeMock.mockResolvedValueOnce([]).mockResolvedValueOnce([
+        { artist_id: 100, source: 'discogs_alias' },
+        { artist_id: 200, source: 'discogs_name_variation' },
+      ]);
+
+      const result = await resolveArtistId('Some Common Variant');
+
+      expect(result).toEqual({ kind: 'ambiguous' });
+    });
   });
 
-  it("still returns { kind: 'alias' } for non-member alias sources (discogs_name_variation, discogs_alias, wxyc_library_alt)", async () => {
-    // The filter is scoped to `discogs_member` only. A
-    // `discogs_name_variation` / `discogs_alias` / `wxyc_library_alt`
-    // hit still resolves an FK — that's the substrate's whole point.
-    executeMock.mockResolvedValueOnce([]).mockResolvedValueOnce([{ artist_id: 42 }]);
+  describe('strict-wins is unchanged', () => {
+    it('a strict singleton skips the alias arm entirely (no SQL filter involvement)', async () => {
+      // Only one db.execute call should fire — the strict one. The alias
+      // arm (and therefore the allowlist) is irrelevant when strict
+      // resolves.
+      executeMock.mockResolvedValueOnce([{ artist_id: 7 }]);
 
-    const result = await resolveArtistId('Thee Oh Sees');
+      const result = await resolveArtistId('Pavement');
 
-    expect(result).toEqual({ kind: 'alias', artist_id: 42 });
-  });
-
-  it('strict-wins is unchanged: a strict singleton skips the alias arm entirely', async () => {
-    // Only one db.execute call should fire — the strict one. The alias
-    // arm (and therefore the filter) is irrelevant when strict resolves.
-    executeMock.mockResolvedValueOnce([{ artist_id: 7 }]);
-
-    const result = await resolveArtistId('Pavement');
-
-    expect(executeMock).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ kind: 'strict', artist_id: 7 });
+      expect(executeMock).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({ kind: 'strict', artist_id: 7 });
+    });
   });
 });

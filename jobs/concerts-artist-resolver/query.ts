@@ -99,22 +99,31 @@ export const resolveArtistId: ResolveFn = async (raw: string): Promise<ResolveOu
     return { kind: 'ambiguous' };
   }
 
-  // Filter `discogs_member` (BS#1383): it's a relational signal — "X
-  // was a member of Y" — not a synonym signal. Folding it into the FK-
-  // write path produced the Geordie Greep → black midi mislabel from the
-  // BS#1368 frequency audit (Greep is touring solo, not in WXYC's
-  // library). The catalog-search sites WANT these rows surfaced as a
-  // "related artist" UX hint and propagate `source` end-to-end; the
-  // resolver collapses to a single FK and has no wire-shape seam, so it
-  // filters at the SQL level. Negative form (`<>`) is forward-compatible
-  // against a future fifth source (collaborator, featured-on, side-
-  // project): any new relational signal LML adds is excluded by default
-  // until we explicitly opt it in.
+  // Restrict to synonym-class sources (BS#1383). The four
+  // `artist_search_alias.source` values today partition into:
+  //   - synonym-class: discogs_name_variation, discogs_alias,
+  //     wxyc_library_alt — these name the same artist by another
+  //     spelling, and folding them into the FK-write path is the
+  //     substrate's whole point.
+  //   - relational-class: discogs_member — this is "X was a member of
+  //     Y", not "X is also called Y". Folding it in produced the
+  //     Geordie Greep → black midi mislabel from the BS#1368 audit
+  //     (Greep tours solo; WXYC only has his old band's records).
+  // Positive allowlist is safe-by-default: a future LML source
+  // (collaborator, featured-on, side-project) stays out of the FK-
+  // write path until we explicitly opt it in here — the FK stays NULL
+  // and the row drops to manual review, instead of silently writing a
+  // wrong artist_id. The catalog-search sites take the opposite tack:
+  // they DO want relational rows surfaced so iOS / dj-site can render
+  // a "related artist" UX hint, and they propagate `source` end-to-end
+  // for that reason. The resolver collapses to a single FK with no
+  // wire-shape seam for `source`, so the partition is enforced here in
+  // SQL.
   const alias: unknown = await db.execute(sql`
     SELECT DISTINCT asa."artist_id"
     FROM ${ARTIST_SEARCH_ALIAS_TABLE} asa
     WHERE ${NORMALIZE_FN}(asa."variant") = ${NORMALIZE_FN}(${raw})
-      AND asa."source" <> 'discogs_member'
+      AND asa."source" IN ('discogs_name_variation', 'discogs_alias', 'wxyc_library_alt')
     LIMIT 2
   `);
   const aliasRows = unwrapRows<IdRow>(alias);
