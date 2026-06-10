@@ -177,7 +177,7 @@ export const auth = betterAuth({
       loginPage: '/sign-in',
       allowDynamicClientRegistration: false,
       requirePKCE: true,
-      trustedClients: buildTrustedClients(),
+      trustedClients: buildTrustedClients(process.env),
       getAdditionalUserInfoClaim: async (userRecord) => {
         try {
           const memberRecord = await db

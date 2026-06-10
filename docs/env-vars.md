@@ -38,6 +38,13 @@ Full reference. CLAUDE.md links here. Variables marked _required_ have no defaul
 - `BETTER_AUTH_TRUSTED_ORIGINS` — Comma-separated CORS origins
 - `FRONTEND_SOURCE` — Frontend origin for CORS and redirects
 
+### OIDC trustedClients (better-auth `oidcProvider`)
+
+Each downstream WXYC app that authenticates against `api.wxyc.org/auth` via OIDC code + PKCE flow needs a `trustedClient` entry, populated by `shared/authentication/src/oidc-trusted-clients.ts`'s `buildTrustedClients()` from env vars. Each client is gated behind its full required-env-var set — including a non-empty redirect-URL list — so partial configuration omits the entry entirely rather than silently producing a malformed redirect URL that better-auth's authorize endpoint rejects on every login.
+
+- `WIKIJS_OIDC_CLIENT_ID`, `WIKIJS_OIDC_CLIENT_SECRET`, `WIKIJS_URL` — Wiki.js (production only — Wiki.js doesn't run locally). All three required to register the entry; `redirectUrls` is derived as `${WIKIJS_URL}/login/oidc/callback`.
+- `FLOWSHEET_OIDC_CLIENT_ID`, `FLOWSHEET_OIDC_CLIENT_SECRET`, `FLOWSHEET_OIDC_REDIRECT_URLS` — Flowsheet verifier (see [`flowsheet-digitization` plans/oidc-auth.md](https://github.com/WXYC/flowsheet-digitization/blob/main/plans/oidc-auth.md)). `FLOWSHEET_OIDC_REDIRECT_URLS` is comma-separated; production is set to both `https://flowsheet.wxyc.org/auth/callback` and `http://localhost:8765/auth/callback` so the same secret works for both environments.
+
 ## Email (SES)
 
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`

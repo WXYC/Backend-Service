@@ -33,14 +33,29 @@ describe('buildTrustedClients', () => {
       expect(clients[0].redirectUrls).toEqual(['https://a/cb', 'https://b/cb']);
     });
 
-    it('emits flowsheet entry with empty redirectUrls when FLOWSHEET_OIDC_REDIRECT_URLS is unset', () => {
+    it('omits the flowsheet entry when FLOWSHEET_OIDC_REDIRECT_URLS is unset', () => {
+      // Match the file-level docstring contract: a partially configured
+      // client is omitted, not silently pushed with a broken redirect-URL
+      // allowlist. Without this gate, better-auth's authorize endpoint would
+      // reject every login with "invalid redirect URI".
       const clients = buildTrustedClients({
         FLOWSHEET_OIDC_CLIENT_ID: 'flowsheet',
         FLOWSHEET_OIDC_CLIENT_SECRET: 'shh',
       });
 
-      expect(clients).toHaveLength(1);
-      expect(clients[0].redirectUrls).toEqual([]);
+      expect(clients).toEqual([]);
+    });
+
+    it('omits the flowsheet entry when FLOWSHEET_OIDC_REDIRECT_URLS has only blank entries', () => {
+      // ' , , ,' → ['', '', '', ''] after trim+filter Boolean → [].
+      // Same omission as the unset case for the same reason.
+      const clients = buildTrustedClients({
+        FLOWSHEET_OIDC_CLIENT_ID: 'flowsheet',
+        FLOWSHEET_OIDC_CLIENT_SECRET: 'shh',
+        FLOWSHEET_OIDC_REDIRECT_URLS: ' , , ,',
+      });
+
+      expect(clients).toEqual([]);
     });
 
     it('omits the flowsheet entry when FLOWSHEET_OIDC_CLIENT_ID is unset', () => {
@@ -63,11 +78,11 @@ describe('buildTrustedClients', () => {
   });
 
   describe('wiki.js client', () => {
-    it('preserves the existing inline-literal shape byte-for-byte', () => {
+    it('preserves the existing inline-literal shape field-for-field', () => {
       // Behavior-preserving refactor: a Wiki.js entry built from the same env
       // vars the current inline literal reads must equal that literal exactly.
       // Reviewers should diff this expectation against `auth.definition.ts`
-      // lines 180-190 on `main`.
+      // lines 179-190 on `main` (pre-extraction).
       const clients = buildTrustedClients({
         WIKIJS_OIDC_CLIENT_ID: 'wiki-id',
         WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',
