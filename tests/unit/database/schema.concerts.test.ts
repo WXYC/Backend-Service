@@ -113,14 +113,17 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
 
     it('declares first_scraped_at as a NOT NULL timestamptz with DEFAULT now() (INSERT-only scraper-stability anchor, BS#1385)', () => {
       const def = extractTableDef('concerts');
-      // Three things must hold for the writer's INSERT-only invariant to
-      // be expressible: the column exists, is timezone-aware, and carries
-      // defaultNow() so a values payload that omits it still gets a value
-      // at INSERT time. The writer's tests separately pin that the column
-      // is omitted from both `values` and the ON CONFLICT `set` clause.
-      expect(def).toMatch(
-        /first_scraped_at:\s*timestamp\(['"]first_scraped_at['"],\s*\{\s*withTimezone:\s*true\s*\}\)[\s\S]*?\.defaultNow\(\)[\s\S]*?\.notNull\(\)/
-      );
+      // Pin each fact independently so an equivalent reorder of the
+      // chain (e.g. `.notNull().defaultNow()`) doesn't fail the test —
+      // the SQL is identical either way. The writer's tests separately
+      // pin that the column is omitted from both `values` and the ON
+      // CONFLICT `set` clause.
+      const column = def.match(/first_scraped_at:\s*timestamp\([^)]*\)[^,]*/);
+      expect(column?.[0]).toBeDefined();
+      expect(column?.[0]).toMatch(/['"]first_scraped_at['"]/);
+      expect(column?.[0]).toMatch(/withTimezone:\s*true/);
+      expect(column?.[0]).toMatch(/\.defaultNow\(\)/);
+      expect(column?.[0]).toMatch(/\.notNull\(\)/);
     });
   });
 
