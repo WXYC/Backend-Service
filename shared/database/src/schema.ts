@@ -1592,14 +1592,18 @@ export type NewVenue = InferInsertModel<typeof venues>;
  * `Event` object for `rhp_scrape`) so we can forensically diff when the
  * source's format changes.
  *
- * `scraped_at` refreshes on every UPSERT (last scrape), so MIN(scraped_at)
- * collapses to "most recent scraper run" once the scraper has been running
- * for a while. `first_scraped_at` is the forward-only anchor for the same
- * question — added in migration 0093 (BS#1385), held constant across
- * re-UPSERTs by the writer's omission from the ON CONFLICT `set` clause.
- * Rows backfilled at migration time carry the migration timestamp, not
- * their original scrape time; the column is meaningful only for rows
- * inserted after 2026-06-10.
+ * `scraped_at` refreshes on every UPSERT — every row's scraped_at converges
+ * to the last successful sweep, so MIN/MAX(scraped_at) both answer "when
+ * did the scraper last run?" and can't answer "how long has the scraper
+ * been running steadily?". `first_scraped_at` is the forward-only anchor
+ * for that latter question — added in migration 0093 (BS#1385), held
+ * constant across re-UPSERTs by the writer's omission from the ON CONFLICT
+ * `set` clause. Pre-existing rows backfilled at migration apply time carry
+ * the DEFAULT now() evaluated then, NOT their original scrape time; the
+ * column is meaningful only for rows inserted after migration 0093 applied
+ * in the current environment. Downstream consumers asking "≥30 days
+ * steady?" must filter against the migration's per-env apply timestamp
+ * rather than treat backfilled rows as real first-scrape moments.
  */
 export const concerts = wxyc_schema.table(
   'concerts',
