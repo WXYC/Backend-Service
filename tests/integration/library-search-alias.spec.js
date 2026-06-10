@@ -136,9 +136,13 @@ describe('GET /library/query — alias-aware LATERAL JOIN (PR 5)', () => {
     // LATERAL on can fix it in one read.
     if (hit === undefined) {
       throw new Error(
-        '[BS#1383] /library/query alias hit for "Geordie Greep" was absent. The wire-shape assertion ' +
-          'cannot run. The backend likely is missing CATALOG_SEARCH_ALIAS_ENABLED=true — set it on ' +
-          'the backend service in dev_env/docker-compose.yml (or .env for local `npm run dev`) and re-run.'
+        '[BS#1383] /library/query alias hit for "Geordie Greep" was absent — the wire-shape ' +
+          'assertion cannot run. Likely causes: (1) the backend is missing ' +
+          'CATALOG_SEARCH_ALIAS_ENABLED=true (set it on the backend service in ' +
+          'dev_env/docker-compose.yml or in .env for local `npm run dev`); (2) the alias ' +
+          'LATERAL JOIN in library-search.service.ts / library.service.ts was changed to filter ' +
+          'discogs_member rows — the resolver does, but the catalog-search sites must not (this ' +
+          'test exists to pin that asymmetry).'
       );
     }
     expect(hit.matched_via_alias).toEqual([{ matched_variant: 'Geordie Greep', source: 'discogs_member' }]);
