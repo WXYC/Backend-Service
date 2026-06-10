@@ -106,14 +106,21 @@ describe('upsertConcert', () => {
 
       await upsertConcert(fakeParsed('insert-only'), 1, new Date('2026-06-05T12:00:00Z'));
 
-      // INSERT-side: locate the concerts payload across every values()
-      // call (and every row inside an array-form call). Assert the column
-      // is absent everywhere — the schema's DEFAULT now() is what
-      // populates it; spelling it in `values` would shadow the DEFAULT
-      // and re-collapse the stability clock into per-writer wall-clock.
+      // INSERT-side: locate every concerts row across all values() calls
+      // (including any array-form batched call) and assert the column is
+      // absent everywhere — the schema's DEFAULT now() is what populates
+      // it; spelling it in `values` would shadow the DEFAULT and
+      // re-collapse the stability clock into per-writer wall-clock noise.
       const allInsertRows = mockDb._chain.values.mock.calls.flatMap((c: unknown[]) => concertRows(c[0]));
       const concertInserts = allInsertRows.filter(isConcertRow);
+      // Sanity-anchor: at least one concerts INSERT row materialized AND
+      // the writer still spells `scraped_at` (which BS#1385's clock
+      // contrast hangs on). Pinning the anchor explicitly means a future
+      // refactor that drops `scraped_at` fails with a clear "missing
+      // scraped_at" message rather than a confusing "expected length > 0"
+      // on a test named for `first_scraped_at`.
       expect(concertInserts.length).toBeGreaterThan(0);
+      expect(concertInserts[0]).toHaveProperty('scraped_at');
       for (const row of concertInserts) {
         expect(row).not.toHaveProperty('first_scraped_at');
       }
@@ -126,11 +133,13 @@ describe('upsertConcert', () => {
       const concertSetClauses = mockDb._chain.onConflictDoUpdate.mock.calls
         .map((c: unknown[]) => (c[0] as { set?: Record<string, unknown> } | undefined)?.set)
         .filter((set): set is Record<string, unknown> => !!set && 'scraped_at' in set);
-      // The discriminator (`scraped_at` in set) is what the writer adds
-      // here; any future co-located onConflictDoUpdate against another
-      // table (venues, etc.) is filtered out, so this assertion stays
-      // focused on the concerts upsert.
+      // Same anchor on the UPDATE side: at least one concerts set: clause
+      // present, and `scraped_at` is still in it (the contrast that
+      // motivates first_scraped_at). Catches a future refactor that
+      // reformulates "last successful sweep" via a different column
+      // before it silently disables the BS#1385 guard via filter-elision.
       expect(concertSetClauses.length).toBeGreaterThan(0);
+      expect(concertSetClauses[0]).toHaveProperty('scraped_at');
       for (const set of concertSetClauses) {
         // Adding first_scraped_at to `set` would overwrite the insert
         // moment on every nightly re-scrape — the exact failure mode
