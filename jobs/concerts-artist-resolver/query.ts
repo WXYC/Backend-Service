@@ -56,19 +56,45 @@ const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
  * `source` to callers so iOS / dj-site can render relational hits
  * differently (e.g., "related artist") with full source context.
  *
- * Drift hazard worth noting (out of scope for BS#1383): the
- * `ArtistSearchAliasSource` type union lives in three other places —
- * jobs/artist-search-alias-consumer/lml-types.ts,
- * apps/backend/services/requestLine/types.ts,
- * tests/unit/jobs/artist-search-alias-consumer/orchestrate.test.ts —
- * none of which import from each other. A future PR should
- * consolidate them into a single typed source-of-truth that derives
- * from (or is derived by) the partition declared here.
+ * Drift hazard (tracked by BS#1390): the `ArtistSearchAliasSource`
+ * type union lives in three other places — lml-types.ts,
+ * requestLine/types.ts, orchestrate.test.ts — none of which import
+ * from each other or from these constants. BS#1390 consolidates them
+ * around this partition; the matching SynonymAliasSource /
+ * RelationalAliasSource types will be exported from here at that time.
  */
 export const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias', 'wxyc_library_alt'] as const;
 export const RELATIONAL_ALIAS_SOURCES = ['discogs_member'] as const;
-export type SynonymAliasSource = (typeof SYNONYM_ALIAS_SOURCES)[number];
-export type RelationalAliasSource = (typeof RELATIONAL_ALIAS_SOURCES)[number];
+
+/**
+ * Frozen IN-list for the alias arm, built once at module load. The
+ * partition is immutable and the values are compile-time constants we
+ * control — so this is safe-by-construction against the kind of SQL
+ * injection that a runtime-built string would worry about. The tripwire
+ * below shifts that safety from "by-construction" to "checked": if a
+ * future maintainer ever adds a value that escapes the identifier
+ * shape, the module fails to load with an actionable error.
+ *
+ * The `sql.raw` shape (vs `sql.join`) is a TEST plumbing call, not a
+ * production concern. `sql.join` works correctly in production —
+ * `jobs/artist-search-alias-consumer/writer.ts` uses it heavily — but
+ * ts-jest's drizzle-orm transform exposes its `SQL` class slightly
+ * differently than the production CJS bundle, so writer.test.ts has to
+ * mock drizzle-orm to satisfy `sql.join` (see writer.test.ts:4-7). For
+ * a closed const tuple this is overkill; `sql.raw` skips the mock and
+ * keeps the test suite cheap.
+ */
+const NON_IDENTIFIER_CHAR = /[^A-Za-z0-9_]/;
+const offending = SYNONYM_ALIAS_SOURCES.find((s) => NON_IDENTIFIER_CHAR.test(s));
+if (offending !== undefined) {
+  throw new Error(
+    `BS#1383: SYNONYM_ALIAS_SOURCES contains non-identifier value ${JSON.stringify(offending)}. ` +
+      `Inline-quoted sql.raw assembly assumes [A-Za-z0-9_]+. Either keep source names within ` +
+      `that charset (Postgres' own identifier convention), or switch the IN-list assembly to ` +
+      `sql.join (and add the writer-style drizzle-orm mock to query.test.ts).`
+  );
+}
+const SYNONYM_SOURCE_IN_LIST = sql.raw(SYNONYM_ALIAS_SOURCES.map((s) => `'${s}'`).join(', '));
 
 type IdRow = { artist_id: number };
 
@@ -135,30 +161,15 @@ export const resolveArtistId: ResolveFn = async (raw: string): Promise<ResolveOu
     return { kind: 'ambiguous' };
   }
 
-  // Restrict to synonym-class sources (BS#1383). See the
-  // SYNONYM_ALIAS_SOURCES / RELATIONAL_ALIAS_SOURCES docstring above
-  // for the rationale and the open drift hazard. The IN-list is built
-  // from the constant so the partition has exactly one source of
-  // truth in this file. We assemble via `sql.raw` because the source
-  // values are compile-time constants we control (a closed const
-  // tuple, never user input); the assertion below pins that
-  // invariant. `sql.join` would be the canonical pattern but
-  // ts-jest's drizzle-orm transform doesn't expose it cleanly (see
-  // jobs/artist-search-alias-consumer/writer.test.ts:4-7), and going
-  // through `sql.raw` keeps unit tests cheap.
-  if (SYNONYM_ALIAS_SOURCES.some((s) => !/^[a-z_]+$/.test(s))) {
-    // Tripwire — if a future synonym source ever contains a quote /
-    // backslash / non-identifier character, switch to `sql.join` (and
-    // pay the test plumbing cost) rather than letting `sql.raw` embed
-    // an unsanitised string.
-    throw new Error(`SYNONYM_ALIAS_SOURCES contains a non-identifier value; switch to sql.join`);
-  }
-  const synonymList = sql.raw(SYNONYM_ALIAS_SOURCES.map((s) => `'${s}'`).join(', '));
+  // Restrict to synonym-class sources (BS#1383). The IN-list is built
+  // at module load from SYNONYM_ALIAS_SOURCES — see the docstring on
+  // that constant for the partition rationale and the BS#1390 drift
+  // tracker.
   const alias: unknown = await db.execute(sql`
     SELECT DISTINCT asa."artist_id"
     FROM ${ARTIST_SEARCH_ALIAS_TABLE} asa
     WHERE ${NORMALIZE_FN}(asa."variant") = ${NORMALIZE_FN}(${raw})
-      AND asa."source" IN (${synonymList})
+      AND asa."source" IN (${SYNONYM_SOURCE_IN_LIST})
     LIMIT 2
   `);
   const aliasRows = unwrapRows<IdRow>(alias);
