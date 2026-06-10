@@ -61,6 +61,15 @@ jest.mock('@wxyc/database', () => ({
     transaction: (...args: unknown[]) => mockTransaction(...(args as [(tx: unknown) => Promise<void>])),
     execute: mockExecute,
   },
+  // Mirror of `shared/database/src/normalize-artist-name.ts` (the
+  // TS twin of the SQL `wxyc_schema.normalize_artist_name(text)`). The
+  // mock factory cannot import the real module (the auto-mocker runs
+  // before the file's top-level imports are evaluated), so we re-inline
+  // the rule. Keep in sync if the canonical normalization changes.
+  normalizeArtistName: (input: string | null | undefined): string => {
+    const coalesced = input ?? '';
+    return coalesced.replace(/^the[ \t\n\r\f\v]+/i, '').toLowerCase();
+  },
 }));
 
 import type { ArtistSearchAliasVariant } from '../../../../jobs/artist-search-alias-consumer/lml-types';
@@ -87,26 +96,32 @@ beforeEach(() => {
   mockTransaction.mockClear();
 });
 
+// Default canonical that does NOT normalize-collide with the default
+// `variant()` fixture (`'Thee Oh Sees'`). Tests that exercise the no-op
+// filter pass an explicit canonical (e.g. `'The Format'` for the
+// BS#1382 leading-"The" subform).
+const CANONICAL = 'Oh Sees';
+
 describe('writeArtistVariants', () => {
   it('short-circuits with no transaction and no SQL when sourcesPresent is empty', async () => {
-    const outcome = await writeArtistVariants(42, [variant()], []);
+    const outcome = await writeArtistVariants(42, CANONICAL, [variant()], []);
     expect(mockTransaction).toHaveBeenCalledTimes(0);
     expect(mockExecute).toHaveBeenCalledTimes(0);
     expect(outcome.variants_written).toBe(0);
   });
 
   it('opens a transaction when sourcesPresent is non-empty', async () => {
-    await writeArtistVariants(42, [variant()], ['discogs_name_variation']);
+    await writeArtistVariants(42, CANONICAL, [variant()], ['discogs_name_variation']);
     expect(mockTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('emits a single SQL statement (DELETE only) when variants is empty', async () => {
-    await writeArtistVariants(42, [], ['discogs_alias', 'wxyc_library_alt']);
+    await writeArtistVariants(42, CANONICAL, [], ['discogs_alias', 'wxyc_library_alt']);
     expect(mockExecute).toHaveBeenCalledTimes(1);
   });
 
   it('uses sql.join for the source list (anti-regression vs text[] literal)', async () => {
-    await writeArtistVariants(42, [], ['discogs_alias', 'wxyc_library_alt']);
+    await writeArtistVariants(42, CANONICAL, [], ['discogs_alias', 'wxyc_library_alt']);
     // sql.join is the parameterized-VALUES helper; if the writer ever
     // regressed to building a `'{${arr.join(",")}}'::text[]` literal,
     // sql.join would never be called.
@@ -118,7 +133,9 @@ describe('writeArtistVariants', () => {
       variant({ source: 'discogs_name_variation', variant: 'OH SEES' }),
       variant({ source: 'discogs_alias', variant: 'Oh Sees', method: 'alias_curated', confidence: 0.85 }),
     ];
-    await writeArtistVariants(42, variants, ['discogs_name_variation', 'discogs_alias']);
+    // Canonical 'Thee Oh Sees' so neither variant normalize-collides with
+    // it ('OH SEES' lowercases to 'oh sees' which does not equal 'thee oh sees').
+    await writeArtistVariants(42, 'Thee Oh Sees', variants, ['discogs_name_variation', 'discogs_alias']);
     // 1 DELETE + 2 INSERTs.
     expect(mockExecute).toHaveBeenCalledTimes(3);
   });
@@ -126,6 +143,7 @@ describe('writeArtistVariants', () => {
   it('uses sql.join twice in the non-empty-variants branch (source list and pair list)', async () => {
     await writeArtistVariants(
       42,
+      'Thee Oh Sees',
       [variant(), variant({ variant: 'OH SEES' })],
       ['discogs_name_variation', 'discogs_alias']
     );
@@ -136,7 +154,9 @@ describe('writeArtistVariants', () => {
   });
 
   it('pre-stringifies last_verified_at (BS#802 drizzle Date trap)', async () => {
-    await writeArtistVariants(42, [variant()], ['discogs_name_variation']);
+    // Canonical is distinct (normalization-wise) from 'Thee Oh Sees' so
+    // the default variant isn't filtered out by the no-op-variant gate.
+    await writeArtistVariants(42, 'Osees', [variant()], ['discogs_name_variation']);
     // Inspect every captured `sql\`...\`` call's bind values. The
     // last_verified_at slot is the only timestamp-shaped bind in the
     // INSERT; it must be a string, never a Date.
@@ -150,6 +170,7 @@ describe('writeArtistVariants', () => {
   it('binds the artist_id, source, and variant text as positional params', async () => {
     await writeArtistVariants(
       42,
+      'Sinead OConnor',
       [variant({ source: 'discogs_alias', variant: "Sinéad O'Connor" })],
       ['discogs_alias']
     );
@@ -164,8 +185,12 @@ describe('writeArtistVariants', () => {
   });
 
   it('returns variants_written equal to the variants supplied (when sourcesPresent is non-empty)', async () => {
+    // Canonical 'Osees' so neither default variant ('Thee Oh Sees') nor
+    // the two override variants ('OH SEES' / 'OHSEES') normalize-collide
+    // with it. The no-op-variant gate is exercised in the BS#1382-tagged
+    // cases below; this case checks the count-through behaviour.
     const variants = [variant(), variant({ variant: 'OH SEES' }), variant({ variant: 'OHSEES' })];
-    const outcome = await writeArtistVariants(42, variants, ['discogs_name_variation']);
+    const outcome = await writeArtistVariants(42, 'Osees', variants, ['discogs_name_variation']);
     expect(outcome.variants_written).toBe(3);
   });
 
@@ -184,7 +209,7 @@ describe('writeArtistVariants', () => {
       variant({ variant: '\t\n  ' }), // whitespace-only
       variant({ variant: 'Another Valid' }),
     ];
-    const outcome = await writeArtistVariants(42, variants, ['discogs_name_variation']);
+    const outcome = await writeArtistVariants(42, CANONICAL, variants, ['discogs_name_variation']);
     // Only the 2 valid variants reach the INSERT loop. 1 DELETE + 2 INSERTs.
     expect(outcome.variants_written).toBe(2);
     expect(mockExecute).toHaveBeenCalledTimes(3);
@@ -218,7 +243,7 @@ describe('writeArtistVariants', () => {
       // are absent — `v.x` is `undefined` at runtime.
     } as unknown as ArtistSearchAliasVariant;
 
-    await writeArtistVariants(42, [sparseVariant], ['discogs_name_variation']);
+    await writeArtistVariants(42, 'Sonic Youth', [sparseVariant], ['discogs_name_variation']);
 
     const allBinds = sqlTagCalls.flatMap((c) => c.values);
     // No `undefined` binds anywhere — every nullable slot must coerce
@@ -233,7 +258,95 @@ describe('writeArtistVariants', () => {
   it('falls back to DELETE-only when every variant is blank-after-trim (treats filtered-out as variants=[])', async () => {
     // If the only variants supplied are all blank, the writer should
     // behave as if variants=[] was passed: scoped DELETE, no INSERT.
-    await writeArtistVariants(42, [variant({ variant: '   ' }), variant({ variant: '' })], ['discogs_name_variation']);
+    await writeArtistVariants(
+      42,
+      CANONICAL,
+      [variant({ variant: '   ' }), variant({ variant: '' })],
+      ['discogs_name_variation']
+    );
+    // Exactly one statement fires — the DELETE-only branch.
+    expect(mockExecute).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------------------------------------------------------------
+  // BS#1382 — substrate FP cleanup. The writer must reject no-op
+  // `discogs_name_variation` rows whose normalized form equals the
+  // canonical's normalized form. The audit (BS#1368 Path A) surfaced
+  // "The Format" → "Format" and "The Snares" → "Snares" as the
+  // leading-"The" subform; the rule is expressed against the shared
+  // normalize function so any future expansion of the normalization key
+  // (case-only, accent-only, etc.) covers automatically.
+  // ---------------------------------------------------------------
+
+  it("BS#1382 (leading-The subform): rejects discogs_name_variation row where the variant is the de-The'd canonical", async () => {
+    // From the BS#1368 audit table: artist_id=260, canonical='The Format',
+    // variant='Format' on source='discogs_name_variation'. Normalization
+    // strips the leading "The " from both sides, so the variant adds zero
+    // recall over the canonical row while actively colliding the
+    // de-normalized form against a distinct library "Format".
+    const variants = [
+      variant({ source: 'discogs_name_variation', variant: 'Format' }),
+      // A real synonym from a different source survives.
+      variant({ source: 'discogs_alias', variant: 'The Formats', method: 'alias_curated', confidence: 0.85 }),
+    ];
+    const outcome = await writeArtistVariants(260, 'The Format', variants, ['discogs_name_variation', 'discogs_alias']);
+    // Only the surviving variant is INSERTed; the DELETE still fires.
+    expect(outcome.variants_written).toBe(1);
+    expect(mockExecute).toHaveBeenCalledTimes(2); // 1 DELETE + 1 INSERT
+    const allBinds = sqlTagCalls.flatMap((c) => c.values);
+    expect(allBinds).not.toContain('Format');
+    expect(allBinds).toContain('The Formats');
+  });
+
+  it('BS#1382 (non-The norm-equivalent subform): rejects discogs_name_variation row whose only difference from the canonical collapses on normalization (case-only)', async () => {
+    // The rule is general: any `discogs_name_variation` row whose
+    // normalized form equals the canonical's normalized form is a no-op.
+    // `normalize` lowercases, so "Stereolab" / "STEREOLAB" / "stereolab"
+    // all collapse to the same key. This case locks in the generality of
+    // the rule beyond the leading-"The" subform documented in the audit.
+    const variants = [
+      variant({ source: 'discogs_name_variation', variant: 'STEREOLAB' }),
+      // A truly distinct name-variation survives.
+      variant({ source: 'discogs_name_variation', variant: 'Stereo-Lab' }),
+    ];
+    const outcome = await writeArtistVariants(7, 'Stereolab', variants, ['discogs_name_variation']);
+    expect(outcome.variants_written).toBe(1);
+    const allBinds = sqlTagCalls.flatMap((c) => c.values);
+    expect(allBinds).not.toContain('STEREOLAB');
+    expect(allBinds).toContain('Stereo-Lab');
+  });
+
+  it('BS#1382: leaves `discogs_alias` / `discogs_member` / `wxyc_library_alt` rows untouched even if normalize-equivalent to canonical', async () => {
+    // Only `discogs_name_variation` is gated. The other three sources
+    // carry relational or curatorial signal that does not collapse on
+    // normalization — a `discogs_alias` row pointing to the same name as
+    // its canonical may still be a curated synonym worth preserving in
+    // the substrate (and shape 2 — `discogs_member` — is the consumer-side
+    // problem covered by #1383, not the substrate's). The writer must NOT
+    // filter those.
+    const variants = [
+      variant({ source: 'discogs_alias', variant: 'Format', method: 'alias_curated', confidence: 0.85 }),
+      variant({ source: 'discogs_member', variant: 'Format', method: 'member_group', confidence: 0.7 }),
+      variant({ source: 'wxyc_library_alt', variant: 'Format', method: 'alt_curated', confidence: 0.85 }),
+    ];
+    const outcome = await writeArtistVariants(260, 'The Format', variants, [
+      'discogs_alias',
+      'discogs_member',
+      'wxyc_library_alt',
+    ]);
+    // All three survive.
+    expect(outcome.variants_written).toBe(3);
+  });
+
+  it('BS#1382: falls back to DELETE-only when the only variant is a no-op `discogs_name_variation`', async () => {
+    // If the only variant for an artist is the no-op row, the writer
+    // should reconcile away any stale row but emit no INSERT.
+    await writeArtistVariants(
+      20351,
+      'The Snares',
+      [variant({ source: 'discogs_name_variation', variant: 'Snares' })],
+      ['discogs_name_variation']
+    );
     // Exactly one statement fires — the DELETE-only branch.
     expect(mockExecute).toHaveBeenCalledTimes(1);
   });

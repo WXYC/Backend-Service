@@ -40,10 +40,29 @@
  *     rather than `null`. Use `${v.field ?? null}` on every nullable
  *     column (BS#1300 cost 899 writer_errors on the 2026-06-03 first
  *     prod run — ~20% of substrate rows).
+ *
+ * One substrate-cleanup invariant (BS#1382, from the BS#1368 Path A audit):
+ *   - **Reject no-op `discogs_name_variation` variants where
+ *     `normalizeArtistName(variant) === normalizeArtistName(canonical)`.**
+ *     The consumer's match arm normalizes both sides before comparing, so a
+ *     variant whose normalized form equals the canonical's contributes zero
+ *     recall over the canonical row — anything that would match the variant
+ *     already matches the canonical post-normalization — while actively
+ *     introducing FPs by colliding the de-normalized form against same-named
+ *     distinct library artists ("The Format" → "Format" colliding with a
+ *     different "Format"). The rule is expressed against the shared
+ *     `normalizeArtistName` so writer-reject and consumer-match cannot
+ *     drift; it covers the leading-"The" subform plus any future expansion
+ *     of the normalization key (case-only, accent-only, etc.). Scoped to
+ *     `discogs_name_variation` because it is the only source LML emits as a
+ *     pure name-shape synonym — `discogs_alias` / `discogs_member` /
+ *     `wxyc_library_alt` carry relational or curatorial signal even when
+ *     their text normalizes to the canonical. The one-shot cleanup of
+ *     existing rows lives at `scripts/cleanup-no-op-name-variations.sql`.
  */
 
 import { sql } from 'drizzle-orm';
-import { db } from '@wxyc/database';
+import { db, normalizeArtistName } from '@wxyc/database';
 
 import type { ArtistSearchAliasVariant } from './lml-types.js';
 
@@ -58,9 +77,17 @@ export type WriteOutcome = {
  * Reconcile one artist's alias variants. Returns the per-call counts the
  * orchestrator accumulates. On any error the transaction rolls back; the
  * caller is responsible for catching + counting the failure.
+ *
+ * `canonicalName` is the canonical `artists.artist_name` for `artist_id` and
+ * is used to gate no-op `discogs_name_variation` rows out of the substrate
+ * at write time (BS#1382). Passing the canonical here — rather than
+ * re-reading it from the DB inside the writer — keeps the writer free of an
+ * extra round-trip per artist; the orchestrator already has the grouped
+ * canonical (`NameGroup.artist_name`) on hand.
  */
 export const writeArtistVariants = async (
   artist_id: number,
+  canonicalName: string,
   variants: ArtistSearchAliasVariant[],
   sourcesPresent: string[]
 ): Promise<WriteOutcome> => {
@@ -68,6 +95,20 @@ export const writeArtistVariants = async (
     // No composer leg ran — leave the cache untouched.
     return { variants_written: 0 };
   }
+
+  // BS#1382: reject `discogs_name_variation` rows whose normalized form
+  // equals the normalized canonical. Anything that would match the variant
+  // already matches the canonical post-normalization (the consumer
+  // normalizes both sides before comparing), so the row is pure dead
+  // weight — and it actively introduces FPs by colliding the de-normalized
+  // form against same-named distinct library artists. Scoped to
+  // `discogs_name_variation` because `discogs_alias` / `discogs_member` /
+  // `wxyc_library_alt` carry relational or curatorial signal that doesn't
+  // collapse on normalization.
+  const normalizedCanonical = normalizeArtistName(canonicalName);
+  const nonNoopVariants = variants.filter(
+    (v) => v.source !== 'discogs_name_variation' || normalizeArtistName(v.variant) !== normalizedCanonical
+  );
 
   // Defensive filter against the `artist_search_alias_variant_nonblank`
   // CHECK constraint. A single blank-after-trim variant rolls the whole
@@ -77,7 +118,7 @@ export const writeArtistVariants = async (
   // alt-name-source.ts forwards as a `wxyc_library_alt` variant (it only
   // filters NULL). Drop blanks at the writer boundary so one bad row
   // doesn't poison the whole artist's run.
-  const filteredVariants = variants.filter((v) => v.variant.trim().length > 0);
+  const filteredVariants = nonNoopVariants.filter((v) => v.variant.trim().length > 0);
 
   const lastVerifiedAt = new Date().toISOString(); // Pre-stringify (BS#802 trap).
 
