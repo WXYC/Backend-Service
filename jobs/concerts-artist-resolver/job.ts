@@ -43,15 +43,28 @@ const JOB_NAME = 'concerts-artist-resolver';
 /**
  * Pull a usable error message off `unknown` so a `throw 'string'` /
  * `throw null` / a Symbol from upstream code doesn't crash the catch
- * block via `(error as Error).message`. Mirrors the pattern in
- * `jobs/rotation-artist-backfill/job.ts` (BS#1361) — once a third
- * caller appears, promote to `shared/database` or a shared `jobs/`
- * helper.
+ * block via `(error as Error).message`. The whole body is wrapped in a
+ * try so even `e instanceof Error` (a Proxy with throwing
+ * `Symbol.hasInstance`) or a throwing `.message` getter can't escape —
+ * symmetric with `safeStringifyThrown` in orchestrate.ts. Mirrors the
+ * pattern in `jobs/rotation-artist-backfill/job.ts` (BS#1361) — once a
+ * third caller appears, promote to `shared/database` or a shared
+ * `jobs/` helper.
  */
 const errorMessage = (e: unknown): string => {
-  if (e instanceof Error) return e.message;
   try {
+    if (e instanceof Error) return e.message;
     return String(e);
+  } catch {
+    return '<unrepresentable error>';
+  }
+};
+
+/** Mirror of `errorMessage` for the discriminator field. */
+const errorName = (e: unknown): string => {
+  try {
+    if (e instanceof Error) return e.name;
+    return typeof e;
   } catch {
     return '<unrepresentable error>';
   }
@@ -63,12 +76,21 @@ const errorMessage = (e: unknown): string => {
  * `closeDatabaseConnection` would prevent `closeLogger` from running —
  * Sentry events would stay buffered and the PG pool would leak through
  * to process exit. Pattern landed independently for BS#1361.
+ *
+ * Sets `process.exitCode = 1` on failure so a teardown error after an
+ * otherwise-successful run doesn't masquerade as a clean exit —
+ * monitoring keyed on exit code (the cron's primary success signal)
+ * needs to see the failure even when the inner span resolved OK.
  */
 const safeFinalize = async (step: string, fn: () => Promise<void>): Promise<void> => {
   try {
     await fn();
   } catch (e) {
-    log('error', step, `${JOB_NAME} cleanup step failed`, { error_message: errorMessage(e) });
+    log('error', step, `${JOB_NAME} cleanup step failed`, {
+      error_message: errorMessage(e),
+      error_name: errorName(e),
+    });
+    process.exitCode = 1;
   }
 };
 
@@ -87,6 +109,7 @@ const main = async (): Promise<void> => {
             log('warn', 'row_error', `resolver row failed for concert ${candidate.id}`, {
               concert_id: candidate.id,
               error_message: errorMessage(error),
+              error_name: errorName(error),
             });
             captureError(error, 'row_error', { concert_id: candidate.id });
           },
@@ -120,7 +143,10 @@ const main = async (): Promise<void> => {
           }
         );
       } catch (error) {
-        log('error', 'failed', `${JOB_NAME} failed`, { error_message: errorMessage(error) });
+        log('error', 'failed', `${JOB_NAME} failed`, {
+          error_message: errorMessage(error),
+          error_name: errorName(error),
+        });
         captureError(error, 'failed');
         // Mark the wrapping `${JOB_NAME}.run` span as failed (Sentry
         // span-status code 2 = ERROR) so OTLP / Sentry alerts keyed on
@@ -161,6 +187,7 @@ main().catch((error: unknown) => {
         step: 'unhandled',
         message: `${JOB_NAME} unhandled top-level rejection`,
         error_message: errorMessage(error),
+        error_name: errorName(error),
       }) + '\n'
     );
   } catch {
