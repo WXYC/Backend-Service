@@ -141,6 +141,24 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
       const overlap = SYNONYM_ALIAS_SOURCES.filter((s) => (RELATIONAL_ALIAS_SOURCES as readonly string[]).includes(s));
       expect(overlap).toEqual([]);
     });
+
+    it('SYNONYM_ALIAS_SOURCES values are identifier-safe', () => {
+      // The production resolver inline-quotes these values into a
+      // `sql.raw` IN-list (jobs/concerts-artist-resolver/query.ts).
+      // That's safe-by-construction only as long as the values stay
+      // within Postgres' identifier charset — anything outside `[A-Za-
+      // z0-9_]` (apostrophe, backslash, NUL, etc.) would inject. The
+      // check used to live at module-load in query.ts as a thrown Error,
+      // but that path runs before Sentry / the structured logger / the
+      // safeFinalize teardown initialise — a bad value would crash-loop
+      // the container with a bare Node trace, no actionable log line.
+      // Pinning the contract in CI instead means a bad PR fails the
+      // unit-test step and never deploys; production gets the cheaper,
+      // unguarded `sql.raw` call.
+      const nonIdentifier = /[^A-Za-z0-9_]/;
+      const offenders = SYNONYM_ALIAS_SOURCES.filter((s) => nonIdentifier.test(s));
+      expect(offenders).toEqual([]);
+    });
   });
 
   describe('SQL contract', () => {
@@ -152,24 +170,23 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
       expect(db.execute).toHaveBeenCalledTimes(2);
       const aliasSql = renderSql(db.execute.mock.calls[1][0]);
 
-      // Positive contract: every synonym-class source appears as a
-      // quoted SQL literal inside an `IN (...)` predicate. A negative-
-      // form predicate (`<>`) would silently admit every future source
-      // and reintroduce the BS#1368 mislabel under a new label.
-      expect(aliasSql).toMatch(/"?source"?\s+IN\s*\(/i);
-
-      // Exact-set check: parse the IN-list out of the rendered SQL and
-      // assert it equals SYNONYM_ALIAS_SOURCES set-wise. The
-      // containment-only check above passes if a hotfix bypasses the
-      // constant and hardcodes an extra source in SQL — this assertion
-      // is what closes the JS↔SQL alignment gap.
+      // Parses the IN-list literals out of the rendered SQL and
+      // asserts the alias arm names EXACTLY the synonym-class sources
+      // — no extras, no missing, no duplicates. A negative-form
+      // predicate (`<>`) or a hotfix that hardcodes an extra source
+      // outside the const would fail this. The parser assumes a flat
+      // IN-list with single-quoted identifier-safe values; that
+      // shape is pinned by `SYNONYM_ALIAS_SOURCES values are
+      // identifier-safe` above. Sorted-array comparison rather than
+      // Set so duplicates fail too (e.g., an assembly bug that emits
+      // `('a','a','b')` for a 2-element tuple).
       const inListMatch = aliasSql.match(/"?source"?\s+IN\s*\(([^)]*)\)/i);
       expect(inListMatch).not.toBeNull();
       const inListLiterals = (inListMatch?.[1] || '')
         .split(',')
         .map((s) => s.trim().replace(/^'|'$/g, ''))
         .filter((s) => s.length > 0);
-      expect(new Set(inListLiterals)).toEqual(new Set(SYNONYM_ALIAS_SOURCES));
+      expect([...inListLiterals].sort()).toEqual([...SYNONYM_ALIAS_SOURCES].sort());
     });
 
     it('the alias arm does NOT name any relational-class source as a filter literal', async () => {
