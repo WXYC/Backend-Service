@@ -1615,6 +1615,12 @@ export const concerts = wxyc_schema.table(
     status: concertStatusEnum('status').notNull().default('on_sale'),
     raw_data: jsonb('raw_data').notNull(),
     scraped_at: timestamp('scraped_at', { withTimezone: true }).notNull(),
+    // INSERT-only — `scraped_at` is overwritten on every UPSERT, so
+    // `MIN(scraped_at)` collapses to "most recent scraper run" once the
+    // scraper has been running for a while. `first_scraped_at` anchors a
+    // forward-only stability clock; the writer MUST exclude this column
+    // from its ON CONFLICT update set. See BS#1385 / BS#1373.
+    first_scraped_at: timestamp('first_scraped_at', { withTimezone: true }).defaultNow().notNull(),
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [

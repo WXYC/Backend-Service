@@ -24,6 +24,10 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
   const sqlPath91 = entry91 ? path.join(migrationsDir, `${entry91.tag}.sql`) : null;
   const sql91 = sqlPath91 && fs.existsSync(sqlPath91) ? fs.readFileSync(sqlPath91, 'utf-8') : '';
 
+  const entry93 = journal.entries.find((e) => e.idx === 93);
+  const sqlPath93 = entry93 ? path.join(migrationsDir, `${entry93.tag}.sql`) : null;
+  const sql93 = sqlPath93 && fs.existsSync(sqlPath93) ? fs.readFileSync(sqlPath93, 'utf-8') : '';
+
   const extractTableDef = (tableName: string): string => {
     const regex = new RegExp(`export const ${tableName}\\b[\\s\\S]*?^\\);`, 'm');
     const match = schemaSource.match(regex);
@@ -106,6 +110,18 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
       const def = extractTableDef('concerts');
       expect(def).toMatch(/raw_data:\s*jsonb\(['"]raw_data['"]/);
     });
+
+    it('declares first_scraped_at as a NOT NULL timestamptz with DEFAULT now() (INSERT-only scraper-stability anchor, BS#1385)', () => {
+      const def = extractTableDef('concerts');
+      // Three things must hold for the writer's INSERT-only invariant to
+      // be expressible: the column exists, is timezone-aware, and carries
+      // defaultNow() so a values payload that omits it still gets a value
+      // at INSERT time. The writer's tests separately pin that the column
+      // is omitted from both `values` and the ON CONFLICT `set` clause.
+      expect(def).toMatch(
+        /first_scraped_at:\s*timestamp\(['"]first_scraped_at['"],\s*\{\s*withTimezone:\s*true\s*\}\)[\s\S]*?\.defaultNow\(\)[\s\S]*?\.notNull\(\)/
+      );
+    });
   });
 
   describe('enums', () => {
@@ -137,6 +153,22 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
 
     it('carries the precondition-guard opt-out comment so validate-migrations:check-8 stays quiet', () => {
       expect(sql91).toMatch(/precondition-guard:\s*not-required/);
+    });
+  });
+
+  describe('migration 0093 (concerts.first_scraped_at, BS#1385)', () => {
+    it('exists in the journal', () => {
+      expect(entry93).toBeDefined();
+      expect(entry93?.tag).toMatch(/^0093_concerts-first-scraped-at$/);
+    });
+
+    it('adds first_scraped_at to wxyc_schema.concerts as NOT NULL DEFAULT now()', () => {
+      expect(sql93).toMatch(/ALTER TABLE "wxyc_schema"\."concerts" ADD COLUMN "first_scraped_at"/);
+      expect(sql93).toMatch(/timestamp with time zone\s+DEFAULT now\(\)\s+NOT NULL/);
+    });
+
+    it('carries the precondition-guard opt-out comment (ADD COLUMN with non-null DEFAULT is safe by construction)', () => {
+      expect(sql93).toMatch(/precondition-guard:\s*not-required/);
     });
   });
 });

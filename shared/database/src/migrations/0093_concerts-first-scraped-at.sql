@@ -1,0 +1,27 @@
+-- precondition-guard: not-required (single-column ADD with DEFAULT now() and
+--   NOT NULL is safe by construction — existing rows backfill to the migration
+--   instant, no invariant on prior data is asserted)
+-- @no-precondition-needed: ALTER TABLE … ADD COLUMN with a non-null DEFAULT
+--   populates every existing row at apply time, so the NOT NULL constraint
+--   cannot be violated by pre-existing data.
+-- 0093 — concerts.first_scraped_at: anchor a forward-only scraper-stability clock.
+--
+-- `concerts.scraped_at` is overwritten on every venue-events-scraper UPSERT
+-- (`jobs/venue-events-scraper/writer.ts`), so `MIN(scraped_at)` collapses to
+-- "most recent scraper run" once the scraper has been running for a while.
+-- The Path B re-run in BS#1373 needs to know whether the scraper has been
+-- running steadily for ≥30 days — a question the current schema can't
+-- answer. `first_scraped_at` records the moment a row first appeared and
+-- is held constant by the writer's ON CONFLICT update-set on subsequent
+-- re-scrapes; the writer's invariant is documented in writer.ts and
+-- covered by `tests/unit/jobs/venue-events-scraper/writer.test.ts`.
+--
+-- Migration date: 2026-06-10. Rows backfilled by the DEFAULT carry the
+-- migration timestamp, not their original scrape time — this column is
+-- meaningful only for rows inserted on or after that date. Reconstructing
+-- pre-migration first-scrape times is intentionally out of scope (BS#1385).
+--
+-- Companion writer change: `set:` clause in `upsertConcert` excludes
+-- `first_scraped_at` so re-scrapes leave the insert-time value alone.
+
+ALTER TABLE "wxyc_schema"."concerts" ADD COLUMN "first_scraped_at" timestamp with time zone DEFAULT now() NOT NULL;
