@@ -70,20 +70,20 @@ export const RELATIONAL_ALIAS_SOURCES = ['discogs_member'] as const;
  * Frozen IN-list for the alias arm, built once at module load. Safe-
  * by-construction: the partition is immutable and the values are
  * compile-time constants we control. The identifier-charset assumption
- * (\`[A-Za-z0-9_]+\`, Postgres' own convention) that lets us inline-
+ * (`[A-Za-z0-9_]+`, Postgres' own convention) that lets us inline-
  * quote without escaping is pinned by the unit test
- * \`SYNONYM_ALIAS_SOURCES values are identifier-safe\` in
+ * `SYNONYM_ALIAS_SOURCES values are identifier-safe` in
  * query.test.ts — runtime validation would just crash-loop the
  * container at deploy with a bare Node stack, before Sentry / logger /
  * safeFinalize get a chance to attribute the failure, so the
  * gatekeeping lives in CI instead.
  *
- * \`sql.raw\` is the simplest assembly here because the values are a
- * closed const tuple. \`sql.join\` would also work and is the project's
+ * `sql.raw` is the simplest assembly here because the values are a
+ * closed const tuple. `sql.join` would also work and is the project's
  * default for parameterised lists (see
- * \`jobs/artist-search-alias-consumer/writer.ts\` for the canonical
+ * `jobs/artist-search-alias-consumer/writer.ts` for the canonical
  * runtime usage with comma-bearing variant strings); the only reason
- * to prefer \`sql.raw\` for this site is that \`sql.join\` requires
+ * to prefer `sql.raw` for this site is that `sql.join` requires
  * mocking drizzle-orm in unit tests (the writer's test does this),
  * which is overkill for a 3-element identifier-safe tuple.
  */
