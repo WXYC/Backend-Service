@@ -17,6 +17,7 @@ import { generateId } from '@better-auth/core/utils/id';
 import { and, eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
+import { buildTrustedClients } from './oidc-trusted-clients';
 import { rewriteUrlForFrontend } from './url-rewrite';
 
 const buildResetUrl = (url: string, redirectTo?: string) => {
@@ -176,19 +177,7 @@ export const auth = betterAuth({
       loginPage: '/sign-in',
       allowDynamicClientRegistration: false,
       requirePKCE: true,
-      trustedClients: [
-        {
-          clientId: process.env.WIKIJS_OIDC_CLIENT_ID!,
-          clientSecret: process.env.WIKIJS_OIDC_CLIENT_SECRET!,
-          redirectUrls: [`${process.env.WIKIJS_URL}/login/oidc/callback`],
-          name: 'Wiki.js',
-          type: 'web' as const,
-          disabled: false,
-          icon: undefined,
-          metadata: null,
-          skipConsent: true,
-        },
-      ],
+      trustedClients: buildTrustedClients(),
       getAdditionalUserInfoClaim: async (userRecord) => {
         try {
           const memberRecord = await db
