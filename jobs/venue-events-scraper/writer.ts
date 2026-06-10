@@ -217,18 +217,18 @@ export const upsertConcert = async (
     scraped_at: new Date(scrapedAtIso),
   };
 
-  // INSERT-only columns deliberately omitted from `set` below:
-  //   - `first_scraped_at` is the scraper-stability anchor (BS#1385) — it
-  //     must stay at its insert-time value across re-scrapes so
-  //     MIN(first_scraped_at) answers "how long has the scraper been
-  //     running steadily?" rather than collapsing to "most recent run" the
-  //     way `scraped_at` does. The schema's DEFAULT now() populates it on
-  //     INSERT; the absence from `set` keeps it untouched on UPDATE.
   const result = await db
     .insert(concerts)
     .values(values)
     .onConflictDoUpdate({
       target: [concerts.source, concerts.source_id],
+      // INSERT-only: do NOT add `first_scraped_at` here. The schema's
+      // DEFAULT now() populates it on INSERT; the omission from this
+      // `set` is what keeps MIN(first_scraped_at) the forward-only
+      // scraper-stability clock (BS#1385) instead of collapsing into
+      // "most recent run" the way `scraped_at` does. `status` and
+      // `headlining_artist_id` are separately INSERT-only per the
+      // function docstring above — don't conflate the two invariants.
       set: {
         venue_id: values.venue_id,
         starts_at: values.starts_at,

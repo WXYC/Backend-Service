@@ -144,7 +144,6 @@ export const concerts = {
   status: 'status',
   raw_data: 'raw_data',
   scraped_at: 'scraped_at',
-  first_scraped_at: 'first_scraped_at',
   last_modified: 'last_modified',
 };
 export const album_plays = {

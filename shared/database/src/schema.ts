@@ -1591,6 +1591,15 @@ export type NewVenue = InferInsertModel<typeof venues>;
  * `raw_data` carries the source's original payload (the parsed schema.org
  * `Event` object for `rhp_scrape`) so we can forensically diff when the
  * source's format changes.
+ *
+ * `scraped_at` refreshes on every UPSERT (last scrape), so MIN(scraped_at)
+ * collapses to "most recent scraper run" once the scraper has been running
+ * for a while. `first_scraped_at` is the forward-only anchor for the same
+ * question — added in migration 0093 (BS#1385), held constant across
+ * re-UPSERTs by the writer's omission from the ON CONFLICT `set` clause.
+ * Rows backfilled at migration time carry the migration timestamp, not
+ * their original scrape time; the column is meaningful only for rows
+ * inserted after 2026-06-10.
  */
 export const concerts = wxyc_schema.table(
   'concerts',
@@ -1615,11 +1624,9 @@ export const concerts = wxyc_schema.table(
     status: concertStatusEnum('status').notNull().default('on_sale'),
     raw_data: jsonb('raw_data').notNull(),
     scraped_at: timestamp('scraped_at', { withTimezone: true }).notNull(),
-    // INSERT-only — `scraped_at` is overwritten on every UPSERT, so
-    // `MIN(scraped_at)` collapses to "most recent scraper run" once the
-    // scraper has been running for a while. `first_scraped_at` anchors a
-    // forward-only stability clock; the writer MUST exclude this column
-    // from its ON CONFLICT update set. See BS#1385 / BS#1373.
+    // INSERT-only scraper-stability anchor — writer omits from ON CONFLICT
+    // set so re-UPSERTs preserve the insert moment. See BS#1385 (migration
+    // 0093) and the table JSDoc above for the full rationale.
     first_scraped_at: timestamp('first_scraped_at', { withTimezone: true }).defaultNow().notNull(),
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },

@@ -78,44 +78,50 @@ describe('upsertConcert', () => {
   });
 
   // BS#1385 — `first_scraped_at` is the INSERT-only scraper-stability
-  // anchor. On a fresh INSERT it picks up the schema's `DEFAULT now()`
-  // (so the writer doesn't need to spell it in the values payload), and
-  // on a re-UPSERT the row must keep its insert-time value — which means
-  // the ON CONFLICT `set:` clause MUST NOT carry the column. The two
-  // assertions below are paired because the invariant has two halves
-  // (don't overwrite the default on INSERT; don't refresh on UPDATE).
+  // anchor: the schema's `DEFAULT now()` populates it on INSERT, and the
+  // ON CONFLICT `set:` clause must omit it so re-UPSERT preserves the
+  // insert-time value. One decision (omit the column from the upsert
+  // payload), pinned at both read-positions.
   describe('first_scraped_at INSERT-only invariant (BS#1385)', () => {
-    it('does not pass first_scraped_at in the values payload, so the schema DEFAULT now() populates it on INSERT', async () => {
+    // Normalize Drizzle's `values(obj | obj[])` overload so a future
+    // refactor to array form can't make `not.toHaveProperty('first_scraped_at')`
+    // pass vacuously against an array (arrays have no string keys).
+    const concertRow = (arg: unknown): Record<string, unknown> | undefined => {
+      const row = Array.isArray(arg) ? arg[0] : arg;
+      return row && typeof row === 'object' ? (row as Record<string, unknown>) : undefined;
+    };
+
+    it('omits first_scraped_at from both the INSERT values and the ON CONFLICT set', async () => {
       mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
 
-      await upsertConcert(fakeParsed('insert-default'), 1, new Date('2026-06-05T12:00:00Z'));
+      await upsertConcert(fakeParsed('insert-only'), 1, new Date('2026-06-05T12:00:00Z'));
 
-      const valuesArg = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
-      expect(valuesArg).toBeDefined();
-      // If the writer ever started supplying first_scraped_at on INSERT it
-      // would shadow the DEFAULT, defeating the whole point of the column
-      // (the scraper's clock would drift forward with each writer revision).
-      expect(valuesArg).not.toHaveProperty('first_scraped_at');
-    });
+      // Find the concerts INSERT across all values() calls — robust if
+      // upsertConcert ever calls a co-located helper (e.g. ensureVenue)
+      // that also uses the shared chain mock.
+      const concertValues = mockDb._chain.values.mock.calls
+        .map((c: unknown[]) => concertRow(c[0]))
+        .find((row): row is Record<string, unknown> => row?.source === 'rhp_scrape');
+      expect(concertValues).toBeDefined();
+      // INSERT-side: keeping first_scraped_at out of `values` is what lets
+      // the schema's DEFAULT now() populate the column. Spelling it
+      // explicitly would shadow the DEFAULT and re-collapse the stability
+      // clock into per-writer-revision wall-clock noise.
+      expect(concertValues).not.toHaveProperty('first_scraped_at');
 
-    it('excludes first_scraped_at from the ON CONFLICT update set so re-UPSERT preserves the insert-time value', async () => {
-      mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: false }]);
-
-      await upsertConcert(fakeParsed('reupsert'), 1, new Date('2026-06-05T12:00:00Z'));
-
-      const onConflictArg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as
-        | { set?: Record<string, unknown> }
-        | undefined;
-      expect(onConflictArg?.set).toBeDefined();
-      // The whole point of the column is to record the first-ever scrape
-      // moment for the (source, source_id) tuple. Adding it to `set` would
-      // overwrite that moment on every nightly re-scrape, collapsing
-      // first_scraped_at into "most recent run" — the exact failure mode
-      // scraped_at already has.
-      expect(onConflictArg?.set).not.toHaveProperty('first_scraped_at');
-      // Sanity: scraped_at IS refreshed (this is the contrast that
-      // justifies adding first_scraped_at in the first place).
-      expect(onConflictArg?.set).toHaveProperty('scraped_at');
+      // UPDATE-side: the concerts upsert is the only onConflictDoUpdate
+      // call here, but iterating defends against a future caller (or
+      // retry wrapper) adding a second invocation whose set: regresses.
+      for (const call of mockDb._chain.onConflictDoUpdate.mock.calls) {
+        const set = (call[0] as { set?: Record<string, unknown> } | undefined)?.set;
+        expect(set).toBeDefined();
+        // Adding first_scraped_at to `set` would overwrite the insert
+        // moment on every nightly re-scrape — the exact failure mode
+        // scraped_at already has, and the reason this column exists.
+        expect(set).not.toHaveProperty('first_scraped_at');
+        // Sanity-anchor the contrast: scraped_at IS refreshed.
+        expect(set).toHaveProperty('scraped_at');
+      }
     });
   });
 });
