@@ -95,11 +95,14 @@ describe('upsertConcert', () => {
 
     // Structural discriminator — pick the concerts upsert out of any
     // co-located mock invocations (e.g. ensureVenue under a future
-    // refactor) by the keys this writer uniquely sets. Keeps the test
-    // green if the writer ever routes `source` through a constant /
-    // enum reference instead of the literal string 'rhp_scrape'.
-    const isConcertRow = (r: Record<string, unknown>): boolean =>
-      'source_id' in r && 'venue_id' in r && 'scraped_at' in r;
+    // refactor) by keys that uniquely belong to concerts and NOT to
+    // venues' payload: `source_id` (venues uses `slug`) + `venue_id`
+    // (an FK that venues' own row has no reason to carry). Deliberately
+    // does NOT include `scraped_at` so the separate scraped_at-presence
+    // anchor below can actually fire if the writer ever drops it.
+    // Keeps the test green if the writer ever routes `source` through a
+    // constant / enum reference instead of the literal 'rhp_scrape'.
+    const isConcertRow = (r: Record<string, unknown>): boolean => 'source_id' in r && 'venue_id' in r;
 
     it('omits first_scraped_at from both the INSERT values and the ON CONFLICT set', async () => {
       mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
@@ -132,12 +135,16 @@ describe('upsertConcert', () => {
       expect(mockDb._chain.onConflictDoUpdate).toHaveBeenCalled();
       const concertSetClauses = mockDb._chain.onConflictDoUpdate.mock.calls
         .map((c: unknown[]) => (c[0] as { set?: Record<string, unknown> } | undefined)?.set)
-        .filter((set): set is Record<string, unknown> => !!set && 'scraped_at' in set);
+        // Discriminate via `venue_id` — concerts' set: lists it; venues'
+        // seeded-path set: lists name/city/state/address/last_modified
+        // only. Excluding `scraped_at` from the discriminator keeps the
+        // independent anchor below meaningful.
+        .filter((set): set is Record<string, unknown> => !!set && 'venue_id' in set);
       // Same anchor on the UPDATE side: at least one concerts set: clause
       // present, and `scraped_at` is still in it (the contrast that
       // motivates first_scraped_at). Catches a future refactor that
       // reformulates "last successful sweep" via a different column
-      // before it silently disables the BS#1385 guard via filter-elision.
+      // before it silently disables the BS#1385 guard.
       expect(concertSetClauses.length).toBeGreaterThan(0);
       expect(concertSetClauses[0]).toHaveProperty('scraped_at');
       for (const set of concertSetClauses) {
