@@ -217,6 +217,13 @@ export const upsertConcert = async (
     scraped_at: new Date(scrapedAtIso),
   };
 
+  // INSERT-only columns deliberately omitted from `set` below:
+  //   - `first_scraped_at` is the scraper-stability anchor (BS#1385) — it
+  //     must stay at its insert-time value across re-scrapes so
+  //     MIN(first_scraped_at) answers "how long has the scraper been
+  //     running steadily?" rather than collapsing to "most recent run" the
+  //     way `scraped_at` does. The schema's DEFAULT now() populates it on
+  //     INSERT; the absence from `set` keeps it untouched on UPDATE.
   const result = await db
     .insert(concerts)
     .values(values)

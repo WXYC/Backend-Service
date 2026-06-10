@@ -16,7 +16,7 @@ import { ensureVenue, upsertConcert } from '../../../../jobs/venue-events-scrape
 import type { ParsedConcert } from '../../../../jobs/venue-events-scraper/rhp-types';
 
 type MockDb = typeof db & {
-  _chain: { returning: jest.Mock; limit: jest.Mock };
+  _chain: { returning: jest.Mock; limit: jest.Mock; onConflictDoUpdate: jest.Mock; values: jest.Mock };
 };
 
 const mockDb = db as MockDb;
@@ -75,6 +75,48 @@ describe('upsertConcert', () => {
     // here would surface as ERR_INVALID_ARG_TYPE inside Buffer.byteLength
     // (the BS#802 failure mode).
     await expect(upsertConcert(fakeParsed('date-shape'), 1, new Date('2026-06-05T12:00:00Z'))).resolves.toBeDefined();
+  });
+
+  // BS#1385 — `first_scraped_at` is the INSERT-only scraper-stability
+  // anchor. On a fresh INSERT it picks up the schema's `DEFAULT now()`
+  // (so the writer doesn't need to spell it in the values payload), and
+  // on a re-UPSERT the row must keep its insert-time value — which means
+  // the ON CONFLICT `set:` clause MUST NOT carry the column. The two
+  // assertions below are paired because the invariant has two halves
+  // (don't overwrite the default on INSERT; don't refresh on UPDATE).
+  describe('first_scraped_at INSERT-only invariant (BS#1385)', () => {
+    it('does not pass first_scraped_at in the values payload, so the schema DEFAULT now() populates it on INSERT', async () => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
+
+      await upsertConcert(fakeParsed('insert-default'), 1, new Date('2026-06-05T12:00:00Z'));
+
+      const valuesArg = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+      expect(valuesArg).toBeDefined();
+      // If the writer ever started supplying first_scraped_at on INSERT it
+      // would shadow the DEFAULT, defeating the whole point of the column
+      // (the scraper's clock would drift forward with each writer revision).
+      expect(valuesArg).not.toHaveProperty('first_scraped_at');
+    });
+
+    it('excludes first_scraped_at from the ON CONFLICT update set so re-UPSERT preserves the insert-time value', async () => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: false }]);
+
+      await upsertConcert(fakeParsed('reupsert'), 1, new Date('2026-06-05T12:00:00Z'));
+
+      const onConflictArg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as
+        | { set?: Record<string, unknown> }
+        | undefined;
+      expect(onConflictArg?.set).toBeDefined();
+      // The whole point of the column is to record the first-ever scrape
+      // moment for the (source, source_id) tuple. Adding it to `set` would
+      // overwrite that moment on every nightly re-scrape, collapsing
+      // first_scraped_at into "most recent run" — the exact failure mode
+      // scraped_at already has.
+      expect(onConflictArg?.set).not.toHaveProperty('first_scraped_at');
+      // Sanity: scraped_at IS refreshed (this is the contrast that
+      // justifies adding first_scraped_at in the first place).
+      expect(onConflictArg?.set).toHaveProperty('scraped_at');
+    });
   });
 });
 
