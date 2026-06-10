@@ -224,11 +224,13 @@ export const upsertConcert = async (
       target: [concerts.source, concerts.source_id],
       // INSERT-only: do NOT add `first_scraped_at` here. The schema's
       // DEFAULT now() populates it on INSERT; the omission from this
-      // `set` is what keeps MIN(first_scraped_at) the forward-only
-      // scraper-stability clock (BS#1385) instead of collapsing into
-      // "most recent run" the way `scraped_at` does. `status` and
-      // `headlining_artist_id` are separately INSERT-only per the
-      // function docstring above — don't conflate the two invariants.
+      // `set` is what keeps MIN(first_scraped_at) a forward-only
+      // anchor (BS#1385). Contrast with `scraped_at`, which IS in `set`
+      // below — every row's scraped_at refreshes on every run, so
+      // MIN/MAX(scraped_at) both converge to "last successful sweep"
+      // and can't answer "how long has the scraper been running?".
+      // (`status` is also omitted, but for a separate reason — see the
+      // docstring above. Don't conflate the two invariants.)
       set: {
         venue_id: values.venue_id,
         starts_at: values.starts_at,
