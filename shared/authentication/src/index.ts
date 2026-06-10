@@ -2,5 +2,4 @@ export * from './auth.definition';
 export * from './auth.roles';
 export * from './auth.middleware';
 export * from './auth.username';
-export * from './oidc-trusted-clients';
 export { sendAccountSetupEmail } from './email';
