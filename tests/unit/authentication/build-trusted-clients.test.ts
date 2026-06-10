@@ -58,6 +58,21 @@ describe('buildTrustedClients', () => {
       expect(clients).toEqual([]);
     });
 
+    it('keeps the valid URLs and drops the blank entries when both are mixed', () => {
+      // Pins the .filter(Boolean) semantics: an operator with a typo'd
+      // trailing comma or an accidental blank slot in the middle still gets
+      // the entry registered for the URLs that parse — we don't reject the
+      // whole list because one entry was blank.
+      const clients = buildTrustedClients({
+        FLOWSHEET_OIDC_CLIENT_ID: 'flowsheet',
+        FLOWSHEET_OIDC_CLIENT_SECRET: 'shh',
+        FLOWSHEET_OIDC_REDIRECT_URLS: 'https://a/cb, , https://b/cb',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0].redirectUrls).toEqual(['https://a/cb', 'https://b/cb']);
+    });
+
     it('omits the flowsheet entry when FLOWSHEET_OIDC_CLIENT_ID is unset', () => {
       const clients = buildTrustedClients({
         FLOWSHEET_OIDC_CLIENT_SECRET: 'shh',
@@ -81,8 +96,9 @@ describe('buildTrustedClients', () => {
     it('preserves the existing inline-literal shape field-for-field', () => {
       // Behavior-preserving refactor: a Wiki.js entry built from the same env
       // vars the current inline literal reads must equal that literal exactly.
-      // Reviewers should diff this expectation against `auth.definition.ts`
-      // lines 179-190 on `main` (pre-extraction).
+      // Reviewers should diff this expectation against the inline literal's
+      // object contents on `main` (pre-extraction, lines 180-190 of
+      // `shared/authentication/src/auth.definition.ts`).
       const clients = buildTrustedClients({
         WIKIJS_OIDC_CLIENT_ID: 'wiki-id',
         WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',
