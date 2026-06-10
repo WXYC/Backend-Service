@@ -119,6 +119,7 @@ npm run drizzle:drop       # Delete a migration file
 - `auth.roles.ts` — Role definitions and access control rules
 - `auth.middleware.ts` — JWT verification and permission checking
 - `auth.client.ts` — Client-side better-auth initialization
+- `oidc-trusted-clients.ts` — `buildTrustedClients(env)` for the better-auth `oidcProvider` plugin. Each downstream WXYC app (Wiki.js, Flowsheet verifier) is gated behind its full env-var set, including a non-empty parsed redirect-URL list, so partial configs are omitted rather than pushed broken. Env contract in [`docs/env-vars.md`](docs/env-vars.md#oidc-trustedclients-better-auth-oidcprovider).
 - `email.ts` — SES email sending (password reset, verification)
 
 **Roles** (hierarchical): member < dj < musicDirector < stationManager

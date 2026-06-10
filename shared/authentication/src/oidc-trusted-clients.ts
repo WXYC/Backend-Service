@@ -16,6 +16,12 @@
  *      code-exchange (better-auth's authorize endpoint rejects every login
  *      with "invalid redirect URI"); we'd rather omit the entry and surface
  *      "trustedClient absent" the first time someone tries to log in.
+ *
+ * Trust posture (`skipConsent: true`): every client registered here is a
+ * first-party WXYC tool the station already operates, so the OAuth consent
+ * screen is UX papercut, not a trust boundary. When adding a third-party or
+ * less-trusted app, set `skipConsent: false` so the user sees the standard
+ * consent screen.
  */
 
 import type { Client } from 'better-auth/plugins';
@@ -33,10 +39,6 @@ export function buildTrustedClients(env: NodeJS.ProcessEnv): Client[] {
       disabled: false,
       icon: undefined,
       metadata: null,
-      // skipConsent: every trustedClient here is a first-party WXYC tool the
-      // station already operates; the consent screen is a UX papercut, not a
-      // trust boundary. When adding a third-party or less-trusted app, set
-      // this to false and the user will see the standard consent screen.
       skipConsent: true,
     });
   }
@@ -56,7 +58,7 @@ export function buildTrustedClients(env: NodeJS.ProcessEnv): Client[] {
         disabled: false,
         icon: undefined,
         metadata: null,
-        skipConsent: true, // see Wiki.js entry above for the trust rationale.
+        skipConsent: true,
       });
     }
   }
