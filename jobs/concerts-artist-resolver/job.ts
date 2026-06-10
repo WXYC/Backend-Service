@@ -40,59 +40,97 @@ import { initLogger, log, captureError, closeLogger } from './logger.js';
 
 const JOB_NAME = 'concerts-artist-resolver';
 
+/**
+ * Pull a usable error message off `unknown` so a `throw 'string'` /
+ * `throw null` / a Symbol from upstream code doesn't crash the catch
+ * block via `(error as Error).message`. Mirrors the pattern in
+ * `jobs/rotation-artist-backfill/job.ts` (BS#1361) — once a third
+ * caller appears, promote to `shared/database` or a shared `jobs/`
+ * helper.
+ */
+const errorMessage = (e: unknown): string => {
+  if (e instanceof Error) return e.message;
+  try {
+    return String(e);
+  } catch {
+    return '<unrepresentable error>';
+  }
+};
+
+/**
+ * Run a teardown step and log+swallow any throw so a failure in one
+ * cleanup call doesn't skip the next. Without this, an exception out of
+ * `closeDatabaseConnection` would prevent `closeLogger` from running —
+ * Sentry events would stay buffered and the PG pool would leak through
+ * to process exit. Pattern landed independently for BS#1361.
+ */
+const safeFinalize = async (step: string, fn: () => Promise<void>): Promise<void> => {
+  try {
+    await fn();
+  } catch (e) {
+    log('error', step, `${JOB_NAME} cleanup step failed`, { error_message: errorMessage(e) });
+  }
+};
+
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
   try {
     await Sentry.startSpan({ name: `${JOB_NAME}.run`, op: 'job.run' }, async () => {
-      log('info', 'init', `${JOB_NAME} initialized`);
+      try {
+        log('info', 'init', `${JOB_NAME} initialized`);
 
-      const { totals } = await runResolver({
-        loadCandidates,
-        resolve: resolveArtistId,
-        write: writeArtistId,
-        onError: (candidate, error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          log('warn', 'row_error', `resolver row failed for concert ${candidate.id}`, {
-            concert_id: candidate.id,
-            error_message: message,
-          });
-          captureError(error, 'row_error', { concert_id: candidate.id });
-        },
-      });
-
-      log('info', 'finished', `${JOB_NAME} done`, { ...totals });
-
-      // Surface run totals as a CHILD span whose numeric attributes are
-      // set at creation time (per BS#1081 / memory
-      // `feedback_sentry_attribute_typing_trap`: numeric values passed
-      // via `setAttribute(name, number)` AFTER the span has already
-      // started get indexed as strings, which breaks avg/p50/p95/sum
-      // aggregation on Sentry dashboards).
-      Sentry.startSpan(
-        {
-          name: `${JOB_NAME}.run.totals`,
-          attributes: {
-            'resolver.scanned': totals.scanned,
-            'resolver.resolved': totals.resolved,
-            'resolver.resolved_strict': totals.resolved_strict,
-            'resolver.resolved_alias': totals.resolved_alias,
-            'resolver.ambiguous': totals.ambiguous,
-            'resolver.unmatched': totals.unmatched,
-            'resolver.null_raw_skipped': totals.null_raw_skipped,
-            'resolver.error': totals.error,
-            'resolver.raced': totals.raced,
+        const { totals } = await runResolver({
+          loadCandidates,
+          resolve: resolveArtistId,
+          write: writeArtistId,
+          onError: (candidate, error) => {
+            log('warn', 'row_error', `resolver row failed for concert ${candidate.id}`, {
+              concert_id: candidate.id,
+              error_message: errorMessage(error),
+            });
+            captureError(error, 'row_error', { concert_id: candidate.id });
           },
-        },
-        () => {
-          /* attributes set at creation; nothing else to do */
-        }
-      );
+        });
+
+        log('info', 'finished', `${JOB_NAME} done`, { ...totals });
+
+        // Surface run totals as a CHILD span whose numeric attributes are
+        // set at creation time (per BS#1081 / memory
+        // `feedback_sentry_attribute_typing_trap`: numeric values passed
+        // via `setAttribute(name, number)` AFTER the span has already
+        // started get indexed as strings, which breaks avg/p50/p95/sum
+        // aggregation on Sentry dashboards).
+        Sentry.startSpan(
+          {
+            name: `${JOB_NAME}.run.totals`,
+            attributes: {
+              'resolver.scanned': totals.scanned,
+              'resolver.resolved': totals.resolved,
+              'resolver.resolved_strict': totals.resolved_strict,
+              'resolver.resolved_alias': totals.resolved_alias,
+              'resolver.ambiguous': totals.ambiguous,
+              'resolver.unmatched': totals.unmatched,
+              'resolver.null_raw_skipped': totals.null_raw_skipped,
+              'resolver.error': totals.error,
+              'resolver.raced': totals.raced,
+            },
+          },
+          () => {
+            /* attributes set at creation; nothing else to do */
+          }
+        );
+      } catch (error) {
+        log('error', 'failed', `${JOB_NAME} failed`, { error_message: errorMessage(error) });
+        captureError(error, 'failed');
+        // Mark the wrapping `${JOB_NAME}.run` span as failed (Sentry
+        // span-status code 2 = ERROR) so OTLP / Sentry alerts keyed on
+        // `op:job.run` error rate actually fire. Without this the span
+        // resolves with status:OK and the failure stays invisible to
+        // alerting even though captureError has logged the exception.
+        Sentry.getActiveSpan()?.setStatus({ code: 2, message: 'failed' });
+        process.exitCode = 1;
+      }
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    log('error', 'failed', `${JOB_NAME} failed`, { error_message: message });
-    captureError(error, 'failed');
-    process.exitCode = 1;
   } finally {
     // Cleanup runs OUTSIDE the `Sentry.startSpan` callback so the parent
     // `${JOB_NAME}.run` span's end event fires through a live transport.
@@ -101,9 +139,32 @@ const main = async (): Promise<void> => {
     // terminal event would land on an already-disabled client and the
     // whole transaction (including the .totals child span) would be
     // dropped silently.
-    await closeDatabaseConnection();
-    await closeLogger();
+    await safeFinalize('teardown_db', closeDatabaseConnection);
+    await safeFinalize('teardown_logger', closeLogger);
   }
 };
 
-void main();
+/**
+ * Top-level run guard. `void main()` would swallow a rejection from the
+ * finally block as an unhandled promise rejection — Node 19+ exits
+ * non-zero on default settings, Node 18 warns and continues; behavior
+ * also drifts across Node majors. Catching here means the cron always
+ * exits with a meaningful code regardless. Logger may already be closed
+ * by this point, so we write directly to stderr.
+ */
+main().catch((error: unknown) => {
+  try {
+    process.stderr.write(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: 'error',
+        step: 'unhandled',
+        message: `${JOB_NAME} unhandled top-level rejection`,
+        error_message: errorMessage(error),
+      }) + '\n'
+    );
+  } catch {
+    /* even stderr is gone — there is nothing else we can do */
+  }
+  process.exitCode = 1;
+});
