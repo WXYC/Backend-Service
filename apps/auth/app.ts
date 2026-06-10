@@ -20,6 +20,7 @@ import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
 import { resolveOrganization } from './resolve-organization';
+import { shouldCaptureAuthExpressError } from './sentry-error-filter';
 
 const port = process.env.AUTH_PORT || '8082';
 
@@ -360,7 +361,12 @@ app.get('/healthcheck', async (req, res) => {
   }
 });
 
-Sentry.setupExpressErrorHandler(app);
+// Pass an explicit predicate (BS#1387). Without it, the SDK's default
+// `shouldHandleError` falls back to a "treat unknown status as 500" rule that
+// captures errors without an explicit status (bare TypeErrors, deserialisation
+// faults) indistinguishably from genuine 5xx faults. The named predicate
+// documents intent and mirrors the backend service's `shouldCaptureExpressError`.
+Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureAuthExpressError });
 
 // Fallback error handler — sanitises response body, forwards full error to
 // Sentry. See `./fallback-error-handler.ts` for rationale (BS#1109).
