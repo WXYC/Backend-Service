@@ -34,6 +34,42 @@ const ARTISTS_TABLE = sql.raw(`"${SCHEMA}"."artists"`);
 const ARTIST_SEARCH_ALIAS_TABLE = sql.raw(`"${SCHEMA}"."artist_search_alias"`);
 const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
 
+/**
+ * `artist_search_alias.source` partitions into two classes (BS#1383).
+ * The resolver is the partition's owner: it decides which sources are
+ * eligible to drive an FK write. Tests import these constants directly
+ * so the SQL IN-list and the test fixtures cannot drift.
+ *
+ *   - SYNONYM_ALIAS_SOURCES name the same artist by another spelling
+ *     and are safe to fold into the FK-write path — that's the alias
+ *     substrate's whole point.
+ *   - RELATIONAL_ALIAS_SOURCES express "X is related to Y" (member
+ *     of, collaborator, etc.) and are NOT safe — they produce
+ *     mislabels like the Geordie Greep → black midi case from the
+ *     BS#1368 audit.
+ *
+ * Adding a 5th LML source requires a deliberate choice here. The
+ * resolver's SQL IN-list is built from SYNONYM_ALIAS_SOURCES, so a
+ * source the partition does not name is silently excluded (safe-by-
+ * default: FK stays NULL, row drops to manual review). The catalog-
+ * search sites do not consult these constants — they propagate
+ * `source` to callers so iOS / dj-site can render relational hits
+ * differently (e.g., "related artist") with full source context.
+ *
+ * Drift hazard worth noting (out of scope for BS#1383): the
+ * `ArtistSearchAliasSource` type union lives in three other places —
+ * jobs/artist-search-alias-consumer/lml-types.ts,
+ * apps/backend/services/requestLine/types.ts,
+ * tests/unit/jobs/artist-search-alias-consumer/orchestrate.test.ts —
+ * none of which import from each other. A future PR should
+ * consolidate them into a single typed source-of-truth that derives
+ * from (or is derived by) the partition declared here.
+ */
+export const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias', 'wxyc_library_alt'] as const;
+export const RELATIONAL_ALIAS_SOURCES = ['discogs_member'] as const;
+export type SynonymAliasSource = (typeof SYNONYM_ALIAS_SOURCES)[number];
+export type RelationalAliasSource = (typeof RELATIONAL_ALIAS_SOURCES)[number];
+
 type IdRow = { artist_id: number };
 
 /**
@@ -99,31 +135,30 @@ export const resolveArtistId: ResolveFn = async (raw: string): Promise<ResolveOu
     return { kind: 'ambiguous' };
   }
 
-  // Restrict to synonym-class sources (BS#1383). The four
-  // `artist_search_alias.source` values today partition into:
-  //   - synonym-class: discogs_name_variation, discogs_alias,
-  //     wxyc_library_alt — these name the same artist by another
-  //     spelling, and folding them into the FK-write path is the
-  //     substrate's whole point.
-  //   - relational-class: discogs_member — this is "X was a member of
-  //     Y", not "X is also called Y". Folding it in produced the
-  //     Geordie Greep → black midi mislabel from the BS#1368 audit
-  //     (Greep tours solo; WXYC only has his old band's records).
-  // Positive allowlist is safe-by-default: a future LML source
-  // (collaborator, featured-on, side-project) stays out of the FK-
-  // write path until we explicitly opt it in here — the FK stays NULL
-  // and the row drops to manual review, instead of silently writing a
-  // wrong artist_id. The catalog-search sites take the opposite tack:
-  // they DO want relational rows surfaced so iOS / dj-site can render
-  // a "related artist" UX hint, and they propagate `source` end-to-end
-  // for that reason. The resolver collapses to a single FK with no
-  // wire-shape seam for `source`, so the partition is enforced here in
-  // SQL.
+  // Restrict to synonym-class sources (BS#1383). See the
+  // SYNONYM_ALIAS_SOURCES / RELATIONAL_ALIAS_SOURCES docstring above
+  // for the rationale and the open drift hazard. The IN-list is built
+  // from the constant so the partition has exactly one source of
+  // truth in this file. We assemble via `sql.raw` because the source
+  // values are compile-time constants we control (a closed const
+  // tuple, never user input); the assertion below pins that
+  // invariant. `sql.join` would be the canonical pattern but
+  // ts-jest's drizzle-orm transform doesn't expose it cleanly (see
+  // jobs/artist-search-alias-consumer/writer.test.ts:4-7), and going
+  // through `sql.raw` keeps unit tests cheap.
+  if (SYNONYM_ALIAS_SOURCES.some((s) => !/^[a-z_]+$/.test(s))) {
+    // Tripwire — if a future synonym source ever contains a quote /
+    // backslash / non-identifier character, switch to `sql.join` (and
+    // pay the test plumbing cost) rather than letting `sql.raw` embed
+    // an unsanitised string.
+    throw new Error(`SYNONYM_ALIAS_SOURCES contains a non-identifier value; switch to sql.join`);
+  }
+  const synonymList = sql.raw(SYNONYM_ALIAS_SOURCES.map((s) => `'${s}'`).join(', '));
   const alias: unknown = await db.execute(sql`
     SELECT DISTINCT asa."artist_id"
     FROM ${ARTIST_SEARCH_ALIAS_TABLE} asa
     WHERE ${NORMALIZE_FN}(asa."variant") = ${NORMALIZE_FN}(${raw})
-      AND asa."source" IN ('discogs_name_variation', 'discogs_alias', 'wxyc_library_alt')
+      AND asa."source" IN (${synonymList})
     LIMIT 2
   `);
   const aliasRows = unwrapRows<IdRow>(alias);
