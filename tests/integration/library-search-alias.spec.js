@@ -128,12 +128,18 @@ describe('GET /library/query — alias-aware LATERAL JOIN (PR 5)', () => {
     const res = await auth.get('/library/query').query({ q: 'Geordie Greep', limit: 50 }).expect(200);
 
     const hit = res.body.results.find((r) => r.id === TEST_LIBRARY_ID);
+    // Fail-fast rather than warn-skip (BS#1383 review): the wire-shape
+    // assertion below is the WHOLE point of this test. A warn-and-return
+    // when the hit is absent would let a `CATALOG_SEARCH_ALIAS_ENABLED`
+    // regression in `dev_env/docker-compose.yml` slip past CI silently.
+    // The throw names the flag so a dev running locally without the
+    // LATERAL on can fix it in one read.
     if (hit === undefined) {
-      console.warn(
-        '[BS#1383] /library/query alias hit absent. Likely the backend is running ' +
-          'without CATALOG_SEARCH_ALIAS_ENABLED=true. Set it in .env and restart `npm run dev`.'
+      throw new Error(
+        '[BS#1383] /library/query alias hit for "Geordie Greep" was absent. The wire-shape assertion ' +
+          'cannot run. The backend likely is missing CATALOG_SEARCH_ALIAS_ENABLED=true — set it on ' +
+          'the backend service in dev_env/docker-compose.yml (or .env for local `npm run dev`) and re-run.'
       );
-      return;
     }
     expect(hit.matched_via_alias).toEqual([{ matched_variant: 'Geordie Greep', source: 'discogs_member' }]);
   });
