@@ -103,6 +103,40 @@ describe('GET /library/query — alias-aware LATERAL JOIN (PR 5)', () => {
     expect(hit.artist_name).toBe('OHSEES');
     expect(hit.matched_via_alias).toEqual([{ matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' }]);
   });
+
+  test('discogs_member alias hit surfaces with source=discogs_member (BS#1383)', async () => {
+    // BS#1383: the catalog-search sites WANT `discogs_member` rows surfaced
+    // (so iOS/dj-site can render a "related artist" UX hint), unlike the
+    // concerts-artist-resolver which filters them. This asserts the source
+    // string survives the LATERAL projection and the wire shape so a
+    // downstream caller can distinguish in-library matches from
+    // related-artist matches. Geordie-Greep-via-black-midi is the prod
+    // shape from the BS#1368 audit; we reuse the OHSEES fixture artist
+    // (the source label is what's under test, not the artist semantics).
+    await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = $1`, [TEST_ARTIST_ID]);
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.artist_search_alias
+         (artist_id, source, variant, related_artist_id, external_subject_id,
+          external_object_id, active, method, confidence, last_verified_at)
+       VALUES ($1, 'discogs_member', 'Geordie Greep', NULL, NULL,
+               'discogs:artist:1234567', NULL, 'member_group', 0.9, NOW())
+       ON CONFLICT (artist_id, source, variant) DO UPDATE
+         SET last_verified_at = NOW()`,
+      [TEST_ARTIST_ID]
+    );
+
+    const res = await auth.get('/library/query').query({ q: 'Geordie Greep', limit: 50 }).expect(200);
+
+    const hit = res.body.results.find((r) => r.id === TEST_LIBRARY_ID);
+    if (hit === undefined) {
+      console.warn(
+        '[BS#1383] /library/query alias hit absent. Likely the backend is running ' +
+          'without CATALOG_SEARCH_ALIAS_ENABLED=true. Set it in .env and restart `npm run dev`.'
+      );
+      return;
+    }
+    expect(hit.matched_via_alias).toEqual([{ matched_variant: 'Geordie Greep', source: 'discogs_member' }]);
+  });
 });
 
 async function cleanupSeededRows(sql, wxycSchema) {

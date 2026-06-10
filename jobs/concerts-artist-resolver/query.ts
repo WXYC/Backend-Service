@@ -99,10 +99,22 @@ export const resolveArtistId: ResolveFn = async (raw: string): Promise<ResolveOu
     return { kind: 'ambiguous' };
   }
 
+  // Filter `discogs_member` (BS#1383): it's a relational signal — "X
+  // was a member of Y" — not a synonym signal. Folding it into the FK-
+  // write path produced the Geordie Greep → black midi mislabel from the
+  // BS#1368 frequency audit (Greep is touring solo, not in WXYC's
+  // library). The catalog-search sites WANT these rows surfaced as a
+  // "related artist" UX hint and propagate `source` end-to-end; the
+  // resolver collapses to a single FK and has no wire-shape seam, so it
+  // filters at the SQL level. Negative form (`<>`) is forward-compatible
+  // against a future fifth source (collaborator, featured-on, side-
+  // project): any new relational signal LML adds is excluded by default
+  // until we explicitly opt it in.
   const alias: unknown = await db.execute(sql`
     SELECT DISTINCT asa."artist_id"
     FROM ${ARTIST_SEARCH_ALIAS_TABLE} asa
     WHERE ${NORMALIZE_FN}(asa."variant") = ${NORMALIZE_FN}(${raw})
+      AND asa."source" <> 'discogs_member'
     LIMIT 2
   `);
   const aliasRows = unwrapRows<IdRow>(alias);
