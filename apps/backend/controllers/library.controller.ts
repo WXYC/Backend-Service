@@ -51,6 +51,11 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   ) {
     throw new WxycError('Missing Parameters: album_title, label, genre_id, format_id, artist_name, or artist_id', 400);
   }
+  // '' satisfies the NOT NULL constraint but is never a valid title — reject
+  // before it lands in the catalog (PR #1154 review issue 8).
+  if (typeof body.album_title !== 'string' || body.album_title.trim() === '') {
+    throw new WxycError('album_title must be a non-empty string', 400);
+  }
 
   let artist_id = body.artist_id;
   if (artist_id === undefined && body.artist_name !== undefined) {
@@ -278,6 +283,44 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   });
 };
 
+type SearchArtistsInGenreQuery = {
+  genre_id?: string;
+  q?: string;
+  limit?: string;
+};
+
+export const searchArtistsInGenre: RequestHandler = async (
+  req: Request<object, object, object, SearchArtistsInGenreQuery>,
+  res
+) => {
+  const genreId = Number(req.query.genre_id);
+  if (!Number.isInteger(genreId) || genreId < 1) {
+    throw new WxycError('Invalid genre_id: must be a positive integer', 400);
+  }
+
+  // Express's `simple` query parser yields string[] for repeated keys
+  // (`?q=Bu&q=lt`); reject anything that isn't a single string before .trim().
+  if (req.query.q !== undefined && typeof req.query.q !== 'string') {
+    throw new WxycError('Invalid q: must be a single string value', 400);
+  }
+  const q = (req.query.q ?? '').trim();
+  if (q.length < 2) {
+    throw new WxycError('Missing or invalid q: must be at least 2 characters', 400);
+  }
+
+  const limitRaw = req.query.limit !== undefined ? Number(req.query.limit) : 10;
+  const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? limitRaw : 10;
+
+  // Distinguish a stale/unknown genre_id from a genre with no matching
+  // artists — silent `{ artists: [] }` hides stale dropdown IDs from clients.
+  if (!(await libraryService.genreExists(genreId))) {
+    throw new WxycError('Genre not found', 404);
+  }
+
+  const artists = await libraryService.searchArtistsInGenre(genreId, q, limit);
+  res.status(200).json({ artists });
+};
+
 type ArtistNumberPeekQuery = {
   code_letters?: string;
   genre_id?: string;
@@ -470,6 +513,236 @@ const parseAlbumId = (rawId: string): number => {
   return albumId;
 };
 
+type UpdateAlbumRequest = {
+  album_title?: string;
+  label?: string;
+  label_id?: number | null;
+  genre_id?: number;
+  format_id?: number;
+  artist_id?: number;
+  alternate_artist_name?: string | null;
+  disc_quantity?: number;
+};
+
+const UPDATABLE_ALBUM_FIELDS = [
+  'album_title',
+  'label',
+  'label_id',
+  'genre_id',
+  'format_id',
+  'artist_id',
+  'alternate_artist_name',
+  'disc_quantity',
+] as const;
+
+/**
+ * PATCH /library/:id with true partial semantics (PR #1154 review issues
+ * 5–8, 10–13): only fields present in the body are validated and written, so
+ * a title-typo fix can't reset disc_quantity, wipe alternate_artist_name, or
+ * NULL a long-stable label_id.
+ */
+export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumRequest> = async (req, res) => {
+  const albumId = parseAlbumId(req.params.id);
+  const { body } = req;
+
+  if (!UPDATABLE_ALBUM_FIELDS.some((field) => field in body)) {
+    throw new WxycError(`Bad Request: provide at least one of ${UPDATABLE_ALBUM_FIELDS.join(', ')}`, 400);
+  }
+
+  // Resolve the album before any side effects — the old order ran the label
+  // upsert first, leaving orphan labels rows on the 404 path (issue 10).
+  const existing = await libraryService.getLibraryRowById(albumId);
+  if (!existing) {
+    throw new WxycError('Album not found', 404);
+  }
+
+  const updates: libraryService.UpdateAlbumRow = {};
+
+  if (body.album_title !== undefined) {
+    if (typeof body.album_title !== 'string' || body.album_title.trim() === '') {
+      throw new WxycError('album_title must be a non-empty string', 400);
+    }
+    updates.album_title = body.album_title.trim();
+  }
+
+  if ('alternate_artist_name' in body) {
+    if (body.alternate_artist_name !== null && typeof body.alternate_artist_name !== 'string') {
+      throw new WxycError('alternate_artist_name must be a string or null', 400);
+    }
+    updates.alternate_artist_name = body.alternate_artist_name?.trim() || null;
+  }
+
+  if (body.disc_quantity !== undefined) {
+    if (!Number.isInteger(body.disc_quantity) || body.disc_quantity < 1 || body.disc_quantity > 99) {
+      throw new WxycError('disc_quantity must be an integer between 1 and 99', 400);
+    }
+    updates.disc_quantity = body.disc_quantity;
+  }
+
+  if (body.format_id !== undefined) {
+    if (!Number.isInteger(body.format_id) || body.format_id < 1) {
+      throw new WxycError('format_id must be a positive integer', 400);
+    }
+    updates.format_id = body.format_id;
+  }
+
+  // Validate the *effective* (artist, genre) pair so a genre-only move still
+  // checks the current artist is catalogued there, and vice versa.
+  if (body.artist_id !== undefined || body.genre_id !== undefined) {
+    if (body.artist_id !== undefined && (!Number.isInteger(body.artist_id) || body.artist_id < 1)) {
+      throw new WxycError('artist_id must be a positive integer', 400);
+    }
+    if (body.genre_id !== undefined && (!Number.isInteger(body.genre_id) || body.genre_id < 1)) {
+      throw new WxycError('genre_id must be a positive integer', 400);
+    }
+    const effectiveArtistId = body.artist_id ?? existing.artist_id;
+    const effectiveGenreId = body.genre_id ?? existing.genre_id;
+
+    const canonical_artist_name = await libraryService.getArtistNameById(effectiveArtistId);
+    if (!canonical_artist_name) {
+      throw new WxycError('Artist not found', 404);
+    }
+
+    const inGenre = await libraryService.artistExistsInGenre(effectiveArtistId, effectiveGenreId);
+    if (!inGenre) {
+      throw new WxycError('Artist is not catalogued in the selected genre', 400);
+    }
+
+    if (body.genre_id !== undefined) updates.genre_id = body.genre_id;
+    if (body.artist_id !== undefined && body.artist_id !== existing.artist_id) {
+      updates.artist_id = body.artist_id;
+      updates.artist_name = canonical_artist_name;
+      // Re-attribution keeps the album's code_number unless the new artist
+      // already owns it (issue 7) — only on collision do we burn the next
+      // number in the new artist's sequence.
+      if (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId)) {
+        updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id);
+      }
+    }
+  }
+
+  const labelProvided = body.label !== undefined;
+  const labelIdProvided = 'label_id' in body;
+  if (labelProvided || labelIdProvided) {
+    if (labelProvided && typeof body.label !== 'string') {
+      throw new WxycError('label must be a string', 400);
+    }
+    const trimmedLabel = labelProvided ? (body.label as string).trim() : undefined;
+    if (labelProvided && trimmedLabel === '') {
+      // '' slid past the old `=== undefined` guard and silently NULLed a
+      // long-stable label_id (issue 6). Clearing must be explicit.
+      throw new WxycError('label must be a non-empty string; clear the label by sending label_id: null', 400);
+    }
+
+    if (labelIdProvided && body.label_id === null) {
+      if (trimmedLabel) {
+        throw new WxycError('label_id: null cannot be combined with a non-empty label', 400);
+      }
+      updates.label_id = null;
+      updates.label = null;
+    } else if (labelIdProvided) {
+      if (!Number.isInteger(body.label_id) || (body.label_id as number) < 1) {
+        throw new WxycError('label_id must be a positive integer or null', 400);
+      }
+      // Validate against the labels table so a stale/guessed id surfaces as
+      // 400 instead of a PG 23503 → 500.
+      const labelRow = await labelsService.getLabelById(body.label_id as number);
+      if (!labelRow) {
+        throw new WxycError('label_id does not reference an existing label', 400);
+      }
+      updates.label_id = labelRow.id;
+      updates.label = trimmedLabel ?? labelRow.label_name;
+    } else if (trimmedLabel) {
+      // Trim before the upsert: `createLabel('  Drag City  ')` would insert a
+      // padded labels row that future trimmed submissions miss (issue 11).
+      const resolvedLabel = await labelsService.createLabel(trimmedLabel);
+      updates.label_id = resolvedLabel.id;
+      updates.label = trimmedLabel;
+    }
+  }
+
+  // Identity-affecting edits invalidate the LML enrichment columns and
+  // re-fire the same pipeline addAlbum runs (issue 12); otherwise
+  // on_streaming / artwork_url / canonical_entity stay bound to the OLD
+  // (artist, title) identity and no drain job repairs them.
+  const identityChanged =
+    (updates.artist_id !== undefined && updates.artist_id !== existing.artist_id) ||
+    (updates.album_title !== undefined && updates.album_title !== existing.album_title) ||
+    ('alternate_artist_name' in body &&
+      (updates.alternate_artist_name ?? null) !== (existing.alternate_artist_name ?? null));
+
+  const updated = await libraryService.updateAlbumInDB(albumId, updates, { resetEnrichment: identityChanged });
+  if (!updated) {
+    throw new WxycError('Album not found', 404);
+  }
+
+  if (identityChanged && isLmlConfigured()) {
+    const canonicalArtistName =
+      updates.artist_name ?? existing.artist_name ?? (await libraryService.getArtistNameById(existing.artist_id));
+    const effectiveAlternate =
+      'alternate_artist_name' in body ? updates.alternate_artist_name : existing.alternate_artist_name;
+    const effectiveTitle = updates.album_title ?? existing.album_title;
+    await enrichAlbumAfterIdentityChange(
+      albumId,
+      effectiveAlternate || canonicalArtistName || '',
+      effectiveTitle,
+      canonicalArtistName
+    );
+  }
+
+  const album = await libraryService.getAlbumFromDB(albumId);
+  res.status(200).json(album);
+};
+
+/**
+ * Mirror of the addAlbum LML enrichment block (streaming + artwork +
+ * canonical entity), fired when a PATCH changes the album's identity. The
+ * row is already updated; every branch here is best-effort.
+ */
+async function enrichAlbumAfterIdentityChange(
+  albumId: number,
+  displayArtistName: string,
+  albumTitle: string,
+  canonicalArtistName: string | null
+): Promise<void> {
+  if (!displayArtistName) return;
+
+  const [streamingResult, artworkResult] = await Promise.allSettled([
+    checkStreamingAvailability(displayArtistName, albumTitle),
+    lmlLookupCoordinator.lookup(displayArtistName, albumTitle, undefined, {
+      budgetMs: LIBRARY_LML_BUDGET_MS,
+      caller: 'library-update-album',
+      warm_cache: true,
+      requireSearchType: 'direct',
+    }),
+  ]);
+
+  if (streamingResult.status === 'fulfilled' && streamingResult.value.on_streaming !== null) {
+    try {
+      await libraryService.updateOnStreaming(albumId, streamingResult.value.on_streaming);
+    } catch (e) {
+      console.warn('Failed to persist streaming status after album update:', (e as Error).message);
+    }
+  } else if (streamingResult.status === 'rejected') {
+    console.warn('Streaming check failed for updated album:', streamingResult.reason);
+  }
+
+  if (artworkResult.status === 'rejected') {
+    console.warn('Artwork fetch failed for updated album:', artworkResult.reason);
+  } else if (artworkResult.value !== null) {
+    const artworkUrl = filterSpacerGif(artworkResult.value.results?.[0]?.artwork?.artwork_url);
+    if (artworkUrl) {
+      try {
+        await libraryService.updateArtworkUrl(albumId, artworkUrl);
+      } catch (e) {
+        console.warn('Failed to persist artwork URL after album update:', (e as Error).message);
+      }
+    }
+  }
+
+  fireAndForgetCanonicalEntity(albumId, canonicalArtistName, albumTitle);
+}
+
 export const markMissing: RequestHandler<{ id: string }> = async (req, res) => {
   const albumId = parseAlbumId(req.params.id);
 
@@ -501,8 +774,12 @@ type LibraryQueryParams = {
   sort?: string;
   order?: string;
   on_streaming?: string;
+  missing?: string;
   genre?: string;
+  genres?: string;
   format?: string;
+  formats?: string;
+  rotation_bins?: string;
 };
 
 const VALID_CATALOG_SORTS: CatalogSort[] = ['artist', 'album', 'plays', 'date'];
@@ -514,6 +791,9 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
   req,
   res
 ) => {
+  if (req.query.q !== undefined && typeof req.query.q !== 'string') {
+    throw new WxycError('q must be a single string value', 400);
+  }
   const q = req.query.q ?? '';
 
   const page = parseInt(req.query.page ?? '0');
@@ -555,8 +835,19 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
     }
   }
 
-  const genre = req.query.genre || undefined;
-  const format = req.query.format || undefined;
+  const missingRaw = req.query.missing;
+  let missing: boolean | undefined;
+  if (missingRaw !== undefined) {
+    if (missingRaw === 'true') missing = true;
+    else if (missingRaw === 'false') missing = false;
+    else {
+      throw new WxycError('missing must be "true" or "false"', 400);
+    }
+  }
+
+  const genres = librarySearchService.parseEnumQueryList(req.query.genres, req.query.genre);
+  const formats = librarySearchService.parseEnumQueryList(req.query.formats, req.query.format);
+  const rotation_bins = librarySearchService.parseRotationBinsQueryList(req.query.rotation_bins);
 
   const { results, total } = await librarySearchService.searchLibrary({
     q,
@@ -565,8 +856,10 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
     sort,
     order,
     on_streaming,
-    genre,
-    format,
+    missing,
+    genres,
+    formats,
+    rotation_bins,
   });
   const totalPages = Math.ceil(total / limit);
   res.status(200).json({ results, total, page, totalPages });
