@@ -19,9 +19,9 @@
  *
  * Trust posture (`skipConsent: true`): every client registered here is a
  * first-party WXYC tool the station already operates, so the OAuth consent
- * screen is UX papercut, not a trust boundary. When adding a third-party or
- * less-trusted app, set `skipConsent: false` so the user sees the standard
- * consent screen.
+ * screen is a UX papercut, not a trust boundary. When adding a third-party
+ * or less-trusted app, set `skipConsent: false` so the user sees the
+ * standard consent screen.
  */
 
 import type { Client } from 'better-auth/plugins';
