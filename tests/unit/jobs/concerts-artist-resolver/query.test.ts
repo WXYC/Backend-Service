@@ -33,13 +33,16 @@ type SqlLike = {
   value?: string | string[];
   raw?: string;
 };
+
+const PARAM_PLACEHOLDER = '<?>';
+
 /**
  * Best-effort render of a Drizzle SQL fragment back to its underlying
  * textual form so SQL-contract assertions can inspect the IN-list, the
  * predicate shape, etc.
  *
- * Drizzle's exact in-memory representation varies across (build mode,
- * driver, ts-jest transform): the most common shapes observed are
+ * Drizzle's in-memory shape varies across (build mode, driver, ts-jest
+ * transform). The renderer handles three forms:
  *   - `{ sql: string[], values: any[] }` — fragments interleaved with
  *     values; this is what surfaces under ts-jest's CJS transform of
  *     `sql\`...\``.
@@ -47,16 +50,35 @@ type SqlLike = {
  *     directly via `node` REPL against the ESM build).
  *   - `{ value: string | string[] }` — a StringChunk (what `sql.raw(s)`
  *     produces internally).
- * Each branch is exercised by either the renderer-itself or by a parent
- * call that recurses. Parameter-bound substitutions (the `${raw}` user
- * input) render to empty — the helper inspects SQL SHAPE, not param
- * values. Brittle on purpose: a drizzle major bump that reshapes any of
- * the three forms will surface as a noisy assertion failure, not a
- * silent pass.
+ *
+ * Parameter-bound substitutions (`${raw}` user input passed without
+ * `sql.raw`) render to the placeholder `<?>` rather than their actual
+ * value. The helper inspects SQL SHAPE, not parameter VALUES: a
+ * `not.toContain("'discogs_member'")` assertion must NOT fail just
+ * because a future test fixture happens to pass `'discogs_member'` as
+ * `${raw}`. The placeholder is the seam that keeps the assertion shape-
+ * specific.
+ *
+ * Distinguishing a parameter from a structural string is heuristic:
+ *   - Under `{sql, values}`, values that are plain JS strings/numbers
+ *     are parameters; values that are objects (Drizzle SQL / Param /
+ *     raw-chunk) are structural.
+ *   - Under `{queryChunks}`, parameters appear as `Param` objects (a
+ *     class instance carrying `.value`). We render those as the
+ *     placeholder too. Static StringChunks have `.value: string[]` (an
+ *     array — note the array vs string distinction is load-bearing for
+ *     the param check).
+ *
+ * Brittle on purpose: a drizzle major bump that reshapes any of these
+ * forms will surface as a noisy assertion failure, not a silent pass.
  */
 const renderSql = (value: unknown): string => {
   if (value === null || value === undefined) return '';
-  if (typeof value === 'string') return value;
+  // Plain JS scalar at the top level → parameter placeholder. Strings
+  // and numbers passed via `${...}` in a tagged template surface here.
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return PARAM_PLACEHOLDER;
+  }
   const obj = value as SqlLike;
   if (Array.isArray(obj.sql) && Array.isArray(obj.values)) {
     // Interleave: sql[0] + render(values[0]) + sql[1] + render(values[1]) + ... + sql[n]
@@ -77,8 +99,13 @@ const renderSql = (value: unknown): string => {
     return obj.queryChunks.map((chunk) => renderSql(chunk)).join('');
   }
   if (typeof obj.raw === 'string') return obj.raw;
+  // StringChunk: `{ value: string[] }`. Drizzle's AST array form for a
+  // chunk of static SQL. Concatenate the segments.
   if (Array.isArray(obj.value)) return obj.value.join('');
-  if (typeof obj.value === 'string') return obj.value;
+  // Param: `{ value: string }` (a single string, not array). The Param
+  // class is how Drizzle wraps user-supplied template values; render as
+  // placeholder so the param value can't leak into shape assertions.
+  if (typeof obj.value === 'string') return PARAM_PLACEHOLDER;
   return '';
 };
 
@@ -117,7 +144,7 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
   });
 
   describe('SQL contract', () => {
-    it('the alias arm allowlists every synonym-class source as a SQL literal', async () => {
+    it('the alias arm allowlists exactly the synonym-class sources as SQL literals', async () => {
       db.execute.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
       await resolveArtistId('Geordie Greep');
@@ -129,10 +156,20 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
       // quoted SQL literal inside an `IN (...)` predicate. A negative-
       // form predicate (`<>`) would silently admit every future source
       // and reintroduce the BS#1368 mislabel under a new label.
-      for (const source of SYNONYM_ALIAS_SOURCES) {
-        expect(aliasSql).toContain(`'${source}'`);
-      }
       expect(aliasSql).toMatch(/"?source"?\s+IN\s*\(/i);
+
+      // Exact-set check: parse the IN-list out of the rendered SQL and
+      // assert it equals SYNONYM_ALIAS_SOURCES set-wise. The
+      // containment-only check above passes if a hotfix bypasses the
+      // constant and hardcodes an extra source in SQL — this assertion
+      // is what closes the JS↔SQL alignment gap.
+      const inListMatch = aliasSql.match(/"?source"?\s+IN\s*\(([^)]*)\)/i);
+      expect(inListMatch).not.toBeNull();
+      const inListLiterals = (inListMatch?.[1] || '')
+        .split(',')
+        .map((s) => s.trim().replace(/^'|'$/g, ''))
+        .filter((s) => s.length > 0);
+      expect(new Set(inListLiterals)).toEqual(new Set(SYNONYM_ALIAS_SOURCES));
     });
 
     it('the alias arm does NOT name any relational-class source as a filter literal', async () => {
