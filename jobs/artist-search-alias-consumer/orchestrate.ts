@@ -42,6 +42,7 @@ export type FetchBulkFn = (names: string[]) => Promise<ArtistSearchAliasesBulkRe
 export type FetchAltsFn = (artistIds: number[]) => Promise<Map<number, string[]>>;
 export type WriteArtistVariantsFn = (
   artist_id: number,
+  canonicalName: string,
   variants: ArtistSearchAliasVariant[],
   sourcesPresent: string[]
 ) => Promise<{ variants_written: number }>;
@@ -227,7 +228,7 @@ export const runConsumer = async (opts: {
         }
 
         try {
-          const outcome = await opts.writeArtistVariants(artist_id, allVariants, sourcesPresent);
+          const outcome = await opts.writeArtistVariants(artist_id, group.artist_name, allVariants, sourcesPresent);
           totals.source_rows_written += outcome.variants_written;
         } catch (error) {
           totals.writer_errors += 1;
