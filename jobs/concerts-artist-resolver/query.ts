@@ -67,33 +67,26 @@ export const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias',
 export const RELATIONAL_ALIAS_SOURCES = ['discogs_member'] as const;
 
 /**
- * Frozen IN-list for the alias arm, built once at module load. The
- * partition is immutable and the values are compile-time constants we
- * control — so this is safe-by-construction against the kind of SQL
- * injection that a runtime-built string would worry about. The tripwire
- * below shifts that safety from "by-construction" to "checked": if a
- * future maintainer ever adds a value that escapes the identifier
- * shape, the module fails to load with an actionable error.
+ * Frozen IN-list for the alias arm, built once at module load. Safe-
+ * by-construction: the partition is immutable and the values are
+ * compile-time constants we control. The identifier-charset assumption
+ * (\`[A-Za-z0-9_]+\`, Postgres' own convention) that lets us inline-
+ * quote without escaping is pinned by the unit test
+ * \`SYNONYM_ALIAS_SOURCES values are identifier-safe\` in
+ * query.test.ts — runtime validation would just crash-loop the
+ * container at deploy with a bare Node stack, before Sentry / logger /
+ * safeFinalize get a chance to attribute the failure, so the
+ * gatekeeping lives in CI instead.
  *
- * The `sql.raw` shape (vs `sql.join`) is a TEST plumbing call, not a
- * production concern. `sql.join` works correctly in production —
- * `jobs/artist-search-alias-consumer/writer.ts` uses it heavily — but
- * ts-jest's drizzle-orm transform exposes its `SQL` class slightly
- * differently than the production CJS bundle, so writer.test.ts has to
- * mock drizzle-orm to satisfy `sql.join` (see writer.test.ts:4-7). For
- * a closed const tuple this is overkill; `sql.raw` skips the mock and
- * keeps the test suite cheap.
+ * \`sql.raw\` is the simplest assembly here because the values are a
+ * closed const tuple. \`sql.join\` would also work and is the project's
+ * default for parameterised lists (see
+ * \`jobs/artist-search-alias-consumer/writer.ts\` for the canonical
+ * runtime usage with comma-bearing variant strings); the only reason
+ * to prefer \`sql.raw\` for this site is that \`sql.join\` requires
+ * mocking drizzle-orm in unit tests (the writer's test does this),
+ * which is overkill for a 3-element identifier-safe tuple.
  */
-const NON_IDENTIFIER_CHAR = /[^A-Za-z0-9_]/;
-const offending = SYNONYM_ALIAS_SOURCES.find((s) => NON_IDENTIFIER_CHAR.test(s));
-if (offending !== undefined) {
-  throw new Error(
-    `BS#1383: SYNONYM_ALIAS_SOURCES contains non-identifier value ${JSON.stringify(offending)}. ` +
-      `Inline-quoted sql.raw assembly assumes [A-Za-z0-9_]+. Either keep source names within ` +
-      `that charset (Postgres' own identifier convention), or switch the IN-list assembly to ` +
-      `sql.join (and add the writer-style drizzle-orm mock to query.test.ts).`
-  );
-}
 const SYNONYM_SOURCE_IN_LIST = sql.raw(SYNONYM_ALIAS_SOURCES.map((s) => `'${s}'`).join(', '));
 
 type IdRow = { artist_id: number };
