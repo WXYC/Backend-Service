@@ -92,25 +92,37 @@ export const fetchHandleMappings = async (mirror = MirrorSQL.instance()): Promis
 export interface BatchResult {
   showsUpdated: number;
   markerRowsReset: number;
-  touchedShowIds: number[];
+  /**
+   * Every BS-side show_id that joined on the input legacy_show_ids — not just
+   * the rows the scrub had to update. The re-resolve pass scopes on this set
+   * (not the smaller "scrub touched" set) so a transient failure between the
+   * scrub UPDATE and the subsequent re-resolve UPDATE on a prior run still
+   * heals on the next run: a re-run's scrub finds nothing to do (legacy_dj_name
+   * already correct), but the re-resolve still scans every show in the batch
+   * for dangling NULL markers via `WHERE dj_name IS NULL AND show_id = ANY`.
+   *
+   * `WHERE dj_name IS NULL` makes the re-resolve idempotent — already-resolved
+   * rows are no-ops, so the wider scope adds only a fast index-bounded scan.
+   */
+  batchShowIds: number[];
 }
 
 /**
- * Build the per-batch CTE. Three operations in one statement, evaluated in
- * a single snapshot:
+ * Build the per-batch CTE. Four named results in one statement, evaluated
+ * in a single snapshot:
  *
- *   1. `to_update` — SELECT shows whose stored `legacy_dj_name` differs from
- *      the incoming DJ_HANDLE (`IS DISTINCT FROM` on trimmed values, so
- *      whitespace-only or NULL-vs-empty drift counts as no-change).
- *   2. `updated_shows` — UPDATE `shows.legacy_dj_name` to the new handle for
+ *   1. `all_known` — every BS-side show id whose legacy_show_id matches the
+ *      input. Returned as `batch_show_ids` for the re-resolve pass; this
+ *      wider set means a prior-run failure between the per-batch scrub and
+ *      re-resolve commits still heals on the next run.
+ *   2. `to_update` — subset of `all_known` whose `legacy_dj_name` differs
+ *      from the incoming DJ_HANDLE (`IS DISTINCT FROM` on trimmed values).
+ *   3. `updated_shows` — UPDATE `shows.legacy_dj_name` to the new handle for
  *      those rows.
- *   3. `nulled_markers` — UPDATE marker `flowsheet.dj_name` to NULL on the
+ *   4. `nulled_markers` — UPDATE marker `flowsheet.dj_name` to NULL on the
  *      same shows where the stored marker value still matches the OLD
  *      polluted handle (trim-aware so trailing-whitespace pollution is
- *      caught). Re-resolution happens later in a scoped pass.
- *
- * Returns three counts plus the touched show_ids so the caller can scope the
- * subsequent re-resolve pass.
+ *      caught). Re-resolution happens after this CTE returns.
  */
 const buildScrubBatchSql = (batch: HandleMapping[]): SQL => {
   // Drizzle parameter-binds each fragment; `sql.join` interleaves them with a
@@ -123,14 +135,18 @@ const buildScrubBatchSql = (batch: HandleMapping[]): SQL => {
     WITH input(legacy_show_id, new_handle) AS (
       VALUES ${values}
     ),
-    to_update AS (
+    all_known AS (
       SELECT
         s.id              AS show_id,
         s.legacy_dj_name  AS old_handle,
         i.new_handle      AS new_handle
       FROM ${schema}.shows AS s
       JOIN input AS i ON i.legacy_show_id = s.legacy_show_id
-      WHERE COALESCE(trim(s.legacy_dj_name), '') IS DISTINCT FROM COALESCE(trim(i.new_handle), '')
+    ),
+    to_update AS (
+      SELECT show_id, old_handle, new_handle
+      FROM all_known
+      WHERE COALESCE(trim(old_handle), '') IS DISTINCT FROM COALESCE(trim(new_handle), '')
     ),
     updated_shows AS (
       UPDATE ${schema}.shows AS s
@@ -152,7 +168,7 @@ const buildScrubBatchSql = (batch: HandleMapping[]): SQL => {
     SELECT
       (SELECT count(*)::int FROM updated_shows)                       AS shows_updated,
       (SELECT count(*)::int FROM nulled_markers)                      AS markers_reset,
-      COALESCE((SELECT array_agg(show_id) FROM to_update), '{}'::int[]) AS touched_show_ids
+      COALESCE((SELECT array_agg(show_id) FROM all_known), '{}'::int[]) AS batch_show_ids
   `;
 };
 
@@ -171,13 +187,17 @@ const buildScrubBatchPreviewSql = (batch: HandleMapping[]): SQL => {
     WITH input(legacy_show_id, new_handle) AS (
       VALUES ${values}
     ),
-    to_update AS (
+    all_known AS (
       SELECT
         s.id              AS show_id,
-        s.legacy_dj_name  AS old_handle
+        s.legacy_dj_name  AS old_handle,
+        i.new_handle      AS new_handle
       FROM ${schema}.shows AS s
       JOIN input AS i ON i.legacy_show_id = s.legacy_show_id
-      WHERE COALESCE(trim(s.legacy_dj_name), '') IS DISTINCT FROM COALESCE(trim(i.new_handle), '')
+    ),
+    to_update AS (
+      SELECT show_id, old_handle FROM all_known
+      WHERE COALESCE(trim(old_handle), '') IS DISTINCT FROM COALESCE(trim(new_handle), '')
     ),
     markers AS (
       SELECT f.id
@@ -188,16 +208,16 @@ const buildScrubBatchPreviewSql = (batch: HandleMapping[]): SQL => {
         AND trim(f.dj_name) = trim(t.old_handle)
     )
     SELECT
-      (SELECT count(*)::int FROM to_update)                            AS shows_updated,
-      (SELECT count(*)::int FROM markers)                              AS markers_reset,
-      COALESCE((SELECT array_agg(show_id) FROM to_update), '{}'::int[]) AS touched_show_ids
+      (SELECT count(*)::int FROM to_update)                           AS shows_updated,
+      (SELECT count(*)::int FROM markers)                             AS markers_reset,
+      COALESCE((SELECT array_agg(show_id) FROM all_known), '{}'::int[]) AS batch_show_ids
   `;
 };
 
 type ScrubBatchRow = {
   shows_updated: number;
   markers_reset: number;
-  touched_show_ids: number[] | null;
+  batch_show_ids: number[] | null;
 };
 
 /**
@@ -208,15 +228,15 @@ type ScrubBatchRow = {
  */
 export const runScrubBatch = async (batch: HandleMapping[]): Promise<BatchResult> => {
   if (batch.length === 0) {
-    return { showsUpdated: 0, markerRowsReset: 0, touchedShowIds: [] };
+    return { showsUpdated: 0, markerRowsReset: 0, batchShowIds: [] };
   }
   const query = DRY_RUN ? buildScrubBatchPreviewSql(batch) : buildScrubBatchSql(batch);
   const rows = (await db.execute(query)) as unknown as ScrubBatchRow[];
-  const row = rows[0] ?? { shows_updated: 0, markers_reset: 0, touched_show_ids: [] };
+  const row = rows[0] ?? { shows_updated: 0, markers_reset: 0, batch_show_ids: [] };
   return {
     showsUpdated: Number(row.shows_updated ?? 0),
     markerRowsReset: Number(row.markers_reset ?? 0),
-    touchedShowIds: row.touched_show_ids ?? [],
+    batchShowIds: row.batch_show_ids ?? [],
   };
 };
 
@@ -238,11 +258,15 @@ export const runScrubBatch = async (batch: HandleMapping[]): Promise<BatchResult
 const intArrayLiteral = (ids: readonly number[]): string => `{${ids.join(',')}}`;
 
 /**
- * Re-resolve `flowsheet.dj_name` on marker rows whose value was nulled out by
- * the per-batch scrub. Called once per scrub batch with the touched-show-id
- * subset for that batch, so the touchedShowIds array stays bounded by
- * BATCH_SIZE and the operator-visible re-resolve count tracks 1:1 with the
- * preceding scrub's blast radius.
+ * Re-resolve `flowsheet.dj_name` on marker rows whose value is NULL on any
+ * show in the current batch. Called once per scrub batch with that batch's
+ * `batchShowIds` (NOT the smaller "scrub touched" subset) so a transient
+ * failure between the prior run's scrub commit and re-resolve commit still
+ * heals on the next run: the re-run's scrub no-ops on already-clean shows,
+ * but this pass still finds and re-resolves the leftover NULL markers.
+ *
+ * `WHERE dj_name IS NULL` makes the re-resolve idempotent — already-resolved
+ * rows are no-ops, so the wider scope adds only a fast index-bounded scan.
  *
  * Matches the COALESCE chain used everywhere else: the show DJ's
  * `auth_user.dj_name` first (now-corrected via BS#1286 / BS#1371),
@@ -251,16 +275,15 @@ const intArrayLiteral = (ids: readonly number[]): string => `{${ids.join(',')}}`
  * leaf. Rows left NULL after this pass are the asymmetric-fallback case the
  * live path tolerates.
  *
- * Dry-run preview counts the union of (markers currently NULL on touched
- * shows) ∪ (markers whose dj_name currently equals the polluted
- * `shows.legacy_dj_name` and would be NULLed by the scrub), so the reported
- * number matches the live-run impact instead of just the pre-existing-NULL
- * tail.
+ * Dry-run preview counts the union of (markers currently NULL on batch shows)
+ * ∪ (markers whose dj_name currently equals the polluted `shows.legacy_dj_name`
+ * and would be NULLed by the scrub), so the reported number matches the
+ * live-run impact instead of just the pre-existing-NULL tail.
  */
-export const reresolveMarkerDjNames = async (touchedShowIds: number[]): Promise<number> => {
-  if (touchedShowIds.length === 0) return 0;
+export const reresolveMarkerDjNames = async (batchShowIds: number[]): Promise<number> => {
+  if (batchShowIds.length === 0) return 0;
   const schema = schemaPrefix();
-  const idArrayLiteral = intArrayLiteral(touchedShowIds);
+  const idArrayLiteral = intArrayLiteral(batchShowIds);
 
   if (DRY_RUN) {
     const preview = (await db.execute(sql`
@@ -336,17 +359,17 @@ export const runRemediation = async (): Promise<void> => {
   let totalMarkerRowsReset = 0;
   let totalReresolved = 0;
 
-  // Per-batch re-resolve keeps `touchedShowIds` bounded by BATCH_SIZE (5000),
-  // well under Postgres's 65535-parameter prepared-statement ceiling and
-  // under the array-literal cast's planner-friendly range. The accumulator
-  // approach (one big re-resolve at the end with all touched ids) would
-  // collapse the per-batch atomicity claim — if the final re-resolve aborted
-  // for any reason, every preceding batch's NULLed marker rows would be left
-  // dangling instead of re-resolved.
+  // Per-batch re-resolve keeps the show_id list bounded by BATCH_SIZE (5000),
+  // well under Postgres's 65535-parameter prepared-statement ceiling. The
+  // re-resolve scopes by the WHOLE batch (`batchShowIds`), not only the
+  // scrub-touched subset — so if a prior run committed the scrub but the
+  // subsequent re-resolve crashed, the re-run's scrub no-ops on already-clean
+  // shows BUT the re-resolve still finds and heals the dangling NULL markers.
+  // `WHERE dj_name IS NULL` keeps the wider scope idempotent.
   for (let i = 0; i < totalBatches; i++) {
     const batch = mappings.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
     const result = await runScrubBatch(batch);
-    const reresolved = await reresolveMarkerDjNames(result.touchedShowIds);
+    const reresolved = await reresolveMarkerDjNames(result.batchShowIds);
 
     totalShowsUpdated += result.showsUpdated;
     totalMarkerRowsReset += result.markerRowsReset;
