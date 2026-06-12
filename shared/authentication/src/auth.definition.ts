@@ -18,6 +18,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 import { buildTrustedClients } from './oidc-trusted-clients';
+import { buildLoginPage } from './oidc-login-page';
 import { rewriteUrlForFrontend } from './url-rewrite';
 
 const buildResetUrl = (url: string, redirectTo?: string) => {
@@ -174,7 +175,7 @@ export const auth = betterAuth({
       },
     }),
     oidcProvider({
-      loginPage: '/sign-in',
+      loginPage: buildLoginPage(process.env),
       allowDynamicClientRegistration: false,
       requirePKCE: true,
       trustedClients: buildTrustedClients(process.env),
