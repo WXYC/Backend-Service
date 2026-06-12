@@ -113,6 +113,11 @@ const fetchDJMappings = async (): Promise<DJMapping[]> => {
     if (cols.length < 3) continue;
     const showId = Number(cols[0]);
     if (!Number.isFinite(showId)) continue;
+    // Reject NUL bytes — Postgres refuses text containing U+0000, and a
+    // dirty row would otherwise abort the per-show UPDATE mid-batch and
+    // leave the legacy-id backfill in a half-applied state. Matches the
+    // jobs/legacy-dj-name-remediation/job.ts:fetchHandleMappings guard.
+    if (cols[1].includes('\0')) continue;
     const djHandle = cols[1].trim().length > 0 && cols[1].trim() !== 'NULL' ? cols[1].trim() : null;
     const rawDjId = Number(cols[2]);
     const djId = Number.isFinite(rawDjId) && rawDjId !== 0 ? rawDjId : null;
