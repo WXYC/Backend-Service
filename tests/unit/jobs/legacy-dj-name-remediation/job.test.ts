@@ -184,6 +184,25 @@ describe('legacy-dj-name-remediation: reresolveMarkerDjNames', () => {
     expect(sql).toMatch(/show_id\s*=\s*ANY/i);
   });
 
+  it('binds touchedShowIds as a single PG array-literal string with ::int[] cast — never a JS array splat (BS#1071 regression)', async () => {
+    // Drizzle/postgres-js splat a JS array in `${...}` positions across N
+    // positional placeholders, producing `ANY(($1, $2, …, $n))`. Postgres
+    // rejects with `op ANY/ALL (array) requires array on right side`. The fix
+    // (per album-level-backfill / BS#1071) is to bind the array as a single
+    // PG-literal string parameter and cast with `::int[]`. If a refactor
+    // ever reverts to bare `ANY(${touchedShowIds})`, this test fires.
+    mockExecute.mockResolvedValueOnce({ count: 0 });
+
+    await reresolveMarkerDjNames([10, 11, 12]);
+
+    const sqlCall = lastSqlTagCall();
+    expect(sqlCall.strings.join(' ')).toMatch(/::int\[\]/);
+    // The bound value must be the literal `'{10,11,12}'` string, NOT the
+    // JS array (which would trigger drizzle's splat path).
+    expect(sqlCall.values).toContain('{10,11,12}');
+    expect(sqlCall.values.some((v) => Array.isArray(v))).toBe(false);
+  });
+
   it('COALESCE chain is auth_user.dj_name → shows.legacy_dj_name only (no auth_user.name fallback — PII regression guard)', async () => {
     mockExecute.mockResolvedValueOnce({ count: 0 });
 

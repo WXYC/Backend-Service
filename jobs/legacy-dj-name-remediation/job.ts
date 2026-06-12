@@ -223,11 +223,26 @@ export const runScrubBatch = async (batch: HandleMapping[]): Promise<BatchResult
 // ---- Re-resolve flowsheet.dj_name on marker rows ----
 
 /**
+ * Build the PG array literal `'{1,2,3}'` form for an int[] parameter. Drizzle
+ * + postgres-js splat JS arrays in `${...}` positions across N positional
+ * placeholders (`($1, $2, ..., $n)`), which PG rejects with `op ANY/ALL
+ * (array) requires array on right side` (the BS#1071 / BS#1068 family of
+ * incidents). Binding a single string parameter that PG can cast to `int[]`
+ * sidesteps the splat. Safe by construction: `touchedShowIds` is typed
+ * `number[]`, so the join produces only numeric literals — no injection
+ * surface.
+ *
+ * See `jobs/album-level-backfill/job.ts` (BS#1071, 2026-05-24 prod canary)
+ * for the original codebase reference.
+ */
+const intArrayLiteral = (ids: readonly number[]): string => `{${ids.join(',')}}`;
+
+/**
  * Re-resolve `flowsheet.dj_name` on marker rows whose value was nulled out by
- * the scrub. Scoped to `show_id = ANY(${touchedShowIds})` so this UPDATE
- * touches at most one row per nulled marker, not the whole table — avoiding
- * the BS#511 wedge pattern and keeping the reported count an honest
- * remediation-coverage metric.
+ * the per-batch scrub. Called once per scrub batch with the touched-show-id
+ * subset for that batch, so the touchedShowIds array stays bounded by
+ * BATCH_SIZE and the operator-visible re-resolve count tracks 1:1 with the
+ * preceding scrub's blast radius.
  *
  * Matches the COALESCE chain used everywhere else: the show DJ's
  * `auth_user.dj_name` first (now-corrected via BS#1286 / BS#1371),
@@ -235,18 +250,26 @@ export const runScrubBatch = async (batch: HandleMapping[]): Promise<BatchResult
  * falls back to `auth_user.name` — that's the PII leak BS#1371 closed at the
  * leaf. Rows left NULL after this pass are the asymmetric-fallback case the
  * live path tolerates.
+ *
+ * Dry-run preview counts the union of (markers currently NULL on touched
+ * shows) ∪ (markers whose dj_name currently equals the polluted
+ * `shows.legacy_dj_name` and would be NULLed by the scrub), so the reported
+ * number matches the live-run impact instead of just the pre-existing-NULL
+ * tail.
  */
 export const reresolveMarkerDjNames = async (touchedShowIds: number[]): Promise<number> => {
   if (touchedShowIds.length === 0) return 0;
   const schema = schemaPrefix();
+  const idArrayLiteral = intArrayLiteral(touchedShowIds);
 
   if (DRY_RUN) {
     const preview = (await db.execute(sql`
       SELECT count(*)::int AS pending
-      FROM ${schema}.flowsheet
-      WHERE entry_type IN ('show_start', 'show_end', 'dj_join', 'dj_leave')
-        AND dj_name IS NULL
-        AND show_id = ANY(${touchedShowIds})
+      FROM ${schema}.flowsheet AS f
+      JOIN ${schema}.shows AS s ON s.id = f.show_id
+      WHERE f.entry_type IN ('show_start', 'show_end', 'dj_join', 'dj_leave')
+        AND f.show_id = ANY(${idArrayLiteral}::int[])
+        AND (f.dj_name IS NULL OR trim(f.dj_name) = trim(s.legacy_dj_name))
     `)) as unknown as Array<{ pending: number }>;
     return Number(preview[0]?.pending ?? 0);
   }
@@ -259,7 +282,7 @@ export const reresolveMarkerDjNames = async (touchedShowIds: number[]): Promise<
     WHERE f.show_id = s.id
       AND f.entry_type IN ('show_start', 'show_end', 'dj_join', 'dj_leave')
       AND f.dj_name IS NULL
-      AND f.show_id = ANY(${touchedShowIds})
+      AND f.show_id = ANY(${idArrayLiteral}::int[])
   `);
   return Number(result.count ?? 0);
 };
@@ -288,12 +311,14 @@ const formatBatchProgress = (
   i: number,
   totalBatches: number,
   batchResult: BatchResult,
-  totals: { showsUpdated: number; markerRowsReset: number; touchedShowIds: number }
+  reresolved: number,
+  totals: { showsUpdated: number; markerRowsReset: number; reresolved: number }
 ): string =>
   `[remediate] batch ${i + 1}/${totalBatches}: ` +
-  `${batchResult.showsUpdated} shows updated, ${batchResult.markerRowsReset} marker rows reset. ` +
-  `Cumulative: ${totals.showsUpdated} shows, ${totals.markerRowsReset} markers, ` +
-  `${totals.touchedShowIds} touched show_ids.`;
+  `${batchResult.showsUpdated} shows updated, ${batchResult.markerRowsReset} marker rows reset, ` +
+  `${reresolved} marker rows re-resolved. ` +
+  `Cumulative: ${totals.showsUpdated} shows, ${totals.markerRowsReset} markers reset, ` +
+  `${totals.reresolved} markers re-resolved.`;
 
 export const runRemediation = async (): Promise<void> => {
   if (DRY_RUN) {
@@ -309,31 +334,35 @@ export const runRemediation = async (): Promise<void> => {
   const totalBatches = Math.ceil(mappings.length / BATCH_SIZE);
   let totalShowsUpdated = 0;
   let totalMarkerRowsReset = 0;
-  const allTouchedShowIds: number[] = [];
+  let totalReresolved = 0;
 
+  // Per-batch re-resolve keeps `touchedShowIds` bounded by BATCH_SIZE (5000),
+  // well under Postgres's 65535-parameter prepared-statement ceiling and
+  // under the array-literal cast's planner-friendly range. The accumulator
+  // approach (one big re-resolve at the end with all touched ids) would
+  // collapse the per-batch atomicity claim — if the final re-resolve aborted
+  // for any reason, every preceding batch's NULLed marker rows would be left
+  // dangling instead of re-resolved.
   for (let i = 0; i < totalBatches; i++) {
     const batch = mappings.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
     const result = await runScrubBatch(batch);
+    const reresolved = await reresolveMarkerDjNames(result.touchedShowIds);
+
     totalShowsUpdated += result.showsUpdated;
     totalMarkerRowsReset += result.markerRowsReset;
-    allTouchedShowIds.push(...result.touchedShowIds);
+    totalReresolved += reresolved;
 
     console.log(
-      formatBatchProgress(i, totalBatches, result, {
+      formatBatchProgress(i, totalBatches, result, reresolved, {
         showsUpdated: totalShowsUpdated,
         markerRowsReset: totalMarkerRowsReset,
-        touchedShowIds: allTouchedShowIds.length,
+        reresolved: totalReresolved,
       })
     );
   }
 
-  console.log(
-    `[remediate] Scrub: ${totalShowsUpdated} shows updated, ${totalMarkerRowsReset} marker rows reset, ` +
-      `${allTouchedShowIds.length} show_ids touched.`
-  );
-
-  const reresolved = await reresolveMarkerDjNames(allTouchedShowIds);
-  console.log(`[remediate] Re-resolved dj_name on ${reresolved} marker rows (scoped to touched show_ids).`);
+  console.log(`[remediate] Scrub: ${totalShowsUpdated} shows updated, ${totalMarkerRowsReset} marker rows reset.`);
+  console.log(`[remediate] Re-resolved dj_name on ${totalReresolved} marker rows total.`);
 
   await analyzeTables();
   if (!DRY_RUN) {
