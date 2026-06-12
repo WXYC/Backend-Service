@@ -189,12 +189,13 @@ INSERT INTO RELEASE_CROSS_REFERENCE (ID, CROSS_REFERENCING_ARTIST_ID, CROSS_REFE
 -- ---- Shows ----
 -- DJ_NAME holds the full real name in prod (BS forwards `realName || name` via
 -- the legacy mirror); DJ_HANDLE holds the on-air alias. The ETL pulls
--- DJ_HANDLE into shows.legacy_dj_name (BS#1393 PII fix). Seed both columns so
--- the V1 admin UI keeps a realistic name AND the V2-relevant column has the
--- handle value the e2e assertions expect.
+-- DJ_HANDLE into shows.legacy_dj_name (BS#1393 PII fix). Seed the columns
+-- with DISTINCT values so the e2e ETL assertions act as a column-confusion
+-- regression detector — if a refactor ever flips the ETL back to reading
+-- DJ_NAME, `legacy_dj_name` lands the real-name value and the assertion fails.
 INSERT INTO FLOWSHEET_RADIO_SHOW_PROD (ID, STARTING_RADIO_HOUR, DJ_NAME, DJ_ID, DJ_HANDLE, SHOW_NAME, SIGNON_TIME, SIGNOFF_TIME, TIME_LAST_MODIFIED, TIME_CREATED) VALUES
-  (1001, 1775300400000, 'DJ Bluejay', 42, 'DJ Bluejay', 'The Nest', 1775300460000, 1775311200000, 1775311200000, 1775300460000),
-  (1002, 1775311200000, 'dj wilde', NULL, 'dj wilde', NULL, 1775311260000, NULL, 1775311260000, 1775311260000);
+  (1001, 1775300400000, 'Jonathan Smith', 42, 'DJ Bluejay', 'The Nest', 1775300460000, 1775311200000, 1775311200000, 1775300460000),
+  (1002, 1775311200000, 'Alice Wilde', NULL, 'dj wilde', NULL, 1775311260000, NULL, 1775311260000, 1775311260000);
 
 -- ---- Flowsheet Entries ----
 INSERT INTO FLOWSHEET_ENTRY_PROD (ID, ARTIST_NAME, ARTIST_ID, SONG_TITLE, RELEASE_TITLE, RELEASE_FORMAT_ID, LIBRARY_RELEASE_ID, ROTATION_RELEASE_ID, LABEL_NAME, RADIO_HOUR, START_TIME, STOP_TIME, RADIO_SHOW_ID, SEQUENCE_WITHIN_SHOW, NOW_PLAYING_FLAG, FLOWSHEET_ENTRY_TYPE_CODE_ID, TIME_LAST_MODIFIED, TIME_CREATED, REQUEST_FLAG, GLOBAL_ORDER_ID, BMI_COMPOSER, SEGUE_FLAG) VALUES

@@ -7,7 +7,7 @@
  *   (a) Per-batch scrub fires the shows-UPDATE and the marker-flowsheet-NULL
  *       UPDATE atomically (single CTE) — never the two as separate
  *       statements, where a mid-run abort would leave PII on the wire.
- *   (b) Re-resolve is row-id-scoped via `show_id = ANY(touchedShowIds)`, so
+ *   (b) Re-resolve is row-id-scoped via `show_id = ANY(batchShowIds)`, so
  *       the job never reproduces the BS#511 unbounded-UPDATE wedge pattern.
  *   (c) The COALESCE chain stops at `shows.legacy_dj_name` — `auth_user.name`
  *       MUST NEVER appear (it would re-open the leak BS#1371 closed).
@@ -93,11 +93,28 @@ afterEach(() => {
 });
 
 describe('legacy-dj-name-remediation: runScrubBatch', () => {
+  it('CTE returns batch_show_ids (all BS shows in batch), not just scrub-touched ids — guards prior-run-crash recovery', async () => {
+    // Per the BatchResult docstring: if a prior run committed the scrub but
+    // the subsequent re-resolve crashed, the next run's scrub no-ops on the
+    // already-clean shows. The re-resolve must still see those show_ids so
+    // it can heal the dangling NULL markers from the previous crash. So the
+    // CTE selects `array_agg(show_id) FROM all_known` (every batch show),
+    // never `FROM to_update` (only scrub-touched). If this regresses, a
+    // partial-failure re-run leaks PII residue indefinitely.
+    mockExecute.mockResolvedValueOnce([{ shows_updated: 0, markers_reset: 0, batch_show_ids: [10, 11] }]);
+
+    await runScrubBatch([{ showId: 1001, djHandle: 'DJ Bluejay' }]);
+
+    const sql = lastSqlBlob();
+    expect(sql).toMatch(/array_agg\(show_id\)\s+FROM\s+all_known/i);
+    expect(sql).not.toMatch(/array_agg\(show_id\)\s+FROM\s+to_update/i);
+  });
+
   it('builds a single CTE that scrubs shows.legacy_dj_name AND nulls matching marker dj_name in one statement', async () => {
     // Atomicity is the whole point of the CTE — a mid-run abort cannot leave
     // shows.legacy_dj_name corrected with the matching marker dj_name still
     // leaking PII.
-    mockExecute.mockResolvedValueOnce([{ shows_updated: 2, markers_reset: 5, touched_show_ids: [10, 11] }]);
+    mockExecute.mockResolvedValueOnce([{ shows_updated: 2, markers_reset: 5, batch_show_ids: [10, 11] }]);
 
     await runScrubBatch([
       { showId: 1001, djHandle: 'DJ Bluejay' },
@@ -121,13 +138,18 @@ describe('legacy-dj-name-remediation: runScrubBatch', () => {
     // A row stored as `'Real Name  '` (trailing whitespace from a legacy
     // write path) must match `oldHandle = 'Real Name'`. Otherwise the
     // PII residue stays on the v2 wire after the scrub claims success.
-    mockExecute.mockResolvedValueOnce([{ shows_updated: 0, markers_reset: 0, touched_show_ids: [] }]);
+    mockExecute.mockResolvedValueOnce([{ shows_updated: 0, markers_reset: 0, batch_show_ids: [] }]);
 
     await runScrubBatch([{ showId: 1001, djHandle: 'DJ Bluejay' }]);
 
     const sql = lastSqlBlob();
     expect(sql).toMatch(/trim\(\s*f\.dj_name\s*\)\s*=\s*trim\(/i);
-    expect(sql).toMatch(/COALESCE\(trim\(s\.legacy_dj_name\),\s*''\)\s+IS DISTINCT FROM/i);
+    // After the iter-3 refactor `legacy_dj_name` is projected into the
+    // `all_known` CTE as `old_handle`, and the IS DISTINCT FROM filter
+    // compares against the `new_handle` column from the same CTE. The
+    // structural invariant — trim-aware, NULL-vs-empty-tolerant — is the
+    // same.
+    expect(sql).toMatch(/COALESCE\(trim\(old_handle\),\s*''\)\s+IS DISTINCT FROM\s+COALESCE\(trim\(new_handle\)/i);
   });
 
   it('binds (showId, djHandle) tuples through sql.join — never sql.raw (PII / SQL-injection regression)', async () => {
@@ -135,7 +157,7 @@ describe('legacy-dj-name-remediation: runScrubBatch', () => {
     // `sql.raw` + a hand-rolled `replace(/'/g, "''")` escape — which doesn't
     // cover backslashes or NUL bytes. Pin that the implementation routes the
     // dj-handle values through sql.join's parameter binder instead.
-    mockExecute.mockResolvedValueOnce([{ shows_updated: 0, markers_reset: 0, touched_show_ids: [] }]);
+    mockExecute.mockResolvedValueOnce([{ shows_updated: 0, markers_reset: 0, batch_show_ids: [] }]);
 
     await runScrubBatch([
       { showId: 1001, djHandle: "O'Brien" },
@@ -150,14 +172,14 @@ describe('legacy-dj-name-remediation: runScrubBatch', () => {
     expect(boundHandles).toEqual(expect.arrayContaining(["O'Brien", 'Bro\\Slash']));
   });
 
-  it('returns shows_updated / markers_reset / touched_show_ids from the CTE result row', async () => {
-    mockExecute.mockResolvedValueOnce([{ shows_updated: 17, markers_reset: 42, touched_show_ids: [10, 11, 12] }]);
+  it('returns shows_updated / markers_reset / batch_show_ids from the CTE result row', async () => {
+    mockExecute.mockResolvedValueOnce([{ shows_updated: 17, markers_reset: 42, batch_show_ids: [10, 11, 12] }]);
 
     const result = await runScrubBatch([{ showId: 1001, djHandle: 'A' }]);
 
     expect(result.showsUpdated).toBe(17);
     expect(result.markerRowsReset).toBe(42);
-    expect(result.touchedShowIds).toEqual([10, 11, 12]);
+    expect(result.batchShowIds).toEqual([10, 11, 12]);
   });
 
   it('returns zeroes + empty list when the batch is empty (no SQL issued)', async () => {
@@ -165,13 +187,13 @@ describe('legacy-dj-name-remediation: runScrubBatch', () => {
 
     expect(result.showsUpdated).toBe(0);
     expect(result.markerRowsReset).toBe(0);
-    expect(result.touchedShowIds).toEqual([]);
+    expect(result.batchShowIds).toEqual([]);
     expect(mockExecute).not.toHaveBeenCalled();
   });
 });
 
 describe('legacy-dj-name-remediation: reresolveMarkerDjNames', () => {
-  it('UPDATE is row-id-scoped via show_id = ANY(touchedShowIds) so it never wedges like BS#511', async () => {
+  it('UPDATE is row-id-scoped via show_id = ANY(batchShowIds) so it never wedges like BS#511', async () => {
     // The whole point of the touched-show-id accumulator is that the
     // re-resolve never runs unbounded against the whole flowsheet. If the
     // ANY-scope ever gets dropped, this test fires.
@@ -184,13 +206,13 @@ describe('legacy-dj-name-remediation: reresolveMarkerDjNames', () => {
     expect(sql).toMatch(/show_id\s*=\s*ANY/i);
   });
 
-  it('binds touchedShowIds as a single PG array-literal string with ::int[] cast — never a JS array splat (BS#1071 regression)', async () => {
+  it('binds batchShowIds as a single PG array-literal string with ::int[] cast — never a JS array splat (BS#1071 regression)', async () => {
     // Drizzle/postgres-js splat a JS array in `${...}` positions across N
     // positional placeholders, producing `ANY(($1, $2, …, $n))`. Postgres
     // rejects with `op ANY/ALL (array) requires array on right side`. The fix
     // (per album-level-backfill / BS#1071) is to bind the array as a single
     // PG-literal string parameter and cast with `::int[]`. If a refactor
-    // ever reverts to bare `ANY(${touchedShowIds})`, this test fires.
+    // ever reverts to bare `ANY(${batchShowIds})`, this test fires.
     mockExecute.mockResolvedValueOnce({ count: 0 });
 
     await reresolveMarkerDjNames([10, 11, 12]);
