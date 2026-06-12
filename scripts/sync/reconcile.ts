@@ -240,9 +240,14 @@ async function reconcileRadioShow(event: CdcEvent) {
   const row = rows[0];
   const diffs: FieldDiff[] = [];
 
-  const expectedDjName = String(data.djName ?? '');
-  if (expectedDjName && row.legacy_dj_name && expectedDjName !== String(row.legacy_dj_name)) {
-    diffs.push({ field: 'dj_name', expected: expectedDjName, actual: row.legacy_dj_name });
+  // BS#1393: `shows.legacy_dj_name` is sourced from tubafrenzy's `DJ_HANDLE`
+  // (the on-air alias), not `DJ_NAME` (the full real name BS forwards through
+  // the legacy mirror). Compare against the matching CDC field so this
+  // reconciler doesn't fire a permanent false-positive `dj_name` mismatch on
+  // every show whose handle differs from the real name.
+  const expectedDjHandle = String(data.djHandle ?? '');
+  if (expectedDjHandle && row.legacy_dj_name && expectedDjHandle !== String(row.legacy_dj_name)) {
+    diffs.push({ field: 'dj_handle', expected: expectedDjHandle, actual: row.legacy_dj_name });
   }
 
   if (diffs.length === 0) {

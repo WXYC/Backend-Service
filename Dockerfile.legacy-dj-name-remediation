@@ -32,4 +32,11 @@ ENV DB_APPLICATION_NAME=wxyc-legacy-dj-name-remediation
 ENV DB_STATEMENT_TIMEOUT_MS=900000
 ENV DB_SYNCHRONOUS_COMMIT=off
 
-CMD ["npm", "start", "--workspace=@wxyc/legacy-dj-name-remediation"]
+# ENTRYPOINT + empty CMD so docker-level args (e.g. `--dry-run`) pass through
+# to the job rather than replacing the launcher. With `CMD ["npm", "start"]`,
+# `docker run <image> --dry-run` would replace the whole command, npm would
+# never see `start`, and node would try to parse `--dry-run` itself. ENTRYPOINT
+# pins the launcher; any args after `<image>` extend it. node resolves
+# `@wxyc/database` etc. via the standard walk up to /legacy-dj-name-remediation/node_modules.
+ENTRYPOINT ["node", "/legacy-dj-name-remediation/jobs/legacy-dj-name-remediation/dist/job.js"]
+CMD []
