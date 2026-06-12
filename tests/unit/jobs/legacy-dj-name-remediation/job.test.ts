@@ -194,9 +194,9 @@ describe('legacy-dj-name-remediation: runScrubBatch', () => {
 
 describe('legacy-dj-name-remediation: reresolveMarkerDjNames', () => {
   it('UPDATE is row-id-scoped via show_id = ANY(batchShowIds) so it never wedges like BS#511', async () => {
-    // The whole point of the touched-show-id accumulator is that the
-    // re-resolve never runs unbounded against the whole flowsheet. If the
-    // ANY-scope ever gets dropped, this test fires.
+    // The whole point of the per-batch row-id scope is that the re-resolve
+    // never runs unbounded against the whole flowsheet. If the ANY-scope
+    // ever gets dropped, this test fires.
     mockExecute.mockResolvedValueOnce({ count: 5 });
 
     await reresolveMarkerDjNames([10, 11, 12]);

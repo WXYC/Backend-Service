@@ -248,9 +248,8 @@ export const runScrubBatch = async (batch: HandleMapping[]): Promise<BatchResult
  * placeholders (`($1, $2, ..., $n)`), which PG rejects with `op ANY/ALL
  * (array) requires array on right side` (the BS#1071 / BS#1068 family of
  * incidents). Binding a single string parameter that PG can cast to `int[]`
- * sidesteps the splat. Safe by construction: `touchedShowIds` is typed
- * `number[]`, so the join produces only numeric literals — no injection
- * surface.
+ * sidesteps the splat. Safe by construction: the input is typed `number[]`,
+ * so the join produces only numeric literals — no injection surface.
  *
  * See `jobs/album-level-backfill/job.ts` (BS#1071, 2026-05-24 prod canary)
  * for the original codebase reference.
