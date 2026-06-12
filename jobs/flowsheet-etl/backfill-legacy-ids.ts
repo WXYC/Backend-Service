@@ -86,15 +86,21 @@ const backfillReleaseIds = async (mappings: ReleaseMapping[]): Promise<number> =
 };
 
 // ---- Shows: legacy_dj_name, legacy_dj_id ----
+//
+// `legacy_dj_name` is sourced from FLOWSHEET_RADIO_SHOW_PROD.DJ_HANDLE (the
+// on-air alias), NOT DJ_NAME (the full real name BS forwards through the
+// legacy mirror as `realName || name`). Reading DJ_NAME here leaks PII onto
+// the v2 wire via the shows.legacy_dj_name → flowsheet.dj_name COALESCE
+// chain. See the leak path in fetch-legacy.ts's LegacyShowRow comment.
 
-type DJMapping = { showId: number; djName: string | null; djId: number | null };
+type DJMapping = { showId: number; djHandle: string | null; djId: number | null };
 
 const fetchDJMappings = async (): Promise<DJMapping[]> => {
-  console.log('[backfill] Fetching DJ_NAME/DJ_ID mappings from tubafrenzy...');
+  console.log('[backfill] Fetching DJ_HANDLE/DJ_ID mappings from tubafrenzy...');
   const raw = await legacyDB.send(`
     SELECT
       ID,
-      REPLACE(REPLACE(IFNULL(DJ_NAME, ''), '\\t', ' '), '\\n', ' '),
+      REPLACE(REPLACE(IFNULL(DJ_HANDLE, ''), '\\t', ' '), '\\n', ' '),
       DJ_ID
     FROM FLOWSHEET_RADIO_SHOW_PROD;
   `);
@@ -107,11 +113,11 @@ const fetchDJMappings = async (): Promise<DJMapping[]> => {
     if (cols.length < 3) continue;
     const showId = Number(cols[0]);
     if (!Number.isFinite(showId)) continue;
-    const djName = cols[1].trim().length > 0 && cols[1].trim() !== 'NULL' ? cols[1].trim() : null;
+    const djHandle = cols[1].trim().length > 0 && cols[1].trim() !== 'NULL' ? cols[1].trim() : null;
     const rawDjId = Number(cols[2]);
     const djId = Number.isFinite(rawDjId) && rawDjId !== 0 ? rawDjId : null;
-    if (djName || djId) {
-      mappings.push({ showId, djName, djId });
+    if (djHandle || djId) {
+      mappings.push({ showId, djHandle, djId });
     }
   }
 
@@ -132,12 +138,12 @@ const backfillDJInfo = async (mappings: DJMapping[]): Promise<number> => {
     }
 
     for (const m of batch) {
-      const djNameValue = m.djName ? `'${m.djName.replace(/'/g, "''")}'` : 'NULL';
+      const djHandleValue = m.djHandle ? `'${m.djHandle.replace(/'/g, "''")}'` : 'NULL';
       const djIdValue = m.djId != null ? String(m.djId) : 'NULL';
       await db.execute(
         sql.raw(`
         UPDATE ${getSchemaPrefix()}shows
-        SET legacy_dj_name = ${djNameValue}, legacy_dj_id = ${djIdValue}
+        SET legacy_dj_name = ${djHandleValue}, legacy_dj_id = ${djIdValue}
         WHERE legacy_show_id = ${m.showId} AND legacy_dj_name IS NULL
       `)
       );

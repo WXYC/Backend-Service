@@ -1,0 +1,25 @@
+{
+  "name": "@wxyc/legacy-dj-name-remediation",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot remediation: scrub shows.legacy_dj_name of values pulled from the wrong tubafrenzy column (DJ_NAME -> DJ_HANDLE) and re-resolve marker flowsheet.dj_name",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_legacy_dj_name_remediation:ci -f ../../Dockerfile.legacy-dj-name-remediation ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
