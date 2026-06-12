@@ -342,6 +342,18 @@ services:
         NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [e2e]
     environment:
+      # Override the Dockerfile's `ENV NODE_ENV=production` pin (BS#1097) so
+      # the production-shaped guards in shared/authentication (buildLoginPage
+      # fail-loud when FRONTEND_SOURCE is unset) don't fire in tests.
+      # Matches the ci-profile backend at line 173.
+      - NODE_ENV=test
+      # `apps/backend/app.ts` imports `requirePermissions` from
+      # `@wxyc/authentication`, which evaluates `betterAuth({...})` at module
+      # load and calls buildLoginPage(process.env). Without FRONTEND_SOURCE
+      # the helper falls back to localhost — fine here because the e2e
+      # backend never serves the OIDC redirect, but the value still has to
+      # be present for the dev-fallback branch to fire.
+      - FRONTEND_SOURCE=http://e2e-frontend:3000
       - DB_HOST=e2e-db
       - DB_PORT=5432
       - DB_USERNAME=${DB_USERNAME:-e2euser}
