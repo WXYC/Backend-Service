@@ -36,7 +36,7 @@ const makeShow = (overrides: Partial<LegacyShowRow> = {}): LegacyShowRow => ({
   endTime: 1706803200000,
   showName: 'The Nest',
   timeLastModified: 1706799700000,
-  djName: 'DJ Bluejay',
+  djHandle: 'DJ Bluejay',
   djId: 42,
   ...overrides,
 });

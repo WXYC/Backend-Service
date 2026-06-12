@@ -1,0 +1,35 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+WORKDIR /legacy-dj-name-remediation-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/legacy-dj-name-remediation ./jobs/legacy-dj-name-remediation
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/legacy-dj-name-remediation
+
+#Production stage
+FROM node:24-alpine AS prod
+
+WORKDIR /legacy-dj-name-remediation
+
+COPY ./package* ./
+COPY ./jobs/legacy-dj-name-remediation/package* ./jobs/legacy-dj-name-remediation/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./legacy-dj-name-remediation-builder/jobs/legacy-dj-name-remediation/dist ./jobs/legacy-dj-name-remediation/dist
+COPY --from=builder ./legacy-dj-name-remediation-builder/shared/database/dist ./shared/database/dist
+
+# Bulk UPDATE workload — async commit is safe (the job is idempotent and
+# resumes via the `legacy_dj_name = tubafrenzy.DJ_HANDLE` early-skip). Avoids
+# RDS WAL fsync stalls. DB_STATEMENT_TIMEOUT_MS is set high so a slow batch
+# under live load does not abort the run.
+ENV DB_APPLICATION_NAME=wxyc-legacy-dj-name-remediation
+ENV DB_STATEMENT_TIMEOUT_MS=900000
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+CMD ["npm", "start", "--workspace=@wxyc/legacy-dj-name-remediation"]

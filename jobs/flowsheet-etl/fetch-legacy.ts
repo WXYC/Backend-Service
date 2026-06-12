@@ -17,7 +17,13 @@ export type LegacyShowRow = {
   endTime: number | null;
   showName: string | null;
   timeLastModified: number;
-  djName: string | null;
+  // On-air handle (FLOWSHEET_RADIO_SHOW_PROD.DJ_HANDLE). NOT the user's full
+  // name — that lives in DJ_NAME, which BS receives via the legacy mirror as
+  // `realName || name` (apps/backend/middleware/legacy/http.mirror.ts) and so
+  // is PII. Surfacing DJ_NAME on the public v2 wire (via the
+  // shows.legacy_dj_name → flowsheet.dj_name COALESCE chain) is the leak we
+  // closed by reading DJ_HANDLE instead.
+  djHandle: string | null;
   djId: number | null;
 };
 
@@ -54,7 +60,7 @@ export const parseShowRows = (raw: string): LegacyShowRow[] => {
       endTime: Number(cols[2]) || null,
       showName: toNullable(cols[3]),
       timeLastModified: Number(cols[4]) || 0,
-      djName: toNullable(cols[5]),
+      djHandle: toNullable(cols[5]),
       djId: Number.isFinite(rawDjId) && rawDjId !== 0 ? rawDjId : null,
     });
   }
@@ -70,7 +76,7 @@ export const fetchLegacyShows = async (sinceMs: number | null): Promise<LegacySh
       rs.SIGNOFF_TIME,
       rs.SHOW_NAME,
       rs.TIME_LAST_MODIFIED,
-      REPLACE(REPLACE(IFNULL(rs.DJ_NAME, ''), '\\t', ' '), '\\n', ' '),
+      REPLACE(REPLACE(IFNULL(rs.DJ_HANDLE, ''), '\\t', ' '), '\\n', ' '),
       rs.DJ_ID
     FROM FLOWSHEET_RADIO_SHOW_PROD rs
     ${filter}

@@ -158,7 +158,11 @@ describe('fetch-legacy parsing', () => {
   });
 
   describe('parseShowRows', () => {
-    // Columns: ID, SIGNON_TIME, SIGNOFF_TIME, SHOW_NAME, TLM, DJ_NAME, DJ_ID
+    // Columns: ID, SIGNON_TIME, SIGNOFF_TIME, SHOW_NAME, TLM, DJ_HANDLE, DJ_ID
+    // (column 5 is DJ_HANDLE, the on-air alias — NOT DJ_NAME, the user's full
+    // real name. Pulling DJ_NAME into shows.legacy_dj_name leaked PII onto the
+    // v2 marker dj_name wire via the COALESCE fallback. The query string in
+    // fetchLegacyShows is asserted separately below.)
 
     it('parses 7-column format with DJ fields', () => {
       const raw = '1\t1706799600000\t1706803200000\tThe Morning Show\t1706799700000\tDJ Bluejay\t42';
@@ -171,7 +175,7 @@ describe('fetch-legacy parsing', () => {
         endTime: 1706803200000,
         showName: 'The Morning Show',
         timeLastModified: 1706799700000,
-        djName: 'DJ Bluejay',
+        djHandle: 'DJ Bluejay',
         djId: 42,
       });
     });
@@ -192,11 +196,11 @@ describe('fetch-legacy parsing', () => {
       expect(rows[0].showName).toBeNull();
     });
 
-    it('sets djName to null for empty/NULL values', () => {
+    it('sets djHandle to null for empty/NULL values', () => {
       const raw = '1\t1706799600000\t0\tShow\t0\tNULL\t0';
       const rows = parseShowRows(raw);
 
-      expect(rows[0].djName).toBeNull();
+      expect(rows[0].djHandle).toBeNull();
     });
 
     it('sets djId to null for 0 or invalid values', () => {
@@ -210,12 +214,32 @@ describe('fetch-legacy parsing', () => {
       const raw = '1\t1706799600000\t1706803200000\tThe Nest\t1706799700000\tDJ Bluejay\t42';
       const rows = parseShowRows(raw);
 
-      expect(rows[0].djName).toBe('DJ Bluejay');
+      expect(rows[0].djHandle).toBe('DJ Bluejay');
       expect(rows[0].djId).toBe(42);
     });
 
     it('returns empty array for empty input', () => {
       expect(parseShowRows('')).toEqual([]);
+    });
+  });
+
+  describe('fetchLegacyShows query — DJ_HANDLE source (PII regression)', () => {
+    // BS#1371 surfaced shows.legacy_dj_name on the public v2 marker dj_name
+    // wire. The ETL must read DJ_HANDLE (on-air alias), not DJ_NAME (the
+    // user's full real name forwarded by the BS legacy mirror as
+    // `realName || name`). If the column ever flips back, this test fires.
+    it('SELECTs DJ_HANDLE — never DJ_NAME — for shows.legacy_dj_name', async () => {
+      const { MirrorSQL } = jest.requireMock('@wxyc/database');
+      const sendMock: jest.Mock = MirrorSQL.instance().send;
+      sendMock.mockReset().mockResolvedValue('');
+
+      const { fetchLegacyShows } = await import('../../../../jobs/flowsheet-etl/fetch-legacy');
+      await fetchLegacyShows(null);
+
+      expect(sendMock).toHaveBeenCalledTimes(1);
+      const query: string = sendMock.mock.calls[0][0];
+      expect(query).toMatch(/\brs\.DJ_HANDLE\b/);
+      expect(query).not.toMatch(/\brs\.DJ_NAME\b/);
     });
   });
 });

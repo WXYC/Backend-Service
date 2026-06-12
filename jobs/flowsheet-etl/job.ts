@@ -197,7 +197,11 @@ const importShows = async (dbClient: DbClient, lines: string[]) => {
         .insert(shows)
         .values({
           legacy_show_id: Number(tuple[0]),
-          legacy_dj_name: truncate(tuple[2] != null ? String(tuple[2]) : null, 128),
+          // tuple[4] = DJ_HANDLE (on-air alias). tuple[2] (DJ_NAME) is the
+          // full real name that BS sends through the legacy mirror as
+          // `realName || name`; reading it here would leak PII onto the v2
+          // wire via shows.legacy_dj_name → flowsheet.dj_name COALESCE.
+          legacy_dj_name: truncate(tuple[4] != null ? String(tuple[4]) : null, 128),
           legacy_dj_id: Number.isFinite(rawDjId) && rawDjId !== 0 ? rawDjId : null,
           start_time: startTime,
           end_time: epochMsToDate(Number(tuple[9]) || 0),
@@ -335,7 +339,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
       .insert(shows)
       .values({
         legacy_show_id: show.id,
-        legacy_dj_name: truncate(show.djName, 128),
+        legacy_dj_name: truncate(show.djHandle, 128),
         legacy_dj_id: show.djId,
         start_time: startTime,
         end_time: endTime,

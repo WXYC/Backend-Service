@@ -29,7 +29,7 @@ const makeShow = (overrides: Partial<LegacyShowRow> = {}): LegacyShowRow => ({
   endTime: 1706803200000,
   showName: 'The Nest',
   timeLastModified: 1706799700000,
-  djName: 'DJ Bluejay',
+  djHandle: 'DJ Bluejay',
   djId: 42,
   ...overrides,
 });
@@ -201,5 +201,17 @@ describe('runBulkLoad: dj_name backfill ownership', () => {
     // unbounded).
     const body = extractFunctionBody('runIncremental');
     expect(body).toMatch(/\bresolveDjNames\s*\(\s*[A-Za-z_]/);
+  });
+
+  // BS#1371 surfaced shows.legacy_dj_name on the public v2 marker dj_name
+  // wire. The bulk-load path reads FLOWSHEET_RADIO_SHOW_PROD dump rows by
+  // tuple position; per the column docstring inside job.ts, position 2 is
+  // DJ_NAME (the user's full real name) and position 4 is DJ_HANDLE (the
+  // on-air alias). If a refactor reverts to tuple[2] the v2 wire starts
+  // leaking real names again, and this test will fire.
+  it('importShows reads legacy_dj_name from tuple[4] (DJ_HANDLE), not tuple[2] (DJ_NAME)', () => {
+    const body = extractFunctionBody('importShows');
+    expect(body).toMatch(/legacy_dj_name:\s*truncate\(\s*tuple\[4\]/);
+    expect(body).not.toMatch(/legacy_dj_name:\s*truncate\(\s*tuple\[2\]/);
   });
 });
