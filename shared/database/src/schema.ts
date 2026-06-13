@@ -1172,6 +1172,20 @@ export const shows = wxyc_schema.table(
     primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
     specialty_id: integer('specialty_id').references(() => specialty_shows.id),
     legacy_show_id: integer('legacy_show_id'),
+    /**
+     * On-air DJ alias for the show, sourced from tubafrenzy's
+     * `FLOWSHEET_RADIO_SHOW_PROD.DJ_HANDLE` column (NOT `DJ_NAME` — that's the
+     * full real name BS forwards through the legacy mirror as `realName || name`
+     * and surfacing it on the public v2 wire would be PII exposure; see BS#1393).
+     *
+     * The marker `flowsheet.dj_name` resolver (apps/backend/routes/internal.route.ts
+     * via `resolveShow`'s COALESCE chain) reads this column as the fallback when
+     * `auth_user.dj_name` is NULL. Anything you write here lands on the public
+     * marker dj_name wire on the next webhook delivery — never write
+     * `auth_user.name` or any other full-name source. The flowsheet ETL writers
+     * (`jobs/flowsheet-etl/fetch-legacy.ts` and `jobs/flowsheet-etl/backfill-legacy-ids.ts`)
+     * are the canonical writers; align any new writer with their `DJ_HANDLE` source.
+     */
     legacy_dj_name: varchar('legacy_dj_name', { length: 128 }),
     legacy_dj_id: integer('legacy_dj_id'),
     /**
