@@ -292,6 +292,23 @@ describe('legacy-dj-name-remediation: fetchHandleMappings', () => {
     ]);
   });
 
+  it('truncates DJ_HANDLE to 128 chars to match shows.legacy_dj_name varchar(128) ceiling', async () => {
+    // Production prior incident: a 300+ char DJ_HANDLE (the Cynocephalus
+    // handle, tubafrenzy#573) aborts the batch CTE mid-pass with `value too
+    // long for type character varying(128)`. The flowsheet ETL truncates at
+    // the source; this fetcher must do the same so the remediation matches
+    // what the ETL would write on the same row.
+    const longHandle = 'A'.repeat(300);
+    const mirror = {
+      send: jest.fn<() => Promise<string>>().mockResolvedValue(`1001\t${longHandle}\n`),
+      close: jest.fn(),
+    };
+
+    const mappings = await fetchHandleMappings(mirror as never);
+
+    expect(mappings).toEqual([{ showId: 1001, djHandle: 'A'.repeat(128) }]);
+  });
+
   it('treats empty / NULL / whitespace handles as null', async () => {
     // Use a sentinel non-whitespace value as the last row's handle so the
     // outer `.trim()` doesn't strip the row's tab delimiter and trigger the

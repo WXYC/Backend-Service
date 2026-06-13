@@ -58,6 +58,20 @@ export const schemaPrefix = (): SQL => {
 
 export type HandleMapping = { showId: number; djHandle: string | null };
 
+/**
+ * Matches the varchar ceiling on `shows.legacy_dj_name` (shared/database/src/
+ * schema.ts:1175). The flowsheet ETL truncates its own DJ_NAME / DJ_HANDLE
+ * pulls to the same length at the source (jobs/flowsheet-etl/job.ts:200 +
+ * job.ts:338); without this, production rows whose DJ_HANDLE exceeds 128
+ * chars (e.g. the 300+ char Cynocephalus handle the tubafrenzy fix in #573
+ * documents) abort the batch CTE with `value too long for type character
+ * varying(128)` — exactly the failure that interrupted the first prod run
+ * at batch 5/15 mid-remediation. Truncation here matches what the ETL would
+ * write on the same row, so idempotency between the two writers is
+ * preserved.
+ */
+const LEGACY_DJ_NAME_MAX_LENGTH = 128;
+
 export const fetchHandleMappings = async (mirror = MirrorSQL.instance()): Promise<HandleMapping[]> => {
   console.log('[remediate] Fetching DJ_HANDLE mappings from tubafrenzy...');
   const raw = await mirror.send(`
@@ -79,7 +93,8 @@ export const fetchHandleMappings = async (mirror = MirrorSQL.instance()): Promis
     // Reject NUL bytes — Postgres refuses text containing U+0000, and a
     // dirty row would otherwise abort the batch mid-flight. Treat as missing.
     if (trimmed.includes('\0')) continue;
-    const djHandle = trimmed.length > 0 && trimmed !== 'NULL' ? trimmed : null;
+    const truncated = trimmed.slice(0, LEGACY_DJ_NAME_MAX_LENGTH);
+    const djHandle = truncated.length > 0 && truncated !== 'NULL' ? truncated : null;
     mappings.push({ showId, djHandle });
   }
 
