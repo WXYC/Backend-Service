@@ -16,9 +16,9 @@ permissions:
 
 jobs:
   audit:
-    # Pinned to v0.3.2 (latest stable as of wiring). Bump to @v1 once the
+    # Pinned to v0.3.3 (latest stable as of wiring). Bump to @v1 once the
     # pipeline cuts a v1.0.0 release — at that point both this ref and the
     # audit-binary-version input can move to floating major pins.
-    uses: jakebromberg/code-audit-pipeline/.github/workflows/pr-comment-reusable.yml@v0.3.2
+    uses: jakebromberg/code-audit-pipeline/.github/workflows/pr-comment-reusable.yml@v0.3.3
     with:
-      audit-binary-version: v0.3.2
+      audit-binary-version: v0.3.3
