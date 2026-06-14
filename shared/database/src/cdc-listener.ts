@@ -183,6 +183,12 @@ async function runProbeTick(echoTimeoutMs: number): Promise<void> {
   // not overlapping probes that might mask a wedge.
   if (outstandingProbeToken !== null) {
     if (Date.now() - outstandingProbeAt >= echoTimeoutMs) {
+      // Clear probe state before dispatching so the next interval tick
+      // re-arms with a fresh NOTIFY. Without this, `outstandingProbeToken`
+      // stays set forever and probing is permanently disabled — even after
+      // postgres-js auto-reconnect re-LISTENs. (BS#1116)
+      outstandingProbeToken = null;
+      outstandingProbeAt = 0;
       dispatchState(false);
     }
     return;
