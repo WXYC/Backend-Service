@@ -23,7 +23,7 @@ import {
   stopCdcListener,
 } from '@wxyc/database';
 import { envInt } from '@wxyc/lml-client';
-import { makeEnrichmentHandler } from './handler.js';
+import { drainInFlightCandidates, makeEnrichmentHandler } from './handler.js';
 import { startHealthcheckServer, type HealthState } from './healthcheck.js';
 import { sweepStrandedClaims } from './sweep.js';
 
@@ -45,6 +45,24 @@ const SWEEP_INTERVAL_MS = envInt('ENRICHMENT_SWEEP_INTERVAL_MS', 60_000);
  * `process.exit(0)` fires unconditionally in the outer finally.
  */
 const SHUTDOWN_STEP_BOUND_MS = 5_000;
+
+/**
+ * In-flight candidate drain budget (BS#1108). Set wide enough for an
+ * in-flight `lookupMetadata` to finish — the shared client's
+ * `ENRICHMENT_LML_BUDGET_MS` defaults to 29s, so 30s gives the lookup a
+ * full budget plus 1s of slack to write the finalize row before the drain
+ * gives up. Override via env for tighter integration runs. A hung LML call
+ * is bounded by this ceiling so it can't block deploy indefinitely.
+ *
+ * Note: this is the deadline for `drainInFlightCandidates` *itself*, NOT a
+ * `runShutdownStep` bound — drain owns its own internal timeout (the
+ * `Promise.race` inside `drainInFlightCandidates`), and the per-step bound
+ * would cap it lower than the drain deadline. The drain step is invoked
+ * without `runShutdownStep` so the full WORKER_DRAIN_DEADLINE_MS budget is
+ * available; its rejection-safe contract removes the need for outer
+ * try/catch.
+ */
+const WORKER_DRAIN_DEADLINE_MS = envInt('ENRICHMENT_WORKER_DRAIN_DEADLINE_MS', 30_000);
 
 /**
  * Run a shutdown step with a per-step bound and a swallow-and-capture
@@ -115,11 +133,42 @@ const main = async (): Promise<void> => {
       //      don't fire fresh DB writes during the sweep wait.
       //   2. Drain any in-flight sweep so closeDatabaseConnection
       //      doesn't tear its UPDATE.
-      //   3. Close the pool, then the healthcheck server.
-      //   4. Flush Sentry LAST so captures from earlier steps also land.
+      //   3. Drain in-flight `handleCandidate` invocations (BS#1108) so
+      //      pending LML lookups can finalize their `metadata_status`
+      //      write before the pool closes. Bounded by
+      //      WORKER_DRAIN_DEADLINE_MS internally — bypasses
+      //      runShutdownStep so the full deadline is available (the
+      //      per-step bound would cap it lower).
+      //   4. Close the pool, then the healthcheck server.
+      //   5. Flush Sentry LAST so captures from earlier steps also land.
       await runShutdownStep('stop_cdc', stopCdcListener);
       if (activeSweep !== null) {
         await runShutdownStep('drain_sweep', activeSweep);
+      }
+      // BS#1108: signal-driven count of candidates that didn't finish in
+      // time. Mirrors the backend's `metric: 'in_flight_dropped'` tag
+      // shape so a single Sentry alert can fan over both surfaces.
+      try {
+        const remaining = await drainInFlightCandidates(WORKER_DRAIN_DEADLINE_MS);
+        if (remaining > 0) {
+          Sentry.captureMessage(`enrichment-worker exiting with ${remaining} in-flight candidate(s)`, {
+            level: 'warning',
+            tags: {
+              component: 'enrichment-worker',
+              subsystem: 'metadata',
+              metric: 'in_flight_dropped',
+            },
+            extra: { remaining, signal, deadline_ms: WORKER_DRAIN_DEADLINE_MS },
+          });
+          console.warn(`[enrichment-worker] drained shutdown with ${remaining} in-flight candidate(s)`);
+        }
+      } catch (err) {
+        // Defensive: drainInFlightCandidates is contractually
+        // non-throwing, but if a future change reintroduces a throw we'd
+        // rather capture it than skip the close_db step below.
+        Sentry.captureException(err, {
+          tags: { component: 'enrichment-worker', step: 'shutdown_drain_in_flight' },
+        });
       }
       await runShutdownStep('close_db', closeDatabaseConnection);
       await runShutdownStep(

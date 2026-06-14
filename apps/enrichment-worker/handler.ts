@@ -70,6 +70,66 @@ import { finalizeRow, type FinalizeOutcome } from './enrich.js';
 const ENRICHMENT_LML_BUDGET_MS = envInt('ENRICHMENT_LML_BUDGET_MS', 29000);
 
 /**
+ * Registry of in-flight `handleCandidate` invocations, used by the worker's
+ * SIGTERM/SIGINT drain (BS#1108). Mirrors the backend's
+ * `inFlightEnrichments` shape in
+ * `apps/backend/services/metadata/enrichment.service.ts`.
+ *
+ * Without this registry the worker's shutdown path closes the PG pool while
+ * LML lookups are still pending; the subsequent claim or finalize write
+ * throws on a torn-down connection and the row stays in
+ * `metadata_status='enriching'` until the C6 sweep (#895) reverts it past
+ * `enriching_since + 60s` and triggers a second Discogs lookup whose answer
+ * was already retrieved and discarded.
+ */
+const inFlightCandidates = new Set<Promise<unknown>>();
+
+export function getInFlightCandidateCount(): number {
+  return inFlightCandidates.size;
+}
+
+/**
+ * Test-only: clear the registry without awaiting any of the in-flight
+ * promises. Production code must never call this — drained candidates still
+ * mutate the DB once their lookup resolves, so dropping them on the floor
+ * mid-flight is exactly the bug this module avoids. The leading underscore
+ * keeps that intent loud.
+ */
+export function _resetInFlightCandidatesForTest(): void {
+  inFlightCandidates.clear();
+}
+
+/**
+ * Wait up to `deadlineMs` for every in-flight candidate in the snapshot
+ * taken at call time to settle, then return the *current registry size* —
+ * which may include candidates added during the wait (a CDC event that
+ * arrives between SIGTERM and `stopCdcListener()` completing can still
+ * dispatch one). The returned count is therefore a drop *estimate*, not a
+ * strict count of unsettled snapshot members; that's the right shape for a
+ * `level: 'warning'` Sentry signal.
+ *
+ * Never throws. Returns 0 immediately when the registry is empty so a
+ * healthy shutdown pays no setTimeout cost. Mirrors the backend's
+ * `drainInFlightEnrichments` (BS#905).
+ */
+export async function drainInFlightCandidates(deadlineMs: number): Promise<number> {
+  if (inFlightCandidates.size === 0) return 0;
+  const snapshot = Array.from(inFlightCandidates);
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(snapshot),
+      new Promise<void>((resolve) => {
+        timeoutId = setTimeout(resolve, deadlineMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+  return inFlightCandidates.size;
+}
+
+/**
  * Build a CDC event handler that runs the full enrichment chain.
  *
  * The returned function is the long-lived handler that
@@ -84,7 +144,17 @@ export function makeEnrichmentHandler(): (event: CdcEvent) => void {
     // we awaited, slow LML lookups would back-pressure the listener and
     // cause it to drop events. The handler is internally bounded by the
     // shared LML Semaphore(5) so concurrency is capped at the chokepoint.
-    void handleCandidate(candidate);
+    //
+    // BS#1108: register in the in-flight set so the SIGTERM drain can await
+    // pending lookups before the DB pool closes. `handleCandidate` itself
+    // never throws (its outer try/catch routes both LML errors and DB
+    // errors through Sentry + console.error), so the .finally below always
+    // fires and the registry can't slow-leak past a tick.
+    const promise = handleCandidate(candidate);
+    inFlightCandidates.add(promise);
+    void promise.finally(() => {
+      inFlightCandidates.delete(promise);
+    });
   };
 }
 
