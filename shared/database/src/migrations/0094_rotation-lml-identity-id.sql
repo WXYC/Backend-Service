@@ -1,0 +1,87 @@
+-- precondition-guard: not-required (ADD COLUMN nullable + ALTER TYPE ADD
+--   VALUE are both metadata-only DDL with no row-level invariants to
+--   violate. Existing rows accept NULL on the new column without rewrite.)
+-- 0094 — add `rotation.lml_identity_id` + extend
+--   `discogs_release_id_source_enum` with `'library_identity'` (BS#1380).
+--
+-- (a) NEW COLUMN `rotation.lml_identity_id integer NULL`.
+--
+--     Stable LML release-identity handle. Points at
+--     `entity.release_identity.id` on the LML side (see LML#526 / the
+--     companion DDL applied via discogs-etl#278). FK semantics live on
+--     LML's side; PG-level FK is not enforceable across the network.
+--
+--     Why a new column, not "reuse `discogs_release_id`":
+--       1. Discogs IDs aren't intrinsically stable. Discogs admins
+--          periodically reorganize the catalog — the 2026-04-28 reshuffle
+--          (BS#624) is documented prior art. A column we populate from a
+--          paste URL today can point at a different release (or 404)
+--          months later.
+--       2. Layer violation. BS shouldn't carry Discogs's ID space; the
+--          reason BS records *any* ID at all is to give LML a stable
+--          handle for follow-up calls (avoiding text-search on
+--          `artist + album`). LML is the right layer to own the stable
+--          handle.
+--       3. No path to multi-source. Once LML#216 / LML#217 populate the
+--          MusicBrainz/Wikidata legs of the reconciliation log, a
+--          rotation row's "what release is this" answer should follow
+--          whichever source has data. With `discogs_release_id` as the
+--          only handle, MB-only releases are unreachable from this
+--          column.
+--
+--     Writers:
+--       - `apps/backend/services/library.service.ts:addToRotation`
+--         (dj-site path, BS#1380) synchronously resolves via
+--         `POST /api/v1/identity/resolve` before INSERT when
+--         `library_identity.discogs_release_id` is non-NULL. Falls back
+--         to NULL on resolve timeout / 5xx (the row's
+--         `discogs_release_id` still lands so the backfill can re-resolve
+--         within ~24h).
+--       - `jobs/rotation-lml-identity-backfill` (BS#1380, daily cron)
+--         sweeps rows with `lml_identity_id IS NULL AND
+--         discogs_release_id IS NOT NULL`. Catches both rotation-etl
+--         writes (rotation-etl never calls LML; its useful life is bounded
+--         by the tubafrenzy decommission window ~September 2026) and
+--         addToRotation resolve-failure fallbacks.
+--
+--     Rotation-etl preserves the column across ticks via a guarded CASE
+--     in jobs/rotation-etl/job.ts that clears it only when the
+--     *effective* `discogs_release_id` changes — paste-correction lands
+--     at `(X', NULL)` and the next backfill tick re-resolves.
+--
+-- (b) NEW ENUM VALUE `discogs_release_id_source_enum.library_identity`.
+--
+--     `addToRotation` is a new writer that doesn't fit any of the three
+--     existing values (`tubafrenzy_paste` / `lml_offline_backfill` /
+--     `discogs_direct_backfill` are all tubafrenzy/operator-side). Without
+--     extending the enum, the `NOT NULL DEFAULT 'tubafrenzy_paste'`
+--     would tag every dj-site row as if it came from tubafrenzy,
+--     silently corrupting the provenance invariant — kill_date forensics,
+--     BS#1029 backfill scoping, and the future `discogs_release_id`
+--     retirement migration all rely on the column being honest.
+--
+--     Note on resolve-failure fallback: when the LML mint fails inside
+--     `addToRotation`, `lml_identity_id` lands NULL but
+--     `discogs_release_id_source` is still `library_identity` — the
+--     source-of-the-Discogs-id is library_identity regardless of whether
+--     we successfully minted the identity.
+--
+-- DDL-only — no row UPDATE. `ALTER TYPE ... ADD VALUE` is type-system
+-- metadata; `ADD COLUMN integer NULL` is metadata-only on PG11+. The
+-- enum-value addition runs fine inside Drizzle's transaction-per-
+-- migration shape on PG12+ as long as the new value isn't referenced
+-- in the same transaction — the follow-on `addToRotation` writes the
+-- new value at runtime, not migration time, so there's no ordering
+-- hazard.
+--
+-- No new index. Rotation is hundreds of active rows; the backfill's
+-- predicate (`lml_identity_id IS NULL AND discogs_release_id IS NOT
+-- NULL`) is seqscan-fine at this row count, matching the precedent set
+-- by `jobs/rotation-release-id-backfill/query.ts`.
+--
+-- @no-analyze-needed: ALTER TYPE ADD VALUE is type-system metadata, and
+-- ADD COLUMN integer NULL is metadata-only on PG11+. No rows are
+-- rewritten, no planner stats to refresh.
+
+ALTER TYPE "wxyc_schema"."discogs_release_id_source_enum" ADD VALUE 'library_identity' AFTER 'discogs_direct_backfill';--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."rotation" ADD COLUMN "lml_identity_id" integer;
