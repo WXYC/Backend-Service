@@ -1,6 +1,6 @@
 /**
  * FK ON DELETE behaviour on flowsheet / rotation / reviews
- * (WXYC/Backend-Service#1126, migration 0094).
+ * (WXYC/Backend-Service#1126, migration 0097).
  *
  * Five FK constraints drifted between the Drizzle schema source (SET NULL
  * for the three flowsheet FKs, CASCADE for rotation.album_id and
@@ -46,7 +46,7 @@ const SEED_ARTIST_ID = 1;
 const SEED_GENRE_ID = 11;
 const SEED_FORMAT_ID = 1;
 
-describe('FK ON DELETE on flowsheet / rotation / reviews (#1126, migration 0094)', () => {
+describe('FK ON DELETE on flowsheet / rotation / reviews (#1126, migration 0097)', () => {
   let sql;
 
   beforeAll(() => {
@@ -67,13 +67,16 @@ describe('FK ON DELETE on flowsheet / rotation / reviews (#1126, migration 0094)
     // Constraint namespace is the per-worker schema (WXYC_SCHEMA_NAME). We
     // filter by both the constraint name and the namespace so a stale
     // constraint in `wxyc_schema` doesn't bleed into a worker schema's
-    // assertions.
+    // assertions. postgres-js binds a JS array as a Postgres text[] in the
+    // `ANY(${arr})` position (see flowsheet-etl-setwhere.spec.js:61,
+    // album-metadata-upsert.spec.js:159 for the canonical idiom).
+    const constraintNames = expectations.map((e) => e.name);
     const rows = await sql`
       SELECT c.conname, c.confdeltype
         FROM pg_constraint c
         JOIN pg_namespace n ON n.oid = c.connamespace
        WHERE n.nspname = ${SCHEMA}
-         AND c.conname = ANY (${sql.array(expectations.map((e) => e.name))})
+         AND c.conname = ANY(${constraintNames})
     `;
     const observed = new Map(rows.map((r) => [r.conname, r.confdeltype]));
 
