@@ -146,15 +146,25 @@ export function makeEnrichmentHandler(): (event: CdcEvent) => void {
     // shared LML Semaphore(5) so concurrency is capped at the chokepoint.
     //
     // BS#1108: register in the in-flight set so the SIGTERM drain can await
-    // pending lookups before the DB pool closes. `handleCandidate` itself
-    // never throws (its outer try/catch routes both LML errors and DB
-    // errors through Sentry + console.error), so the .finally below always
-    // fires and the registry can't slow-leak past a tick.
+    // pending lookups before the DB pool closes. `handleCandidate`'s body
+    // is wrapped in try/catch for LML + DB errors, but the outer
+    // `Sentry.startSpan(...)` call itself sits outside any try/catch — if
+    // Sentry's internals throw (e.g. exporter error, disposed hub during
+    // shutdown) the promise rejects. Chain `.catch(() => {})` so the
+    // discarded `void promise.finally(...)` can't produce an
+    // unhandledRejection that crashes the worker mid-shutdown. Mirrors
+    // backend's pattern in apps/backend/services/metadata/enrichment.service.ts.
     const promise = handleCandidate(candidate);
     inFlightCandidates.add(promise);
-    void promise.finally(() => {
-      inFlightCandidates.delete(promise);
-    });
+    void promise
+      .catch(() => {
+        // Swallow defensively; handleCandidate already routes its own
+        // failures through Sentry + console.error. A reject reaching here
+        // is a Sentry/runtime bug, not a row-level error worth re-surfacing.
+      })
+      .finally(() => {
+        inFlightCandidates.delete(promise);
+      });
   };
 }
 
