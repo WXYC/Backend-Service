@@ -265,6 +265,53 @@ describe('ServerEventsManager', () => {
     });
   });
 
+  describe('registerClient close-before-insert race (BS#1128)', () => {
+    // Build a mock Response whose `write` synchronously emits `close`,
+    // mimicking a TCP RST that arrives between the close-handler attach
+    // and the final `this.clients.set(client.id, client)` insertion.
+    function createMockResponseClosingOnWrite(): Response {
+      const emitter = new EventEmitter();
+      const res = {
+        writeHead: jest.fn(),
+        write: jest.fn().mockImplementation(() => {
+          // Fire 'close' synchronously during writeHead/write — i.e. while
+          // registerClient is still mid-function, before clients.set runs.
+          emitter.emit('close');
+          return true;
+        }),
+        end: jest.fn(),
+        on: emitter.on.bind(emitter),
+        emit: emitter.emit.bind(emitter),
+      } as unknown as Response;
+      return res;
+    }
+
+    it('does not leave a dead client in the clients map when close fires before insert', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      const res = createMockResponseClosingOnWrite();
+      const client = mgr.registerClient(res);
+
+      // If the race is fixed, the close handler observed the client in the
+      // map and removed it, OR the client was never inserted at all.
+      // Either way, a subscribe call must fail with a 404-style WxycError.
+      expect(() => mgr.subscribe(['topic-a'], client.id)).toThrow(/not found/i);
+    });
+
+    it('disconnect() of a raced client is a no-op (entry was already cleaned up)', () => {
+      const mgr = new ServerEventsManager('topic-a');
+      const res = createMockResponseClosingOnWrite();
+      const client = mgr.registerClient(res);
+
+      // If the dead client leaked into `clients`, disconnect() would find
+      // it and call `res.end()`. With the race fixed, the close handler
+      // already removed it (or it was never inserted), so end is untouched.
+      const endMock = res.end as jest.Mock;
+      endMock.mockClear();
+      mgr.disconnect(client.id);
+      expect(endMock).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getClientCountByTopic', () => {
     it('returns a count of subscribed clients per topic', () => {
       const mgr = new ServerEventsManager('topic-a', 'topic-b');

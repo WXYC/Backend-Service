@@ -117,6 +117,14 @@ export class ServerEventsManager {
       res: res,
     };
 
+    // Insert into the clients map BEFORE attaching the close handler and
+    // before any operation that can synchronously trigger 'close' (writeHead,
+    // write). Otherwise a TCP reset arriving between `on('close')` and
+    // `clients.set` would run the close handler's `unsubAll(client.id)` as a
+    // no-op against the not-yet-inserted entry, and the dead client would
+    // leak into the map permanently (BS#1128). No async boundary may sit
+    // between this set() and the on('close') attach below.
+    this.clients.set(client.id, client);
     this.startHeartbeat(client.id);
 
     client.res.on('close', () => {
@@ -141,8 +149,6 @@ export class ServerEventsManager {
       timestamp: new Date(),
     };
     client.res.write(`data: ${JSON.stringify(connectionEvent)}\n\n`);
-
-    this.clients.set(client.id, client);
 
     return client;
   };
