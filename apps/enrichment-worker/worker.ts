@@ -47,12 +47,26 @@ const SWEEP_INTERVAL_MS = envInt('ENRICHMENT_SWEEP_INTERVAL_MS', 60_000);
 const SHUTDOWN_STEP_BOUND_MS = 5_000;
 
 /**
- * In-flight candidate drain budget (BS#1108). Set wide enough for an
- * in-flight `lookupMetadata` to finish — the shared client's
- * `ENRICHMENT_LML_BUDGET_MS` defaults to 29s, so 30s gives the lookup a
- * full budget plus 1s of slack to write the finalize row before the drain
- * gives up. Override via env for tighter integration runs. A hung LML call
- * is bounded by this ceiling so it can't block deploy indefinitely.
+ * Hard ceiling on the in-flight candidate drain budget. The worker runs in
+ * a Docker container stopped with `docker stop $TARGET_APP` (no `-t` flag —
+ * see `.github/actions/deploy-service/action.yml`), so SIGTERM-to-SIGKILL
+ * is the Docker default of 10s. The drain step runs after `stop_cdc` and
+ * `drain_sweep` (each bounded by SHUTDOWN_STEP_BOUND_MS=5s), so by the
+ * time control reaches the drain Docker has at most ~10s left in absolute
+ * terms — any deadline above ~5s is dead budget. Clamp the env override at
+ * SHUTDOWN_STEP_BOUND_MS so a deploy-config typo can't push the deadline
+ * past Docker's kill window.
+ */
+const WORKER_DRAIN_DEADLINE_CEILING_MS = SHUTDOWN_STEP_BOUND_MS;
+
+/**
+ * In-flight candidate drain budget (BS#1108). Matches the backend's
+ * ENRICHMENT_DRAIN_DEADLINE_MS=2_000 (apps/backend/app.ts) — tuned to the
+ * same 10s docker-stop grace window. A hung LML call is bounded by this
+ * ceiling so it can't block deploy past Docker's SIGKILL. Override via env
+ * for tighter integration runs; the override is clamped at
+ * WORKER_DRAIN_DEADLINE_CEILING_MS so an over-eager deploy variable can't
+ * blow past the grace window.
  *
  * Note: this is the deadline for `drainInFlightCandidates` *itself*, NOT a
  * `runShutdownStep` bound — drain owns its own internal timeout (the
@@ -62,7 +76,10 @@ const SHUTDOWN_STEP_BOUND_MS = 5_000;
  * available; its rejection-safe contract removes the need for outer
  * try/catch.
  */
-const WORKER_DRAIN_DEADLINE_MS = envInt('ENRICHMENT_WORKER_DRAIN_DEADLINE_MS', 30_000);
+const WORKER_DRAIN_DEADLINE_MS = Math.min(
+  envInt('ENRICHMENT_WORKER_DRAIN_DEADLINE_MS', 2_000),
+  WORKER_DRAIN_DEADLINE_CEILING_MS
+);
 
 /**
  * Run a shutdown step with a per-step bound and a swallow-and-capture

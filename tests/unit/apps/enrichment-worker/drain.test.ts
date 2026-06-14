@@ -103,6 +103,14 @@ function dispatchTick(id: number): void {
 describe('enrichment-worker in-flight drain (BS#1108)', () => {
   beforeEach(() => {
     _resetInFlightCandidatesForTest();
+    // Every mock today uses `mockReturnValueOnce` / `mockResolvedValueOnce`,
+    // so leakage between cases is latent rather than observable. Reset
+    // pinned here so a future test that uses `mockReturnValue` (sticky) or
+    // forgets to re-mock can't silently inherit a previous case's stub —
+    // the failure mode would be a flaky test that passes in isolation and
+    // fails in suite order, which is exactly the kind of bug a unit-test
+    // file should refuse to harbor.
+    jest.resetAllMocks();
   });
 
   describe('inFlightCandidates registry', () => {
@@ -159,6 +167,37 @@ describe('enrichment-worker in-flight drain (BS#1108)', () => {
       await new Promise((resolve) => setImmediate(resolve));
 
       expect(getInFlightCandidateCount()).toBe(0);
+    });
+
+    it('does not raise unhandledRejection when Sentry.startSpan throws synchronously', async () => {
+      // Defensive: handleCandidate wraps its body in try/catch but the outer
+      // `await Sentry.startSpan(...)` sits outside any try/catch. If Sentry's
+      // internals throw (exporter error, disposed hub during shutdown), the
+      // handleCandidate promise rejects. The dispatcher's `void promise.finally(...)`
+      // would otherwise discard the rejection and surface as an
+      // unhandledRejection in production. The `.catch(() => {})` chain pins
+      // that contract here.
+      mockFilterForEnrichment.mockReturnValueOnce(makeCandidate(99));
+      (Sentry.startSpan as jest.Mock).mockImplementation(() => {
+        throw new Error('Sentry exporter dead during shutdown');
+      });
+
+      const unhandled = jest.fn();
+      process.on('unhandledRejection', unhandled);
+      try {
+        const handler = makeEnrichmentHandler();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        handler({} as any);
+        // Two macrotask yields: one to let the rejection propagate through
+        // the .catch + .finally chain, one to let Node's microtask queue
+        // surface any unhandled rejection it would have emitted.
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(unhandled).not.toHaveBeenCalled();
+        expect(getInFlightCandidateCount()).toBe(0);
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
     });
   });
 
