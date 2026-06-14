@@ -36,6 +36,8 @@
 
 jest.mock('@wxyc/database', () => ({
   onCdcEvent: jest.fn(),
+  onCdcOversizedEvent: jest.fn(),
+  onCdcErrorEvent: jest.fn(),
   startCdcListener: jest.fn().mockResolvedValue(undefined),
   stopCdcListener: jest.fn().mockResolvedValue(undefined),
 }));
@@ -69,7 +71,7 @@ jest.mock('ws', () => {
 });
 
 import type { Server as HttpServer } from 'http';
-import { onCdcEvent, startCdcListener, stopCdcListener } from '@wxyc/database';
+import { onCdcErrorEvent, onCdcEvent, onCdcOversizedEvent, startCdcListener, stopCdcListener } from '@wxyc/database';
 import { WebSocketServer } from 'ws';
 import { setupCdcWebSocket, shutdownCdcWebSocket } from '../../../../../../apps/backend/services/cdc/cdc-websocket';
 import { startCdcDispatcher, shutdownCdcDispatcher } from '../../../../../../apps/backend/services/cdc/dispatcher';
@@ -219,6 +221,124 @@ describe('setupCdcWebSocket (BS#1187)', () => {
         await shutdownCdcWebSocket();
       }
     });
+  });
+});
+
+describe('startCdcDispatcher BS#1120 fallback sinks', () => {
+  // BS#1120 / AC #3: migration 0094 emits to `cdc_oversized` and `cdc_error`
+  // when the primary `cdc` payload would have been dropped (oversized) or the
+  // trigger body raised. The dispatcher's job is to bridge those into Sentry
+  // captureMessage calls so the alert hook can fire. Pins:
+  //   1. Both channel subscriptions are wired on startCdcDispatcher.
+  //   2. An oversized event produces a Sentry.captureMessage('cdc.oversized_payload', ...).
+  //   3. A cdc_error event produces a Sentry.captureMessage('cdc.trigger_exception', ...).
+  //   4. Double-start does not double-wire (idempotency latch).
+  //   5. shutdownCdcDispatcher drops the latch so a re-start re-wires.
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    // Drop any latch left over from a prior describe's startCdcDispatcher call.
+    await shutdownCdcDispatcher();
+    jest.clearAllMocks();
+  });
+
+  afterEach(async () => {
+    await shutdownCdcDispatcher();
+  });
+
+  it('subscribes to both cdc_oversized and cdc_error on dispatcher start', async () => {
+    await startCdcDispatcher();
+    expect(onCdcOversizedEvent).toHaveBeenCalledTimes(1);
+    expect(onCdcErrorEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('captureMessages cdc.oversized_payload with table + action + reason tags when an oversized event arrives', async () => {
+    await startCdcDispatcher();
+    // The dispatcher registered a callback via onCdcOversizedEvent — pull it
+    // out of the mock and invoke it directly.
+    const oversizedCb = (onCdcOversizedEvent as jest.Mock).mock.calls[0][0] as (e: unknown) => void;
+
+    oversizedCb({
+      table: 'flowsheet',
+      schema: 'wxyc_schema',
+      action: 'UPDATE',
+      primary_key: '42',
+      payload_bytes: 8501,
+      timestamp: 1_700_000_000_000,
+      reason: 'payload_too_large',
+    });
+
+    expect(captureMessageMock).toHaveBeenCalledTimes(1);
+    expect(captureMessageMock).toHaveBeenCalledWith(
+      'cdc.oversized_payload',
+      expect.objectContaining({
+        level: 'warning',
+        tags: expect.objectContaining({
+          subsystem: 'cdc',
+          table: 'flowsheet',
+          action: 'UPDATE',
+          reason: 'payload_too_large',
+        }),
+        extra: expect.objectContaining({
+          schema: 'wxyc_schema',
+          primary_key: '42',
+          payload_bytes: 8501,
+        }),
+        fingerprint: ['cdc-oversized-payload'],
+      })
+    );
+  });
+
+  it('captureMessages cdc.trigger_exception with sqlstate tag when a cdc_error event arrives', async () => {
+    await startCdcDispatcher();
+    const errorCb = (onCdcErrorEvent as jest.Mock).mock.calls[0][0] as (e: unknown) => void;
+
+    errorCb({
+      table: 'flowsheet',
+      schema: 'wxyc_schema',
+      action: 'INSERT',
+      sqlstate: '22023',
+      sqlerrm: 'invalid_parameter_value',
+      timestamp: 1_700_000_000_000,
+      reason: 'trigger_exception',
+    });
+
+    expect(captureMessageMock).toHaveBeenCalledTimes(1);
+    expect(captureMessageMock).toHaveBeenCalledWith(
+      'cdc.trigger_exception',
+      expect.objectContaining({
+        level: 'error',
+        tags: expect.objectContaining({
+          subsystem: 'cdc',
+          table: 'flowsheet',
+          action: 'INSERT',
+          reason: 'trigger_exception',
+          sqlstate: '22023',
+        }),
+        extra: expect.objectContaining({
+          schema: 'wxyc_schema',
+          sqlerrm: 'invalid_parameter_value',
+        }),
+        fingerprint: ['cdc-trigger-exception'],
+      })
+    );
+  });
+
+  it('does not re-wire fallback sinks on a second startCdcDispatcher call (idempotency)', async () => {
+    await startCdcDispatcher();
+    await startCdcDispatcher();
+    // Without the latch, each call would register a fresh sink → 2 captures
+    // per inbound event. With the latch, exactly one.
+    expect(onCdcOversizedEvent).toHaveBeenCalledTimes(1);
+    expect(onCdcErrorEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('shutdownCdcDispatcher drops the latch so a subsequent start re-wires', async () => {
+    await startCdcDispatcher();
+    await shutdownCdcDispatcher();
+    await startCdcDispatcher();
+    expect(onCdcOversizedEvent).toHaveBeenCalledTimes(2);
+    expect(onCdcErrorEvent).toHaveBeenCalledTimes(2);
   });
 });
 
