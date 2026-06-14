@@ -822,6 +822,90 @@ export async function searchLibrary(params: {
 }
 
 /**
+ * Wire shape for `POST /api/v1/identity/resolve` (LML#526, BS#1380).
+ *
+ * Mirrors `ReleaseIdentityResolveRequest` / `ReleaseIdentityResolveResponse`
+ * in `wxyc-shared/api.yaml`. Defined locally rather than imported from
+ * `@wxyc/shared/dtos` so this wrapper compiles against the currently-shipped
+ * shared bundle; the types move to `@wxyc/shared/dtos` once the OpenAPI
+ * codegen catches up. Same approach used by the original `EntityResolveResponse`
+ * during its own ramp-up.
+ *
+ * v1 accepts only `kind: 'release'`; `kind: 'artist'` is reserved for the
+ * symmetric extension.
+ */
+export type ReleaseIdentityResolveSource = 'discogs_release' | 'discogs_master' | 'bandcamp';
+
+export interface ReleaseIdentityResolveRequest {
+  kind: 'release';
+  source: ReleaseIdentityResolveSource;
+  /**
+   * Source-specific identifier. For `discogs_release` / `discogs_master` it
+   * is the positive integer ID as a string; zero / negative values are
+   * rejected with 422 (Discogs uses `0` for the unknown-release sentinel).
+   * For `bandcamp` it is the canonical album URL.
+   */
+  external_id: string;
+}
+
+export interface ReleaseIdentityResolveResponse {
+  /** Stable `entity.release_identity.id` for the resolved row. */
+  identity_id: number;
+  kind: 'release';
+  /** `true` when this call inserted a new identity row; `false` on re-resolve. */
+  minted: boolean;
+}
+
+/**
+ * BS#1380: default timeout for `resolveIdentity`. The dj-site `addToRotation`
+ * path awaits this synchronously inside the Express handler before INSERT,
+ * so the budget gates user-perceived latency. 2 s matches the user-visible
+ * read paths (BS#992 picker budget) and is the value the BS#1380 plan
+ * commits to in prose; the catch path falls back to NULL on timeout and the
+ * daily backfill cron catches up within ~24h.
+ */
+const RESOLVE_IDENTITY_TIMEOUT_MS = 2000;
+
+/**
+ * Resolve a release-shaped `(source, external_id)` pair to a stable
+ * `entity.release_identity.id` on the LML side (LML#526).
+ *
+ * Idempotent on `(source, external_id)`: the same triple always returns
+ * the same `identity_id`. First call mints (`minted: true`), subsequent
+ * calls return the existing row (`minted: false`).
+ *
+ * The default timeout (`LML_RESOLVE_TIMEOUT_MS`, fallback 2000 ms) is set
+ * at the wrapper layer rather than at each caller — every consumer (BS's
+ * `addToRotation`, the `rotation-lml-identity-backfill` cron) wants the
+ * same fast-fail semantics. Pass an explicit `timeoutMs` to override.
+ *
+ * Errors:
+ *   - Timeout: `LmlClientError('LML request timed out', 504)` (rethrown
+ *     from `lmlFetch`). Caller categorises the AbortError as `'timeout'`
+ *     in its Sentry counter.
+ *   - 5xx: `LmlClientError(..., 502)` (the upstream status is rolled
+ *     into the LML client's "treat as bad gateway" wrapper).
+ *   - 4xx (incl. 422 sentinel rejection): `LmlClientError(..., status)`.
+ *   - Network: `LmlClientError(..., 502)` after the fetch throws.
+ */
+export async function resolveIdentity(
+  request: ReleaseIdentityResolveRequest,
+  options?: { timeoutMs?: number }
+): Promise<ReleaseIdentityResolveResponse> {
+  const timeoutMs = options?.timeoutMs ?? envInt('LML_RESOLVE_TIMEOUT_MS', RESOLVE_IDENTITY_TIMEOUT_MS);
+  const response = await lmlFetch(
+    '/api/v1/identity/resolve',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    },
+    timeoutMs
+  );
+  return (await response.json()) as ReleaseIdentityResolveResponse;
+}
+
+/**
  * Check whether the LML service is configured.
  */
 export function isLmlConfigured(): boolean {
