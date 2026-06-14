@@ -5,13 +5,13 @@
 --   old NO ACTION constraint enforced exactly that)
 -- @no-precondition-needed: ON DELETE behaviour change is forward-looking; it
 --   governs future DELETEs on the parent table, not the present FK shape.
--- 0094 — Fix FK ON DELETE drift on flowsheet / rotation / reviews.
+-- 0097 — Fix FK ON DELETE drift on flowsheet / rotation / reviews.
 --
 -- Five FK constraints were created with ON DELETE NO ACTION in
 -- `0000_rare_prima.sql` and recreated unchanged by `0016_nervous_hydra.sql`,
 -- but the Drizzle schema source declares them as SET NULL (flowsheet) and
 -- CASCADE (rotation, reviews). The most-recent snapshot
--- (`meta/0093_snapshot.json`) records the schema-source values, masking the
+-- (`meta/0096_snapshot.json`) records the schema-source values, masking the
 -- drift from `drizzle-kit generate` — no subsequent migration patched the
 -- production DB to match, so new environments diverge from prod.
 --
