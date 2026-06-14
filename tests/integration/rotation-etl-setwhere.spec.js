@@ -323,6 +323,18 @@ describe('rotation-etl value-aware setWhere (BS#1063)', () => {
     expect(after[0].discogs_release_id).toBe(999001);
     expect(after[0].lml_identity_id).toBe(7700001);
     expect(after[0].kill_date.toISOString().slice(0, 10)).toBe('2027-01-01');
+
+    // Restore kill_date to NULL for the downstream 'xmin-quiet no-op' test.
+    // That test arranges only discogs_release_id + source and relies on the
+    // other fields already matching its upsert input (kill_date: null,
+    // rotation_bin: 'H', ...) so the setWhere gate doesn't fire on a stale
+    // residual. Per the test-ordering convention at the top of the BS#1029
+    // block (lines 170-173): tests reset what they touched.
+    await sql`
+      UPDATE ${sql(SCHEMA)}.rotation
+      SET kill_date = NULL
+      WHERE legacy_rotation_id = ${ROTATION_LEGACY_ID}
+    `;
   });
 
   test('NULL excluded.discogs_release_id over a backfilled row is a xmin-quiet no-op', async () => {
