@@ -176,27 +176,29 @@ describe('cdc-listener liveness (BS#1014)', () => {
       await cdc.enableLivenessProbe({ probeIntervalMs: 1000, echoTimeoutMs: 5000 });
       cb.mockClear();
 
-      // First tick → NOTIFY sent
+      // Flip to false first so the echo→true transition is observable past
+      // the duplicate-suppression filter. Use a one-shot NOTIFY rejection
+      // (immediate false dispatch) rather than the echo-timeout path,
+      // because the timeout now clears `outstandingProbeToken` (BS#1116) —
+      // making a late-arriving echo intentionally a no-op.
+      handles.sql.notify.mockRejectedValueOnce(new Error('pool dead'));
+      const consoleErr = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       jest.advanceTimersByTime(1000);
       await Promise.resolve();
       await Promise.resolve();
-      const token = handles.sql.notify.mock.calls[0][1] as string;
-
-      // Echo arrives via the cdc_health onnotify
-      // But we're still in "true" state from the initial dispatch, so we
-      // need to flip to false first for the echo to register a transition.
-      // Easier: confirm the suppression-aware path by forcing a state
-      // change first.
-      // Reset by hand: deliver a non-matching payload to no-op the echo
-      // path, then force a timeout to flip to false, then deliver the echo.
-
-      // Step 1: timeout to flip false
-      jest.advanceTimersByTime(5000);
       await Promise.resolve();
       expect(cb).toHaveBeenLastCalledWith(false);
-
-      // Step 2: echo of the original token now flips back to true
+      consoleErr.mockRestore();
       cb.mockClear();
+
+      // Next tick: NOTIFY succeeds, token outstanding
+      jest.advanceTimersByTime(1000);
+      await Promise.resolve();
+      await Promise.resolve();
+      const token = handles.sql.notify.mock.calls.at(-1)?.[1] as string;
+      expect(typeof token).toBe('string');
+
+      // Echo of the live outstanding token flips state back to true
       handles.healthOnNotify?.(token);
       expect(cb).toHaveBeenCalledWith(true);
     });
@@ -240,6 +242,50 @@ describe('cdc-listener liveness (BS#1014)', () => {
 
       // Tick 3 (t=3000): probe is 2000ms old, exceeds timeout → false
       jest.advanceTimersByTime(1000);
+      await Promise.resolve();
+      expect(cb).toHaveBeenCalledWith(false);
+    });
+
+    it('continues issuing fresh probes after an echo timeout (wedge recovery, BS#1116)', async () => {
+      // Regression: after the first echo timeout, the probe state must be
+      // cleared so the next interval tick re-arms. Otherwise the early-return
+      // on `outstandingProbeToken !== null` kills probing for the rest of the
+      // process's life — even after postgres-js auto-reconnect.
+      const cb = jest.fn();
+      cdc.onCdcConnectionStateChange(cb);
+      await cdc.startCdcListener();
+      await cdc.enableLivenessProbe({ probeIntervalMs: 1000, echoTimeoutMs: 2000 });
+      cb.mockClear();
+      handles.sql.notify.mockClear();
+
+      // Tick 1 (t=1000): first probe NOTIFY
+      jest.advanceTimersByTime(1000);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(handles.sql.notify).toHaveBeenCalledTimes(1);
+
+      // Tick 3 (t=3000): probe is 2000ms old → exceeds echoTimeoutMs → false
+      jest.advanceTimersByTime(2000);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(cb).toHaveBeenCalledWith(false);
+
+      // Simulate postgres-js auto-reconnect flipping state back to true so
+      // the next failure is observable as a fresh false transition.
+      handles.cdcOnListen?.();
+      expect(cb).toHaveBeenLastCalledWith(true);
+      cb.mockClear();
+      handles.sql.notify.mockClear();
+
+      // Tick 4 (t=4000): probe loop must have re-armed → a fresh NOTIFY goes out
+      jest.advanceTimersByTime(1000);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(handles.sql.notify).toHaveBeenCalledTimes(1);
+
+      // Tick 6 (t=6000): the fresh probe is 2000ms old → false again
+      jest.advanceTimersByTime(2000);
+      await Promise.resolve();
       await Promise.resolve();
       expect(cb).toHaveBeenCalledWith(false);
     });
