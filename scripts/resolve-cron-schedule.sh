@@ -44,12 +44,24 @@ if [ -z "$DEFAULT" ]; then
   exit 1
 fi
 
-# Override only for the specific job the H7 ticket calls out. Generalizing
-# to "any job" would risk an accidental override from a stale env var
-# fanning out across the whole matrix; keep the override scope narrow
-# until a second job needs it.
-if [ "$TARGET" = "flowsheet-metadata-backfill" ] && [ -n "${BACKFILL_CRON_SCHEDULE:-}" ]; then
-  echo "$BACKFILL_CRON_SCHEDULE"
-else
-  echo "$DEFAULT"
-fi
+# Override only for jobs that explicitly opt into the shared env var.
+# Generalizing to "any job" would risk an accidental override from a stale
+# env var fanning out across the whole matrix; keep the allowlist narrow
+# and explicit. Each entry needs a documented operational reason:
+#   - flowsheet-metadata-backfill (BS#914 / H7): nightly metadata sweep;
+#     ops occasionally tightens the cadence (hourly) during C6 retunes
+#   - rotation-lml-identity-backfill (BS#1380): daily LML-identity resolve;
+#     shares the metadata sweep's ops cadence story since both are
+#     LML-bounded drift-repair crons
+case "$TARGET" in
+  flowsheet-metadata-backfill|rotation-lml-identity-backfill)
+    if [ -n "${BACKFILL_CRON_SCHEDULE:-}" ]; then
+      echo "$BACKFILL_CRON_SCHEDULE"
+    else
+      echo "$DEFAULT"
+    fi
+    ;;
+  *)
+    echo "$DEFAULT"
+    ;;
+esac
