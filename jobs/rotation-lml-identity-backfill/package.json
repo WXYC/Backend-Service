@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/rotation-lml-identity-backfill",
+  "cron-schedule": "0 6 * * *",
+  "version": "1.0.0",
+  "description": "WXYC recurring drift-repair: resolve rotation.lml_identity_id via LML for rows with a non-NULL discogs_release_id. Catches rotation-etl-written rows (rotation-etl never calls LML) and addToRotation resolve-failure fallbacks within ~24h (BS#1380).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_rotation_lml_identity_backfill:ci -f ../../Dockerfile.rotation-lml-identity-backfill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.53.1",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
