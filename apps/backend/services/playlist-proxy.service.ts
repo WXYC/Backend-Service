@@ -159,13 +159,21 @@ export function getRecentEntries(n: number): GroupedResponse {
  * Open the SSE connection to tubafrenzy. Call once at startup.
  */
 export function startPlaylistProxy(): void {
+  stopped = false;
   connectSSE();
 }
 
 /**
  * Close the SSE connection, cancel pending reconnects, and clear state.
+ * Idempotent: safe to call multiple times.
+ *
+ * The `stopped` flag gates the 'error' handler so an error that fires
+ * *after* this call (queued in the EventLoop, or emitted by `close()`
+ * itself in some EventSource implementations) cannot schedule a fresh
+ * reconnect (BS#1132).
  */
 export function stopPlaylistProxy(): void {
+  stopped = true;
   if (currentEventSource) {
     currentEventSource.close();
     currentEventSource = null;
@@ -203,8 +211,12 @@ let reconnectDelay = 1000;
 const MAX_RECONNECT_DELAY = 30000;
 let currentEventSource: EventSource | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+// `stopped` gates the 'error' handler from scheduling a reconnect after
+// `stopPlaylistProxy()`. Cleared by `startPlaylistProxy`/`connectSSE`.
+let stopped = false;
 
 function connectSSE(): void {
+  stopped = false;
   const url = `${TUBAFRENZY_URL}/playlists/recentStream`;
   console.log(`[playlist-proxy] Connecting to SSE: ${url}`);
 
@@ -238,10 +250,25 @@ function connectSSE(): void {
   });
 
   es.addEventListener('error', () => {
-    console.error(`[playlist-proxy] SSE error, reconnecting in ${reconnectDelay}ms`);
     es.close();
     if (currentEventSource === es) currentEventSource = null;
+
+    // If the operator has stopped the proxy, do not schedule a
+    // reconnect. Without this guard, errors that fire after stop
+    // (queued in the EventLoop, or emitted by `close()` itself)
+    // would silently reopen the upstream connection. BS#1132.
+    if (stopped) return;
+
+    console.error(`[playlist-proxy] SSE error, reconnecting in ${reconnectDelay}ms`);
+
+    // Clear any prior pending timer before assigning a fresh one.
+    // Cascading 'error' events (e.g. during a deploy disconnect)
+    // would otherwise stack parallel reconnects, each invoking
+    // `connectSSE()` independently. BS#1132.
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => connectSSE(), reconnectDelay);
+
+    // Only escalate the backoff when a reconnect is actually scheduled.
     reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
   });
 }
