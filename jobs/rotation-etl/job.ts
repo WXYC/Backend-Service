@@ -151,10 +151,11 @@ const runIncremental = async (): Promise<SyncResult> => {
           // TRUE — silently nulling a perfectly-good lml_identity_id on
           // every kill_date / artist_name / etc. change.
           //
-          // Guard symmetric to the existing setWhere term at lines
-          // 153-154 (`excluded.discogs_release_id IS NOT NULL AND IS
-          // DISTINCT FROM rotation.discogs_release_id`): only clear
-          // when tubafrenzy supplied a non-NULL different id.
+          // Guard symmetric to the existing setWhere term below
+          // (`excluded.discogs_release_id IS NOT NULL AND
+          // rotation.discogs_release_id IS DISTINCT FROM
+          // excluded.discogs_release_id`): only clear when tubafrenzy
+          // supplied a non-NULL different id.
           //
           // Equivalent formulation:
           //   COALESCE(excluded.discogs_release_id, rotation.discogs_release_id)
