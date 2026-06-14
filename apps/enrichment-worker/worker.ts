@@ -18,7 +18,9 @@ import {
   closeDatabaseConnection,
   enableLivenessProbe,
   onCdcConnectionStateChange,
+  onCdcErrorEvent,
   onCdcEvent,
+  onCdcOversizedEvent,
   startCdcListener,
   stopCdcListener,
 } from '@wxyc/database';
@@ -214,6 +216,51 @@ const main = async (): Promise<void> => {
   });
 
   onCdcEvent(makeEnrichmentHandler());
+
+  // BS#1120: wire the migration-0094 fallback channels to Sentry so a dropped
+  // primary `cdc` payload (oversized row) or an unexpected trigger exception
+  // produces a metric the alert can fire on. Both the worker and the
+  // backend's CDC dispatcher subscribe; they're independent LISTEN
+  // connections, so each process needs its own sink.
+  onCdcOversizedEvent((event) => {
+    Sentry.captureMessage('cdc.oversized_payload', {
+      level: 'warning',
+      tags: {
+        subsystem: 'cdc',
+        consumer: 'enrichment-worker',
+        table: event.table,
+        action: event.action,
+        reason: event.reason,
+      },
+      extra: {
+        schema: event.schema,
+        primary_key: event.primary_key,
+        payload_bytes: event.payload_bytes,
+        timestamp: event.timestamp,
+      },
+      fingerprint: ['cdc-oversized-payload'],
+    });
+  });
+  onCdcErrorEvent((event) => {
+    Sentry.captureMessage('cdc.trigger_exception', {
+      level: 'error',
+      tags: {
+        subsystem: 'cdc',
+        consumer: 'enrichment-worker',
+        table: event.table,
+        action: event.action,
+        reason: event.reason,
+        sqlstate: event.sqlstate,
+      },
+      extra: {
+        schema: event.schema,
+        sqlerrm: event.sqlerrm,
+        timestamp: event.timestamp,
+      },
+      fingerprint: ['cdc-trigger-exception'],
+    });
+  });
+
   await startCdcListener();
   // Belt-and-suspenders: the onlisten hook should have already flipped this
   // to true; re-assert in case a future cdc-listener change skips dispatch.
