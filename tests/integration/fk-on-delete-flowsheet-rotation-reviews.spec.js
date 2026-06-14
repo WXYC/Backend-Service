@@ -12,29 +12,18 @@
  *
  * This spec is the live regression test: it asserts the current
  * `pg_constraint.confdeltype` for each of the five FKs (mirroring the
- * issue body's reproduction query) AND exercises the actual ON DELETE
- * behaviour via a parent-row DELETE under transaction rollback (so the
- * shape fixture loaded by globalSetup is not perturbed).
+ * issue body's reproduction query) AND exercises each of the three
+ * actual ON DELETE behaviours (flowsheet SET NULL, rotation CASCADE,
+ * reviews CASCADE) via a parent-row DELETE under transaction rollback
+ * (so the shape fixture loaded by globalSetup is not perturbed).
  *
  * If a future schema change re-introduces the drift, this spec fails
  * before the migration is ever attempted against prod.
  */
 
-const postgres = require('postgres');
+const { getTestDb, withRollback } = require('../utils/db');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
-
-function makeSql() {
-  return postgres({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
-    database: process.env.DB_NAME || 'wxyc_db',
-    user: process.env.DB_USERNAME || 'test-user',
-    password: process.env.DB_PASSWORD || 'test-pw',
-    onnotice: () => {},
-    max: 2,
-  });
-}
 
 // Map from pg_constraint.confdeltype's single-char encoding to the SQL
 // keyword we expect, for readable assertion failure messages.
@@ -46,15 +35,22 @@ const CONFDELTYPE_LABEL = {
   d: 'SET DEFAULT',
 };
 
+// Seeded baseline (dev_env/seed_db.sql): artists 1-3, genres 1-15
+// (rock=11), formats include cd=1 / vinyl=2. The shape fixture
+// (tests/fixtures/shape.sql) advances the library/rotation/flowsheet
+// sequences to 7199 so any serial-assigned id below lands at 7200+,
+// safely above the explicit-id fixture range (7000-7099). Each
+// behavioural test wraps its INSERT/DELETE in a withRollback transaction
+// so the fixture stays intact for downstream specs.
+const SEED_ARTIST_ID = 1;
+const SEED_GENRE_ID = 11;
+const SEED_FORMAT_ID = 1;
+
 describe('FK ON DELETE on flowsheet / rotation / reviews (#1126, migration 0094)', () => {
   let sql;
 
   beforeAll(() => {
-    sql = makeSql();
-  });
-
-  afterAll(async () => {
-    if (sql) await sql.end({ timeout: 5 });
+    sql = getTestDb();
   });
 
   test('pg_constraint.confdeltype matches the schema-source declarations', async () => {
@@ -96,35 +92,75 @@ describe('FK ON DELETE on flowsheet / rotation / reviews (#1126, migration 0094)
   });
 
   test('DELETE on a library row sets flowsheet.album_id to NULL (was NO ACTION)', async () => {
-    // Run inside a transaction we abort, so the fixture stays intact for
-    // any spec that runs after this one in the same Jest worker.
-    await sql
-      .begin(async (tx) => {
-        // Insert a library row + a flowsheet entry referencing it. Use a
-        // synthetic id well above the shape-fixture range (7000-7099) and
-        // above the `bigserial`/`serial` PK floor for stability.
-        const [lib] = await tx.unsafe(
-          `INSERT INTO "${SCHEMA}".library (artist_name, album_title)
-         VALUES ('FK Test Artist', 'FK Test Album')
-         RETURNING id`
-        );
-        const [fls] = await tx.unsafe(
-          `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, message)
-         VALUES (${lib.id}, 'track', 'fk-test')
-         RETURNING id`
-        );
+    await withRollback(async (tx) => {
+      // library: artist_id, genre_id, format_id, album_title, code_number
+      // are all NOT NULL (see shared/database/src/schema.ts:344).
+      // Let `serial` auto-assign id from the post-fixture sequence floor
+      // (7200+); the explicit-id fixture range stops at 7099.
+      const [lib] = await tx`
+        INSERT INTO ${tx(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
+        VALUES (${SEED_ARTIST_ID}, ${SEED_GENRE_ID}, ${SEED_FORMAT_ID},
+                'FK Test Album SET NULL', 9001, 'FK Test Artist')
+        RETURNING id
+      `;
+      // flowsheet: entry_type defaults to 'track'; play_order is NOT NULL
+      // with no default (schema.ts:679).
+      const [fls] = await tx`
+        INSERT INTO ${tx(SCHEMA)}.flowsheet (album_id, entry_type, play_order, message)
+        VALUES (${lib.id}, 'track', 1, 'fk-test-set-null')
+        RETURNING id
+      `;
 
-        await tx.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id = ${lib.id}`);
+      await tx`DELETE FROM ${tx(SCHEMA)}.library WHERE id = ${lib.id}`;
 
-        const after = await tx.unsafe(`SELECT album_id FROM "${SCHEMA}".flowsheet WHERE id = ${fls.id}`);
-        expect(after.length).toBe(1);
-        expect(after[0].album_id).toBeNull();
+      const after = await tx`SELECT album_id FROM ${tx(SCHEMA)}.flowsheet WHERE id = ${fls.id}`;
+      expect(after).toHaveLength(1);
+      expect(after[0].album_id).toBeNull();
+    });
+  });
 
-        // Roll back so neither row survives the test.
-        throw new Error('intentional rollback');
-      })
-      .catch((err) => {
-        if (err.message !== 'intentional rollback') throw err;
-      });
+  test('DELETE on a library row cascades to rotation rows (was NO ACTION)', async () => {
+    await withRollback(async (tx) => {
+      const [lib] = await tx`
+        INSERT INTO ${tx(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
+        VALUES (${SEED_ARTIST_ID}, ${SEED_GENRE_ID}, ${SEED_FORMAT_ID},
+                'FK Test Album CASCADE rotation', 9002, 'FK Test Artist')
+        RETURNING id
+      `;
+      // rotation: album_id is nullable but referenced; rotation_bin is
+      // NOT NULL (schema.ts:558).
+      const [rot] = await tx`
+        INSERT INTO ${tx(SCHEMA)}.rotation (album_id, rotation_bin)
+        VALUES (${lib.id}, 'L')
+        RETURNING id
+      `;
+
+      await tx`DELETE FROM ${tx(SCHEMA)}.library WHERE id = ${lib.id}`;
+
+      const after = await tx`SELECT id FROM ${tx(SCHEMA)}.rotation WHERE id = ${rot.id}`;
+      expect(after).toHaveLength(0);
+    });
+  });
+
+  test('DELETE on a library row cascades to reviews rows (was NO ACTION)', async () => {
+    await withRollback(async (tx) => {
+      const [lib] = await tx`
+        INSERT INTO ${tx(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
+        VALUES (${SEED_ARTIST_ID}, ${SEED_GENRE_ID}, ${SEED_FORMAT_ID},
+                'FK Test Album CASCADE reviews', 9003, 'FK Test Artist')
+        RETURNING id
+      `;
+      // reviews: album_id is NOT NULL + UNIQUE (schema.ts:1075).
+      const [rev] = await tx`
+        INSERT INTO ${tx(SCHEMA)}.reviews (album_id, review, author)
+        VALUES (${lib.id}, 'fk-test-cascade-reviews', 'fk-test')
+        RETURNING id
+      `;
+
+      await tx`DELETE FROM ${tx(SCHEMA)}.library WHERE id = ${lib.id}`;
+
+      const after = await tx`SELECT id FROM ${tx(SCHEMA)}.reviews WHERE id = ${rev.id}`;
+      expect(after).toHaveLength(0);
+    });
   });
 });
