@@ -858,14 +858,27 @@ export const flowsheet = wxyc_schema.table(
     // /flowsheet `?shows_limit=N` listing endpoint sequentially scans the
     // 2.6M-row table on every dj-site poll. See migration 0068 + issue #511.
     index('flowsheet_show_id_idx').on(table.show_id),
-    // `nextPlayOrder()` runs `SELECT max(play_order) FROM flowsheet` on every
-    // POST /flowsheet/ to derive the next monotonic play_order. Without this
-    // index that's a 2.6M-row parallel Seq Scan (~6s on prod) that exceeds
-    // the 5s `DB_STATEMENT_TIMEOUT_MS`, so postgres-js cancels and the API
-    // returns 500. With it, MAX is an O(1) leaf-page lookup. Built
-    // CONCURRENTLY out-of-band on prod 2026-04-30 to unblock the flowsheet
-    // during a live show. See migration 0071.
-    index('flowsheet_play_order_idx').on(sql`${table.play_order} DESC`),
+    // Composite B-tree on (show_id, play_order DESC) covering the per-show
+    // `nextPlayOrder()` MAX lookup that POST /flowsheet/ runs on every track
+    // and talkset insert. The original migration 0073 shipped a single-column
+    // DESC index on `play_order` to back the then-global MAX query; #693 then
+    // scoped `nextPlayOrder` to `WHERE show_id = ?`, leaving the single-column
+    // index misaligned (the planner can either backward-scan the global DESC
+    // index and filter by show_id, or bitmap-scan `flowsheet_show_id_idx` and
+    // aggregate — neither is the O(1) leaf-page lookup the original migration
+    // promised). The composite makes the per-show MAX a true O(1) lookup:
+    // each show's rows form a contiguous run in the index, with DESC ordering
+    // putting the per-show max at the run's leading edge. Same shape also
+    // accelerates the legacy mirror's announcement-entry lookup
+    // (`WHERE show_id = ? ORDER BY play_order DESC LIMIT 1` in
+    // apps/backend/middleware/legacy/flowsheet.mirror.ts) and `getEntriesByShow`
+    // (`WHERE show_id IN (...) ORDER BY play_order DESC`). Built CONCURRENTLY
+    // out-of-band on prod first; the migration is a no-op against the prod DB
+    // via `IF NOT EXISTS`. The prior single-column index is dropped in the
+    // same migration (BS#1133); the only non-per-show MAX(play_order) caller
+    // is `jobs/flowsheet-etl/job.ts:resetSequences()`, a one-shot post-bulk-
+    // load sequence reset that is not performance-sensitive.
+    index('flowsheet_show_id_play_order_idx').on(table.show_id, sql`${table.play_order} DESC`),
     // BS#902 (Epic F / F1). DESC B-tree on `updated_at` supports any
     // per-row staleness query that filters on `updated_at` (e.g. partial
     // ETag derivation downstream). The conditional-GET middleware itself

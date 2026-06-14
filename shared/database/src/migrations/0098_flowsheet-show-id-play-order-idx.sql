@@ -1,0 +1,78 @@
+-- BS#1133. Swap the single-column DESC `flowsheet_play_order_idx`
+-- (migration 0073) for a composite `(show_id, play_order DESC)`
+-- index that matches the actual `nextPlayOrder()` query shape.
+--
+-- Background:
+--   - 0073 shipped a single-column DESC index on `play_order` to back the
+--     then-global `SELECT max(play_order) FROM flowsheet` that
+--     `nextPlayOrder()` ran on every POST /flowsheet/ insert. At that time
+--     it was correctly O(1): top of the index = global max.
+--   - #693 then rewrote `nextPlayOrder()` to scope by `show_id`
+--     (apps/backend/services/flowsheet.service.ts) so brand-new shows
+--     no longer inherit `max + 1` from a prior show's late additions —
+--     necessary to preserve dj-site's optimistic-update reconciliation.
+--   - The index shape was not revisited at the time. On the 2.6M-row
+--     `flowsheet` table the planner now has three choices, none O(1):
+--       1) Backward index scan of `flowsheet_play_order_idx`, applying
+--          `show_id = ?` as a filter — fast only when the show is the
+--          most recent one (its rows are at the leading edge); for any
+--          earlier show the planner walks an increasingly large
+--          fraction of the index before finding a match.
+--       2) Bitmap Index Scan on `flowsheet_show_id_idx` (0068) →
+--          Bitmap Heap Scan → Aggregate — multiple heap pages per
+--          show, well beyond the 0.119 ms #687 measured.
+--       3) Seq scan + filter for small shows the planner mis-estimates.
+--
+-- A composite `(show_id, play_order DESC)` makes the per-show MAX a true
+-- O(1) leaf-page lookup: each show's rows form a contiguous run inside
+-- the index, with DESC ordering placing the per-show max at the run's
+-- leading edge. Same shape also covers two existing related queries:
+--   - `apps/backend/middleware/legacy/flowsheet.mirror.ts`'s show_start
+--     and show_end announcement lookups:
+--       SELECT * FROM flowsheet
+--        WHERE show_id = ?
+--        ORDER BY play_order DESC LIMIT 1;
+--   - `apps/backend/services/flowsheet.service.ts:getEntriesByShow`:
+--       SELECT ... FROM flowsheet
+--        WHERE show_id IN (...) ORDER BY play_order DESC;
+--
+-- The previous single-column `flowsheet_play_order_idx` is dropped in
+-- the same migration. The only remaining caller of the global
+-- MAX(play_order) shape is `jobs/flowsheet-etl/job.ts:resetSequences()`
+-- — a one-shot post-bulk-load sequence reset that runs occasionally
+-- (not on a hot request path), so the planner falling back to a seq
+-- scan there is acceptable and reclaims the 17 MB the single-column
+-- index used.
+--
+-- Production ops (run out-of-band BEFORE merging this PR to avoid
+-- the AccessExclusiveLock that the in-migration DDL would otherwise
+-- take on the 2.6M-row table during deploy):
+--
+--   CREATE INDEX CONCURRENTLY "flowsheet_show_id_play_order_idx"
+--     ON "wxyc_schema"."flowsheet"
+--     USING btree ("show_id", "play_order" DESC);
+--
+--   -- After the new index is VALID, drop the misaligned predecessor:
+--   DROP INDEX CONCURRENTLY IF EXISTS "wxyc_schema"."flowsheet_play_order_idx";
+--
+-- `CREATE INDEX CONCURRENTLY` takes only a `ShareUpdateExclusiveLock`,
+-- so DJs continue inserting flowsheet rows during the build. The new
+-- index's expected size is ~70 MB (composite on 2.6M rows, two ints
+-- per row plus tuple overhead) and the build typically completes in
+-- under a minute on the prod RDS instance — see the comparable 0080
+-- runbook for the same shape.
+--
+-- The in-migration forms below are NOT `CONCURRENTLY` because Drizzle
+-- wraps each migration in a transaction (`CREATE INDEX CONCURRENTLY
+-- cannot run inside a transaction block`). Same constraint and
+-- mitigation as 0057, 0061, 0068, 0070, 0074, 0078, 0080.
+--
+-- `CREATE INDEX IF NOT EXISTS` makes the create a no-op against the
+-- prod DB where the composite is already in place after the
+-- out-of-band build. `DROP INDEX IF EXISTS` makes the drop idempotent
+-- if the old index was already removed manually. Fresh dev databases
+-- pick the composite up on first migrate and never have the old
+-- single-column index to drop.
+
+DROP INDEX IF EXISTS "wxyc_schema"."flowsheet_play_order_idx";--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "flowsheet_show_id_play_order_idx" ON "wxyc_schema"."flowsheet" USING btree ("show_id","play_order" DESC);
