@@ -659,6 +659,13 @@
       "when": 1781468384340,
       "tag": "0095_drop-stale-trigram-indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1781468384341,
+      "tag": "0096_cdc_oversized_fallback",
+      "breakpoints": true
     }
   ]
 }
