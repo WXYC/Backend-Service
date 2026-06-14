@@ -1,32 +1,37 @@
 /**
- * Rotation-release-id loader for jobs/rotation-artist-backfill (BS#1361).
+ * Rotation identity-id loader for jobs/rotation-artist-backfill (BS#1381).
  *
- * Returns the set of Discogs release ids on active rotation rows. We
- * deliberately read from `rotation.discogs_release_id` (BS#1029) rather
- * than joining through `library`/`library_identity` so the script is one
- * SELECT with no cross-table assumptions. Rows without a populated
- * `discogs_release_id` are out of scope here — rotation-release-id-backfill
- * is the owner of resolving those, and chaining this cron to it would
- * couple two unrelated backfills.
+ * Returns the set of `entity.release_identity.id` values on active rotation
+ * rows. BS#1380 populates this column synchronously on `addToRotation` and
+ * via the daily `rotation-lml-identity-backfill` drift-repair cron, so an
+ * active rotation row should have a non-NULL value at steady state.
  *
- * Distinct on `discogs_release_id` because a release can appear in
- * rotation more than once over its history (multiple bins, re-adds,
- * legacy rows). One LML release call is enough to surface all credited
- * artists; ordering is by id ascending for deterministic dry-run output.
+ * Rows with `lml_identity_id IS NULL` are out of scope here — they belong
+ * to the LML-resolve path and chaining this cron to that one would couple
+ * two unrelated backfills. The exclusion is also load-bearing for the
+ * `backfill.not_found` alert in BS#1402: only rows BS *believes* have a
+ * valid handle should be counted in the denominator, otherwise the
+ * stale-reference signal gets diluted by rows that simply haven't been
+ * resolved yet.
+ *
+ * DISTINCT because a release identity can show up in rotation more than
+ * once over its history (multiple bins, re-adds, legacy rows). One
+ * refresh call is enough to warm every source/artist linked to it.
+ * Ordering is by id ascending for deterministic dry-run + batch logs.
  */
 
 import { sql } from 'drizzle-orm';
 import { db } from '@wxyc/database';
 
-export type RotationRelease = { discogs_release_id: number };
+export type RotationIdentity = { lml_identity_id: number };
 
-export const loadActiveRotationReleaseIds = async (): Promise<number[]> => {
+export const loadActiveRotationIdentityIds = async (): Promise<number[]> => {
   const rows = (await db.execute(sql`
-    SELECT DISTINCT "discogs_release_id"
+    SELECT DISTINCT "lml_identity_id"
     FROM "wxyc_schema"."rotation"
     WHERE ("kill_date" IS NULL OR "kill_date" > CURRENT_DATE)
-      AND "discogs_release_id" IS NOT NULL
-    ORDER BY "discogs_release_id" ASC
-  `)) as unknown as RotationRelease[];
-  return (rows ?? []).map((r) => r.discogs_release_id);
+      AND "lml_identity_id" IS NOT NULL
+    ORDER BY "lml_identity_id" ASC
+  `)) as unknown as RotationIdentity[];
+  return (rows ?? []).map((r) => r.lml_identity_id);
 };
