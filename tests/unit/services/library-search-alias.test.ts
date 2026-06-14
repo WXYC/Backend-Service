@@ -292,12 +292,13 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(results[0].matched_via_alias).toBeUndefined();
     });
 
-    it('flag on + only field-specific conditions: LATERAL is suppressed (no all-field branch to OR into)', async () => {
+    it('flag on + only field-specific conditions: alias path is suppressed (gated on all-field condition)', async () => {
       // A pure `artist:foo` query parses to one field=='artist_name'
-      // condition. buildAllFieldMatch is never called, so the alias OR is
-      // never added to WHERE; the LATERAL would compute similarity for every
-      // candidate row with no chance of an alias-only hit surviving. Skip
-      // the join entirely — result set is identical to the flag-off path.
+      // condition with no `field === 'all'` member, so `hasAllFieldCondition`
+      // is false and `aliasActive` is false. The catalog query falls through
+      // to the legacy single-SELECT path — no CTE, no UNION ALL, no alias
+      // substrate join — preserving pre-#1318 behavior for field-specific
+      // queries.
       process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
       resetCatalogSearchAliasConfig();
       stubGenreFormatLookups();

@@ -67,10 +67,10 @@ type ReconciledIdentityKey = (typeof RECONCILED_IDENTITY_KEYS)[number];
  * A library_artist_view row that may carry an attached `matched_via` hint when
  * the cascade's CTA or LML `/lookup` fallback surfaced it (catalog-track-search
  * plan §5.1), or a `matched_via_alias` hint when the artist-search-alias
- * LATERAL JOIN surfaced it (artist-search-alias plan §PR 5). Wraps
- * `LibraryArtistViewEntry` rather than replacing it so downstream functions
- * (enrichWithArtwork, serializeReconciledIdentity) accept tagged rows without
- * signature changes.
+ * UNION ALL branch surfaced it (artist-search-alias plan §PR 5, post-#1318).
+ * Wraps `LibraryArtistViewEntry` rather than replacing it so downstream
+ * functions (enrichWithArtwork, serializeReconciledIdentity) accept tagged
+ * rows without signature changes.
  */
 export type TaggedLibraryViewEntry = LibraryArtistViewEntry & {
   matched_via?: TrackMatchHint[];
@@ -78,9 +78,9 @@ export type TaggedLibraryViewEntry = LibraryArtistViewEntry & {
 };
 
 /**
- * Raw projection fields appended to the SELECT when the alias LATERAL is on.
- * Returned as nullable columns so callers can detect a no-hit row by
- * `alias_max_sim === null` without forcing a separate query.
+ * Raw projection fields appended to the SELECT when the alias UNION ALL
+ * branch is on (BS#1318). Returned as nullable columns so callers can detect
+ * a no-hit row by `alias_max_sim === null` without forcing a separate query.
  */
 type AliasHitFields = {
   alias_max_sim: number | null;
@@ -89,16 +89,16 @@ type AliasHitFields = {
 };
 
 /**
- * Attach `matched_via_alias` to a tagged row when the LATERAL JOIN surfaced a
- * non-null hit. No-op when all three alias fields are null (the row matched
- * via the underlying trigram predicate, not via the alias cache).
+ * Attach `matched_via_alias` to a tagged row when the alias UNION ALL branch
+ * surfaced a non-null hit. No-op when all three alias fields are null (the
+ * row matched via the underlying trigram predicate, not via the alias cache).
  */
 function attachAliasHint<R extends LibraryArtistViewEntry & AliasHitFields>(row: R): TaggedLibraryViewEntry {
   // Strip the alias-only fields off the wire-shape; matched_via_alias carries
   // the same information in the public sibling-type shape.
   const { alias_max_sim, alias_matched_variant, alias_matched_source, ...rest } = row;
   // Defensive: require non-nullish numeric and truthy variant + source. The
-  // LATERAL JOIN should never emit empty-string fields, but mirror the same
+  // alias branch should never emit empty-string fields, but mirror the same
   // guard `toAlbumSearchResultRow` uses in library-search.service so the
   // catalog (/library/query) and request-line surfaces agree on what counts
   // as an alias hit.
@@ -970,8 +970,8 @@ const LIBRARY_VIEW_PROJECTION = {
 /**
  * Raw SQL mirror of `libraryViewQuery(false)`'s join chain. Used when the
  * caller needs a query shape Drizzle's chained builder can't express
- * (`LEFT JOIN LATERAL` for the alias path). Schema is named once here so a
- * future column change is a single edit.
+ * (the UNION ALL alias path emitted by `buildAliasHitsCte`). Schema is
+ * named once here so a future column change is a single edit.
  */
 const LIBRARY_VIEW_JOINS_RAW = sql`
   INNER JOIN ${artists} ON ${artists.id} = ${library.artist_id}
