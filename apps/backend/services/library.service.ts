@@ -1014,32 +1014,43 @@ const LIBRARY_VIEW_PROJECTION_RAW = sql`
 `;
 
 /**
- * The alias LATERAL JOIN fragment plus its associated SELECT projection,
- * WHERE-list contribution, and ORDER BY ranking term. Keyed on
- * `library.artist_id` (the catalog read paths all project it through their
- * underlying `FROM library` joins). Multiple cached variants for the same
- * artist collapse to a single row via MAX/array_agg ORDER BY similarity
- * (the highest-similarity variant + its source win).
+ * Build the `alias_hits` CTE used by the UNION ALL alias-aware search paths
+ * (BS#1318). The CTE runs the trigram bitmap scan over `artist_search_alias`
+ * exactly once and groups by `artist_id`, yielding (artist_id, max_sim,
+ * matched_variant, matched_source) for every artist whose alias substrate
+ * matches `query`. Callers join this CTE on `artist_id` rather than running
+ * a correlated LATERAL per candidate row.
+ *
+ * Replacement for the previous `LEFT JOIN LATERAL` design: the LATERAL was
+ * correlated on `asa.artist_id = library.artist_id`, which steered the
+ * planner onto the PK btree and filtered `variant % q` row-by-row, never
+ * touching the GIN trigram index. The CTE form lets the planner pick the
+ * trigram bitmap scan once and hash-join into the outer query.
  */
-function buildAliasLateralFragments(query: string) {
-  return {
-    projection: sql`,
-      alias_hit.max_sim AS alias_max_sim,
-      alias_hit.matched_variant AS alias_matched_variant,
-      alias_hit.matched_source AS alias_matched_source`,
-    join: sql`
-      LEFT JOIN LATERAL (
-        SELECT MAX(similarity(asa.variant, ${query})) AS max_sim,
-               (array_agg(asa.variant ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_variant,
-               (array_agg(asa.source ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_source
-        FROM ${artist_search_alias} asa
-        WHERE asa.artist_id = ${library.artist_id}
-          AND asa.variant % ${query}
-      ) alias_hit ON true`,
-    predicate: sql`OR alias_hit.max_sim IS NOT NULL`,
-    rankTerm: sql`, COALESCE(alias_hit.max_sim, 0)`,
-  };
+function buildAliasHitsCte(query: string) {
+  return sql`WITH alias_hits AS (
+    SELECT
+      asa.artist_id,
+      MAX(similarity(asa.variant, ${query})) AS max_sim,
+      (array_agg(asa.variant ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_variant,
+      (array_agg(asa.source ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_source
+    FROM ${artist_search_alias} asa
+    WHERE asa.variant % ${query}
+    GROUP BY asa.artist_id
+  )`;
 }
+
+/** Projection columns emitted by the alias branch of a UNION ALL search query. */
+const ALIAS_HITS_PROJECTION = sql`,
+  alias_hits.max_sim AS alias_max_sim,
+  alias_hits.matched_variant AS alias_matched_variant,
+  alias_hits.matched_source AS alias_matched_source`;
+
+/** NULL placeholders for the alias-shape columns on the non-alias UNION ALL branch. */
+const ALIAS_HITS_PROJECTION_NULLS = sql`,
+  NULL::real AS alias_max_sim,
+  NULL::text AS alias_matched_variant,
+  NULL::text AS alias_matched_source`;
 
 /**
  * Build the `FROM library` query shape with the joins needed to project the
@@ -1126,26 +1137,40 @@ async function searchLibraryByTrigramBoth(
       .limit(n) as unknown as Promise<TaggedLibraryViewEntry[]>;
   }
 
-  // Alias-enabled path: raw SQL with `LEFT JOIN LATERAL` against the alias
-  // cache. The OR-trigram predicate stays, plus the alias hit; rank widens
-  // to GREATEST(artist_sim, album_sim, COALESCE(alias_sim, 0)).
-  const alias = buildAliasLateralFragments(query);
+  // Alias-enabled path: ALT1 UNION ALL (BS#1318). The CTE runs the trigram
+  // bitmap scan once over `artist_search_alias`; branch (a) is the
+  // byte-identical alias-OFF trigram predicate against `library`, branch (b)
+  // joins the CTE on `artist_id` and dedupes against branch (a) via NOT-of
+  // the same trigram predicate.
+  //
+  // The trigram OR-predicate is evaluated twice — once positively in (a),
+  // once negated in (b) — but each is bitmap-indexable on its own, so the
+  // total cost is dominated by the substrate scan + LIMIT pushdown on the
+  // outer LAV scan rather than the correlated LATERAL's per-row scan.
   const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
+  const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
   const rows = (await db.execute(sql`
-    SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${alias.projection}
-    FROM ${library}
-    ${LIBRARY_VIEW_JOINS_RAW}
-    ${alias.join}
-    WHERE (
-      ${library.artist_name} % ${query}
-      OR ${library.album_title} % ${query}
-      ${alias.predicate}
+    ${buildAliasHitsCte(query)}
+    (
+      SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
+      FROM ${library}
+      ${LIBRARY_VIEW_JOINS_RAW}
+      WHERE ${trigramPredicate}
+      ${streamingClause}
     )
-    ${streamingClause}
+    UNION ALL
+    (
+      SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
+      FROM ${library}
+      ${LIBRARY_VIEW_JOINS_RAW}
+      INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
+      WHERE NOT ${trigramPredicate}
+      ${streamingClause}
+    )
     ORDER BY GREATEST(
-      similarity(${library.artist_name}, ${query}),
-      similarity(${library.album_title}, ${query})
-      ${alias.rankTerm}
+      similarity(artist_name, ${query}),
+      similarity(album_title, ${query}),
+      COALESCE(alias_max_sim, 0)
     ) DESC
     LIMIT ${n}
   `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];
@@ -1881,22 +1906,30 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
     return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
   }
 
-  // Alias-enabled: single-column trigram on artist_name, OR'd with the
-  // LATERAL alias hit. GREATEST collapses to MAX of two terms since there's
-  // no album_title predicate here.
-  const alias = buildAliasLateralFragments(artistName);
+  // Alias-enabled: ALT1 UNION ALL (BS#1318). Single-column trigram on
+  // `library.artist_name` as branch (a); branch (b) joins the CTE on
+  // `artist_id` and excludes rows already matched by (a). GREATEST collapses
+  // to MAX of two terms since there's no album_title predicate here.
+  const trigramPredicate = sql`${library.artist_name} % ${artistName}`;
   const rows = (await db.execute(sql`
-    SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${alias.projection}
-    FROM ${library}
-    ${LIBRARY_VIEW_JOINS_RAW}
-    ${alias.join}
-    WHERE (
-      ${library.artist_name} % ${artistName}
-      ${alias.predicate}
+    ${buildAliasHitsCte(artistName)}
+    (
+      SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
+      FROM ${library}
+      ${LIBRARY_VIEW_JOINS_RAW}
+      WHERE ${trigramPredicate}
+    )
+    UNION ALL
+    (
+      SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
+      FROM ${library}
+      ${LIBRARY_VIEW_JOINS_RAW}
+      INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
+      WHERE NOT ${trigramPredicate}
     )
     ORDER BY GREATEST(
-      similarity(${library.artist_name}, ${artistName})
-      ${alias.rankTerm}
+      similarity(artist_name, ${artistName}),
+      COALESCE(alias_max_sim, 0)
     ) DESC
     LIMIT ${limit}
   `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];
