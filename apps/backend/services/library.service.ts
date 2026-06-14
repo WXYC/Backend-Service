@@ -1147,26 +1147,34 @@ async function searchLibraryByTrigramBoth(
   // once negated in (b) — but each is bitmap-indexable on its own, so the
   // total cost is dominated by the substrate scan + LIMIT pushdown on the
   // outer LAV scan rather than the correlated LATERAL's per-row scan.
+  //
+  // The UNION ALL is wrapped in a subquery so the outer ORDER BY can
+  // reference both the trigram similarity and the CTE-provided
+  // `alias_max_sim`. Postgres forbids expression-shaped ORDER BY directly on
+  // a UNION result (column names only); the subquery lifts the union's
+  // columns into a scope where `similarity(...)` is a legal ORDER BY term.
   const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
   const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
   const rows = (await db.execute(sql`
     ${buildAliasHitsCte(query)}
-    (
-      SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
-      FROM ${library}
-      ${LIBRARY_VIEW_JOINS_RAW}
-      WHERE ${trigramPredicate}
-      ${streamingClause}
-    )
-    UNION ALL
-    (
-      SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
-      FROM ${library}
-      ${LIBRARY_VIEW_JOINS_RAW}
-      INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
-      WHERE NOT ${trigramPredicate}
-      ${streamingClause}
-    )
+    SELECT * FROM (
+      (
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        WHERE ${trigramPredicate}
+        ${streamingClause}
+      )
+      UNION ALL
+      (
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
+        WHERE NOT ${trigramPredicate}
+        ${streamingClause}
+      )
+    ) alias_search
     ORDER BY GREATEST(
       similarity(artist_name, ${query}),
       similarity(album_title, ${query}),
@@ -1910,23 +1918,29 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
   // `library.artist_name` as branch (a); branch (b) joins the CTE on
   // `artist_id` and excludes rows already matched by (a). GREATEST collapses
   // to MAX of two terms since there's no album_title predicate here.
+  //
+  // Wrap the UNION ALL in a subquery so the outer ORDER BY can use
+  // expression-shaped terms (`similarity(...)`); Postgres forbids
+  // expression ORDER BY directly on a UNION result.
   const trigramPredicate = sql`${library.artist_name} % ${artistName}`;
   const rows = (await db.execute(sql`
     ${buildAliasHitsCte(artistName)}
-    (
-      SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
-      FROM ${library}
-      ${LIBRARY_VIEW_JOINS_RAW}
-      WHERE ${trigramPredicate}
-    )
-    UNION ALL
-    (
-      SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
-      FROM ${library}
-      ${LIBRARY_VIEW_JOINS_RAW}
-      INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
-      WHERE NOT ${trigramPredicate}
-    )
+    SELECT * FROM (
+      (
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        WHERE ${trigramPredicate}
+      )
+      UNION ALL
+      (
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
+        WHERE NOT ${trigramPredicate}
+      )
+    ) alias_search
     ORDER BY GREATEST(
       similarity(artist_name, ${artistName}),
       COALESCE(alias_max_sim, 0)
