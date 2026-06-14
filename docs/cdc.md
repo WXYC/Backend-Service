@@ -31,6 +31,13 @@ PostgreSQL triggers (`cdc_notify()`) fire `pg_notify('cdc', payload)` on every I
 - `apps/backend/services/cdc/dispatcher.ts` — per-process LISTEN startup/shutdown. Runs unconditionally so in-process consumers (`metadata-broadcast`) work regardless of `CDC_SECRET` (BS#1187)
 - `apps/backend/services/cdc/cdc-websocket.ts` — WebSocket server with auth and heartbeat; gated on `CDC_SECRET` (external-listener channel only)
 
+## Back-pressure and liveness (BS#1134)
+
+Per-client guards in `cdc-websocket.ts` keep one misbehaving consumer from leaking memory or wedging the heartbeat signal:
+
+- **Back-pressure**: every send (fan-out and heartbeat) checks `client.bufferedAmount`. Over `BACKPRESSURE_THRESHOLD_BYTES` (1 MiB) the client is `terminate()`d and a Sentry `cdc_ws.buffered_amount_high` warning is captured. The CDC stream offers no replay, so dropping a single event for a slow consumer is no worse than what already happens at reconnect (see the "consumers reconcile out-of-band" contract above).
+- **Native ping/pong**: the 30s heartbeat now uses `ws.ping()` and tracks `'pong'` arrival, not an app-level JSON message. Clients that miss a pong before the next tick are terminated with a Sentry `cdc_ws.missed_pong` warning. This decouples "client is wedged" from "client is slow" — pre-#1134 the app-level message conflated both into a single send-callback signal.
+
 ## Reconciliation monitor
 
 ```bash
