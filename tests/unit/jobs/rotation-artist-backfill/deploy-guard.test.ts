@@ -1,8 +1,8 @@
 /**
- * Unit tests for jobs/rotation-artist-backfill/deploy-guard.ts (BS#1361).
+ * Unit tests for jobs/rotation-artist-backfill/deploy-guard.ts (BS#1381).
  *
  * Covers the four allow/deny shapes:
- *   1. commit_sha matches the gate (3e54907 prefix) → allowed.
+ *   1. commit_sha matches the gate (GATE_COMMIT_SHA prefix) → allowed.
  *   2. commit_sha descends from the gate (per GitHub compare) → allowed.
  *   3. commit_sha is null AND LOCAL_DEV=1 → allowed.
  *   4. commit_sha is null AND no LOCAL_DEV → throw DeployGuardError.
@@ -84,32 +84,32 @@ describe('fetchLmlHealth', () => {
 describe('isDescendantOnGithub', () => {
   it('returns true when status=ahead', async () => {
     const fetchImpl = makeFetch([() => makeResponse({ status: 'ahead' })]);
-    const ok = await isDescendantOnGithub('3e54907', 'abcdef', fetchImpl as unknown as typeof fetch);
+    const ok = await isDescendantOnGithub(GATE_COMMIT_SHA, 'abcdef', fetchImpl as unknown as typeof fetch);
     expect(ok).toBe(true);
   });
 
   it('returns true when status=identical', async () => {
     const fetchImpl = makeFetch([() => makeResponse({ status: 'identical' })]);
-    const ok = await isDescendantOnGithub('3e54907', '3e54907', fetchImpl as unknown as typeof fetch);
+    const ok = await isDescendantOnGithub(GATE_COMMIT_SHA, GATE_COMMIT_SHA, fetchImpl as unknown as typeof fetch);
     expect(ok).toBe(true);
   });
 
   it('returns false when status=behind', async () => {
     const fetchImpl = makeFetch([() => makeResponse({ status: 'behind' })]);
-    const ok = await isDescendantOnGithub('3e54907', 'older', fetchImpl as unknown as typeof fetch);
+    const ok = await isDescendantOnGithub(GATE_COMMIT_SHA, 'older', fetchImpl as unknown as typeof fetch);
     expect(ok).toBe(false);
   });
 
   it('returns false when status=diverged', async () => {
     const fetchImpl = makeFetch([() => makeResponse({ status: 'diverged' })]);
-    const ok = await isDescendantOnGithub('3e54907', 'forked', fetchImpl as unknown as typeof fetch);
+    const ok = await isDescendantOnGithub(GATE_COMMIT_SHA, 'forked', fetchImpl as unknown as typeof fetch);
     expect(ok).toBe(false);
   });
 
   it('throws on non-2xx compare API responses', async () => {
     const fetchImpl = makeFetch([() => makeResponse({}, { status: 404, statusText: 'Not Found' })]);
     await expect(
-      isDescendantOnGithub('3e54907', 'unknown', fetchImpl as unknown as typeof fetch)
+      isDescendantOnGithub(GATE_COMMIT_SHA, 'unknown', fetchImpl as unknown as typeof fetch)
     ).rejects.toBeInstanceOf(DeployGuardError);
   });
 
@@ -141,8 +141,8 @@ describe('isDescendantOnGithub', () => {
       return Promise.resolve(makeResponse({ status: 'ahead' }));
     });
     // `?` would otherwise start a query string; `/` would shift the path.
-    await isDescendantOnGithub('3e54907', 'abc?foo=bar', fetchImpl as unknown as typeof fetch);
-    expect(seenUrl).toContain('3e54907...abc%3Ffoo%3Dbar');
+    await isDescendantOnGithub(GATE_COMMIT_SHA, 'abc?foo=bar', fetchImpl as unknown as typeof fetch);
+    expect(seenUrl).toContain(`${GATE_COMMIT_SHA}...abc%3Ffoo%3Dbar`);
     expect(seenUrl).not.toContain('?foo=bar');
   });
 });

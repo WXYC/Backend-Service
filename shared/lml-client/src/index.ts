@@ -906,6 +906,97 @@ export async function resolveIdentity(
 }
 
 /**
+ * Wire shape for `POST /api/v1/cache/refresh-for-identities` (LML#525, BS#1381).
+ *
+ * Mirrors `BulkCacheRefreshRequest` / `BulkCacheRefreshResponse` in
+ * `wxyc-shared/api.yaml`. Defined locally rather than imported from
+ * `@wxyc/shared/dtos` so this wrapper compiles against the currently-shipped
+ * shared bundle; the types move to `@wxyc/shared/dtos` once the OpenAPI
+ * codegen catches up. Same pattern used by `EntityResolveResponse` and
+ * `ReleaseIdentityResolveResponse` during their own ramp-ups.
+ *
+ * Per-id `status` rollup is release-leg-gated by LML:
+ *   - `warmed`           — at least one source's release_outcome was `success`.
+ *                          Cache hits, fresh fetches, AND tombstones (LML#510)
+ *                          all count — the cache state is current either way.
+ *   - `not_found`        — no row in `entity.release_identity` for this id.
+ *                          BS holds a stale `lml_identity_id` reference.
+ *   - `not_implemented`  — at least one source returned `not_implemented`,
+ *                          no source was `success` (e.g. discogs_master,
+ *                          MusicBrainz pre-LML#217).
+ *   - `error`            — all dispatched sources errored. The only retry
+ *                          signal.
+ */
+export type CacheRefreshSourceOutcome = 'success' | 'error' | 'not_implemented';
+export type CacheRefreshItemStatus = 'warmed' | 'not_found' | 'not_implemented' | 'error';
+
+export interface CacheRefreshArtistOutcome {
+  /** String-typed for future source-agnosticism — Discogs IDs serialize as decimal strings. */
+  external_id: string;
+  outcome: CacheRefreshSourceOutcome;
+  /** Exception class name when `outcome != success`. Full traceback lands in LML's Sentry. */
+  message?: string | null;
+}
+
+export interface CacheRefreshSourceResult {
+  release_outcome: CacheRefreshSourceOutcome;
+  /** Walk-to-artists fan-out result. Empty on tombstone-success and on non-Discogs legs. */
+  artists?: CacheRefreshArtistOutcome[];
+  message?: string | null;
+}
+
+export interface CacheRefreshResultItem {
+  identity_id: number;
+  status: CacheRefreshItemStatus;
+  /** Null when `status === 'not_found'`. Otherwise keyed by source vocabulary (`discogs_release`, …). */
+  sources?: Record<string, CacheRefreshSourceResult> | null;
+  message?: string | null;
+}
+
+export interface BulkCacheRefreshRequest {
+  identity_ids: number[];
+}
+
+export interface BulkCacheRefreshResponse {
+  /** Per-identity verdicts in input order. No top-level counters — callers derive. */
+  results: CacheRefreshResultItem[];
+}
+
+/**
+ * Refresh LML's cache for a batch of release `identity_id`s (LML#525).
+ *
+ * LML maps each id to its per-source `(source, external_id)` pairs, dispatches
+ * the per-source release-cache refresh, and walks each refreshed Discogs
+ * release's artist credits to refresh artist caches too. Multiplexes onto
+ * the existing fallthrough seam (LML#503's `fetched_at` discriminator) —
+ * already-warm cache rows don't re-hit Discogs.
+ *
+ * Per-request cap: **50 identity_ids**. LML returns 400 on overflow. The cap
+ * is bounded by Discogs rate-limit × cold-cache fan-out ≤ Railway's
+ * request-timeout ceiling — it is a hard contract, not a soft tunable.
+ * Consumers should encode 50 as a constant and chunk inputs accordingly.
+ *
+ * Default timeout matches the shared `TIMEOUT_MS` (30 s). The cron consumer
+ * (`jobs/rotation-artist-backfill`) overrides with a budget tuned to its
+ * cold-cache batch latency.
+ */
+export async function refreshForIdentities(
+  identityIds: number[],
+  options?: { timeoutMs?: number }
+): Promise<BulkCacheRefreshResponse> {
+  const response = await lmlFetch(
+    '/api/v1/cache/refresh-for-identities',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identity_ids: identityIds } satisfies BulkCacheRefreshRequest),
+    },
+    options?.timeoutMs
+  );
+  return (await response.json()) as BulkCacheRefreshResponse;
+}
+
+/**
  * Check whether the LML service is configured.
  */
 export function isLmlConfigured(): boolean {

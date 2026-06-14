@@ -1,12 +1,23 @@
 /**
- * Deploy guard for rotation-artist-backfill (BS#1361, acceptance bullet 2).
+ * Deploy guard for rotation-artist-backfill (BS#1381).
  *
- * The job is a no-op against any LML deploy that predates LML#503's
- * `fetched_at` discriminator (`3e54907`) — without that discriminator,
- * the bulk-rebuild stub rows never get refreshed and the cron burns
- * Discogs API budget for nothing. So before scanning any rotation rows
- * we hit LML's `/health` and verify that its `commit_sha` is `3e54907`
- * or a descendant of it.
+ * The job is a no-op against any LML deploy that predates LML#525's
+ * `POST /api/v1/cache/refresh-for-identities` endpoint (`8a1344c`,
+ * library-metadata-lookup PR #559) — without it the cron has nothing
+ * to call against. So before scanning any rotation rows we hit LML's
+ * `/health` and verify that its `commit_sha` is `8a1344c` or a descendant
+ * of it.
+ *
+ * Why gate on the endpoint and not the `fetched_at` discriminator that
+ * the previous incarnation (BS#1361, PR #1376) gated on: the discriminator
+ * is still load-bearing under the hood — LML#525's per-source release
+ * refresh multiplexes onto the same fallthrough seam — but BS no longer
+ * touches `/discogs/release/{id}` or `/discogs/artist/{id}` directly,
+ * so gating on the discriminator's commit would let an older LML deploy
+ * (without the refresh endpoint) sneak past as "descendant" and 404 every
+ * batch. Gating on the endpoint's introducing commit catches both: it
+ * descends from LML#503, and from the LML#525 prep commits (LML PR #557
+ * and #558).
  *
  * Surfaces:
  *   - `commit_sha` is null AND `LOCAL_DEV=1` is set → allowed (local dev,
@@ -35,8 +46,8 @@ const HEALTH_PATH = '/health';
 const HEALTH_TIMEOUT_MS = 10_000;
 const COMPARE_TIMEOUT_MS = 15_000;
 
-/** LML#503: stub rows are now treated as cache misses via `fetched_at`. */
-export const GATE_COMMIT_SHA = '3e54907';
+/** LML#525: `POST /api/v1/cache/refresh-for-identities` shipped (LML PR #559). */
+export const GATE_COMMIT_SHA = '8a1344c';
 
 /** Owner/repo for the GitHub compare API. */
 export const LML_REPO = 'WXYC/library-metadata-lookup';
@@ -175,7 +186,7 @@ export const enforceDeployGuard = async (deps: DeployGuardDeps = {}): Promise<De
   const ok = await isDescendantOnGithub(GATE_COMMIT_SHA, sha, fetchImpl);
   if (!ok) {
     throw new DeployGuardError(
-      `LML commit_sha ${sha} is not a descendant of gate ${GATE_COMMIT_SHA} (LML#503). Refusing to run — the fetched_at discriminator is required for this backfill to make progress.`
+      `LML commit_sha ${sha} is not a descendant of gate ${GATE_COMMIT_SHA} (LML#525). Refusing to run — POST /api/v1/cache/refresh-for-identities is required for this backfill to make progress.`
     );
   }
   return { allowed: true, commit_sha: sha, reason: `commit_sha ${sha} descends from gate ${GATE_COMMIT_SHA}` };
