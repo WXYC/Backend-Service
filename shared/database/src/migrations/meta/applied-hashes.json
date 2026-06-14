@@ -91,7 +91,5 @@
   "0091_venues-and-concerts": "e738de9bdb0ab762c982a6e31f664f88705bc2b7336bbd57a15efe3b250e6e87",
   "0092_normalize-artist-name": "57bf7f03733591917917c5a19b9b67d8527a64ccce224cdc3f1102f4a9cca368",
   "0093_concerts-first-scraped-at": "bbeee146c92ab63fa70e9f2c537d5a06a13f80a5f52c23cb5a1bed1432057421",
-  "0094_rotation-lml-identity-id": "10134a18381f7daad56ca2d8cae80723832be3158cbe6dd01aae2f8e6afcaaa0",
-  "0095_drop-stale-trigram-indexes": "aba5b26a66102d427e1abd6520aa1f7ef14b776eaaa87ea8b99c3b97e79d24c7",
-  "0096_cdc_oversized_fallback": "5615c7a6aa7514b139340ef6c8ba86a548ac6e7b6f9f0c39241bea2a62a1274b"
+  "0094_fix-fk-on-delete-flowsheet-rotation-reviews": "35e9df0f17f40dbb348b0a4e437bc3d44c72260a2eeeef9572046f3eef713e47"
 }
