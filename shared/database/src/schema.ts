@@ -65,8 +65,10 @@ export const user = pgTable(
   (table) => [
     uniqueIndex('auth_user_email_key').on(table.email),
     uniqueIndex('auth_user_username_key').on(table.username),
-    index('auth_user_dj_name_trgm_idx').using('gin', sql`${table.djName} gin_trgm_ops`),
-    index('auth_user_name_trgm_idx').using('gin', sql`${table.name} gin_trgm_ops`),
+    // auth_user trigram indexes (auth_user_dj_name_trgm_idx, auth_user_name_trgm_idx)
+    // were dropped in migrations 0054 + 0065 — search no longer joins through
+    // auth_user; reads come from flowsheet.dj_name + flowsheet_dj_name_trgm_idx.
+    // Declaration removed to keep schema.ts aligned with the dropped state (BS#1129).
   ]
 );
 
@@ -1243,7 +1245,10 @@ export const shows = wxyc_schema.table(
     // dj-site-originated shows.
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     uniqueIndex('shows_legacy_show_id_idx').on(table.legacy_show_id),
-    index('shows_legacy_dj_name_trgm_idx').using('gin', sql`${table.legacy_dj_name} gin_trgm_ops`),
+    // shows_legacy_dj_name_trgm_idx was dropped in migrations 0054 + 0065 —
+    // search no longer joins through shows; dj-name reads come from
+    // flowsheet.dj_name + flowsheet_dj_name_trgm_idx. Declaration removed to
+    // keep schema.ts aligned with the dropped state (BS#1129).
   ]
 );
 

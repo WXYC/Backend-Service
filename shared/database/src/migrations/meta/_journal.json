@@ -652,6 +652,13 @@
       "when": 1781411001447,
       "tag": "0094_rotation-lml-identity-id",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1781468384340,
+      "tag": "0095_drop-stale-trigram-indexes",
+      "breakpoints": true
     }
   ]
 }
