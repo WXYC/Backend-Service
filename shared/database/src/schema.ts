@@ -491,7 +491,7 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
   'failed_no_retry',
 ]);
 
-// Provenance for `rotation.discogs_release_id` (BS#1029). Three values:
+// Provenance for `rotation.discogs_release_id` (BS#1029). Four values:
 //
 //   tubafrenzy_paste        — mirrored from tubafrenzy ROTATION_RELEASE
 //                             .DISCOGS_RELEASE_ID by `jobs/rotation-etl`,
@@ -513,18 +513,32 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
 //                             Tagged distinctly from `lml_offline_backfill` so
 //                             a future LML-based re-run can scope its UPDATEs
 //                             without clobbering the bypass-LML provenance.
+//   library_identity        — written by `addToRotation`
+//                             (apps/backend/services/library.service.ts) when
+//                             the dj-site `POST /library/rotation` request
+//                             carried an `album_id` whose `library_identity`
+//                             row supplied a non-NULL `discogs_release_id`.
+//                             The same call synchronously resolves
+//                             `lml_identity_id` against LML; on resolve
+//                             failure `lml_identity_id` lands NULL but the
+//                             source is still `library_identity` — the
+//                             source-of-the-Discogs-id is library_identity
+//                             regardless of whether the lml mint succeeded
+//                             (BS#1380).
 //
 // Column default is `tubafrenzy_paste` so existing pre-migration rows
 // (PG11+ `attmissingval` virtual default) and new rotation-etl inserts
 // are correctly attributed without rotation-etl having to set the column
-// explicitly. The backfill writes `lml_offline_backfill` and the
-// rotation-etl ON CONFLICT path flips it back to `tubafrenzy_paste`
+// explicitly. The backfill writes `lml_offline_backfill`, the
+// dj-site `addToRotation` path writes `library_identity`, and the
+// rotation-etl ON CONFLICT path flips back to `tubafrenzy_paste`
 // when tubafrenzy contributes a non-NULL id (COALESCE-paired with
 // `rotation.discogs_release_id`).
 export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_source_enum', [
   'tubafrenzy_paste',
   'lml_offline_backfill',
   'discogs_direct_backfill',
+  'library_identity',
 ]);
 /**
  * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes
@@ -592,6 +606,30 @@ export const rotation = wxyc_schema.table(
     // exhaustion on every deploy. NULL on transient LML failures (caught arm
     // — caller decides whether to retry) so the row stays retryable.
     tracklist_lookup_attempted_at: timestamp('tracklist_lookup_attempted_at', { withTimezone: true }),
+    // BS#1380: stable LML release-identity handle. Points at
+    // `entity.release_identity.id` on the LML side — the right layer to
+    // own a release identity, since Discogs admins periodically reorganize
+    // the catalog (see BS#624 prior art) and Discogs IDs aren't
+    // intrinsically stable. PG-level FK is not enforceable across the
+    // network; LML owns referential integrity.
+    //
+    // Writers:
+    //   - `addToRotation` (apps/backend/services/library.service.ts)
+    //     synchronously resolves via `POST /api/v1/identity/resolve` before
+    //     INSERT when `library_identity.discogs_release_id` is non-NULL.
+    //     Falls back to NULL on resolve timeout / 5xx (the row's
+    //     `discogs_release_id` still lands so the backfill can re-resolve).
+    //   - `jobs/rotation-lml-identity-backfill` (daily cron, recurring
+    //     drift-repair) sweeps rows with `lml_identity_id IS NULL AND
+    //     discogs_release_id IS NOT NULL`. Catches both rotation-etl
+    //     writes (rotation-etl never calls LML) and addToRotation
+    //     resolve-failure fallbacks.
+    //
+    // Rotation-etl preserves the column across ticks via a guarded CASE
+    // (see jobs/rotation-etl/job.ts) that clears it only when the
+    // *effective* `discogs_release_id` changes — paste-correction lands
+    // at `(X', NULL)` and the next backfill tick re-resolves.
+    lml_identity_id: integer('lml_identity_id'),
   },
   (table) => {
     return {
