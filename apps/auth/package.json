@@ -16,7 +16,7 @@
   "author": "Jackson Meade",
   "license": "MIT",
   "dependencies": {
-    "@sentry/node": "^10.53.1",
+    "@sentry/node": "^10.57.0",
     "@wxyc/authentication": "^1.0.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/shared": "^1.11.0",
