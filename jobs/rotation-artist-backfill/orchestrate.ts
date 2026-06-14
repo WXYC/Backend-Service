@@ -1,79 +1,84 @@
 /**
- * Orchestrator for jobs/rotation-artist-backfill (BS#1361).
+ * Orchestrator for jobs/rotation-artist-backfill (BS#1381).
  *
- * Two-tier loop:
+ * One-tier loop:
  *
- *   1. For each rotation release id (loaded by `loadReleaseIds`), call
- *      LML's `/api/v1/discogs/release/{id}` and project the Phase-1
- *      artist id set out of `release.artists` + `release.artist_id`.
- *   2. For each artist id, call LML's `/api/v1/discogs/artist/{id}`.
+ *   for batch in chunk(identity_ids, LML_REFRESH_BATCH_CAP):
+ *     POST /api/v1/cache/refresh-for-identities { identity_ids: batch }
  *
- * Both endpoints route through LML's fallthrough seam (LML#503: stub rows
- * with `fetched_at IS NULL` are treated as cache misses; LML#510: 404
- * responses tombstone the row server-side). So a re-run after this cron
- * lands is steady-state PG hits.
- *
- * dryRun: the release fan-out still runs (we need it to enumerate artist
- * ids) but the artist tier is skipped. `artists_planned` is populated
- * either way, and the totals Sentry span fires in both modes.
+ * LML handles the source fan-out (per-identity (source, external_id) →
+ * release refresh) AND the walk-to-artists step (release.artists[*].artist_id →
+ * artist refresh) internally. Multiplexes onto LML's fallthrough seam
+ * (LML#503 `fetched_at` discriminator + LML#510 404 tombstones), so a
+ * steady-state re-run is PG hits with no Discogs egress.
  *
  * Idempotency:
- *   - The same release id appearing twice (across re-runs, or in the same
- *     run via different rotation rows) is deduped by `loadReleaseIds`
+ *   - The same identity_id appearing twice (across re-runs, or within a
+ *     single run via different rotation rows) is deduped by `loadIdentityIds`
  *     (DISTINCT) before we get here.
- *   - The same artist id surfacing on multiple releases in one run is
- *     deduped by a Set so we don't re-fetch within a single run.
- *   - Across runs, dedup is free: every successful or 404'd artist call
- *     now produces a non-null `fetched_at` in LML's PG cache, so a
- *     re-run sees PG hits with no API egress.
+ *   - LML's endpoint accepts duplicate identity_ids in a single batch
+ *     (per LML#525) — second occurrence hits the in-process cache from
+ *     the first. We don't rely on that; we dedup upstream.
+ *
+ * Batch size:
+ *   - `LML_REFRESH_BATCH_CAP = 50` is a HARD constant, not a tunable.
+ *     LML returns 400 on batches above 50. The cap is derived from
+ *     Discogs rate-limit × cold-cache fan-out ≤ Railway's request-timeout
+ *     ceiling — recalibration only lands alongside an ingress change. We
+ *     do not expose an env override; raising it would only ever produce
+ *     400s, and lowering it has no operational lever to pull
+ *     (concurrency + rate are the cron-side tunables).
  *
  * Concurrency:
- *   - Caller-supplied; defaults to 3. We don't gate egress here on the
- *     runtime side — the `lml-limiter` Semaphore caps in-flight LML
- *     calls (and `TokenBucket` caps attempted-call rate) regardless of
- *     how many promises we kick off from this layer. The local
- *     `Semaphore` here bounds the number of *materialized* pending
- *     promises so a 10k-rotation set doesn't pile up Promise objects
- *     and so the same primitive used inside the limiter handles
- *     orphan-on-throw cancellation: if a task throws, sibling tasks
- *     finish their current `await` and then exit the loop instead of
- *     continuing forever.
+ *   - Caller-supplied; defaults to 3. The `lml-limiter` Semaphore +
+ *     TokenBucket inside `fetchIdentityRefresh` caps in-flight LML calls
+ *     and attempted-call rate regardless of how many promises we kick
+ *     off from this layer. The local `Semaphore` here bounds the number
+ *     of *materialized* pending promises so a 10k-identity set doesn't
+ *     pile up Promise objects and so orphan-on-throw cancellation works
+ *     correctly under AggregateError.
+ *
+ * dryRun: skip the actual refresh calls; counters reflect identities_scanned
+ * only (no per-source/per-artist data without a real LML response). The
+ * totals span fires in both modes.
  */
 
 import * as Sentry from '@sentry/node';
-import { Semaphore } from '@wxyc/lml-client';
+import { type BulkCacheRefreshResponse, type CacheRefreshResultItem, Semaphore } from '@wxyc/lml-client';
 
-import { extractPhase1ArtistIds, fetchArtist, fetchRelease, type FetchOutcome } from './lml-fetch.js';
+import { fetchIdentityRefresh, type FetchOutcome } from './lml-fetch.js';
 import { log } from './logger.js';
 
+/**
+ * LML#525's per-request batch cap. Hard contract — see file header.
+ * The 400-on-overflow response is LML's runtime guard; this constant is
+ * the BS-side encoding so we never *attempt* an over-cap batch.
+ */
+export const LML_REFRESH_BATCH_CAP = 50;
+
 export type Totals = {
-  releases_scanned: number;
-  releases_ok: number;
-  releases_not_found: number;
-  releases_error: number;
-  artists_planned: number;
-  artists_attempted: number;
-  artists_ok: number;
-  artists_not_found: number;
-  artists_error: number;
+  identities_scanned: number;
+  identities_resolved: number;
+  warmed_releases: number;
+  warmed_artists: number;
+  not_found: number;
+  not_implemented: number;
+  lml_error: number;
 };
 
 const initialTotals = (): Totals => ({
-  releases_scanned: 0,
-  releases_ok: 0,
-  releases_not_found: 0,
-  releases_error: 0,
-  artists_planned: 0,
-  artists_attempted: 0,
-  artists_ok: 0,
-  artists_not_found: 0,
-  artists_error: 0,
+  identities_scanned: 0,
+  identities_resolved: 0,
+  warmed_releases: 0,
+  warmed_artists: 0,
+  not_found: 0,
+  not_implemented: 0,
+  lml_error: 0,
 });
 
 export type RunBackfillDeps = {
-  loadReleaseIds: () => Promise<number[]>;
-  fetchReleaseFn?: typeof fetchRelease;
-  fetchArtistFn?: typeof fetchArtist;
+  loadIdentityIds: () => Promise<number[]>;
+  fetchFn?: typeof fetchIdentityRefresh;
   concurrency?: number;
   dryRun?: boolean;
 };
@@ -91,19 +96,12 @@ export type RunResult = { totals: Totals };
  * When MULTIPLE tasks reject, the rethrow is wrapped in `AggregateError`
  * so the caller's catch block sees the full set, not just the first —
  * losing 2nd+3rd failures would hide real bugs (e.g., a shared decoder
- * regression affecting many calls). Sentry capture is the caller's
+ * regression affecting many batches). Sentry capture is the caller's
  * responsibility: capturing here AND in the top-level catch would
  * double-fire events (N leaves + 1 wrapper = N+1 issues per failed run)
  * and fragment grouping across step tags. `@sentry/core`'s default
  * exception serialization walks `AggregateError.errors[]`, so a single
  * outer capture preserves the leaves.
- *
- * Memory note: this materializes `items.length` Promise objects (each
- * blocked on `sem.acquire()`) up front. The Semaphore caps the IN-FLIGHT
- * subset, not the materialized total. For active rotation (hundreds of
- * releases, low thousands of distinct artists) the eager materialization
- * is negligible; if this is ever applied to 10k+ inputs, switch to a
- * cursor-based worker pool whose Promise count is bounded by `limit`.
  */
 const runWithConcurrency = async <T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> => {
   if (limit < 1) throw new Error(`concurrency must be >= 1, got ${limit}`);
@@ -129,18 +127,100 @@ const runWithConcurrency = async <T>(items: T[], limit: number, run: (item: T) =
   if (errors.length > 1) throw new AggregateError(errors, `${errors.length} tasks failed in runWithConcurrency`);
 };
 
-const tally = <T>(totals: Totals, phase: 'releases' | 'artists', outcome: FetchOutcome<T>): void => {
-  if (phase === 'releases') {
-    totals.releases_scanned += 1;
-    if (outcome.kind === 'ok') totals.releases_ok += 1;
-    else if (outcome.kind === 'not_found') totals.releases_not_found += 1;
-    else totals.releases_error += 1;
-  } else {
-    totals.artists_attempted += 1;
-    if (outcome.kind === 'ok') totals.artists_ok += 1;
-    else if (outcome.kind === 'not_found') totals.artists_not_found += 1;
-    else totals.artists_error += 1;
+/**
+ * Chunk `items` into arrays of at most `size`. Deterministic order
+ * (input order preserved) so dry-run and batch log lines are stable
+ * across runs.
+ */
+export const chunk = <T>(items: T[], size: number): T[][] => {
+  if (size < 1) throw new Error(`chunk size must be >= 1, got ${size}`);
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
   }
+  return out;
+};
+
+/**
+ * Tally a single batch's response onto the run totals. Counter semantics
+ * mirror BS#1381's acceptance criteria:
+ *
+ *   - identities_resolved : per-id `status != 'error'` (any useful work)
+ *   - warmed_releases     : sum of per-source `release_outcome == 'success'`
+ *   - warmed_artists      : sum of per-source artist `outcome == 'success'`
+ *   - not_found           : per-id `status == 'not_found'` (stale handle)
+ *   - not_implemented     : per-id `status == 'not_implemented'`
+ *   - lml_error           : per-id `status == 'error'` (batch-level
+ *                           failures bumped separately in the catch arm)
+ *
+ * Cache hit vs fresh-fetch distinction is intentionally not surfaced as
+ * a BS-side counter — LML#525's response body deliberately omits per-id
+ * cache_stats, and LML's internal recorders are aggregate. Hit/miss
+ * observability lives on LML-side Sentry dashboards (BS#1402 issue notes).
+ */
+const tallyBatch = (totals: Totals, response: BulkCacheRefreshResponse): void => {
+  for (const item of response.results) {
+    totals.identities_scanned += 1;
+    switch (item.status) {
+      case 'warmed':
+        totals.identities_resolved += 1;
+        tallySources(totals, item);
+        break;
+      case 'not_found':
+        totals.identities_resolved += 1;
+        totals.not_found += 1;
+        break;
+      case 'not_implemented':
+        totals.identities_resolved += 1;
+        totals.not_implemented += 1;
+        // Some not_implemented rollups carry source-level outcomes too
+        // (e.g. a row with `discogs_master` only — the source slot is
+        // populated, even though no warm happened). Don't tally those:
+        // `warmed_releases` is reserved for `release_outcome == 'success'`.
+        // Sources with `release_outcome == 'not_implemented'` contribute
+        // to the per-id `not_implemented` counter only.
+        break;
+      case 'error':
+        totals.lml_error += 1;
+        // Still walk sources — if one leg succeeded *and* another errored
+        // we'd already be in `warmed`, not `error`. By the rollup rule,
+        // `error` means no source was `success`, so the warmed_* counters
+        // stay at zero here. We don't tally sources for that reason.
+        break;
+    }
+  }
+};
+
+const tallySources = (totals: Totals, item: CacheRefreshResultItem): void => {
+  if (!item.sources) return;
+  for (const source of Object.values(item.sources)) {
+    if (source.release_outcome === 'success') {
+      totals.warmed_releases += 1;
+    }
+    for (const artist of source.artists ?? []) {
+      if (artist.outcome === 'success') {
+        totals.warmed_artists += 1;
+      }
+    }
+  }
+};
+
+/**
+ * Account for batch-level failures: every identity in a failed batch is
+ * counted as `identities_scanned` (we attempted to refresh it) but does
+ * NOT count toward `identities_resolved` (no useful work happened).
+ * `lml_error` bumps by batch size since the failure obscured the per-id
+ * shape; the orchestrator can't distinguish which sub-fanned-out fine
+ * and which didn't.
+ *
+ * Keeping `identities_scanned` truthful even on batch failure is what
+ * makes the `not_found / identities_scanned` ratio alert (BS#1402)
+ * resilient to transient LML outages — a 100% batch-failure day still
+ * produces a well-defined denominator instead of dividing by zero.
+ */
+const tallyBatchError = (totals: Totals, batchSize: number): void => {
+  totals.identities_scanned += batchSize;
+  totals.lml_error += batchSize;
 };
 
 /**
@@ -157,15 +237,13 @@ const projectTotalsSpan = (totals: Totals, dryRun: boolean): void => {
       name: 'rotation-artist-backfill.run.totals',
       attributes: {
         'backfill.dry_run': dryRun ? 1 : 0,
-        'backfill.releases_scanned': totals.releases_scanned,
-        'backfill.releases_ok': totals.releases_ok,
-        'backfill.releases_not_found': totals.releases_not_found,
-        'backfill.releases_error': totals.releases_error,
-        'backfill.artists_planned': totals.artists_planned,
-        'backfill.artists_attempted': totals.artists_attempted,
-        'backfill.artists_ok': totals.artists_ok,
-        'backfill.artists_not_found': totals.artists_not_found,
-        'backfill.artists_error': totals.artists_error,
+        'backfill.identities_scanned': totals.identities_scanned,
+        'backfill.identities_resolved': totals.identities_resolved,
+        'backfill.warmed_releases': totals.warmed_releases,
+        'backfill.warmed_artists': totals.warmed_artists,
+        'backfill.not_found': totals.not_found,
+        'backfill.not_implemented': totals.not_implemented,
+        'backfill.lml_error': totals.lml_error,
       },
     },
     () => {
@@ -175,75 +253,51 @@ const projectTotalsSpan = (totals: Totals, dryRun: boolean): void => {
 };
 
 export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => {
-  const fetchReleaseFn = deps.fetchReleaseFn ?? fetchRelease;
-  const fetchArtistFn = deps.fetchArtistFn ?? fetchArtist;
+  const fetchFn = deps.fetchFn ?? fetchIdentityRefresh;
   const concurrency = deps.concurrency ?? 3;
   const dryRun = deps.dryRun ?? false;
   const totals = initialTotals();
-  // Sentinel so we don't fire an all-zero totals span when loadReleaseIds
+  // Sentinel so we don't fire an all-zero totals span when loadIdentityIds
   // itself throws — that span shape is indistinguishable from a clean
   // empty-rotation day on the dashboard.
   let didLoadIds = false;
 
-  // Fire the totals span no matter how the run ends past loadReleaseIds:
-  // success, dryRun, or fan-out throw. The accumulated counters are
-  // real and the dashboard pulling on them shouldn't go blank because
-  // one task rejected near the end of the run.
+  // Fire the totals span no matter how the run ends past loadIdentityIds:
+  // success, dryRun, or fan-out throw. The accumulated counters are real
+  // and the dashboard pulling on them shouldn't go blank because one
+  // batch rejected near the end of the run.
   try {
-    const releaseIds = await deps.loadReleaseIds();
+    const identityIds = await deps.loadIdentityIds();
     didLoadIds = true;
-    log('info', 'plan', `loaded ${releaseIds.length} active rotation release ids`, {
-      release_count: releaseIds.length,
+
+    const batches = chunk(identityIds, LML_REFRESH_BATCH_CAP);
+    log('info', 'plan', `loaded ${identityIds.length} active rotation identity ids`, {
+      identity_count: identityIds.length,
+      batch_count: batches.length,
+      batch_cap: LML_REFRESH_BATCH_CAP,
       concurrency,
       dry_run: dryRun,
     });
 
-    // Phase 1 of the two-tier loop: fan out the release fetches. Each
-    // release result feeds an artist-id set into the second tier; dedup
-    // is global across the run.
-    const seenArtistIds = new Set<number>();
-
-    await runWithConcurrency(releaseIds, concurrency, async (releaseId) => {
-      const outcome = await fetchReleaseFn(releaseId);
-      tally(totals, 'releases', outcome);
-      if (outcome.kind !== 'ok') {
-        if (outcome.kind === 'error') {
-          log('warn', 'release_error', `release ${releaseId} fetch failed`, {
-            release_id: releaseId,
-            error_message: outcome.error.message,
-            retryable: outcome.retryable,
-          });
-        }
-        return;
-      }
-      for (const artistId of extractPhase1ArtistIds(outcome.value)) {
-        seenArtistIds.add(artistId);
-      }
-    });
-
-    // Sort for deterministic iteration order (and so dry-run log lines
-    // are stable across runs). The Set was populated in release-
-    // completion order, which is non-deterministic under concurrency > 1.
-    const artistIds = Array.from(seenArtistIds).sort((a, b) => a - b);
-    totals.artists_planned = artistIds.length;
-    log('info', 'plan_artists', `release fan-out produced ${artistIds.length} distinct artist ids`, {
-      artists_planned: artistIds.length,
-    });
-
     if (dryRun) {
-      log('info', 'dry_run', 'dry-run mode: skipping artist fan-out', { artists_planned: artistIds.length });
+      // Surface the same identity_scanned counter so dashboards stay
+      // populated in dry-run; warmed_* / not_* stay at zero by definition.
+      totals.identities_scanned = identityIds.length;
+      log('info', 'dry_run', 'dry-run mode: skipping refresh calls', {
+        identities_scanned: identityIds.length,
+        batch_count: batches.length,
+      });
       return { totals };
     }
 
-    // Phase 2 of the two-tier loop: fan out the artist fetches. Each
-    // LML call either returns the cached row, fires `_api_fetch` +
-    // write-back (LML#503), or tombstones a 404 (LML#510).
-    await runWithConcurrency(artistIds, concurrency, async (artistId) => {
-      const outcome = await fetchArtistFn(artistId);
-      tally(totals, 'artists', outcome);
-      if (outcome.kind === 'error') {
-        log('warn', 'artist_error', `artist ${artistId} fetch failed`, {
-          artist_id: artistId,
+    await runWithConcurrency(batches, concurrency, async (batch) => {
+      const outcome: FetchOutcome<BulkCacheRefreshResponse> = await fetchFn(batch);
+      if (outcome.kind === 'ok') {
+        tallyBatch(totals, outcome.value);
+      } else {
+        tallyBatchError(totals, batch.length);
+        log('warn', 'batch_error', `identity refresh batch failed (${batch.length} ids)`, {
+          batch_size: batch.length,
           error_message: outcome.error.message,
           retryable: outcome.retryable,
         });

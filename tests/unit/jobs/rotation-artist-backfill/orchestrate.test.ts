@@ -1,285 +1,301 @@
 /**
- * Unit tests for jobs/rotation-artist-backfill/orchestrate.ts (BS#1361).
+ * Unit tests for jobs/rotation-artist-backfill/orchestrate.ts (BS#1381).
  *
- * Covers the two-tier loop and the counter shape:
- *   - releases tier: ok / not_found / error counters.
- *   - artists tier: ok / not_found / error counters; dedup across releases.
- *   - dryRun: artist tier skipped; artists_planned still populated.
- *   - one bad row doesn't tear down the whole run (orchestrator catches inside).
- *   - concurrency is honored (no more than N in flight).
+ * Covers the one-tier batched loop and the new counter shape:
+ *   - tally semantics for warmed / not_found / not_implemented / error.
+ *   - warmed_releases / warmed_artists derived from per-source response items.
+ *   - chunking at LML_REFRESH_BATCH_CAP = 50.
+ *   - dryRun: refresh calls skipped; identities_scanned still populated.
+ *   - batch-level failure bumps identities_scanned + lml_error by batch size,
+ *     not identities_resolved.
+ *   - concurrency cap on batches honored.
+ *   - AggregateError when multiple batches fail.
+ *   - totals span gated on didLoadIds.
  */
 
 import { jest } from '@jest/globals';
 
-import type { DiscogsArtistDetails, DiscogsReleaseMetadata } from '@wxyc/lml-client';
+import type { BulkCacheRefreshResponse, CacheRefreshResultItem, CacheRefreshSourceResult } from '@wxyc/lml-client';
 
 import type { FetchOutcome } from '../../../../jobs/rotation-artist-backfill/lml-fetch';
-import { runBackfill } from '../../../../jobs/rotation-artist-backfill/orchestrate';
+import { LML_REFRESH_BATCH_CAP, chunk, runBackfill } from '../../../../jobs/rotation-artist-backfill/orchestrate';
 
-const makeRelease = (artistIds: number[], releaseId: number = 1): DiscogsReleaseMetadata =>
-  ({
-    release_id: releaseId,
-    title: 'X',
-    artist: 'A',
-    artist_id: artistIds[0] ?? null,
-    artists: artistIds.map((id) => ({ artist_id: id, name: `Artist ${id}`, join: '' })),
-    extra_artists: [],
-    labels: [],
-    genres: [],
-    styles: [],
-    tracklist: [],
-    videos: [],
-  }) as DiscogsReleaseMetadata;
+const ok = (value: BulkCacheRefreshResponse): FetchOutcome<BulkCacheRefreshResponse> => ({ kind: 'ok', value });
+const errored = (): FetchOutcome<BulkCacheRefreshResponse> => ({
+  kind: 'error',
+  error: new Error('boom'),
+  retryable: true,
+});
 
-const makeArtist = (id: number): DiscogsArtistDetails =>
-  ({ artist_id: id, name: `Artist ${id}`, profile: 'biography' }) as DiscogsArtistDetails;
+const warmed = (id: number, sources: Record<string, CacheRefreshSourceResult>): CacheRefreshResultItem => ({
+  identity_id: id,
+  status: 'warmed',
+  sources,
+});
+const notFoundItem = (id: number): CacheRefreshResultItem => ({ identity_id: id, status: 'not_found', sources: null });
+const notImplementedItem = (id: number): CacheRefreshResultItem => ({
+  identity_id: id,
+  status: 'not_implemented',
+  sources: { discogs_master: { release_outcome: 'not_implemented', artists: [] } },
+});
+const errorItem = (id: number): CacheRefreshResultItem => ({
+  identity_id: id,
+  status: 'error',
+  sources: { discogs_release: { release_outcome: 'error', artists: [] } },
+});
 
-const ok = <T>(value: T): FetchOutcome<T> => ({ kind: 'ok', value });
-const notFound = <T>(): FetchOutcome<T> => ({ kind: 'not_found' });
-const errored = <T>(): FetchOutcome<T> => ({ kind: 'error', error: new Error('boom'), retryable: true });
+const discogsRelease = (artistOutcomes: ('success' | 'error' | 'not_implemented')[]): CacheRefreshSourceResult => ({
+  release_outcome: 'success',
+  artists: artistOutcomes.map((outcome, i) => ({ external_id: String(100 + i), outcome })),
+});
+
+describe('chunk', () => {
+  it('returns empty array for empty input', () => {
+    expect(chunk([], 10)).toEqual([]);
+  });
+
+  it('returns one chunk when input fits in one batch', () => {
+    expect(chunk([1, 2, 3], 50)).toEqual([[1, 2, 3]]);
+  });
+
+  it('returns multiple chunks at the cap', () => {
+    const items = Array.from({ length: 125 }, (_, i) => i);
+    const chunks = chunk(items, 50);
+    expect(chunks).toHaveLength(3);
+    expect(chunks[0]).toHaveLength(50);
+    expect(chunks[1]).toHaveLength(50);
+    expect(chunks[2]).toHaveLength(25);
+  });
+
+  it('throws on non-positive size', () => {
+    expect(() => chunk([1, 2, 3], 0)).toThrow();
+  });
+});
+
+describe('LML_REFRESH_BATCH_CAP', () => {
+  it('is the hard contract value LML#525 documents', () => {
+    // The cap is a hard contract, not an env-tunable. If LML's ingress is
+    // recalibrated (CDN insertion, replica scale-up, Railway timeout change),
+    // this constant moves alongside that change. The test exists to catch
+    // a drive-by edit that accidentally raises it past LML's 400-on-overflow
+    // ceiling.
+    expect(LML_REFRESH_BATCH_CAP).toBe(50);
+  });
+});
 
 describe('runBackfill', () => {
-  it('iterates the two tiers and tallies happy-path counters', async () => {
-    const loadReleaseIds = jest.fn().mockResolvedValue([10, 20]);
-    const fetchReleaseFn = jest.fn((id: number) =>
-      Promise.resolve(ok(makeRelease(id === 10 ? [100, 200] : [200, 300], id)))
+  it('tallies a single batch of mixed-status responses correctly', async () => {
+    const loadIdentityIds = jest.fn().mockResolvedValue([1, 2, 3, 4]);
+    const fetchFn = jest.fn(() =>
+      Promise.resolve(
+        ok({
+          results: [
+            warmed(1, { discogs_release: discogsRelease(['success', 'success']) }),
+            notFoundItem(2),
+            notImplementedItem(3),
+            errorItem(4),
+          ],
+        })
+      )
     );
-    const fetchArtistFn = jest.fn((id: number) => Promise.resolve(ok(makeArtist(id))));
 
-    const result = await runBackfill({
-      loadReleaseIds,
-      fetchReleaseFn,
-      fetchArtistFn,
-      concurrency: 1,
-    });
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 1 });
 
-    expect(result.totals.releases_scanned).toBe(2);
-    expect(result.totals.releases_ok).toBe(2);
-    expect(result.totals.releases_not_found).toBe(0);
-    expect(result.totals.releases_error).toBe(0);
-
-    // 100, 200, 300 — deduped across the two releases.
-    expect(result.totals.artists_planned).toBe(3);
-    expect(result.totals.artists_attempted).toBe(3);
-    expect(result.totals.artists_ok).toBe(3);
-
-    expect(fetchArtistFn).toHaveBeenCalledTimes(3);
-    const calledIds = fetchArtistFn.mock.calls.map((c) => c[0]).sort();
-    expect(calledIds).toEqual([100, 200, 300]);
+    expect(result.totals.identities_scanned).toBe(4);
+    // resolved = warmed + not_found + not_implemented (everything except error)
+    expect(result.totals.identities_resolved).toBe(3);
+    expect(result.totals.warmed_releases).toBe(1);
+    expect(result.totals.warmed_artists).toBe(2);
+    expect(result.totals.not_found).toBe(1);
+    expect(result.totals.not_implemented).toBe(1);
+    expect(result.totals.lml_error).toBe(1);
   });
 
-  it('counts release 404s and skips artist fan-out for that release', async () => {
-    const loadReleaseIds = jest.fn().mockResolvedValue([1, 2]);
-    const fetchReleaseFn = jest.fn((id: number) =>
-      Promise.resolve(id === 1 ? ok(makeRelease([100], 1)) : notFound<DiscogsReleaseMetadata>())
+  it('counts warmed_releases per-source (multi-source row contributes multiple)', async () => {
+    // A hypothetical future state where LML wires multiple source legs:
+    // a single warmed identity_id can contribute to warmed_releases per
+    // source. We bake the multi-source semantics in now so dashboards
+    // don't have to migrate when MB / Spotify legs come online.
+    const loadIdentityIds = jest.fn().mockResolvedValue([1]);
+    const fetchFn = jest.fn(() =>
+      Promise.resolve(
+        ok({
+          results: [
+            warmed(1, {
+              discogs_release: discogsRelease(['success', 'success', 'success']),
+              musicbrainz_release: {
+                release_outcome: 'success',
+                artists: [{ external_id: 'mbid-1', outcome: 'success' }],
+              },
+            }),
+          ],
+        })
+      )
     );
-    const fetchArtistFn = jest.fn((id: number) => Promise.resolve(ok(makeArtist(id))));
 
-    const result = await runBackfill({
-      loadReleaseIds,
-      fetchReleaseFn,
-      fetchArtistFn,
-      concurrency: 1,
-    });
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 1 });
 
-    expect(result.totals.releases_ok).toBe(1);
-    expect(result.totals.releases_not_found).toBe(1);
-    expect(result.totals.artists_planned).toBe(1);
-    expect(result.totals.artists_ok).toBe(1);
-    expect(fetchArtistFn).toHaveBeenCalledWith(100);
+    expect(result.totals.warmed_releases).toBe(2);
+    expect(result.totals.warmed_artists).toBe(4);
   });
 
-  it('counts release errors and skips artist fan-out for that release', async () => {
-    const loadReleaseIds = jest.fn().mockResolvedValue([1]);
-    const fetchReleaseFn = jest.fn(() => Promise.resolve(errored<DiscogsReleaseMetadata>()));
-    const fetchArtistFn = jest.fn();
+  it('skips warmed_releases for sources that returned not_implemented', async () => {
+    // A warmed identity_id whose discogs_release leg succeeded but whose
+    // discogs_master leg returned not_implemented should bump warmed_releases
+    // by 1, not 2 — only the success leg counts.
+    const loadIdentityIds = jest.fn().mockResolvedValue([1]);
+    const fetchFn = jest.fn(() =>
+      Promise.resolve(
+        ok({
+          results: [
+            warmed(1, {
+              discogs_release: discogsRelease(['success']),
+              discogs_master: { release_outcome: 'not_implemented', artists: [] },
+            }),
+          ],
+        })
+      )
+    );
 
-    const result = await runBackfill({
-      loadReleaseIds,
-      fetchReleaseFn,
-      fetchArtistFn,
-      concurrency: 1,
-    });
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 1 });
 
-    expect(result.totals.releases_error).toBe(1);
-    expect(result.totals.artists_attempted).toBe(0);
-    expect(fetchArtistFn).not.toHaveBeenCalled();
+    expect(result.totals.warmed_releases).toBe(1);
+    expect(result.totals.warmed_artists).toBe(1);
   });
 
-  it('counts artist 404s separately from artist errors', async () => {
-    const loadReleaseIds = jest.fn().mockResolvedValue([1]);
-    const fetchReleaseFn = jest.fn(() => Promise.resolve(ok(makeRelease([100, 200, 300], 1))));
-    const fetchArtistFn = jest.fn((id: number) => {
-      if (id === 100) return Promise.resolve(ok(makeArtist(100)));
-      if (id === 200) return Promise.resolve(notFound<DiscogsArtistDetails>());
-      return Promise.resolve(errored<DiscogsArtistDetails>());
-    });
+  it('counts only success-outcome artists toward warmed_artists', async () => {
+    // Per LML#525's rollup semantics, an artist 404 inside a warmed release
+    // walk does NOT promote the per-id status to error — but it should also
+    // not pad the warmed_artists counter.
+    const loadIdentityIds = jest.fn().mockResolvedValue([1]);
+    const fetchFn = jest.fn(() =>
+      Promise.resolve(
+        ok({
+          results: [warmed(1, { discogs_release: discogsRelease(['success', 'error', 'not_implemented']) })],
+        })
+      )
+    );
 
-    const result = await runBackfill({
-      loadReleaseIds,
-      fetchReleaseFn,
-      fetchArtistFn,
-      concurrency: 1,
-    });
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 1 });
 
-    expect(result.totals.artists_ok).toBe(1);
-    expect(result.totals.artists_not_found).toBe(1);
-    expect(result.totals.artists_error).toBe(1);
+    expect(result.totals.warmed_artists).toBe(1);
   });
 
-  it('dryRun=true skips the artist tier but still reports planned cardinality', async () => {
-    const loadReleaseIds = jest.fn().mockResolvedValue([1, 2]);
-    const fetchReleaseFn = jest.fn((id: number) => Promise.resolve(ok(makeRelease(id === 1 ? [100] : [200, 300], id))));
-    const fetchArtistFn = jest.fn();
+  it('chunks input above LML_REFRESH_BATCH_CAP into multiple batches', async () => {
+    const ids = Array.from({ length: 75 }, (_, i) => i + 1);
+    const loadIdentityIds = jest.fn().mockResolvedValue(ids);
+    const fetchFn = jest.fn((batch: number[]) =>
+      Promise.resolve(ok({ results: batch.map((id) => warmed(id, { discogs_release: discogsRelease(['success']) })) }))
+    );
+
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 1 });
+
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(fetchFn.mock.calls[0][0]).toHaveLength(LML_REFRESH_BATCH_CAP);
+    expect(fetchFn.mock.calls[1][0]).toHaveLength(25);
+    expect(result.totals.identities_scanned).toBe(75);
+    expect(result.totals.warmed_releases).toBe(75);
+  });
+
+  it('dryRun=true skips refresh calls but populates identities_scanned', async () => {
+    const loadIdentityIds = jest.fn().mockResolvedValue([1, 2, 3]);
+    const fetchFn = jest.fn();
 
     const result = await runBackfill({
-      loadReleaseIds,
-      fetchReleaseFn,
-      fetchArtistFn,
+      loadIdentityIds,
+      fetchFn,
       concurrency: 1,
       dryRun: true,
     });
 
-    expect(result.totals.artists_planned).toBe(3);
-    expect(result.totals.artists_attempted).toBe(0);
-    expect(fetchArtistFn).not.toHaveBeenCalled();
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(result.totals.identities_scanned).toBe(3);
+    expect(result.totals.warmed_releases).toBe(0);
   });
 
-  it('dedupes artist ids that surface on multiple releases', async () => {
-    const loadReleaseIds = jest.fn().mockResolvedValue([1, 2, 3]);
-    const fetchReleaseFn = jest.fn((id: number) => Promise.resolve(ok(makeRelease([42], id))));
-    const fetchArtistFn = jest.fn((id: number) => Promise.resolve(ok(makeArtist(id))));
+  it('batch-level failure bumps identities_scanned + lml_error by batch size, not identities_resolved', async () => {
+    // The whole batch failed at the transport level — the orchestrator can't
+    // tell which per-id sub-fanouts ran. Keeping identities_scanned truthful
+    // makes the `not_found / identities_scanned` ratio alert (BS#1402)
+    // resilient to transient LML outages.
+    const loadIdentityIds = jest.fn().mockResolvedValue([10, 20, 30]);
+    const fetchFn = jest.fn(() => Promise.resolve(errored()));
 
-    const result = await runBackfill({
-      loadReleaseIds,
-      fetchReleaseFn,
-      fetchArtistFn,
-      concurrency: 1,
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 1 });
+
+    expect(result.totals.identities_scanned).toBe(3);
+    expect(result.totals.lml_error).toBe(3);
+    expect(result.totals.identities_resolved).toBe(0);
+    expect(result.totals.warmed_releases).toBe(0);
+  });
+
+  it('mixes successful and failed batches without double-counting', async () => {
+    const ids = Array.from({ length: 100 }, (_, i) => i + 1);
+    const loadIdentityIds = jest.fn().mockResolvedValue(ids);
+    let callCount = 0;
+    const fetchFn = jest.fn((batch: number[]) => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve(
+          ok({ results: batch.map((id) => warmed(id, { discogs_release: discogsRelease(['success']) })) })
+        );
+      }
+      return Promise.resolve(errored());
     });
 
-    // Same artist credited on all three releases — one artist call total.
-    expect(result.totals.artists_planned).toBe(1);
-    expect(fetchArtistFn).toHaveBeenCalledTimes(1);
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 1 });
+
+    expect(result.totals.identities_scanned).toBe(100);
+    expect(result.totals.identities_resolved).toBe(50);
+    expect(result.totals.warmed_releases).toBe(50);
+    expect(result.totals.lml_error).toBe(50);
   });
 
-  it('honors the concurrency cap on the artist tier', async () => {
-    const loadReleaseIds = jest.fn().mockResolvedValue([1]);
-    const fetchReleaseFn = jest.fn(() => Promise.resolve(ok(makeRelease([1, 2, 3, 4, 5, 6, 7, 8], 1))));
+  it('honors the concurrency cap on batch fan-out', async () => {
+    const ids = Array.from({ length: 300 }, (_, i) => i + 1); // 6 batches
+    const loadIdentityIds = jest.fn().mockResolvedValue(ids);
 
     let inFlight = 0;
     let maxInFlight = 0;
-    const fetchArtistFn = jest.fn(async (id: number) => {
+    const fetchFn = jest.fn(async (batch: number[]) => {
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
       await new Promise((resolve) => setTimeout(resolve, 5));
       inFlight -= 1;
-      return ok(makeArtist(id));
+      return ok({ results: batch.map((id) => warmed(id, { discogs_release: discogsRelease(['success']) })) });
     });
 
-    await runBackfill({
-      loadReleaseIds,
-      fetchReleaseFn,
-      fetchArtistFn,
-      concurrency: 3,
-    });
+    await runBackfill({ loadIdentityIds, fetchFn, concurrency: 3 });
 
     expect(maxInFlight).toBeLessThanOrEqual(3);
     expect(maxInFlight).toBeGreaterThan(0);
   });
 
-  it('zero release ids → zero artist calls, no throw', async () => {
-    const loadReleaseIds = jest.fn().mockResolvedValue([]);
-    const fetchReleaseFn = jest.fn();
-    const fetchArtistFn = jest.fn();
+  it('zero identity ids → zero refresh calls, no throw', async () => {
+    const loadIdentityIds = jest.fn().mockResolvedValue([]);
+    const fetchFn = jest.fn();
 
-    const result = await runBackfill({
-      loadReleaseIds,
-      fetchReleaseFn,
-      fetchArtistFn,
-      concurrency: 3,
-    });
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 3 });
 
-    expect(result.totals.releases_scanned).toBe(0);
-    expect(result.totals.artists_planned).toBe(0);
-    expect(fetchReleaseFn).not.toHaveBeenCalled();
-    expect(fetchArtistFn).not.toHaveBeenCalled();
+    expect(result.totals.identities_scanned).toBe(0);
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
-  it('emits artist ids in sorted order so dry-run output is stable across runs', async () => {
-    // Release-completion order under concurrency > 1 is non-deterministic;
-    // the orchestrator sorts before the Phase-2 fan-out so artist log lines
-    // and totals projection are byte-identical across re-runs.
-    const loadReleaseIds = jest.fn().mockResolvedValue([1, 2, 3]);
-    const fetchReleaseFn = jest.fn((id: number) => {
-      const ids = id === 1 ? [300, 100] : id === 2 ? [50, 200] : [25, 75];
-      return Promise.resolve(ok(makeRelease(ids, id)));
-    });
-    const calledArtists: number[] = [];
-    const fetchArtistFn = jest.fn((id: number) => {
-      calledArtists.push(id);
-      return Promise.resolve(ok(makeArtist(id)));
-    });
-
-    await runBackfill({
-      loadReleaseIds,
-      fetchReleaseFn,
-      fetchArtistFn,
-      concurrency: 1,
-    });
-
-    expect(calledArtists).toEqual([25, 50, 75, 100, 200, 300]);
-  });
-
-  it('one bad task in the artist tier does not orphan sibling in-flight tasks (Promise.allSettled semantics)', async () => {
-    // If `runWithConcurrency` used `Promise.all` directly, a worker rejection
-    // would let the wrapper resolve while siblings are mid-`await`, leaking
-    // promise resolutions after the caller has moved on. The new
-    // semaphore-based pool waits for every task to settle so the rethrow
-    // happens AFTER all permits are released.
-    const loadReleaseIds = jest.fn().mockResolvedValue([1]);
-    const fetchReleaseFn = jest.fn(() => Promise.resolve(ok(makeRelease([10, 20, 30], 1))));
-    const completed: number[] = [];
-    const fetchArtistFn = jest.fn(async (id: number) => {
+  it('aggregates multiple batch failures into an AggregateError so 2nd+ rejections are not silently dropped', async () => {
+    // Same Promise.allSettled + AggregateError guarantee as the prior shape,
+    // re-asserted here under the batched call surface.
+    const ids = Array.from({ length: 150 }, (_, i) => i + 1); // 3 batches
+    const loadIdentityIds = jest.fn().mockResolvedValue(ids);
+    let callIdx = 0;
+    const fetchFn = jest.fn(async () => {
+      const idx = ++callIdx;
       await new Promise((resolve) => setTimeout(resolve, 5));
-      if (id === 20) throw new Error('synthetic task failure');
-      completed.push(id);
-      return ok(makeArtist(id));
-    });
-
-    await expect(
-      runBackfill({
-        loadReleaseIds,
-        fetchReleaseFn,
-        fetchArtistFn,
-        concurrency: 3,
-      })
-    ).rejects.toThrow('synthetic task failure');
-
-    // Both non-throwing siblings completed (no orphaning).
-    expect(completed.sort((a, b) => a - b)).toEqual([10, 30]);
-  });
-
-  it('aggregates multiple task failures into an AggregateError so 2nd+ rejections are not silently dropped', async () => {
-    // With Promise.all's first-rejection-wins semantics, a run where
-    // three tasks throw at slightly different times would lose two of
-    // the three failures. The aggregator surfaces all of them so the
-    // shared root cause (e.g. a decoder regression hitting many calls)
-    // is visible in the stack instead of hiding behind a single victim.
-    const loadReleaseIds = jest.fn().mockResolvedValue([1]);
-    const fetchReleaseFn = jest.fn(() => Promise.resolve(ok(makeRelease([10, 20, 30], 1))));
-    const fetchArtistFn = jest.fn(async (id: number) => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      throw new Error(`task ${id} failed`);
+      throw new Error(`batch ${idx} failed`);
     });
 
     let caught: unknown;
     try {
-      await runBackfill({
-        loadReleaseIds,
-        fetchReleaseFn,
-        fetchArtistFn,
-        concurrency: 3,
-      });
+      await runBackfill({ loadIdentityIds, fetchFn, concurrency: 3 });
     } catch (e) {
       caught = e;
     }
@@ -288,28 +304,15 @@ describe('runBackfill', () => {
     const aggregate = caught as AggregateError;
     expect(aggregate.errors).toHaveLength(3);
     const messages = (aggregate.errors as Error[]).map((e) => e.message).sort();
-    expect(messages).toEqual(['task 10 failed', 'task 20 failed', 'task 30 failed']);
+    expect(messages).toEqual(['batch 1 failed', 'batch 2 failed', 'batch 3 failed']);
   });
 
-  it('does not fire the totals span when loadReleaseIds throws (avoids all-zero counter span on guard-level failure)', async () => {
-    // If loadReleaseIds rejects before any tier runs, the totals are
-    // all-zero by construction. Firing the span anyway would be
-    // indistinguishable from a legitimate empty-rotation day on the
-    // dashboard. The orchestrator gates on a `didLoadIds` sentinel.
-    const loadReleaseIds = jest.fn().mockRejectedValue(new Error('PG pool exhausted'));
-    const fetchReleaseFn = jest.fn();
-    const fetchArtistFn = jest.fn();
+  it('does not fire the totals span when loadIdentityIds throws (avoids all-zero counter span on guard-level failure)', async () => {
+    const loadIdentityIds = jest.fn().mockRejectedValue(new Error('PG pool exhausted'));
+    const fetchFn = jest.fn();
 
-    await expect(
-      runBackfill({
-        loadReleaseIds,
-        fetchReleaseFn,
-        fetchArtistFn,
-        concurrency: 3,
-      })
-    ).rejects.toThrow('PG pool exhausted');
+    await expect(runBackfill({ loadIdentityIds, fetchFn, concurrency: 3 })).rejects.toThrow('PG pool exhausted');
 
-    expect(fetchReleaseFn).not.toHaveBeenCalled();
-    expect(fetchArtistFn).not.toHaveBeenCalled();
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 });
