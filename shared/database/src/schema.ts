@@ -442,6 +442,21 @@ export const compilation_track_artist = wxyc_schema.table(
     index('cta_library_id_idx').on(table.library_id),
     index('cta_artist_name_idx').on(table.artist_name),
     uniqueIndex('cta_unique_idx').on(table.library_id, table.artist_name, table.track_title),
+    // BS#1135 / 0099_cta-unique-null-track-partial.sql: complement to
+    // `cta_unique_idx` that closes the NULL-track-title duplicate
+    // loophole on PG 14 (prod runtime — `NULLS NOT DISTINCT` is PG15+
+    // and unavailable). The base index above covers the non-NULL
+    // slice (Postgres includes non-NULL rows in unique comparisons
+    // normally); this partial unique covers `track_title IS NULL` on
+    // `(library_id, artist_name)`. Together they enforce the full
+    // intended "no duplicate compilation tracks per (library, artist,
+    // title)" semantics. Tests:
+    // `tests/unit/database/schema.cta-unique-null-track-partial.test.ts`
+    // (schema drift), `tests/integration/cta-unique-null-track-partial.spec.js`
+    // (runtime behavior).
+    uniqueIndex('cta_unique_null_track_idx')
+      .on(table.library_id, table.artist_name)
+      .where(sql`${table.track_title} IS NULL`),
   ]
 );
 
