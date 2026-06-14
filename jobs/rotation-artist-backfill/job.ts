@@ -1,19 +1,19 @@
 /**
- * Entry point for the rotation-artist-backfill job (BS#1361).
+ * Entry point for the rotation-artist-backfill job (BS#1381).
  *
  * Daily cron (default `30 4 * * *` UTC — between artist-search-alias-consumer
- * at `15 4` and flowsheet-metadata-backfill at `0 6`). Two-tier loop:
+ * at `15 4` and flowsheet-metadata-backfill at `0 6`). One-tier batched loop:
  *
- *   for release_id in active_rotation_release_ids():
- *     release = GET /api/v1/discogs/release/{release_id}
- *     for artist_id in extract_phase1(release):
- *       GET /api/v1/discogs/artist/{artist_id}
+ *   for batch in chunk(active_rotation_identity_ids(), 50):
+ *     POST /api/v1/cache/refresh-for-identities { identity_ids: batch }
  *
- * Both endpoints route through LML's fallthrough seam. The job's value is
- * that the second call now fires `_api_fetch` + write-back on any stub
- * row (LML#503), back-filling the artist cache for the small slice of
- * artists DJs actually see on flowsheets — without waiting for the next
- * monthly Discogs rebuild to land.
+ * LML handles the per-source release-cache refresh AND the walk-to-artists
+ * step (release.artists[*].artist_id → artist refresh) internally. The job's
+ * value is that BS no longer needs to hold Discogs IDs to warm the cache —
+ * `rotation.lml_identity_id` (BS#1380) is the stable handle, and LML maps
+ * it to every per-source (source, external_id) pair it knows about. New
+ * sources (MusicBrainz, Bandcamp, Spotify, Apple Music) light up
+ * transparently as LML wires them, without a BS-side cron change.
  *
  * Run procedure:
  *   - Production: registered via the BS deploy-base machinery
@@ -21,8 +21,8 @@
  *     scripts/resolve-cron-schedule.sh).
  *   - Manual one-shot on EC2:
  *       docker run --rm --env-file .env <image> 2>&1 | tee log
- *   - DRY_RUN: set `DRY_RUN=true` to enumerate the release + artist
- *     cardinality before any artist calls fire.
+ *   - DRY_RUN: set `DRY_RUN=true` to enumerate identity cardinality
+ *     before any refresh calls fire.
  *
  * Resumable + idempotent — see orchestrate.ts header.
  */
@@ -34,7 +34,7 @@ import { closeDatabaseConnection } from '@wxyc/database';
 
 import { DeployGuardError, enforceDeployGuard } from './deploy-guard.js';
 import { runBackfill } from './orchestrate.js';
-import { loadActiveRotationReleaseIds } from './query.js';
+import { loadActiveRotationIdentityIds } from './query.js';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'rotation-artist-backfill';
@@ -42,7 +42,7 @@ const JOB_NAME = 'rotation-artist-backfill';
 /**
  * Fail closed before any rows are scanned if the LML transport surface
  * is misconfigured. LML_API_KEY is required in staging/prod where
- * `LML_REQUIRE_AUTH` is on — without it every release/artist call would
+ * `LML_REQUIRE_AUTH` is on — without it every refresh call would
  * silently 401, the run would look like a transient outage in
  * dashboards, and the daily cron would re-run with the same fault
  * indefinitely. LOCAL_DEV=1 keeps the local-dev escape hatch the
@@ -135,7 +135,7 @@ const main = async (): Promise<void> => {
         const dryRun = envBool('DRY_RUN');
 
         const result = await runBackfill({
-          loadReleaseIds: loadActiveRotationReleaseIds,
+          loadIdentityIds: loadActiveRotationIdentityIds,
           concurrency,
           dryRun,
         });
