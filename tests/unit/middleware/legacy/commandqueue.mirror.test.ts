@@ -142,6 +142,83 @@ describe('MirrorCommandQueue', () => {
     expect(queue.enqueue(['SELECT 2'])).toBeNull();
   });
 
+  describe('recovery after fatalStop', () => {
+    test('instance() returns a fresh live queue after the prior singleton went fatal', async () => {
+      mockSend.mockRejectedValueOnce(new Error('fatal 1'));
+
+      const dead = createQueue({ maxAttempts: 1 });
+      dead.enqueue(['SELECT 1']);
+      await jest.advanceTimersByTimeAsync(50);
+
+      expect(dead.isDead()).toBe(true);
+
+      // Simulate the next legacy-mirror cycle: it calls `instance()` again,
+      // expecting a usable queue. After fatalStop, that call must yield a
+      // fresh live instance, not the dead singleton.
+      mockSend.mockResolvedValueOnce('OK');
+      const recovered = MirrorCommandQueue.instance({
+        maxAttempts: 3,
+        baseBackoffMs: 10,
+        maxBackoffMs: 100,
+        jitterMs: 0,
+        logFile: '/tmp/test-mirror-logs',
+      });
+
+      expect(recovered).not.toBe(dead);
+      expect(recovered.isAlive()).toBe(true);
+
+      const succeededSpy = jest.fn();
+      recovered.on('succeeded', succeededSpy);
+
+      const cmd = recovered.enqueue(['SELECT 2']);
+      expect(cmd).not.toBeNull();
+
+      await jest.advanceTimersByTimeAsync(50);
+      expect(succeededSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test('repeated fatalStop -> recover cycles do not leak listeners on the fresh instance', async () => {
+      mockSend.mockRejectedValueOnce(new Error('cycle 1 fatal')).mockRejectedValueOnce(new Error('cycle 2 fatal'));
+
+      const first = createQueue({ maxAttempts: 1 });
+      first.enqueue(['SELECT 1']);
+      await jest.advanceTimersByTimeAsync(50);
+      expect(first.isDead()).toBe(true);
+
+      const second = MirrorCommandQueue.instance({
+        maxAttempts: 1,
+        baseBackoffMs: 10,
+        maxBackoffMs: 100,
+        jitterMs: 0,
+        logFile: '/tmp/test-mirror-logs',
+      });
+      expect(second).not.toBe(first);
+      second.enqueue(['SELECT 2']);
+      await jest.advanceTimersByTimeAsync(50);
+      expect(second.isDead()).toBe(true);
+
+      const third = MirrorCommandQueue.instance({
+        maxAttempts: 3,
+        baseBackoffMs: 10,
+        maxBackoffMs: 100,
+        jitterMs: 0,
+        logFile: '/tmp/test-mirror-logs',
+      });
+      expect(third).not.toBe(second);
+      expect(third.isAlive()).toBe(true);
+
+      // Each lifecycle event has exactly one listener registered by the
+      // static `instance()` factory: the dispatch closure. Verifies that
+      // recovery did not re-register listeners on the same shared instance.
+      expect(third.listenerCount('enqueued')).toBe(1);
+      expect(third.listenerCount('started')).toBe(1);
+      expect(third.listenerCount('succeeded')).toBe(1);
+      expect(third.listenerCount('failedAttempt')).toBe(1);
+      expect(third.listenerCount('fatal')).toBe(1);
+      expect(third.listenerCount('persisted')).toBe(1);
+    });
+  });
+
   describe('fatal report on disk', () => {
     test('uses ring-buffer filename and never serializes raw SQL', async () => {
       mockSend.mockRejectedValue(new Error('connection refused'));
