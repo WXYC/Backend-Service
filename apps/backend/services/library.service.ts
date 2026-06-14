@@ -36,6 +36,7 @@ import {
   isLmlConfigured,
   envInt,
   LmlClientError,
+  resolveIdentity,
   type LookupResponse,
   type DiscogsTrackItem,
   type DiscogsReleaseMetadata,
@@ -340,8 +341,136 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
   return rows.map((row) => serializeReconciledIdentity(row));
 };
 
+/**
+ * BS#1380: Sentry counter `lml.resolve.fallback_to_null` reason buckets.
+ * Each value signals a different operational response:
+ *   - `timeout`: LML latency/capacity (look at LML p95)
+ *   - `5xx`:     LML deploy regression (look at LML release notes)
+ *   - `4xx`:     BS-side caller bug (the library_identity row pointed at
+ *                a sentinel ID LML rejects, etc.)
+ *   - `network`: infra noise (transient TCP/DNS failures)
+ *   - `other`:   uncategorised — investigate per-event
+ *
+ * Surfaced separately so a per-bucket regression doesn't get masked by the
+ * rollup. Revisit (split the knob or tune the value) if Sentry shows p95
+ * user-facing add-to-rotation > 2.5 s OR fallback rate > 5% in any bucket.
+ */
+export type LmlResolveFallbackReason = 'timeout' | '5xx' | '4xx' | 'network' | 'other';
+
+/**
+ * Classify the error caught from `resolveIdentity(...)` into one of the
+ * five operational buckets above. Pulled out so the unit test can
+ * exhaustively exercise every branch without spinning up an LML server.
+ *
+ * `LmlClientError` is the wrapper `lmlFetch` throws; its `statusCode` was
+ * already translated upstream (5xx → 502, AbortError → 504). The catch
+ * here untranslates so the Sentry attribute reads as the original
+ * operational signal.
+ */
+export function classifyLmlResolveError(err: unknown): LmlResolveFallbackReason {
+  if (!err || typeof err !== 'object') return 'other';
+  const e = err as { name?: string; code?: string; statusCode?: number; message?: string };
+  if (e.name === 'AbortError') return 'timeout';
+  if (err instanceof LmlClientError) {
+    // `lmlFetch` translates `AbortError` → 504 and upstream 5xx → 502; restore
+    // the operational bucket from those translations + the raw status range.
+    if (e.statusCode === 504) return 'timeout';
+    if (e.statusCode === 502) {
+      // 502 is overloaded: it's the wrapper for both upstream 5xx and a raw
+      // fetch failure (the catch-all in `lmlFetch`). Disambiguate from the
+      // message — "LML request failed" is the fetch-threw path.
+      return typeof e.message === 'string' && e.message.startsWith('LML request failed') ? 'network' : '5xx';
+    }
+    if (typeof e.statusCode === 'number') {
+      if (e.statusCode >= 500) return '5xx';
+      if (e.statusCode >= 400) return '4xx';
+    }
+    return 'other';
+  }
+  if (e.code === 'ECONNRESET' || e.code === 'ENOTFOUND' || e.code === 'ECONNREFUSED') {
+    return 'network';
+  }
+  return 'other';
+}
+
+/**
+ * Add an album to rotation (dj-site path, `POST /library/rotation`).
+ *
+ * Synchronously triple-writes `(discogs_release_id, discogs_release_id_source =
+ * 'library_identity', lml_identity_id)` when the album's `library_identity`
+ * row supplies a non-NULL `discogs_release_id` (BS#1380):
+ *
+ *   1. Read `library_identity.discogs_release_id` for the requested
+ *      `album_id`. `library_identity.library_id` is the PRIMARY KEY
+ *      (see schema.ts:1391-1393); `LIMIT 1` is defensive.
+ *   2. If non-NULL, `await resolveIdentity({kind:'release',
+ *      source:'discogs_release', external_id})` to mint a stable
+ *      `lml_identity_id`. The hop runs inside this handler — the response
+ *      row carries the populated columns without needing a follow-up
+ *      patch.
+ *   3. INSERT all three columns. On resolve failure (timeout / 5xx /
+ *      network), `lml_identity_id` falls back to NULL but
+ *      `discogs_release_id` + `discogs_release_id_source = 'library_identity'`
+ *      still land — the *source of the Discogs id* is library_identity
+ *      regardless of whether the mint succeeded. The daily backfill cron
+ *      catches up within ~24h.
+ *
+ * Rationale for synchronous-before-INSERT: dj-site's optimistic UI
+ * (WXYC/dj-site#648) covers the latency tail at the client side — the row
+ * appears in-rotation immediately on click. Blocking the music director on
+ * an LML outage is worse than a temporarily-incomplete row, so the catch
+ * arm proceeds rather than rethrowing.
+ */
 export const addToRotation = async (newRotation: RotationAddRequest) => {
-  const insertedRotation: RotationRelease[] = await db.insert(rotation).values(newRotation).returning();
+  const values: RotationAddRequest = { ...newRotation };
+
+  // Allowlist guard already runs at the controller layer, but the server-
+  // derived fields below must always come from this function, not the
+  // request — defense in depth.
+  if (values.album_id != null) {
+    const [identityRow] = await db
+      .select({ discogs_release_id: library_identity.discogs_release_id })
+      .from(library_identity)
+      .where(eq(library_identity.library_id, values.album_id))
+      .limit(1);
+    const discogsReleaseId = identityRow?.discogs_release_id ?? null;
+
+    if (discogsReleaseId != null) {
+      // The source-of-the-Discogs-id is library_identity, regardless of
+      // whether the LML mint that follows succeeds.
+      values.discogs_release_id = discogsReleaseId;
+      values.discogs_release_id_source = 'library_identity';
+
+      let lmlIdentityId: number | null = null;
+      try {
+        const resolved = await resolveIdentity({
+          kind: 'release',
+          source: 'discogs_release',
+          external_id: String(discogsReleaseId),
+        });
+        lmlIdentityId = resolved.identity_id;
+      } catch (err) {
+        const reason = classifyLmlResolveError(err);
+        // BS#1380: classify once at fallback time so each reason bucket
+        // signals a different operational response (timeout → LML
+        // latency, 5xx → LML deploy regression, 4xx → BS-side caller bug,
+        // network → infra noise). v10 SDK shape — `Sentry.metrics.count(
+        // name, value, {attributes})`. Pre-v8
+        // `Sentry.metrics.increment(..., {tags})` was removed.
+        try {
+          Sentry.metrics.count('lml.resolve.fallback_to_null', 1, {
+            attributes: { caller: 'add_to_rotation', reason },
+          });
+        } catch {
+          // Observability must never break the request path; swallow.
+        }
+        // lml_identity_id stays NULL; INSERT proceeds.
+      }
+      values.lml_identity_id = lmlIdentityId;
+    }
+  }
+
+  const insertedRotation: RotationRelease[] = await db.insert(rotation).values(values).returning();
   return insertedRotation[0];
 };
 

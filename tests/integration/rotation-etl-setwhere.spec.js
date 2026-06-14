@@ -34,6 +34,15 @@ async function upsertRotationEtlShape(sql, row) {
         WHEN excluded.discogs_release_id IS NOT NULL
           THEN 'tubafrenzy_paste'::${sql(SCHEMA)}.discogs_release_id_source_enum
         ELSE ${sql(SCHEMA)}.rotation.discogs_release_id_source
+      END,
+      -- BS#1380: drift-prevention CASE. Clears lml_identity_id only when
+      -- tubafrenzy supplied a non-NULL discogs_release_id that differs
+      -- from the persisted value. Mirrors jobs/rotation-etl/job.ts.
+      lml_identity_id = CASE
+        WHEN excluded.discogs_release_id IS NOT NULL
+          AND excluded.discogs_release_id IS DISTINCT FROM ${sql(SCHEMA)}.rotation.discogs_release_id
+          THEN NULL
+        ELSE ${sql(SCHEMA)}.rotation.lml_identity_id
       END
     WHERE
       ${sql(SCHEMA)}.rotation.album_id                  IS DISTINCT FROM excluded.album_id OR
@@ -235,6 +244,87 @@ describe('rotation-etl value-aware setWhere (BS#1063)', () => {
   // IS DISTINCT FROM term on "excluded IS NOT NULL", COALESCE turns the
   // write into a value-no-op but the row still gets rewritten — wasting
   // a CDC event per row on every 30-min tick across all 310 active rows.
+  // BS#1380 — drift-prevention CASE: when a tubafrenzy paste-correction
+  // changes the discogs_release_id (Y_X is the LML identity minted against
+  // the OLD discogs id; clearing it lets the daily backfill cron re-resolve
+  // against X' on the next tick).
+  test("paste-correction (X → X') of discogs_release_id clears lml_identity_id", async () => {
+    // Arrange: pre-existing row at (discogs=X=999001, lml=Y_X=7700001).
+    await sql`
+      UPDATE ${sql(SCHEMA)}.rotation
+      SET discogs_release_id = 999001,
+          discogs_release_id_source = 'lml_offline_backfill',
+          lml_identity_id = 7700001
+      WHERE legacy_rotation_id = ${ROTATION_LEGACY_ID}
+    `;
+
+    // Act: tubafrenzy paste-correction supplies a new discogs_release_id.
+    await upsertRotationEtlShape(sql, {
+      legacy_rotation_id: ROTATION_LEGACY_ID,
+      legacy_library_release_id: 5550001,
+      album_id: null,
+      rotation_bin: 'H',
+      add_date: '2026-05-24',
+      kill_date: null,
+      artist_name: 'Jessica Pratt',
+      album_title: 'On Your Own Love Again',
+      record_label: 'Drag City',
+      discogs_release_id: 999999,
+    });
+
+    const after = await sql`
+      SELECT discogs_release_id, lml_identity_id, discogs_release_id_source
+      FROM ${sql(SCHEMA)}.rotation
+      WHERE legacy_rotation_id = ${ROTATION_LEGACY_ID}
+    `;
+    expect(after[0].discogs_release_id).toBe(999999);
+    expect(after[0].lml_identity_id).toBeNull();
+    expect(after[0].discogs_release_id_source).toBe('tubafrenzy_paste');
+  });
+
+  // BS#1380 — regression test for the unguarded CASE: a tubafrenzy tick
+  // that contributes NULL discogs_release_id but a changed kill_date
+  // must NOT clear lml_identity_id. Without the
+  // `excluded.discogs_release_id IS NOT NULL` guard, three-valued SQL
+  // (NULL IS DISTINCT FROM X = TRUE) would null out a perfectly-good
+  // identity on every kill_date / artist_name / etc. tick.
+  test('NULL-upstream-with-other-change preserves lml_identity_id (drift CASE guard)', async () => {
+    // Arrange: pre-existing row at (discogs=X=999001, lml=Y_X=7700001).
+    await sql`
+      UPDATE ${sql(SCHEMA)}.rotation
+      SET discogs_release_id = 999001,
+          discogs_release_id_source = 'lml_offline_backfill',
+          lml_identity_id = 7700001,
+          kill_date = NULL
+      WHERE legacy_rotation_id = ${ROTATION_LEGACY_ID}
+    `;
+
+    // Act: tubafrenzy tick with NULL discogs_release_id but a kill_date
+    // change. The discogs_release_id COALESCE preserves the persisted
+    // value; without the guard, lml_identity_id would be nulled.
+    await upsertRotationEtlShape(sql, {
+      legacy_rotation_id: ROTATION_LEGACY_ID,
+      legacy_library_release_id: 5550001,
+      album_id: null,
+      rotation_bin: 'H',
+      add_date: '2026-05-24',
+      kill_date: '2027-01-01', // changed; triggers setWhere gate
+      artist_name: 'Jessica Pratt',
+      album_title: 'On Your Own Love Again',
+      record_label: 'Drag City',
+      discogs_release_id: null,
+    });
+
+    const after = await sql`
+      SELECT discogs_release_id, lml_identity_id, kill_date
+      FROM ${sql(SCHEMA)}.rotation
+      WHERE legacy_rotation_id = ${ROTATION_LEGACY_ID}
+    `;
+    expect(after[0].discogs_release_id).toBe(999001);
+    expect(after[0].lml_identity_id).toBe(7700001);
+    expect(after[0].kill_date.toISOString().slice(0, 10)).toBe('2027-01-01');
+  });
+
   test('NULL excluded.discogs_release_id over a backfilled row is a xmin-quiet no-op', async () => {
     await sql`
       UPDATE ${sql(SCHEMA)}.rotation

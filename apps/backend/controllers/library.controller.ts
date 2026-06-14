@@ -307,12 +307,43 @@ export const getRotation: RequestHandler = async (req, res) => {
 };
 
 export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
+
+/**
+ * Pick only the fields the client is allowed to write through the public
+ * `POST /library/rotation` endpoint (BS#1380). Mirrors
+ * `pickUpdateEntryFields()` in flowsheet.controller.ts (BS#1099).
+ *
+ * Server-derived columns (`legacy_rotation_id`, `legacy_library_release_id`,
+ * `discogs_release_id`, `discogs_release_id_source`, `lml_identity_id`,
+ * `tracklist_lookup_attempted_at`, `kill_date`) and tubafrenzy-ETL-only
+ * snapshot columns (`add_date`, `artist_name`, `album_title`,
+ * `record_label`) must never be client-supplied through this endpoint —
+ * `addToRotation` derives the LML-handle columns from `library_identity`
+ * and the synchronous `resolveIdentity` hop, and tubafrenzy is the only
+ * legitimate source for the snapshot columns.
+ *
+ * Phrased as an allowlist (signature-typed accept list) so a future column
+ * addition to `rotation` is implicitly rejected by typecheck until
+ * explicitly added to the signature. Matches dj-site's `RotationParams`
+ * (`{ album_id, rotation_bin }`); widen the signature here when a future
+ * caller legitimately needs another field.
+ */
+type AddRotationAllowlist = Pick<NewRotationRelease, 'album_id' | 'rotation_bin'>;
+
+export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRotationAllowlist {
+  const picked = {} as AddRotationAllowlist;
+  if (body.album_id !== undefined) picked.album_id = body.album_id;
+  if (body.rotation_bin !== undefined) picked.rotation_bin = body.rotation_bin;
+  return picked;
+}
+
 export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res) => {
   if (req.body.album_id === undefined || req.body.rotation_bin === undefined) {
     throw new WxycError('Missing Parameters: album_id or rotation_bin', 400);
   }
 
-  const rotationRelease: RotationRelease = await libraryService.addToRotation(req.body);
+  const picked = pickAddRotationFields(req.body);
+  const rotationRelease: RotationRelease = await libraryService.addToRotation(picked);
   res.status(201).json(rotationRelease);
 };
 
