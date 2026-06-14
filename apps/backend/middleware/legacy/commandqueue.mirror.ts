@@ -88,7 +88,22 @@ function envInt(name: string, fallback: number): number {
 export class MirrorCommandQueue extends EventEmitter {
   private static _instance: MirrorCommandQueue | null = null;
 
+  /**
+   * Get the process-wide mirror queue. Auto-recycles after `fatalStop`:
+   * if the prior singleton went dead (5 failed attempts on any command
+   * tripped `fatalStop`, flipping `alive=false`), the next call returns a
+   * fresh live instance instead of the dead one. Without this, every
+   * caller after the first fatal would see `enqueue` return `null`
+   * silently for the lifetime of the process (BS#1123).
+   *
+   * In-flight write invariant: the dead instance's `workLoop` continues
+   * to drain (or fatal-stop) on its own promise chain; the fresh queue
+   * starts empty, so no command is torn between the two instances.
+   */
   static instance(options?: MirrorQueueOptions) {
+    if (this._instance && this._instance.isDead()) {
+      this._instance = null;
+    }
     if (!this._instance) {
       this._instance = new MirrorCommandQueue(options);
 
