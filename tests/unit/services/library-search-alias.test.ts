@@ -309,13 +309,51 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(results).toHaveLength(1);
       expect(results[0].matched_via_alias).toBeUndefined();
       // Both calls are issued via Promise.all (dataQuery + countQuery). The
-      // load-bearing assertion is that neither SQL embedded `alias_hit`.
+      // load-bearing assertion is that neither SQL embedded the alias
+      // substrate join (LATERAL alias_hit or CTE alias_hits).
       const dataCall = db.execute.mock.calls[0]?.[0];
       const countCall = db.execute.mock.calls[1]?.[0];
       const renderedData = JSON.stringify(dataCall ?? '');
       const renderedCount = JSON.stringify(countCall ?? '');
       expect(renderedData).not.toContain('alias_hit');
       expect(renderedCount).not.toContain('alias_hit');
+      expect(renderedData).not.toContain('alias_hits');
+      expect(renderedCount).not.toContain('alias_hits');
+    });
+
+    it('flag on: emits ALT1 UNION ALL shape with alias_hits CTE (BS#1318)', async () => {
+      // BS#1318 regression pin: the alias-aware catalog path must use the
+      // CTE + UNION ALL form, not the LATERAL JOIN. The LATERAL had a 3-6.5×
+      // p95 regression on selective queries because it picked the PK btree
+      // and filtered `variant % q` row-by-row, never touching the GIN
+      // trigram index. UNION ALL with a CTE lets the planner run the
+      // trigram bitmap scan once.
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+      stubGenreFormatLookups();
+      db.execute.mockReset();
+      db.execute.mockResolvedValueOnce([baseQueryRow]).mockResolvedValueOnce([{ total: 1 }]);
+
+      await searchCatalogQuery(baseQueryParams);
+
+      const dataCall = db.execute.mock.calls[0]?.[0];
+      const countCall = db.execute.mock.calls[1]?.[0];
+      const renderedData = JSON.stringify(dataCall ?? '');
+      const renderedCount = JSON.stringify(countCall ?? '');
+
+      // Positive: CTE + UNION ALL appear in both queries (data + count).
+      expect(renderedData).toContain('alias_hits');
+      expect(renderedData).toContain('UNION ALL');
+      expect(renderedCount).toContain('alias_hits');
+      expect(renderedCount).toContain('UNION ALL');
+
+      // Negative: the LATERAL JOIN must be gone — that's the whole point.
+      // `alias_hit` (singular) was the LATERAL alias; with UNION ALL we
+      // project from `alias_hits` (the CTE name) instead.
+      expect(renderedData).not.toContain('alias_hit ON true');
+      expect(renderedCount).not.toContain('alias_hit ON true');
+      expect(renderedData).not.toContain('LEFT JOIN LATERAL');
+      expect(renderedCount).not.toContain('LEFT JOIN LATERAL');
     });
   });
 
@@ -354,6 +392,58 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(results).toHaveLength(1);
       const hit = results[0] as { matched_via_alias?: Array<{ matched_variant: string; source: string }> };
       expect(hit.matched_via_alias).toEqual([{ matched_variant: 'Thee Oh Sees', source: 'wxyc_library_alt' }]);
+    });
+
+    it('flag on: emits ALT1 UNION ALL shape with alias_hits CTE (BS#1318)', async () => {
+      // BS#1318 regression pin for the request-line single-column trigram
+      // path. Same root cause as the catalog `/library/query` path: the
+      // LATERAL was correlated on artist_id and never used the GIN trigram
+      // index. UNION ALL with a CTE fixes the plan.
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+      db.select.mockReset();
+      db.execute.mockReset();
+      db.execute.mockResolvedValue([]);
+
+      await searchByArtist('Thee Oh Sees');
+
+      const call = db.execute.mock.calls[0]?.[0];
+      const rendered = JSON.stringify(call ?? '');
+      expect(rendered).toContain('alias_hits');
+      expect(rendered).toContain('UNION ALL');
+      expect(rendered).not.toContain('alias_hit ON true');
+      expect(rendered).not.toContain('LEFT JOIN LATERAL');
+    });
+  });
+
+  describe('searchLibrary (Both-mode trigram path) — ALT1 UNION ALL shape (BS#1318)', () => {
+    it('flag on: emits ALT1 UNION ALL shape with alias_hits CTE', async () => {
+      // BS#1318 regression pin for the Both-mode trigram fallback in
+      // `searchLibraryByTrigramBoth`. The tsvector tier returns 0 rows so
+      // the trigram tier fires; assert the SQL uses the new CTE + UNION ALL
+      // form rather than the LATERAL JOIN.
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      db.select.mockReset();
+      db.select.mockReturnValue(tsvectorChain);
+      db.execute.mockReset();
+      db.execute.mockResolvedValue([]);
+
+      await searchLibrary('Thee Oh Sees');
+
+      // db.execute is called once for the alias-aware trigram query (and
+      // potentially for `checkLibraryArtistNameHealth` — but only the
+      // alias-aware call embeds the CTE/UNION ALL keywords).
+      const aliasCall = db.execute.mock.calls.find((call) => JSON.stringify(call[0] ?? '').includes('alias_hits'));
+      expect(aliasCall).toBeDefined();
+      const rendered = JSON.stringify(aliasCall?.[0] ?? '');
+      expect(rendered).toContain('alias_hits');
+      expect(rendered).toContain('UNION ALL');
+      expect(rendered).not.toContain('alias_hit ON true');
+      expect(rendered).not.toContain('LEFT JOIN LATERAL');
     });
   });
 });

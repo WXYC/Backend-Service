@@ -67,6 +67,24 @@ const SECONDARY_SORT: Record<CatalogSort, SQL> = {
   date: sql`${library_artist_view.artist_name}`,
 };
 
+// Bare-column variants for use in an outer ORDER BY after a UNION ALL — once
+// the union closes, the outer query sees the combined column set by SELECT
+// alias, not by underlying table. The qualified `library_artist_view.col`
+// reference in SORT_COLUMNS / SECONDARY_SORT wouldn't resolve at that level.
+const SORT_COLUMNS_UNQUALIFIED: Record<CatalogSort, SQL> = {
+  artist: sql`artist_name`,
+  album: sql`album_title`,
+  plays: sql`plays`,
+  date: sql`add_date`,
+};
+
+const SECONDARY_SORT_UNQUALIFIED: Record<CatalogSort, SQL> = {
+  artist: sql`album_title`,
+  album: sql`artist_name`,
+  plays: sql`artist_name`,
+  date: sql`artist_name`,
+};
+
 export const MIN_CASCADE_QUERY_LENGTH = 4;
 export const MAX_CASCADE_CONDITIONS = 6;
 
@@ -110,38 +128,49 @@ export async function searchLibrary(
   // skip the join entirely.
   const hasAllFieldCondition = conditions.some((c) => c.field === 'all');
   const aliasActive = getCatalogSearchAliasConfig().enabled && params.q.trim().length > 0 && hasAllFieldCondition;
-  const queryWhere = buildWhereClause(conditions, aliasActive);
   const filterWhere = buildFilterClause(params);
 
-  const where = combineWhere(queryWhere, filterWhere);
-
   const orderDirection = params.order === 'asc' ? sql`ASC` : sql`DESC`;
-  const orderBy = sql`${SORT_COLUMNS[params.sort]} ${orderDirection}, ${SECONDARY_SORT[params.sort]} ASC, ${library_artist_view.id} ASC`;
-
   const offset = params.page * params.limit;
-  const aliasJoin = aliasActive
-    ? sql`LEFT JOIN LATERAL (
-        SELECT MAX(similarity(asa.variant, ${params.q})) AS max_sim,
-               (array_agg(asa.variant ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_variant,
-               (array_agg(asa.source ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_source
-        FROM ${artist_search_alias} asa
-        WHERE asa.artist_id = ${library_artist_view.artist_id}
-          AND asa.variant % ${params.q}
-      ) alias_hit ON true`
-    : sql``;
-  const fromClause = where
-    ? sql`FROM ${library_artist_view} ${aliasJoin} WHERE ${where}`
-    : sql`FROM ${library_artist_view} ${aliasJoin}`;
 
-  const aliasProjection = aliasActive
-    ? sql`,
-      alias_hit.max_sim AS alias_max_sim,
-      alias_hit.matched_variant AS alias_matched_variant,
-      alias_hit.matched_source AS alias_matched_source`
-    : sql``;
+  let dataQuery: SQL;
+  let countQuery: SQL;
+  if (aliasActive) {
+    // ALT1 UNION ALL (BS#1318). The CTE runs the trigram bitmap scan over
+    // `artist_search_alias` once, then we emit two branches:
+    //   (a) byte-identical to the alias-OFF path — query conditions
+    //       evaluated WITHOUT the alias-OR — so the planner can pick the
+    //       same per-column GIN trigram / ILIKE plan it picks today, and
+    //       LIMIT pushdown stays intact.
+    //   (b) alias-only hits, INNER JOIN'd to alias_hits on artist_id, with
+    //       a dedupe predicate that excludes anything already in (a).
+    //
+    // The (a)-shaped WHERE is referenced by reference equality in (b)'s
+    // dedupe so the two branches can't drift on what counts as a match.
+    const queryWhereAliasOff = buildWhereClause(conditions, false);
+    const branchAWhere = combineWhere(queryWhereAliasOff, filterWhere);
+    // Branch (b): the row satisfies `filterWhere` AND its artist_id has an
+    // alias hit AND the row would NOT have matched branch (a). When
+    // queryWhereAliasOff is null (defensive — aliasActive gates on
+    // hasAllFieldCondition so this is unreachable today), the NOT becomes
+    // vacuously false and (b) emits nothing, which is what we want.
+    const dedupeWhere = queryWhereAliasOff ? sql`NOT ${queryWhereAliasOff}` : sql`FALSE`;
+    const branchBWhere = combineWhere(dedupeWhere, filterWhere);
 
-  const dataQuery = sql`
-    SELECT
+    const orderBy = sql`${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
+
+    const cte = sql`WITH alias_hits AS (
+      SELECT
+        asa.artist_id,
+        MAX(similarity(asa.variant, ${params.q})) AS max_sim,
+        (array_agg(asa.variant ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_variant,
+        (array_agg(asa.source ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_source
+      FROM ${artist_search_alias} asa
+      WHERE asa.variant % ${params.q}
+      GROUP BY asa.artist_id
+    )`;
+
+    const branchAProjection = sql`
       ${library_artist_view.id} AS id,
       ${library_artist_view.add_date} AS add_date,
       ${library_artist_view.album_title} AS album_title,
@@ -156,13 +185,87 @@ export async function searchLibrary(
       ${library_artist_view.rotation_bin} AS rotation_bin,
       ${library_artist_view.plays} AS plays,
       ${library_artist_view.on_streaming} AS on_streaming,
-      ${library_artist_view.album_artist} AS album_artist
-      ${aliasProjection}
-    ${fromClause}
-    ORDER BY ${orderBy}
-    LIMIT ${params.limit} OFFSET ${offset}
-  `;
-  const countQuery = sql`SELECT COUNT(*)::int AS total ${fromClause}`;
+      ${library_artist_view.album_artist} AS album_artist,
+      NULL::real AS alias_max_sim,
+      NULL::text AS alias_matched_variant,
+      NULL::text AS alias_matched_source`;
+    const branchBProjection = sql`
+      ${library_artist_view.id} AS id,
+      ${library_artist_view.add_date} AS add_date,
+      ${library_artist_view.album_title} AS album_title,
+      ${library_artist_view.artist_name} AS artist_name,
+      ${library_artist_view.code_letters} AS code_letters,
+      ${library_artist_view.code_number} AS code_number,
+      ${library_artist_view.code_artist_number} AS code_artist_number,
+      ${library_artist_view.format_name} AS format_name,
+      ${library_artist_view.genre_name} AS genre_name,
+      ${library_artist_view.label} AS label,
+      ${library_artist_view.label_id} AS label_id,
+      ${library_artist_view.rotation_bin} AS rotation_bin,
+      ${library_artist_view.plays} AS plays,
+      ${library_artist_view.on_streaming} AS on_streaming,
+      ${library_artist_view.album_artist} AS album_artist,
+      alias_hits.max_sim AS alias_max_sim,
+      alias_hits.matched_variant AS alias_matched_variant,
+      alias_hits.matched_source AS alias_matched_source`;
+
+    const branchAFrom = branchAWhere
+      ? sql`FROM ${library_artist_view} WHERE ${branchAWhere}`
+      : sql`FROM ${library_artist_view}`;
+    const branchBFrom = branchBWhere
+      ? sql`FROM ${library_artist_view} INNER JOIN alias_hits ON alias_hits.artist_id = ${library_artist_view.artist_id} WHERE ${branchBWhere}`
+      : sql`FROM ${library_artist_view} INNER JOIN alias_hits ON alias_hits.artist_id = ${library_artist_view.artist_id}`;
+
+    const unionBody = sql`(
+      SELECT ${branchAProjection}
+      ${branchAFrom}
+    )
+    UNION ALL
+    (
+      SELECT ${branchBProjection}
+      ${branchBFrom}
+    )`;
+
+    dataQuery = sql`
+      ${cte}
+      ${unionBody}
+      ORDER BY ${orderBy}
+      LIMIT ${params.limit} OFFSET ${offset}
+    `;
+    countQuery = sql`
+      ${cte}
+      SELECT COUNT(*)::int AS total FROM (${unionBody}) alias_search
+    `;
+  } else {
+    // Alias OFF (legacy path). Single SELECT against library_artist_view,
+    // no CTE, no UNION ALL — byte-identical to pre-#1318 behavior.
+    const queryWhere = buildWhereClause(conditions, false);
+    const where = combineWhere(queryWhere, filterWhere);
+    const fromClause = where ? sql`FROM ${library_artist_view} WHERE ${where}` : sql`FROM ${library_artist_view}`;
+    const orderBy = sql`${SORT_COLUMNS[params.sort]} ${orderDirection}, ${SECONDARY_SORT[params.sort]} ASC, ${library_artist_view.id} ASC`;
+    dataQuery = sql`
+      SELECT
+        ${library_artist_view.id} AS id,
+        ${library_artist_view.add_date} AS add_date,
+        ${library_artist_view.album_title} AS album_title,
+        ${library_artist_view.artist_name} AS artist_name,
+        ${library_artist_view.code_letters} AS code_letters,
+        ${library_artist_view.code_number} AS code_number,
+        ${library_artist_view.code_artist_number} AS code_artist_number,
+        ${library_artist_view.format_name} AS format_name,
+        ${library_artist_view.genre_name} AS genre_name,
+        ${library_artist_view.label} AS label,
+        ${library_artist_view.label_id} AS label_id,
+        ${library_artist_view.rotation_bin} AS rotation_bin,
+        ${library_artist_view.plays} AS plays,
+        ${library_artist_view.on_streaming} AS on_streaming,
+        ${library_artist_view.album_artist} AS album_artist
+      ${fromClause}
+      ORDER BY ${orderBy}
+      LIMIT ${params.limit} OFFSET ${offset}
+    `;
+    countQuery = sql`SELECT COUNT(*)::int AS total ${fromClause}`;
+  }
 
   const [dataRows, countRows] = await Promise.all([db.execute(dataQuery), db.execute(countQuery)]);
 
