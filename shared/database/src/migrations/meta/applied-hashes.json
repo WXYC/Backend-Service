@@ -92,5 +92,6 @@
   "0092_normalize-artist-name": "57bf7f03733591917917c5a19b9b67d8527a64ccce224cdc3f1102f4a9cca368",
   "0093_concerts-first-scraped-at": "bbeee146c92ab63fa70e9f2c537d5a06a13f80a5f52c23cb5a1bed1432057421",
   "0094_rotation-lml-identity-id": "10134a18381f7daad56ca2d8cae80723832be3158cbe6dd01aae2f8e6afcaaa0",
-  "0095_drop-stale-trigram-indexes": "aba5b26a66102d427e1abd6520aa1f7ef14b776eaaa87ea8b99c3b97e79d24c7"
+  "0095_drop-stale-trigram-indexes": "aba5b26a66102d427e1abd6520aa1f7ef14b776eaaa87ea8b99c3b97e79d24c7",
+  "0096_cdc_oversized_fallback": "5615c7a6aa7514b139340ef6c8ba86a548ac6e7b6f9f0c39241bea2a62a1274b"
 }
