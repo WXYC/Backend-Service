@@ -34,6 +34,7 @@ export type Totals = {
   unresolved: number;
   lml_error: number;
   raced: number;
+  sentinel_rejected: number;
 };
 
 export type RunResult = { totals: Totals };
@@ -51,6 +52,7 @@ export const runBackfill = async (deps: {
     unresolved: 0,
     lml_error: 0,
     raced: 0,
+    sentinel_rejected: 0,
   };
 
   const candidates = await deps.loadCandidates();
@@ -68,6 +70,15 @@ export const runBackfill = async (deps: {
       continue;
     }
     if (releaseId !== null) {
+      if (releaseId <= 0) {
+        // BS#1429: rotation.discogs_release_id has a CHECK rejecting `0`
+        // and negative ids. Pre-empt the constraint trip here so a
+        // poisoned LML response (cache pollution, upstream regression)
+        // is contained to one candidate counter instead of crashing the
+        // whole nightly batch.
+        totals.sentinel_rejected += 1;
+        continue;
+      }
       if (deps.dryRun) {
         totals.resolved_dry += 1;
         continue;

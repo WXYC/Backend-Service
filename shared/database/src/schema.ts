@@ -655,12 +655,10 @@ export const rotation = wxyc_schema.table(
       // rotation row; one row per legacy_rotation_id by tubafrenzy's invariant.
       // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
       legacyRotationIdIdx: uniqueIndex('rotation_legacy_rotation_id_idx').on(table.legacy_rotation_id),
-      // BS#1429: reject the `0` sentinel. Discogs uses no `0` in its real ID
-      // space and LML#518's caller-side defense 422s on `id <= 0`; rows
-      // pinned to `0` are permanently unresolvable via BS#1380. Writers
-      // must supply either a real positive ID or NULL. The 2026-05-29
-      // bypass-LML operator rescue's 6 zombie rows have been NULL'd ahead
-      // of this constraint (see #1429 verification comment).
+      // BS#1429 / migration 0101: writers must supply a positive Discogs
+      // release id or NULL; the `0` sentinel (and any negative drift) is
+      // rejected. Operator-rescue background and the 6-row remediation
+      // live in the migration header.
       // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
       discogsReleaseIdNotSentinel: check(
         'rotation_discogs_release_id_not_sentinel',

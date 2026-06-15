@@ -10,12 +10,8 @@
  * is a schema-level fence so any future operator rescue with the same
  * shape fails loudly at the DB layer.
  *
- * Spec covers:
- *   - INSERT with `discogs_release_id = 0` raises 23514 (check_violation).
- *   - INSERT with `discogs_release_id = NULL` succeeds (the normal
- *     "no Discogs handle yet" state for ~half of active rotation rows).
- *   - INSERT with `discogs_release_id = 12345` succeeds (regression
- *     coverage that the fence doesn't over-reject).
+ * Each `test()` case names its own scope; the suite covers the
+ * INSERT/UPDATE × {sentinel, negative, NULL, positive} matrix.
  */
 
 const postgres = require('postgres');

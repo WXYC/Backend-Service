@@ -435,7 +435,13 @@ export const addToRotation = async (newRotation: RotationAddRequest) => {
       .limit(1);
     const discogsReleaseId = identityRow?.discogs_release_id ?? null;
 
-    if (discogsReleaseId != null) {
+    // BS#1429: rotation.discogs_release_id rejects `0` and negative ids via
+    // CHECK constraint. library_identity.discogs_release_id has no such
+    // fence today, so a poisoned upstream value would 23514 this INSERT and
+    // surface as a 5xx to the music director. Treat any non-positive value
+    // as "no Discogs handle" — same graceful-degradation path the LML
+    // resolve-failure catch arm already takes.
+    if (discogsReleaseId != null && discogsReleaseId > 0) {
       // The source-of-the-Discogs-id is library_identity, regardless of
       // whether the LML mint that follows succeeds.
       values.discogs_release_id = discogsReleaseId;
