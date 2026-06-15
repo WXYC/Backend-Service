@@ -118,6 +118,13 @@ One-shot ETL for BS#1029. Reuses `BACKFILL_LML_*` (above) and adds:
 
 - `DRY_RUN` (default unset / `false`) — when `'true'` or `'1'`, the orchestrator skips every UPDATE and increments `rows_resolved_dry` instead of `rows_resolved`. Each planned write is still logged. Useful for confirming the candidate set before a real run; harmless to forget — the `discogs_release_id IS NULL` SELECT predicate is idempotent across reruns.
 
+### Rotation artist backfill (`jobs/rotation-artist-backfill`)
+
+Daily cron job for BS#1381. One BS call here = one batch of up to 50 `lml_identity_id`s; LML fans out internally to per-source release + artist Discogs calls, so this job has a fundamentally different timeout shape than the per-row backfill jobs above. Reuses `BACKFILL_LML_MAX_CONCURRENT` and `BACKFILL_LML_RATE_PER_MIN` (applied to **batch calls**, not Discogs egress), and adds:
+
+- `BACKFILL_LML_BATCH_TIMEOUT_MS` (default `360000` / 6 min) — BS-side `AbortController` budget per `refreshForIdentities` call. Sized to clear LML's worst-case ~4 min cold-cache fan-out (50 release + ~150 artist Discogs calls at LML's 50 req/min cap) PLUS Railway's ~5 min request-timeout ceiling with a 1-min safety margin. Distinct from `BACKFILL_LML_PER_CALL_TIMEOUT_MS` (per-row LML `/lookup`, sized for LML#370's 25 s cascade-exhaustion cap) because the batch-fanout topology is different. If LML's Railway request timeout changes, recalibrate this var.
+- `DRY_RUN` (default unset / `false`) — when `'true'` or `'1'`, enumerate identity cardinality but skip refresh calls.
+
 ### Bulk backfill (`jobs/album-level-backfill`)
 
 Knobs for the one-shot album-level historical backfill (BS#1041). Separate from `BACKFILL_LML_*` above because this job calls LML's bulk endpoint (`/api/v1/lookup/bulk`, LML#368), where the natural unit is the batch, not the row. Defaults are tuned to let this job run concurrently with the per-row drain cron without saturating LML's serial Discogs fan-out. All are positive integers; non-positive or unparseable values throw at job startup.

@@ -155,8 +155,14 @@ export const chunk = <T>(items: T[], size: number): T[][] => {
  *   - warmed_artists      : sum of per-source artist `outcome == 'success'`
  *   - not_found           : per-id `status == 'not_found'` (stale handle)
  *   - not_implemented     : per-id `status == 'not_implemented'`
- *   - lml_error           : per-id `status == 'error'` (batch-level
- *                           failures bumped separately in the catch arm)
+ *   - lml_error           : per-id `status == 'error'` AND any per-id status
+ *                           the BS-side switch doesn't recognize (default
+ *                           arm — keeps the `identities_scanned ==
+ *                           identities_resolved + lml_error` invariant the
+ *                           BS#1402 alert relies on, even if LML adds a
+ *                           new status enum value BS hasn't shipped support
+ *                           for yet). Batch-level transport failures are
+ *                           bumped separately in `tallyBatchError`.
  *
  * Cache hit vs fresh-fetch distinction is intentionally not surfaced as
  * a BS-side counter — LML#525's response body deliberately omits per-id
@@ -176,6 +182,11 @@ const tallyBatch = (totals: Totals, response: BulkCacheRefreshResponse, batchSiz
     tallyBatchError(totals, batchSize);
     return;
   }
+  // One-shot dedup for unknown-status warns: if LML deploys a new status
+  // enum value across the whole batch (e.g. `'partial_warmed'`), every item
+  // would otherwise emit its own warn — N=50 dup lines per batch × N batches
+  // floods CloudWatch/Sentry. Log the first occurrence per status only.
+  const unknownStatusesLogged = new Set<string>();
   for (const item of response.results) {
     totals.identities_scanned += 1;
     switch (item.status) {
@@ -204,16 +215,21 @@ const tallyBatch = (totals: Totals, response: BulkCacheRefreshResponse, batchSiz
         // `error` means no source was `success`, so the warmed_* counters
         // stay at zero here. We don't tally sources for that reason.
         break;
-      default:
+      default: {
         // Future LML versions may add a status (e.g. 'partial_warmed'). Bump
         // `lml_error` so the invariant `identities_scanned ==
         // identities_resolved + lml_error` is preserved and the BS#1402 alert
         // denominator doesn't silently inflate without a matching numerator.
         totals.lml_error += 1;
-        log('warn', 'unknown_status', `LML returned unknown per-id status; counted as lml_error`, {
-          status: String((item as { status?: unknown }).status),
-        });
+        const statusString = String((item as { status?: unknown }).status);
+        if (!unknownStatusesLogged.has(statusString)) {
+          unknownStatusesLogged.add(statusString);
+          log('warn', 'unknown_status', `LML returned unknown per-id status; counted as lml_error`, {
+            status: statusString,
+          });
+        }
         break;
+      }
     }
   }
 };
