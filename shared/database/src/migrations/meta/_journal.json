@@ -318,371 +318,371 @@
       "breakpoints": true
     },
     {
-      "idx": 47,
+      "idx": 48,
       "version": "7",
       "when": 1777214400000,
       "tag": "0047_replica-identity-for-pkless-tables",
       "breakpoints": true
     },
     {
-      "idx": 48,
+      "idx": 49,
       "version": "7",
       "when": 1777300800000,
       "tag": "0048_fix-fk-on-delete-set-null",
       "breakpoints": true
     },
     {
-      "idx": 49,
+      "idx": 50,
       "version": "7",
       "when": 1777387200000,
       "tag": "0049_flowsheet-search-indexes",
       "breakpoints": true
     },
     {
-      "idx": 50,
+      "idx": 51,
       "version": "7",
       "when": 1777473600000,
       "tag": "0050_flowsheet-track-add-time-idx",
       "breakpoints": true
     },
     {
-      "idx": 51,
+      "idx": 52,
       "version": "7",
       "when": 1777560000000,
       "tag": "0051_dj-name-search-indexes",
       "breakpoints": true
     },
     {
-      "idx": 52,
+      "idx": 53,
       "version": "7",
       "when": 1777646400000,
       "tag": "0052_flowsheet-tsvector-search",
       "breakpoints": true
     },
     {
-      "idx": 53,
+      "idx": 54,
       "version": "7",
       "when": 1777732800000,
       "tag": "0053_flowsheet-dj-name-column",
       "breakpoints": true
     },
     {
-      "idx": 54,
+      "idx": 55,
       "version": "7",
       "when": 1777819200000,
       "tag": "0054_flowsheet-search-doc-with-dj-name",
       "breakpoints": true
     },
     {
-      "idx": 55,
+      "idx": 56,
       "version": "7",
       "when": 1777905600000,
       "tag": "0055_add-reconciled-identity-to-artists",
       "breakpoints": true
     },
     {
-      "idx": 56,
+      "idx": 57,
       "version": "7",
       "when": 1777992000000,
       "tag": "0056_project-reconciled-identity-on-library-artist-view",
       "breakpoints": true
     },
     {
-      "idx": 57,
+      "idx": 58,
       "version": "7",
       "when": 1778078400000,
       "tag": "0057_flowsheet-artwork-lookup-partial-idx",
       "breakpoints": true
     },
     {
-      "idx": 58,
+      "idx": 59,
       "version": "7",
       "when": 1778164800000,
       "tag": "0058_library-artist-name-and-search-doc",
       "breakpoints": true
     },
     {
-      "idx": 59,
+      "idx": 60,
       "version": "7",
       "when": 1778251200000,
       "tag": "0059_album-plays-materialized-view",
       "breakpoints": true
     },
     {
-      "idx": 60,
+      "idx": 61,
       "version": "7",
       "when": 1778337600000,
       "tag": "0060_library-artist-name-cascade-trigger",
       "breakpoints": true
     },
     {
-      "idx": 61,
+      "idx": 62,
       "version": "7",
       "when": 1778424000000,
       "tag": "0061_library-canonical-entity",
       "breakpoints": true
     },
     {
-      "idx": 62,
+      "idx": 63,
       "version": "7",
       "when": 1778510400000,
       "tag": "0062_flowsheet-linkage-audit-columns",
       "breakpoints": true
     },
     {
-      "idx": 63,
+      "idx": 64,
       "version": "7",
       "when": 1778596800000,
       "tag": "0063_flowsheet-legacy-link-attempted-at",
       "breakpoints": true
     },
     {
-      "idx": 64,
+      "idx": 65,
       "version": "7",
       "when": 1778683200000,
       "tag": "0064_propagate-v012-mojibake",
       "breakpoints": true
     },
     {
-      "idx": 65,
+      "idx": 66,
       "version": "7",
       "when": 1779683200001,
       "tag": "0065_replay-flowsheet-search-doc-with-dj-name",
       "breakpoints": true
     },
     {
-      "idx": 66,
+      "idx": 67,
       "version": "7",
       "when": 1779683200002,
       "tag": "0066_replay-v012-mojibake",
       "breakpoints": true
     },
     {
-      "idx": 67,
+      "idx": 68,
       "version": "7",
       "when": 1779769600000,
       "tag": "0067_flowsheet-linkage-review",
       "breakpoints": true
     },
     {
-      "idx": 68,
+      "idx": 69,
       "version": "7",
       "when": 1779856000000,
       "tag": "0068_flowsheet-show-id-idx",
       "breakpoints": true
     },
     {
-      "idx": 69,
+      "idx": 70,
       "version": "7",
       "when": 1779856000001,
       "tag": "0069_flowsheet-metadata-attempt-at",
       "breakpoints": true
     },
     {
-      "idx": 70,
+      "idx": 71,
       "version": "7",
       "when": 1779856000002,
       "tag": "0070_flowsheet-metadata-attempt-pending-idx",
       "breakpoints": true
     },
     {
-      "idx": 71,
+      "idx": 72,
       "version": "7",
       "when": 1779856000003,
       "tag": "0071_rotation-active-album-bin-uniq",
       "breakpoints": true
     },
     {
-      "idx": 72,
+      "idx": 73,
       "version": "7",
       "when": 1779856000004,
       "tag": "0072_drop-rotation-active-album-bin-uniq",
       "breakpoints": true
     },
     {
-      "idx": 73,
+      "idx": 74,
       "version": "7",
       "when": 1779856000005,
       "tag": "0073_flowsheet-play-order-idx",
       "breakpoints": true
     },
     {
-      "idx": 74,
+      "idx": 75,
       "version": "7",
       "when": 1779856000006,
       "tag": "0074_flowsheet-metadata-attempt-pending-covering-idx",
       "breakpoints": true
     },
     {
-      "idx": 75,
+      "idx": 76,
       "version": "7",
       "when": 1779856000007,
       "tag": "0075_library-identity-substrate",
       "breakpoints": true
     },
     {
-      "idx": 76,
+      "idx": 77,
       "version": "7",
       "when": 1779856000008,
       "tag": "0076_flowsheet-track-position",
       "breakpoints": true
     },
     {
-      "idx": 77,
+      "idx": 78,
       "version": "7",
       "when": 1779856000009,
       "tag": "0077_rotation-discogs-release-id",
       "breakpoints": true
     },
     {
-      "idx": 78,
+      "idx": 79,
       "version": "7",
       "when": 1779856000010,
       "tag": "0078_flowsheet-metadata-status",
       "breakpoints": true
     },
     {
-      "idx": 79,
+      "idx": 80,
       "version": "7",
       "when": 1779856000011,
       "tag": "0079_album-metadata-table",
       "breakpoints": true
     },
     {
-      "idx": 80,
+      "idx": 81,
       "version": "7",
       "when": 1779856000012,
       "tag": "0080_flowsheet-album-id-enriched-idx",
       "breakpoints": true
     },
     {
-      "idx": 81,
+      "idx": 82,
       "version": "7",
       "when": 1779856000013,
       "tag": "0081_flowsheet-album-link-lookup-idx",
       "breakpoints": true
     },
     {
-      "idx": 82,
+      "idx": 83,
       "version": "7",
       "when": 1779856000014,
       "tag": "0082_drop-flowsheet-artwork-lookup-idx",
       "breakpoints": true
     },
     {
-      "idx": 83,
+      "idx": 84,
       "version": "7",
       "when": 1779856000015,
       "tag": "0083_drop-flowsheet-dj-name-trgm-idx",
       "breakpoints": true
     },
     {
-      "idx": 84,
+      "idx": 85,
       "version": "7",
       "when": 1779856000016,
       "tag": "0084_flowsheet-updated-at",
       "breakpoints": true
     },
     {
-      "idx": 85,
+      "idx": 86,
       "version": "7",
       "when": 1779856000017,
       "tag": "0085_rotation-discogs-release-id-source",
       "breakpoints": true
     },
     {
-      "idx": 86,
+      "idx": 87,
       "version": "7",
       "when": 1779856000018,
       "tag": "0086_rotation-discogs-direct-backfill-source",
       "breakpoints": true
     },
     {
-      "idx": 87,
+      "idx": 88,
       "version": "7",
       "when": 1779856000019,
       "tag": "0087_rotation-tracklist-lookup-attempted-at",
       "breakpoints": true
     },
     {
-      "idx": 88,
+      "idx": 89,
       "version": "7",
       "when": 1779856000020,
       "tag": "0088_banned-fingerprints",
       "breakpoints": true
     },
     {
-      "idx": 89,
+      "idx": 90,
       "version": "7",
       "when": 1779856000021,
       "tag": "0089_artist-search-alias",
       "breakpoints": true
     },
     {
-      "idx": 90,
+      "idx": 91,
       "version": "7",
       "when": 1780520783641,
       "tag": "0090_shows-dj-name-override",
       "breakpoints": true
     },
     {
-      "idx": 91,
+      "idx": 92,
       "version": "7",
       "when": 1780667256173,
       "tag": "0091_venues-and-concerts",
       "breakpoints": true
     },
     {
-      "idx": 92,
+      "idx": 93,
       "version": "7",
       "when": 1780667256174,
       "tag": "0092_normalize-artist-name",
       "breakpoints": true
     },
     {
-      "idx": 93,
+      "idx": 94,
       "version": "7",
       "when": 1780667256175,
       "tag": "0093_concerts-first-scraped-at",
       "breakpoints": true
     },
     {
-      "idx": 94,
+      "idx": 95,
       "version": "7",
       "when": 1781411001447,
       "tag": "0094_rotation-lml-identity-id",
       "breakpoints": true
     },
     {
-      "idx": 95,
+      "idx": 96,
       "version": "7",
       "when": 1781468384340,
       "tag": "0095_drop-stale-trigram-indexes",
       "breakpoints": true
     },
     {
-      "idx": 96,
+      "idx": 97,
       "version": "7",
       "when": 1781468384341,
       "tag": "0096_cdc_oversized_fallback",
       "breakpoints": true
     },
     {
-      "idx": 97,
+      "idx": 98,
       "version": "7",
       "when": 1781468384342,
       "tag": "0097_fix-fk-on-delete-flowsheet-rotation-reviews",
       "breakpoints": true
     },
     {
-      "idx": 98,
+      "idx": 99,
       "version": "7",
       "when": 1781468384343,
       "tag": "0098_flowsheet-show-id-play-order-idx",
       "breakpoints": true
     },
     {
-      "idx": 99,
+      "idx": 100,
       "version": "7",
       "when": 1781468384344,
       "tag": "0099_cta-unique-null-track-partial",

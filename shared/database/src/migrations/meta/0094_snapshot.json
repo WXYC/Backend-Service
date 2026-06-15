@@ -1,6 +1,6 @@
 {
-  "id": "c8373eb4-18cb-4df3-b27d-ff6fee643736",
-  "prevId": "2d29c071-9ffd-4d9e-a159-95b24ddecea4",
+  "id": "2d29c071-9ffd-4d9e-a159-95b24ddecea4",
+  "prevId": "d1d534ad-2e06-41e4-a375-5e941768e6c9",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3362,12 +3362,6 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
-        },
-        "lml_identity_id": {
-          "name": "lml_identity_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -4362,8 +4356,7 @@
       "values": [
         "tubafrenzy_paste",
         "lml_offline_backfill",
-        "discogs_direct_backfill",
-        "library_identity"
+        "discogs_direct_backfill"
       ]
     },
     "wxyc_schema.flowsheet_entry_type": {

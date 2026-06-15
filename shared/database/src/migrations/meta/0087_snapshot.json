@@ -1,6 +1,6 @@
 {
-  "id": "9ff7bed5-9ea8-4a21-8f2c-925b497c05fa",
-  "prevId": "a39e63e7-96dd-4681-a71f-5bcdb7023d38",
+  "id": "a39e63e7-96dd-4681-a71f-5bcdb7023d38",
+  "prevId": "1f6d7e99-cbd3-4c51-b265-fcbd3e002b3d",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2943,12 +2943,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'tubafrenzy_paste'"
-        },
-        "tracklist_lookup_attempted_at": {
-          "name": "tracklist_lookup_attempted_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {

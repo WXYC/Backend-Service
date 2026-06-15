@@ -1,6 +1,6 @@
 {
-  "id": "5b870f5a-2326-4862-b3fe-8ff35b4dc23f",
-  "prevId": "5f31cf59-178c-491e-b169-269764bacf9f",
+  "id": "5f31cf59-178c-491e-b169-269764bacf9f",
+  "prevId": "71d7f75b-12a0-40d1-954e-2caee947ea10",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1125,22 +1125,6 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "flowsheet_metadata_attempt_pending_idx": {
-          "name": "flowsheet_metadata_attempt_pending_idx",
-          "columns": [
-            {
-              "expression": "id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"wxyc_schema\".\"flowsheet\".\"entry_type\" = 'track' AND \"wxyc_schema\".\"flowsheet\".\"artist_name\" IS NOT NULL AND \"wxyc_schema\".\"flowsheet\".\"metadata_attempt_at\" IS NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

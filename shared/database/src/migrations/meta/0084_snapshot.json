@@ -1,6 +1,6 @@
 {
-  "id": "786c0c0e-f94d-4b46-9991-3092434fbc7d",
-  "prevId": "dc17541d-2fef-4979-b1e7-af1dd0bf6f75",
+  "id": "dc17541d-2fef-4979-b1e7-af1dd0bf6f75",
+  "prevId": "441c6076-be50-4970-a52a-04663ac1cbef",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -961,13 +961,6 @@
           "notNull": true,
           "default": "now()"
         },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
         "artwork_url": {
           "name": "artwork_url",
           "type": "varchar(512)",
@@ -1257,21 +1250,6 @@
           "method": "btree",
           "with": {}
         },
-        "flowsheet_updated_at_idx": {
-          "name": "flowsheet_updated_at_idx",
-          "columns": [
-            {
-              "expression": "\"updated_at\" DESC",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "flowsheet_metadata_attempt_pending_idx": {
           "name": "flowsheet_metadata_attempt_pending_idx",
           "columns": [
@@ -1517,38 +1495,6 @@
       },
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "wxyc_schema.flowsheet_watermark": {
-      "name": "flowsheet_watermark",
-      "schema": "wxyc_schema",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "boolean",
-          "primaryKey": true,
-          "notNull": true,
-          "default": true
-        },
-        "last_modified_at": {
-          "name": "last_modified_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "flowsheet_watermark_singleton": {
-          "name": "flowsheet_watermark_singleton",
-          "value": "\"id\" = true"
-        }
-      },
       "isRLSEnabled": false
     },
     "wxyc_schema.format": {

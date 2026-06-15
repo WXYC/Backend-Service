@@ -1,6 +1,6 @@
 {
-  "id": "a39e63e7-96dd-4681-a71f-5bcdb7023d38",
-  "prevId": "1f6d7e99-cbd3-4c51-b265-fcbd3e002b3d",
+  "id": "1f6d7e99-cbd3-4c51-b265-fcbd3e002b3d",
+  "prevId": "786c0c0e-f94d-4b46-9991-3092434fbc7d",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3834,8 +3834,7 @@
       "schema": "wxyc_schema",
       "values": [
         "tubafrenzy_paste",
-        "lml_offline_backfill",
-        "discogs_direct_backfill"
+        "lml_offline_backfill"
       ]
     },
     "wxyc_schema.flowsheet_entry_type": {
