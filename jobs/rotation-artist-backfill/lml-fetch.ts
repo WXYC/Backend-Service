@@ -37,11 +37,16 @@ import { defaultLmlLimiter } from './lml-limiter.js';
 /**
  * Per-batch BS-side AbortController budget for `refreshForIdentities`.
  * Sized to cover LML's worst-case cold-cache fan-out (~50 release +
- * ~150 artist Discogs calls at LML's 50 req/min cap ≈ 4 min) plus
- * a small margin. Operators can dial this via
- * `BACKFILL_LML_BATCH_TIMEOUT_MS` without a redeploy.
+ * ~150 artist Discogs calls at LML's 50 req/min cap ≈ 4 min) PLUS
+ * Railway's request-timeout ceiling (~5 min) with a 1-min safety margin
+ * so the BS-side AbortController does not race the LML/Railway edge
+ * timeout — if BS aborts at exactly the ceiling, a successful LML
+ * writeback is misclassified as a transport error and `lml_error`
+ * bumps by `batch.length` even though LML completes the work in the
+ * background. Operators can dial via `BACKFILL_LML_BATCH_TIMEOUT_MS`
+ * without a redeploy (e.g. when LML's Railway timeout changes).
  */
-const BATCH_TIMEOUT_MS = envInt('BACKFILL_LML_BATCH_TIMEOUT_MS', 5 * 60 * 1000);
+const BATCH_TIMEOUT_MS = envInt('BACKFILL_LML_BATCH_TIMEOUT_MS', 6 * 60 * 1000);
 
 export type FetchOutcome<T> = { kind: 'ok'; value: T } | { kind: 'error'; error: Error; retryable: boolean };
 
@@ -62,11 +67,14 @@ const classifyError = (e: unknown): FetchOutcome<never> => {
 /**
  * Mark the active Sentry span with an explicit OK or ERROR status. Per OTLP
  * semantic conventions, span status is the queryable signal for error-rate
- * dashboards — without this, every span comes back `unset` even when
- * classifyError returned `kind: 'error'` (because the throw was caught
- * and converted to a return value), and any custom alert filter of the
- * shape `span.status_code != 1` would treat every successful batch as
- * an error.
+ * dashboards. `@sentry/core`'s `spanToJSON` defaults the status to `ok`
+ * when nothing is set, so a successful batch without this call still
+ * surfaces as OK in standard Sentry views — the explicit `code: 1` set
+ * is defense against custom alert filters of the shape
+ * `span.status_code != 1` or query backends that surface `unset`
+ * separately, AND it makes the OK case symmetric with the explicit
+ * `code: 2` set on failure (so reviewers don't have to grep the SDK to
+ * confirm the OK branch is wired).
  *
  * Per-id failures inside a successful batch (`status: 'error'` items)
  * do NOT promote to span-level error here — the orchestrator's tally
