@@ -29,20 +29,29 @@
 --
 -- Post-UPDATE state for the 6 sentinel rows: `(discogs_release_id IS
 -- NULL, discogs_release_id_source = 'discogs_direct_backfill')`. This
--- is a deliberate inconsistency (source attests a backfill that ended
--- with no id) preserved as a forensic breadcrumb of the operator
--- rescue. The state is NOT self-healing: rotation-etl's UPSERT only
--- flips the source when tubafrenzy contributes a non-NULL id, and
--- fetch-legacy.ts:53 normalizes tubafrenzy's `0` to NULL before the
--- UPSERT, so the source can only repaint via a future tubafrenzy
--- paste-correction landing a real id. Any follow-up CHECK that ties
--- source-enum to id-NULL semantics must accommodate this permanent
--- minority state.
+-- inconsistency (source attests a backfill that ended with no id) is
+-- preserved as a forensic breadcrumb of the operator rescue. Repaint
+-- paths:
+--   - rotation-etl UPSERT: only flips the source when tubafrenzy
+--     contributes a non-NULL id, and fetch-legacy.ts normalizes
+--     tubafrenzy's `<= 0` to NULL, so this path requires a future
+--     paste-correction landing a real id.
+--   - rotation-release-id-backfill daily cron: SELECTs rows where
+--     `discogs_release_id IS NULL` and on a successful LML resolve
+--     sets `discogs_release_id_source = 'lml_offline_backfill'`. The
+--     6 rows are eligible candidates — so the source CAN flip from
+--     `discogs_direct_backfill` to `lml_offline_backfill` whenever
+--     LML starts returning a hit. Any follow-up CHECK that pins
+--     source-enum to id-NULL semantics must accommodate both states.
 --
 -- CDC ripple: the UPDATE fires the cdc_rotation trigger (migration 0046)
--- and emits up to 6 pg_notify('cdc', ...) events during deploy. WebSocket
--- consumers (docs/cdc.md) observe 6 'update' events with
--- (id_old=0, id_new=NULL). Within deploy budget.
+-- and emits one pg_notify('cdc', ...) event per remediated row. Today's
+-- prod count is 6; older RDS snapshots (migrate-dryrun replays) may
+-- touch a different count if they predate the manual remediation or
+-- contain negative-id drift. The trigger payload is the standard
+-- `{table, schema, action: 'UPDATE', data: to_jsonb(NEW), timestamp}`
+-- shape from cdc_notify() — no id_old/id_new diff fields; consumers
+-- see the post-UPDATE row with `data.discogs_release_id = null`.
 --
 -- Regression coverage: negative IDs and the `0` sentinel are both
 -- exercised in tests/integration/rotation-discogs-release-id-not-sentinel.spec.js.

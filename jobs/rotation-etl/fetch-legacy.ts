@@ -50,7 +50,12 @@ export const parseRotationRows = (raw: string): LegacyRotationRow[] => {
       killDate: Number(cols[6]) || 0,
       libraryReleaseId: rawLibraryId === 0 ? null : rawLibraryId,
       timeLastModified: Number(cols[8]) || 0,
-      discogsReleaseId: rawDiscogsId === 0 ? null : rawDiscogsId,
+      // BS#1429: match the rotation_discogs_release_id_not_sentinel CHECK's
+      // full rejection set (NULL or > 0), not just `0`. A negative id from
+      // tubafrenzy (operator typo on a paste URL, upstream regression)
+      // would otherwise trip the constraint at INSERT time, crash the
+      // 30-min rotation-etl cron loop, and wedge tubafrenzy↔BS sync.
+      discogsReleaseId: rawDiscogsId <= 0 ? null : rawDiscogsId,
     });
   }
   return rows;

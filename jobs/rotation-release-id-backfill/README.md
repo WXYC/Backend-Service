@@ -63,22 +63,24 @@ JSON log line emitted on `step: finished`:
   "unresolved": 51,
   "lml_error": 11,
   "raced": 1,
+  "sentinel_rejected": 0,
   "repo": "Backend-Service",
   "tool": "rotation-release-id-backfill",
   "run_id": "<uuid>"
 }
 ```
 
-Invariant: `scanned == resolved + resolved_dry + unresolved + lml_error + raced`.
+Invariant: `scanned == resolved + resolved_dry + unresolved + lml_error + raced + sentinel_rejected`.
 
-| Counter        | Meaning                                                                                              |
-| -------------- | ---------------------------------------------------------------------------------------------------- |
-| `scanned`      | Rows visited (matches the candidate query's row count)                                               |
-| `resolved`     | LML returned a release id AND the UPDATE landed cleanly                                              |
-| `resolved_dry` | LML returned a release id; DRY_RUN suppressed the UPDATE                                             |
-| `unresolved`   | LML returned no Discogs match (`response.results[0].artwork.release_id` was null)                    |
-| `lml_error`    | LML call threw (cold-cache timeout, network blip, etc.); row stays NULL for next run                 |
-| `raced`        | UPDATE matched zero rows because a tubafrenzy paste won the race between candidate-select and update |
+| Counter             | Meaning                                                                                                      |
+| ------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `scanned`           | Rows visited (matches the candidate query's row count)                                                       |
+| `resolved`          | LML returned a positive release id AND the UPDATE landed cleanly                                             |
+| `resolved_dry`      | LML returned a positive release id; DRY_RUN suppressed the UPDATE                                            |
+| `unresolved`        | LML returned no Discogs match (`response.results[0].artwork.release_id` was null)                            |
+| `lml_error`         | LML call threw (cold-cache timeout, network blip, etc.); row stays NULL for next run                         |
+| `raced`             | UPDATE matched zero rows because a tubafrenzy paste won the race between candidate-select and update         |
+| `sentinel_rejected` | LML returned `<= 0` (cache pollution / upstream regression); pre-empted before write per BS#1429 CHECK fence |
 
 ## Post-run verification
 
