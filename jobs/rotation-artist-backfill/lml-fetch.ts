@@ -19,7 +19,7 @@
  * whole batch couldn't be retrieved. Per-id status rollup lives in the
  * orchestrator's tally.
  *
- * BS-side per-call timeout is `BATCH_TIMEOUT_MS` (default 5 min, overridable
+ * BS-side per-call timeout is `BATCH_TIMEOUT_MS` (default 6 min, overridable
  * via `BACKFILL_LML_BATCH_TIMEOUT_MS`). LML server-side caps the batch
  * wall-clock at Railway's request-timeout ceiling on cold cache; the cron's
  * timeout sits ≥ that ceiling so a successful LML writeback isn't
