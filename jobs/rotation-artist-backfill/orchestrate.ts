@@ -44,17 +44,22 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { type BulkCacheRefreshResponse, type CacheRefreshResultItem, Semaphore } from '@wxyc/lml-client';
+import {
+  type BulkCacheRefreshResponse,
+  type CacheRefreshResultItem,
+  REFRESH_FOR_IDENTITIES_BATCH_CAP,
+  Semaphore,
+} from '@wxyc/lml-client';
 
 import { fetchIdentityRefresh, type FetchOutcome } from './lml-fetch.js';
 import { log } from './logger.js';
 
 /**
  * LML#525's per-request batch cap. Hard contract — see file header.
- * The 400-on-overflow response is LML's runtime guard; this constant is
- * the BS-side encoding so we never *attempt* an over-cap batch.
+ * Re-exported from `@wxyc/lml-client` so the wrapper's runtime guard and
+ * the cron's chunker agree on the same value.
  */
-export const LML_REFRESH_BATCH_CAP = 50;
+export const LML_REFRESH_BATCH_CAP = REFRESH_FOR_IDENTITIES_BATCH_CAP;
 
 export type Totals = {
   identities_scanned: number;
@@ -158,7 +163,19 @@ export const chunk = <T>(items: T[], size: number): T[][] => {
  * cache_stats, and LML's internal recorders are aggregate. Hit/miss
  * observability lives on LML-side Sentry dashboards (BS#1402 issue notes).
  */
-const tallyBatch = (totals: Totals, response: BulkCacheRefreshResponse): void => {
+const tallyBatch = (totals: Totals, response: BulkCacheRefreshResponse, batchSize: number): void => {
+  // Defend against response-shape drift. `BulkCacheRefreshResponse` is a TS
+  // cast (lml-client does no runtime validation), so a malformed 200 body
+  // would otherwise throw `Symbol.iterator` mid-batch and leave the batch's
+  // identity_ids uncounted, corrupting the BS#1402 not_found/identities_scanned
+  // denominator. Treat malformed-but-200 as a batch-level failure.
+  if (!Array.isArray(response?.results)) {
+    log('warn', 'malformed_response', `LML returned 200 with non-array results (${batchSize} ids)`, {
+      batch_size: batchSize,
+    });
+    tallyBatchError(totals, batchSize);
+    return;
+  }
   for (const item of response.results) {
     totals.identities_scanned += 1;
     switch (item.status) {
@@ -187,6 +204,16 @@ const tallyBatch = (totals: Totals, response: BulkCacheRefreshResponse): void =>
         // `error` means no source was `success`, so the warmed_* counters
         // stay at zero here. We don't tally sources for that reason.
         break;
+      default:
+        // Future LML versions may add a status (e.g. 'partial_warmed'). Bump
+        // `lml_error` so the invariant `identities_scanned ==
+        // identities_resolved + lml_error` is preserved and the BS#1402 alert
+        // denominator doesn't silently inflate without a matching numerator.
+        totals.lml_error += 1;
+        log('warn', 'unknown_status', `LML returned unknown per-id status; counted as lml_error`, {
+          status: String((item as { status?: unknown }).status),
+        });
+        break;
     }
   }
 };
@@ -194,11 +221,15 @@ const tallyBatch = (totals: Totals, response: BulkCacheRefreshResponse): void =>
 const tallySources = (totals: Totals, item: CacheRefreshResultItem): void => {
   if (!item.sources) return;
   for (const source of Object.values(item.sources)) {
+    // Defend against per-source null values — type contract excludes them,
+    // but the wrapper does no runtime validation, and a single null entry
+    // would otherwise throw TypeError mid-batch.
+    if (!source) continue;
     if (source.release_outcome === 'success') {
       totals.warmed_releases += 1;
     }
     for (const artist of source.artists ?? []) {
-      if (artist.outcome === 'success') {
+      if (artist?.outcome === 'success') {
         totals.warmed_artists += 1;
       }
     }
@@ -293,7 +324,7 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
     await runWithConcurrency(batches, concurrency, async (batch) => {
       const outcome: FetchOutcome<BulkCacheRefreshResponse> = await fetchFn(batch);
       if (outcome.kind === 'ok') {
-        tallyBatch(totals, outcome.value);
+        tallyBatch(totals, outcome.value, batch.length);
       } else {
         tallyBatchError(totals, batch.length);
         log('warn', 'batch_error', `identity refresh batch failed (${batch.length} ids)`, {

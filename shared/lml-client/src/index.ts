@@ -963,6 +963,14 @@ export interface BulkCacheRefreshResponse {
 }
 
 /**
+ * Per-request cap on `refreshForIdentities`. LML returns 400 on overflow —
+ * the cap is bounded by Discogs rate-limit × cold-cache fan-out ≤ Railway's
+ * request-timeout ceiling. Exported so consumers can chunk inputs against
+ * the same constant instead of redefining it. Hard contract, not a tunable.
+ */
+export const REFRESH_FOR_IDENTITIES_BATCH_CAP = 50;
+
+/**
  * Refresh LML's cache for a batch of release `identity_id`s (LML#525).
  *
  * LML maps each id to its per-source `(source, external_id)` pairs, dispatches
@@ -971,19 +979,29 @@ export interface BulkCacheRefreshResponse {
  * the existing fallthrough seam (LML#503's `fetched_at` discriminator) —
  * already-warm cache rows don't re-hit Discogs.
  *
- * Per-request cap: **50 identity_ids**. LML returns 400 on overflow. The cap
- * is bounded by Discogs rate-limit × cold-cache fan-out ≤ Railway's
- * request-timeout ceiling — it is a hard contract, not a soft tunable.
- * Consumers should encode 50 as a constant and chunk inputs accordingly.
+ * Per-request cap: **50 identity_ids** (`REFRESH_FOR_IDENTITIES_BATCH_CAP`).
+ * The wrapper defends against under- and over-cap inputs client-side so a
+ * misconfigured caller fails fast instead of burning a wire round-trip on
+ * an LML 400.
  *
- * Default timeout matches the shared `TIMEOUT_MS` (30 s). The cron consumer
- * (`jobs/rotation-artist-backfill`) overrides with a budget tuned to its
- * cold-cache batch latency.
+ * Default timeout matches the shared `TIMEOUT_MS` (30 s). Consumers whose
+ * batches can run cold-cache (Discogs fan-out × per-call latency) should
+ * pass a longer `timeoutMs` so a successful LML writeback isn't misclassified
+ * as a transport error on first touch.
  */
 export async function refreshForIdentities(
   identityIds: number[],
   options?: { timeoutMs?: number }
 ): Promise<BulkCacheRefreshResponse> {
+  if (identityIds.length === 0) {
+    throw new LmlClientError('refreshForIdentities requires at least one identity_id', 400);
+  }
+  if (identityIds.length > REFRESH_FOR_IDENTITIES_BATCH_CAP) {
+    throw new LmlClientError(
+      `refreshForIdentities batch size ${identityIds.length} exceeds the ${REFRESH_FOR_IDENTITIES_BATCH_CAP}-id cap; chunk upstream`,
+      400
+    );
+  }
   const response = await lmlFetch(
     '/api/v1/cache/refresh-for-identities',
     {
