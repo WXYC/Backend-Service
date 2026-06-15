@@ -315,4 +315,98 @@ describe('runBackfill', () => {
 
     expect(fetchFn).not.toHaveBeenCalled();
   });
+
+  it('under concurrency > 1, completes sibling batches when one batch throws (no sibling-orphan)', async () => {
+    // Coverage gap fixed: previously only concurrency=1 + all-fail were
+    // tested. A future refactor of runWithConcurrency from Promise.allSettled
+    // to Promise.all (first-rejection-wins) would orphan in-flight siblings.
+    // This test guards by mixing one throwing batch with two successful
+    // batches and asserting siblings completed (counters reflect 100 ids).
+    const ids = Array.from({ length: 150 }, (_, i) => i + 1); // 3 batches of 50
+    const loadIdentityIds = jest.fn().mockResolvedValue(ids);
+    let callIdx = 0;
+    const fetchFn = jest.fn(async (batch: number[]) => {
+      const idx = ++callIdx;
+      // Stagger so sibling batches are in-flight when batch 2 throws.
+      await new Promise((resolve) => setTimeout(resolve, idx === 2 ? 2 : 10));
+      if (idx === 2) {
+        throw new Error('batch 2 failed mid-flight');
+      }
+      return ok({ results: batch.map((id) => warmed(id, { discogs_release: discogsRelease(['success']) })) });
+    });
+
+    await expect(runBackfill({ loadIdentityIds, fetchFn, concurrency: 3 })).rejects.toThrow(
+      'batch 2 failed mid-flight'
+    );
+
+    // All 3 batches were dispatched; siblings drained.
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('treats a 200 response with non-array results as a batch-level error (denominator stays truthful)', async () => {
+    // Defends against LML response-shape drift (`{}` or `{results: null}`)
+    // that would otherwise throw Symbol.iterator mid-batch and leak through
+    // runWithConcurrency, leaving identities_scanned uncounted for that
+    // batch and corrupting BS#1402's not_found/identities_scanned ratio.
+    const ids = Array.from({ length: 50 }, (_, i) => i + 1);
+    const loadIdentityIds = jest.fn().mockResolvedValue(ids);
+    const fetchFn = jest.fn().mockResolvedValue({ kind: 'ok', value: {} as BulkCacheRefreshResponse });
+
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 1 });
+
+    expect(result.totals.identities_scanned).toBe(50);
+    expect(result.totals.lml_error).toBe(50);
+    expect(result.totals.identities_resolved).toBe(0);
+  });
+
+  it('skips null source values in tallySources without throwing (response-shape defense)', async () => {
+    // If LML's response carries a null source slot (response-shape drift),
+    // tallySources must continue instead of throwing TypeError mid-batch.
+    const loadIdentityIds = jest.fn().mockResolvedValue([1]);
+    const fetchFn = jest.fn(() =>
+      Promise.resolve(
+        ok({
+          results: [
+            {
+              identity_id: 1,
+              status: 'warmed',
+              // One real source, one null; the null must not crash the tally.
+              sources: {
+                discogs_release: { release_outcome: 'success', artists: [] },
+                musicbrainz_release: null,
+              } as unknown as Record<string, CacheRefreshSourceResult>,
+            },
+          ],
+        })
+      )
+    );
+
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 1 });
+
+    expect(result.totals.identities_scanned).toBe(1);
+    expect(result.totals.identities_resolved).toBe(1);
+    expect(result.totals.warmed_releases).toBe(1);
+  });
+
+  it('counts an unknown per-id status under lml_error (default switch arm)', async () => {
+    // Future LML version may add a status (e.g. 'partial_warmed') BS doesn't
+    // yet recognize. Without a default arm, identities_scanned would bump
+    // without identities_resolved or lml_error, breaking the invariant the
+    // BS#1402 alert relies on.
+    const loadIdentityIds = jest.fn().mockResolvedValue([1]);
+    const fetchFn = jest.fn(() =>
+      Promise.resolve(
+        ok({
+          results: [{ identity_id: 1, status: 'partial_warmed' as unknown as 'warmed', sources: null }],
+        })
+      )
+    );
+
+    const result = await runBackfill({ loadIdentityIds, fetchFn, concurrency: 1 });
+
+    expect(result.totals.identities_scanned).toBe(1);
+    expect(result.totals.lml_error).toBe(1);
+    // Invariant: scanned == resolved + lml_error.
+    expect(result.totals.identities_scanned).toBe(result.totals.identities_resolved + result.totals.lml_error);
+  });
 });

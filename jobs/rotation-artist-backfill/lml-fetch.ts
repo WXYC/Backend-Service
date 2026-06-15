@@ -19,22 +19,29 @@
  * whole batch couldn't be retrieved. Per-id status rollup lives in the
  * orchestrator's tally.
  *
- * BS-side upper bound on a single call is `lmlFetch`'s hard-coded 30 s
- * (shared/lml-client/src/index.ts TIMEOUT_MS — refreshForIdentities accepts
- * a `timeoutMs` override but defaults to TIMEOUT_MS). LML server-side caps
- * the batch wall-clock at ~5 min (Railway's request-timeout ceiling) on
- * cold cache; a BS-side 30 s budget can timeout while LML's background
- * completes and writes back the rows — the per-id counters undercount the
- * actual back-fill rate, and the next day's run picks the rows up as PG
- * hits. Threading a budget that survives the worst-case cold-cache fan-out
- * is the follow-up tracked in the PR description.
+ * BS-side per-call timeout is `BATCH_TIMEOUT_MS` (default 5 min, overridable
+ * via `BACKFILL_LML_BATCH_TIMEOUT_MS`). LML server-side caps the batch
+ * wall-clock at Railway's request-timeout ceiling on cold cache; the cron's
+ * timeout sits ≥ that ceiling so a successful LML writeback isn't
+ * misclassified as a transport error on first touch — under-timing makes
+ * the batch count as `lml_error+batchSize` even though LML completes the
+ * work in the background, doubling Discogs egress on the next day's run.
  */
 
 import * as Sentry from '@sentry/node';
 
-import { type BulkCacheRefreshResponse, LmlClientError, refreshForIdentities } from '@wxyc/lml-client';
+import { envInt, type BulkCacheRefreshResponse, LmlClientError, refreshForIdentities } from '@wxyc/lml-client';
 
 import { defaultLmlLimiter } from './lml-limiter.js';
+
+/**
+ * Per-batch BS-side AbortController budget for `refreshForIdentities`.
+ * Sized to cover LML's worst-case cold-cache fan-out (~50 release +
+ * ~150 artist Discogs calls at LML's 50 req/min cap ≈ 4 min) plus
+ * a small margin. Operators can dial this via
+ * `BACKFILL_LML_BATCH_TIMEOUT_MS` without a redeploy.
+ */
+const BATCH_TIMEOUT_MS = envInt('BACKFILL_LML_BATCH_TIMEOUT_MS', 5 * 60 * 1000);
 
 export type FetchOutcome<T> = { kind: 'ok'; value: T } | { kind: 'error'; error: Error; retryable: boolean };
 
@@ -53,11 +60,13 @@ const classifyError = (e: unknown): FetchOutcome<never> => {
 };
 
 /**
- * Mark the active Sentry span with a non-OK status when the batch call
- * itself fails. Per OTLP semantic conventions, span status is the
- * queryable signal for error-rate dashboards — without this, every span
- * comes back `ok` even when classifyError returned `kind: 'error'`
- * (because the throw was caught and converted to a return value).
+ * Mark the active Sentry span with an explicit OK or ERROR status. Per OTLP
+ * semantic conventions, span status is the queryable signal for error-rate
+ * dashboards — without this, every span comes back `unset` even when
+ * classifyError returned `kind: 'error'` (because the throw was caught
+ * and converted to a return value), and any custom alert filter of the
+ * shape `span.status_code != 1` would treat every successful batch as
+ * an error.
  *
  * Per-id failures inside a successful batch (`status: 'error'` items)
  * do NOT promote to span-level error here — the orchestrator's tally
@@ -68,9 +77,12 @@ const classifyError = (e: unknown): FetchOutcome<never> => {
  * Status codes: 0 = unset, 1 = OK, 2 = ERROR (OTLP / @sentry/core).
  */
 const markSpanOutcome = <T>(outcome: FetchOutcome<T>): void => {
-  if (outcome.kind === 'ok') return;
   const span = Sentry.getActiveSpan();
   if (!span) return;
+  if (outcome.kind === 'ok') {
+    span.setStatus({ code: 1, message: 'ok' });
+    return;
+  }
   span.setStatus({ code: 2, message: outcome.retryable ? 'retryable_error' : 'permanent_error' });
 };
 
@@ -79,12 +91,17 @@ export const fetchIdentityRefresh = async (identityIds: number[]): Promise<Fetch
     {
       name: 'lml.refresh_for_identities',
       op: 'http.client',
-      attributes: { 'lml.batch_size': identityIds.length },
+      attributes: {
+        'lml.batch_size': identityIds.length,
+        'lml.batch_timeout_ms': BATCH_TIMEOUT_MS,
+      },
     },
     async () => {
       let outcome: FetchOutcome<BulkCacheRefreshResponse>;
       try {
-        const value = await defaultLmlLimiter.run(() => refreshForIdentities(identityIds));
+        const value = await defaultLmlLimiter.run(() =>
+          refreshForIdentities(identityIds, { timeoutMs: BATCH_TIMEOUT_MS })
+        );
         outcome = { kind: 'ok', value };
       } catch (e) {
         outcome = classifyError(e);

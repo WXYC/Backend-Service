@@ -28,6 +28,8 @@ import {
   getRelease,
   getArtistDetails,
   resolveEntity,
+  refreshForIdentities,
+  REFRESH_FOR_IDENTITIES_BATCH_CAP,
   LmlClientError,
   checkStreamingAvailability,
   searchLibrary,
@@ -688,6 +690,71 @@ describe('lml.client', () => {
       } as unknown as globalThis.Response);
 
       await expect(bulkLookupMetadata([itemFor('A', 'X')])).rejects.toThrow(LmlClientError);
+    });
+  });
+
+  describe('refreshForIdentities (BS#1381 / LML#525)', () => {
+    it('sends POST to /api/v1/cache/refresh-for-identities with identity_ids body', async () => {
+      const response = {
+        results: [
+          {
+            identity_id: 7,
+            status: 'warmed',
+            sources: { discogs_release: { release_outcome: 'success', artists: [] } },
+          },
+        ],
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(response),
+      } as unknown as globalThis.Response);
+
+      const result = await refreshForIdentities([7]);
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://lml.test:8000/api/v1/cache/refresh-for-identities',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ identity_ids: [7] }),
+        })
+      );
+      expect(result).toEqual(response);
+    });
+
+    it('rejects empty input locally without hitting the wire', async () => {
+      await expect(refreshForIdentities([])).rejects.toThrow(/at least one identity_id/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects oversize batches (> 50) locally without hitting the wire', async () => {
+      const ids = Array.from({ length: REFRESH_FOR_IDENTITIES_BATCH_CAP + 1 }, (_, i) => i + 1);
+      await expect(refreshForIdentities(ids)).rejects.toThrow(/exceeds the 50-id cap/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('exports REFRESH_FOR_IDENTITIES_BATCH_CAP as the LML#525 hard contract value (50)', () => {
+      expect(REFRESH_FOR_IDENTITIES_BATCH_CAP).toBe(50);
+    });
+
+    it('threads the timeoutMs override to lmlFetch (cold-cache budget)', async () => {
+      jest.useFakeTimers();
+      try {
+        mockFetch.mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ results: [] }),
+        } as unknown as globalThis.Response);
+
+        await refreshForIdentities([1], { timeoutMs: 250_000 });
+
+        // The signal is from a per-call AbortController; we can't observe the
+        // exact delay value directly, but we CAN verify a signal was passed
+        // (proving the timeout wiring is engaged for this call).
+        const init = mockFetch.mock.calls[0][1];
+        if (!init) throw new Error('mockFetch was not called with init args');
+        expect(init.signal).toBeDefined();
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 

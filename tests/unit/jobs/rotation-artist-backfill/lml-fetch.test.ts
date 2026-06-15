@@ -25,21 +25,29 @@ describe('jobs/rotation-artist-backfill/lml-fetch', () => {
   });
 
   const loadModule = async (
-    overrides: { refreshForIdentities?: jest.Mock } = {}
+    overrides: { refreshForIdentities?: jest.Mock; limiterRun?: jest.Mock } = {}
   ): Promise<typeof import('../../../../jobs/rotation-artist-backfill/lml-fetch.js')> => {
+    const limiterRun = overrides.limiterRun ?? jest.fn(<T>(fn: () => Promise<T>) => fn());
     jest.doMock('../../../../jobs/rotation-artist-backfill/lml-limiter.js', () => ({
-      // Run-through limiter: no rate-limiting in unit tests.
-      defaultLmlLimiter: { run: <T>(fn: () => Promise<T>) => fn() },
+      // Run-through limiter by default; tests can swap in a spy to assert
+      // `.run` was actually invoked around refreshForIdentities (regression
+      // guard for a refactor that drops the limiter wrap and bypasses
+      // BACKFILL_LML_* in prod).
+      defaultLmlLimiter: { run: limiterRun },
     }));
     jest.doMock('@wxyc/lml-client', () => ({
       LmlClientError,
+      // Stub envInt: the cron module reads BACKFILL_LML_BATCH_TIMEOUT_MS at
+      // import time. Tests pass a numeric value so the AbortController budget
+      // is finite and deterministic.
+      envInt: (_name: string, fallback: number) => fallback,
       refreshForIdentities: overrides.refreshForIdentities ?? jest.fn(),
     }));
     return import('../../../../jobs/rotation-artist-backfill/lml-fetch.js');
   };
 
   describe('fetchIdentityRefresh', () => {
-    it('returns {kind: "ok", value} on success', async () => {
+    it('returns {kind: "ok", value} on success and routes through defaultLmlLimiter.run', async () => {
       const response = {
         results: [
           {
@@ -50,10 +58,19 @@ describe('jobs/rotation-artist-backfill/lml-fetch', () => {
         ],
       };
       const refreshForIdentities = jest.fn().mockResolvedValue(response);
-      const { fetchIdentityRefresh } = await loadModule({ refreshForIdentities });
+      const limiterRun = jest.fn(<T>(fn: () => Promise<T>) => fn());
+      const { fetchIdentityRefresh } = await loadModule({ refreshForIdentities, limiterRun });
       const result = await fetchIdentityRefresh([42]);
       expect(result).toEqual({ kind: 'ok', value: response });
-      expect(refreshForIdentities).toHaveBeenCalledWith([42]);
+      // The limiter MUST be invoked: regression guard against dropping the
+      // BACKFILL_LML_* rate-limit gate in a future refactor.
+      expect(limiterRun).toHaveBeenCalledTimes(1);
+      // Wrapper threads a timeoutMs override so cold-cache batches don't
+      // misclassify as transport errors at the shared 30 s TIMEOUT_MS.
+      expect(refreshForIdentities).toHaveBeenCalledWith(
+        [42],
+        expect.objectContaining({ timeoutMs: expect.any(Number) })
+      );
     });
 
     it('maps a 5xx LmlClientError to {kind: "error", retryable: true}', async () => {
