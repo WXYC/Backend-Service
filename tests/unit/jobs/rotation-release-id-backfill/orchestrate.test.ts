@@ -88,6 +88,40 @@ describe('runBackfill', () => {
     expect(result.totals.resolved).toBe(0);
   });
 
+  test('LML returns 0 (sentinel) → sentinel_rejected counter, no write (BS#1429)', async () => {
+    // The CHECK at rotation_discogs_release_id_not_sentinel rejects `0`
+    // and negative ids. Without this pre-empt the writer's UPDATE would
+    // raise 23514, the throw would escape the for-loop, and the entire
+    // batch's remaining candidates would be abandoned.
+    const loadCandidates = makeLoadCandidates([
+      { id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' },
+      { id: 8, artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again' },
+    ]);
+    const lookup = jest.fn<LookupFn>().mockResolvedValueOnce(0).mockResolvedValueOnce(999001);
+    const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+
+    const result = await runBackfill({ loadCandidates, lookup, write });
+
+    // Sentinel candidate is skipped, second candidate proceeds to write.
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledWith(8, 999001);
+    expect(result.totals.scanned).toBe(2);
+    expect(result.totals.sentinel_rejected).toBe(1);
+    expect(result.totals.resolved).toBe(1);
+  });
+
+  test('LML returns a negative id → sentinel_rejected counter, no write (BS#1429)', async () => {
+    const loadCandidates = makeLoadCandidates([{ id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' }]);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(-1);
+    const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+
+    const result = await runBackfill({ loadCandidates, lookup, write });
+
+    expect(write).not.toHaveBeenCalled();
+    expect(result.totals.sentinel_rejected).toBe(1);
+    expect(result.totals.resolved).toBe(0);
+  });
+
   test('dryRun=true skips writes and bumps resolved_dry instead of resolved', async () => {
     const loadCandidates = makeLoadCandidates([
       { id: 42, artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again' },
