@@ -113,6 +113,22 @@ Three `timestamp with time zone` markers record "this row was attempted by job X
 
 Don't move the file aside as part of the migration PR — restore it before commit.
 
+## Journal idx vs filename idx (post-2026-06-14 invariant)
+
+From journal idx 47 onward, the journal `idx` field is one greater than the leading number in the corresponding filename. `_journal.json` historically had two entries at idx 47 (`0046_cdc_notify_triggers` and `0047_replica-identity-for-pkless-tables`); #1131 / PR #1415 broke the tie by shifting every entry from idx 47 onward by +1. Filenames were not renamed, so the relationship is now:
+
+| Filename             | Journal idx |
+| -------------------- | ----------- |
+| `0000_*.sql`–`0045_*.sql` | 0–46  (matches)   |
+| `0046_*.sql`         | 47          |
+| `0047_*.sql`         | 48          |
+| ...                  | ...         |
+| `0099_*.sql`         | 100         |
+
+This is benign at runtime: Drizzle's runtime migrator identifies a migration by its `tag` (filename), not by `idx`. The mismatch only matters when reasoning about a journal entry without its filename next to it — `idx N` is not the same as filename `N` from this point onward. New migrations continue to follow the `previous_entry.when + 1` recipe and `drizzle-kit generate` auto-allocates the next idx; no special handling required.
+
+Don't "fix" the off-by-one without good reason. Renumbering ripples through every per-step `meta/<idx>_snapshot.json` (PR #1415 itself was a ~4800-line diff for this reason).
+
 ## Rule annotation convention
 
 Each rule above is preceded by a `<!-- @rule -->` marker. Fields:
