@@ -58,6 +58,17 @@ describe('parseRotationRows', () => {
     expect(rows[0].discogsReleaseId).toBeNull();
   });
 
+  it('treats negative DISCOGS_RELEASE_ID as null (BS#1429)', () => {
+    // The rotation_discogs_release_id_not_sentinel CHECK rejects `<= 0`.
+    // A negative id from tubafrenzy (paste-URL typo, upstream regression)
+    // would otherwise reach the rotation-etl UPSERT and trip 23514,
+    // wedging the 30-min cron.
+    const raw = '42\tAutechre\tConfield\tH\tWarp\t1706788800000\t0\t101\t1706800000000\t-12345';
+    const rows = parseRotationRows(raw);
+
+    expect(rows[0].discogsReleaseId).toBeNull();
+  });
+
   it('treats empty artist name as null', () => {
     const raw = '42\t\tConfield\tN\tWarp\t1706788800000\t0\t0\t1706800000000\t0';
     const rows = parseRotationRows(raw);

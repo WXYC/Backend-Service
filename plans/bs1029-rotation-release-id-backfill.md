@@ -167,8 +167,9 @@ For each row:
 - `rows_unresolved`
 - `rows_lml_error`
 - `rows_raced`
+- `rows_sentinel_rejected` (added BS#1429 — LML returned a `<= 0` release id, pre-empted before write)
 
-`rows_scanned == rows_resolved + rows_resolved_dry + rows_unresolved + rows_lml_error + rows_raced` is a runtime invariant we assert at end-of-run.
+`rows_scanned == rows_resolved + rows_resolved_dry + rows_unresolved + rows_lml_error + rows_raced + rows_sentinel_rejected` is a runtime invariant we assert at end-of-run.
 
 **Pacing (env-controlled, all reused from flowsheet-metadata-backfill):**
 
@@ -207,7 +208,7 @@ Workflow wiring is automatic. `deploy-base.yml`'s `validate_inputs` step accepts
   - rerun idempotency: a row with non-NULL `discogs_release_id` is skipped (SELECT predicate excludes it)
   - race: writer's WHERE guard returns 0 rows updated → `rows_raced=1`
   - DRY_RUN: no UPDATEs executed; `rows_resolved_dry=1`; planned log emitted
-  - counter invariant: `scanned == resolved + resolved_dry + unresolved + lml_error + raced`
+  - counter invariant: `scanned == resolved + resolved_dry + unresolved + lml_error + raced + sentinel_rejected`
 - `writer.test.ts`
   - UPDATE shape pinned: `SET discogs_release_id=$1, discogs_release_id_source='lml_offline_backfill' WHERE id=$2 AND discogs_release_id IS NULL`
   - returns `{ written: true }` when result.count=1
