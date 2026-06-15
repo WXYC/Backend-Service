@@ -97,5 +97,5 @@
   "0097_fix-fk-on-delete-flowsheet-rotation-reviews": "f13d8eed11d7da774cbdf92abe12cd45440ac7bff594226364c387bd378e4224",
   "0098_flowsheet-show-id-play-order-idx": "4599512035c91ad0d41d6e73f34c27edcbc00bcd15ad6093ed18c338273cc417",
   "0099_cta-unique-null-track-partial": "9ab35148120ee357c2a12b6c2733f048ad3c194837d438aa50d94656f366890d",
-  "0101_rotation-discogs-release-id-not-sentinel": "6674a7a975a3ebe925ca85fbac669485cf3bc24305cd84362f948b57b1906fe6"
+  "0101_rotation-discogs-release-id-not-sentinel": "1d7c2cbddb96dca9586f208164c7e6d46a69b8e22b63da7b3a238fd45e1d7e20"
 }
