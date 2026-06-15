@@ -24,8 +24,9 @@ const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 // High-entropy probe namespace so this spec doesn't collide with fixture
 // rows or other tests sharing the per-worker schema. We INSERT with
-// NULL album_id (FK is nullable; the 2005 zombie rows had this shape)
-// so we don't need a library FK target.
+// NULL album_id (the prod zombie rows had this shape — `album_id IS NULL`
+// is the normal pre-catalog state for an active rotation row per
+// library.service.ts:247-263) so we don't need a library FK target.
 const TEST_LEGACY_ROTATION_ID_BASE = 814290000;
 
 function makeSql() {
@@ -99,6 +100,27 @@ describe('rotation_discogs_release_id_not_sentinel (BS#1429)', () => {
     ]);
     expect(rows).toHaveLength(1);
     expect(rows[0].discogs_release_id).toBeNull();
+  });
+
+  test('INSERT with a negative discogs_release_id is rejected', async () => {
+    // Defense-in-depth: the predicate is `IS NULL OR > 0`, so negative
+    // ints also fall outside the constraint. Discogs doesn't issue
+    // negative IDs in practice, but a future refactor weakening the
+    // predicate to `IS NULL OR <> 0` would regress this case silently
+    // without the regression coverage below.
+    let err;
+    try {
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".rotation (legacy_rotation_id, rotation_bin, add_date, discogs_release_id)
+         VALUES ($1, 'H', CURRENT_DATE, -1)`,
+        [TEST_LEGACY_ROTATION_ID_BASE + 5]
+      );
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('23514');
+    expect(err.constraint_name || err.constraint || '').toMatch(/rotation_discogs_release_id_not_sentinel/);
   });
 
   test('INSERT with a real positive Discogs release id succeeds', async () => {

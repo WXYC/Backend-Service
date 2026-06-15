@@ -661,6 +661,7 @@ export const rotation = wxyc_schema.table(
       // must supply either a real positive ID or NULL. The 2026-05-29
       // bypass-LML operator rescue's 6 zombie rows have been NULL'd ahead
       // of this constraint (see #1429 verification comment).
+      // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
       discogsReleaseIdNotSentinel: check(
         'rotation_discogs_release_id_not_sentinel',
         sql`${table.discogs_release_id} IS NULL OR ${table.discogs_release_id} > 0`
