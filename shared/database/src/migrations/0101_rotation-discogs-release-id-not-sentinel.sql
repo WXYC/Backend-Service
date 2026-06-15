@@ -1,3 +1,4 @@
+-- precondition-guard: not-required (constraint is on rotation.discogs_release_id, not on library_identity*; the library_identity reference below is a precedent citation in a comment, not a column/table dependency)
 -- BS#1429. Add a CHECK constraint on `wxyc_schema.rotation.discogs_release_id`
 -- that rejects the `0` sentinel.
 --
