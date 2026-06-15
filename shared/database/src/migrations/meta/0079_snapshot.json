@@ -1,6 +1,6 @@
 {
-  "id": "aa9f2f41-fc71-472c-be30-6de910bfa91b",
-  "prevId": "be88e1d9-995e-4f74-941b-20eaeb09a44b",
+  "id": "be88e1d9-995e-4f74-941b-20eaeb09a44b",
+  "prevId": "54a7dea3-b580-4a40-9cff-29f61879afd2",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -119,107 +119,6 @@
           "tableTo": "auth_user",
           "columnsFrom": [
             "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "wxyc_schema.album_metadata": {
-      "name": "album_metadata",
-      "schema": "wxyc_schema",
-      "columns": {
-        "album_id": {
-          "name": "album_id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "artwork_url": {
-          "name": "artwork_url",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "discogs_url": {
-          "name": "discogs_url",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "release_year": {
-          "name": "release_year",
-          "type": "smallint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "spotify_url": {
-          "name": "spotify_url",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "apple_music_url": {
-          "name": "apple_music_url",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "youtube_music_url": {
-          "name": "youtube_music_url",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "bandcamp_url": {
-          "name": "bandcamp_url",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "soundcloud_url": {
-          "name": "soundcloud_url",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "artist_bio": {
-          "name": "artist_bio",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "artist_wikipedia_url": {
-          "name": "artist_wikipedia_url",
-          "type": "varchar(512)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "album_metadata_album_id_library_id_fk": {
-          "name": "album_metadata_album_id_library_id_fk",
-          "tableFrom": "album_metadata",
-          "tableTo": "library",
-          "schemaTo": "wxyc_schema",
-          "columnsFrom": [
-            "album_id"
           ],
           "columnsTo": [
             "id"

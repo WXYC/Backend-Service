@@ -20,11 +20,15 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
   const journal: { entries: Array<{ idx: number; when: number; tag: string }> } = JSON.parse(
     fs.readFileSync(journalPath, 'utf-8')
   );
-  const entry91 = journal.entries.find((e) => e.idx === 91);
+  // Post-#1131 the migration is matched by tag prefix, not idx. The
+  // duplicate-idx-47 fix shifted every idx >= 48 by +1; tags (and so
+  // .sql filenames) are stable, so prefix-matching survives the
+  // renumber.
+  const entry91 = journal.entries.find((e) => e.tag.startsWith('0091_'));
   const sqlPath91 = entry91 ? path.join(migrationsDir, `${entry91.tag}.sql`) : null;
   const sql91 = sqlPath91 && fs.existsSync(sqlPath91) ? fs.readFileSync(sqlPath91, 'utf-8') : '';
 
-  const entry93 = journal.entries.find((e) => e.idx === 93);
+  const entry93 = journal.entries.find((e) => e.tag.startsWith('0093_'));
   const sqlPath93 = entry93 ? path.join(migrationsDir, `${entry93.tag}.sql`) : null;
   const sql93 = sqlPath93 && fs.existsSync(sqlPath93) ? fs.readFileSync(sqlPath93, 'utf-8') : '';
 

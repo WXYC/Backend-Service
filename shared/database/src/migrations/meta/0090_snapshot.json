@@ -1,6 +1,6 @@
 {
-  "id": "866205db-bf86-477b-a32f-c0df947b057b",
-  "prevId": "dd317cc9-295e-47fe-8b73-ec9e833385cd",
+  "id": "dd317cc9-295e-47fe-8b73-ec9e833385cd",
+  "prevId": "1fc2b441-b64e-47d0-88b1-60329f3c5fbf",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3608,12 +3608,6 @@
         "legacy_dj_id": {
           "name": "legacy_dj_id",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "dj_name_override": {
-          "name": "dj_name_override",
-          "type": "varchar(255)",
           "primaryKey": false,
           "notNull": false
         },

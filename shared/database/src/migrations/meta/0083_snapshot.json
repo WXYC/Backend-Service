@@ -1,6 +1,6 @@
 {
-  "id": "dc17541d-2fef-4979-b1e7-af1dd0bf6f75",
-  "prevId": "441c6076-be50-4970-a52a-04663ac1cbef",
+  "id": "441c6076-be50-4970-a52a-04663ac1cbef",
+  "prevId": "18f59b18-4334-4ef9-87e5-78ac9c216ddc",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1163,6 +1163,21 @@
           "columns": [
             {
               "expression": "\"record_label\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "flowsheet_dj_name_trgm_idx": {
+          "name": "flowsheet_dj_name_trgm_idx",
+          "columns": [
+            {
+              "expression": "\"dj_name\" gin_trgm_ops",
               "asc": true,
               "isExpression": true,
               "nulls": "last"

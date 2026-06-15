@@ -1,6 +1,6 @@
 {
-  "id": "858fd918-e2a9-485d-8ef0-222daf9119bb",
-  "prevId": "e3a1884c-0b1e-4b7c-8233-665b9a2fc3f6",
+  "id": "e3a1884c-0b1e-4b7c-8233-665b9a2fc3f6",
+  "prevId": "4d4ed747-aeba-4120-8063-80dc520a1cc5",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -962,28 +962,6 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "cta_unique_null_track_idx": {
-          "name": "cta_unique_null_track_idx",
-          "columns": [
-            {
-              "expression": "library_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "artist_name",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"wxyc_schema\".\"compilation_track_artist\".\"track_title\" IS NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

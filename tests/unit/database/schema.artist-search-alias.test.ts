@@ -8,12 +8,16 @@ describe('schema: artist_search_alias + library_artist_view.artist_id (artist-se
   const migrationsDir = path.resolve(__dirname, '../../../shared/database/src/migrations');
   const journalPath = path.join(migrationsDir, 'meta/_journal.json');
 
-  // Migration tag isn't fixed — drizzle-kit picks the friendly suffix at
-  // generate time. The journal entry's `tag` is the source of truth.
+  // Migration tag (post-#1131): match by the `0089_` tag prefix rather
+  // than by idx. The tag prefix is stable across journal renumbers (the
+  // .sql file's filename never moves); the idx assignment shifted +1
+  // for every entry above the historic idx-47 duplicate. Tags also
+  // survive the `drizzle-kit picks the friendly suffix at generate time`
+  // case the original comment called out — drizzle-kit fixes the prefix.
   const journal: { entries: Array<{ idx: number; when: number; tag: string }> } = JSON.parse(
     fs.readFileSync(journalPath, 'utf-8')
   );
-  const entry89 = journal.entries.find((e) => e.idx === 89);
+  const entry89 = journal.entries.find((e) => e.tag.startsWith('0089_'));
   const sqlPath89 = entry89 ? path.join(migrationsDir, `${entry89.tag}.sql`) : null;
   const sql89 = sqlPath89 && fs.existsSync(sqlPath89) ? fs.readFileSync(sqlPath89, 'utf-8') : '';
 
@@ -104,7 +108,7 @@ describe('schema: artist_search_alias + library_artist_view.artist_id (artist-se
     });
 
     it('journal `when` strictly exceeds the prior tail (0088)', () => {
-      const entry88 = journal.entries.find((e) => e.idx === 88);
+      const entry88 = journal.entries.find((e) => e.tag.startsWith('0088_'));
       expect(entry88).toBeDefined();
       expect(entry89.when).toBeGreaterThan(entry88.when);
     });

@@ -67,7 +67,11 @@ describe('validate-migrations.mjs', () => {
   });
 
   test('flags conflict markers in snapshot files', () => {
-    const snapshotPath = path.join(workdir, 'shared/database/src/migrations/meta/0055_snapshot.json');
+    // 0056_snapshot.json is the post-#1131-renumber name for what used
+    // to be 0055_snapshot.json. Pick any real snapshot file — the
+    // assertion is that Check 4 fires on conflict markers in *any*
+    // snapshot, not on a specific idx.
+    const snapshotPath = path.join(workdir, 'shared/database/src/migrations/meta/0056_snapshot.json');
     const raw = fs.readFileSync(snapshotPath, 'utf8');
     fs.writeFileSync(snapshotPath, '<<<<<<< HEAD\n' + raw + '\n>>>>>>> branch');
 
@@ -78,7 +82,11 @@ describe('validate-migrations.mjs', () => {
 
   test('flags non-allowlisted duplicate idxs', () => {
     const journal = readJournal(workdir);
-    // Duplicate idx 50 (not in HISTORICAL_DUPLICATE_IDXS allowlist)
+    // Post-#1131 the journal's tail is at idx 94; idx 50 belongs to
+    // `0049_flowsheet-search-indexes`. Appending another entry at idx 50
+    // exercises Check 5's duplicate-idx branch (the legacy uniqueness
+    // signal — distinct from the new strict-monotonic signal that the
+    // same insertion would also trip).
     journal.entries.push({
       idx: 50,
       version: '7',
@@ -91,6 +99,39 @@ describe('validate-migrations.mjs', () => {
     const { status, stderr } = run(workdir);
     expect(status).toBe(1);
     expect(stderr).toMatch(/Duplicate idx 50/);
+  });
+
+  test('flags a non-monotonic idx (lower than predecessor) without duplicate', () => {
+    // Append an entry whose idx is lower than the journal's tail but
+    // does NOT collide with any existing idx. The duplicate detector
+    // stays quiet; the new strict-monotonic detector fires. This pins
+    // the post-#1131 invariant — see scripts/validate-migrations.mjs
+    // Check 5's monotonic loop.
+    //
+    // idx=1 is one of the DROPPED_IDXS gaps (1, 5, 8), so:
+    //   - It's free; the duplicate detector won't fire.
+    //   - Check 7 (snapshot required) is suppressed for DROPPED idxs.
+    // This isolates the Non-monotonic signal cleanly.
+    const journal = readJournal(workdir);
+    const existingIdxs = new Set(journal.entries.map((e) => e.idx));
+    const sentinelIdx = 1;
+    expect(existingIdxs.has(sentinelIdx)).toBe(false);
+    journal.entries.push({
+      idx: sentinelIdx,
+      version: '7',
+      when: Date.now() + 1_000_000_000_000,
+      tag: '9999_non-monotonic-canary',
+      breakpoints: true,
+    });
+    writeJournal(workdir, journal);
+    fs.writeFileSync(path.join(workdir, 'shared/database/src/migrations/9999_non-monotonic-canary.sql'), '-- canary\n');
+
+    const { status, stderr } = run(workdir);
+    expect(status).toBe(1);
+    expect(stderr).toMatch(/Non-monotonic idx in journal/);
+    expect(stderr).toMatch(/9999_non-monotonic-canary/);
+    // Duplicate branch must stay quiet for the no-collision case.
+    expect(stderr).not.toMatch(new RegExp(`Duplicate idx ${sentinelIdx}\\b`));
   });
 
   test('flags missing SQL files for journal entries', () => {
@@ -118,11 +159,17 @@ describe('validate-migrations.mjs', () => {
     expect(stderr).toMatch(/Orphaned SQL file/);
   });
 
-  test('warns on the historical idx 47 duplicate but does not fail', () => {
+  test('no historical duplicate idxs remain post-#1131', () => {
+    // Pre-#1131 the journal carried a duplicate at idx 47 (both
+    // `0046_cdc_notify_triggers` and `0047_replica-identity-for-pkless-tables`).
+    // The fix renumbered the second `0047_*` to idx 48 and shifted the
+    // tail +1, leaving HISTORICAL_DUPLICATE_IDXS empty. This guard pins
+    // the post-fix state — if a future PR re-allowlists a duplicate, the
+    // tripwire test below also fires.
     const { status, stdout, stderr } = run(workdir);
     expect(status).toBe(0);
-    // Warnings go to stderr (console.warn), summary goes to stdout
-    expect(stderr + stdout).toMatch(/Historical duplicate idx 47/);
+    expect(stderr + stdout).not.toMatch(/Historical duplicate idx/);
+    expect(stderr + stdout).not.toMatch(/Duplicate idx \d+ in journal/);
   });
 
   test('flags a broken prevId chain (not a dropped-idx break)', () => {
@@ -179,10 +226,15 @@ describe('validate-migrations.mjs', () => {
     // "passes on the current repo state" test above, but pins Check 7's
     // tolerance specifically so future allowlist edits can't silently
     // promote the gap to an error.
+    //
+    // Post-#1131 the gap idxs shifted +1: tags `0057_*` through `0067_*`
+    // now live at idxs 58 through 68 (the second `0047_*` moved from 47
+    // to 48 and the entire tail compensated). The allowlist in
+    // scripts/validate-migrations.mjs was updated accordingly.
     const { status, stdout, stderr } = run(workdir);
     expect(status).toBe(0);
-    // No "Missing snapshot for journal entry idx 57" (or 58…67) errors.
-    for (const idx of [57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67]) {
+    // No "Missing snapshot for journal entry idx 58" (or 59…68) errors.
+    for (const idx of [58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68]) {
       expect(stderr + stdout).not.toMatch(new RegExp(`Missing snapshot for journal entry idx ${idx}\\b`));
     }
   });
@@ -831,7 +883,13 @@ describe('validate-migrations.mjs', () => {
       .split(',')
       .map((s) => parseInt(s.trim(), 10))
       .filter(Number.isFinite);
-    const expected = new Set([36, 41, 47, 48, 49, 50, 51, 52, 53, 54, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67]);
+    // Post-#1131 every idx >= 48 is +1 vs. the pre-#1131 mapping; the
+    // gap idxs shifted accordingly. The new contents are:
+    //   - 36, 41: unchanged (pre-renumber gaps).
+    //   - 47: the kept `0046_cdc_notify_triggers` (never had a snapshot).
+    //   - 48-55: were 47-54 (the second `0047_*` through `0054_*`).
+    //   - 58-68: were 57-67 (`0057_*` through `0067_*`).
+    const expected = new Set([36, 41, 47, 48, 49, 50, 51, 52, 53, 54, 55, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68]);
     const actual = new Set(idxs);
     // Every idx in `actual` must be in `expected` (no growth allowed).
     for (const idx of actual) {

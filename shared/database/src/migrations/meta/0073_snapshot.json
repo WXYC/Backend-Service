@@ -1,6 +1,6 @@
 {
-  "id": "c63ac0f0-7fca-4f25-9c03-e33f5ef46cde",
-  "prevId": "aebb183a-e441-4c33-aa1b-c2cd437666ed",
+  "id": "aebb183a-e441-4c33-aa1b-c2cd437666ed",
+  "prevId": "46be4105-04b4-4b4b-8f7b-be805a2368d9",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1121,21 +1121,6 @@
               "expression": "show_id",
               "isExpression": false,
               "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "flowsheet_play_order_idx": {
-          "name": "flowsheet_play_order_idx",
-          "columns": [
-            {
-              "expression": "\"play_order\" DESC",
-              "asc": true,
-              "isExpression": true,
               "nulls": "last"
             }
           ],

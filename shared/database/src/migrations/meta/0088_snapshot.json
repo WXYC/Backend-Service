@@ -1,6 +1,6 @@
 {
-  "id": "1fc2b441-b64e-47d0-88b1-60329f3c5fbf",
-  "prevId": "9ff7bed5-9ea8-4a21-8f2c-925b497c05fa",
+  "id": "9ff7bed5-9ea8-4a21-8f2c-925b497c05fa",
+  "prevId": "a39e63e7-96dd-4681-a71f-5bcdb7023d38",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3827,81 +3827,6 @@
       },
       "indexes": {},
       "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "wxyc_schema.banned_fingerprints": {
-      "name": "banned_fingerprints",
-      "schema": "wxyc_schema",
-      "columns": {
-        "fingerprint": {
-          "name": "fingerprint",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "banned_at": {
-          "name": "banned_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "ban_reason": {
-          "name": "ban_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "ban_expires_at": {
-          "name": "ban_expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "banned_by_user_id": {
-          "name": "banned_by_user_id",
-          "type": "varchar(255)",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "banned_fingerprints_ban_expires_at_idx": {
-          "name": "banned_fingerprints_ban_expires_at_idx",
-          "columns": [
-            {
-              "expression": "ban_expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"wxyc_schema\".\"banned_fingerprints\".\"ban_expires_at\" IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "banned_fingerprints_banned_by_user_id_auth_user_id_fk": {
-          "name": "banned_fingerprints_banned_by_user_id_auth_user_id_fk",
-          "tableFrom": "banned_fingerprints",
-          "tableTo": "auth_user",
-          "columnsFrom": [
-            "banned_by_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},

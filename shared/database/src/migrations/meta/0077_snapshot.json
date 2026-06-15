@@ -1,6 +1,6 @@
 {
-  "id": "54a7dea3-b580-4a40-9cff-29f61879afd2",
-  "prevId": "5c48e8da-c661-49dc-badf-48bcb9ec1c69",
+  "id": "5c48e8da-c661-49dc-badf-48bcb9ec1c69",
+  "prevId": "621d7e4d-23e4-4073-a60b-7e5c91b0fcaa",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2725,12 +2725,6 @@
         "record_label": {
           "name": "record_label",
           "type": "varchar(128)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "discogs_release_id": {
-          "name": "discogs_release_id",
-          "type": "integer",
           "primaryKey": false,
           "notNull": false
         }

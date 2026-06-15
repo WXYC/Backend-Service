@@ -1,6 +1,6 @@
 {
-  "id": "18f59b18-4334-4ef9-87e5-78ac9c216ddc",
-  "prevId": "c871b649-e5d1-4056-8d61-2910f40af609",
+  "id": "c871b649-e5d1-4056-8d61-2910f40af609",
+  "prevId": "aa9f2f41-fc71-472c-be30-6de910bfa91b",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1231,22 +1231,6 @@
           ],
           "isUnique": false,
           "where": "\"wxyc_schema\".\"flowsheet\".\"artwork_url\" IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "flowsheet_album_link_lookup_idx": {
-          "name": "flowsheet_album_link_lookup_idx",
-          "columns": [
-            {
-              "expression": "(lower(trim(\"artist_name\")) || '-' || lower(trim(coalesce(\"album_title\", ''))))",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"wxyc_schema\".\"flowsheet\".\"album_id\" IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

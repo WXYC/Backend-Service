@@ -1,6 +1,6 @@
 {
-  "id": "a6af8b03-b9f0-468c-8ae8-80ffc614a65a",
-  "prevId": "c8373eb4-18cb-4df3-b27d-ff6fee643736",
+  "id": "c8373eb4-18cb-4df3-b27d-ff6fee643736",
+  "prevId": "2d29c071-9ffd-4d9e-a159-95b24ddecea4",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3860,6 +3860,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "shows_legacy_dj_name_trgm_idx": {
+          "name": "shows_legacy_dj_name_trgm_idx",
+          "columns": [
+            {
+              "expression": "\"legacy_dj_name\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -4098,6 +4113,36 @@
           "isUnique": true,
           "concurrently": false,
           "method": "btree",
+          "with": {}
+        },
+        "auth_user_dj_name_trgm_idx": {
+          "name": "auth_user_dj_name_trgm_idx",
+          "columns": [
+            {
+              "expression": "\"dj_name\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "auth_user_name_trgm_idx": {
+          "name": "auth_user_name_trgm_idx",
+          "columns": [
+            {
+              "expression": "\"name\" gin_trgm_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
           "with": {}
         }
       },
