@@ -26,11 +26,23 @@
 -- pre-date the prod remediation). Idempotent: no-op against current
 -- prod, clears the 6 rows in any older snapshot.
 --
--- Mirrors the precedent set by `library_identity_confidence_range`
--- (migration 0075) and `artist_search_alias_variant_nonblank`
--- (migration 0089). Negative IDs are also rejected by the `> 0`
--- predicate; Discogs doesn't issue them in practice, but the broader
--- form costs nothing.
+-- Deliberate post-UPDATE state: `discogs_release_id IS NULL` paired with
+-- `discogs_release_id_source = 'discogs_direct_backfill'`. The source
+-- enum value (added in migration 0086 for these specific rows) is
+-- preserved as a forensic breadcrumb of the 2026-05-29 operator rescue.
+-- Rotation-etl's COALESCE+CASE upsert (jobs/rotation-etl/job.ts:131-136)
+-- only flips the source when tubafrenzy contributes a non-NULL id, so a
+-- subsequent paste-correction will repaint provenance accurately
+-- without further migration work.
+--
+-- CDC ripple: the UPDATE fires the cdc_rotation trigger (migration 0046)
+-- and emits up to 6 pg_notify('cdc', ...) events during deploy. WebSocket
+-- consumers (docs/cdc.md) will observe 6 'update' events with
+-- (id_old=0, id_new=NULL). Within deploy budget.
+--
+-- Negative IDs are also rejected by the `> 0` predicate; Discogs doesn't
+-- issue them in practice. Regression-covered by the spec at
+-- tests/integration/rotation-discogs-release-id-not-sentinel.spec.js.
 
 -- @no-analyze-needed: clears the sentinel from <= 6 known rotation
 -- rows; touches a single nullable column with no index on its values.
