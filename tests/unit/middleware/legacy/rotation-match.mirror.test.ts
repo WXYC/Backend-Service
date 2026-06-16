@@ -161,6 +161,14 @@ describe('isActiveRotationMatch', () => {
     });
   });
 
+  // Cohort (c) fires via the library+artists LEFT JOIN inside the EXISTS
+  // query. Because the helper issues a single SQL call covering all three
+  // cohorts as an OR, the unit mock cannot distinguish which cohort fired —
+  // the structural test below pins that the JS branch logic correctly
+  // propagates a DB match regardless of which cohort is responsible. The
+  // read-path integration suite in flowsheet.spec.js exercises the actual
+  // SQL predicates (including the library+artists JOIN path) against a real
+  // PostgreSQL instance.
   describe('cohort (c): name-match through library + artists join', () => {
     it('queries DB and returns true when match via join', async () => {
       mockDbExecute.mockResolvedValue([{ match: true }]);
