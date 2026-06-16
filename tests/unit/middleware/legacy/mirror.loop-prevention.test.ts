@@ -150,9 +150,15 @@ describe('mirror loop prevention', () => {
     jest.clearAllMocks();
     mockGetCachedEntryId.mockReturnValue(undefined);
     mockSelectLimitResult = [];
-    // jest.clearAllMocks() resets the rotation-match mock's default
-    // resolution; re-stamp the "no match" default here so the per-test
-    // positive overrides via mockResolvedValueOnce(true) are deliberate.
+    // jest.clearAllMocks() only clears call history (mock.calls/results) —
+    // it does NOT clear the queued `mockResolvedValueOnce(true)` impls or
+    // the default `mockResolvedValue(false)` set at module-load. A queued
+    // Once that the test under it never consumed (e.g., because an
+    // earlier `expect` throw bypassed the helper call) would leak into
+    // the next test. Use `mockReset()` to clear both queue and impl, then
+    // re-stamp the module-load default so subsequent tests see "no match"
+    // unless they explicitly opt into a positive case via mockResolvedValueOnce.
+    mockIsActiveRotationMatch.mockReset();
     mockIsActiveRotationMatch.mockResolvedValue(false);
   });
 

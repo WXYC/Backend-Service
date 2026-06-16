@@ -92,6 +92,11 @@ export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<
   try {
     const albumIdCohort = entry.album_id != null ? sql`r2.album_id = ${entry.album_id}` : sql`false`;
 
+    // Cohort SQL is structurally identical to the read-path subquery's
+    // WHERE clause (flowsheet.service.ts:147-165). Bound values
+    // (artistName, albumTitle) are non-null JS strings post `?? ''` plus
+    // the empty-guard above, so no inner `coalesce(..., '')` is needed on
+    // the JS-bound side — matches the read path's column-ref shape exactly.
     const result = await db.execute(sql`
       SELECT EXISTS(
         SELECT 1
@@ -102,12 +107,12 @@ export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<
           AND (
             ${albumIdCohort}
             OR (
-              lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(coalesce(${artistName}, '')))
-              AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(coalesce(${albumTitle}, '')))
+              lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(${artistName}))
+              AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(${albumTitle}))
             )
             OR (
-              lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(coalesce(${artistName}, '')))
-              AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(coalesce(${albumTitle}, '')))
+              lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(${artistName}))
+              AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(${albumTitle}))
             )
           )
       ) AS match
