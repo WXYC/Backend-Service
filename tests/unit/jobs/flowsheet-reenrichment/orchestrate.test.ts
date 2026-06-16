@@ -42,7 +42,7 @@ const renderSql = (value: unknown): string => {
       .map((chunk) => {
         if (typeof chunk === 'string') return chunk;
         if (Array.isArray(chunk.value)) return chunk.value.join('');
-        if (chunk.value !== undefined && chunk.value !== null) return String(chunk.value);
+        if (typeof chunk.value === 'number' || typeof chunk.value === 'string') return String(chunk.value);
         return '';
       })
       .join('');
@@ -252,11 +252,11 @@ describe('runReenrichment — cooperative pause', () => {
       batchSize: 100,
       liveActivityLookbackSeconds: 60,
       liveActivityPauseMs: 0,
-      checkLiveActivity: mockCheckLiveActivity as jest.Mock,
+      checkLiveActivity: mockCheckLiveActivity,
     });
 
     // Probe was called at least 3 times (twice truthy, once falsy)
-    expect((mockCheckLiveActivity as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(mockCheckLiveActivity.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
 
   it('skips probe when liveActivityLookbackSeconds=0', async () => {
@@ -271,10 +271,10 @@ describe('runReenrichment — cooperative pause', () => {
       cutoffTs: CUTOFF,
       batchSize: 100,
       liveActivityLookbackSeconds: 0,
-      checkLiveActivity: mockCheckLiveActivity as jest.Mock,
+      checkLiveActivity: mockCheckLiveActivity,
     });
 
-    expect(mockCheckLiveActivity as jest.Mock).not.toHaveBeenCalled();
+    expect(mockCheckLiveActivity).not.toHaveBeenCalled();
   });
 });
 
