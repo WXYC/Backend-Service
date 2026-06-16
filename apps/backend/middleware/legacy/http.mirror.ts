@@ -51,12 +51,14 @@ interface MirrorEntry {
  * 2026-06-05 tubafrenzy auth-config drift (missing `MIRROR_API_KEY` on the
  * tubafrenzy side) ran silent through a full DJ's show.
  */
-function captureMirrorFailure(
-  operation: 'create_entry' | 'update_entry' | 'signoff_show',
-  details: { status?: number; responseBody?: string; error?: unknown }
+export function captureMirrorFailure(
+  operation: 'create_entry' | 'update_entry' | 'signoff_show' | 'rotation_lookup',
+  details: { status?: number; responseBody?: string; error?: unknown },
+  level: 'error' | 'warning' = 'error'
 ): void {
   Sentry.captureMessage(`Mirror: ${operation} failed`, {
-    level: 'error',
+    level,
+    fingerprint: ['mirror-failure', operation],
     tags: {
       subsystem: 'legacy-mirror',
       operation,
@@ -141,7 +143,11 @@ export function clearEntryIdMap(): void {
  * When radioShowID is provided, it's included so tubafrenzy doesn't auto-resolve.
  * nowPlayingFlag is always 0 (dropped — nothing in tubafrenzy reads it).
  */
-export function mapEntryToTubafrenzy(entry: MirrorEntry, radioShowID?: number | null): Record<string, unknown> {
+export function mapEntryToTubafrenzy(
+  entry: MirrorEntry,
+  radioShowID?: number | null,
+  isRotationMatch = false
+): Record<string, unknown> {
   const startMs = entry.add_time ? new Date(entry.add_time).getTime() : Date.now();
   const radioHour = Math.floor(startMs / 3_600_000) * 3_600_000;
 
@@ -194,7 +200,7 @@ export function mapEntryToTubafrenzy(entry: MirrorEntry, radioShowID?: number | 
 
   // Track entries
   let flowsheetEntryType = 0;
-  if (entry.rotation_id && entry.rotation_id > 0) {
+  if ((entry.rotation_id && entry.rotation_id > 0) || isRotationMatch) {
     flowsheetEntryType = 2;
   } else if (entry.album_id && entry.album_id > 0) {
     flowsheetEntryType = 6;
@@ -220,9 +226,9 @@ export function mapEntryToTubafrenzy(entry: MirrorEntry, radioShowID?: number | 
  * Maps a Backend-Service FSEntry to the tubafrenzy PATCH JSON body.
  * Only includes fields that can be updated on an existing entry.
  */
-export function mapUpdateToTubafrenzy(entry: MirrorEntry): Record<string, unknown> {
+export function mapUpdateToTubafrenzy(entry: MirrorEntry, isRotationMatch = false): Record<string, unknown> {
   let flowsheetEntryType = 0;
-  if (entry.rotation_id && entry.rotation_id > 0) {
+  if ((entry.rotation_id && entry.rotation_id > 0) || isRotationMatch) {
     flowsheetEntryType = 2;
   } else if (entry.album_id && entry.album_id > 0) {
     flowsheetEntryType = 6;

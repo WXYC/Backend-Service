@@ -18,6 +18,7 @@ import {
   mapShowToTubafrenzy,
   mapUpdateToTubafrenzy,
 } from './http.mirror.js';
+import { isActiveRotationMatch } from './rotation-match.mirror.js';
 
 const FLOWSHEET_ENTRY_TABLE = 'FLOWSHEET_ENTRY_PROD';
 const RADIO_SHOW_TABLE = 'FLOWSHEET_RADIO_SHOW_PROD';
@@ -300,7 +301,8 @@ export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) 
     }
   }
 
-  const body = mapEntryToTubafrenzy(entry, radioShowID);
+  const isRotationMatch = await isActiveRotationMatch(entry);
+  const body = mapEntryToTubafrenzy(entry, radioShowID, isRotationMatch);
   const tubafrenzyId = await mirrorCreateEntry(body);
   if (tubafrenzyId != null) {
     cacheEntryId(entry.play_order, tubafrenzyId);
@@ -330,7 +332,8 @@ export const updateEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entr
     return;
   }
 
-  const body = mapUpdateToTubafrenzy(entry);
+  const isRotationMatch = await isActiveRotationMatch(entry);
+  const body = mapUpdateToTubafrenzy(entry, isRotationMatch);
   await mirrorUpdateEntry(tubafrenzyId, body);
 });
 
