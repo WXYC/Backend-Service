@@ -220,6 +220,22 @@ describe('isActiveRotationMatch', () => {
       expect(result).toBe(true);
     });
 
+    // Round-3 review: pins the helper's `!= null` add_time check (vs the
+    // round-1 falsy check that would have treated 0 as "no add_time"). With
+    // add_time=0 (epoch ms = 1970-01-01) the helper must hit the DB and
+    // pass the actual epoch into the kill_date filter — not silently fall
+    // back to `new Date()` ("now"). Schema makes add_time NOT NULL so this
+    // is theoretical in production, but pinning the contract prevents a
+    // future "simplify the null check to a falsy ternary" refactor from
+    // silently losing the 1970-01-01 timestamp.
+    it('handles add_time=0 epoch (1970-01-01) as a real timestamp, not "no add_time"', async () => {
+      mockDbExecute.mockResolvedValue([{ match: true }]);
+      const entry = { ...baseEntry, add_time: 0 };
+      const result = await isActiveRotationMatch(entry);
+      expect(result).toBe(true);
+      expect(mockDbExecute).toHaveBeenCalledTimes(1);
+    });
+
     // Driver-shape-contract tests (BS#1432 round-2 review). The helper
     // accesses `(result[0]?.match)` via `!!` coercion (rather than `=== true`)
     // so a future postgres-js or drizzle-orm change that returns rows in a

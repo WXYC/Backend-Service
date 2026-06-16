@@ -10,7 +10,11 @@ const mockFetch = jest.fn();
 global.fetch = mockFetch as any;
 
 const mockCaptureMessage = jest.fn();
-jest.mock('@sentry/node', () => ({ captureMessage: (...args: unknown[]) => mockCaptureMessage(...args) }));
+const mockCaptureException = jest.fn();
+jest.mock('@sentry/node', () => ({
+  captureMessage: (...args: unknown[]) => mockCaptureMessage(...args),
+  captureException: (...args: unknown[]) => mockCaptureException(...args),
+}));
 
 import {
   mirrorCreateEntry,
@@ -26,11 +30,14 @@ import {
   getCachedShowId,
   clearShowIdMap,
   mapShowToTubafrenzy,
+  captureMirrorFailure,
+  MIRROR_OPERATION_META,
 } from '../../../../apps/backend/middleware/legacy/http.mirror';
 
 beforeEach(() => {
   mockFetch.mockReset();
   mockCaptureMessage.mockReset();
+  mockCaptureException.mockReset();
   clearEntryIdMap();
   clearShowIdMap();
 });
@@ -666,22 +673,36 @@ describe('http.mirror', () => {
       );
     });
 
-    it('mirrorCreateEntry captures network error without status tag', async () => {
+    // Round-3 review: Error instances route through captureException so
+    // Sentry parses the stack into its native lane (matches the codebase
+    // pattern in enrichment-worker / auth). The level/tags/fingerprint
+    // flow through unchanged.
+    it('mirrorCreateEntry captures network error via captureException (Error instance path)', async () => {
       const err = new Error('ECONNREFUSED');
       mockFetch.mockRejectedValue(err);
 
       await mirrorCreateEntry({ radioHour: 0 });
 
-      expect(mockCaptureMessage).toHaveBeenCalledWith(
-        'Mirror: create_entry failed',
+      expect(mockCaptureException).toHaveBeenCalledTimes(1);
+      expect(mockCaptureException).toHaveBeenCalledWith(
+        err,
         expect.objectContaining({
           level: 'error',
-          tags: expect.objectContaining({ subsystem: 'legacy-mirror', operation: 'create_entry' }),
-          extra: expect.objectContaining({ error: expect.stringContaining('ECONNREFUSED') }),
+          tags: expect.objectContaining({
+            subsystem: 'legacy-mirror',
+            operation: 'create_entry',
+            category: 'http',
+          }),
+          extra: expect.objectContaining({ stack: expect.any(String) }),
         })
       );
-      const call = mockCaptureMessage.mock.calls[0][1];
+      // captureMessage should NOT be called when the error is an Error.
+      expect(mockCaptureMessage).not.toHaveBeenCalled();
+      const call = mockCaptureException.mock.calls[0][1];
       expect(call.tags).not.toHaveProperty('status');
+      // HTTP ops never use a fingerprint — they group via Sentry's
+      // default message/exception grouping to preserve issue identity.
+      expect(call).not.toHaveProperty('fingerprint');
     });
 
     it('mirrorUpdateEntry captures HTTP error', async () => {
@@ -738,6 +759,97 @@ describe('http.mirror', () => {
       await mirrorCreateEntry({ radioHour: 0 });
 
       expect(mockCaptureMessage).not.toHaveBeenCalled();
+      expect(mockCaptureException).not.toHaveBeenCalled();
+    });
+
+    // Round-3 review: pin the operation→meta registry contract. The
+    // category tag and absence-of-fingerprint for HTTP ops are
+    // load-bearing for the 2026-06-05 runbook + issue-lineage promise
+    // in the captureMirrorFailure docstring.
+    it('HTTP ops are tagged with category=http and have no explicit fingerprint', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve('boom'),
+      });
+
+      await mirrorCreateEntry({ radioHour: 0 });
+      await mirrorUpdateEntry(42, { songTitle: 'x' });
+      await mirrorSignoffShow(171500, 1773799200000);
+
+      expect(mockCaptureMessage).toHaveBeenCalledTimes(3);
+      for (const [, opts] of mockCaptureMessage.mock.calls) {
+        expect(opts.tags.category).toBe('http');
+        expect(opts).not.toHaveProperty('fingerprint');
+      }
+    });
+
+    it('stack is sliced to STACK_TRACE_MAX_LENGTH (4000 chars) for long stacks', async () => {
+      const err = new Error('deep stack');
+      err.stack = 'Error: deep stack\n' + 'x'.repeat(10_000);
+      mockFetch.mockRejectedValue(err);
+
+      await mirrorCreateEntry({ radioHour: 0 });
+
+      const call = mockCaptureException.mock.calls[0][1];
+      expect(call.extra.stack.length).toBe(4000);
+    });
+  });
+
+  // Round-3 review: dedicated suite for captureMirrorFailure's
+  // operation→meta contract. These tests cover the DB-category path
+  // (rotation_lookup) which the rotation-match unit tests can't reach
+  // because they mock captureMirrorFailure directly.
+  describe('captureMirrorFailure operation→meta contract', () => {
+    it('MIRROR_OPERATION_META declares the four current operations with correct shape', () => {
+      // Lock the registry shape so a future entry that drops a key or
+      // sets an unexpected value fails the build (TS) and this test.
+      expect(MIRROR_OPERATION_META).toEqual({
+        create_entry: { category: 'http', useFingerprint: false },
+        update_entry: { category: 'http', useFingerprint: false },
+        signoff_show: { category: 'http', useFingerprint: false },
+        rotation_lookup: { category: 'db', useFingerprint: true },
+      });
+    });
+
+    it('rotation_lookup gets category=db and the explicit fingerprint', () => {
+      const err = new Error('select EXISTS failed');
+      captureMirrorFailure('rotation_lookup', { error: err }, 'warning');
+
+      expect(mockCaptureException).toHaveBeenCalledTimes(1);
+      const [capturedErr, opts] = mockCaptureException.mock.calls[0];
+      expect(capturedErr).toBe(err);
+      expect(opts.level).toBe('warning');
+      expect(opts.tags.category).toBe('db');
+      expect(opts.tags.operation).toBe('rotation_lookup');
+      expect(opts.fingerprint).toEqual(['mirror-failure', 'rotation_lookup']);
+      expect(opts.extra.stack).toEqual(expect.any(String));
+    });
+
+    it('non-Error rotation_lookup details fall through to captureMessage', () => {
+      // Defensive: should be rare (the helper only catches), but the
+      // captureMirrorFailure surface accepts non-Error errors. Pin the
+      // fallback so a future refactor that drops the captureMessage
+      // branch is loud.
+      captureMirrorFailure('rotation_lookup', { error: 'string-thrown-value' }, 'warning');
+
+      expect(mockCaptureException).not.toHaveBeenCalled();
+      expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+      const [, opts] = mockCaptureMessage.mock.calls[0];
+      expect(opts.tags.category).toBe('db');
+      expect(opts.fingerprint).toEqual(['mirror-failure', 'rotation_lookup']);
+      expect(opts.extra.error).toBe('string-thrown-value');
+    });
+
+    it('HTTP ops with only a status code (no error) use captureMessage and no fingerprint', () => {
+      captureMirrorFailure('create_entry', { status: 500, responseBody: 'boom' });
+
+      expect(mockCaptureException).not.toHaveBeenCalled();
+      expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+      const [msg, opts] = mockCaptureMessage.mock.calls[0];
+      expect(msg).toBe('Mirror: create_entry failed');
+      expect(opts.tags.category).toBe('http');
+      expect(opts).not.toHaveProperty('fingerprint');
     });
   });
 
