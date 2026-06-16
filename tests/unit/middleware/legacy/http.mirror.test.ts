@@ -906,13 +906,12 @@ describe('http.mirror', () => {
     // BS#1432 round-5/6/7: defense-in-depth — verify the registry actually
     // resists runtime mutation. `as const` is TypeScript-only; without
     // `Object.freeze` a downstream `(meta as any).x = y` write would
-    // corrupt grouping for the process lifetime. ES modules execute in
-    // strict mode by default (per the ECMAScript spec), so the
-    // production code (apps/backend/middleware/legacy/http.mirror.ts —
-    // `module: ESNext` in tsconfig.base.json) AND these tests (compiled
-    // by ts-jest under `module: ESNext` in tests/tsconfig.json) both
-    // run strict, and any mutation attempt on a frozen object throws
-    // TypeError.
+    // corrupt grouping for the process lifetime. Both tsconfigs target
+    // ES modules (production: `module: NodeNext` in tsconfig.base.json;
+    // tests: `module: ESNext` in tests/tsconfig.json, threaded through
+    // ts-jest via jest.unit.config.ts), and ES modules execute in strict
+    // mode by default per the ECMAScript spec — so any mutation attempt
+    // on a frozen object throws TypeError in both runtimes.
     //
     // Round-6 expanded coverage to:
     //   (a) loop over EVERY entry (round-5 spot-checked only 2 of 4 —
