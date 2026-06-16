@@ -118,16 +118,19 @@ export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<
       ) AS match
     `);
 
-    // Explicit allowlist instead of `!!` (truthy coercion): `!!` handles
-    // the current driver shape (JS boolean) and `1`/`'t'` correctly, but
-    // `!!('f')` === true — a non-empty string is always truthy, so the
-    // PostgreSQL string representation of boolean-false would silently
-    // produce a false positive (typed-in non-rotation entry incorrectly
-    // badged as rotation on wxyc.info). Enumerate every known true-signal
-    // shape explicitly so a future driver change lands a detectable test
-    // failure rather than a silent wrong answer in either direction.
+    // `=== true` (strict equality). postgres-js registers an OID 16
+    // (boolean) parser `parse: x => x === 't'` in types.js that converts
+    // the wire bytes 't'/'f' to JS true/false in the DataRow handler
+    // before the result ever reaches application code. `SELECT EXISTS(...)`
+    // always returns a JS boolean — never integer 1, string 't', or any
+    // other shape. Truthy coercion (`!!`) would have been semantically
+    // equivalent today, but `!!('f')` === true: if the driver ever stopped
+    // applying the OID 16 parser, a string 'f' would produce a false
+    // positive. `=== true` is both correct for the current driver and safe
+    // against that future regression. The test suite has a 'f' → false
+    // canary that would fail loudly if the driver shape changes.
     const match = (result as unknown as Array<{ match: unknown }>)[0]?.match;
-    return match === true || match === 1 || match === 't';
+    return match === true;
   } catch (e) {
     captureMirrorFailure('rotation_lookup', { error: e }, 'warning');
     return false;

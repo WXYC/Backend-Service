@@ -236,37 +236,35 @@ describe('isActiveRotationMatch', () => {
       expect(mockDbExecute).toHaveBeenCalledTimes(1);
     });
 
-    // Driver-shape-contract tests (BS#1432 round-2 / round-9 review). The
-    // helper uses an explicit allowlist check (`=== true || === 1 || === 't'`)
-    // rather than `!!` (truthy coercion) or `=== true` (strict equality) so
-    // every known driver shape produces the right boolean in both directions
-    // without false positives or false negatives. These tests pin the contract:
-    //   - bare-array `[{match: true}]` → true  (current postgres-js shape)
-    //   - bare-array `[{match: false}]` → false (current postgres-js shape, negative)
-    //   - empty array → false (no rows)
-    //   - wrapped-object `{rows: [...]}` → false (safe default; needs unwrap if shape changes)
-    //   - `match: 't'` → true  (PostgreSQL boolean string true; `!!'t'` also true)
-    //   - `match: 'f'` → false (PostgreSQL boolean string false; `!!'f'` would INCORRECTLY be true)
-    //   - `match: 1`   → true  (integer 1; `!!1` also true)
-    //   - `match: null` → false
-    it('accepts string "t" as a true result (PostgreSQL boolean string)', async () => {
-      mockDbExecute.mockResolvedValue([{ match: 't' }]);
-      const result = await isActiveRotationMatch(baseEntry);
-      expect(result).toBe(true);
-    });
+    // Driver-shape-contract tests (BS#1432 round-2 / round-9 / round-10).
+    //
+    // postgres-js registers an OID 16 (boolean) parser `parse: x => x === 't'`
+    // that converts the wire bytes 't'/'f' to JS true/false in the DataRow
+    // handler before the result reaches application code. `SELECT EXISTS(...)`
+    // always returns a JS boolean — the `match === true` check in the helper
+    // is both sufficient and accurate for the current driver.
+    //
+    // The 'f' canary below is the key safety net: if the OID 16 parser were
+    // ever removed (or the query routed through a raw client that skips it),
+    // `match` would be the string 'f'. `'f' === true` is false, so the helper
+    // correctly returns false. Had the helper used `!!` coercion, `!!('f')` ===
+    // true would have caused a false positive — that is the bug this test pins.
+    //
+    // Tests pinning the contract:
+    //   - `[{match: true}]`  → true  (current driver shape; `=== true` live branch)
+    //   - `[{match: false}]` → false (current driver shape, negative)
+    //   - empty array        → false (no rows)
+    //   - `{rows: [...]}`    → false (safe default; needs unwrap if shape changes)
+    //   - `match: 'f'`       → false (canary: string 'f' must never be truthy here)
+    //   - `match: null`      → false
 
-    it('rejects string "f" as a false result (PostgreSQL boolean string) — NOT a false positive', async () => {
-      // `!!('f')` === true (non-empty string is truthy), so `!!` coercion would
-      // incorrectly return true here. The explicit allowlist check prevents this.
+    it('returns false for PostgreSQL string "f" — canary against !!(\"f\") false-positive', async () => {
+      // postgres-js normally converts 'f' to JS false via OID 16 parser,
+      // so this shape only arises if the parser is bypassed. The test pins
+      // that `=== true` (not `!!`) rejects 'f' as false in that scenario.
       mockDbExecute.mockResolvedValue([{ match: 'f' }]);
       const result = await isActiveRotationMatch(baseEntry);
       expect(result).toBe(false);
-    });
-
-    it('accepts integer 1 as a true result', async () => {
-      mockDbExecute.mockResolvedValue([{ match: 1 }]);
-      const result = await isActiveRotationMatch(baseEntry);
-      expect(result).toBe(true);
     });
 
     it('treats null match as false', async () => {
