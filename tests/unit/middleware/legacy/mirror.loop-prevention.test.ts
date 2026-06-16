@@ -81,8 +81,9 @@ jest.mock('@sentry/node', () => ({
   captureException: jest.fn(),
 }));
 
+const mockIsActiveRotationMatch = jest.fn().mockResolvedValue(false);
 jest.mock('../../../../apps/backend/middleware/legacy/rotation-match.mirror', () => ({
-  isActiveRotationMatch: jest.fn().mockResolvedValue(false),
+  isActiveRotationMatch: mockIsActiveRotationMatch,
 }));
 
 import { EventEmitter } from 'events';
@@ -149,6 +150,10 @@ describe('mirror loop prevention', () => {
     jest.clearAllMocks();
     mockGetCachedEntryId.mockReturnValue(undefined);
     mockSelectLimitResult = [];
+    // jest.clearAllMocks() resets the rotation-match mock's default
+    // resolution; re-stamp the "no match" default here so the per-test
+    // positive overrides via mockResolvedValueOnce(true) are deliberate.
+    mockIsActiveRotationMatch.mockResolvedValue(false);
   });
 
   const baseEntry = {
@@ -230,6 +235,25 @@ describe('mirror loop prevention', () => {
         done();
       });
     });
+
+    // BS#1432 round-2 review: pin the positive-flow propagation so a future
+    // refactor that drops the `await isActiveRotationMatch(entry)` call (or
+    // accidentally hard-codes the third arg to false) doesn't silently
+    // regress the typed-in-rotation-play badge.
+    it('propagates isRotationMatch=true to mapEntryToTubafrenzy when helper resolves true', (done) => {
+      mockMirrorCreateEntry.mockResolvedValue(99);
+      mockIsActiveRotationMatch.mockResolvedValueOnce(true);
+
+      void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockIsActiveRotationMatch).toHaveBeenCalledWith(expect.objectContaining({ rotation_id: null }));
+        // The default `mockSelectLimitResult = []` (empty) makes the
+        // radioShowID lookup resolve to null in this test environment;
+        // matcher pins the third arg specifically while accepting the
+        // first two as the entry object and `null` radioShowID.
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.any(Object), null, true);
+        done();
+      });
+    });
   });
 
   describe('updateEntry', () => {
@@ -246,8 +270,25 @@ describe('mirror loop prevention', () => {
       mockGetCachedEntryId.mockReturnValue(99);
 
       void runMiddleware(flowsheetMirror.updateEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
-        expect(mockMapUpdateToTubafrenzy).toHaveBeenCalled();
+        // Pin both args: BS#1432 added isRotationMatch as the second arg
+        // and the default-false flow must be visible at the call site so
+        // a regression that drops the helper call is loud.
+        expect(mockMapUpdateToTubafrenzy).toHaveBeenCalledWith(expect.anything(), false);
         expect(mockMirrorUpdateEntry).toHaveBeenCalledWith(99, expect.any(Object));
+        done();
+      });
+    });
+
+    // BS#1432 round-2 review: symmetric positive-case for updateEntry. Same
+    // rationale as the addEntry test above — guard against a refactor that
+    // silently disables the typed-in-rotation-play classification on update.
+    it('propagates isRotationMatch=true to mapUpdateToTubafrenzy when helper resolves true', (done) => {
+      mockGetCachedEntryId.mockReturnValue(99);
+      mockIsActiveRotationMatch.mockResolvedValueOnce(true);
+
+      void runMiddleware(flowsheetMirror.updateEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockIsActiveRotationMatch).toHaveBeenCalledWith(expect.objectContaining({ rotation_id: null }));
+        expect(mockMapUpdateToTubafrenzy).toHaveBeenCalledWith(expect.anything(), true);
         done();
       });
     });

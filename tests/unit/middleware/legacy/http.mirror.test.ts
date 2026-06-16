@@ -520,6 +520,14 @@ describe('http.mirror', () => {
       expect(result.flowsheetEntryType).toBe(6);
     });
 
+    // Symmetric with mapEntryToTubafrenzy's 'rotation_id set still wins regardless of isRotationMatch value' (BS#1432).
+    it('rotation_id set still wins regardless of isRotationMatch value', () => {
+      const entry = { ...baseTrack, rotation_id: 456 };
+      const result = mapUpdateToTubafrenzy(entry, false);
+      expect(result.flowsheetEntryType).toBe(2);
+      expect(result.rotationReleaseID).toBe(456);
+    });
+
     it('does not include radioShowID or radioHour', () => {
       const result = mapUpdateToTubafrenzy(baseTrack);
       expect(result).not.toHaveProperty('radioShowID');

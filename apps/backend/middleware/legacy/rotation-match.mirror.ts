@@ -7,9 +7,26 @@
  * `flowsheetEntryType=0`, tubafrenzy's `FlowsheetEntry.isRotation()` returns
  * false, and the entry shows unbadged on wxyc.info.
  *
- * Three-cohort match mirrors BS#1362's read-path COALESCE subquery exactly so
- * the two surfaces stay in sync. See apps/backend/services/flowsheet.service.ts
+ * Three-cohort match mirrors BS#1362's read-path COALESCE subquery at the
+ * cohort level. See apps/backend/services/flowsheet.service.ts
  * FSEntryFieldsRaw.rotation_bin for the read-path reference implementation.
+ *
+ * Known shape differences from the read-path subquery (kept in sync at the
+ * cohort/predicate level, not literally):
+ *   - Aggregation: this helper wraps as `SELECT EXISTS(...)` (returns
+ *     boolean); read path uses `SELECT r2.rotation_bin ... ORDER BY r2.id
+ *     LIMIT 1` (returns the bin letter). The write path only needs a
+ *     boolean to decide flowsheetEntryType=2 vs fall-through, so no
+ *     tie-break is needed here.
+ *   - Gate: read-path's outer CASE uses `${flowsheet.rotation_id} IS NULL`;
+ *     this helper's JS guard matches via `entry.rotation_id == null` so
+ *     non-NULL values (including 0 and negatives, theoretical but
+ *     representable) skip the fallback — aligned with the read path.
+ *   - Empty-name guard: applied against the raw input value (no JS-side
+ *     trim) so the SQL `lower(trim(coalesce(col, '')))` on both sides
+ *     stays the single normalizer. JS `String.prototype.trim()` is broader
+ *     than PG's `trim()` (strips Unicode whitespace like NBSP); pre-
+ *     trimming on the JS side would fork the comparison key.
  */
 
 import { db, rotation, library, artists } from '@wxyc/database';
@@ -35,22 +52,42 @@ export interface RotationMatchEntry {
  * classified using the rotation state at the time of the play, not now.
  *
  * Returns false immediately — without querying the DB — when:
- *   - `rotation_id` is set (the primary FK path handles those entries)
- *   - `artist_name` or `album_title` is empty (no cohort can fire meaningfully;
- *     mirrors the `artist_name <> '' AND album_title <> ''` guard on the
- *     read-path CASE WHEN)
+ *   - `rotation_id` is non-NULL (matches the read-path `IS NULL` gate; the
+ *     primary FK path handles those entries)
+ *   - `artist_name` or `album_title` is missing or the empty string (no
+ *     cohort can fire meaningfully; mirrors the read-path's outer
+ *     `coalesce(col, '') <> ''` guard)
  *
- * On DB error, captures to Sentry at `warning` level and returns false so the
- * caller falls through to the existing album_id → type-6 branch.
+ * On DB error, captures to Sentry at `warning` level (with `category=db`
+ * via captureMirrorFailure) and returns false so the caller falls through
+ * to the existing album_id → type-6 branch.
  */
 export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<boolean> {
-  if (entry.rotation_id != null && entry.rotation_id > 0) return false;
+  // Read-path parity: gate on IS NULL only. A non-NULL rotation_id —
+  // including 0 or any negative drift — means the FK lane already owns
+  // this row; skip the fallback so the two surfaces classify it the same
+  // way. BS#1432 round-2 review tightened this from `> 0` to match the
+  // read-path subquery's `${flowsheet.rotation_id} IS NULL` semantic.
+  if (entry.rotation_id != null) return false;
 
-  const artistName = (entry.artist_name ?? '').trim();
-  const albumTitle = (entry.album_title ?? '').trim();
-  if (artistName.length === 0 || albumTitle.length === 0) return false;
+  // Outer empty-guard on the raw input, mirroring read-path's
+  // `coalesce(col, '') <> ''`. JS-side trim is deliberately NOT applied
+  // here: PG's `trim()` strips only ASCII space, but JS
+  // `String.prototype.trim()` also strips Unicode whitespace (NBSP
+  // U+00A0, U+2028, ...). Pre-trimming on the JS side would normalize one
+  // side of the comparison more aggressively than the SQL `lower(trim(
+  // coalesce(col, '')))` on the other, forking the match key on rotation
+  // rows bulk-loaded from CSV sources that occasionally carry a leading
+  // NBSP.
+  const artistName = entry.artist_name ?? '';
+  const albumTitle = entry.album_title ?? '';
+  if (artistName === '' || albumTitle === '') return false;
 
-  const addTime = entry.add_time ? new Date(entry.add_time as Date | string | number) : new Date();
+  // Use `!= null` (not a falsy check) so epoch 0 (1970-01-01) is treated
+  // as a real timestamp, not "no add_time". flowsheet.add_time is NOT
+  // NULL with a NOW() default in the schema, so the new-Date fallback is
+  // purely defensive against a caller that passes undefined.
+  const addTime = entry.add_time != null ? new Date(entry.add_time as Date | string | number) : new Date();
 
   try {
     const albumIdCohort = entry.album_id != null ? sql`r2.album_id = ${entry.album_id}` : sql`false`;
@@ -65,18 +102,23 @@ export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<
           AND (
             ${albumIdCohort}
             OR (
-              lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(${artistName}))
-              AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(${albumTitle}))
+              lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(coalesce(${artistName}, '')))
+              AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(coalesce(${albumTitle}, '')))
             )
             OR (
-              lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(${artistName}))
-              AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(${albumTitle}))
+              lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(coalesce(${artistName}, '')))
+              AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(coalesce(${albumTitle}, '')))
             )
           )
       ) AS match
     `);
 
-    return (result as unknown as Array<{ match: boolean }>)[0]?.match === true;
+    // `!!` (truthy coercion) instead of strict `=== true` so a future
+    // driver change that returns 't'/'f' strings, 1/0 numerics, or wraps
+    // rows in `{rows: [...]}` doesn't silently disable the fallback. The
+    // wrapped-object case still returns false (no badge) — same safe
+    // default as a "no match" result.
+    return !!(result as unknown as Array<{ match: unknown }>)[0]?.match;
   } catch (e) {
     captureMirrorFailure('rotation_lookup', { error: e }, 'warning');
     return false;
