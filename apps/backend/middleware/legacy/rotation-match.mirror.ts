@@ -118,12 +118,16 @@ export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<
       ) AS match
     `);
 
-    // `!!` (truthy coercion) instead of strict `=== true` so a future
-    // driver change that returns 't'/'f' strings, 1/0 numerics, or wraps
-    // rows in `{rows: [...]}` doesn't silently disable the fallback. The
-    // wrapped-object case still returns false (no badge) — same safe
-    // default as a "no match" result.
-    return !!(result as unknown as Array<{ match: unknown }>)[0]?.match;
+    // Explicit allowlist instead of `!!` (truthy coercion): `!!` handles
+    // the current driver shape (JS boolean) and `1`/`'t'` correctly, but
+    // `!!('f')` === true — a non-empty string is always truthy, so the
+    // PostgreSQL string representation of boolean-false would silently
+    // produce a false positive (typed-in non-rotation entry incorrectly
+    // badged as rotation on wxyc.info). Enumerate every known true-signal
+    // shape explicitly so a future driver change lands a detectable test
+    // failure rather than a silent wrong answer in either direction.
+    const match = (result as unknown as Array<{ match: unknown }>)[0]?.match;
+    return match === true || match === 1 || match === 't';
   } catch (e) {
     captureMirrorFailure('rotation_lookup', { error: e }, 'warning');
     return false;
