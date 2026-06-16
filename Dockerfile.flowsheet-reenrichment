@@ -1,0 +1,53 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-reenrichment-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./shared/lml-client ./shared/lml-client
+COPY ./shared/metadata ./shared/metadata
+COPY ./jobs/flowsheet-reenrichment ./jobs/flowsheet-reenrichment
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/flowsheet-reenrichment
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-reenrichment
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/flowsheet-reenrichment/package* ./jobs/flowsheet-reenrichment/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
+COPY ./shared/metadata/package* ./shared/metadata/
+
+# `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
+# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
+# .npmrc the prod stage's npm install 401s on @wxyc/shared.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./flowsheet-reenrichment-builder/jobs/flowsheet-reenrichment/dist ./jobs/flowsheet-reenrichment/dist
+COPY --from=builder ./flowsheet-reenrichment-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./flowsheet-reenrichment-builder/shared/lml-client/dist ./shared/lml-client/dist
+COPY --from=builder ./flowsheet-reenrichment-builder/shared/metadata/dist ./shared/metadata/dist
+
+# Long-running per-statement timeout: per-row UPDATEs over a large table
+# can spend tens of seconds on hot batches. The API's tight 5s default is
+# too aggressive here.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+
+# Async commit: WHERE idempotency guard (`metadata_status='enriched_no_match'
+# AND album_id IS NULL`) naturally handles any work lost to an RDS crash,
+# so the RPO trade-off is safe.
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# Identifies the connection in pg_stat_activity during triage.
+ENV DB_APPLICATION_NAME=wxyc-flowsheet-reenrichment
+
+CMD ["npm", "start", "--workspace=@wxyc/flowsheet-reenrichment"]
