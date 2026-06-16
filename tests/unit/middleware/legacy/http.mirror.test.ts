@@ -876,22 +876,41 @@ describe('http.mirror', () => {
       expect(opts.extra).not.toHaveProperty('stack');
     });
 
-    it('HTTP ops with Error route through captureMessage too (preserves issue lineage)', () => {
-      // BS#1432 round-4 contract: HTTP ops never use captureException,
-      // even for catch-arm Errors, because Sentry's exception grouping
-      // would fork the message-grouped issue lineage the 2026-06-05
-      // runbook depends on. Stack is forwarded via extra.
-      const err = new Error('ETIMEDOUT');
-      captureMirrorFailure('update_entry', { error: err });
+    // BS#1432 round-4 contract: HTTP ops never use captureException,
+    // even for catch-arm Errors, because Sentry's exception grouping
+    // would fork the message-grouped issue lineage the 2026-06-05
+    // runbook depends on. Stack is forwarded via extra. Round-5:
+    // parameterized over all three HTTP ops so signoff_show's routing
+    // regression would also be caught (round-4 covered only update_entry).
+    it.each(['create_entry', 'update_entry', 'signoff_show'] as const)(
+      'HTTP op %s with Error routes through captureMessage (preserves issue lineage)',
+      (operation) => {
+        const err = new Error('ETIMEDOUT');
+        captureMirrorFailure(operation, { error: err });
 
-      expect(mockCaptureException).not.toHaveBeenCalled();
-      expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
-      const [msg, opts] = mockCaptureMessage.mock.calls[0];
-      expect(msg).toBe('Mirror: update_entry failed');
-      expect(opts.tags.category).toBe('http');
-      expect(opts).not.toHaveProperty('fingerprint');
-      expect(opts.extra.error).toContain('ETIMEDOUT');
-      expect(opts.extra.stack).toEqual(expect.any(String));
+        expect(mockCaptureException).not.toHaveBeenCalled();
+        expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+        const [msg, opts] = mockCaptureMessage.mock.calls[0];
+        expect(msg).toBe(`Mirror: ${operation} failed`);
+        expect(opts.level).toBe('error'); // default level when caller omits it
+        expect(opts.tags.subsystem).toBe('legacy-mirror');
+        expect(opts.tags.operation).toBe(operation);
+        expect(opts.tags.category).toBe('http');
+        expect(opts).not.toHaveProperty('fingerprint');
+        expect(opts.extra.error).toContain('ETIMEDOUT');
+        expect(opts.extra.stack).toEqual(expect.any(String));
+      }
+    );
+
+    // BS#1432 round-5: defense-in-depth — verify the registry actually
+    // resists runtime mutation. `as const` is TypeScript-only; without
+    // `Object.freeze` an `(meta as any).x = y` write would corrupt
+    // grouping for the process lifetime. The freeze should make the
+    // assignment a silent no-op in non-strict mode and throw in strict.
+    it('MIRROR_OPERATION_META is frozen at runtime', () => {
+      expect(Object.isFrozen(MIRROR_OPERATION_META)).toBe(true);
+      expect(Object.isFrozen(MIRROR_OPERATION_META.rotation_lookup)).toBe(true);
+      expect(Object.isFrozen(MIRROR_OPERATION_META.create_entry)).toBe(true);
     });
   });
 
