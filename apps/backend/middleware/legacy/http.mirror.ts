@@ -43,13 +43,26 @@ interface MirrorEntry {
 }
 
 /**
- * Capture a mirror call failure to Sentry. Grouping is by `operation` (in
- * the message) and sub-tagged by `status` so a sustained outage rolls up
- * into a single issue with an occurrence count rather than fanning out
- * per-row. `mirrorCreateShow` had this since its 5-retry path; the entry
- * and signoff paths previously logged to console only, which is how the
- * 2026-06-05 tubafrenzy auth-config drift (missing `MIRROR_API_KEY` on the
- * tubafrenzy side) ran silent through a full DJ's show.
+ * Capture a mirror call failure to Sentry. The three HTTP operations
+ * (`create_entry`, `update_entry`, `signoff_show`) group via Sentry's default
+ * message-based grouping — they each send a stable `Mirror: <op> failed`
+ * message which keys their existing issues. `rotation_lookup` is the new
+ * helper-side operation (a local DB `EXISTS` query, not an HTTP call) and
+ * opts into an explicit `fingerprint: ['mirror-failure', 'rotation_lookup']`
+ * so it's grouped under a dedicated issue from the start.
+ *
+ * Why not fingerprint the HTTP operations too: adding a fingerprint to a
+ * captureMessage that previously had none forks the issue lineage in Sentry
+ * — existing alert rules / muted-issue subscriptions / runbook links keyed
+ * to the historical issue IDs would silently stop firing. The 2026-06-05
+ * tubafrenzy auth-config drift incident wired the entry and signoff paths
+ * into Sentry (replacing console.error) and that issue history is the
+ * record the on-call runbook references; we preserve it by leaving the
+ * HTTP operations on default grouping.
+ *
+ * `status` is captured as a tag (filterable in search but not part of the
+ * group hash) so a sustained outage rolls up into a single issue with an
+ * occurrence count rather than fanning out per-row.
  */
 export function captureMirrorFailure(
   operation: 'create_entry' | 'update_entry' | 'signoff_show' | 'rotation_lookup',
@@ -58,16 +71,25 @@ export function captureMirrorFailure(
 ): void {
   Sentry.captureMessage(`Mirror: ${operation} failed`, {
     level,
-    fingerprint: ['mirror-failure', operation],
+    // Explicit fingerprint ONLY for the new helper-side operation so
+    // pre-existing HTTP operations keep their default-grouping issue
+    // identity. See doc comment above.
+    ...(operation === 'rotation_lookup' ? { fingerprint: ['mirror-failure', 'rotation_lookup'] } : {}),
     tags: {
       subsystem: 'legacy-mirror',
       operation,
+      // category disambiguates HTTP failures (mirror calls to tubafrenzy)
+      // from the local DB EXISTS query in `isActiveRotationMatch`. Triagers
+      // filtering on `category:http` see only outbound-mirror issues; the
+      // 2026-06-05 runbook is keyed on those.
+      category: operation === 'rotation_lookup' ? 'db' : 'http',
       ...(details.status != null ? { status: String(details.status) } : {}),
     },
     extra: {
       ...(details.status != null ? { status: details.status } : {}),
       ...(details.responseBody != null ? { responseBody: details.responseBody.slice(0, 500) } : {}),
       ...(details.error != null ? { error: String(details.error) } : {}),
+      ...(details.error instanceof Error && details.error.stack != null ? { stack: details.error.stack } : {}),
     },
   });
 }
