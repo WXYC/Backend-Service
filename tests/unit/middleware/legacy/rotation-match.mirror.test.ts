@@ -258,7 +258,7 @@ describe('isActiveRotationMatch', () => {
     //   - `match: 'f'`       → false (canary: string 'f' must never be truthy here)
     //   - `match: null`      → false
 
-    it('returns false for PostgreSQL string "f" — canary against !!(\"f\") false-positive', async () => {
+    it('returns false for PostgreSQL string "f" — canary against !! false-positive', async () => {
       // postgres-js normally converts 'f' to JS false via OID 16 parser,
       // so this shape only arises if the parser is bypassed. The test pins
       // that `=== true` (not `!!`) rejects 'f' as false in that scenario.
