@@ -7,6 +7,7 @@ One-shot re-enrichment drain for BS#1433. Rescues ~11,965 `flowsheet` rows writt
 Before LML#583, `(artist, album)` pairs not in the WXYC library returned `results: []` from LML, causing `metadata_status='enriched_no_match'` to be written. Those rows are terminal in the new enum — the CDC consumer never revisits them. With LML#583 live, the same pairs now return Discogs metadata; this job performs a single sweep to recover them.
 
 **Target cohort** (verified on prod 2026-06-16, 11,965 rows):
+
 ```sql
 SELECT COUNT(*) FROM wxyc_schema.flowsheet
 WHERE metadata_status = 'enriched_no_match'
@@ -19,10 +20,12 @@ WHERE metadata_status = 'enriched_no_match'
 1. **LML#583 deployed**: PR #584 merged 2026-06-16T17:53:53Z; Railway auto-deploys on main push. Verify at Railway dashboard.
 
 2. **Sibling cron is stopped**: Both jobs share the `BACKFILL_LML_*` token bucket and LML's 50/min global ceiling. Concurrent runs trip the BS#994 outage pattern.
+
    ```bash
    docker ps -a --filter name=flowsheet-metadata-backfill-cron --format '{{.Status}}'
    # Must show: Exited (1)
    ```
+
    If not exited, coordinate with #1011's resume sequence before launching.
 
 3. **Run the pre-launch diagnostic** to understand the cohort partition:
@@ -68,6 +71,7 @@ Monitor real-time LML p95 via Sentry trace explorer; stay within +20% of baselin
 ## Post-run
 
 Source the flip count from the `finished` log line's `flipped` field:
+
 ```bash
 docker logs <container> 2>&1 | jq -r 'select(.step=="finished") | "flipped=\(.flipped) still_no_match=\(.still_no_match) lml_error=\(.lml_error)"'
 ```
@@ -78,14 +82,14 @@ Then spot-check 20 sample rows that flipped — verify `discogs_url`, `artwork_u
 
 ## Environment variables
 
-| Variable | Default | Notes |
-|---|---|---|
-| `BACKFILL_CUTOFF_TS` | (required) | LML#583 merge timestamp: `2026-06-16T17:53:53Z` |
-| `LIBRARY_METADATA_URL` | (required) | LML endpoint |
-| `BACKFILL_BATCH_SIZE` | 100 | Rows per SELECT |
-| `BACKFILL_LML_MAX_CONCURRENT` | 1 | Semaphore permit count |
-| `BACKFILL_LML_RATE_PER_MIN` | 20 | Token bucket rate |
-| `BACKFILL_LML_PER_CALL_TIMEOUT_MS` | 35000 | Per-LML-call timeout (ms) |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS` | 60 | Set 0 to disable cooperative pause |
-| `LIVE_ACTIVITY_PAUSE_MS` | 30000 | Pause duration when DJ activity detected |
-| `SENTRY_DSN` | (optional) | Sentry error reporting |
+| Variable                           | Default    | Notes                                           |
+| ---------------------------------- | ---------- | ----------------------------------------------- |
+| `BACKFILL_CUTOFF_TS`               | (required) | LML#583 merge timestamp: `2026-06-16T17:53:53Z` |
+| `LIBRARY_METADATA_URL`             | (required) | LML endpoint                                    |
+| `BACKFILL_BATCH_SIZE`              | 100        | Rows per SELECT                                 |
+| `BACKFILL_LML_MAX_CONCURRENT`      | 1          | Semaphore permit count                          |
+| `BACKFILL_LML_RATE_PER_MIN`        | 20         | Token bucket rate                               |
+| `BACKFILL_LML_PER_CALL_TIMEOUT_MS` | 35000      | Per-LML-call timeout (ms)                       |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`   | 60         | Set 0 to disable cooperative pause              |
+| `LIVE_ACTIVITY_PAUSE_MS`           | 30000      | Pause duration when DJ activity detected        |
+| `SENTRY_DSN`                       | (optional) | Sentry error reporting                          |
