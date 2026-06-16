@@ -72,8 +72,12 @@ interface MirrorEntry {
  *
  * Adding a new operation REQUIRES a new entry here — TypeScript's
  * `satisfies Record<MirrorOperation, MirrorOperationMeta>` enforces
- * exhaustiveness. `as const` then preserves literal types AND prevents
- * accidental runtime mutation of the registry by downstream importers.
+ * exhaustiveness. `as const` preserves literal types so consumers see
+ * narrow `'http' | 'db'` and literal-`true`/`false` types instead of
+ * widened `string` / `boolean`. `Object.freeze` makes the registry
+ * actually immutable at runtime — `as const` is TypeScript-only, so
+ * without the freeze a downstream importer doing `(meta as any).x = y`
+ * could corrupt grouping for the lifetime of the process.
  */
 export type MirrorOperation = 'create_entry' | 'update_entry' | 'signoff_show' | 'rotation_lookup';
 
@@ -83,12 +87,12 @@ interface MirrorOperationMeta {
   useException: boolean;
 }
 
-export const MIRROR_OPERATION_META = {
-  create_entry: { category: 'http', useFingerprint: false, useException: false },
-  update_entry: { category: 'http', useFingerprint: false, useException: false },
-  signoff_show: { category: 'http', useFingerprint: false, useException: false },
-  rotation_lookup: { category: 'db', useFingerprint: true, useException: true },
-} as const satisfies Record<MirrorOperation, MirrorOperationMeta>;
+export const MIRROR_OPERATION_META = Object.freeze({
+  create_entry: Object.freeze({ category: 'http', useFingerprint: false, useException: false }),
+  update_entry: Object.freeze({ category: 'http', useFingerprint: false, useException: false }),
+  signoff_show: Object.freeze({ category: 'http', useFingerprint: false, useException: false }),
+  rotation_lookup: Object.freeze({ category: 'db', useFingerprint: true, useException: true }),
+} as const) satisfies Readonly<Record<MirrorOperation, Readonly<MirrorOperationMeta>>>;
 
 /** Defensive cap for stack-trace strings sent to Sentry, mirroring the
  *  responseBody cap pattern. Long async stacks from drizzle + postgres-js
