@@ -44,66 +44,89 @@ interface MirrorEntry {
 
 /**
  * Mirror operation taxonomy. Each operation declares:
+ *
  *   - `category`: `'http'` for outbound tubafrenzy calls (the 2026-06-05
  *     runbook is keyed on `category:http`); `'db'` for local DB queries
  *     in the helper layer.
+ *
  *   - `useFingerprint`: whether the Sentry event opts into an explicit
  *     `['mirror-failure', operation]` fingerprint. The pre-existing HTTP
- *     ops (`create_entry`, `update_entry`, `signoff_show`) DO NOT
- *     fingerprint — they group via Sentry's default message-based grouping
- *     to preserve their existing issue lineage (alert rules / muted-issue
- *     subscriptions / runbook links wired to historical IDs would silently
- *     stop firing if we forked the lineage). `rotation_lookup` is new in
- *     BS#1432, so it opts into an explicit fingerprint from the start.
+ *     ops DO NOT fingerprint — they group via Sentry's default
+ *     message-based grouping to preserve their existing issue lineage
+ *     (alert rules / muted-issue subscriptions / runbook links wired to
+ *     historical IDs would silently stop firing if we forked the
+ *     lineage). `rotation_lookup` is new in BS#1432, so it opts into an
+ *     explicit fingerprint from the start.
  *
- * Adding a new operation REQUIRES a new entry here — TypeScript will fail
- * the build via the `Record<MirrorOperation, ...>` exhaustiveness check.
- * This collapses the two parallel string-equality ternaries the prior
- * shape used (fingerprint + category) into a single registry that the
- * compiler keeps in sync.
+ *   - `useException`: whether `Error`-valued failures route through
+ *     `Sentry.captureException` (true) or stay on `captureMessage`
+ *     (false). The pre-existing HTTP ops MUST stay on captureMessage
+ *     even for catch-arm Errors: Sentry's default exception-grouping
+ *     algorithm keys by exception type + top stack frame, NOT by the
+ *     `Mirror: <op> failed` message string. Routing HTTP-op Errors
+ *     through captureException would silently fork their issue lineage
+ *     (round-3 review caught this). `rotation_lookup` opts into the
+ *     captureException lane because it's a new op with no historical
+ *     lineage to preserve, and its explicit fingerprint overrides
+ *     Sentry's default exception grouping anyway.
+ *
+ * Adding a new operation REQUIRES a new entry here — TypeScript's
+ * `satisfies Record<MirrorOperation, MirrorOperationMeta>` enforces
+ * exhaustiveness. `as const` then preserves literal types AND prevents
+ * accidental runtime mutation of the registry by downstream importers.
  */
 export type MirrorOperation = 'create_entry' | 'update_entry' | 'signoff_show' | 'rotation_lookup';
 
 interface MirrorOperationMeta {
   category: 'http' | 'db';
   useFingerprint: boolean;
+  useException: boolean;
 }
 
-export const MIRROR_OPERATION_META: Record<MirrorOperation, MirrorOperationMeta> = {
-  create_entry: { category: 'http', useFingerprint: false },
-  update_entry: { category: 'http', useFingerprint: false },
-  signoff_show: { category: 'http', useFingerprint: false },
-  rotation_lookup: { category: 'db', useFingerprint: true },
-};
+export const MIRROR_OPERATION_META = {
+  create_entry: { category: 'http', useFingerprint: false, useException: false },
+  update_entry: { category: 'http', useFingerprint: false, useException: false },
+  signoff_show: { category: 'http', useFingerprint: false, useException: false },
+  rotation_lookup: { category: 'db', useFingerprint: true, useException: true },
+} as const satisfies Record<MirrorOperation, MirrorOperationMeta>;
 
 /** Defensive cap for stack-trace strings sent to Sentry, mirroring the
  *  responseBody cap pattern. Long async stacks from drizzle + postgres-js
  *  wrappers can be many KB; Sentry's per-event payload limit is finite,
- *  and under sustained DB outage the helper emits one warning per entry
- *  add/update — preferring a truncated stack over dropped events. */
+ *  and under sustained outage we emit one event per entry add/update.
+ *  Only applied on the captureMessage path (where we manually surface the
+ *  stack via `extra.stack`). The captureException path relies on Sentry's
+ *  native exception lane, which has its own framing/truncation. */
 const STACK_TRACE_MAX_LENGTH = 4000;
 
 /**
- * Capture a mirror call failure to Sentry. Grouping behavior is governed
- * by the per-operation entry in `MIRROR_OPERATION_META`:
+ * Capture a mirror call failure to Sentry. Routing is governed by the
+ * per-operation entry in `MIRROR_OPERATION_META`:
  *
  *   - HTTP operations (`create_entry`, `update_entry`, `signoff_show`)
- *     use Sentry's default message-based grouping. Their existing issue
- *     identity (wired in by the 2026-06-05 tubafrenzy auth-config drift
- *     incident, which replaced silent console.error logs) is preserved.
+ *     always emit via `Sentry.captureMessage` regardless of whether the
+ *     failure is a status code (`!response.ok`) or a catch-arm Error
+ *     (network error, fetch reject). This preserves their historical
+ *     issue identity: Sentry's default message grouping keys on
+ *     `'Mirror: <op> failed'`, so all four failure-mode subsets (401,
+ *     5xx, ECONNREFUSED, timeout) roll into the same operation-keyed
+ *     issue. The on-call runbook (2026-06-05 tubafrenzy auth-config
+ *     drift) is wired to that issue lineage. Error stacks are surfaced
+ *     via `extra.stack` (sliced to `STACK_TRACE_MAX_LENGTH`) since
+ *     captureMessage doesn't auto-extract them.
  *
- *   - The DB operation (`rotation_lookup`) opts into an explicit
- *     fingerprint `['mirror-failure', 'rotation_lookup']` so it's grouped
- *     under a dedicated issue from the start (new in BS#1432).
+ *   - The DB operation (`rotation_lookup`) emits via
+ *     `Sentry.captureException` for Error-valued failures, with an
+ *     explicit fingerprint `['mirror-failure', 'rotation_lookup']` so
+ *     it's grouped under a dedicated issue from the start (new in
+ *     BS#1432). Sentry's native exception lane handles the stack —
+ *     matches the codebase pattern in enrichment-worker / auth /
+ *     provision-user. Non-Error failures (defensive — should be rare)
+ *     fall through to captureMessage with the same fingerprint.
  *
- * For Error instances we call `Sentry.captureException` instead of
- * `captureMessage` to use Sentry's native stack capture (matches the
- * codebase pattern in enrichment-worker / auth). For non-Error cases
- * (HTTP failures where only `status`/`responseBody` are present), we
- * fall back to `captureMessage` with the stringified status surfaced as
- * a tag. `status` is captured as a tag (filterable in search but not
- * part of the group hash) so a sustained outage rolls up into a single
- * issue with an occurrence count rather than fanning out per-row.
+ * `status` is captured as a tag (filterable in search but not part of
+ * the group hash) so a sustained outage rolls up into a single issue
+ * with an occurrence count rather than fanning out per-row.
  */
 export function captureMirrorFailure(
   operation: MirrorOperation,
@@ -123,16 +146,13 @@ export function captureMirrorFailure(
     ...(details.responseBody != null ? { responseBody: details.responseBody.slice(0, 500) } : {}),
   };
 
-  if (details.error instanceof Error) {
-    // captureException is the codebase convention for Error instances
-    // (enrichment-worker, auth/provision-user) — Sentry parses the stack
-    // into its native lane (source-map-aware, deduplicates by exception
-    // type+location), and we tag/extra/level/fingerprint the same way.
-    // We attach a truncated stack copy under extra as a belt-and-braces
-    // fallback in case Sentry's native stack lane gets dropped.
-    if (details.error.stack != null) {
-      extra.stack = details.error.stack.slice(0, STACK_TRACE_MAX_LENGTH);
-    }
+  // captureException path: only for ops that opt in (currently just
+  // rotation_lookup) AND only when the failure is a real Error. Sentry's
+  // native exception lane handles the stack; no manual `extra.stack`
+  // forwarding here (matches the convention in enrichment-worker / auth
+  // / provision-user / check-request-ban-handler — none of those sites
+  // duplicate err.stack into extra).
+  if (meta.useException && details.error instanceof Error) {
     Sentry.captureException(details.error, {
       level,
       ...(fingerprint != null ? { fingerprint } : {}),
@@ -142,11 +162,17 @@ export function captureMirrorFailure(
     return;
   }
 
-  // Non-Error case (HTTP failure with status/responseBody, or a thrown
-  // non-Error value). Fall back to captureMessage; surface the value via
-  // String() since there's no .stack to forward.
+  // captureMessage path: HTTP ops always (preserves message-grouped
+  // issue lineage even for catch-arm Errors), plus the defensive
+  // non-Error rotation_lookup case. Surface the error value as a
+  // stringified summary; for Error instances, also forward a truncated
+  // stack via extra so triagers don't lose it (captureMessage doesn't
+  // auto-extract stacks the way captureException does).
   if (details.error != null) {
     extra.error = String(details.error);
+    if (details.error instanceof Error && details.error.stack != null) {
+      extra.stack = details.error.stack.slice(0, STACK_TRACE_MAX_LENGTH);
+    }
   }
   Sentry.captureMessage(`Mirror: ${operation} failed`, {
     level,
