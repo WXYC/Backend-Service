@@ -74,10 +74,14 @@ interface MirrorEntry {
  * `satisfies Record<MirrorOperation, MirrorOperationMeta>` enforces
  * exhaustiveness. `as const` preserves literal types so consumers see
  * narrow `'http' | 'db'` and literal-`true`/`false` types instead of
- * widened `string` / `boolean`. `Object.freeze` makes the registry
- * actually immutable at runtime — `as const` is TypeScript-only, so
- * without the freeze a downstream importer doing `(meta as any).x = y`
- * could corrupt grouping for the lifetime of the process.
+ * widened `string` / `boolean`. `Object.freeze` (outer + per-entry,
+ * since freeze is shallow) makes the registry actually immutable at
+ * runtime: `as const` is TypeScript-only, so it catches only writes in
+ * typechecked code. The runtime freeze closes the TS-bypass paths —
+ * `(meta as any).x = y` casts, JS-from-TS imports, `Object.assign`
+ * targets, and anything else the compiler can't see. Both layers
+ * together prevent a downstream importer from silently corrupting
+ * grouping for the lifetime of the process.
  */
 export type MirrorOperation = 'create_entry' | 'update_entry' | 'signoff_show' | 'rotation_lookup';
 
