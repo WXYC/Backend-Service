@@ -223,6 +223,35 @@ describe('http.mirror', () => {
       expect(result.flowsheetEntryType).toBe(0);
     });
 
+    // BS#1432: isRotationMatch fallback for typed-in rotation plays
+    it('maps isRotationMatch=true with rotation_id=null to flowsheetEntryType 2', () => {
+      const result = mapEntryToTubafrenzy(baseTrack, undefined, true);
+      expect(result.flowsheetEntryType).toBe(2);
+    });
+
+    it('isRotationMatch=true takes priority over album_id-only (type 6)', () => {
+      const entry = { ...baseTrack, album_id: 123 };
+      const result = mapEntryToTubafrenzy(entry, undefined, true);
+      expect(result.flowsheetEntryType).toBe(2);
+    });
+
+    it('isRotationMatch=false with rotation_id=null and album_id set yields type 6', () => {
+      const entry = { ...baseTrack, album_id: 123 };
+      const result = mapEntryToTubafrenzy(entry, undefined, false);
+      expect(result.flowsheetEntryType).toBe(6);
+    });
+
+    it('isRotationMatch=false with rotation_id=null and no album_id yields type 0', () => {
+      const result = mapEntryToTubafrenzy(baseTrack, undefined, false);
+      expect(result.flowsheetEntryType).toBe(0);
+    });
+
+    it('rotation_id set still wins regardless of isRotationMatch value', () => {
+      const entry = { ...baseTrack, rotation_id: 456 };
+      const result = mapEntryToTubafrenzy(entry, undefined, false);
+      expect(result.flowsheetEntryType).toBe(2);
+    });
+
     it('maps request_flag true', () => {
       const entry = { ...baseTrack, request_flag: true };
       const result = mapEntryToTubafrenzy(entry);
@@ -471,6 +500,24 @@ describe('http.mirror', () => {
       const result = mapUpdateToTubafrenzy(entry);
       expect(result.flowsheetEntryType).toBe(2);
       expect(result.rotationReleaseID).toBe(456);
+    });
+
+    // BS#1432: isRotationMatch fallback for typed-in rotation plays
+    it('maps isRotationMatch=true with rotation_id=null to flowsheetEntryType 2', () => {
+      const result = mapUpdateToTubafrenzy(baseTrack, true);
+      expect(result.flowsheetEntryType).toBe(2);
+    });
+
+    it('isRotationMatch=true with album_id set yields type 2 (not 6)', () => {
+      const entry = { ...baseTrack, album_id: 123 };
+      const result = mapUpdateToTubafrenzy(entry, true);
+      expect(result.flowsheetEntryType).toBe(2);
+    });
+
+    it('isRotationMatch=false with album_id set yields type 6', () => {
+      const entry = { ...baseTrack, album_id: 123 };
+      const result = mapUpdateToTubafrenzy(entry, false);
+      expect(result.flowsheetEntryType).toBe(6);
     });
 
     it('does not include radioShowID or radioHour', () => {

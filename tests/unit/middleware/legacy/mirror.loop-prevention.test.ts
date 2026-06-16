@@ -81,6 +81,10 @@ jest.mock('@sentry/node', () => ({
   captureException: jest.fn(),
 }));
 
+jest.mock('../../../../apps/backend/middleware/legacy/rotation-match.mirror', () => ({
+  isActiveRotationMatch: jest.fn().mockResolvedValue(false),
+}));
+
 import { EventEmitter } from 'events';
 
 // Helper: create mock Express response that simulates the middleware lifecycle
@@ -210,7 +214,7 @@ describe('mirror loop prevention', () => {
 
       void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
         expect(mockCacheShowId).toHaveBeenCalledWith(100, 171500);
-        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), 171500);
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), 171500, false);
         done();
       });
     });
@@ -222,7 +226,7 @@ describe('mirror loop prevention', () => {
 
       void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
         expect(mockCacheShowId).not.toHaveBeenCalled();
-        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), null);
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), null, false);
         done();
       });
     });
