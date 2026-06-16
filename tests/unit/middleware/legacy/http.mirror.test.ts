@@ -32,6 +32,7 @@ import {
   mapShowToTubafrenzy,
   captureMirrorFailure,
   MIRROR_OPERATION_META,
+  type MirrorOperation,
 } from '../../../../apps/backend/middleware/legacy/http.mirror';
 
 beforeEach(() => {
@@ -902,15 +903,40 @@ describe('http.mirror', () => {
       }
     );
 
-    // BS#1432 round-5: defense-in-depth — verify the registry actually
+    // BS#1432 round-5/6: defense-in-depth — verify the registry actually
     // resists runtime mutation. `as const` is TypeScript-only; without
-    // `Object.freeze` an `(meta as any).x = y` write would corrupt
-    // grouping for the process lifetime. The freeze should make the
-    // assignment a silent no-op in non-strict mode and throw in strict.
-    it('MIRROR_OPERATION_META is frozen at runtime', () => {
+    // `Object.freeze` a downstream `(meta as any).x = y` write would
+    // corrupt grouping for the process lifetime. The backend runs under
+    // `alwaysStrict: true` (tsconfig.base.json) so every mutation
+    // attempt throws TypeError — there is no non-strict path here.
+    //
+    // Round-6 expanded coverage to:
+    //   (a) loop over EVERY entry (round-5 spot-checked only 2 of 4 —
+    //       a future regression dropping the inner freeze on one of the
+    //       unchecked entries would have slipped past).
+    //   (b) assert the behavioral contract (the comment-promised throw)
+    //       in addition to the `isFrozen` structural flag, so the test
+    //       fails loud if Object.freeze's runtime semantics ever change
+    //       or if a future refactor swaps it for a non-throwing
+    //       Readonly-by-convention shape.
+    it('MIRROR_OPERATION_META and every entry are deeply frozen at runtime', () => {
       expect(Object.isFrozen(MIRROR_OPERATION_META)).toBe(true);
-      expect(Object.isFrozen(MIRROR_OPERATION_META.rotation_lookup)).toBe(true);
-      expect(Object.isFrozen(MIRROR_OPERATION_META.create_entry)).toBe(true);
+      for (const op of Object.keys(MIRROR_OPERATION_META) as MirrorOperation[]) {
+        expect(Object.isFrozen(MIRROR_OPERATION_META[op])).toBe(true);
+      }
+    });
+
+    it('mutating a frozen entry throws TypeError under strict mode', () => {
+      // Verifies the behavioral promise of the freeze, not just the
+      // structural flag. Cast to `any` to bypass TS's readonly guard
+      // (that's the exact attack vector the round-5 freeze was added
+      // to defend against).
+      expect(() => {
+        (MIRROR_OPERATION_META.create_entry as { category: string }).category = 'db';
+      }).toThrow(TypeError);
+      expect(() => {
+        (MIRROR_OPERATION_META as { [k: string]: unknown }).new_op = {};
+      }).toThrow(TypeError);
     });
   });
 
