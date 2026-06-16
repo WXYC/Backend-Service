@@ -236,25 +236,40 @@ describe('isActiveRotationMatch', () => {
       expect(mockDbExecute).toHaveBeenCalledTimes(1);
     });
 
-    // Driver-shape-contract tests (BS#1432 round-2 review). The helper
-    // accesses `(result[0]?.match)` via `!!` coercion (rather than `=== true`)
-    // so a future postgres-js or drizzle-orm change that returns rows in a
-    // different shape doesn't silently disable the fallback. These tests pin
-    // the contract:
-    //   - bare-array `[{match: true}]` → true (current shape)
-    //   - bare-array `[{match: false}]` → false (current shape, negative)
+    // Driver-shape-contract tests (BS#1432 round-2 / round-9 review). The
+    // helper uses an explicit allowlist check (`=== true || === 1 || === 't'`)
+    // rather than `!!` (truthy coercion) or `=== true` (strict equality) so
+    // every known driver shape produces the right boolean in both directions
+    // without false positives or false negatives. These tests pin the contract:
+    //   - bare-array `[{match: true}]` → true  (current postgres-js shape)
+    //   - bare-array `[{match: false}]` → false (current postgres-js shape, negative)
     //   - empty array → false (no rows)
-    //   - wrapped-object `{rows: [...]}` → false (safe default; caller's
-    //     responsibility to unwrap if a driver change lands)
-    //   - `match: 't'` → true (truthy string survives coercion)
+    //   - wrapped-object `{rows: [...]}` → false (safe default; needs unwrap if shape changes)
+    //   - `match: 't'` → true  (PostgreSQL boolean string true; `!!'t'` also true)
+    //   - `match: 'f'` → false (PostgreSQL boolean string false; `!!'f'` would INCORRECTLY be true)
+    //   - `match: 1`   → true  (integer 1; `!!1` also true)
     //   - `match: null` → false
-    it('coerces truthy match value via !! (string "t" treated as true)', async () => {
+    it('accepts string "t" as a true result (PostgreSQL boolean string)', async () => {
       mockDbExecute.mockResolvedValue([{ match: 't' }]);
       const result = await isActiveRotationMatch(baseEntry);
       expect(result).toBe(true);
     });
 
-    it('coerces falsy match value via !! (null treated as false)', async () => {
+    it('rejects string "f" as a false result (PostgreSQL boolean string) — NOT a false positive', async () => {
+      // `!!('f')` === true (non-empty string is truthy), so `!!` coercion would
+      // incorrectly return true here. The explicit allowlist check prevents this.
+      mockDbExecute.mockResolvedValue([{ match: 'f' }]);
+      const result = await isActiveRotationMatch(baseEntry);
+      expect(result).toBe(false);
+    });
+
+    it('accepts integer 1 as a true result', async () => {
+      mockDbExecute.mockResolvedValue([{ match: 1 }]);
+      const result = await isActiveRotationMatch(baseEntry);
+      expect(result).toBe(true);
+    });
+
+    it('treats null match as false', async () => {
       mockDbExecute.mockResolvedValue([{ match: null }]);
       const result = await isActiveRotationMatch(baseEntry);
       expect(result).toBe(false);
