@@ -150,6 +150,16 @@ export type RunResult = {
   totals: Totals;
   flipped: number;
   stopped: boolean;
+  /**
+   * True iff the run terminated via the failed-step path (uncaught loop
+   * exception or loadBatch retry exhaustion). Used by job.ts main() to
+   * set process.exitCode=1 — without this, the container would exit 0
+   * on sustained RDS outage because runReenrichment now catches its own
+   * exceptions to preserve the summary log. The structured log carries
+   * the error_message; this field is the boolean shortcut for the
+   * wrapping script's `$?` check.
+   */
+  failed: boolean;
 };
 
 /**
@@ -499,5 +509,5 @@ export const runReenrichment = async (opts: {
     }
   }
   const flipped = totals.match;
-  return { totals, flipped, stopped };
+  return { totals, flipped, stopped, failed: failed !== null };
 };
