@@ -12,24 +12,29 @@
  *     -e BACKFILL_CUTOFF_TS='2026-06-16T17:53:53Z' \
  *     <ECR-URI>/flowsheet-reenrichment:<tag>
  *
- * See jobs/flowsheet-reenrichment/README.md for the full run procedure.
+ * See jobs/flowsheet-reenrichment/README.md for the full run procedure,
+ * including the `docker stop -t 600` recommendation (default 10s grace
+ * isn't enough for an in-flight batch to drain through LML).
  *
  * Blocked by #1011 (shared LML budget). Pre-flight: verify the sibling
  * flowsheet-metadata-backfill-cron container is Exited before launching.
  *
- * SIGTERM/SIGINT (`docker stop`, Ctrl-C): signal handler flips the
- * orchestrator's cooperative-stop flag; the run finishes its in-flight
- * batch, writes a structured `stop_requested` log line, then falls
- * through to the `finally` arm which flushes Sentry and closes the DB
- * pool. Without this, Node's default SIGTERM handling exits the process
- * before `finally` runs and the last seconds of captures are lost.
+ * SIGTERM/SIGINT handling: the signal handler flips the orchestrator's
+ * cooperative-stop flag; the run finishes its in-flight row (round 3:
+ * between-row check, not between-batch), emits a structured `stopped`
+ * log line, then falls through to the `finally` arm. A *second* SIGTERM
+ * arriving before the run completes is allowed to terminate the process
+ * via Node's default handler — this is intentional escape-hatch behavior
+ * for operators who need to force-exit a wedged in-flight LML call. We
+ * use `process.on` (not `process.once`) so any number of SIGTERMs flip
+ * the flag idempotently; the override is the operator's responsibility.
  */
 
 import { closeDatabaseConnection } from '@wxyc/database';
 import { runReenrichment, requestStop } from './orchestrate.js';
 import { lookupMetadata } from './lml-fetch.js';
 import { reenrichRow } from './enrich.js';
-import { initLogger, log, captureError, closeLogger } from './logger.js';
+import { initLogger, log, captureError, closeLogger, errorMessage } from './logger.js';
 
 const JOB_NAME = 'flowsheet-reenrichment';
 
@@ -45,15 +50,17 @@ const requireCutoffConfigured = (): void => {
   }
 };
 
-const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-
 const registerSignalHandlers = (): void => {
+  // `process.on` (not `process.once`): repeated SIGTERMs from `docker stop`
+  // retries simply re-flip the (already-true) stop flag — idempotent. An
+  // operator who *wants* a force-exit can attach a second handler or send
+  // SIGKILL; we don't pretend to defend against intentional force-exit.
   const onSignal = (signal: NodeJS.Signals) => {
     log('warn', 'signal', `received ${signal}; requesting graceful stop`, { signal });
     requestStop();
   };
-  process.once('SIGTERM', onSignal);
-  process.once('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
 };
 
 const main = async () => {
