@@ -217,15 +217,31 @@ describe('probeRefreshEndpoint', () => {
 
   it('throws DeployGuardError on a network failure (ABORT, never silently allow)', async () => {
     const fetchImpl = jest.fn().mockImplementation(() => Promise.reject(new Error('ECONNREFUSED')));
-    await expect(probeRefreshEndpoint(fetchImpl as unknown as typeof fetch)).rejects.toBeInstanceOf(DeployGuardError);
+    // Pin the label too — a regression that routed this into the timeout branch
+    // (or swallowed it) would otherwise stay green under a bare instanceof check.
+    await expect(probeRefreshEndpoint(fetchImpl as unknown as typeof fetch)).rejects.toThrow(
+      /probe request failed: ECONNREFUSED/
+    );
   });
 
   it('throws DeployGuardError when the probe times out', async () => {
     const abortErr = Object.assign(new Error('aborted'), { name: 'AbortError' });
     const fetchImpl = jest.fn().mockImplementation(() => Promise.reject(abortErr));
-    await expect(probeRefreshEndpoint(fetchImpl as unknown as typeof fetch, 5)).rejects.toBeInstanceOf(
-      DeployGuardError
+    await expect(probeRefreshEndpoint(fetchImpl as unknown as typeof fetch, 5)).rejects.toThrow(
+      /probe timed out after 5ms/
     );
+  });
+
+  it('rethrows a config DeployGuardError unchanged instead of re-wrapping it', async () => {
+    delete process.env.LIBRARY_METADATA_URL;
+    const fetchImpl = jest.fn();
+    // baseUrl() throws a DeployGuardError before any fetch; it must surface
+    // as-is, not be re-wrapped into the generic "probe request failed" message
+    // (which would mis-route an operator to debug the network instead of env).
+    await expect(probeRefreshEndpoint(fetchImpl as unknown as typeof fetch)).rejects.toThrow(
+      /^LIBRARY_METADATA_URL is not configured$/
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 

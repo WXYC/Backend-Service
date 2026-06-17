@@ -175,6 +175,10 @@ export const probeRefreshEndpoint = async (
     });
     return !ENDPOINT_ABSENT_STATUSES.has(response.status);
   } catch (e) {
+    // Surface a DeployGuardError from baseUrl() (e.g. LIBRARY_METADATA_URL
+    // unset) as-is — re-wrapping it as "probe request failed" would mislabel a
+    // config error as a network error. Mirrors fetchLmlHealth / isDescendantOnGithub.
+    if (e instanceof DeployGuardError) throw e;
     if ((e as Error).name === 'AbortError') {
       throw new DeployGuardError(`LML cache-refresh probe timed out after ${signalTimeoutMs}ms`);
     }
