@@ -1,13 +1,14 @@
 /**
- * Unit tests for jobs/rotation-artist-backfill/deploy-guard.ts (BS#1381).
+ * Unit tests for jobs/rotation-artist-backfill/deploy-guard.ts (BS#1381, BS#1438).
  *
- * Covers the four allow/deny shapes:
+ * Covers the allow/deny shapes:
  *   1. commit_sha matches the gate (GATE_COMMIT_SHA prefix) → allowed.
  *   2. commit_sha descends from the gate (per GitHub compare) → allowed.
- *   3. commit_sha is null AND LOCAL_DEV=1 → allowed.
- *   4. commit_sha is null AND no LOCAL_DEV → throw DeployGuardError.
- *   5. commit_sha does NOT descend from the gate → throw.
- *   6. /health non-2xx, network errors, GitHub compare non-2xx → throw.
+ *   3. commit_sha is null AND LOCAL_DEV=1 → allowed (no endpoint probe).
+ *   4. commit_sha is null, not LOCAL_DEV, endpoint probe present → allowed (BS#1438).
+ *   5. commit_sha is null, not LOCAL_DEV, endpoint probe absent (404/405) → throw (BS#1438).
+ *   6. commit_sha does NOT descend from the gate → throw.
+ *   7. /health non-2xx, network errors, GitHub compare non-2xx, probe network/timeout → throw.
  */
 
 import { jest } from '@jest/globals';
@@ -18,6 +19,7 @@ import {
   enforceDeployGuard,
   fetchLmlHealth,
   isDescendantOnGithub,
+  probeRefreshEndpoint,
 } from '../../../../jobs/rotation-artist-backfill/deploy-guard';
 
 const ORIGINAL_ENV = process.env;
@@ -42,6 +44,7 @@ beforeEach(() => {
   process.env.LIBRARY_METADATA_URL = 'http://lml.test';
   delete process.env.LOCAL_DEV;
   delete process.env.GITHUB_TOKEN;
+  delete process.env.LML_API_KEY;
 });
 
 afterAll(() => {
@@ -147,6 +150,85 @@ describe('isDescendantOnGithub', () => {
   });
 });
 
+describe('probeRefreshEndpoint', () => {
+  it('returns true when the endpoint rejects the empty batch with 422 (present)', async () => {
+    const fetchImpl = makeFetch([() => makeResponse({ detail: 'empty' }, { status: 422 })]);
+    const present = await probeRefreshEndpoint(fetchImpl as unknown as typeof fetch);
+    expect(present).toBe(true);
+  });
+
+  it('returns false on 404 (route not mounted — older LML deploy)', async () => {
+    const fetchImpl = makeFetch([
+      () => makeResponse({ detail: 'Not Found' }, { status: 404, statusText: 'Not Found' }),
+    ]);
+    const present = await probeRefreshEndpoint(fetchImpl as unknown as typeof fetch);
+    expect(present).toBe(false);
+  });
+
+  it('returns false on 405 (path resolves but POST not allowed)', async () => {
+    const fetchImpl = makeFetch([() => makeResponse({}, { status: 405, statusText: 'Method Not Allowed' })]);
+    const present = await probeRefreshEndpoint(fetchImpl as unknown as typeof fetch);
+    expect(present).toBe(false);
+  });
+
+  // Every non-404/405 status proves the route is mounted — that is all the gate
+  // needs. 401/403 (auth gate), 400 (manual reject), 200 (no-op), 503 (degraded
+  // dependency) all mean "present".
+  it.each([200, 400, 401, 403, 503])('returns true on %d (route is mounted)', async (status) => {
+    const fetchImpl = makeFetch([() => makeResponse({ detail: String(status) }, { status })]);
+    const present = await probeRefreshEndpoint(fetchImpl as unknown as typeof fetch);
+    expect(present).toBe(true);
+  });
+
+  it('POSTs an empty identity_ids batch to the refresh path (zero-work probe)', async () => {
+    let seenUrl = '';
+    let seenInit: RequestInit = {};
+    const fetchImpl = jest.fn().mockImplementation((url: string, init?: RequestInit) => {
+      seenUrl = url;
+      seenInit = init ?? {};
+      return Promise.resolve(makeResponse({}, { status: 422 }));
+    });
+    await probeRefreshEndpoint(fetchImpl as unknown as typeof fetch);
+    expect(seenUrl).toBe('http://lml.test/api/v1/cache/refresh-for-identities');
+    expect(seenInit.method).toBe('POST');
+    expect(JSON.parse(seenInit.body as string)).toEqual({ identity_ids: [] });
+  });
+
+  it('attaches the LML_API_KEY bearer header when set', async () => {
+    process.env.LML_API_KEY = 'secret-key';
+    let seenHeaders: Record<string, string> = {};
+    const fetchImpl = jest.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      seenHeaders = (init?.headers ?? {}) as Record<string, string>;
+      return Promise.resolve(makeResponse({}, { status: 422 }));
+    });
+    await probeRefreshEndpoint(fetchImpl as unknown as typeof fetch);
+    expect(seenHeaders.Authorization).toBe('Bearer secret-key');
+  });
+
+  it('omits Authorization when LML_API_KEY is unset', async () => {
+    let seenHeaders: Record<string, string> = {};
+    const fetchImpl = jest.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      seenHeaders = (init?.headers ?? {}) as Record<string, string>;
+      return Promise.resolve(makeResponse({}, { status: 422 }));
+    });
+    await probeRefreshEndpoint(fetchImpl as unknown as typeof fetch);
+    expect(seenHeaders.Authorization).toBeUndefined();
+  });
+
+  it('throws DeployGuardError on a network failure (ABORT, never silently allow)', async () => {
+    const fetchImpl = jest.fn().mockImplementation(() => Promise.reject(new Error('ECONNREFUSED')));
+    await expect(probeRefreshEndpoint(fetchImpl as unknown as typeof fetch)).rejects.toBeInstanceOf(DeployGuardError);
+  });
+
+  it('throws DeployGuardError when the probe times out', async () => {
+    const abortErr = Object.assign(new Error('aborted'), { name: 'AbortError' });
+    const fetchImpl = jest.fn().mockImplementation(() => Promise.reject(abortErr));
+    await expect(probeRefreshEndpoint(fetchImpl as unknown as typeof fetch, 5)).rejects.toBeInstanceOf(
+      DeployGuardError
+    );
+  });
+});
+
 describe('enforceDeployGuard', () => {
   it('passes when commit_sha is the gate sha itself', async () => {
     const fetchImpl = makeFetch([() => makeResponse({ commit_sha: `${GATE_COMMIT_SHA}deadbeef` })]);
@@ -178,7 +260,7 @@ describe('enforceDeployGuard', () => {
     );
   });
 
-  it('passes when commit_sha is null and LOCAL_DEV=1', async () => {
+  it('passes when commit_sha is null and LOCAL_DEV=1 without probing the endpoint', async () => {
     process.env.LOCAL_DEV = '1';
     const fetchImpl = makeFetch([() => makeResponse({ commit_sha: null })]);
     const result = await enforceDeployGuard({
@@ -188,10 +270,31 @@ describe('enforceDeployGuard', () => {
     });
     expect(result.allowed).toBe(true);
     expect(result.commit_sha).toBeNull();
+    // Only /health — LOCAL_DEV short-circuits before the endpoint probe.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses when commit_sha is null and LOCAL_DEV is unset', async () => {
-    const fetchImpl = makeFetch([() => makeResponse({ commit_sha: null })]);
+  it('passes when commit_sha is null, not LOCAL_DEV, and the endpoint probe finds it present', async () => {
+    const fetchImpl = makeFetch([
+      () => makeResponse({ commit_sha: null }),
+      () => makeResponse({ detail: 'empty' }, { status: 422 }),
+    ]);
+    const result = await enforceDeployGuard({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      isLocalDev: () => false,
+    });
+    expect(result.allowed).toBe(true);
+    expect(result.commit_sha).toBeNull();
+    // /health then the endpoint probe — the SHA-descendant path is skipped.
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(result.reason).toMatch(/probe/i);
+  });
+
+  it('refuses when commit_sha is null, not LOCAL_DEV, and the endpoint probe finds it absent (404)', async () => {
+    const fetchImpl = makeFetch([
+      () => makeResponse({ commit_sha: null }),
+      () => makeResponse({ detail: 'Not Found' }, { status: 404, statusText: 'Not Found' }),
+    ]);
     await expect(
       enforceDeployGuard({
         fetchImpl: fetchImpl as unknown as typeof fetch,

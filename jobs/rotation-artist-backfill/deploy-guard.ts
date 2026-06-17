@@ -1,5 +1,5 @@
 /**
- * Deploy guard for rotation-artist-backfill (BS#1381).
+ * Deploy guard for rotation-artist-backfill (BS#1381, BS#1438).
  *
  * The job is a no-op against any LML deploy that predates LML#525's
  * `POST /api/v1/cache/refresh-for-identities` endpoint (`8a1344c`,
@@ -7,6 +7,14 @@
  * to call against. So before scanning any rotation rows we hit LML's
  * `/health` and verify that its `commit_sha` is `8a1344c` or a descendant
  * of it.
+ *
+ * BS#1438: LML prod serves `commit_sha: null` permanently — it deploys via
+ * `railway up`, whose CLI source-deploys carry no git metadata (LML#509). The
+ * SHA-descendant check can therefore never succeed against prod, so when the
+ * sha is null (and not LOCAL_DEV) the guard falls back to probing the endpoint
+ * directly rather than aborting. See `probeRefreshEndpoint`. The probe is the
+ * path that actually runs in production until LML#509 changes LML's deploy
+ * method.
  *
  * Why gate on the endpoint and not the `fetched_at` discriminator that
  * the previous incarnation (BS#1361, PR #1376) gated on: the discriminator
@@ -23,9 +31,11 @@
  *   - `commit_sha` is null AND `LOCAL_DEV=1` is set → allowed (local dev,
  *     CI, and unit tests, where Railway's `RAILWAY_GIT_COMMIT_SHA` is
  *     unset). The flag must be explicit so an accidental
- *     production env-var drop doesn't silently neuter the guard.
- *   - `commit_sha` is null AND `LOCAL_DEV` is not set → ABORT (treated as
- *     a misconfigured prod deploy).
+ *     production env-var drop doesn't silently neuter the guard. Short-
+ *     circuits before the endpoint probe.
+ *   - `commit_sha` is null AND `LOCAL_DEV` is not set → probe the endpoint
+ *     (BS#1438): mounted → allowed; absent (404/405) → ABORT; network /
+ *     timeout → ABORT.
  *   - `commit_sha` is the gate sha itself OR a descendant → allowed.
  *   - `commit_sha` is anything else → ABORT.
  *
@@ -42,9 +52,24 @@
 
 const LML_BASE_URL_ENV = 'LIBRARY_METADATA_URL';
 const HEALTH_PATH = '/health';
+const REFRESH_PATH = '/api/v1/cache/refresh-for-identities';
 
 const HEALTH_TIMEOUT_MS = 10_000;
 const COMPARE_TIMEOUT_MS = 15_000;
+const PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * HTTP statuses that mean `POST /api/v1/cache/refresh-for-identities` is NOT
+ * present as a POST handler on this LML deploy:
+ *   - 404 — the route isn't mounted (a deploy predating LML#525).
+ *   - 405 — the path resolves but POST isn't allowed (i.e. not the handler
+ *     LML#525 introduced).
+ * Every other status — 422 (Pydantic `min_length=1` rejects the empty batch),
+ * 400 (manual malformed/over-cap reject), 401/403 (`LML_REQUIRE_AUTH` gate),
+ * 200 (no-op), 503 (entity store / Discogs degraded) — proves the route IS
+ * mounted, which is the only question this probe answers. See `probeRefreshEndpoint`.
+ */
+const ENDPOINT_ABSENT_STATUSES = new Set([404, 405]);
 
 /** LML#525: `POST /api/v1/cache/refresh-for-identities` shipped (LML PR #559). */
 export const GATE_COMMIT_SHA = '8a1344c';
@@ -104,6 +129,56 @@ export const fetchLmlHealth = async (
       throw new DeployGuardError(`LML /health timed out after ${signalTimeoutMs}ms`);
     }
     throw new DeployGuardError(`LML /health request failed: ${(e as Error).message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
+ * Probe whether LML exposes `POST /api/v1/cache/refresh-for-identities`
+ * (the endpoint LML#525 introduced, which this backfill needs to make any
+ * progress). Returns `true` when the route is mounted, `false` when it is
+ * absent (404/405); throws `DeployGuardError` on network failure or timeout.
+ *
+ * Why this exists: LML prod serves `/health.commit_sha = null` permanently
+ * (it deploys via `railway up`, whose CLI source-deploys carry no git
+ * metadata — LML#509 / BS#1438), so the SHA-descendant gate can never succeed
+ * against prod. The probe asks the real question the SHA was only a proxy for:
+ * does the endpoint exist? The path was introduced by the gate commit itself,
+ * so "route mounted" is equivalent to "this LML has LML#525" — no older
+ * same-named endpoint exists to confuse the signal.
+ *
+ * The probe sends an empty `identity_ids: []` batch. That body is genuinely
+ * zero-work: LML rejects it at request-model validation (`min_length=1` → 422)
+ * before reading provenance or touching Discogs, so the probe warms no cache
+ * and burns no Discogs budget (verified against `cache/router.py` /
+ * `cache/models.py` in library-metadata-lookup). The `LML_API_KEY` bearer is
+ * attached when set (mirroring the lml-client chokepoint) so an
+ * `LML_REQUIRE_AUTH=true` prod returns 422 rather than 401 — though either is
+ * treated as "present" since only 404/405 mean absent.
+ */
+export const probeRefreshEndpoint = async (
+  fetchImpl: FetchLike = fetch,
+  signalTimeoutMs: number = PROBE_TIMEOUT_MS
+): Promise<boolean> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), signalTimeoutMs);
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const apiKey = process.env.LML_API_KEY;
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const response = await fetchImpl(`${baseUrl()}${REFRESH_PATH}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ identity_ids: [] }),
+      signal: controller.signal,
+    });
+    return !ENDPOINT_ABSENT_STATUSES.has(response.status);
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') {
+      throw new DeployGuardError(`LML cache-refresh probe timed out after ${signalTimeoutMs}ms`);
+    }
+    throw new DeployGuardError(`LML cache-refresh probe request failed: ${(e as Error).message}`);
   } finally {
     clearTimeout(timer);
   }
@@ -174,9 +249,25 @@ export const enforceDeployGuard = async (deps: DeployGuardDeps = {}): Promise<De
     if (isLocalDev()) {
       return { allowed: true, commit_sha: null, reason: 'LOCAL_DEV=1; commit_sha unavailable' };
     }
-    throw new DeployGuardError(
-      'LML /health returned commit_sha=null but LOCAL_DEV is not set. Refusing to run against an LML deploy whose SHA cannot be verified.'
-    );
+    // LML prod serves commit_sha=null permanently (deploys via `railway up`,
+    // which carries no git metadata — LML#509 / BS#1438), so the SHA-descendant
+    // path below can never succeed against prod. Fall back to asking the real
+    // question the SHA was only a proxy for: is the LML#525 endpoint actually
+    // mounted? A network/timeout failure rethrows from the probe (ABORT); only
+    // a definitive 404/405 (endpoint absent) reaches the throw here.
+    const present = await probeRefreshEndpoint(fetchImpl);
+    if (!present) {
+      throw new DeployGuardError(
+        'LML /health returned commit_sha=null and the endpoint probe found ' +
+          'POST /api/v1/cache/refresh-for-identities absent (404/405). Refusing to run — ' +
+          'the LML#525 endpoint is required for this backfill to make progress.'
+      );
+    }
+    return {
+      allowed: true,
+      commit_sha: null,
+      reason: 'commit_sha null; endpoint probe confirms POST /api/v1/cache/refresh-for-identities is present',
+    };
   }
 
   if (sha.startsWith(GATE_COMMIT_SHA)) {

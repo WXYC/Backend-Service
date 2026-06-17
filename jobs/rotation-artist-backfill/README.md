@@ -49,9 +49,14 @@ Recalibration only lands alongside an ingress change (CDN insertion, replica sca
 
 ## Deploy gate
 
-The job aborts unless LML's `/health` returns a `commit_sha` that is `8a1344c` (LML PR [#559](https://github.com/WXYC/library-metadata-lookup/pull/559), the feat PR that shipped LML#525) or a descendant of it. Without that commit, `POST /api/v1/cache/refresh-for-identities` returns 404 and every batch fails. See `deploy-guard.ts`.
+The gate's job is to refuse to run against an LML deploy that lacks `POST /api/v1/cache/refresh-for-identities` (the endpoint LML#525 introduced) — without it every batch 404s and the run does no work. It answers that question two ways:
 
-Local dev: set `LOCAL_DEV=1` to skip the gate when `commit_sha` is null (Railway only injects `RAILWAY_GIT_COMMIT_SHA` in deployed environments).
+1. **Fast path — `commit_sha` present.** When LML's `/health` returns a `commit_sha`, the job allows iff that sha is `8a1344c` (LML PR [#559](https://github.com/WXYC/library-metadata-lookup/pull/559), the feat PR that shipped LML#525) or a descendant of it, verified via GitHub's compare API.
+2. **Fallback — `commit_sha` null (BS#1438).** LML prod serves `commit_sha: null` **permanently**: it deploys via `railway up`, whose CLI source-deploys carry no git metadata ([LML#509](https://github.com/WXYC/library-metadata-lookup/issues/509)). The SHA path can therefore never succeed against prod, so instead of aborting, the gate probes the endpoint directly — a `POST` with an empty `{ "identity_ids": [] }` batch. A `404`/`405` means the route is absent ⇒ **abort**; any other status (`422` empty-batch reject, `400`, `401`/`403` auth, `200`, `503`) means the route is mounted ⇒ **allow**. A network error or timeout ⇒ **abort** (never silently allow). The probe is genuinely zero-work: LML rejects the empty batch at request-model validation (`min_length=1`) before reading provenance or touching Discogs, so it warms no cache and burns no Discogs budget.
+
+Because the LML#525 endpoint was introduced by the gate commit itself, "route mounted" is equivalent to "this LML has LML#525" — there is no older same-named endpoint to confuse the probe. Given LML prod's structural null sha, the probe path is the one that actually runs in production until LML#509 changes LML's deploy method. See `deploy-guard.ts`.
+
+Local dev: set `LOCAL_DEV=1` to skip the gate when `commit_sha` is null — the bypass short-circuits before the probe (Railway only injects `RAILWAY_GIT_COMMIT_SHA` in deployed environments).
 
 ## Configuration
 
@@ -105,7 +110,7 @@ The `backfill.not_found / backfill.identities_scanned > 1%` alert (BS#1402) sign
 ## Files
 
 - `job.ts` — entry point + run lifecycle.
-- `deploy-guard.ts` — `/health` + GitHub compare gate.
+- `deploy-guard.ts` — `/health` + GitHub compare gate, with a null-sha endpoint-probe fallback (BS#1438).
 - `query.ts` — SELECT for active rotation identity ids.
 - `lml-fetch.ts` — typed wrapper over LML's identity-refresh endpoint.
 - `lml-limiter.ts` — concurrency + rate-limit gate.
