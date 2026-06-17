@@ -55,6 +55,20 @@ export const auth = betterAuth({
     },
   }),
 
+  // better-auth's default session.expiresIn is 7 days and updateAge is 1 day.
+  // Combined with the bearer plugin's per-renewal token rotation, the 1-day
+  // updateAge cadence surfaced as DJs being silently signed out roughly once
+  // a day on iOS (the client kept using the pre-rotation bearer). The iOS
+  // app now captures the rotated set-auth-token; pinning expiresIn here makes
+  // sessions effectively permanent for daily users (rolling 1-year window on
+  // every renewal), and turning cookieCache off keeps every /auth/token call
+  // routed through the database so the renewal/rotation actually happens.
+  session: {
+    expiresIn: 60 * 60 * 24 * 365,
+    updateAge: 60 * 60 * 24,
+    cookieCache: { enabled: false },
+  },
+
   // Base URL for the auth service
   baseURL: process.env.BETTER_AUTH_URL || 'http://localhost:8082/auth',
 
