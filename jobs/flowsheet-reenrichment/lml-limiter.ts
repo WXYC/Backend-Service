@@ -24,8 +24,10 @@ const envInt = (name: string, fallback: number): number => {
   // Number.isInteger keeps 1.5 from passing to a Semaphore that expects a
   // whole permit count.
   const parsed = Number(raw);
-  if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) return parsed;
-  console.warn(`lml-limiter: ${name}=${raw} is invalid (must be positive integer); using fallback ${fallback}`);
+  // isSafeInteger guards against precision-lost values like 2^53+1 silently
+  // becoming valid Semaphore permit counts (round 3).
+  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  console.warn(`lml-limiter: ${name}=${raw} is invalid (must be positive safe integer); using fallback ${fallback}`);
   return fallback;
 };
 

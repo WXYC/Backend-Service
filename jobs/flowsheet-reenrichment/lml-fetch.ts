@@ -21,8 +21,9 @@ const envInt = (name: string, fallback: number): number => {
   // Number(raw) — not parseInt — so partial-parse strings like "35000banana"
   // surface as NaN and get rejected instead of silently coercing to 35000.
   const parsed = Number(raw);
-  if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) return parsed;
-  console.warn(`lml-fetch: ${name}=${raw} is invalid (must be positive integer); using fallback ${fallback}`);
+  // isSafeInteger guards against precision-lost large values (round 3).
+  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  console.warn(`lml-fetch: ${name}=${raw} is invalid (must be positive safe integer); using fallback ${fallback}`);
   return fallback;
 };
 

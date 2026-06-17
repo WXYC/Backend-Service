@@ -15,7 +15,12 @@
 import { jest } from '@jest/globals';
 
 import { db } from '@wxyc/database';
-import { runReenrichment, type LookupFn, type EnrichFn } from '../../../../jobs/flowsheet-reenrichment/orchestrate';
+import {
+  runReenrichment,
+  type LookupFn,
+  type EnrichFn,
+  __resetStopForTesting,
+} from '../../../../jobs/flowsheet-reenrichment/orchestrate';
 import { initLogger, closeLogger } from '../../../../jobs/flowsheet-reenrichment/logger';
 import type { LookupResponse } from '@wxyc/lml-client';
 
@@ -50,8 +55,20 @@ const matchedResponse: LookupResponse = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // mockReset wipes the mockResolvedValueOnce queue too (clearAllMocks
+  // only clears call history, so an unconsumed mockResolvedValueOnce from
+  // an earlier test would leak into the next one and make db.execute
+  // return [] before the test's intended mock values).
+  (db.execute as jest.Mock).mockReset();
+  // Reset module-level singleton so tests that exercise requestStop()
+  // don't leak the flag into subsequent tests (round 3).
+  __resetStopForTesting();
   delete process.env.SENTRY_DSN;
   initLogger({ repo: 'Backend-Service', tool: 'flowsheet-reenrichment', runId: 'test-run' });
+});
+
+afterEach(() => {
+  __resetStopForTesting();
 });
 
 afterEach(async () => {
@@ -103,6 +120,73 @@ describe('runbook log contract — batch_done', () => {
     expect(rec?.match).toBe(1); // non-raced matches
     expect(rec?.match_raced).toBe(1); // raced matches
     expect(rec?.flipped).toBe(1); // = match (non-raced)
+  });
+});
+
+describe('runbook log contract — stopped step (round 3)', () => {
+  it('emits step=stopped (not finished) on SIGTERM-induced early break', async () => {
+    const { requestStop, __resetStopForTesting } = await import('../../../../jobs/flowsheet-reenrichment/orchestrate');
+    __resetStopForTesting();
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockImplementation(() => {
+      requestStop(); // simulate SIGTERM during processing of row 1
+      return Promise.resolve({ response: noMatchResponse, cacheHit: false });
+    });
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');
+
+    const stdoutLines = captureJson('stdout');
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      cutoffTs: CUTOFF,
+      batchSize: 10,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    // Runbook's jq filter is `select(.step=="finished" or .step=="stopped")`.
+    // A stopped run MUST be distinguishable from a finished one so the
+    // runbook can tell the operator to re-run.
+    const finished = stdoutLines.find((l) => l.step === 'finished');
+    const stopped = stdoutLines.find((l) => l.step === 'stopped');
+    expect(finished).toBeUndefined();
+    expect(stopped).toBeDefined();
+    expect(stopped?.stopped).toBe(true);
+    expect(result.stopped).toBe(true);
+    __resetStopForTesting();
+  });
+});
+
+describe('runbook log contract — match_raced_summary (round 3)', () => {
+  it('emits one summary log per run when match_raced > 0 (not per-row)', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1), makeRow(2), makeRow(3)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ response: matchedResponse, cacheHit: false });
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match_raced');
+
+    const stdoutLines = captureJson('stdout');
+    const stderrLines = captureJson('stderr');
+    await runReenrichment({ lookup, enrich, cutoffTs: CUTOFF, batchSize: 10, liveActivityLookbackSeconds: 0 });
+
+    const summaries = [...stdoutLines, ...stderrLines].filter((l) => l.step === 'match_raced_summary');
+    expect(summaries.length).toBe(1);
+    expect(summaries[0].match_raced_count).toBe(3);
+    expect(summaries[0].sample_ids).toEqual([1, 2, 3]);
+    expect(summaries[0].truncated_count).toBe(0);
+  });
+
+  it('does NOT emit when match_raced is zero', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ response: noMatchResponse, cacheHit: false });
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');
+
+    const stdoutLines = captureJson('stdout');
+    const stderrLines = captureJson('stderr');
+    await runReenrichment({ lookup, enrich, cutoffTs: CUTOFF, batchSize: 10, liveActivityLookbackSeconds: 0 });
+
+    const summaries = [...stdoutLines, ...stderrLines].filter((l) => l.step === 'match_raced_summary');
+    expect(summaries.length).toBe(0);
   });
 });
 

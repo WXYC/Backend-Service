@@ -67,6 +67,14 @@ export const captureError = (error: unknown, step: string, extra: Record<string,
   Sentry.captureException(error, { tags: { step }, extra });
 };
 
+/**
+ * Defend against non-Error throws (`throw 'string'`, `throw { code: x }`) —
+ * `(err as Error).message` would emit `undefined` and the JSON logger would
+ * drop the key. The canonical safe pattern from
+ * flowsheet-metadata-backfill/orchestrate.ts:381-384.
+ */
+export const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
 export const closeLogger = async (): Promise<void> => {
   await Sentry.close(2000);
   baseTags = null;

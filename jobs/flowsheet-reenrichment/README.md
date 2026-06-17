@@ -77,38 +77,57 @@ docker run --rm --name flowsheet-reenrichment --env-file .env \
 ## Kill-switch
 
 ```bash
-docker stop flowsheet-reenrichment
+# -t 600 gives the container up to 10 minutes to drain its in-flight row,
+# emit the structured `stopped` log line, flush Sentry, and close the DB
+# pool. Docker's default 10s grace will SIGKILL before any of that runs;
+# the bare `docker stop` form is intentionally not the documented path.
+docker stop -t 600 flowsheet-reenrichment
 ```
 
-The container's SIGTERM handler flips a cooperative-stop flag; the run finishes its in-flight row, emits a `stop_requested` log line, and exits cleanly so Sentry flushes and the DB pool closes. Monitor real-time LML p95 via Sentry trace explorer; stay within +20% of baseline per the BS#994 acceptance criterion.
+The container's SIGTERM handler flips a cooperative-stop flag; the orchestrator checks the flag between rows (not just between batches), so a single in-flight LML lookup is the longest wait. A `step: "stopped"` log line is emitted on graceful break — the runbook's `finished`-step jq filter (below) will correctly skip a stopped run. A second SIGTERM falls through to Node's default handler (force-exit) — intentional escape hatch if an LML call hangs past `BACKFILL_LML_PER_CALL_TIMEOUT_MS`.
+
+Monitor real-time LML p95 via Sentry trace explorer; stay within +20% of baseline per the BS#994 acceptance criterion.
 
 ## Post-run
 
-1. **Source the flip count** from the `finished` log line:
+1. **Source the flip count** from the `finished` (or `stopped`) log line. The `fromjson?` trick makes jq tolerant of any non-JSON lines (the `console.warn` env-validation lines from lml-fetch / lml-limiter would otherwise crash a raw jq invocation):
 
    ```bash
    docker logs flowsheet-reenrichment 2>&1 | \
-     jq -r 'select(.step=="finished") |
-       "scanned=\(.scanned) flipped=\(.flipped) match_raced=\(.match_raced) still_no_match=\(.still_no_match) lml_error=\(.lml_error) db_error=\(.db_error)"'
+     jq -r 'fromjson? | select(.step=="finished" or .step=="stopped") |
+       "step=\(.step) scanned=\(.scanned) flipped=\(.flipped) match_raced=\(.match_raced) still_no_match=\(.still_no_match) lml_error=\(.lml_error) db_error=\(.db_error) last_id=\(.last_id)"'
    ```
 
-   Document these as a comment on BS#1433.
+   If `step=stopped`, the run did NOT complete the cohort — re-run it to drain the remainder (the WHERE filter is idempotent against rows the run already flipped). Document the totals from the final completed run as a comment on BS#1433.
 
-2. **Linkage-race audit**: a parallel linkage resolver can flip `album_id` non-null between the orchestrator's SELECT and `reenrichRow`'s UPDATE, which the WHERE guard then skips (counted as `match_raced`). Most `match_raced` rows are benign (another writer flipped the status), but the rare orphan case leaves a row with `album_id` non-null AND `metadata_status='enriched_no_match'` — no automated path revisits these. Catch them with:
+2. **Linkage-race audit**: a parallel linkage resolver can flip `album_id` non-null between the orchestrator's SELECT and `reenrichRow`'s UPDATE, which the WHERE guard then skips (counted as `match_raced`). The audit SQL below catches every such orphan — a row with `album_id` non-null AND `metadata_status='enriched_no_match'` AND `artist_name IS NOT NULL` AND `add_time < cutoff`. Without rescue, no automated path revisits these rows; the run also emits one `match_raced_summary` log line with a bounded sample of IDs to cross-reference.
 
    ```sql
+   -- Audit: identify orphans. WHERE must match the drain's WHERE
+   -- (artist_name IS NOT NULL) plus album_id IS NOT NULL (the race outcome).
    SELECT id, album_id, artist_name, album_title, add_time
    FROM wxyc_schema.flowsheet
    WHERE metadata_status = 'enriched_no_match'
      AND album_id IS NOT NULL
+     AND artist_name IS NOT NULL
      AND add_time < '2026-06-16T17:53:53Z'::timestamptz;
    ```
 
-   For each orphan row, manually trigger re-enrichment (e.g. via the CDC consumer by setting `metadata_status='pending'`) or open a follow-up ticket if the count is non-trivial. Cross-reference the `possible_linkage_race` log lines from the run (each `match_raced` row id is emitted as a structured warning).
+   **Rescue** (only if the audit returns rows): re-arm them for the nightly backfill cron (`flowsheet-metadata-backfill`), which filters on `metadata_attempt_at IS NULL` and will re-call LML. Setting `metadata_status='pending'` alone is NOT sufficient — the CDC consumer fires only on INSERT, and the backfill cron's WHERE keys on `metadata_attempt_at`. Clear BOTH:
+
+   ```sql
+   UPDATE wxyc_schema.flowsheet
+      SET metadata_status = 'pending',
+          metadata_attempt_at = NULL
+    WHERE id = ANY(ARRAY[<audit_ids>]);  -- explicit ID list, not a re-SELECT
+   ```
+
+   Do NOT use `WHERE metadata_status='enriched_no_match' AND album_id IS NOT NULL` — that would race a concurrent linkage flip and re-arm rows still being processed. Use the explicit ID list from the audit's output.
 
 3. **Spot-check 20 sample rows that flipped** — verify `discogs_url`, `artwork_url`, `release_year` populated and correct against the live Discogs release.
 
 4. **Drop the one-shot index** once the audit is complete:
+
    ```sql
    DROP INDEX CONCURRENTLY IF EXISTS wxyc_schema.flowsheet_reenrichment_idx;
    ```

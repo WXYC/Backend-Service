@@ -98,9 +98,31 @@ describe('resolveCutoffTs', () => {
     expect(resolveCutoffTs(CUTOFF)).toBe(CUTOFF);
   });
 
-  it('throws on garbage (Date.parse → NaN)', () => {
-    expect(() => resolveCutoffTs('not-a-date')).toThrow(/not a valid ISO 8601/);
-    expect(() => resolveCutoffTs('yesterday')).toThrow(/not a valid ISO 8601/);
+  it('throws on garbage', () => {
+    expect(() => resolveCutoffTs('not-a-date')).toThrow(/strict ISO 8601/);
+    expect(() => resolveCutoffTs('yesterday')).toThrow(/strict ISO 8601/);
+  });
+
+  it('throws on non-strict-ISO formats Date.parse accepts but PG would reject (or interpret differently)', () => {
+    // round-3 hardening: Date.parse accepts these, but they could shift
+    // cohort semantics vs PG ::timestamptz.
+    expect(() => resolveCutoffTs('2026-6-16T17:53:53Z')).toThrow(/strict ISO 8601/);
+    expect(() => resolveCutoffTs('2026/06/16 17:53:53')).toThrow(/strict ISO 8601/);
+    expect(() => resolveCutoffTs('2026')).toThrow(/strict ISO 8601/);
+    expect(() => resolveCutoffTs('2026-06-16')).toThrow(/strict ISO 8601/); // date-only
+  });
+
+  it('throws on out-of-range day that Date.parse silently normalizes', () => {
+    // '2026-02-30' would normalize to '2026-03-02' under bare Date.parse;
+    // our calendar-validation catches it explicitly.
+    expect(() => resolveCutoffTs('2026-02-30T00:00:00Z')).toThrow(/out-of-range field/);
+    expect(() => resolveCutoffTs('2026-06-31T00:00:00Z')).toThrow(/out-of-range field/);
+    expect(() => resolveCutoffTs('2026-13-01T00:00:00Z')).toThrow(/out-of-range field/);
+    expect(() => resolveCutoffTs('2026-06-16T25:00:00Z')).toThrow(/out-of-range field/);
+  });
+
+  it('accepts timezone-offset form (e.g. -07:00)', () => {
+    expect(resolveCutoffTs('2026-06-16T10:53:53-07:00')).toBe('2026-06-16T10:53:53-07:00');
   });
 
   it('throws on a future timestamp (catches fat-finger year typos)', () => {
