@@ -213,33 +213,23 @@ const loadBatchOnce = async (afterId: number, batchSize: number, cutoffTs: strin
 };
 
 /**
- * Sentinel for the rare "stop arrived during a backoff sleep" path. The
- * outer loop treats this as a clean stop-break (NOT a failure), so the
- * run still emits the `stopped` summary log + summary span instead of
- * `failed` with no totals.
- */
-class StopRequestedDuringRetry extends Error {
-  constructor() {
-    super('stop requested during loadBatch retry backoff');
-    this.name = 'StopRequestedDuringRetry';
-  }
-}
-
-/**
  * loadBatch with transient-error retry. Honors stopRequested so shutdown
  * isn't blocked by retry backoffs. Exhausting retries throws the most
- * recent error. Stop-during-backoff throws a sentinel the outer loop
- * recognizes as a stop (not a failure), so the run still emits the
- * stopped summary instead of the failed-with-no-totals shape.
+ * recent error.
+ *
+ * Stop-during-retry signaling: caller distinguishes a stop-triggered exit
+ * from a real failure by checking the module-level `stopRequested` flag
+ * — no custom sentinel needed, since the flag was true at throw time and
+ * stays true until __resetStopForTesting (production never resets it).
  */
 const loadBatch = async (afterId: number, batchSize: number, cutoffTs: string): Promise<ReenrichRow[]> => {
+  let lastError: unknown;
   for (let attempt = 0; attempt < LOAD_BATCH_MAX_ATTEMPTS; attempt += 1) {
     try {
       return await loadBatchOnce(afterId, batchSize, cutoffTs);
     } catch (error) {
-      const isLast = attempt + 1 >= LOAD_BATCH_MAX_ATTEMPTS;
-      if (stopRequested) throw new StopRequestedDuringRetry();
-      if (isLast) throw error;
+      lastError = error;
+      if (stopRequested || attempt + 1 >= LOAD_BATCH_MAX_ATTEMPTS) throw error;
       const backoff = LOAD_BATCH_BACKOFF_MS[attempt] ?? LOAD_BATCH_BACKOFF_MS[LOAD_BATCH_BACKOFF_MS.length - 1];
       log('warn', 'load_batch_retry', `loadBatch attempt ${attempt + 1} failed; retrying in ${backoff}ms`, {
         attempt: attempt + 1,
@@ -248,11 +238,12 @@ const loadBatch = async (afterId: number, batchSize: number, cutoffTs: string): 
         error_message: errorMessage(error),
       });
       await stopAwareSleep(backoff);
-      if (stopRequested) throw new StopRequestedDuringRetry();
+      if (stopRequested) throw error;
     }
   }
-  // Unreachable: the loop above either returns or throws.
-  throw new Error('loadBatch: unreachable retry-exhaustion path');
+  // Unreachable: the loop above either returns or throws. The throw exists
+  // for TS narrowing — without it the function's return type widens.
+  throw lastError;
 };
 
 /**
@@ -319,6 +310,38 @@ export const runReenrichment = async (opts: {
   // Hoist deps outside the per-row loop — one object reused for ~12k rows.
   const deps = { lookup: opts.lookup, enrich: opts.enrich };
 
+  // On probe error: log + Sentry capture + assume no activity (defer to
+  // next batch). A transient RDS error in the probe SELECT shouldn't abort
+  // the whole drain — same posture as loadBatch's retry.
+  const safeProbe = async (): Promise<boolean> => {
+    try {
+      return await probe(liveActivityLookbackSeconds);
+    } catch (error) {
+      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+        error_message: errorMessage(error),
+      });
+      captureError(error, 'probe_error');
+      return false;
+    }
+  };
+
+  // Returns true iff the run should stop (SIGTERM observed during the wait).
+  // Disabled (returns false immediately) when lookback==0.
+  const waitForQuietPeriod = async (): Promise<boolean> => {
+    if (liveActivityLookbackSeconds <= 0) return false;
+    let active = await safeProbe();
+    while (active) {
+      if (stopRequested) return true;
+      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
+        lookback_seconds: liveActivityLookbackSeconds,
+        pause_ms: liveActivityPauseMs,
+      });
+      await stopAwareSleep(liveActivityPauseMs);
+      active = await safeProbe();
+    }
+    return stopRequested;
+  };
+
   log('info', 'started', `${JOB_NAME} starting`, {
     cutoff_ts: cutoffTs,
     batch_size: batchSize,
@@ -340,68 +363,30 @@ export const runReenrichment = async (opts: {
   let batchIndex = 0;
   let stopped = false;
   let failed: { error: unknown } | null = null;
+  const flipped = (): number => totals.match;
 
   try {
-    outer: while (true) {
-      if (stopRequested) {
+    while (true) {
+      if (stopRequested || (await waitForQuietPeriod())) {
         stopped = true;
         break;
-      }
-
-      if (liveActivityLookbackSeconds > 0) {
-        // Wrap the probe SELECT in try/catch so a transient RDS error doesn't
-        // abort the whole run with no summary — same posture as loadBatch's
-        // retry. We don't bother retrying the probe (it's a single buffer
-        // read against a partial index); on failure we log and proceed as
-        // if no activity, deferring to the next batch.
-        let probeActive = false;
-        try {
-          probeActive = await probe(liveActivityLookbackSeconds);
-        } catch (error) {
-          log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
-            error_message: errorMessage(error),
-          });
-          captureError(error, 'probe_error');
-        }
-        while (probeActive) {
-          if (stopRequested) {
-            stopped = true;
-            break outer;
-          }
-          log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
-            lookback_seconds: liveActivityLookbackSeconds,
-            pause_ms: liveActivityPauseMs,
-          });
-          await stopAwareSleep(liveActivityPauseMs);
-          try {
-            probeActive = await probe(liveActivityLookbackSeconds);
-          } catch (error) {
-            log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
-              error_message: errorMessage(error),
-            });
-            captureError(error, 'probe_error');
-            probeActive = false;
-          }
-        }
-        if (stopRequested) {
-          stopped = true;
-          break;
-        }
       }
 
       let rows: ReenrichRow[];
       try {
         rows = await loadBatch(lastId, batchSize, cutoffTs);
       } catch (error) {
-        if (error instanceof StopRequestedDuringRetry) {
-          // Treat as a clean stop — summary span + structured log still emit.
+        // Distinguish stop-triggered exit from real failure via the same
+        // module flag the inner retry observed. No custom sentinel class
+        // — just read the flag the SIGTERM handler set.
+        if (stopRequested) {
           stopped = true;
-          break;
+        } else {
+          // Sustained DB outage exhausted the retry budget. Capture so the
+          // finally arm still emits the summary span + log with last_id,
+          // enabling resume-from-last_id from the structured logs.
+          failed = { error };
         }
-        // Sustained DB outage exhausted the retry budget. Capture so the
-        // finally arm still emits the summary span + log with last_id,
-        // enabling resume-from-last_id from the structured logs.
-        failed = { error };
         break;
       }
       if (rows.length === 0) break;
@@ -451,8 +436,6 @@ export const runReenrichment = async (opts: {
       if (stopped) break;
     }
   } finally {
-    const flipped = totals.match;
-
     // Summary span carrying numeric attributes (BS#1081 typing-trap workaround).
     // Always emitted — even on stop/fail — so partial-run telemetry is
     // available in Sentry trace explorer.
@@ -460,7 +443,7 @@ export const runReenrichment = async (opts: {
       {
         name: 'reenrichment.run.summary',
         attributes: {
-          'reenrichment.flipped_count': flipped,
+          'reenrichment.flipped_count': flipped(),
           'reenrichment.still_no_match_count': totals.still_no_match,
           'reenrichment.match_raced_count': totals.match_raced,
           'reenrichment.lml_error_count': totals.lml_error,
@@ -498,16 +481,15 @@ export const runReenrichment = async (opts: {
     const level = failed ? 'error' : 'info';
     log(level, step, `${JOB_NAME} ${step}`, {
       ...totals,
-      flipped,
+      flipped: flipped(),
       last_id: lastId,
       stopped,
       failed: failed !== null,
       ...(failed ? { error_message: errorMessage(failed.error) } : {}),
     });
     if (failed) {
-      captureError(failed.error, 'failed', { last_id: lastId, scanned: totals.scanned, flipped });
+      captureError(failed.error, 'failed', { last_id: lastId, scanned: totals.scanned, flipped: flipped() });
     }
   }
-  const flipped = totals.match;
-  return { totals, flipped, stopped, failed: failed !== null };
+  return { totals, flipped: flipped(), stopped, failed: failed !== null };
 };

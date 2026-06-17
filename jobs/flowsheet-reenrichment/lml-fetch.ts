@@ -9,25 +9,14 @@
  *
  * Timeout: BACKFILL_LML_PER_CALL_TIMEOUT_MS, default 35 s — clears
  * LML#370's 25.25 s per-item cascade-exhaustion cap plus headroom. Reads
- * the env var (review-round-2) so operators can tune without rebuilding.
+ * the env var at module load; see README note on env-var timing.
  */
 
 import { lookupMetadata as sharedLookupMetadata, type LookupResponse } from '@wxyc/lml-client';
+import { envInt } from './env.js';
 import { defaultLmlLimiter } from './lml-limiter.js';
 
-const envInt = (name: string, fallback: number): number => {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  // Number(raw) — not parseInt — so partial-parse strings like "35000banana"
-  // surface as NaN and get rejected instead of silently coercing to 35000.
-  const parsed = Number(raw);
-  // isSafeInteger guards against precision-lost large values (round 3).
-  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
-  console.warn(`lml-fetch: ${name}=${raw} is invalid (must be positive safe integer); using fallback ${fallback}`);
-  return fallback;
-};
-
-const TIMEOUT_MS = envInt('BACKFILL_LML_PER_CALL_TIMEOUT_MS', 35_000);
+const TIMEOUT_MS = envInt('BACKFILL_LML_PER_CALL_TIMEOUT_MS', 35_000, 'lml-fetch');
 
 export type LookupResult = { response: LookupResponse; cacheHit: boolean };
 
