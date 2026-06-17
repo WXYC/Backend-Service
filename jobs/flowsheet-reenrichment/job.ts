@@ -73,10 +73,19 @@ const main = async () => {
     requireLmlConfigured();
     requireCutoffConfigured();
     log('info', 'init', `${JOB_NAME} initialized`, { cutoff_ts: process.env.BACKFILL_CUTOFF_TS });
-    await runReenrichment({
+    const result = await runReenrichment({
       lookup: lookupMetadata,
       enrich: reenrichRow,
     });
+    // Round 6: runReenrichment now catches its own loop exceptions to
+    // preserve the summary log + span. Without propagating that failure
+    // through the exit code, a wrapping script's `$?` check would
+    // believe the drain succeeded on a sustained RDS outage. The
+    // structured log carries the error_message; this is the boolean
+    // signal for container-exit-code-driven alerting.
+    if (result.failed) {
+      process.exitCode = 1;
+    }
   } catch (error) {
     log('error', 'failed', `${JOB_NAME} failed`, { error_message: errorMessage(error) });
     captureError(error, 'failed');

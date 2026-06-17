@@ -458,7 +458,28 @@ describe('runReenrichment — loadBatch retry on transient DB error', () => {
     });
 
     expect(result.stopped).toBe(false);
+    // Round 6: result.failed=true tells main() to set exitCode=1, so a
+    // wrapping script's $? check correctly detects the failed drain.
+    expect(result.failed).toBe(true);
     expect(result.totals.scanned).toBe(0);
     expect((db.execute as jest.Mock).mock.calls.length).toBe(3);
   }, 30_000);
+
+  it('result.failed is false on a clean completion', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');
+
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      cutoffTs: CUTOFF,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    expect(result.failed).toBe(false);
+    expect(result.stopped).toBe(false);
+  });
 });
