@@ -438,22 +438,27 @@ describe('runReenrichment — loadBatch retry on transient DB error', () => {
     expect(result.totals.scanned).toBe(0);
   }, 30_000);
 
-  it('propagates after exhausting retries', async () => {
+  it('captures exhaustion in failed-step summary instead of propagating (round 4)', async () => {
+    // Round 4: runReenrichment catches the exhaustion so its finally arm
+    // emits the structured `failed` log line (carrying last_id, the
+    // operator's resume cursor). The previous shape — throwing — lost
+    // the summary span and the structured totals.
     const err = new Error('sustained outage');
     (db.execute as jest.Mock).mockRejectedValueOnce(err).mockRejectedValueOnce(err).mockRejectedValueOnce(err);
 
     const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult());
     const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');
 
-    await expect(
-      runReenrichment({
-        lookup,
-        enrich,
-        cutoffTs: CUTOFF,
-        batchSize: 100,
-        liveActivityLookbackSeconds: 0,
-      })
-    ).rejects.toThrow(/sustained outage/);
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      cutoffTs: CUTOFF,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    expect(result.stopped).toBe(false);
+    expect(result.totals.scanned).toBe(0);
     expect((db.execute as jest.Mock).mock.calls.length).toBe(3);
   }, 30_000);
 });
