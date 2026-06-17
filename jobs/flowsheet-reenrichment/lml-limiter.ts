@@ -19,9 +19,13 @@ export { type LmlLimiter, Semaphore, TokenBucket };
 const envInt = (name: string, fallback: number): number => {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
+  // Number(raw) — not parseInt — so partial-parse strings like "20banana"
+  // surface as NaN and get rejected, instead of silently coercing to 20.
+  // Number.isInteger keeps 1.5 from passing to a Semaphore that expects a
+  // whole permit count.
   const parsed = Number(raw);
-  if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  console.warn(`lml-limiter: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`);
+  if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) return parsed;
+  console.warn(`lml-limiter: ${name}=${raw} is invalid (must be positive integer); using fallback ${fallback}`);
   return fallback;
 };
 

@@ -29,6 +29,8 @@ import {
   resolveCutoffTs,
   resolveLiveActivityLookback,
   resolveLiveActivityPauseMs,
+  requestStop,
+  __resetStopForTesting,
 } from '../../../../jobs/flowsheet-reenrichment/orchestrate';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: unknown }> };
@@ -92,8 +94,17 @@ describe('resolveCutoffTs', () => {
     expect(() => resolveCutoffTs(undefined)).toThrow(/BACKFILL_CUTOFF_TS/);
   });
 
-  it('returns the value when set', () => {
+  it('returns the value when set to a valid past ISO timestamp', () => {
     expect(resolveCutoffTs(CUTOFF)).toBe(CUTOFF);
+  });
+
+  it('throws on garbage (Date.parse → NaN)', () => {
+    expect(() => resolveCutoffTs('not-a-date')).toThrow(/not a valid ISO 8601/);
+    expect(() => resolveCutoffTs('yesterday')).toThrow(/not a valid ISO 8601/);
+  });
+
+  it('throws on a future timestamp (catches fat-finger year typos)', () => {
+    expect(() => resolveCutoffTs('2099-01-01T00:00:00Z')).toThrow(/in the future/);
   });
 });
 
@@ -300,4 +311,127 @@ describe('runReenrichment — idempotency', () => {
     expect(result.totals.match_raced).toBe(2);
     expect(result.totals.lml_error).toBe(0);
   });
+});
+
+describe('runReenrichment — db_error catch arm (review-round-2)', () => {
+  it('counts db_error and continues when enrich throws (transient PG failure)', async () => {
+    // First row enrich throws (e.g. transient connection reset), second row succeeds
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1), makeRow(2)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockRejectedValueOnce(new Error('connection reset')).mockResolvedValue('match');
+
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      cutoffTs: CUTOFF,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    // Critical: the run does NOT abort — both rows are scanned, one
+    // counted as db_error, one as match.
+    expect(result.totals.scanned).toBe(2);
+    expect(result.totals.db_error).toBe(1);
+    expect(result.totals.match).toBe(1);
+    expect(result.flipped).toBe(1);
+  });
+});
+
+describe('runReenrichment — cooperative stop (SIGTERM)', () => {
+  // Reset before AND after so the module-level stopRequested flag never
+  // leaks into a subsequent describe block (e.g. loadBatch-retry tests
+  // that would otherwise see stopRequested=true and exit before the
+  // first batch).
+  beforeEach(() => {
+    __resetStopForTesting();
+  });
+  afterEach(() => {
+    __resetStopForTesting();
+  });
+
+  it('exits between batches when requestStop() is called', async () => {
+    // Two batches available; stop is requested before the second loads
+    let batchCount = 0;
+    (db.execute as jest.Mock).mockImplementation(() => {
+      batchCount += 1;
+      if (batchCount === 1) {
+        return Promise.resolve([makeRow(1)]);
+      }
+      return Promise.resolve([makeRow(2)]);
+    });
+
+    const lookup = jest.fn<LookupFn>().mockImplementation(() => {
+      // Request stop after the first row is processed
+      requestStop();
+      return Promise.resolve(noMatchResult());
+    });
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');
+
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      cutoffTs: CUTOFF,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    // First batch's single row processes; the loop checks stopRequested
+    // before the second loadBatch and exits. Row 2 is never scanned.
+    expect(result.totals.scanned).toBe(1);
+  });
+});
+
+describe('runReenrichment — loadBatch retry on transient DB error', () => {
+  // mockReset (not mockClear) wipes the previous test's mockImplementation
+  // so we can fully control db.execute here. Also reset the global
+  // stopRequested flag in case a prior SIGTERM test left it set.
+  beforeEach(() => {
+    (db.execute as jest.Mock).mockReset();
+    __resetStopForTesting();
+  });
+
+  it('retries up to 3 times before succeeding', async () => {
+    let attempts = 0;
+    (db.execute as jest.Mock).mockImplementation(() => {
+      attempts += 1;
+      if (attempts < 3) {
+        return Promise.reject(new Error('transient connection reset'));
+      }
+      return Promise.resolve([]); // third attempt succeeds with empty → loop exits
+    });
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');
+
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      cutoffTs: CUTOFF,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    expect(attempts).toBe(3);
+    expect(result.totals.scanned).toBe(0);
+  }, 30_000);
+
+  it('propagates after exhausting retries', async () => {
+    const err = new Error('sustained outage');
+    (db.execute as jest.Mock).mockRejectedValueOnce(err).mockRejectedValueOnce(err).mockRejectedValueOnce(err);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');
+
+    await expect(
+      runReenrichment({
+        lookup,
+        enrich,
+        cutoffTs: CUTOFF,
+        batchSize: 100,
+        liveActivityLookbackSeconds: 0,
+      })
+    ).rejects.toThrow(/sustained outage/);
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(3);
+  }, 30_000);
 });
