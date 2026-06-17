@@ -93,7 +93,15 @@ docker run --rm --name flowsheet-reenrichment --env-file .env \
 docker stop -t 600 flowsheet-reenrichment
 ```
 
-The container's SIGTERM handler flips a cooperative-stop flag; the orchestrator checks the flag between rows (not just between batches), so a single in-flight LML lookup is the longest wait. A `step: "stopped"` log line is emitted on graceful break — the runbook's `finished`-step jq filter (below) will correctly skip a stopped run. A second SIGTERM falls through to Node's default handler (force-exit) — intentional escape hatch if an LML call hangs past `BACKFILL_LML_PER_CALL_TIMEOUT_MS`.
+The container's SIGTERM handler flips a cooperative-stop flag; the orchestrator checks the flag between rows (not just between batches), so a single in-flight LML lookup is the longest wait. A `step: "stopped"` log line is emitted on graceful break — the runbook's jq filter (below) treats `stopped` and `failed` the same as `finished` so the operator can read the resume cursor.
+
+The signal handler stays attached after the first SIGTERM, so additional SIGTERMs/SIGINTs are idempotent (they just re-flip the already-true flag). If an LML call is wedged past `BACKFILL_LML_PER_CALL_TIMEOUT_MS` and graceful stop isn't progressing, the escape hatch is SIGKILL:
+
+```bash
+docker kill flowsheet-reenrichment   # defaults to SIGKILL — force-exit
+```
+
+This skips the `finally` arm so Sentry won't flush the last seconds of captures and the DB pool isn't cleanly closed. Only reach for it when graceful stop has demonstrably stuck.
 
 Monitor real-time LML p95 via Sentry trace explorer; stay within +20% of baseline per the BS#994 acceptance criterion.
 
