@@ -22,12 +22,15 @@
  * SIGTERM/SIGINT handling: the signal handler flips the orchestrator's
  * cooperative-stop flag; the run finishes its in-flight row (round 3:
  * between-row check, not between-batch), emits a structured `stopped`
- * log line, then falls through to the `finally` arm. A *second* SIGTERM
- * arriving before the run completes is allowed to terminate the process
- * via Node's default handler — this is intentional escape-hatch behavior
- * for operators who need to force-exit a wedged in-flight LML call. We
- * use `process.on` (not `process.once`) so any number of SIGTERMs flip
- * the flag idempotently; the override is the operator's responsibility.
+ * log line, then falls through to the `finally` arm. `process.on` (not
+ * `process.once`) is deliberate — every SIGTERM/SIGINT just re-flips
+ * the already-true flag (idempotent), so the handler never wears off.
+ *
+ * Force-exit escape hatch: a stuck in-flight LML call past
+ * BACKFILL_LML_PER_CALL_TIMEOUT_MS that needs to be killed is a SIGKILL
+ * case (`docker kill flowsheet-reenrichment` — defaults to SIGKILL —
+ * or `docker kill -s KILL`). SIGTERM/SIGINT will NOT force-exit because
+ * we keep the handler attached.
  */
 
 import { closeDatabaseConnection } from '@wxyc/database';
