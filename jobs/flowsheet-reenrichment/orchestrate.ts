@@ -203,9 +203,24 @@ const loadBatchOnce = async (afterId: number, batchSize: number, cutoffTs: strin
 };
 
 /**
+ * Sentinel for the rare "stop arrived during a backoff sleep" path. The
+ * outer loop treats this as a clean stop-break (NOT a failure), so the
+ * run still emits the `stopped` summary log + summary span instead of
+ * `failed` with no totals.
+ */
+class StopRequestedDuringRetry extends Error {
+  constructor() {
+    super('stop requested during loadBatch retry backoff');
+    this.name = 'StopRequestedDuringRetry';
+  }
+}
+
+/**
  * loadBatch with transient-error retry. Honors stopRequested so shutdown
  * isn't blocked by retry backoffs. Exhausting retries throws the most
- * recent error.
+ * recent error. Stop-during-backoff throws a sentinel the outer loop
+ * recognizes as a stop (not a failure), so the run still emits the
+ * stopped summary instead of the failed-with-no-totals shape.
  */
 const loadBatch = async (afterId: number, batchSize: number, cutoffTs: string): Promise<ReenrichRow[]> => {
   for (let attempt = 0; attempt < LOAD_BATCH_MAX_ATTEMPTS; attempt += 1) {
@@ -213,7 +228,8 @@ const loadBatch = async (afterId: number, batchSize: number, cutoffTs: string): 
       return await loadBatchOnce(afterId, batchSize, cutoffTs);
     } catch (error) {
       const isLast = attempt + 1 >= LOAD_BATCH_MAX_ATTEMPTS;
-      if (isLast || stopRequested) throw error;
+      if (stopRequested) throw new StopRequestedDuringRetry();
+      if (isLast) throw error;
       const backoff = LOAD_BATCH_BACKOFF_MS[attempt] ?? LOAD_BATCH_BACKOFF_MS[LOAD_BATCH_BACKOFF_MS.length - 1];
       log('warn', 'load_batch_retry', `loadBatch attempt ${attempt + 1} failed; retrying in ${backoff}ms`, {
         attempt: attempt + 1,
@@ -222,6 +238,7 @@ const loadBatch = async (afterId: number, batchSize: number, cutoffTs: string): 
         error_message: errorMessage(error),
       });
       await stopAwareSleep(backoff);
+      if (stopRequested) throw new StopRequestedDuringRetry();
     }
   }
   // Unreachable: the loop above either returns or throws.
@@ -312,122 +329,175 @@ export const runReenrichment = async (opts: {
   let lastId = 0;
   let batchIndex = 0;
   let stopped = false;
+  let failed: { error: unknown } | null = null;
 
-  outer: while (true) {
-    if (stopRequested) {
-      stopped = true;
-      break;
-    }
+  try {
+    outer: while (true) {
+      if (stopRequested) {
+        stopped = true;
+        break;
+      }
 
-    if (liveActivityLookbackSeconds > 0) {
-      while (await probe(liveActivityLookbackSeconds)) {
+      if (liveActivityLookbackSeconds > 0) {
+        // Wrap the probe SELECT in try/catch so a transient RDS error doesn't
+        // abort the whole run with no summary — same posture as loadBatch's
+        // retry. We don't bother retrying the probe (it's a single buffer
+        // read against a partial index); on failure we log and proceed as
+        // if no activity, deferring to the next batch.
+        let probeActive = false;
+        try {
+          probeActive = await probe(liveActivityLookbackSeconds);
+        } catch (error) {
+          log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+            error_message: errorMessage(error),
+          });
+          captureError(error, 'probe_error');
+        }
+        while (probeActive) {
+          if (stopRequested) {
+            stopped = true;
+            break outer;
+          }
+          log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
+            lookback_seconds: liveActivityLookbackSeconds,
+            pause_ms: liveActivityPauseMs,
+          });
+          await stopAwareSleep(liveActivityPauseMs);
+          try {
+            probeActive = await probe(liveActivityLookbackSeconds);
+          } catch (error) {
+            log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+              error_message: errorMessage(error),
+            });
+            captureError(error, 'probe_error');
+            probeActive = false;
+          }
+        }
         if (stopRequested) {
           stopped = true;
-          break outer;
+          break;
         }
-        log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
-          lookback_seconds: liveActivityLookbackSeconds,
-          pause_ms: liveActivityPauseMs,
-        });
-        await stopAwareSleep(liveActivityPauseMs);
       }
-      if (stopRequested) {
-        stopped = true;
+
+      let rows: ReenrichRow[];
+      try {
+        rows = await loadBatch(lastId, batchSize, cutoffTs);
+      } catch (error) {
+        if (error instanceof StopRequestedDuringRetry) {
+          // Treat as a clean stop — summary span + structured log still emit.
+          stopped = true;
+          break;
+        }
+        // Sustained DB outage exhausted the retry budget. Capture so the
+        // finally arm still emits the summary span + log with last_id,
+        // enabling resume-from-last_id from the structured logs.
+        failed = { error };
         break;
       }
-    }
+      if (rows.length === 0) break;
 
-    const rows = await loadBatch(lastId, batchSize, cutoffTs);
-    if (rows.length === 0) break;
+      batchIndex += 1;
+      const batchStart = Date.now();
+      // Snapshot totals before the batch so per-batch counters can be
+      // derived without a parallel batchTotals object (round 3 cleanup).
+      const before = { ...totals };
 
-    batchIndex += 1;
-    const batchStart = Date.now();
-    // Snapshot totals before the batch so per-batch counters can be
-    // derived without a parallel batchTotals object (round 3 cleanup).
-    const before = { ...totals };
-
-    for (const row of rows) {
-      const outcome = await processRow(row, deps);
-      totals.scanned += 1;
-      totals[outcome] += 1;
-      if (outcome === 'match_raced') {
-        if (matchRacedIds.length < MATCH_RACED_SAMPLE) matchRacedIds.push(row.id);
-        else matchRacedTruncatedCount += 1;
+      for (const row of rows) {
+        const outcome = await processRow(row, deps);
+        totals.scanned += 1;
+        totals[outcome] += 1;
+        if (outcome === 'match_raced') {
+          if (matchRacedIds.length < MATCH_RACED_SAMPLE) matchRacedIds.push(row.id);
+          else matchRacedTruncatedCount += 1;
+        }
+        lastId = row.id;
+        // Stop check between rows (round 3): with batch_size=100 and ~3s/row
+        // a batch can take ~5 min — far beyond docker's 10s default grace.
+        // Per-row check keeps the README's "finishes its in-flight row" claim
+        // honest.
+        if (stopRequested) {
+          stopped = true;
+          break;
+        }
       }
-      lastId = row.id;
-      // Stop check between rows (round 3): with batch_size=100 and ~3s/row
-      // a batch can take ~5 min — far beyond docker's 10s default grace.
-      // Per-row check keeps the README's "finishes its in-flight row" claim
-      // honest.
-      if (stopRequested) {
-        stopped = true;
-        break;
-      }
+
+      log('info', 'batch_done', `batch ${batchIndex} done`, {
+        batch_index: batchIndex,
+        wall_clock_ms: Date.now() - batchStart,
+        last_id: lastId,
+        // Per-batch deltas (round 3): derived from the pre-batch snapshot so
+        // there's no parallel counter to keep in sync.
+        scanned: totals.scanned - before.scanned,
+        match: totals.match - before.match,
+        match_raced: totals.match_raced - before.match_raced,
+        still_no_match: totals.still_no_match - before.still_no_match,
+        lml_error: totals.lml_error - before.lml_error,
+        db_error: totals.db_error - before.db_error,
+        flipped: totals.match - before.match,
+        // Cumulative scanned for progress monitoring.
+        total_scanned: totals.scanned,
+      });
+
+      if (stopped) break;
     }
+  } finally {
+    const flipped = totals.match;
 
-    log('info', 'batch_done', `batch ${batchIndex} done`, {
-      batch_index: batchIndex,
-      wall_clock_ms: Date.now() - batchStart,
-      last_id: lastId,
-      // Per-batch deltas (round 3): derived from the pre-batch snapshot so
-      // there's no parallel counter to keep in sync.
-      scanned: totals.scanned - before.scanned,
-      match: totals.match - before.match,
-      match_raced: totals.match_raced - before.match_raced,
-      still_no_match: totals.still_no_match - before.still_no_match,
-      lml_error: totals.lml_error - before.lml_error,
-      db_error: totals.db_error - before.db_error,
-      flipped: totals.match - before.match,
-      // Cumulative scanned for progress monitoring.
-      total_scanned: totals.scanned,
-    });
-
-    if (stopped) break;
-  }
-
-  const flipped = totals.match;
-
-  // Summary span carrying numeric attributes (BS#1081 typing-trap workaround).
-  // Note: span is sampled by Sentry's tracesSampleRate; for guaranteed
-  // delivery the structured log line below carries the same numbers.
-  Sentry.startSpan(
-    {
-      name: 'reenrichment.run.summary',
-      attributes: {
-        'reenrichment.flipped_count': flipped,
-        'reenrichment.still_no_match_count': totals.still_no_match,
-        'reenrichment.match_raced_count': totals.match_raced,
-        'reenrichment.lml_error_count': totals.lml_error,
-        'reenrichment.db_error_count': totals.db_error,
-        'reenrichment.scanned_count': totals.scanned,
-        'reenrichment.stopped': stopped,
+    // Summary span carrying numeric attributes (BS#1081 typing-trap workaround).
+    // Always emitted — even on stop/fail — so partial-run telemetry is
+    // available in Sentry trace explorer.
+    Sentry.startSpan(
+      {
+        name: 'reenrichment.run.summary',
+        attributes: {
+          'reenrichment.flipped_count': flipped,
+          'reenrichment.still_no_match_count': totals.still_no_match,
+          'reenrichment.match_raced_count': totals.match_raced,
+          'reenrichment.lml_error_count': totals.lml_error,
+          'reenrichment.db_error_count': totals.db_error,
+          'reenrichment.scanned_count': totals.scanned,
+          'reenrichment.last_id': lastId,
+          'reenrichment.stopped': stopped,
+          'reenrichment.failed': failed !== null,
+        },
       },
-    },
-    () => {
-      /* attributes set at creation; nothing else to do */
+      () => {
+        /* attributes set at creation */
+      }
+    );
+
+    if (totals.match_raced > 0) {
+      log(
+        'warn',
+        'match_raced_summary',
+        `${totals.match_raced} rows raced; run README post-run audit SQL to enumerate`,
+        {
+          match_raced_count: totals.match_raced,
+          sample_ids: matchRacedIds,
+          truncated_count: matchRacedTruncatedCount,
+        }
+      );
     }
-  );
 
-  // Match-raced summary (round 3): replaces the per-row warn log with one
-  // bounded sample at run end so the runbook can cross-reference the audit
-  // SQL without per-row stdout amplification.
-  if (totals.match_raced > 0) {
-    log('warn', 'match_raced_summary', `${totals.match_raced} rows raced; run README post-run audit SQL to enumerate`, {
-      match_raced_count: totals.match_raced,
-      sample_ids: matchRacedIds,
-      truncated_count: matchRacedTruncatedCount,
+    // Distinct steps so the runbook's jq filter can differentiate:
+    //   - 'finished' — drain ran to completion (empty batch)
+    //   - 'stopped'  — SIGTERM caused a clean early break
+    //   - 'failed'   — uncaught exception; the structured log still
+    //                  carries last_id so the operator can resume.
+    const step = failed ? 'failed' : stopped ? 'stopped' : 'finished';
+    const level = failed ? 'error' : 'info';
+    log(level, step, `${JOB_NAME} ${step}`, {
+      ...totals,
+      flipped,
+      last_id: lastId,
+      stopped,
+      failed: failed !== null,
+      ...(failed ? { error_message: errorMessage(failed.error) } : {}),
     });
+    if (failed) {
+      captureError(failed.error, 'failed', { last_id: lastId, scanned: totals.scanned, flipped });
+    }
   }
-
-  // Round 3: use a distinct `step` on early break so the runbook's jq
-  // `select(.step=="finished")` filter doesn't mis-report partial totals
-  // as a completed run.
-  log('info', stopped ? 'stopped' : 'finished', `${JOB_NAME} ${stopped ? 'stopped' : 'done'}`, {
-    ...totals,
-    flipped,
-    last_id: lastId,
-    stopped,
-  });
-
+  const flipped = totals.match;
   return { totals, flipped, stopped };
 };

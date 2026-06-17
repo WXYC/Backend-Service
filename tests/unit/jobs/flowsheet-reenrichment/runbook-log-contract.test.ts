@@ -123,6 +123,65 @@ describe('runbook log contract — batch_done', () => {
   });
 });
 
+describe('runbook log contract — db_error / match_raced field pinning (round 4)', () => {
+  it('batch_done emits db_error and match_raced as numeric fields', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ response: matchedResponse, cacheHit: false });
+    // db_error path: enrich throws → counted as db_error
+    const enrich = jest.fn<EnrichFn>().mockRejectedValueOnce(new Error('pg blip'));
+
+    const stdoutLines = captureJson('stdout');
+    await runReenrichment({ lookup, enrich, cutoffTs: CUTOFF, batchSize: 10, liveActivityLookbackSeconds: 0 });
+
+    const rec = stdoutLines.find((l) => l.step === 'batch_done');
+    expect(typeof rec?.db_error).toBe('number');
+    expect(typeof rec?.match_raced).toBe('number');
+    expect(rec?.db_error).toBe(1);
+  });
+
+  it('finished log carries match_raced, db_error, last_id, and stopped fields', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(7)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ response: matchedResponse, cacheHit: false });
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    const stdoutLines = captureJson('stdout');
+    await runReenrichment({ lookup, enrich, cutoffTs: CUTOFF, batchSize: 10, liveActivityLookbackSeconds: 0 });
+
+    const finished = stdoutLines.find((l) => l.step === 'finished');
+    expect(typeof finished?.match_raced).toBe('number');
+    expect(typeof finished?.db_error).toBe('number');
+    expect(typeof finished?.last_id).toBe('number');
+    expect(typeof finished?.stopped).toBe('boolean');
+    expect(finished?.last_id).toBe(7); // resume cursor
+    expect(finished?.stopped).toBe(false);
+  });
+});
+
+describe('runbook log contract — failed step (round 4)', () => {
+  it('emits step=failed with last_id when loadBatch exhausts retries', async () => {
+    const err = new Error('sustained outage');
+    (db.execute as jest.Mock).mockRejectedValueOnce(err).mockRejectedValueOnce(err).mockRejectedValueOnce(err);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ response: noMatchResponse, cacheHit: false });
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');
+
+    const stdoutLines = captureJson('stdout');
+    const stderrLines = captureJson('stderr');
+    await runReenrichment({ lookup, enrich, cutoffTs: CUTOFF, batchSize: 100, liveActivityLookbackSeconds: 0 });
+
+    const failed = [...stdoutLines, ...stderrLines].find((l) => l.step === 'failed');
+    expect(failed).toBeDefined();
+    expect(failed?.failed).toBe(true);
+    expect(failed?.error_message).toMatch(/sustained outage/);
+    expect(typeof failed?.last_id).toBe('number');
+    expect(typeof failed?.scanned).toBe('number');
+    // Runbook's jq filter must include 'failed' alongside finished/stopped
+    // so the operator can extract last_id for resume after a sustained outage.
+  }, 30_000);
+});
+
 describe('runbook log contract — stopped step (round 3)', () => {
   it('emits step=stopped (not finished) on SIGTERM-induced early break', async () => {
     const { requestStop, __resetStopForTesting } = await import('../../../../jobs/flowsheet-reenrichment/orchestrate');

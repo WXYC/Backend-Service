@@ -61,13 +61,22 @@ WHERE metadata_status = 'enriched_no_match'
 gh workflow run deploy-manual.yml --ref main \
   -f target=flowsheet-reenrichment -f version=latest
 
-# 2. SSH to EC2 and run. `--name` is load-bearing — the kill-switch below
-# greps it; without it docker assigns a random name and `docker stop` fails.
+# 2. SSH to EC2 and run. Tee logs to a file BEFORE relying on `docker
+# logs` for the post-run summary — `--rm` auto-removes the container on
+# exit, after which `docker logs flowsheet-reenrichment` returns "No
+# such container" and the structured `finished`/`stopped` summary is
+# unrecoverable. The tee'd file persists across container teardown.
+#
+# `--name` is load-bearing for the kill-switch below; without it docker
+# assigns a random name and `docker stop flowsheet-reenrichment` fails.
 ssh wxyc-ec2
 docker run --rm --name flowsheet-reenrichment --env-file .env \
   -e BACKFILL_CUTOFF_TS='2026-06-16T17:53:53Z' \
-  <ECR-URI>/flowsheet-reenrichment:<tag>
+  <ECR-URI>/flowsheet-reenrichment:<tag> 2>&1 \
+  | tee /tmp/flowsheet-reenrichment-$(date +%Y%m%d-%H%M%S).log
 ```
+
+> **Note on env-var read timing**: `lml-fetch.ts` reads `BACKFILL_LML_PER_CALL_TIMEOUT_MS` and `lml-limiter.ts` reads `BACKFILL_LML_MAX_CONCURRENT` / `BACKFILL_LML_RATE_PER_MIN` at module-load time. The `--env-file .env` pattern above passes env vars to the container's PID 1 (Node) so they're visible before any module loads. Do NOT export env vars from inside the container after start — they'll be silently ignored.
 
 ## Pacing & wall-clock estimate
 
@@ -90,15 +99,16 @@ Monitor real-time LML p95 via Sentry trace explorer; stay within +20% of baselin
 
 ## Post-run
 
-1. **Source the flip count** from the `finished` (or `stopped`) log line. The `fromjson?` trick makes jq tolerant of any non-JSON lines (the `console.warn` env-validation lines from lml-fetch / lml-limiter would otherwise crash a raw jq invocation):
+1. **Source the flip count** from the `finished` / `stopped` / `failed` summary log line. `-R` (raw input) is required for `fromjson?` to skip non-JSON lines safely — the `console.warn` env-validation lines from lml-fetch / lml-limiter would otherwise crash a default-mode jq invocation:
 
    ```bash
-   docker logs flowsheet-reenrichment 2>&1 | \
-     jq -r 'fromjson? | select(.step=="finished" or .step=="stopped") |
+   # Read from the tee'd file (preferred — survives --rm container removal)
+   cat /tmp/flowsheet-reenrichment-*.log | \
+     jq -rR 'fromjson? | select(.step=="finished" or .step=="stopped" or .step=="failed") |
        "step=\(.step) scanned=\(.scanned) flipped=\(.flipped) match_raced=\(.match_raced) still_no_match=\(.still_no_match) lml_error=\(.lml_error) db_error=\(.db_error) last_id=\(.last_id)"'
    ```
 
-   If `step=stopped`, the run did NOT complete the cohort — re-run it to drain the remainder (the WHERE filter is idempotent against rows the run already flipped). Document the totals from the final completed run as a comment on BS#1433.
+   If `step=stopped` or `step=failed`, the run did NOT complete the cohort. Re-run it to drain the remainder (the WHERE filter is idempotent against rows the run already flipped); the `last_id` field from the partial run is the resume cursor (the next run's first SELECT will skip everything `id ≤ last_id`). Document the totals from the final completed run as a comment on BS#1433.
 
 2. **Linkage-race audit**: a parallel linkage resolver can flip `album_id` non-null between the orchestrator's SELECT and `reenrichRow`'s UPDATE, which the WHERE guard then skips (counted as `match_raced`). The audit SQL below catches every such orphan — a row with `album_id` non-null AND `metadata_status='enriched_no_match'` AND `artist_name IS NOT NULL` AND `add_time < cutoff`. Without rescue, no automated path revisits these rows; the run also emits one `match_raced_summary` log line with a bounded sample of IDs to cross-reference.
 
