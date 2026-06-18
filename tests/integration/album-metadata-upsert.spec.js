@@ -20,6 +20,14 @@
  *   4. catch-arm conflict-do-nothing: a search-URL fallback INSERT against
  *      an album_id that already has a fully-enriched row leaves the existing
  *      payload intact (no clobber of artwork_url / discogs_url / etc.).
+ *   5. BS#1336 extended columns: the 8 LML-only columns the worker added to
+ *      its match payload (discogs_artist_id, label, full_release_date,
+ *      genres/styles as `text[]`, tracklist/bio_tokens as `jsonb`,
+ *      artist_image_url) round-trip through real PG — arrays come back as JS
+ *      arrays, jsonb comes back parsed (the read path spreads/projects them).
+ *
+ * (Coverage 1-4 above predate BS#1336 and describe the 10-column base
+ * payload; the worker's match payload is now 18 columns — see #5.)
  *
  * Pure SQL — does NOT import `apps/enrichment-worker/enrich.ts` or
  * `apps/backend/services/metadata/enrichment.service.ts`. The integration
