@@ -1,0 +1,24 @@
+name: code-audit (PR comment)
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# The reusable workflow declares these same permissions internally, but a
+# job-level grant here is still required: reusable-workflow permissions are
+# an UPPER BOUND, never an additive grant. marocchino needs pull-requests:write
+# to post / edit the sticky comment.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  audit:
+    # Pinned to v0.3.3 (latest stable as of wiring). Bump to @v1 once the
+    # pipeline cuts a v1.0.0 release — at that point both this ref and the
+    # audit-binary-version input can move to floating major pins.
+    uses: jakebromberg/code-audit-pipeline/.github/workflows/pr-comment-reusable.yml@v0.3.3
+    with:
+      audit-binary-version: v0.3.3
