@@ -673,6 +673,46 @@ describe('proxy.controller', () => {
         });
       });
 
+      it('omits empty-string label/fullReleaseDate (parity with the local-hit branch, BS#1336)', async () => {
+        // The cold branch uses `|| undefined` (not `?? undefined`) so an
+        // empty-string label/date is omitted, not emitted as "". This keeps
+        // it byte-identical to buildLocalMetadataResponse's `if (persisted.x)`
+        // truthy guard for the empty-string case.
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: { id: 1, title: 'Album', artist: 'Artist', call_number: '', library_url: '' },
+              artwork: {
+                release_id: 7,
+                release_url: 'https://www.discogs.com/release/7',
+                artwork_url: 'https://i.discogs.com/a.jpg',
+                album: 'Album',
+                artist: 'Artist',
+                confidence: 0.9,
+                label: '',
+                full_release_date: '',
+              },
+            },
+          ],
+          search_type: 'direct',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = { query: { artistName: 'Artist', releaseTitle: 'Album' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        // Parity is about the serialized wire output: `|| undefined` leaves the
+        // value undefined, which JSON.stringify drops — matching the local
+        // branch's omitted key. Assert via round-tripped JSON, not the
+        // in-memory object (which carries the key with an undefined value).
+        const wire = JSON.parse(JSON.stringify((res.json as jest.Mock).mock.calls[0][0]));
+        expect('label' in wire).toBe(false);
+        expect('fullReleaseDate' in wire).toBe(false);
+      });
+
       it('falls back to search URLs when LML lookup returns empty results', async () => {
         mockLookupMetadata.mockResolvedValue({
           results: [],

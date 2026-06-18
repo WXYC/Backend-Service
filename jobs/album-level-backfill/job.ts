@@ -220,10 +220,19 @@ export const buildBulkItems = (albums: ResolvedAlbum[]): BulkLookupItem[] =>
 // -- album_metadata UPSERT ---------------------------------------------------
 
 /** Extract the top-1 artwork from a LookupResponse and UPSERT into
- * album_metadata. Mirrors the linked+match branch of
- * jobs/flowsheet-metadata-backfill/enrich.ts (lines 161-198) verbatim,
- * minus the marker-stamp on flowsheet (the post-pass UPDATE handles that
- * in bulk).
+ * album_metadata. Mirrors the *10-column* linked+match branch of
+ * jobs/flowsheet-metadata-backfill/enrich.ts (lines 161-198), minus the
+ * marker-stamp on flowsheet (the post-pass UPDATE handles that in bulk).
+ *
+ * BS#1336 NOTE: the enrichment-worker (apps/enrichment-worker/enrich.ts) now
+ * writes 8 additional LML-only columns (discogs_artist_id, label,
+ * full_release_date, genres, styles, tracklist, artist_image_url, bio_tokens)
+ * on its linked+match UPSERT. This job intentionally does NOT (it can't —
+ * `bulkLookupMetadata` has no `extended` flag yet; tracked in BS#1442). This
+ * is SAFE because the `set` clause below omits those 8 columns, so a backfill
+ * UPSERT against a worker-enriched row PRESERVES them (never clobbers). DO NOT
+ * add the 8 columns to the `set` clause without also sourcing them via
+ * `extended: true` — adding them as nulls would clobber the worker's writes.
  *
  * Returns `true` if a row was attempted to be written (the UPSERT itself
  * is race-guarded by `updated_at < NOW()`; postgres-js doesn't surface
