@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, rotation, library, truncate, user } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
 import { mapProdEntryType, isMessageEntryType, type BackendEntryType } from '../utils/flowsheet-transform.js';
@@ -207,7 +207,8 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // joining guest. Same known limitation as flowsheet-dj-name-backfill;
       // the live createJoinNotification path is the only one that gets
       // guest attribution right today.
-      const markerDjName = MARKER_ENTRY_TYPES.has(entryType) ? normalizeMarkerName(show?.dj_name) : null;
+      const resolvedShowName = normalizeMarkerName(show?.dj_name);
+      const markerDjName = MARKER_ENTRY_TYPES.has(entryType) ? resolvedShowName : null;
 
       // INSERT ... ON CONFLICT DO NOTHING RETURNING { id }: either we win
       // the insert and PG hands back exactly one row, or a concurrent
@@ -277,6 +278,40 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           refresh.dj_name = markerDjName;
         }
         await db.update(flowsheet).set(refresh).where(eq(flowsheet.legacy_entry_id, entry.id));
+      }
+
+      // Sibling-marker heal (BS#1444 — residual of BS#1371).
+      //
+      // The conflict path above only heals the SAME `legacy_entry_id`, but a
+      // `show_start` is the FIRST entry of a show, so when it arrives
+      // `resolveShow` has only just created the stub `shows` row — no
+      // `legacy_dj_name` yet — and the marker lands with dj_name=NULL (see the
+      // `ResolvedShow.dj_name` docstring). Tubafrenzy never re-delivers that
+      // create event, the periodic ETL's resolveDjNames only re-resolves ids
+      // it bulk-fetched, and `flowsheet-dj-name-backfill` is one-shot — so
+      // nothing ever fills the show_start once `shows.legacy_dj_name` lands.
+      // Net effect: every new tubafrenzy show renders a nameless "signed on"
+      // on the v2 wire until sign-off.
+      //
+      // Fix: whenever ANY later webhook entry for the show resolves a non-null
+      // name, backfill that show's still-NULL marker rows. Firing on every
+      // entry (incl. tracks) heals a live show's show_start at the next track
+      // add after the ETL fills the name — minutes, not at sign-off. Scoped to
+      // `MARKER_ENTRY_TYPES` + `dj_name IS NULL`, so track rows (own population
+      // path) and already-resolved markers are never touched. Index-backed by
+      // `flowsheet_show_id_idx`; once a show is healed the predicate matches
+      // zero rows, so steady-state deliveries pay only an empty index probe.
+      if (resolvedShowName !== null && showId !== null) {
+        await db
+          .update(flowsheet)
+          .set({ dj_name: resolvedShowName })
+          .where(
+            and(
+              eq(flowsheet.show_id, showId),
+              isNull(flowsheet.dj_name),
+              inArray(flowsheet.entry_type, [...MARKER_ENTRY_TYPES])
+            )
+          );
       }
     }
 
