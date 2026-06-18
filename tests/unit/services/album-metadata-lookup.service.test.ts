@@ -237,7 +237,7 @@ describe('album-metadata-lookup.service', () => {
           styles: ['Folk', 'Indie Rock'],
           tracklist: [{ position: '1', title: 'la paradoja', duration: '4:12' }],
           artist_image_url: 'https://i.discogs.com/artist/juana.jpg',
-          bio_tokens: [{ type: 'text', value: 'Argentine musician' }],
+          bio_tokens: [{ type: 'plainText', text: 'Argentine musician' }],
         },
       ]);
       const result = await lookupAlbumMetadataByKey('Juana Molina', 'DOGA');
@@ -248,7 +248,7 @@ describe('album-metadata-lookup.service', () => {
       expect(result?.styles).toEqual(['Folk', 'Indie Rock']);
       expect(result?.tracklist).toEqual([{ position: '1', title: 'la paradoja', duration: '4:12' }]);
       expect(result?.artist_image_url).toBe('https://i.discogs.com/artist/juana.jpg');
-      expect(result?.bio_tokens).toEqual([{ type: 'text', value: 'Argentine musician' }]);
+      expect(result?.bio_tokens).toEqual([{ type: 'plainText', text: 'Argentine musician' }]);
     });
 
     it('catch-arm-shape row (YT/BC/SC populated, others null) is returned faithfully — caller decides synthesis', async () => {
