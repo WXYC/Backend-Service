@@ -26,6 +26,15 @@
  * invariant. Borrow the album_metadata UPSERT shape from the worker; do
  * NOT borrow its status-based guard.
  *
+ * BS#1336 NOTE: the worker now writes 8 additional LML-only columns
+ * (discogs_artist_id, label, full_release_date, genres, styles, tracklist,
+ * artist_image_url, bio_tokens) on its linked+match UPSERT. This job stays at
+ * the 10-column shape for now (extending it needs `extended: true` on the
+ * lookup; tracked in BS#1442). SAFE because the `set` clause omits those 8
+ * columns → a backfill UPSERT preserves any worker-written values, never
+ * clobbers. DO NOT add them to `set` as nulls without sourcing them via
+ * `extended: true`, or the backfill would clobber the worker's writes.
+ *
  * Spacer.gif filter + Discogs bio cleanup: imported from `@wxyc/metadata`
  * (BS#1242 deep-module rollout). The shared module is build-graph-safe for
  * jobs; replaces the inline duplicates previously pinned by parity tests.
