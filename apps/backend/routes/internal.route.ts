@@ -315,7 +315,10 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // SELECT fires no trigger, so we read first and issue the watermark-
       // touching UPDATE only when a marker is actually unhealed — at most once
       // per show, after which every later delivery pays only the read. Both
-      // queries are index-backed by `flowsheet_show_id_idx`.
+      // queries are index-backed by `flowsheet_show_id_idx`. (Two deliveries
+      // for the same show can still race between probe and UPDATE and fire one
+      // bounded spurious bump before the marker is healed; correctness is
+      // unaffected — the UPDATE re-checks `dj_name IS NULL`.)
       if (resolvedShowName !== null && showId !== null) {
         const unhealedMarkerWhere = and(
           eq(flowsheet.show_id, showId),
