@@ -748,6 +748,12 @@ export const flowsheet = wxyc_schema.table(
     message: varchar('message', { length: 250 }),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
+    // Exact top-of-hour a breakpoint marks (tubafrenzy RADIO_HOUR), distinct from
+    // add_time — the row's logging instant, ~1 min before the hour. Nullable: only
+    // breakpoint rows populate it, and NULL until backfilled. Serialized onto V2
+    // breakpoint entries so clients render the hour-marker label from the real hour
+    // instead of flooring add_time across the boundary (#1448 / #1449).
+    radio_hour: timestamp('radio_hour', { withTimezone: true }),
     // BS#902 (Epic F / F1). Per-row mutation timestamp. Bumped by the
     // BEFORE INSERT OR UPDATE trigger (`bump_flowsheet_updated_at`,
     // migration 0084), so every write — including the enrichment-worker
