@@ -23,6 +23,10 @@ const MARKER_ENTRY_TYPES: ReadonlySet<BackendEntryType> = new Set<BackendEntryTy
   'dj_leave',
 ]);
 
+// Materialized once for `inArray(...)` in the sibling-marker heal below — avoids
+// re-spreading the Set into an array on every webhook delivery.
+const MARKER_ENTRY_TYPE_LIST: BackendEntryType[] = [...MARKER_ENTRY_TYPES];
+
 export const internal_route = Router();
 
 /**
@@ -293,25 +297,40 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // Net effect: every new tubafrenzy show renders a nameless "signed on"
       // on the v2 wire until sign-off.
       //
-      // Fix: whenever ANY later webhook entry for the show resolves a non-null
-      // name, backfill that show's still-NULL marker rows. Firing on every
-      // entry (incl. tracks) heals a live show's show_start at the next track
-      // add after the ETL fills the name — minutes, not at sign-off. Scoped to
-      // `MARKER_ENTRY_TYPES` + `dj_name IS NULL`, so track rows (own population
-      // path) and already-resolved markers are never touched. Index-backed by
-      // `flowsheet_show_id_idx`; once a show is healed the predicate matches
-      // zero rows, so steady-state deliveries pay only an empty index probe.
-      if (resolvedShowName !== null && showId !== null) {
-        await db
-          .update(flowsheet)
-          .set({ dj_name: resolvedShowName })
-          .where(
-            and(
-              eq(flowsheet.show_id, showId),
-              isNull(flowsheet.dj_name),
-              inArray(flowsheet.entry_type, [...MARKER_ENTRY_TYPES])
-            )
-          );
+      // Fix: on the FIRST delivery of an entry whose show now resolves a name,
+      // backfill that show's still-NULL marker rows. A live show's show_start
+      // heals at the next track add after the ETL fills the name — minutes, not
+      // at sign-off — and the show_end heals itself / its siblings at sign-off.
+      // Scoped to `MARKER_ENTRY_TYPES` + `dj_name IS NULL`, so track rows (own
+      // population path) and already-resolved markers are never touched.
+      //
+      // Two deliberate gates keep this off the hot path:
+      //   1. `created` only — a re-delivery / tubafrenzy edit can't introduce a
+      //      new unhealed sibling (marker rows are created on their own first
+      //      delivery), and a re-delivered marker self-heals via the conflict
+      //      branch above. This skips the high-frequency edit-churn path.
+      //   2. Probe-before-write — a bare UPDATE that matches zero rows still
+      //      fires the STATEMENT-level `flowsheet_watermark` trigger (migration
+      //      0084), ratcheting the conditional-GET watermark +1s and thrashing
+      //      iOS/dj-site pollers (the very churn BS#902/Epic F's watermark
+      //      exists to prevent). A SELECT fires no trigger, so we read first and
+      //      issue the watermark-touching UPDATE only when a marker is actually
+      //      unhealed — at most once per show. Both queries are index-backed by
+      //      `flowsheet_show_id_idx`.
+      if (created && resolvedShowName !== null && showId !== null) {
+        const unhealedMarkerWhere = and(
+          eq(flowsheet.show_id, showId),
+          isNull(flowsheet.dj_name),
+          inArray(flowsheet.entry_type, MARKER_ENTRY_TYPE_LIST)
+        );
+        const [unhealedMarker] = await db
+          .select({ id: flowsheet.id })
+          .from(flowsheet)
+          .where(unhealedMarkerWhere)
+          .limit(1);
+        if (unhealedMarker) {
+          await db.update(flowsheet).set({ dj_name: resolvedShowName }).where(unhealedMarkerWhere);
+        }
       }
     }
 
