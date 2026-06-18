@@ -1123,6 +1123,26 @@ export const album_metadata = wxyc_schema.table('album_metadata', {
   soundcloud_url: varchar('soundcloud_url', { length: 512 }),
   artist_bio: text('artist_bio'),
   artist_wikipedia_url: varchar('artist_wikipedia_url', { length: 512 }),
+  // LML-only enrichment fields (BS#1336). These ride on the top-1
+  // `DiscogsMatchResult` only when the originating lookup sets `extended:
+  // true`; the enrichment-worker now forces it (handler.ts). Cold
+  // `/proxy/metadata/album` fallthrough already wired these into the
+  // response; persisting them here lets the BS#1331 cache-first path emit
+  // the same artist+release subtree on a hit instead of shedding it.
+  // `discogs_artist_id` is the external Discogs artist id (not an FK to
+  // `artists`); the artist sub-panel on dj-site / iOS V1 gates on it.
+  // `bio_tokens` is the persisted name for LML's `profile_tokens` (iOS's
+  // `bioTokens`). `tracklist` / `bio_tokens` stay untyped jsonb here
+  // (matching the existing `raw_data` column) and are typed at the read
+  // boundary in `album-metadata-lookup.service.ts`.
+  discogs_artist_id: integer('discogs_artist_id'),
+  label: varchar('label', { length: 255 }),
+  full_release_date: varchar('full_release_date', { length: 32 }),
+  genres: text('genres').array(),
+  styles: text('styles').array(),
+  tracklist: jsonb('tracklist'),
+  artist_image_url: varchar('artist_image_url', { length: 512 }),
+  bio_tokens: jsonb('bio_tokens'),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
 

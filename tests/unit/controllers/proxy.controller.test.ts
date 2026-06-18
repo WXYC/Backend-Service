@@ -870,6 +870,123 @@ describe('proxy.controller', () => {
         expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');
       });
 
+      it('emits the 8 LML-only fields on a local hit, matching the cold extended-mode shape (BS#1336)', async () => {
+        // Pre-1336, a cache hit shed genres/styles/label/fullReleaseDate/
+        // tracklist/artistImageUrl/bioTokens/discogsArtistId — the cold
+        // LML-fallthrough returned them, a hit omitted them. Now the worker
+        // persists them and this branch emits them with the same conventions
+        // as `populateReleaseMetadata` + `populateCommonMetadataFields`.
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: 'https://i.discogs.com/art.jpg',
+          discogs_url: 'https://www.discogs.com/release/12345',
+          release_year: 2001,
+          spotify_url: 'https://open.spotify.com/album/abc',
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+          discogs_artist_id: 3840,
+          label: 'Warp',
+          full_release_date: '2001-04-30',
+          genres: ['Electronic'],
+          styles: ['IDM', 'Abstract'],
+          tracklist: [
+            { position: '1', title: 'VI Scose Poise', duration: '6:45' },
+            { position: '2', title: 'Cfern', duration: '7:01' },
+          ],
+          artist_image_url: 'https://i.discogs.com/artist.jpg',
+          bio_tokens: [{ type: 'text', value: 'Sheffield electronic duo' }],
+        });
+
+        const req = {
+          query: { artistName: 'Autechre', releaseTitle: 'Confield' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        // Property-for-property with the extended-mode (cold) test above.
+        expect(result.discogsArtistId).toBe(3840);
+        expect(result.genres).toEqual(['Electronic']);
+        expect(result.styles).toEqual(['IDM', 'Abstract']);
+        expect(result.label).toBe('Warp');
+        expect(result.fullReleaseDate).toBe('2001-04-30');
+        expect(result.tracklist).toEqual([
+          { position: '1', title: 'VI Scose Poise', duration: '6:45' },
+          { position: '2', title: 'Cfern', duration: '7:01' },
+        ]);
+        expect(result.artistImageUrl).toBe('https://i.discogs.com/artist.jpg');
+        expect(result.bioTokens).toEqual([{ type: 'text', value: 'Sheffield electronic duo' }]);
+      });
+
+      it('discogsArtistId parity: present-as-null on a match-shaped row, omitted on a no-match-shaped row (BS#1336)', async () => {
+        // The cold LML *match* branch always emits `discogsArtistId` (`?? null`);
+        // its *no-match* branch emits neither artwork nor discogsArtistId. The
+        // local branch mirrors both: gated on `discogs_url` (the match-shape
+        // marker), so a match row with a null artist id still carries the key.
+        mockLookupAlbumMetadataByKey.mockResolvedValueOnce({
+          artwork_url: 'https://i.discogs.com/art.jpg',
+          discogs_url: 'https://www.discogs.com/release/55',
+          release_year: 2019,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+          discogs_artist_id: null,
+          label: null,
+          full_release_date: null,
+          genres: null,
+          styles: null,
+          tracklist: null,
+          artist_image_url: null,
+          bio_tokens: null,
+        });
+
+        const reqMatch = { query: { artistName: 'Match', releaseTitle: 'Shaped' } } as unknown as Request;
+        const resMatch = createMockRes();
+        await getAlbumMetadata(reqMatch, resMatch as Response, mockNext);
+        const matchResult = (resMatch.json as jest.Mock).mock.calls[0][0];
+        // Key present, value literal null — matches the cold match branch.
+        expect('discogsArtistId' in matchResult).toBe(true);
+        expect(matchResult.discogsArtistId).toBeNull();
+
+        // No-match-shaped row: discogs_url null (the no-match UPSERT writes only
+        // search URLs), so discogsArtistId is omitted like the cold no-match.
+        mockLookupAlbumMetadataByKey.mockResolvedValueOnce({
+          artwork_url: null,
+          discogs_url: null,
+          release_year: null,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: 'https://music.youtube.com/search?q=x',
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+          discogs_artist_id: null,
+          label: null,
+          full_release_date: null,
+          genres: null,
+          styles: null,
+          tracklist: null,
+          artist_image_url: null,
+          bio_tokens: null,
+        });
+
+        const reqNoMatch = { query: { artistName: 'NoMatch', releaseTitle: 'Shaped' } } as unknown as Request;
+        const resNoMatch = createMockRes();
+        await getAlbumMetadata(reqNoMatch, resNoMatch as Response, mockNext);
+        const noMatchResult = (resNoMatch.json as jest.Mock).mock.calls[0][0];
+        expect('discogsArtistId' in noMatchResult).toBe(false);
+      });
+
       it('catch-arm-shape row: persisted YT/BC/SC win, missing Apple/Spotify synthesized at request time (no LML)', async () => {
         // BS#873 catch arm at enrichment.service.ts writes only the three
         // synth-able streaming URLs on LML failure (no Apple, no Spotify,

@@ -185,6 +185,25 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });
 
+  it('requests extended LML fields so finalizeRow can persist the BS#1336 columns', async () => {
+    // The worker is the canonical album_metadata writer (Epic C). Without
+    // `extended: true` the top-1 artwork block omits genres/styles/tracklist/
+    // label/full_release_date/discogs_artist_id/artist_image_url/profile_tokens
+    // and finalizeRow would persist nulls — silently re-opening the BS#1331
+    // cache-hit shape gap this ticket closes.
+    mockLookupMetadata.mockResolvedValueOnce(matchResponseWithArtwork);
+    mockFinalizeRow.mockResolvedValueOnce('enriched_match');
+
+    await driveOneTick();
+
+    expect(mockLookupMetadata).toHaveBeenCalledWith(
+      'Juana Molina',
+      'DOGA',
+      'la paradoja',
+      expect.objectContaining({ extended: true, caller: 'enrichment-worker' })
+    );
+  });
+
   it('does NOT fire captureMessage on lml_match (artwork_url present)', async () => {
     // Sanity: the happy path stays silent. extractArtwork sees a populated
     // artwork_url so isEmptyOutcome returns false.
