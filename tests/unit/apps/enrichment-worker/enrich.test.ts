@@ -90,7 +90,7 @@ const extendedMatchResponse = {
         styles: ['Folk', 'Indie Rock'],
         tracklist: [{ position: '1', title: 'la paradoja', duration: '4:12' }],
         artist_image_url: 'https://i.discogs.com/artist/juana.jpg',
-        profile_tokens: [{ type: 'text', value: 'Argentine musician' }],
+        profile_tokens: [{ type: 'plainText', text: 'Argentine musician' }],
       },
     },
   ],
@@ -305,12 +305,12 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
     expect(insertPayload.tracklist).toEqual([{ position: '1', title: 'la paradoja', duration: '4:12' }]);
     expect(insertPayload.artist_image_url).toBe('https://i.discogs.com/artist/juana.jpg');
     // `profile_tokens` is persisted under the `bio_tokens` column name.
-    expect(insertPayload.bio_tokens).toEqual([{ type: 'text', value: 'Argentine musician' }]);
+    expect(insertPayload.bio_tokens).toEqual([{ type: 'plainText', text: 'Argentine musician' }]);
 
     // The same 8 columns ride the conflict-update set (idempotent re-enrich).
     const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
     expect(conflictCfg.set.discogs_artist_id).toBe(3840);
-    expect(conflictCfg.set.bio_tokens).toEqual([{ type: 'text', value: 'Argentine musician' }]);
+    expect(conflictCfg.set.bio_tokens).toEqual([{ type: 'plainText', text: 'Argentine musician' }]);
   });
 
   it('on extended match: the 8 columns default to null when LML omits them (no extended payload)', async () => {

@@ -937,7 +937,7 @@ describe('proxy.controller', () => {
             { position: '2', title: 'Cfern', duration: '7:01' },
           ],
           artist_image_url: 'https://i.discogs.com/artist.jpg',
-          bio_tokens: [{ type: 'text', value: 'Sheffield electronic duo' }],
+          bio_tokens: [{ type: 'plainText', text: 'Sheffield electronic duo' }],
         });
 
         const req = {
@@ -960,7 +960,7 @@ describe('proxy.controller', () => {
           { position: '2', title: 'Cfern', duration: '7:01' },
         ]);
         expect(result.artistImageUrl).toBe('https://i.discogs.com/artist.jpg');
-        expect(result.bioTokens).toEqual([{ type: 'text', value: 'Sheffield electronic duo' }]);
+        expect(result.bioTokens).toEqual([{ type: 'plainText', text: 'Sheffield electronic duo' }]);
       });
 
       it('discogsArtistId parity: present-as-null on a match-shaped row, omitted on a no-match-shaped row (BS#1336)', async () => {
