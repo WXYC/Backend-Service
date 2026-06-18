@@ -6,6 +6,14 @@
  * same spacer.gif filter, the same synthesized search URLs — but with a
  * different idempotency guard and a different terminal state.
  *
+ * BS#1336 adds 8 LML-only enrichment columns to the *linked* (album_id
+ * non-null) on-match album_metadata payload only — `discogs_artist_id`,
+ * `label`, `full_release_date`, `genres`, `styles`, `tracklist`,
+ * `artist_image_url`, `bio_tokens`. The unlinked inline-flowsheet path and
+ * the no-match arms keep the original 10/4-column shapes (flowsheet carries
+ * none of the 8 columns). Sourcing them requires `extended: true` on the LML
+ * lookup, set in handler.ts.
+ *
  * Idempotency guard: WHERE narrows by `metadata_status = 'enriching'`. The
  * claim primitive (`claim.ts`) is the only writer that flips a row to
  * `enriching`, so the WHERE here can match only a row this worker (or a
@@ -155,6 +163,23 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
         soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,
         artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
         artist_wikipedia_url: artwork.wikipedia_url ?? null,
+        // LML-only enrichment fields (BS#1336). Present on `artwork` only
+        // because handler.ts now sets `extended: true`; without it these
+        // would all write null. Persisting them lets the BS#1331 cache-first
+        // read path emit the artist+release subtree on a hit instead of
+        // shedding it. `profile_tokens` maps to the `bio_tokens` column
+        // (iOS's `bioTokens`). No cleanup/synthesis here — raw passthroughs
+        // of what LML resolved for the top-1 release match; the read side
+        // (`buildLocalMetadataResponse`) projects + filters to match the
+        // cold-fallthrough wire shape.
+        discogs_artist_id: artwork.discogs_artist_id ?? null,
+        label: artwork.label ?? null,
+        full_release_date: artwork.full_release_date ?? null,
+        genres: artwork.genres ?? null,
+        styles: artwork.styles ?? null,
+        tracklist: artwork.tracklist ?? null,
+        artist_image_url: artwork.artist_image_url ?? null,
+        bio_tokens: artwork.profile_tokens ?? null,
       };
       await db
         .insert(album_metadata)

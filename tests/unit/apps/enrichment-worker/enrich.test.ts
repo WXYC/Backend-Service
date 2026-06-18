@@ -65,6 +65,37 @@ const matchResponse = {
 
 const noMatchResponse = { results: [] } as unknown as LookupResponse;
 
+// Extended-mode response (BS#1336): the worker now sets `extended: true`, so
+// the top-1 artwork block carries the 8 LML-only fields. Mirrors the shape in
+// proxy.controller's extended-mode test fixture.
+const extendedMatchResponse = {
+  results: [
+    {
+      artwork: {
+        artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+        release_url: 'https://discogs.com/release/123',
+        release_year: 2022,
+        spotify_url: 'https://open.spotify.com/album/x',
+        apple_music_url: null,
+        youtube_music_url: null,
+        bandcamp_url: null,
+        soundcloud_url: null,
+        artist_bio: null,
+        wikipedia_url: null,
+        // Extended-only fields
+        discogs_artist_id: 3840,
+        label: 'Sonamos',
+        full_release_date: '2022-09-30',
+        genres: ['Rock'],
+        styles: ['Folk', 'Indie Rock'],
+        tracklist: [{ position: '1', title: 'la paradoja', duration: '4:12' }],
+        artist_image_url: 'https://i.discogs.com/artist/juana.jpg',
+        profile_tokens: [{ type: 'text', value: 'Argentine musician' }],
+      },
+    },
+  ],
+} as unknown as LookupResponse;
+
 describe('finalizeRow (BS#892 PR-2)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -258,6 +289,60 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
     expect(setCall.soundcloud_url).toBeUndefined();
     expect(setCall.artist_bio).toBeUndefined();
     expect(setCall.artist_wikipedia_url).toBeUndefined();
+  });
+
+  it('on extended match: UPSERTs the 8 LML-only columns into album_metadata (BS#1336)', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(LINKED_ROW, extendedMatchResponse);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.discogs_artist_id).toBe(3840);
+    expect(insertPayload.label).toBe('Sonamos');
+    expect(insertPayload.full_release_date).toBe('2022-09-30');
+    expect(insertPayload.genres).toEqual(['Rock']);
+    expect(insertPayload.styles).toEqual(['Folk', 'Indie Rock']);
+    expect(insertPayload.tracklist).toEqual([{ position: '1', title: 'la paradoja', duration: '4:12' }]);
+    expect(insertPayload.artist_image_url).toBe('https://i.discogs.com/artist/juana.jpg');
+    // `profile_tokens` is persisted under the `bio_tokens` column name.
+    expect(insertPayload.bio_tokens).toEqual([{ type: 'text', value: 'Argentine musician' }]);
+
+    // The same 8 columns ride the conflict-update set (idempotent re-enrich).
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    expect(conflictCfg.set.discogs_artist_id).toBe(3840);
+    expect(conflictCfg.set.bio_tokens).toEqual([{ type: 'text', value: 'Argentine musician' }]);
+  });
+
+  it('on extended match: the 8 columns default to null when LML omits them (no extended payload)', async () => {
+    // matchResponse carries no extended fields — the worker still requested
+    // them, but a degraded/older LML response can omit them. Persisting null
+    // (not undefined) keeps the UPSERT column-complete.
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(LINKED_ROW, matchResponse);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.discogs_artist_id).toBeNull();
+    expect(insertPayload.label).toBeNull();
+    expect(insertPayload.genres).toBeNull();
+    expect(insertPayload.tracklist).toBeNull();
+    expect(insertPayload.bio_tokens).toBeNull();
+  });
+
+  it('on extended match: the 8 columns are NOT written inline on flowsheet for an unlinked row', async () => {
+    // Unlinked rows write inline on flowsheet, which carries none of the 8
+    // BS#1336 columns. The inline UPDATE must stay at the original 10-column
+    // shape regardless of the extended payload.
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(ROW, extendedMatchResponse);
+
+    expect(mockDb.insert).not.toHaveBeenCalled();
+    const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setCall).not.toHaveProperty('discogs_artist_id');
+    expect(setCall).not.toHaveProperty('genres');
+    expect(setCall).not.toHaveProperty('tracklist');
+    expect(setCall).not.toHaveProperty('bio_tokens');
   });
 
   it('on no-match: UPSERTs the 4 search URLs into album_metadata', async () => {

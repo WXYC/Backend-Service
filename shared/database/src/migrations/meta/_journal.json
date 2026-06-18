@@ -694,6 +694,13 @@
       "when": 1781468384345,
       "tag": "0101_rotation-discogs-release-id-not-sentinel",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1781468384346,
+      "tag": "0102_album-metadata-lml-fields",
+      "breakpoints": true
     }
   ]
 }

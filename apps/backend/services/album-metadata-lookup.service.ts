@@ -21,15 +21,15 @@
  * to the same `album_metadata` row anyway, so the row-pick within a key
  * is degenerate as long as we land on one matching `album_id`.
  *
- * Returns the 10 columns the proxy response is built from. Excludes
- * LML-only enrichment fields (`genres` / `styles` / `tracklist` / `label`
- * / `discogs_artist_id` / `full_release_date` / `artist_image_url` /
- * `bio_tokens`) — those aren't on `album_metadata`. iOS V1 callers that
- * read those fields get them omitted on cache hit; the response is still
- * decode-compatible (every iOS V1 type marks them optional), but the
- * Playcut Detail card renders fewer chips. Re-fetching them from LML at
- * request time would defeat the cache-first goal; persisting them is the
- * follow-up path (a future album_metadata schema extension).
+ * Returns the 10 base columns the proxy response is built from plus the 8
+ * LML-only enrichment fields (`discogs_artist_id` / `label` /
+ * `full_release_date` / `genres` / `styles` / `tracklist` /
+ * `artist_image_url` / `bio_tokens`) added by BS#1336. Before that, those
+ * fields lived only on the cold LML-fallthrough response, so a cache hit
+ * shed the artist+release subtree (dj-site / iOS V1 gate the artist
+ * sub-panel on `discogsArtistId`); the enrichment-worker now persists them
+ * (`extended: true`) and the read path surfaces them, so a hit carries the
+ * same shape as the cold path.
  *
  * `null` return means "no enriched local row for this key" — the caller
  * should fall through to LML. Free-form flowsheet rows (`album_id IS
@@ -40,6 +40,7 @@
  */
 import { sql, eq, desc } from 'drizzle-orm';
 import { db, flowsheet, album_metadata } from '@wxyc/database';
+import type { DiscogsResolvedToken, DiscogsTrackItem } from '@wxyc/lml-client';
 
 const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
 
@@ -59,12 +60,16 @@ function lookupKey(artist: string, album?: string): string {
 }
 
 /**
- * Persisted album metadata projection. Matches the 10 columns on
- * `album_metadata`. Read straight from `album_metadata` (no COALESCE
- * over `flowsheet.col`) — D3 made `album_metadata` the canonical write
- * target, and the sibling `playlist-proxy.service.ts` already reads
- * `album_metadata` directly. Less brittle to D4 (#900) which drops the
- * inline `flowsheet.*_url` columns.
+ * Persisted album metadata projection. Matches the 18 columns on
+ * `album_metadata` (10 base + 8 LML-only, BS#1336). Read straight from
+ * `album_metadata` (no COALESCE over `flowsheet.col`) — D3 made
+ * `album_metadata` the canonical write target, and the sibling
+ * `playlist-proxy.service.ts` already reads `album_metadata` directly. Less
+ * brittle to D4 (#900) which drops the inline `flowsheet.*_url` columns.
+ *
+ * `tracklist` / `bio_tokens` are untyped jsonb at the schema layer
+ * (`shared/database`, which takes no DTO dependency); they're typed here at
+ * the read boundary as the LML DTO shapes the enrichment-worker persists.
  */
 export interface PersistedAlbumMetadata {
   artwork_url: string | null;
@@ -77,6 +82,15 @@ export interface PersistedAlbumMetadata {
   soundcloud_url: string | null;
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
+  // LML-only enrichment fields (BS#1336).
+  discogs_artist_id: number | null;
+  label: string | null;
+  full_release_date: string | null;
+  genres: string[] | null;
+  styles: string[] | null;
+  tracklist: DiscogsTrackItem[] | null;
+  artist_image_url: string | null;
+  bio_tokens: DiscogsResolvedToken[] | null;
 }
 
 /**
@@ -147,10 +161,23 @@ export async function lookupAlbumMetadataByKey(
       soundcloud_url: album_metadata.soundcloud_url,
       artist_bio: album_metadata.artist_bio,
       artist_wikipedia_url: album_metadata.artist_wikipedia_url,
+      // LML-only enrichment fields (BS#1336).
+      discogs_artist_id: album_metadata.discogs_artist_id,
+      label: album_metadata.label,
+      full_release_date: album_metadata.full_release_date,
+      genres: album_metadata.genres,
+      styles: album_metadata.styles,
+      tracklist: album_metadata.tracklist,
+      artist_image_url: album_metadata.artist_image_url,
+      bio_tokens: album_metadata.bio_tokens,
     })
     .from(album_metadata)
     .where(eq(album_metadata.album_id, albumId))
     .limit(1);
 
-  return rows[0] ?? null;
+  // `tracklist` / `bio_tokens` are untyped jsonb columns (the schema layer
+  // takes no DTO dependency), so drizzle infers them as `unknown`. Cast to
+  // the typed projection here — the enrichment-worker is the sole writer and
+  // persists the LML DTO shapes verbatim.
+  return (rows[0] ?? null) as PersistedAlbumMetadata | null;
 }

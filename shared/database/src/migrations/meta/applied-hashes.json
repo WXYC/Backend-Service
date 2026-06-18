@@ -97,5 +97,6 @@
   "0097_fix-fk-on-delete-flowsheet-rotation-reviews": "f13d8eed11d7da774cbdf92abe12cd45440ac7bff594226364c387bd378e4224",
   "0098_flowsheet-show-id-play-order-idx": "4599512035c91ad0d41d6e73f34c27edcbc00bcd15ad6093ed18c338273cc417",
   "0099_cta-unique-null-track-partial": "9ab35148120ee357c2a12b6c2733f048ad3c194837d438aa50d94656f366890d",
-  "0101_rotation-discogs-release-id-not-sentinel": "19c3889d8859246d561ad250aac5a8f891afe60a6474e3fa4b4568c96bcb6908"
+  "0101_rotation-discogs-release-id-not-sentinel": "19c3889d8859246d561ad250aac5a8f891afe60a6474e3fa4b4568c96bcb6908",
+  "0102_album-metadata-lml-fields": "43425ee132e94b7962fe67a60b3b3cb979726179362e481986cef8cb217faebe"
 }

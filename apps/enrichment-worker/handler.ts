@@ -194,7 +194,14 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
             candidate.artist_name,
             candidate.album_title ?? undefined,
             candidate.track_title ?? undefined,
-            { budgetMs: ENRICHMENT_LML_BUDGET_MS, caller: 'enrichment-worker' }
+            // `extended: true` surfaces the 8 LML-only fields (genres/styles/
+            // tracklist/label/full_release_date/discogs_artist_id/
+            // artist_image_url/profile_tokens) on the top-1 artwork block so
+            // finalizeRow can persist them into album_metadata (BS#1336).
+            // LML "already fetches these during enrichment but normally
+            // discards" them, so the marginal cost on this background path is
+            // low; the worker's ~29s budget absorbs it.
+            { budgetMs: ENRICHMENT_LML_BUDGET_MS, caller: 'enrichment-worker', extended: true }
           );
           outcome = await finalizeRow(candidate, response);
           // G7 (BS#969): defer the captureMessage until after the

@@ -80,6 +80,15 @@ jest.mock('@wxyc/database', () => ({
     soundcloud_url: 'soundcloud_url',
     artist_bio: 'artist_bio',
     artist_wikipedia_url: 'artist_wikipedia_url',
+    // LML-only enrichment columns (BS#1336).
+    discogs_artist_id: 'discogs_artist_id',
+    label: 'label',
+    full_release_date: 'full_release_date',
+    genres: 'genres',
+    styles: 'styles',
+    tracklist: 'tracklist',
+    artist_image_url: 'artist_image_url',
+    bio_tokens: 'bio_tokens',
   },
 }));
 
@@ -205,6 +214,41 @@ describe('album-metadata-lookup.service', () => {
         artist_bio: 'Bio.',
         artist_wikipedia_url: null,
       });
+    });
+
+    it('returns the 8 LML-only enrichment fields on a hit (BS#1336)', async () => {
+      mockRowsQueue.push([{ album_id: 7 }]);
+      mockRowsQueue.push([
+        {
+          artwork_url: 'https://i.discogs.com/x.jpg',
+          discogs_url: 'https://www.discogs.com/release/7',
+          release_year: 2022,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+          discogs_artist_id: 3840,
+          label: 'Sonamos',
+          full_release_date: '2022-09-30',
+          genres: ['Rock'],
+          styles: ['Folk', 'Indie Rock'],
+          tracklist: [{ position: '1', title: 'la paradoja', duration: '4:12' }],
+          artist_image_url: 'https://i.discogs.com/artist/juana.jpg',
+          bio_tokens: [{ type: 'text', value: 'Argentine musician' }],
+        },
+      ]);
+      const result = await lookupAlbumMetadataByKey('Juana Molina', 'DOGA');
+      expect(result?.discogs_artist_id).toBe(3840);
+      expect(result?.label).toBe('Sonamos');
+      expect(result?.full_release_date).toBe('2022-09-30');
+      expect(result?.genres).toEqual(['Rock']);
+      expect(result?.styles).toEqual(['Folk', 'Indie Rock']);
+      expect(result?.tracklist).toEqual([{ position: '1', title: 'la paradoja', duration: '4:12' }]);
+      expect(result?.artist_image_url).toBe('https://i.discogs.com/artist/juana.jpg');
+      expect(result?.bio_tokens).toEqual([{ type: 'text', value: 'Argentine musician' }]);
     });
 
     it('catch-arm-shape row (YT/BC/SC populated, others null) is returned faithfully — caller decides synthesis', async () => {
