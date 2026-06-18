@@ -17,6 +17,8 @@ const nullMetadata: IFSEntryMetadata = {
   soundcloud_url: null,
   artist_bio: null,
   artist_wikipedia_url: null,
+  genres: null,
+  styles: null,
 };
 
 // Helper to create a base entry with common fields
@@ -238,6 +240,48 @@ describe('flowsheet.service', () => {
         expect(result.soundcloud_url).toBe('soundcloud.com');
         expect(result.artist_bio).toBe('A great band');
         expect(result.artist_wikipedia_url).toBe('wiki.com');
+      });
+
+      // BS#1441: genres/styles are album_metadata-only arrays. Unlike the
+      // scalar siblings (plain `?? null`), they coerce empty→null so the wire
+      // has one canonical "no genres" value matching the LEFT-JOIN-miss case.
+      it('projects populated genres/styles arrays for tracks', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          metadata: {
+            genres: ['Rock', 'Electronic'],
+            styles: ['Post-Rock', 'Ambient'],
+          },
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.genres).toEqual(['Rock', 'Electronic']);
+        expect(result.styles).toEqual(['Post-Rock', 'Ambient']);
+      });
+
+      it('coerces empty genres/styles arrays to null', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          metadata: {
+            genres: [],
+            styles: [],
+          },
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.genres).toBeNull();
+        expect(result.styles).toBeNull();
+      });
+
+      it('projects null genres/styles when metadata has none', () => {
+        const entry = createBaseEntry({ entry_type: 'track' });
+
+        const result = transformToV2(entry);
+
+        expect(result.genres).toBeNull();
+        expect(result.styles).toBeNull();
       });
     });
 
