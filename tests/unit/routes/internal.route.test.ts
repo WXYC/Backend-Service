@@ -271,7 +271,8 @@ describe('POST /internal/flowsheet-webhook', () => {
     mockLimit
       .mockResolvedValueOnce([{ id: 9999, dj_name: 'Default Test DJ' }])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ id: 4242 }]);
+      .mockResolvedValueOnce([{ id: 4242 }])
+      .mockResolvedValue([]); // BS#1444 sibling-heal probe finds no unhealed marker
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
 
     const res = await request(app)
@@ -315,7 +316,8 @@ describe('POST /internal/flowsheet-webhook', () => {
     mockLimit
       .mockResolvedValueOnce([{ id: 9999, dj_name: 'Default Test DJ' }])
       .mockResolvedValueOnce([{ id: 7777 }])
-      .mockResolvedValueOnce([{ id: 4242 }]);
+      .mockResolvedValueOnce([{ id: 4242 }])
+      .mockResolvedValue([]); // BS#1444 sibling-heal probe finds no unhealed marker
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
 
     const res = await request(app)
