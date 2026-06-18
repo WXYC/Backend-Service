@@ -533,6 +533,55 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(setClause).toEqual(expect.objectContaining({ entry_type: 'track' }));
   });
 
+  // -- Sibling-marker heal probe-before-write (BS#1444) --
+  //
+  // The heal SELECTs for a still-NULL marker first and only issues the
+  // watermark-touching UPDATE when one exists. These two tests pin that
+  // behaviour: a regression back to an unconditional UPDATE (the round-1
+  // over-fire that re-touches flowsheet_watermark on every delivery) would
+  // flip the "no UPDATE" assertion below.
+
+  it('heal fires a dj_name-only UPDATE when the probe finds an unhealed marker (BS#1444)', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Aubrey' }]) // resolveShow
+      .mockResolvedValueOnce([]) // resolveAlbumId (unlinked)
+      .mockResolvedValueOnce([{ id: 4242 }]) // heal probe → an unhealed marker exists
+      .mockResolvedValue([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]); // fresh INSERT (created=true)
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry }); // track → fresh insert, no conflict UPDATE
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).toHaveBeenCalled();
+    // The only UPDATE is the heal: dj_name alone (the conflict refresh would
+    // also carry entry_type), proving the probe-hit path issued it.
+    expect(lastUpdateSet()).toEqual({ dj_name: 'Aubrey' });
+  });
+
+  it('heal issues NO UPDATE when the probe finds no unhealed marker (BS#1444 watermark guard)', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Aubrey' }]) // resolveShow
+      .mockResolvedValueOnce([]) // resolveAlbumId
+      .mockResolvedValueOnce([]) // heal probe → nothing to heal
+      .mockResolvedValue([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]); // fresh INSERT (created=true)
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry });
+
+    expect(res.status).toBe(200);
+    // Fresh insert → no conflict UPDATE; empty probe → no heal UPDATE. A bare
+    // unconditional heal would re-touch the watermark here on every delivery.
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
   it('INSERT trims whitespace-only resolved dj_name to null on a marker entry', async () => {
     // shows.legacy_dj_name='   ' (whitespace) — without normalizeMarkerName
     // this would persist as '   ' and v2 wire would emit whitespace.
