@@ -195,6 +195,10 @@ const FSEntryFieldsRaw = {
   artist_wikipedia_url: sql<
     string | null
   >`coalesce(${album_metadata.artist_wikipedia_url}, ${flowsheet.artist_wikipedia_url})`,
+  // genres/styles live ONLY on album_metadata (no inline flowsheet column to
+  // COALESCE over), so these are plain column reads. BS#1441.
+  genres: album_metadata.genres,
+  styles: album_metadata.styles,
   on_streaming: library.on_streaming,
   metadata_status: flowsheet.metadata_status,
   enriching_since: flowsheet.enriching_since,
@@ -235,6 +239,8 @@ type FSEntryRaw = {
   soundcloud_url: string | null;
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
+  genres: string[] | null;
+  styles: string[] | null;
   on_streaming: boolean | null;
   metadata_status: FSEntry['metadata_status'];
   enriching_since: Date | null;
@@ -279,7 +285,9 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   on_streaming: raw.on_streaming ?? null,
   metadata_status: raw.metadata_status,
   enriching_since: raw.enriching_since,
-  // Nested metadata view (used by transformToV2)
+  // Nested metadata view (used by transformToV2). genres/styles are
+  // album_metadata-only fields (BS#1441) and so live here, NOT as top-level
+  // IFSEntry/FSEntry fields (that type mirrors the flowsheet table).
   metadata: {
     artwork_url: raw.artwork_url,
     discogs_url: raw.discogs_url,
@@ -291,6 +299,8 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
     soundcloud_url: raw.soundcloud_url,
     artist_bio: raw.artist_bio,
     artist_wikipedia_url: raw.artist_wikipedia_url,
+    genres: raw.genres,
+    styles: raw.styles,
   },
 });
 
@@ -997,6 +1007,11 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         soundcloud_url: entry.metadata?.soundcloud_url ?? null,
         artist_bio: entry.metadata?.artist_bio ?? null,
         artist_wikipedia_url: entry.metadata?.artist_wikipedia_url ?? null,
+        // Arrays coerce empty→null (unlike the sibling scalars' plain `?? null`):
+        // a `'{}'` album_metadata row carries no information, so it collapses to
+        // the same `null` the contract uses for "absent". See BS#1441 rationale.
+        genres: entry.metadata?.genres?.length ? entry.metadata.genres : null,
+        styles: entry.metadata?.styles?.length ? entry.metadata.styles : null,
         on_streaming: entry.on_streaming ?? null,
         // BS#891. iOS branches on this to decide whether to render inline
         // metadata or fall back to the proxy-fetch path

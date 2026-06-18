@@ -447,6 +447,127 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
   });
 });
 
+describe('V2 flowsheet genres/styles projection (BS#1441)', () => {
+  // iOS's Playcut Detail card renders genre/style capsules from inline
+  // `genres`/`styles` on the V2 track entry (wxyc-ios-64#402). Unlike the
+  // 10 sibling metadata fields, genres/styles live ONLY on `album_metadata`
+  // (not the flowsheet inline columns), so `transformToV2` reads them
+  // straight from the nested metadata view with no COALESCE fallback.
+  //
+  // The one wire-shape decision (see the plan's empty-vs-null section): an
+  // empty array carries no information, so a `'{}'` album_metadata row
+  // collapses to the same `null` the contract uses for an absent row. Both
+  // the empty and the missing-row cases therefore present as `null`.
+  //
+  // As in the BS#897 block above, force LML to 500 so the runtime
+  // fire-and-forget enrichment's catch arm (an `onConflictDoNothing` INSERT
+  // that writes only URL fields) can neither clobber the seeded sentinel row
+  // nor synthesize genres/styles from a live LML response.
+
+  let sql;
+  let mockApiAvailable = false;
+  const SENTINEL_ALBUM_ID = 5; // real library.id; FK album_metadata.album_id ON DELETE CASCADE
+  // Discogs-style genre/style taxonomy labels (not artist names); the values
+  // are what LML would surface for a WXYC-representative release.
+  const GENRES = ['Rock', 'Electronic'];
+  const STYLES = ['Post-Rock', 'Ambient'];
+
+  beforeAll(async () => {
+    sql = makeSql();
+    mockApiAvailable = await isMockApiAvailable();
+  });
+
+  afterAll(async () => {
+    if (sql) await sql.end();
+  });
+
+  beforeEach(async () => {
+    // Clear before each case so an interrupted prior run can't leave a stale
+    // sentinel row that poisons the next (BS#897 cleans up the same id 5).
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
+    if (mockApiAvailable) await resetMockApi();
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
+  });
+
+  afterEach(async () => {
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
+    if (mockApiAvailable) await resetMockApi();
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
+  });
+
+  // Add a track linked to the sentinel album and read it back through the V2
+  // serializer (GET /flowsheet maps every entry through transformToV2).
+  const addTrackAndRead = async (title) => {
+    const addRes = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({ album_id: SENTINEL_ALBUM_ID, track_title: title })
+      .expect(201);
+
+    const getRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+    const entry = getRes.body.entries.find((e) => e.id === addRes.body.id);
+    expect(entry).toBeDefined();
+    return entry;
+  };
+
+  test('populated album_metadata genres/styles project onto the V2 track entry', async () => {
+    if (!mockApiAvailable) {
+      console.warn('Skipping: mock API server not available for LML failure simulation');
+      return;
+    }
+    await simulateError('lml', '/api/v1/lookup', 500);
+
+    // Parameterized array binding (not a `'{...}'::text[]` literal) so genre
+    // labels round-trip without element-boundary corruption.
+    await sql`
+      INSERT INTO ${sql(`${SCHEMA}.album_metadata`)} (album_id, genres, styles)
+      VALUES (${SENTINEL_ALBUM_ID}, ${GENRES}::text[], ${STYLES}::text[])
+    `;
+
+    const entry = await addTrackAndRead('BS1441 populated genres/styles track');
+    expect(entry.genres).toEqual(GENRES);
+    expect(entry.styles).toEqual(STYLES);
+  });
+
+  test('empty genres/styles arrays coerce to null on the wire', async () => {
+    if (!mockApiAvailable) {
+      console.warn('Skipping: mock API server not available for LML failure simulation');
+      return;
+    }
+    await simulateError('lml', '/api/v1/lookup', 500);
+
+    // Empty-array literal is safe here (no values → no comma-boundary trap).
+    await sql`
+      INSERT INTO ${sql(`${SCHEMA}.album_metadata`)} (album_id, genres, styles)
+      VALUES (${SENTINEL_ALBUM_ID}, '{}'::text[], '{}'::text[])
+    `;
+
+    const entry = await addTrackAndRead('BS1441 empty genres/styles track');
+    expect(entry.genres).toBeNull();
+    expect(entry.styles).toBeNull();
+  });
+
+  test('no album_metadata row yields null genres/styles (no leak from populated case)', async () => {
+    if (!mockApiAvailable) {
+      console.warn('Skipping: mock API server not available for LML failure simulation');
+      return;
+    }
+    // No insert: beforeEach cleared the sentinel row. With LML forced to 500
+    // the catch arm only ever writes URL fields, so genres/styles read as SQL
+    // NULL regardless of whether the LEFT JOIN misses (no row) or hits a
+    // URL-only fallback row — either way `null` on the wire.
+    await simulateError('lml', '/api/v1/lookup', 500);
+
+    const entry = await addTrackAndRead('BS1441 no-row genres/styles track');
+    expect(entry.genres).toBeNull();
+    expect(entry.styles).toBeNull();
+    // The populated-case sentinel arrays must not leak in (guard style mirrors
+    // the BS#897 fallthrough test).
+    expect(entry.genres).not.toEqual(GENRES);
+    expect(entry.styles).not.toEqual(STYLES);
+  });
+});
+
 describe('Metadata Service Initialization', () => {
   test('Backend healthcheck passes (metadata service initialized)', async () => {
     // Body conforms to HealthCheckResponse from @wxyc/shared (#804).

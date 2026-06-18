@@ -26,6 +26,10 @@ export interface IFSEntryMetadata {
   soundcloud_url: string | null;
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
+  // album_metadata-only fields (BS#1441); no inline flowsheet column, so they
+  // are not top-level IFSEntry fields — only here in the nested metadata view.
+  genres: string[] | null;
+  styles: string[] | null;
 }
 
 // search_doc is a STORED GENERATED tsvector used only by the search hot path
