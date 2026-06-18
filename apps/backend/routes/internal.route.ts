@@ -297,27 +297,26 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // Net effect: every new tubafrenzy show renders a nameless "signed on"
       // on the v2 wire until sign-off.
       //
-      // Fix: on the FIRST delivery of an entry whose show now resolves a name,
-      // backfill that show's still-NULL marker rows. A live show's show_start
-      // heals at the next track add after the ETL fills the name — minutes, not
-      // at sign-off — and the show_end heals itself / its siblings at sign-off.
-      // Scoped to `MARKER_ENTRY_TYPES` + `dj_name IS NULL`, so track rows (own
-      // population path) and already-resolved markers are never touched.
+      // Fix: whenever a delivery for the show resolves a non-null name, backfill
+      // the show's still-NULL marker rows. A live show's show_start heals at the
+      // next entry for the show — track add, edit, or sign-off — after the ETL
+      // fills the name. Healing on ANY delivery (not just fresh inserts) matters
+      // for the short-show case: a show whose start AND end both land before the
+      // ETL fill would otherwise never heal, since the ETL's resolveDjNames
+      // skips webhook-inserted rows (they arrive as updates, not inserts) — a
+      // later edit is then the only delivery that can fill them. Scoped to
+      // `MARKER_ENTRY_TYPES` + `dj_name IS NULL`, so track rows (own population
+      // path) and already-resolved markers are never touched.
       //
-      // Two deliberate gates keep this off the hot path:
-      //   1. `created` only — a re-delivery / tubafrenzy edit can't introduce a
-      //      new unhealed sibling (marker rows are created on their own first
-      //      delivery), and a re-delivered marker self-heals via the conflict
-      //      branch above. This skips the high-frequency edit-churn path.
-      //   2. Probe-before-write — a bare UPDATE that matches zero rows still
-      //      fires the STATEMENT-level `flowsheet_watermark` trigger (migration
-      //      0084), ratcheting the conditional-GET watermark +1s and thrashing
-      //      iOS/dj-site pollers (the very churn BS#902/Epic F's watermark
-      //      exists to prevent). A SELECT fires no trigger, so we read first and
-      //      issue the watermark-touching UPDATE only when a marker is actually
-      //      unhealed — at most once per show. Both queries are index-backed by
-      //      `flowsheet_show_id_idx`.
-      if (created && resolvedShowName !== null && showId !== null) {
+      // Probe-before-write — a bare UPDATE that matches zero rows still fires the
+      // STATEMENT-level `flowsheet_watermark` trigger (migration 0084),
+      // ratcheting the conditional-GET watermark +1s and thrashing iOS/dj-site
+      // pollers (the very churn BS#902/Epic F's watermark exists to prevent). A
+      // SELECT fires no trigger, so we read first and issue the watermark-
+      // touching UPDATE only when a marker is actually unhealed — at most once
+      // per show, after which every later delivery pays only the read. Both
+      // queries are index-backed by `flowsheet_show_id_idx`.
+      if (resolvedShowName !== null && showId !== null) {
         const unhealedMarkerWhere = and(
           eq(flowsheet.show_id, showId),
           isNull(flowsheet.dj_name),

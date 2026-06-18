@@ -312,61 +312,66 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
     }
   });
 
-  // BS#1444 guard: the heal is scoped to `dj_name IS NULL`, so a marker that
-  // already resolved to one handle must NOT be clobbered when the show's
-  // resolved name later changes (e.g. PII remediation re-points primary_dj_id,
-  // or an operator edits the handle). Without this, dropping the isNull
-  // predicate would silently overwrite correct stored handles.
-  test('heal does not overwrite a marker that already has a dj_name (BS#1444)', async () => {
+  // BS#1444 guard: in a single delivery the heal must fix a still-NULL marker
+  // (proving the machinery is live) WHILE leaving an already-named sibling
+  // untouched (proving the `dj_name IS NULL` scope holds). Distinct values
+  // ('Old' vs 'New') make a clobber visible — dropping the isNull predicate
+  // would rewrite the named row to the new value and fail this test, and a dead
+  // heal would leave the NULL row unhealed and also fail it.
+  test('heal fixes a NULL marker while sparing an already-named sibling (BS#1444)', async () => {
     const LEGACY_SHOW_ID = 9_999_986;
     const SHOW_START_ID = 9_999_983;
+    const SHOW_END_ID = 9_999_981;
     const TRACK_ID = 9_999_982;
 
-    // Show already has a resolvable name when the show_start arrives.
-    await seedShow(LEGACY_SHOW_ID, { legacyDjName: 'First Handle' });
+    // show_start arrives while the show has a name → lands named 'Old Handle'.
+    await seedShow(LEGACY_SHOW_ID, { legacyDjName: 'Old Handle' });
 
     const cleanup = async () => {
-      await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id IN ($1, $2)`, [SHOW_START_ID, TRACK_ID]);
+      await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id IN ($1, $2, $3)`, [
+        SHOW_START_ID,
+        SHOW_END_ID,
+        TRACK_ID,
+      ]);
       await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE legacy_show_id = $1`, [LEGACY_SHOW_ID]);
     };
 
-    try {
-      // show_start lands already-named (resolved at insert).
-      const startRes = await request
-        .post('/internal/flowsheet-webhook')
-        .set('X-Internal-Key', INTERNAL_KEY)
-        .send({
-          action: 'create',
-          entry: buildEntry({ id: SHOW_START_ID, flowsheetEntryType: 9, radioShowId: LEGACY_SHOW_ID }),
-        });
-      expect(startRes.status).toBe(200);
+    const post = (entry) =>
+      request.post('/internal/flowsheet-webhook').set('X-Internal-Key', INTERNAL_KEY).send({ action: 'create', entry });
 
+    try {
+      // 1) show_start lands already-named.
+      await post(buildEntry({ id: SHOW_START_ID, flowsheetEntryType: 9, radioShowId: LEGACY_SHOW_ID }));
+
+      // 2) name goes unresolvable, then show_end arrives → lands NULL (stub race).
+      await sql.unsafe(`UPDATE ${SCHEMA}.shows SET legacy_dj_name = NULL WHERE legacy_show_id = $1`, [LEGACY_SHOW_ID]);
+      await post(buildEntry({ id: SHOW_END_ID, flowsheetEntryType: 10, radioShowId: LEGACY_SHOW_ID }));
+
+      // Precondition: one named marker + one NULL marker on the same show.
       const [startBefore] = await sql.unsafe(`SELECT dj_name FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
         SHOW_START_ID,
       ]);
-      expect(startBefore.dj_name).toBe('First Handle');
+      const [endBefore] = await sql.unsafe(`SELECT dj_name FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
+        SHOW_END_ID,
+      ]);
+      expect(startBefore.dj_name).toBe('Old Handle');
+      expect(endBefore.dj_name).toBeNull();
 
-      // The show's resolved name changes...
+      // 3) name resolves to a DIFFERENT value; a later entry triggers the heal.
       await sql.unsafe(`UPDATE ${SCHEMA}.shows SET legacy_dj_name = $1 WHERE legacy_show_id = $2`, [
-        'Second Handle',
+        'New Handle',
         LEGACY_SHOW_ID,
       ]);
-
-      // ...and a later entry arrives. The heal must leave the already-named
-      // show_start alone (its dj_name IS NOT NULL).
-      const trackRes = await request
-        .post('/internal/flowsheet-webhook')
-        .set('X-Internal-Key', INTERNAL_KEY)
-        .send({
-          action: 'create',
-          entry: buildEntry({ id: TRACK_ID, flowsheetEntryType: 6, radioShowId: LEGACY_SHOW_ID }),
-        });
-      expect(trackRes.status).toBe(200);
+      await post(buildEntry({ id: TRACK_ID, flowsheetEntryType: 6, radioShowId: LEGACY_SHOW_ID }));
 
       const [startAfter] = await sql.unsafe(`SELECT dj_name FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
         SHOW_START_ID,
       ]);
-      expect(startAfter.dj_name).toBe('First Handle'); // unchanged, not 'Second Handle'
+      const [endAfter] = await sql.unsafe(`SELECT dj_name FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
+        SHOW_END_ID,
+      ]);
+      expect(endAfter.dj_name).toBe('New Handle'); // NULL marker healed → machinery is live
+      expect(startAfter.dj_name).toBe('Old Handle'); // already-named sibling spared, not 'New Handle'
     } finally {
       await cleanup();
     }
