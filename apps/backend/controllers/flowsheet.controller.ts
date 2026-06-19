@@ -47,14 +47,12 @@ export interface IFSEntryMetadata {
 // controller layer because the V2 wire format projects metadata_status onto
 // track rows for iOS branch logic (WXYC/wxyc-ios-64#270).
 //
-// `radio_hour` (migration 0103, BS#1448) is added to the flowsheet schema but is
-// not yet surfaced through the service/wire types — it's excluded here so the
-// schema-only migration PR builds cleanly. BS#1449 removes it from this Omit when
-// it wires the read path (SELECT + FSEntryRaw + transformToIFSEntry) and the V2
-// breakpoint serialization.
+// `radio_hour` (migration 0103, BS#1448) IS surfaced (BS#1449): the read path
+// projects it and transformToV2 emits it on breakpoint entries as the
+// authoritative top-of-hour. It's a present-but-nullable property here.
 export interface IFSEntry extends Omit<
   FSEntry,
-  'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at' | 'updated_at' | 'radio_hour'
+  'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at' | 'updated_at'
 > {
   label_id: number | null;
   rotation_bin: string | null;

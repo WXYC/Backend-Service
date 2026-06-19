@@ -265,6 +265,63 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(lastInsertValues()).toEqual(expect.objectContaining({ album_id: null }));
   });
 
+  // -- radio_hour ingestion (BS#1449). tubafrenzy#593 adds `radioHour` (epoch
+  // ms, the authoritative top-of-hour) to the breakpoint webhook payload. BS
+  // persists it only for breakpoint rows; everything else stays null.
+
+  it('writes radio_hour for a breakpoint INSERT when radioHour is present', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 8, radioHour: 1718726400000 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(
+      expect.objectContaining({ entry_type: 'breakpoint', radio_hour: new Date(1718726400000) })
+    );
+  });
+
+  it('writes radio_hour: null on a breakpoint INSERT when radioHour is absent (pre-#593)', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 8 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'breakpoint', radio_hour: null }));
+  });
+
+  it('writes radio_hour: null (not an Invalid Date) on a breakpoint INSERT with a malformed radioHour', async () => {
+    // Hardening: resolveRadioHour routes through epochMsToDate, so a
+    // contract-violating non-numeric/out-of-range radioHour degrades to null
+    // rather than persisting an Invalid Date or 500-ing the delivery.
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 8, radioHour: 'not-a-number' } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'breakpoint', radio_hour: null }));
+  });
+
+  it('writes radio_hour: null on a track INSERT even when radioHour is present', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 0, radioHour: 1718726400000 } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'track', radio_hour: null }));
+  });
+
   it('forwards the resolved rotation_id when rotationReleaseId matches a rotation row', async () => {
     // resolveShow → 9999, resolveAlbumId → unlinked, resolveRotationId → 4242.
     mockLimit.mockReset();
@@ -516,6 +573,53 @@ describe('POST /internal/flowsheet-webhook', () => {
     const setClause = lastUpdateSet();
     expect(setClause).not.toHaveProperty('dj_name');
     expect(setClause).toEqual(expect.objectContaining({ entry_type: 'show_start' }));
+  });
+
+  // -- ON CONFLICT UPDATE radio_hour refresh (BS#1449 self-heal) --
+  //
+  // A breakpoint row inserted before the radio_hour column existed (NULL) heals
+  // on a later redelivery once tubafrenzy#593 ships `radioHour`. Mirrors the
+  // dj_name conditional: only set when present, never on non-breakpoints.
+
+  it('UPDATE on conflict refreshes radio_hour for a breakpoint with radioHour', async () => {
+    mockReturning.mockResolvedValueOnce([]); // conflict signal
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 8, radioHour: 1718726400000 } });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).toHaveBeenCalled();
+    expect(lastUpdateSet()).toEqual(
+      expect.objectContaining({ entry_type: 'breakpoint', radio_hour: new Date(1718726400000) })
+    );
+  });
+
+  it('UPDATE on conflict OMITS radio_hour for a breakpoint without radioHour (never overwrite with NULL)', async () => {
+    mockReturning.mockResolvedValueOnce([]); // conflict signal
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 8 } });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).toHaveBeenCalled();
+    expect(lastUpdateSet()).not.toHaveProperty('radio_hour');
+  });
+
+  it('UPDATE on conflict OMITS radio_hour for a track even when radioHour is present', async () => {
+    mockReturning.mockResolvedValueOnce([]); // conflict signal
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', entry: { ...validEntry, flowsheetEntryType: 0, radioHour: 1718726400000 } });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).toHaveBeenCalled();
+    expect(lastUpdateSet()).not.toHaveProperty('radio_hour');
   });
 
   it('UPDATE on conflict OMITS dj_name on a track entry (non-marker entry types never set dj_name)', async () => {

@@ -47,6 +47,7 @@ const createTrackEntry = (overrides: Partial<IFSEntry> = {}): IFSEntry => ({
   linked_at: null,
   metadata_status: 'pending',
   enriching_since: null,
+  radio_hour: null,
   metadata: nullMetadata,
   ...overrides,
 });

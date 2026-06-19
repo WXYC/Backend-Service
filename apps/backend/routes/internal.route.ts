@@ -2,7 +2,12 @@ import { Router } from 'express';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, rotation, library, truncate, user } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
-import { mapProdEntryType, isMessageEntryType, type BackendEntryType } from '../utils/flowsheet-transform.js';
+import {
+  mapProdEntryType,
+  isMessageEntryType,
+  resolveRadioHour,
+  type BackendEntryType,
+} from '../utils/flowsheet-transform.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
 
@@ -214,6 +219,14 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       const resolvedShowName = normalizeMarkerName(show?.dj_name);
       const markerDjName = MARKER_ENTRY_TYPES.has(entryType) ? resolvedShowName : null;
 
+      // tubafrenzy's authoritative top-of-hour for a breakpoint (BS#1449).
+      // `radioHour` (epoch ms) is present on breakpoint payloads only once
+      // tubafrenzy#593 ships; resolveRadioHour (shared with the ETL) tolerates
+      // its absence (null) and any malformed value (→ null via epochMsToDate),
+      // so deploy ordering is safe and a garbage payload can't write an Invalid
+      // Date. Computed once and shared by the INSERT and the ON-CONFLICT heal.
+      const breakpointRadioHour = resolveRadioHour(entryType, entry.radioHour ?? null);
+
       // INSERT ... ON CONFLICT DO NOTHING RETURNING { id }: either we win
       // the insert and PG hands back exactly one row, or a concurrent
       // INSERT / prior webhook delivery already claimed the
@@ -248,6 +261,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           segue: false,
           play_order: entry.sequenceWithinShow ?? 0,
           add_time: entry.startTime ? new Date(entry.startTime) : new Date(),
+          radio_hour: breakpointRadioHour,
         })
         .onConflictDoNothing()
         .returning({ id: flowsheet.id });
@@ -280,6 +294,11 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
         };
         if (markerDjName !== null) {
           refresh.dj_name = markerDjName;
+        }
+        // Heal breakpoint rows inserted before radio_hour existed (BS#1449).
+        // Like dj_name, only set when present — never overwrite with NULL.
+        if (breakpointRadioHour) {
+          refresh.radio_hour = breakpointRadioHour;
         }
         await db.update(flowsheet).set(refresh).where(eq(flowsheet.legacy_entry_id, entry.id));
       }

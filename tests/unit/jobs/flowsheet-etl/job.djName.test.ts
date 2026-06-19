@@ -49,6 +49,7 @@ const makeEntry = (overrides: Partial<LegacyEntryRow> = {}): LegacyEntryRow => (
   timeLastModified: 1706799700000,
   legacyReleaseId: 101,
   segueFlag: 0,
+  radioHour: null,
   ...overrides,
 });
 

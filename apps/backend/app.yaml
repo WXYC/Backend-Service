@@ -70,6 +70,7 @@ components:
         show_start/show_end entries include dj_name and timestamp.
         dj_join/dj_leave entries include dj_name.
         talkset/breakpoint/message entries include message.
+        breakpoint entries also include radio_hour (the authoritative top-of-hour as an ISO date-time, or null) — clients should format this rather than add_time.
 
     FlowsheetPaginatedResponse:
       type: object
