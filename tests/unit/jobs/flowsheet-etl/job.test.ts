@@ -71,6 +71,13 @@ describe('runIncremental', () => {
     // Default: no previous run (full sync)
     (getLastRunTimestamp as jest.Mock).mockResolvedValue(null);
 
+    // jest.clearAllMocks() (and clearMocks: true) reset mock.calls but do NOT
+    // drain the mockImplementationOnce queue — only mockReset() does. A test
+    // that short-circuits before consuming both onces (e.g. an empty-entries
+    // run that skips the existing-IDs query) would otherwise leak its leftover
+    // once into the next test. Drain here so the block is reorder/insert-safe.
+    chain.then.mockReset();
+
     // Default: show map query returns one show mapping
     // Then: existing entry IDs query returns empty (all entries are new)
     chain.then
@@ -156,7 +163,10 @@ describe('runIncremental', () => {
     mockFetchLegacyShows.mockResolvedValue([]);
     mockFetchLegacyEntries.mockResolvedValue([]);
 
-    // Reset chain.then for the show map + existing IDs queries
+    // Override the beforeEach default onces with this test's values (show map
+    // empty, existing IDs empty). mockReset() is load-bearing here: it clears
+    // the defaults so these onces are the ones consumed — not redundant with
+    // the beforeEach drain, which only resets between tests.
     chain.then
       .mockReset()
       .mockImplementationOnce((resolve: (v: unknown) => void) => resolve([]))
@@ -175,7 +185,10 @@ describe('runIncremental', () => {
       makeEntry({ id: 2002, trackTitle: 'Pen Expers', playOrder: 2 }), // existing entry
     ]);
 
-    // Show map query, then existing IDs query returns one match
+    // Override the beforeEach default onces: show map query, then existing IDs
+    // query returns one match. mockReset() is load-bearing — it clears the
+    // defaults so these onces are consumed (not redundant with the beforeEach
+    // drain).
     chain.then
       .mockReset()
       .mockImplementationOnce((resolve: (v: unknown) => void) => resolve([{ id: 10, legacyId: 1001 }]))
