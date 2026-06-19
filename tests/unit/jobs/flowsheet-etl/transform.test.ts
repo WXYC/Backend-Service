@@ -3,6 +3,7 @@ import {
   mapProdEntryType,
   epochMsToDate,
   resolveEntryTimestamp,
+  resolveRadioHour,
   parseMySQLDatetime,
   truncate,
   transformShow,
@@ -26,6 +27,27 @@ describe('flowsheet-etl transform', () => {
 
     it.each([8, 9, 10, 99, -1])('maps unknown code %d to "message"', (code) => {
       expect(mapEntryType(code)).toBe('message');
+    });
+  });
+
+  describe('resolveRadioHour', () => {
+    // tubafrenzy's RADIO_HOUR is the authoritative top-of-hour for a breakpoint;
+    // it is only meaningful for breakpoint rows (BS#1449).
+    it('maps a breakpoint RADIO_HOUR (epoch ms) to a Date', () => {
+      const topOfHour = 1718722800000; // 2024-06-18T15:00:00Z
+      expect(resolveRadioHour('breakpoint', topOfHour)).toEqual(new Date(topOfHour));
+    });
+
+    it('returns null for a non-breakpoint type even when RADIO_HOUR is present', () => {
+      expect(resolveRadioHour('track', 1718722800000)).toBeNull();
+    });
+
+    it('returns null for a breakpoint with RADIO_HOUR=0 (absent)', () => {
+      expect(resolveRadioHour('breakpoint', 0)).toBeNull();
+    });
+
+    it('returns null for a breakpoint with a null RADIO_HOUR', () => {
+      expect(resolveRadioHour('breakpoint', null)).toBeNull();
     });
   });
 

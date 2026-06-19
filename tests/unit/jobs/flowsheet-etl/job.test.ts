@@ -57,6 +57,7 @@ const makeEntry = (overrides: Partial<LegacyEntryRow> = {}): LegacyEntryRow => (
   timeLastModified: 1706799700000,
   legacyReleaseId: 101,
   segueFlag: 0,
+  radioHour: null,
   ...overrides,
 });
 
@@ -98,6 +99,36 @@ describe('runIncremental', () => {
     // The key assertion: add_time should come from TIME_CREATED (the fallback),
     // not be null/skipped because START_TIME was 0
     expect(values.add_time).toEqual(new Date(1706799650000));
+  });
+
+  it('writes radio_hour from RADIO_HOUR for a breakpoint entry', async () => {
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([makeEntry({ id: 3003, entryTypeCode: 8, radioHour: 1718726400000 })]);
+
+    await runIncremental();
+
+    const flowsheetInsert = chain.values.mock.calls.find(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).legacy_entry_id === 3003
+    );
+    expect(flowsheetInsert).toBeDefined();
+    const values = flowsheetInsert![0] as Record<string, unknown>;
+    expect(values.entry_type).toBe('breakpoint');
+    expect(values.radio_hour).toEqual(new Date(1718726400000));
+  });
+
+  it('writes radio_hour: null for a track entry even when RADIO_HOUR is present', async () => {
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([makeEntry({ id: 3004, entryTypeCode: 0, radioHour: 1718726400000 })]);
+
+    await runIncremental();
+
+    const flowsheetInsert = chain.values.mock.calls.find(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).legacy_entry_id === 3004
+    );
+    expect(flowsheetInsert).toBeDefined();
+    const values = flowsheetInsert![0] as Record<string, unknown>;
+    expect(values.entry_type).toBe('track');
+    expect(values.radio_hour).toBeNull();
   });
 
   it('skips entry when all three timestamps are 0', async () => {

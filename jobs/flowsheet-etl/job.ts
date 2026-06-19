@@ -29,7 +29,7 @@ import {
   truncate,
 } from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
-import { mapProdEntryType, resolveEntryTimestamp } from './transform.js';
+import { mapProdEntryType, resolveEntryTimestamp, resolveRadioHour } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
@@ -178,6 +178,7 @@ type BulkEntryRow = {
   segue: boolean;
   play_order: number;
   add_time: Date;
+  radio_hour: Date | null;
 };
 
 type DbClient = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -259,6 +260,8 @@ const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map
         segue: tuple.length > 21 ? Number(tuple[21]) === 1 : false,
         play_order: Number(tuple[13]) || 0,
         add_time: addTime,
+        // tuple[9] = RADIO_HOUR (epoch ms); only breakpoints carry a top-of-hour.
+        radio_hour: resolveRadioHour(entryType, Number(tuple[9]) || 0),
       });
 
       if (pendingEntries.length >= BATCH_SIZE) {
@@ -433,6 +436,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
         segue: entry.segueFlag === 1,
         play_order: entry.playOrder,
         add_time: addTime,
+        radio_hour: resolveRadioHour(entryType, entry.radioHour),
       })
       .onConflictDoUpdate({
         target: flowsheet.legacy_entry_id,
@@ -448,6 +452,8 @@ export const runIncremental = async (): Promise<SyncResult> => {
           add_time: sql`excluded.add_time`,
           show_id: sql`excluded.show_id`,
           play_order: sql`excluded.play_order`,
+          // Self-heal breakpoint rows synced before the column existed (BS#1449).
+          radio_hour: sql`excluded.radio_hour`,
         },
         // tubafrenzy bumps TIME_LAST_MODIFIED on adjacent rows during normal
         // operation (flowsheet.mirror.ts close-prior-now-playing UPDATE), so
@@ -466,7 +472,8 @@ export const runIncremental = async (): Promise<SyncResult> => {
           ${flowsheet.entry_type} IS DISTINCT FROM excluded.entry_type OR
           ${flowsheet.add_time} IS DISTINCT FROM excluded.add_time OR
           ${flowsheet.show_id} IS DISTINCT FROM excluded.show_id OR
-          ${flowsheet.play_order} IS DISTINCT FROM excluded.play_order
+          ${flowsheet.play_order} IS DISTINCT FROM excluded.play_order OR
+          ${flowsheet.radio_hour} IS DISTINCT FROM excluded.radio_hour
         `,
       });
 

@@ -202,6 +202,9 @@ const FSEntryFieldsRaw = {
   on_streaming: library.on_streaming,
   metadata_status: flowsheet.metadata_status,
   enriching_since: flowsheet.enriching_since,
+  // tubafrenzy's authoritative top-of-hour for breakpoint rows (BS#1449); NULL
+  // on every other type. transformToV2 emits it only on the breakpoint case.
+  radio_hour: flowsheet.radio_hour,
 };
 
 // Raw result type from SQL query
@@ -244,6 +247,7 @@ type FSEntryRaw = {
   on_streaming: boolean | null;
   metadata_status: FSEntry['metadata_status'];
   enriching_since: Date | null;
+  radio_hour: Date | null;
 };
 
 /** Transform flat SQL result to nested IFSEntry structure */
@@ -285,6 +289,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   on_streaming: raw.on_streaming ?? null,
   metadata_status: raw.metadata_status,
   enriching_since: raw.enriching_since,
+  radio_hour: raw.radio_hour ?? null,
   // Nested metadata view (used by transformToV2). genres/styles are
   // album_metadata-only fields (BS#1441) and so live here, NOT as top-level
   // IFSEntry/FSEntry fields (that type mirrors the flowsheet table).
@@ -1048,6 +1053,9 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
       return {
         ...baseFields,
         message: entry.message,
+        // The authoritative top-of-hour (BS#1449). Date here; res.json emits ISO
+        // (or null). Clients format this instead of the early add_time.
+        radio_hour: entry.radio_hour,
       };
 
     default: {

@@ -41,6 +41,7 @@ const createBaseEntry = (overrides: Partial<IFSEntry & { metadata?: Partial<IFSE
     segue: false,
     message: null,
     add_time: new Date('2024-01-15T12:00:00Z'),
+    radio_hour: null,
     dj_name: null,
     rotation_bin: null,
     on_streaming: null,
@@ -481,6 +482,47 @@ describe('flowsheet.service', () => {
 
         expect(result.entry_type).toBe('breakpoint');
         expect(result.message).toBeNull();
+      });
+
+      it('emits radio_hour as the breakpoint top-of-hour Date (BS#1449)', () => {
+        // add_time is the early logging instant; radio_hour is the authoritative
+        // top-of-hour that clients should format instead.
+        const topOfHour = new Date('2024-06-18T16:00:00Z');
+        const entry = createBaseEntry({
+          entry_type: 'breakpoint',
+          message: '--- 12:00 PM BREAKPOINT ---',
+          add_time: new Date('2024-06-18T15:58:42Z'),
+          radio_hour: topOfHour,
+        });
+
+        const result = transformToV2(entry);
+
+        // transformToV2 emits the Date; Express res.json serializes it to ISO.
+        expect(result.radio_hour).toEqual(topOfHour);
+      });
+
+      it('emits radio_hour as null when the breakpoint has none', () => {
+        const entry = createBaseEntry({
+          entry_type: 'breakpoint',
+          message: '--- breakpoint ---',
+          radio_hour: null,
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.radio_hour).toBeNull();
+      });
+
+      it('omits radio_hour entirely for non-breakpoint (track) entries', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          artist_name: 'Juana Molina',
+          radio_hour: new Date('2024-06-18T16:00:00Z'),
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.radio_hour).toBeUndefined();
       });
     });
 
