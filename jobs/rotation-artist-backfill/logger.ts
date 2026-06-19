@@ -4,8 +4,9 @@
  * Forked from `jobs/artist-search-alias-consumer/logger.ts` (same Phase A
  * `repo`/`tool`/`step`/`run_id` tag set; the duplication keeps the cron's
  * build graph decoupled). One intentional divergence: `resolveTracesSampleRate`
- * defaults an unset `SENTRY_TRACES_SAMPLE_RATE` to 1.0, not 0 — see its
- * doc comment.
+ * resolves any unusable `SENTRY_TRACES_SAMPLE_RATE` — unset OR malformed /
+ * out-of-range — to 1.0, where the sibling resolves it to 0. See its doc
+ * comment.
  */
 
 import * as Sentry from '@sentry/node';
@@ -36,11 +37,13 @@ let baseTags: BaseTags | null = null;
  * the alerts sit at "no data" forever (the BS#1428 finding: zero job spans in
  * 30 days because the cron's deploy env never set this var).
  *
- * The downshift lever is preserved: an explicit `SENTRY_TRACES_SAMPLE_RATE=0`
- * still silences the job's spans. Only the *unset* default changed. A
- * malformed / out-of-range value falls back to the 1.0 default rather than 0,
- * so a typo can't silently disable the job's observability. Spans remain gated
- * on `SENTRY_DSN`, so dev/CI runs (no DSN) emit nothing regardless of rate.
+ * The downshift lever is preserved: an explicit, valid `SENTRY_TRACES_SAMPLE_RATE=0`
+ * still silences the job's spans. What changed is the resolved *default*: both
+ * an unset value AND a malformed / out-of-range one now yield 1.0 (the sibling
+ * yields 0 for both). Failing toward 1.0 rather than 0 is deliberate — a typo
+ * while trying to retune must not silently disable this job's observability,
+ * the very failure this fix addresses. Spans remain gated on `SENTRY_DSN`, so
+ * dev/CI runs (no DSN) emit nothing regardless of rate.
  */
 export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
   if (raw === undefined) return 1;
