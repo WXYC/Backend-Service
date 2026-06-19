@@ -458,6 +458,13 @@ jobs:
               # in tested code rather than inline workflow yaml. See BS#914.
               CRON_SCHEDULE=$(scripts/resolve-cron-schedule.sh "$TARGET_APP")
               echo "cron_schedule=$CRON_SCHEDULE" >> $GITHUB_OUTPUT
+              # Per-job Sentry trace-sampling opt-in (BS#1428). Empty unless the
+              # job's package.json sets `sentry-traces-sample-rate`, so non-opted
+              # crons keep their default (0 -> spans suppressed) and neither the
+              # shared API nor the high-cardinality backfills are affected. Read
+              # inline with yq, matching how `job-type` is read above.
+              SENTRY_TRACES_SAMPLE_RATE=$(yq -r '.["sentry-traces-sample-rate"] // ""' jobs/$TARGET_APP/package.json)
+              echo "sentry_traces_sample_rate=$SENTRY_TRACES_SAMPLE_RATE" >> $GITHUB_OUTPUT
             else
               echo "Unknown job-type '$JOB_TYPE' in jobs/$TARGET_APP/package.json (expected 'cron' or 'one-shot')" >&2
               exit 1
@@ -500,6 +507,7 @@ jobs:
             TARGET_APP=${{ matrix.target }}
             DEPLOY_TAG=${{ steps.determine_version.outputs.deploy_version }}
             CRON_SCHEDULE='${{ steps.deploy_vars.outputs.cron_schedule }}'
+            SENTRY_TRACES_SAMPLE_RATE='${{ steps.deploy_vars.outputs.sentry_traces_sample_rate }}'
             AWS_ECR_URI=${{ secrets.AWS_ECR_URI }}
             AWS_REGION=${{ secrets.AWS_REGION }}
 
@@ -510,7 +518,17 @@ jobs:
             echo "Pulling Docker image for deploy..."
             docker pull $AWS_ECR_URI/$TARGET_APP:$DEPLOY_TAG
 
-            CRON_CMD="docker rm -f ${TARGET_APP}-cron >/dev/null 2>&1 || true; docker run --name ${TARGET_APP}-cron --env-file .env $AWS_ECR_URI/$TARGET_APP:$DEPLOY_TAG"
+            # Inject the per-job trace-sampling override only when the job opted
+            # in (non-empty). Absent -> no -e -> the job's own default (0) ->
+            # spans suppressed, exactly as before. `-e` beats the shared
+            # `--env-file .env` for this container only, so the API and
+            # non-opted crons are unaffected (BS#1428).
+            SENTRY_ENV_ARG=""
+            if [ -n "$SENTRY_TRACES_SAMPLE_RATE" ]; then
+              SENTRY_ENV_ARG="-e SENTRY_TRACES_SAMPLE_RATE=$SENTRY_TRACES_SAMPLE_RATE"
+            fi
+
+            CRON_CMD="docker rm -f ${TARGET_APP}-cron >/dev/null 2>&1 || true; docker run --name ${TARGET_APP}-cron --env-file .env $SENTRY_ENV_ARG $AWS_ECR_URI/$TARGET_APP:$DEPLOY_TAG"
 
             echo "CRON DETAILS: $CRON_ID"
             echo "SCHEDULE: $CRON_SCHEDULE"

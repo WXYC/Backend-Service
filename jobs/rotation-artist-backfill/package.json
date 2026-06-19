@@ -1,6 +1,7 @@
 {
   "name": "@wxyc/rotation-artist-backfill",
   "cron-schedule": "30 4 * * *",
+  "sentry-traces-sample-rate": "1.0",
   "version": "1.0.0",
   "description": "WXYC daily cron: refresh LML's release + artist caches for every release currently in BS rotation, keyed by rotation.lml_identity_id (BS#1380). One-tier batched call to POST /api/v1/cache/refresh-for-identities (LML#525) — LML maps each identity to its per-source (source, external_id) pairs and walks to artists internally. Closes BS#1381; supersedes the Discogs-specific iteration from BS#1361 (PR #1376).",
   "type": "module",
