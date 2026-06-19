@@ -226,7 +226,13 @@ const buildShowIdMap = async (dbClient: DbClient) => {
   return map;
 };
 
-const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map<number, number>) => {
+/**
+ * Parse FLOWSHEET_ENTRY_PROD dump lines into flowsheet rows and bulk-insert
+ * them. Exported so unit tests can pin the dump-column→row mapping — most
+ * importantly `radio_hour` from RADIO_HOUR (tuple[9]) — which otherwise has no
+ * CI regression guard against the dump column map drifting (#1462).
+ */
+export const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map<number, number>) => {
   let entryCount = 0;
   const pendingEntries: BulkEntryRow[] = [];
 
