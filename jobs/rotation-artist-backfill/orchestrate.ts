@@ -274,14 +274,20 @@ const tallyBatchError = (totals: Totals, batchSize: number): void => {
  * Project the run totals onto a Sentry child span with numeric attributes
  * set at creation time (per the BS#1081 convention — late `setAttribute`
  * calls index numbers as strings and break sum/avg/p95 aggregation).
- * Span name follows the sibling artist-search-alias-consumer's
- * `${JOB_NAME}.run.totals` shape so dashboards filtering by span name
- * pattern can group all backfill totals consistently.
+ *
+ * The span carries an explicit `op` of `rotation-artist-backfill.totals` so
+ * the BS#1402 alert rules (439423 / 439424) — which filter
+ * `span.op:rotation-artist-backfill.*` — actually match it. Without an `op`
+ * the span lands under a generic default op, that wildcard matches nothing,
+ * and the alerts' `sum(backfill.*)` aggregate resolves over zero rows: they
+ * sit at "no data" forever (the BS#1428 finding). The name keeps the sibling
+ * `${JOB_NAME}.run.totals` shape for name-pattern dashboard grouping.
  */
 const projectTotalsSpan = (totals: Totals, dryRun: boolean): void => {
   Sentry.startSpan(
     {
       name: 'rotation-artist-backfill.run.totals',
+      op: 'rotation-artist-backfill.totals',
       attributes: {
         'backfill.dry_run': dryRun ? 1 : 0,
         'backfill.identities_scanned': totals.identities_scanned,

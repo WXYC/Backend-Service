@@ -1,9 +1,11 @@
 /**
  * Observability for rotation-artist-backfill: Sentry init + JSON logs.
  *
- * Mirrors `jobs/artist-search-alias-consumer/logger.ts` verbatim. The
- * contract is identical (Phase A `repo`/`tool`/`step`/`run_id` tag set)
- * and the duplication keeps the cron's build graph decoupled.
+ * Forked from `jobs/artist-search-alias-consumer/logger.ts` (same Phase A
+ * `repo`/`tool`/`step`/`run_id` tag set; the duplication keeps the cron's
+ * build graph decoupled). One intentional divergence: `resolveTracesSampleRate`
+ * defaults an unset `SENTRY_TRACES_SAMPLE_RATE` to 1.0, not 0 — see its
+ * doc comment.
  */
 
 import * as Sentry from '@sentry/node';
@@ -21,10 +23,29 @@ type BaseTags = { repo: string; tool: string; run_id: string };
 
 let baseTags: BaseTags | null = null;
 
+/**
+ * Resolve the Sentry traces sample rate for this cron.
+ *
+ * Unlike the sibling ETL crons (flowsheet-etl, album-level-backfill, …) whose
+ * loggers default an unset `SENTRY_TRACES_SAMPLE_RATE` to 0, this job defaults
+ * to 1.0 — matching the runtime apps (`apps/backend`, `apps/auth`). The
+ * `rotation-artist-backfill.run.totals` span this job emits IS its product:
+ * the BS#1402 alert rules (439423 / 439424) and the BS#1428 numeric-typing
+ * verification read `sum(backfill.*)` off that span. Defaulting tracing to 0
+ * makes those alerts dead-on-arrival — the span never reaches the index and
+ * the alerts sit at "no data" forever (the BS#1428 finding: zero job spans in
+ * 30 days because the cron's deploy env never set this var).
+ *
+ * The downshift lever is preserved: an explicit `SENTRY_TRACES_SAMPLE_RATE=0`
+ * still silences the job's spans. Only the *unset* default changed. A
+ * malformed / out-of-range value falls back to the 1.0 default rather than 0,
+ * so a typo can't silently disable the job's observability. Spans remain gated
+ * on `SENTRY_DSN`, so dev/CI runs (no DSN) emit nothing regardless of rate.
+ */
 export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
-  if (raw === undefined) return 0;
+  if (raw === undefined) return 1;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 0;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 1;
   return parsed;
 };
 
