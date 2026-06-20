@@ -103,7 +103,7 @@
     "ws": "^8.21.0"
   },
   "dependencies": {
-    "@sentry/node": "^10.53.1",
+    "@sentry/node": "^10.59.0",
     "eventsource": "^4.1.0",
     "jose": "^6.2.3"
   },
