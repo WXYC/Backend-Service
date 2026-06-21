@@ -22,6 +22,11 @@
  *      trigger drops that floor (`GREATEST(now(), last_modified_at)`), so it
  *      can't drift. A single-statement test fires the trigger once and cannot
  *      catch this.
+ *
+ * TRUNCATE is also covered by the trigger (statement-level), but isn't
+ * exercised here: TRUNCATE-ing the shared per-worker `library` table would
+ * destroy fixture rows other --runInBand specs depend on. It's verified against
+ * an isolated throwaway database instead.
  */
 
 const postgres = require('postgres');
@@ -59,6 +64,13 @@ describe('library_watermark trigger (BS#1467)', () => {
       SHAPE_FIXTURE_LIBRARY_ID,
     ]);
     fk = rows[0];
+    // Fail loudly with an actionable message rather than a downstream
+    // "Cannot read properties of undefined" if the shape fixture didn't load.
+    if (!fk) {
+      throw new Error(
+        `shape fixture library row ${SHAPE_FIXTURE_LIBRARY_ID} not found in schema "${SCHEMA}" — globalSetup should load tests/fixtures/shape.sql before any spec`
+      );
+    }
   });
 
   afterAll(async () => {
@@ -153,9 +165,13 @@ describe('library_watermark trigger (BS#1467)', () => {
     );
     const driftSeconds = Number(rows[0].drift_s);
 
-    // Correct formula: drift ≈ 0 (≤ 1s slop). The +1s floor would put this at
-    // ≈ +(N-1)s.
-    expect(driftSeconds).toBeLessThanOrEqual(1);
+    // The correct GREATEST(now(), last_modified_at) formula pins the watermark
+    // at the bulk transaction's start (transaction_timestamp(), frozen), which
+    // is strictly earlier than the post-commit now() read above — so drift is
+    // always <= 0. Asserting "not in the future" this way is N-independent: it
+    // catches ANY forward drift, not just 0084's +1s-per-statement shape (which
+    // here would land the watermark at ≈ +(N-1)s).
+    expect(driftSeconds).toBeLessThanOrEqual(0);
     // And it still advanced (the trigger fired) — not stuck at the aged value.
     expect(await advancedToNow()).toBe(true);
   });
