@@ -228,6 +228,50 @@ components:
           type: string
           nullable: true
 
+    CatalogExportRow:
+      type: object
+      description: >
+        One catalog row in the `GET /library/catalog` NDJSON export (BS#1468).
+        `rotation_bin` / `rotation_kill_date` are raw (the most-recently-added
+        rotation record per album); the client evaluates "in rotation" locally.
+      properties:
+        id:
+          type: integer
+        artist_name:
+          type: string
+        album_title:
+          type: string
+        code_letters:
+          type: string
+        code_number:
+          type: integer
+        code_artist_number:
+          type: integer
+        label:
+          type: string
+          nullable: true
+        genre_name:
+          type: string
+        format_name:
+          type: string
+        on_streaming:
+          type: boolean
+          nullable: true
+        plays:
+          type: integer
+          nullable: true
+        artwork_url:
+          type: string
+          nullable: true
+        rotation_bin:
+          type: string
+          nullable: true
+          enum: [S, L, M, H, N]
+        rotation_kill_date:
+          type: string
+          format: date
+          nullable: true
+
     Rotation:
       type: object
       properties:
@@ -856,6 +900,59 @@ paths:
       responses:
         '200':
           description: Successfully added album
+
+  /library/catalog:
+    get:
+      summary: Bulk catalog export (gzipped NDJSON, conditional-GET)
+      description: >
+        Returns the entire music library catalog as one gzipped NDJSON body
+        (one JSON object per line) for clients that clone the catalog on-device
+        (e.g. iOS Core Spotlight indexing). Freshness is gated by the catalog
+        watermark: send `If-Modified-Since` (or `?since=`) and receive `304 Not
+        Modified` while the catalog is unchanged (it changes ~daily, after the
+        library ETL sync), or a fresh `200` with the full payload when it has
+        advanced. `rotation_bin` and `rotation_kill_date` are exported raw (the
+        most-recently-added rotation record per album); the client evaluates
+        "in rotation" against its own clock as
+        `rotation_bin != null && (rotation_kill_date == null || rotation_kill_date > today)`.
+      security:
+        - BearerAuth: ['catalog-read']
+      parameters:
+        - name: If-Modified-Since
+          in: header
+          required: false
+          description: RFC 9110 HTTP date from a prior response's `Last-Modified`.
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          description: Alternative to `If-Modified-Since` (any parseable date string).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Full catalog as gzipped NDJSON. One CatalogExportRow per line.
+          headers:
+            Last-Modified:
+              description: Catalog watermark; echo back as `If-Modified-Since`.
+              schema:
+                type: string
+            Content-Encoding:
+              description: '`gzip` when the request accepts gzip.'
+              schema:
+                type: string
+            Vary:
+              schema:
+                type: string
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: '#/components/schemas/CatalogExportRow'
+        '304':
+          description: Catalog unchanged since `If-Modified-Since` / `since`.
+        '401':
+          description: Missing or invalid bearer token.
 
   /library/rotation:
     get:

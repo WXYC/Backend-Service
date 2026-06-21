@@ -3,6 +3,8 @@ import { Router } from 'express';
 import * as libraryController from '../controllers/library.controller.js';
 import * as requestLineController from '../controllers/requestLine.controller.js';
 import { trackActivity } from '../middleware/trackActivity.js';
+import { conditionalGet } from '../middleware/conditionalGet.js';
+import { getCatalogLastModifiedAt } from '../services/library.service.js';
 
 export const library_route = Router();
 
@@ -13,6 +15,17 @@ library_route.get('/search', requirePermissions({}), trackActivity, requestLineC
 library_route.get('/', requirePermissions({ catalog: ['read'] }), libraryController.searchForAlbum);
 
 library_route.get('/query', requirePermissions({ catalog: ['read'] }), libraryController.searchLibraryQueryEndpoint);
+
+// Catalog bulk export (BS#1468 / Epic F, parent #1466). `conditionalGet` gates
+// `304` on the library_watermark so a client that has cloned the catalog
+// re-pulls only when it changes (~daily). Same `catalog:read` auth as the other
+// catalog reads.
+library_route.get(
+  '/catalog',
+  requirePermissions({ catalog: ['read'] }),
+  conditionalGet(getCatalogLastModifiedAt),
+  libraryController.exportCatalog
+);
 
 library_route.post('/', requirePermissions({ catalog: ['write'] }), libraryController.addAlbum);
 

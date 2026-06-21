@@ -9,7 +9,9 @@ import {
   NewRotationRelease,
   RotationRelease,
 } from '@wxyc/database';
+import { gunzipSync } from 'node:zlib';
 import * as libraryService from '../services/library.service.js';
+import * as catalogExportService from '../services/catalog-export.service.js';
 import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
@@ -601,4 +603,42 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
   });
   const totalPages = Math.ceil(total / limit);
   res.status(200).json({ results, total, page, totalPages });
+};
+
+// ---------------------------------------------------------------------------
+// GET /library/catalog — full catalog bulk export (BS#1468 / Epic F, #1466)
+// ---------------------------------------------------------------------------
+
+/**
+ * Stream the entire catalog as one gzipped NDJSON body so the iOS app can clone
+ * it for on-device Spotlight indexing. Freshness is handled upstream by the
+ * `conditionalGet(getCatalogLastModifiedAt)` middleware (which sets
+ * `Last-Modified` and short-circuits to `304` on `If-Modified-Since` / `?since=`
+ * when the `library_watermark` hasn't advanced); by the time this handler runs
+ * the catalog has changed and a full `200` is owed.
+ *
+ * The payload is pre-gzipped and cached per watermark (one shared copy per pod),
+ * so this is a memcpy on the hot path. There is no `compression` middleware in
+ * the app, so we set `Content-Encoding` ourselves and honor the request's
+ * `Accept-Encoding`: gzip-capable clients (iOS `URLSession` inflates
+ * transparently) get the cached bytes as-is with a correct `Content-Length`; the
+ * rare client that doesn't accept gzip gets a one-off inflate.
+ */
+export const exportCatalog: RequestHandler = async (req, res) => {
+  const gzipped = await catalogExportService.getCatalogExportGzip();
+  const acceptsGzip = (req.headers['accept-encoding'] ?? '').includes('gzip');
+
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Vary', 'Accept-Encoding');
+
+  if (acceptsGzip) {
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Content-Length', gzipped.length);
+    res.status(200).end(gzipped);
+    return;
+  }
+
+  const inflated = gunzipSync(gzipped);
+  res.setHeader('Content-Length', inflated.length);
+  res.status(200).end(inflated);
 };
