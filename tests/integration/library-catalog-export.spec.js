@@ -189,6 +189,17 @@ describe('GET /library/catalog (BS#1468)', () => {
     expect(expired.rotation_kill_date).toBe('2024-07-01');
   });
 
+  test('artist_name is never null: a row with NULL library.artist_name falls back to the authoritative artists.artist_name', async () => {
+    // library.artist_name is nullable ("Nullable until A.2"); shape fixture row
+    // 7006 has it NULL. The OpenAPI/TS contract types artist_name as a non-null
+    // string (generated iOS/Kotlin decoders would throw on null), so the export
+    // must COALESCE to artists.artist_name (NOT NULL) rather than ship null.
+    const byId = new Map(parseRows(await getCatalog(auth)).map((r) => [r.id, r]));
+    const nullArtistRow = byId.get(7006);
+    expect(nullArtistRow).toBeDefined();
+    expect(nullArtistRow.artist_name).toBe('Shape Fixture Artist Alpha');
+  });
+
   test('returns 304 when If-Modified-Since matches the current watermark', async () => {
     const first = await getCatalog(auth);
     expect(first.status).toBe(200);
