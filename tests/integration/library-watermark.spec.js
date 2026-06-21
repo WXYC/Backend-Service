@@ -134,6 +134,33 @@ describe('library_watermark trigger (BS#1467)', () => {
     expect(await advancedToNow()).toBe(true);
   });
 
+  test('a transaction with no INSERT/UPDATE/DELETE on library leaves the watermark unchanged (no-change ETL day → clients keep 304-ing)', async () => {
+    // Age the watermark to a known, far-past instant. (beforeEach's cleanup
+    // DELETE already fired the trigger up to now(); ageWm pushes it well back
+    // so a failure to stay put is unambiguous.)
+    await ageWm('100 years');
+
+    // Mirror the library-etl no-change day: open one transaction, read the
+    // catalog, issue ZERO mutating statements on `library`, commit. The trigger
+    // fires AFTER INSERT/UPDATE/DELETE/TRUNCATE only, so a plain read of the
+    // catalog is not a freshness event. (Note the asymmetry: a zero-ROW UPDATE
+    // would still fire — statement-level triggers run regardless of row count —
+    // so the genuine no-op is the absence of any mutating statement, not a
+    // no-match write.)
+    await sql.begin(async (tx) => {
+      await tx.unsafe(`SELECT count(*) FROM "${SCHEMA}".library`);
+    });
+
+    // The watermark must NOT have advanced: still ~100 years in the past. If the
+    // trigger had fired it would now be ≈now(). Evaluated in SQL against the DB
+    // clock — no JS-vs-DB skew.
+    const rows = await sql.unsafe(
+      `SELECT last_modified_at < now() - interval '50 years' AS unchanged
+       FROM "${SCHEMA}".library_watermark WHERE id = true`
+    );
+    expect(rows[0].unchanged).toBe(true);
+  });
+
   test('a direct, app-layer-bypassing multi-row UPDATE advances the watermark (#1106 bypass guard)', async () => {
     await insertProbeRow('bypass-a');
     await insertProbeRow('bypass-b');
