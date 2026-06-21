@@ -1111,10 +1111,10 @@ export const flowsheet_watermark = wxyc_schema.table(
 
 /**
  * BS#1467 (Epic F pattern, applied to the catalog). Single-row sibling
- * watermark table that any INSERT/UPDATE/DELETE on `library` advances via the
- * `touch_library_watermark` AFTER STATEMENT trigger (migration 0104). It is
- * the conditional-GET freshness source for the catalog bulk-export endpoint
- * (#1466 child 2).
+ * watermark table that any INSERT/UPDATE/DELETE/TRUNCATE on `library` advances
+ * via the `touch_library_watermark` AFTER STATEMENT trigger (migration 0104).
+ * It is the conditional-GET freshness source for the catalog bulk-export
+ * endpoint (#1466 child 2).
  *
  * Mirrors `flowsheet_watermark` structurally, with one deliberate divergence
  * in the trigger (not visible here — see migration 0104): the library trigger

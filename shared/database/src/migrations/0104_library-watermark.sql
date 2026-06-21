@@ -3,16 +3,19 @@
 -- the freshness source the bulk-export endpoint (#1466 child 2) gates 304s on.
 --
 -- `library_watermark` — single-row sibling table with one `last_modified_at`
--- column, touched by an AFTER INSERT/UPDATE/DELETE STATEMENT trigger on
--- `library`. This is the source `library.service.getCatalogLastModifiedAt()`
+-- column, touched by an AFTER INSERT/UPDATE/DELETE/TRUNCATE STATEMENT trigger
+-- on `library`. This is the source `library.service.getCatalogLastModifiedAt()`
 -- reads. A DB trigger (not an app-level watermark) is mandatory because the
--- catalog's primary writer — the `jobs/library-etl/` daily sync — writes
--- straight to Postgres, bypassing the BS app layer entirely; an app-level
--- `updateLastModified()` would silently miss every ETL write (the #1106 bypass
--- failure mode). **DELETE matters** for the same reason it does on flowsheet:
+-- catalog's primary writer — the `jobs/library-etl/` daily sync — is a separate
+-- job process (not the API server) that writes to Postgres via the Drizzle
+-- client, never through `library.service`. An app-level `updateLastModified()`
+-- call would therefore never run for ETL writes, silently stranding the
+-- watermark (the #1106 bypass failure mode). **DELETE and TRUNCATE matter**:
 -- a `MAX(library.last_modified)` read would retreat when the row holding the
--- MAX is deleted, so a polling client would 304 against a stale baseline and
--- miss the deletion. The sibling row only ever moves forward.
+-- MAX is deleted (and TRUNCATE leaves no row at all), so a polling client would
+-- 304 against a stale baseline and miss an emptied / shrunk catalog. The
+-- statement trigger covers TRUNCATE too (a re-seed-via-TRUNCATE still advances
+-- the watermark); the sibling row only ever moves forward.
 --
 -- WATERMARK FORMULA — deliberate divergence from 0084 (read before copying):
 -- this trigger uses `GREATEST(now(), last_modified_at)`, dropping 0084's
@@ -62,6 +65,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;--> statement-breakpoint
 CREATE TRIGGER touch_library_watermark
-AFTER INSERT OR UPDATE OR DELETE ON wxyc_schema.library
+AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON wxyc_schema.library
 FOR EACH STATEMENT
 EXECUTE FUNCTION wxyc_schema.touch_library_watermark();
