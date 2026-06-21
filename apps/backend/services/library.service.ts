@@ -20,6 +20,7 @@ import {
   genres,
   library,
   library_identity,
+  library_watermark,
   rotation,
   LibraryArtistViewEntry,
 } from '@wxyc/database';
@@ -47,6 +48,28 @@ import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.se
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
+
+/**
+ * Catalog freshness watermark for the conditional-GET path (BS#1467 / Epic F
+ * pattern). Returns `library_watermark.last_modified_at`, the single-row
+ * sibling table advanced by the `touch_library_watermark` AFTER STATEMENT
+ * trigger on `library` (migration 0104). The trigger fires on every
+ * INSERT/UPDATE/DELETE — including the daily `jobs/library-etl/` write that
+ * bypasses this service layer — so the watermark is correct even though most
+ * catalog mutations never call into `library.service`.
+ *
+ * The conditional-GET middleware (`conditionalGet(getCatalogLastModifiedAt)`)
+ * reads this on every poll; PK lookup is O(1). Returns the epoch
+ * (`new Date(0)`) only as a defensive fallback — the migration seeds the
+ * singleton row at apply time, so in production the SELECT always returns
+ * exactly one row.
+ *
+ * Analogue of `flowsheet.service.getLastModifiedAt`.
+ */
+export const getCatalogLastModifiedAt = async (): Promise<Date> => {
+  const result = await db.select({ at: library_watermark.last_modified_at }).from(library_watermark).limit(1);
+  return result[0]?.at ?? new Date(0);
+};
 
 /**
  * Source columns on `artists` (and any joined / view-projected row) that
