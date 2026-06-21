@@ -100,5 +100,6 @@
   "0101_rotation-discogs-release-id-not-sentinel": "19c3889d8859246d561ad250aac5a8f891afe60a6474e3fa4b4568c96bcb6908",
   "0102_album-metadata-lml-fields": "43425ee132e94b7962fe67a60b3b3cb979726179362e481986cef8cb217faebe",
   "0103_flowsheet-radio-hour": "48ac339af838c8bb6a00e2793d80b57b00f6b9971ed50c7f1e91a4359114fb68",
-  "0104_library-watermark": "e9cfb021ab16c8b44c9c9afead1d81ee348521428358536fe62eecfe557605e9"
+  "0104_library-watermark": "e9cfb021ab16c8b44c9c9afead1d81ee348521428358536fe62eecfe557605e9",
+  "0105_library-watermark-parent-tables": "879a3ac81a8a93b1108db8d72701d5927518d47c2cd006a39a632ac8c801c579"
 }
