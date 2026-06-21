@@ -3,16 +3,21 @@ import { Router } from 'express';
 import * as flowsheetController from '../controllers/flowsheet.controller';
 import * as searchController from '../controllers/search.controller';
 import * as suggestController from '../controllers/suggest.controller';
+import * as flowsheet_service from '../services/flowsheet.service';
 import { flowsheetMirror } from '../middleware/legacy/flowsheet.mirror';
 import { conditionalGet } from '../middleware/conditionalGet';
 import { showMemberMiddleware } from '../middleware/checkShowMember';
 
 export const flowsheet_route = Router();
 
+// Conditional-GET over the flowsheet watermark (BS#902); the catalog passes a
+// different provider (BS#1467) but reuses the same middleware factory.
+const flowsheetConditionalGet = conditionalGet(flowsheet_service.getLastModifiedAt);
+
 // Public playlist archive search
 flowsheet_route.get('/search', searchController.searchFlowsheetEndpoint);
 
-flowsheet_route.get('/', conditionalGet, flowsheetMirror.getEntries, flowsheetController.getEntries);
+flowsheet_route.get('/', flowsheetConditionalGet, flowsheetMirror.getEntries, flowsheetController.getEntries);
 
 flowsheet_route.post(
   '/',
@@ -46,7 +51,7 @@ flowsheet_route.patch(
   flowsheetController.changeOrder
 );
 
-flowsheet_route.get('/latest', conditionalGet, flowsheetController.getLatest);
+flowsheet_route.get('/latest', flowsheetConditionalGet, flowsheetController.getLatest);
 
 flowsheet_route.post(
   '/join',

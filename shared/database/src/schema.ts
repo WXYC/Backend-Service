@@ -1109,6 +1109,50 @@ export const flowsheet_watermark = wxyc_schema.table(
   ]
 );
 
+/**
+ * BS#1467 (Epic F pattern, applied to the catalog). Single-row sibling
+ * watermark table that any INSERT/UPDATE/DELETE on `library` advances via the
+ * `touch_library_watermark` AFTER STATEMENT trigger (migration 0104). It is
+ * the conditional-GET freshness source for the catalog bulk-export endpoint
+ * (#1466 child 2).
+ *
+ * Mirrors `flowsheet_watermark` structurally, with one deliberate divergence
+ * in the trigger (not visible here — see migration 0104): the library trigger
+ * advances with a plain `GREATEST(now(), last_modified_at)`, dropping 0084's
+ * `+ interval '1 second'` floor. The catalog's primary writer is the
+ * `jobs/library-etl/` daily sync, which runs its entire per-row loop inside a
+ * single transaction; Postgres `now()` is `transaction_timestamp()` (frozen at
+ * transaction start), so a `+1s` floor would push the watermark N seconds into
+ * the future under a bulk write — the drift-forward half of #1106. A
+ * once-daily ETL feeding a once-daily poller doesn't need 0084's same-second
+ * disambiguation, so the monotonic-but-not-forced form is correct here.
+ *
+ * A DB trigger (not an app-level watermark) is mandatory because the ETL
+ * writes straight to Postgres, bypassing the BS service layer entirely — an
+ * app-level `updateLastModified()` would silently miss every ETL write (the
+ * #1106 bypass failure mode).
+ *
+ * The `id boolean PRIMARY KEY DEFAULT true` + `CHECK (id = true)` shape is the
+ * standard singleton-row pattern: only one row can ever exist (the seed
+ * inserted at migration apply time), so reads never need a predicate beyond
+ * the implicit "the row".
+ */
+export const library_watermark = wxyc_schema.table(
+  'library_watermark',
+  {
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    id: boolean('id').primaryKey().notNull().default(true),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    last_modified_at: timestamp('last_modified_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (_table) => [
+    // Singleton-row guard ships in migration 0104. The raw `"id" = true` form
+    // (no schema/table qualification) matches 0104's snapshot byte-for-byte so
+    // drizzle:generate doesn't emit a spurious DROP/ADD pair (the BS#1029 trap).
+    check('library_watermark_singleton', sql.raw(`"id" = true`)),
+  ]
+);
+
 export const album_metadata = wxyc_schema.table('album_metadata', {
   // `.notNull()` is redundant with `.primaryKey()` at the SQL level (PK
   // implies NOT NULL), but Drizzle's `InferInsertModel` type derivation

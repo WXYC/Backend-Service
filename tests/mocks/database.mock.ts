@@ -194,6 +194,10 @@ export const flowsheet_watermark = {
   id: 'id',
   last_modified_at: 'last_modified_at',
 };
+export const library_watermark = {
+  id: 'id',
+  last_modified_at: 'last_modified_at',
+};
 export const album_metadata = {
   album_id: 'album_id',
   artwork_url: 'artwork_url',
