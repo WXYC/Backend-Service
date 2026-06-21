@@ -436,7 +436,14 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
     .where(inArray(flowsheet.show_id, show_ids))
-    .orderBy(desc(flowsheet.play_order));
+    // play_order can collide within a show: the tubafrenzy webhook and the
+    // dj-site live-insert path assign it independently and the schema
+    // intentionally allows overlap (no per-show UNIQUE — see schema.ts). Tied
+    // rows must therefore break on a stable secondary key, or the live
+    // flowsheet reshuffles between polls (the "randomly rearranging" report).
+    // flowsheet.id is globally monotonic, so it orders the two writers'
+    // entries deterministically at every shared play_order.
+    .orderBy(desc(flowsheet.play_order), desc(flowsheet.id));
 
   return raw.map(transformToIFSEntry);
 };
