@@ -94,8 +94,13 @@ export const serializeCatalogNdjson = (rows: CatalogExportRow[]): string =>
  *    the client evaluates expiry against its own clock. `kill_date` is cast to
  *    text so it serializes as a stable `YYYY-MM-DD` string (or null), not a
  *    parser-dependent Date.
- *  - `artist_name` reads the denormalized `library.artist_name` (physical
- *    column kept current by the 0060 cascade) rather than the `artists` join.
+ *  - `artist_name` prefers the denormalized `library.artist_name` (physical
+ *    column kept current by the 0060 cascade) but COALESCEs to the authoritative
+ *    `artists.artist_name` (NOT NULL) — `library.artist_name` is nullable
+ *    ("Nullable until A.2") and the export contract types `artist_name` non-null,
+ *    so an un-backfilled NULL must not ship as JSON null and break generated
+ *    iOS/Kotlin decoders. Both source columns advance the watermark (library
+ *    trigger + the 0105 artists trigger), so the COALESCE stays freshness-correct.
  *
  * One scan per watermark (cached below), so the full-table cost is paid ~daily.
  */
@@ -103,7 +108,7 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
   const rows = await db.execute(sql`
     SELECT DISTINCT ON (${library.id})
       ${library.id}                            AS id,
-      ${library.artist_name}                   AS artist_name,
+      COALESCE(${library.artist_name}, ${artists.artist_name}) AS artist_name,
       ${library.album_title}                   AS album_title,
       ${artists.code_letters}                  AS code_letters,
       ${library.code_number}                   AS code_number,
