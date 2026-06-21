@@ -626,7 +626,11 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
  */
 export const exportCatalog: RequestHandler = async (req, res) => {
   const gzipped = await catalogExportService.getCatalogExportGzip();
-  const acceptsGzip = (req.headers['accept-encoding'] ?? '').includes('gzip');
+  // Use Express's content-negotiation (the `accepts` library) rather than a
+  // substring match: it honors q-values, so `gzip;q=0` (an explicit refusal)
+  // correctly returns false, and `Accept-Encoding: *` correctly returns gzip —
+  // both of which `String.includes('gzip')` gets wrong.
+  const acceptsGzip = req.acceptsEncodings('gzip') === 'gzip';
 
   res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
   res.setHeader('Vary', 'Accept-Encoding');

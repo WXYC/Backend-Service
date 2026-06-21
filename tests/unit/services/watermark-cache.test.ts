@@ -63,4 +63,46 @@ describe('createWatermarkCache', () => {
     expect(build).toHaveBeenCalledTimes(1);
     expect(ra).toBe(rb);
   });
+
+  it('a slow build for an older watermark does not clobber a newer cached entry (lost-update guard)', async () => {
+    // Two builds overlap because the watermark advanced mid-build. The OLDER
+    // build resolves LAST and must not overwrite the fresher cached payload, or
+    // a poller would briefly get stale bytes and the newer build's work is
+    // discarded, forcing a redundant rebuild.
+    const W1 = new Date('2026-06-20T00:00:00.000Z');
+    const W2 = new Date('2026-06-21T00:00:00.000Z');
+    let watermark = W1;
+    const resolvers: Array<(b: Buffer) => void> = [];
+    const build = jest.fn(() => new Promise<Buffer>((resolve) => resolvers.push(resolve)));
+    const cache = createWatermarkCache(() => Promise.resolve(watermark), build);
+
+    // get() awaits the watermark provider before calling build(), so drain the
+    // microtask queue after each call to let the build() actually fire.
+    const flush = async () => {
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    };
+
+    const pA = cache.get(); // reads W1, starts build[0]
+    await flush();
+    watermark = W2;
+    const pB = cache.get(); // reads W2 (different), starts build[1]
+    await flush();
+
+    resolvers[1](Buffer.from('payload-v2')); // newer build resolves first → caches W2
+    await pB;
+    resolvers[0](Buffer.from('payload-v1')); // stale older build resolves last
+    await pA;
+
+    // A read at W2 must be a cache hit (no third build) returning v2. With the
+    // bug, the stale W1 build clobbered the cache, so this read misses and
+    // triggers a third build — resolve any such straggler so the assertion is a
+    // clean failure rather than a hang.
+    const pC = cache.get();
+    await flush();
+    while (resolvers.length > 2) resolvers.pop()?.(Buffer.from('straggler'));
+    const cReadAtW2 = await pC;
+
+    expect(build).toHaveBeenCalledTimes(2); // one per distinct watermark — not a third rebuild
+    expect(cReadAtW2.toString()).toBe('payload-v2');
+  });
 });
