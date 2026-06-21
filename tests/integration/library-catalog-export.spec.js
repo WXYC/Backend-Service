@@ -150,6 +150,20 @@ describe('GET /library/catalog (BS#1468)', () => {
     expect(decodeBody(res)).not.toContain('search_doc');
   });
 
+  test('honors Accept-Encoding: gzip;q=0 by serving identity (not gzip the client refused)', async () => {
+    // q=0 is an explicit refusal of gzip (RFC 9110). The handler must serve an
+    // uncompressed body — a substring `includes('gzip')` check would wrongly
+    // send gzip bytes the client won't inflate.
+    const res = await auth.get('/library/catalog').set('Accept-Encoding', 'gzip;q=0').buffer(true).parse(collectBuffer);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-encoding']).toBeUndefined();
+    // Body is plaintext NDJSON the client can parse without inflating.
+    const rows = parseRows(res);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(Object.keys(rows[0]).sort()).toEqual(CONTRACT_KEYS);
+  });
+
   test('exports raw rotation_bin + rotation_kill_date (most-recently-added record, NOT the view CURRENT_DATE filter)', async () => {
     const byId = new Map(parseRows(await getCatalog(auth)).map((r) => [r.id, r]));
 
