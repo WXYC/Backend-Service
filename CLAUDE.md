@@ -76,7 +76,7 @@ Key middleware:
 - `errorHandler` — Centralized error handling returning standardized responses
 - Legacy mirror middleware — Syncs flowsheet data to tubafrenzy. Show lifecycle (`startShow`, `endShow`) and entry CRUD (`addEntry`, `updateEntry`) use HTTP REST calls to tubafrenzy's mirror API. `deleteEntry` uses raw SQL via SSH. Show IDs live in two places: an in-memory `showIdMap` (process-local, populated lazily by `cacheShowId`, cleared on process exit) and the persisted `shows.legacy_show_id` column (written alongside the cache after `mirrorCreateShow`). On BS restart the map starts empty; read paths fall back to the persisted column, paying one extra DB round-trip on the first lookup per show.
 
-Server timeout is 35 seconds globally — strictly greater than the LML client's 30 s `AbortController` (`@wxyc/lml-client`, `shared/lml-client/src/index.ts`) so a slow LML lookup's catch path can flush a 200-with-fallback response instead of racing the socket teardown to a CORS-less 502. SSE routes opt out via `res.setTimeout(0)`. Swagger API docs are served at `/api-docs` from `app.yaml`.
+Server timeout is 35 seconds globally — strictly greater than the LML client's 30 s `AbortController` (`@wxyc/lml-client`, `shared/lml-client/src/index.ts`) so a slow LML lookup's catch path can flush a 200-with-fallback response instead of racing the socket teardown to a CORS-less 502. SSE routes opt out via `res.setTimeout(0)`. Swagger API docs are served at `/api-docs` from `app.yaml` — Swagger-UI display only, **not** a codegen source; the cross-repo SSOT is `wxyc-shared/api.yaml` (see Code Quality).
 
 ### Auth Server (`apps/auth`)
 
@@ -185,6 +185,8 @@ npm run format           # Prettier formatting
 npm run format:check     # Verify formatting (used in CI)
 npm run build            # Compile all workspaces
 ```
+
+**Schema-first rule:** a new public endpoint's request/response shape goes into `wxyc-shared/api.yaml` (the cross-repo SSOT that feeds iOS/Kotlin/dj-site codegen) first, before or alongside the private TS type. `apps/backend/app.yaml` is Swagger-UI docs only — not a codegen source — so a shape that lives only there (or only as a private TS type) is invisible to SSOT consumers and the specs drift.
 
 ### Doc hygiene
 
