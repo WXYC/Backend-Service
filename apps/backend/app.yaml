@@ -266,7 +266,6 @@ components:
         rotation_bin:
           type: string
           nullable: true
-          enum: [S, L, M, H, N]
         rotation_kill_date:
           type: string
           format: date
