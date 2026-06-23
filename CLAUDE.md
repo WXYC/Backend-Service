@@ -186,7 +186,7 @@ npm run format:check     # Verify formatting (used in CI)
 npm run build            # Compile all workspaces
 ```
 
-**Schema-first rule:** a new public endpoint's request/response shape goes into `wxyc-shared/api.yaml` (the cross-repo SSOT that feeds iOS/Kotlin/dj-site codegen) first, before or alongside the private TS type. `apps/backend/app.yaml` is Swagger-UI docs only — not a codegen source — so a shape that lives only there (or only as a private TS type) is invisible to SSOT consumers and the specs drift.
+**Schema-first rule:** a new public endpoint's request/response shape goes into `wxyc-shared/api.yaml` (the cross-repo SSOT whose codegen feeds this repo, dj-site, iOS, and Android) first, before or alongside the private TS type. `apps/backend/app.yaml` is Swagger-UI docs only — not a codegen source — so a shape that lives only there (or only as a private TS type) is invisible to SSOT consumers and the specs drift.
 
 ### Doc hygiene
 
