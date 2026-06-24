@@ -24,6 +24,8 @@ const GEN = 11; // 'Rock'
 const FMT = 1; // 'cd'
 const PROBE_ACTIVE = 7050;
 const PROBE_EXPIRED = 7052;
+const PROBE_PLAYS = 7054; // album with seeded flowsheet track plays (BS#1486)
+const PROBE_PLAYS_COUNT = 5; // number of 'track' flowsheet rows seeded for PROBE_PLAYS
 
 // Exactly the export contract field set (#1468 AC), sorted for comparison.
 const CONTRACT_KEYS = [
@@ -120,13 +122,50 @@ describe('GET /library/catalog (BS#1468)', () => {
        ON CONFLICT (id) DO NOTHING`,
       [PROBE_EXPIRED]
     );
+
+    // Probe album with real flowsheet play history (BS#1486). `plays` is sourced
+    // from the `album_plays` MV (count of 'track' flowsheet rows with this
+    // album_id), NOT the dead `library.plays` column. Seed PROBE_PLAYS_COUNT
+    // 'track' rows plus one non-track ('breakpoint') row carrying the same
+    // album_id — the non-track row must be excluded by the MV's
+    // `entry_type='track'` filter, so the exported count stays exactly
+    // PROBE_PLAYS_COUNT, not +1.
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".library
+         (id, artist_id, genre_id, format_id, album_title, code_number, artist_name)
+       VALUES ($1, $2, $3, $4, 'BS#1486 Export Probe Plays', 93, 'Shape Fixture Artist Alpha')
+       ON CONFLICT (id) DO NOTHING`,
+      [PROBE_PLAYS, ART, GEN, FMT]
+    );
+    for (let i = 0; i < PROBE_PLAYS_COUNT; i++) {
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, play_order, artist_name, album_title, track_title)
+         VALUES ($1, 'track', $2, 'Shape Fixture Artist Alpha', 'BS#1486 Export Probe Plays', $3)`,
+        [PROBE_PLAYS, 9000 + i, `probe track ${i}`]
+      );
+    }
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, play_order, message)
+       VALUES ($1, 'breakpoint', 9100, 'non-track row that must NOT count toward plays')`,
+      [PROBE_PLAYS]
+    );
   });
 
   afterAll(async () => {
     if (sql) {
-      // rotation.album_id is ON DELETE CASCADE, so this reaps the probe rotation
-      // rows too.
-      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN ($1, $2)`, [PROBE_ACTIVE, PROBE_EXPIRED]);
+      // flowsheet.album_id is ON DELETE SET NULL, so reap the seeded play rows by
+      // album_id BEFORE deleting the library row (after which album_id is NULL and
+      // unfindable). rotation.album_id is ON DELETE CASCADE, so the library delete
+      // reaps the probe rotation rows.
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id = $1`, [PROBE_PLAYS]);
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN ($1, $2, $3)`, [
+        PROBE_ACTIVE,
+        PROBE_EXPIRED,
+        PROBE_PLAYS,
+      ]);
+      // Drop the now-stale PROBE_PLAYS row from the MV so it can't leak into a
+      // later test's export.
+      await sql.unsafe(`REFRESH MATERIALIZED VIEW "${SCHEMA}".album_plays`);
       await sql.end();
     }
   });
@@ -198,6 +237,30 @@ describe('GET /library/catalog (BS#1468)', () => {
     const nullArtistRow = byId.get(7006);
     expect(nullArtistRow).toBeDefined();
     expect(nullArtistRow.artist_name).toBe('Shape Fixture Artist Alpha');
+  });
+
+  test('plays is the real per-release play count from album_plays, not the dead library.plays column (BS#1486)', async () => {
+    // Refresh the MV so the seeded flowsheet 'track' rows roll up into album_plays,
+    // then advance the watermark (the per-watermark export cache is keyed on
+    // library_watermark, which album_plays refresh does NOT bump) so the next GET
+    // rebuilds the export against the refreshed MV.
+    await sql.unsafe(`REFRESH MATERIALIZED VIEW "${SCHEMA}".album_plays`);
+    await sql.unsafe(`UPDATE "${SCHEMA}".library SET album_title = album_title WHERE id = $1`, [PROBE_PLAYS]);
+
+    const byId = new Map(parseRows(await getCatalog(auth)).map((r) => [r.id, r]));
+
+    // A played album exports its real count — and exactly the count of 'track'
+    // rows, excluding the non-track ('breakpoint') row seeded with the same
+    // album_id.
+    const played = byId.get(PROBE_PLAYS);
+    expect(played).toBeDefined();
+    expect(played.plays).toBe(PROBE_PLAYS_COUNT);
+
+    // An album with no flowsheet track rows has no album_plays row; the LEFT JOIN
+    // COALESCEs to 0 — never JSON null — so consumers can rank numerically.
+    const unplayed = byId.get(PROBE_EXPIRED);
+    expect(unplayed).toBeDefined();
+    expect(unplayed.plays).toBe(0);
   });
 
   test('returns 304 when If-Modified-Since matches the current watermark', async () => {

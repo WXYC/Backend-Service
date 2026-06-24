@@ -14,7 +14,16 @@
 
 import { gzipSync } from 'node:zlib';
 import { sql } from 'drizzle-orm';
-import { db, library, artists, format, genres, genre_artist_crossreference, rotation } from '@wxyc/database';
+import {
+  db,
+  library,
+  artists,
+  format,
+  genres,
+  genre_artist_crossreference,
+  rotation,
+  album_plays,
+} from '@wxyc/database';
 import { createWatermarkCache } from './watermark-cache.service.js';
 import { getCatalogLastModifiedAt } from './library.service.js';
 
@@ -80,7 +89,7 @@ export const serializeCatalogNdjson = (rows: CatalogExportRow[]): string =>
 
 /**
  * Read the full catalog as flat export rows. Mirrors `library_artist_view`'s
- * 5-table join, with two deliberate divergences for the export contract:
+ * 5-table join, with three deliberate divergences for the export contract:
  *
  *  - rotation is joined RAW (no `kill_date > CURRENT_DATE` filter) and we keep
  *    the most-recently-ADDED rotation record per album (`DISTINCT ON
@@ -101,6 +110,23 @@ export const serializeCatalogNdjson = (rows: CatalogExportRow[]): string =>
  *    so an un-backfilled NULL must not ship as JSON null and break generated
  *    iOS/Kotlin decoders. Both source columns advance the watermark (library
  *    trigger + the 0105 artists trigger), so the COALESCE stays freshness-correct.
+ *  - `plays` comes from the `album_plays` materialized view (migration 0059,
+ *    refreshed hourly by `album-plays-refresh.service.ts`), NOT the
+ *    `library_artist_view.plays` passthrough of the physical `library.plays`
+ *    column. `library.plays` is a dead counter — nothing maintains it (the
+ *    flowsheet add/delete increments are commented out), so it is `0` for every
+ *    row and shipped a no-signal field (BS#1486). `album_plays` is the live
+ *    per-album `COUNT(*)` over `flowsheet` track entries, LEFT JOINed and
+ *    COALESCEd to `0` so unplayed albums ship `0` (never JSON null). Two known
+ *    limitations, tracked as the Phase-2 attribution epic (BS#1486): (1) it
+ *    counts only flowsheet rows with a non-null `album_id` FK — ~43% of music
+ *    plays are free-text/unlinked and invisible here; (2) it is keyed per
+ *    `library.id` (per pressing/format), so the same logical album split across
+ *    multiple `library` rows is NOT collapsed. Freshness: `album_plays` refreshes
+ *    on its own timer and does not advance `library_watermark`, so a play-count
+ *    change surfaces in the export only once the next library/parent write bumps
+ *    the watermark and rebuilds the cache below — acceptable day-scale lag for a
+ *    slow-moving popularity signal.
  *
  * One scan per watermark (cached below), so the full-table cost is paid ~daily.
  */
@@ -117,7 +143,7 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
       ${genres.genre_name}                     AS genre_name,
       ${format.format_name}                    AS format_name,
       ${library.on_streaming}                  AS on_streaming,
-      ${library.plays}                         AS plays,
+      COALESCE(${album_plays.plays}, 0)::int   AS plays,
       ${library.artwork_url}                   AS artwork_url,
       ${rotation.rotation_bin}                 AS rotation_bin,
       ${rotation.kill_date}::text              AS rotation_kill_date
@@ -129,6 +155,7 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
         ON ${genre_artist_crossreference.artist_id} = ${library.artist_id}
        AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
       LEFT JOIN ${rotation} ON ${rotation.album_id} = ${library.id}
+      LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library.id}
     ORDER BY ${library.id}, ${rotation.add_date} DESC, ${rotation.id} DESC
   `);
   return rows as unknown as CatalogExportRow[];
