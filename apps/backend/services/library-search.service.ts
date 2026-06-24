@@ -1,6 +1,13 @@
 import * as Sentry from '@sentry/node';
 import { sql, type SQL } from 'drizzle-orm';
-import { db, library_artist_view, genres, format as formatTable, artist_search_alias } from '@wxyc/database';
+import {
+  db,
+  library_artist_view,
+  genres,
+  format as formatTable,
+  artist_search_alias,
+  album_plays,
+} from '@wxyc/database';
 import type { TrackMatchHint } from '@wxyc/shared/dtos';
 import {
   parseSearchQuery,
@@ -53,10 +60,24 @@ const FIELD_COLUMNS: Record<CatalogField, SQL> = {
   label: sql`${library_artist_view.label}`,
 };
 
+// BS#1489: `library_artist_view.plays` projects the physical `library.plays`
+// column, which nothing maintains — it is 0 for every row, so `sort=plays`
+// ordered a constant (silently a no-op, falling through to the secondary
+// tiebreak). The real per-album play count lives in the `album_plays` MV
+// (migration 0059) — the same live `COUNT(*)` over flowsheet track entries the
+// catalog export and the tsvector ranker read. Scope a LEFT JOIN to it into the
+// search query and source `plays` from it, rather than redefining the view (the
+// view is read by several other code paths; this keeps the blast radius on the
+// one surface with the bug). The join is 1:1 (unique index on
+// `album_plays.album_id`), so it never changes the result set or `COUNT(*)`;
+// COALESCE 0 covers never-played albums, which have no MV row.
+const albumPlaysJoin = sql`LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library_artist_view.id}`;
+const playsColumn = sql`COALESCE(${album_plays.plays}, 0)`;
+
 const SORT_COLUMNS: Record<CatalogSort, SQL> = {
   artist: sql`${library_artist_view.artist_name}`,
   album: sql`${library_artist_view.album_title}`,
-  plays: sql`${library_artist_view.plays}`,
+  plays: playsColumn,
   date: sql`${library_artist_view.add_date}`,
 };
 
@@ -184,7 +205,7 @@ export async function searchLibrary(
       ${library_artist_view.label} AS label,
       ${library_artist_view.label_id} AS label_id,
       ${library_artist_view.rotation_bin} AS rotation_bin,
-      ${library_artist_view.plays} AS plays,
+      ${playsColumn} AS plays,
       ${library_artist_view.on_streaming} AS on_streaming,
       ${library_artist_view.album_artist} AS album_artist,
       NULL::real AS alias_max_sim,
@@ -203,7 +224,7 @@ export async function searchLibrary(
       ${library_artist_view.label} AS label,
       ${library_artist_view.label_id} AS label_id,
       ${library_artist_view.rotation_bin} AS rotation_bin,
-      ${library_artist_view.plays} AS plays,
+      ${playsColumn} AS plays,
       ${library_artist_view.on_streaming} AS on_streaming,
       ${library_artist_view.album_artist} AS album_artist,
       alias_hits.max_sim AS alias_max_sim,
@@ -211,11 +232,11 @@ export async function searchLibrary(
       alias_hits.matched_source AS alias_matched_source`;
 
     const branchAFrom = branchAWhere
-      ? sql`FROM ${library_artist_view} WHERE ${branchAWhere}`
-      : sql`FROM ${library_artist_view}`;
+      ? sql`FROM ${library_artist_view} ${albumPlaysJoin} WHERE ${branchAWhere}`
+      : sql`FROM ${library_artist_view} ${albumPlaysJoin}`;
     const branchBFrom = branchBWhere
-      ? sql`FROM ${library_artist_view} INNER JOIN alias_hits ON alias_hits.artist_id = ${library_artist_view.artist_id} WHERE ${branchBWhere}`
-      : sql`FROM ${library_artist_view} INNER JOIN alias_hits ON alias_hits.artist_id = ${library_artist_view.artist_id}`;
+      ? sql`FROM ${library_artist_view} INNER JOIN alias_hits ON alias_hits.artist_id = ${library_artist_view.artist_id} ${albumPlaysJoin} WHERE ${branchBWhere}`
+      : sql`FROM ${library_artist_view} INNER JOIN alias_hits ON alias_hits.artist_id = ${library_artist_view.artist_id} ${albumPlaysJoin}`;
 
     const unionBody = sql`(
       SELECT ${branchAProjection}
@@ -242,7 +263,9 @@ export async function searchLibrary(
     // no CTE, no UNION ALL — byte-identical to pre-#1318 behavior.
     const queryWhere = buildWhereClause(conditions);
     const where = combineWhere(queryWhere, filterWhere);
-    const fromClause = where ? sql`FROM ${library_artist_view} WHERE ${where}` : sql`FROM ${library_artist_view}`;
+    const fromClause = where
+      ? sql`FROM ${library_artist_view} ${albumPlaysJoin} WHERE ${where}`
+      : sql`FROM ${library_artist_view} ${albumPlaysJoin}`;
     const orderBy = sql`${SORT_COLUMNS[params.sort]} ${orderDirection}, ${SECONDARY_SORT[params.sort]} ASC, ${library_artist_view.id} ASC`;
     dataQuery = sql`
       SELECT
@@ -258,7 +281,7 @@ export async function searchLibrary(
         ${library_artist_view.label} AS label,
         ${library_artist_view.label_id} AS label_id,
         ${library_artist_view.rotation_bin} AS rotation_bin,
-        ${library_artist_view.plays} AS plays,
+        ${playsColumn} AS plays,
         ${library_artist_view.on_streaming} AS on_streaming,
         ${library_artist_view.album_artist} AS album_artist
       ${fromClause}
