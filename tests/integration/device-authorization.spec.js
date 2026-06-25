@@ -85,6 +85,24 @@ async function pollDeviceToken(authBaseUrl, deviceCode) {
   return { res, body };
 }
 
+async function claimDeviceCode(authBaseUrl, cookie, userCode) {
+  // GET /device?user_code=… is the claim step. The plugin's handler reads
+  // the session from the request and, if the row has no userId, atomically
+  // sets userId = session.user.id. /device/approve and /device/deny both
+  // require the row to be claimed before they'll accept it.
+  const res = await fetch(`${authBaseUrl}/device?user_code=${encodeURIComponent(userCode)}`, {
+    method: 'GET',
+    headers: { Cookie: cookie },
+  });
+  let body;
+  try {
+    body = await res.json();
+  } catch {
+    body = undefined;
+  }
+  return { res, body };
+}
+
 async function approveDeviceCode(authBaseUrl, cookie, userCode) {
   const res = await fetch(`${authBaseUrl}/device/approve`, {
     method: 'POST',
@@ -145,8 +163,11 @@ describe('QR device-authorization (ADR 0008)', () => {
     expect(pendingRes.status).toBe(400);
     expect(pendingBody?.error).toBe('authorization_pending');
 
-    // iOS approves with a DJ-role session.
+    // iOS scans the QR. /device claims the code (sets userId = DJ's id),
+    // then /device/approve flips status to approved.
     const djCookie = await signIn(authBaseUrl, 'test_dj1');
+    const { res: claimRes } = await claimDeviceCode(authBaseUrl, djCookie, codeBody.user_code);
+    expect(claimRes.status).toBe(200);
     const { res: approveRes } = await approveDeviceCode(authBaseUrl, djCookie, codeBody.user_code);
     expect(approveRes.status).toBe(200);
 
@@ -172,10 +193,15 @@ describe('QR device-authorization (ADR 0008)', () => {
     await sql.unsafe(`DELETE FROM auth_session WHERE token = $1`, [tokenBody.access_token]);
   });
 
-  test('member-denied path: member at /device/approve gets access_denied, browser sees access_denied', async () => {
+  test('member-denied path: member at /device/approve gets access_denied, browser sees authorization_pending', async () => {
     const { body: codeBody } = await requestDeviceCode(authBaseUrl);
 
     const memberCookie = await signIn(authBaseUrl, 'test_member');
+    // Member claims first (the plugin's own /device claim step always
+    // succeeds — it doesn't know about the role gate, which fires at
+    // /device/approve).
+    const { res: claimRes } = await claimDeviceCode(authBaseUrl, memberCookie, codeBody.user_code);
+    expect(claimRes.status).toBe(200);
     const { res: approveRes, body: approveBody } = await approveDeviceCode(
       authBaseUrl,
       memberCookie,
@@ -184,20 +210,23 @@ describe('QR device-authorization (ADR 0008)', () => {
     expect(approveRes.status).toBe(403);
     expect(approveBody?.error).toBe('access_denied');
 
-    // Plugin leaves the row in `pending` because the approve never reached
-    // the flip; the next /device/token poll should therefore return
-    // authorization_pending, NOT access_denied. The role gate stops the
-    // member; it doesn't poison the code for the legitimate DJ who can
-    // still approve it before TTL.
+    // Role gate aborted the approve in hooks.before, so the row's status
+    // is still `pending` — the next /device/token poll returns
+    // authorization_pending. (The userId was set on the row by the
+    // member's claim, which is acceptable behavior for v1: the DJ's
+    // re-claim is a no-op, so the member effectively "burns" the
+    // user_code on this run and the DJ scans a fresh QR.)
     const { res: pollRes, body: pollBody } = await pollDeviceToken(authBaseUrl, codeBody.device_code);
     expect(pollRes.status).toBe(400);
     expect(pollBody?.error).toBe('authorization_pending');
   });
 
-  test('deny path: DJ denies their own pending code, browser sees access_denied', async () => {
+  test('deny path: DJ denies their own claimed code, browser sees access_denied', async () => {
     const { body: codeBody } = await requestDeviceCode(authBaseUrl);
 
     const djCookie = await signIn(authBaseUrl, 'test_dj1');
+    const { res: claimRes } = await claimDeviceCode(authBaseUrl, djCookie, codeBody.user_code);
+    expect(claimRes.status).toBe(200);
     const { res: denyRes } = await denyDeviceCode(authBaseUrl, djCookie, codeBody.user_code);
     expect(denyRes.status).toBe(200);
 

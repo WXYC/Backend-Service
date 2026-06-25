@@ -13,7 +13,7 @@ import {
 } from '@wxyc/database';
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { createAuthMiddleware } from 'better-auth/api';
+import { createAuthMiddleware, getSessionFromCtx } from 'better-auth/api';
 import {
   admin,
   anonymous,
@@ -366,11 +366,18 @@ export const auth = betterAuth({
     // ADR 0008: gate /device/approve so non-DJ users can't approve a QR
     // sign-in. The plugin's own session check 401s anonymous callers; this
     // hook adds the role check on top.
+    //
+    // ctx.context.session is not pre-populated for /device/approve — the
+    // plugin's handler resolves it on its own via getSessionFromCtx (see
+    // node_modules/better-auth/dist/plugins/device-authorization/routes.mjs
+    // deviceApprove). We do the same here so the role lookup runs against
+    // the same session the handler will see. Costs one extra DB round-trip
+    // per approve request, fine for the ADR 0008 path.
     before: createAuthMiddleware(async (ctx) => {
       if (ctx.path !== '/device/approve') return;
-      const sessionUser = ctx.context.session?.user;
-      if (!sessionUser?.id) return; // let the plugin's own auth check 401
-      await applyDeviceApproveRoleGate(sessionUser.id, async (uid) => {
+      const session = await getSessionFromCtx(ctx);
+      if (!session?.user?.id) return; // let the plugin's own UNAUTHORIZED fire
+      await applyDeviceApproveRoleGate(session.user.id, async (uid) => {
         const rows = await db.select({ role: member.role }).from(member).where(eq(member.userId, uid)).limit(1);
         return rows[0];
       });
