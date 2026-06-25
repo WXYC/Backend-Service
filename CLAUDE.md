@@ -81,13 +81,14 @@ Server timeout is 35 seconds globally — strictly greater than the LML client's
 
 ### Auth Server (`apps/auth`)
 
-Express wrapper around better-auth with these plugins: admin, username, anonymous, bearer, jwt, organization.
+Express wrapper around better-auth with these plugins: admin, username, anonymous, bearer, jwt, organization, deviceAuthorization.
 
 - Email+password auth only (no social auth)
 - Email verification required
 - Sign-up disabled (admin creates accounts)
 - `POST /auth/admin/provision-user` — Atomic user provisioning: creates user, credential account, and org membership in one call. Requires admin session. Accepts `organizationSlug` (resolved server-side) so the client never needs to map slugs to UUIDs. See `apps/auth/provision-user.ts`.
 - `GET /auth/admin/resolve-organization?slug=<slug>` — Resolves an organization slug to its UUID. Requires admin session. Returns `{ id, slug, name }`. Used by dj-site admin pages to avoid the fragile `getFullOrganization` SDK call which requires `orgSessionMiddleware`. See `apps/auth/resolve-organization.ts`.
+- QR sign-in (ADR 0008, RFC 8628): `POST /auth/device/code`, `GET /auth/device?user_code=…`, `POST /auth/device/approve`, `POST /auth/device/deny`, `POST /auth/device/token`. Browser at dj.wxyc.org polls `/device/token`; the DJ scans the QR with the iOS app and approves via `/device/approve` (gated to roles ≥ `dj`); resulting browser session is clamped to 12h. See `shared/authentication/src/device-authorization.ts` for the helpers and `docs/adr/0008-qr-device-authorization-shared-computer-signin.md` for the design.
 - Default user creation from env vars when `CREATE_DEFAULT_USER=TRUE` (uses `provisionUser()` internally)
 - Test-only endpoints (non-production): `/auth/test/verification-token`, `/auth/test/expire-session`
 
