@@ -722,6 +722,13 @@
       "when": 1781468384349,
       "tag": "0105_library-watermark-parent-tables",
       "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1781468384350,
+      "tag": "0106_freetext-resolution",
+      "breakpoints": true
     }
   ]
 }
