@@ -58,7 +58,11 @@ const EDITION_KEYWORDS = [
   'ost',
 ].join('|');
 
-const EDITION_CLAUSE = new RegExp(`(?:${EDITION_KEYWORDS})`, 'i');
+// `\b` anchors so each keyword matches as a WHOLE WORD, not a substring:
+// without them `ost`/`mono`/`stereo` match inside `lost`/`ghost`/`monologue`/
+// `stereotype`, wrongly flagging non-edition clauses as cruft and collapsing
+// distinct albums into one dedup key.
+const EDITION_CLAUSE = new RegExp(`\\b(?:${EDITION_KEYWORDS})\\b`, 'i');
 
 /** Self-titled sentinels the long tail of DJs typed for an eponymous record. */
 const SELF_TITLED = /^(?:s\s*\/\s*t|self[\s-]*titled)$/i;
@@ -67,8 +71,11 @@ const stripFeaturing = (s: string): string =>
   s
     // Parenthesized/bracketed featuring clause: "(feat. X)", "[ft. Y]".
     .replace(/[([]\s*(?:feat\.?|featuring|ft\.?)\b[^)\]]*[)\]]/gi, ' ')
-    // Trailing featuring clause with no brackets: "... feat. X" to end.
-    .replace(/\s+(?:feat\.?|featuring|ft\.?)\b.*$/i, ' ');
+    // Trailing featuring clause with no brackets: "... featuring X" / "feat. X"
+    // to end. The abbreviations require a trailing "." and every form requires
+    // a following guest (`\s+\S`) so a bare content word like "Ft" in
+    // "10 Ft Ganja Plant" or a trailing "Feat" is NOT treated as a marker.
+    .replace(/\s+(?:featuring|feat\.|ft\.)\s+\S.*$/i, ' ');
 
 const stripEditionSuffixes = (s: string): string => {
   let out = s;

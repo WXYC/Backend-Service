@@ -48,9 +48,16 @@ describe('normalizeAlbumTitle', () => {
     // Featuring clauses are dropped (album titles rarely carry them, but
     // free-text the DJ typed can).
     ['drops "feat." clause', 'Edits feat. Some Guest', 'edits'],
-    ['drops "featuring" clause', 'DAMN. featuring Rihanna', 'damn.'],
+    ['drops "featuring" clause', 'DAMN. featuring Laraaji', 'damn.'],
     ['drops "ft." clause', 'Donuts ft. J Dilla', 'donuts'],
     ['drops parenthetical "(feat. X)" clause', 'Call Your Name (feat. Guest)', 'call your name'],
+
+    // The featuring strip must only fire on a real marker (the full word
+    // "featuring", or the abbreviations with a period), never on a bare "ft"/
+    // "feat" that is itself a content word — otherwise real titles get
+    // truncated and collide. "10 Ft Ganja Plant" is a real WXYC-played act.
+    ['preserves a standalone "Ft" content word', '10 Ft Ganja Plant', '10 ft ganja plant'],
+    ['preserves a trailing real "Feat" word', 'A Great Feat', 'a great feat'],
 
     // Edition / remaster parentheticals are stripped (the core reason this
     // function exists; normalizeArtistName does NOT do this).
@@ -68,6 +75,14 @@ describe('normalizeAlbumTitle', () => {
     ['strips "(Original Motion Picture Soundtrack)"', 'DAMN. (Original Motion Picture Soundtrack)', 'damn.'],
     ['strips multiple parentheticals', 'Pet Sounds (Deluxe Edition) (Remastered)', 'pet sounds'],
     ['preserves a non-edition parenthetical', 'DOGA (Live)', 'doga (live)'],
+
+    // Edition keywords must match as WHOLE WORDS, not substrings — otherwise a
+    // non-edition clause containing "ost"/"mono"/"stereo" etc. as a substring
+    // (lost, ghost, monologue, stereotype) is wrongly stripped and two
+    // genuinely distinct albums collapse into one dedup key.
+    ['preserves "(Lost Tapes)" — "ost" is not a whole word', 'Donuts (Lost Tapes)', 'donuts (lost tapes)'],
+    ['preserves "(Monologue)" — "mono" is not a whole word', 'Edits (Monologue)', 'edits (monologue)'],
+    ['preserves a non-edition trailing "- Lost Sessions"', 'Donuts - Lost Sessions', 'donuts - lost sessions'],
 
     // Common abbreviations expanded so typed variants collapse together.
     ['expands leading "Vol." to volume', 'Vol. 1', 'volume 1'],

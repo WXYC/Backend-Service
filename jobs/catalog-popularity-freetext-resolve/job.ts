@@ -161,12 +161,20 @@ export const enumerateFreetextPairs = async (timeoutMs: number = READ_TIMEOUT_DE
 export const normalizePairs = (raw: RawPair[]): NormalizedPair[] => {
   const byKey = new Map<string, NormalizedPair>();
   for (const r of raw) {
-    const norm_artist = normalizeArtistName(r.artist);
+    // `normalizeArtistName` only strips a leading "The " + lowercases; it does
+    // NOT trim or collapse internal whitespace, while `normalizeAlbumTitle`
+    // does. Apply the same whitespace canonicalization to the artist leg so the
+    // dedup key is whitespace-stable on BOTH columns — otherwise 'J Dilla ',
+    // 'J  Dilla', and 'J Dilla' split into distinct rows + duplicate LML
+    // lookups + a split play count, the double-count this table exists to fold.
+    const norm_artist = normalizeArtistName(r.artist)
+      .replace(/[ \t\n\r\f\v]+/g, ' ')
+      .trim();
     const norm_album = normalizeAlbumTitle(r.album);
-    // `normalizeArtistName` does NOT trim (it preserves trailing whitespace),
-    // so a whitespace-only artist normalizes to non-empty whitespace; treat
-    // that as empty. `normalizeAlbumTitle` already trims.
-    if (norm_artist.trim().length === 0 || norm_album.length === 0) continue;
+    // Both legs are now trimmed, so an empty normalized key means a usable
+    // lookup is impossible; skip it (an empty pair would all collapse to one
+    // meaningless ('', '') row).
+    if (norm_artist.length === 0 || norm_album.length === 0) continue;
     const key = pairKey(norm_artist, norm_album);
     if (!byKey.has(key)) {
       byKey.set(key, { norm_artist, norm_album, artist: r.artist, album: r.album });
