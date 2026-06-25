@@ -335,6 +335,13 @@ export const auth = betterAuth({
       userCodeLength: 8,
       deviceCodeLength: 32,
       verificationUri: 'https://dj.wxyc.org/device-auth',
+      // Upstream quirk: `schema` is declared `z.custom(() => true)` with no
+      // `.optional()` in deviceAuthorizationOptionsSchema, so the runtime
+      // zod parse throws if absent — TypeScript's looser `unknown` type
+      // hides it. Pass an empty object; `mergeSchema()` folds in the plugin
+      // defaults from node_modules/better-auth/dist/plugins/device-
+      // authorization/schema.mjs. Tracked at WXYC/Backend-Service#1494.
+      schema: {},
     }),
     emailOTP({
       async sendVerificationOTP({ email, otp, type }) {
