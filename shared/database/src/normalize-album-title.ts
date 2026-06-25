@@ -72,10 +72,13 @@ const stripFeaturing = (s: string): string =>
     // Parenthesized/bracketed featuring clause: "(feat. X)", "[ft. Y]".
     .replace(/[([]\s*(?:feat\.?|featuring|ft\.?)\b[^)\]]*[)\]]/gi, ' ')
     // Trailing featuring clause with no brackets: "... featuring X" / "feat. X"
-    // to end. The abbreviations require a trailing "." and every form requires
-    // a following guest (`\s+\S`) so a bare content word like "Ft" in
-    // "10 Ft Ganja Plant" or a trailing "Feat" is NOT treated as a marker.
-    .replace(/\s+(?:featuring|feat\.|ft\.)\s+\S.*$/i, ' ');
+    // / "feat.X" to end. A real marker is the full word "featuring" (then a
+    // space + guest) OR the abbreviations "feat."/"ft." carrying the period
+    // (then an optional space + guest). Requiring the period on the
+    // abbreviations and a following guest (`\S`) means a bare content word like
+    // "Ft" in "10 Ft Ganja Plant" or a trailing "Feat" is NOT a marker, while
+    // the period-bearing forms still strip whether or not a space follows.
+    .replace(/\s+(?:featuring\s+|(?:feat|ft)\.\s*)\S.*$/i, ' ');
 
 const stripEditionSuffixes = (s: string): string => {
   let out = s;

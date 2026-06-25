@@ -31,7 +31,7 @@ There is **no "retire after N"**. A pair with a release id is permanent (never r
 
 ## Schedule
 
-Default `30 4 * * *` UTC (00:30 ET) from `package.json` `cron-schedule`, registered via deploy-base. Chosen to sit in the overnight low-traffic window alongside the other LML-bounded crons (`flowsheet-metadata-backfill` 06:00, `artist-search-alias-consumer` 04:15) without all firing at once.
+Default `45 4 * * *` UTC (00:45 ET) from `package.json` `cron-schedule`, registered via deploy-base. Chosen to sit in the overnight low-traffic window in a free minute that does not collide with the other LML-bounded crons (`artist-search-alias-consumer` 04:15, `rotation-artist-backfill` 04:30, `flowsheet-metadata-backfill` 06:00), so they don't all fan out to LML at once.
 
 ## Run procedure (manual, e.g. catch-up)
 

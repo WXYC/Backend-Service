@@ -1,8 +1,8 @@
 {
   "name": "@wxyc/catalog-popularity-freetext-resolve",
-  "cron-schedule": "30 4 * * *",
+  "cron-schedule": "45 4 * * *",
   "version": "1.0.0",
-  "description": "WXYC recurring cron (BS#1491 / catalog-popularity Phase-2 Track 1): resolve every distinct free-text (artist, album) pair from the flowsheet (album_id IS NULL) to a Discogs release (+master once LML Track 0 ships) via LML bulkLookupMetadata, UPSERTing verdicts into flowsheet_freetext_resolution. Re-attempts attempt_at IS NULL rows and no-match rows past a TTL. Default schedule 04:30 UTC; cooperative pause defers when DJs are active.",
+  "description": "WXYC recurring cron (BS#1491 / catalog-popularity Phase-2 Track 1): resolve every distinct free-text (artist, album) pair from the flowsheet (album_id IS NULL) to a Discogs release (+master once LML Track 0 ships) via LML bulkLookupMetadata, UPSERTing verdicts into flowsheet_freetext_resolution. Re-attempts attempt_at IS NULL rows and no-match rows past a TTL. Default schedule 04:45 UTC; cooperative pause defers when DJs are active.",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {
