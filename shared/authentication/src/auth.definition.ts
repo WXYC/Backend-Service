@@ -1,5 +1,16 @@
 import * as Sentry from '@sentry/node';
-import { account, db, invitation, jwks, member, organization, session, user, verification } from '@wxyc/database';
+import {
+  account,
+  db,
+  deviceCode,
+  invitation,
+  jwks,
+  member,
+  organization,
+  session,
+  user,
+  verification,
+} from '@wxyc/database';
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { createAuthMiddleware } from 'better-auth/api';
@@ -7,6 +18,7 @@ import {
   admin,
   anonymous,
   bearer,
+  deviceAuthorization,
   emailOTP,
   jwt,
   oidcProvider,
@@ -16,6 +28,7 @@ import {
 import { generateId } from '@better-auth/core/utils/id';
 import { and, eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
+import { applyDeviceApproveRoleGate, applyDeviceTokenSessionTtl } from './device-authorization';
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 import { buildTrustedClients } from './oidc-trusted-clients';
 import { buildLoginPage } from './oidc-login-page';
@@ -52,6 +65,7 @@ export const auth = betterAuth({
       organization: organization,
       member: member,
       invitation: invitation,
+      deviceCode: deviceCode,
     },
   }),
 
@@ -320,6 +334,22 @@ export const auth = betterAuth({
         },
       },
     }),
+    // ADR 0008 — QR sign-in for the shared control-room computer (RFC 8628).
+    // Browser at dj.wxyc.org calls /device/code, polls /device/token, and the
+    // DJ approves from the iOS app via /device/approve. The role gate
+    // (hooks.before) rejects `member` users with `access_denied`; the
+    // session-TTL clamp (hooks.after) overrides the 7-day cookie default to
+    // 12h for device-auth sessions only. The verificationUri keeps a
+    // universal-link fallback open for later but the iOS app reads the
+    // user_code out of the QR payload directly — it does not navigate the
+    // URL.
+    deviceAuthorization({
+      expiresIn: '5min',
+      interval: '5s',
+      userCodeLength: 8,
+      deviceCodeLength: 32,
+      verificationUri: 'https://dj.wxyc.org/device-auth',
+    }),
     emailOTP({
       async sendVerificationOTP({ email, otp, type }) {
         void sendOTPEmail({ to: email, otp, type }).catch((error) => {
@@ -340,21 +370,59 @@ export const auth = betterAuth({
   ],
 
   hooks: {
+    // ADR 0008: gate /device/approve so non-DJ users can't approve a QR
+    // sign-in. The plugin's own session check 401s anonymous callers; this
+    // hook adds the role check on top.
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== '/device/approve') return;
+      const sessionUser = ctx.context.session?.user;
+      if (!sessionUser?.id) return; // let the plugin's own auth check 401
+      await applyDeviceApproveRoleGate(sessionUser.id, async (uid) => {
+        const rows = await db.select({ role: member.role }).from(member).where(eq(member.userId, uid)).limit(1);
+        return rows[0];
+      });
+    }),
     after: createAuthMiddleware(async (ctx) => {
-      if (ctx.path !== '/admin/create-user') {
+      if (ctx.path === '/admin/create-user') {
+        const email = ctx.body?.email;
+        if (!email || typeof email !== 'string') {
+          return;
+        }
+
+        // Auto-verify email for admin-created users (trusted operation)
+        try {
+          await db.update(user).set({ emailVerified: true }).where(eq(user.email, email));
+        } catch (error) {
+          console.error('Error auto-verifying admin-created user:', error);
+        }
         return;
       }
 
-      const email = ctx.body?.email;
-      if (!email || typeof email !== 'string') {
-        return;
-      }
-
-      // Auto-verify email for admin-created users (trusted operation)
-      try {
-        await db.update(user).set({ emailVerified: true }).where(eq(user.email, email));
-      } catch (error) {
-        console.error('Error auto-verifying admin-created user:', error);
+      // ADR 0008: clamp /device/token sessions to DEVICE_SESSION_TTL_MS.
+      // The plugin creates the session with the global default; we override
+      // its expiry and rewrite expires_in so the browser and DB agree.
+      // ctx.context.returned is the raw body object `ctx.json` produced when
+      // the dispatcher is invoked with asResponse=false (see
+      // node_modules/better-auth/dist/api/dispatch.mjs:225) — mutating
+      // expires_in on it propagates to the HTTP response.
+      if (ctx.path === '/device/token') {
+        const newSession = ctx.context.newSession;
+        const token = newSession?.session?.token;
+        const body = ctx.context.returned as { expires_in?: number } | undefined;
+        // Only on the success path: failed polls (authorization_pending,
+        // slow_down, expired_token, access_denied) don't populate newSession.
+        if (!token || !body) return;
+        try {
+          await applyDeviceTokenSessionTtl(token, body, new Date(), async (t, expiresAt) => {
+            await db.update(session).set({ expiresAt }).where(eq(session.token, t));
+          });
+        } catch (error) {
+          // Don't fail the response just because the TTL extension hit a
+          // transient DB error — the session is still valid, just at the
+          // default expiry. Surface to Sentry so we notice the drift.
+          console.error('[device-auth] Failed to clamp session TTL:', error);
+          Sentry.captureException(error, { tags: { subsystem: 'device-authorization' } });
+        }
       }
     }),
   },
