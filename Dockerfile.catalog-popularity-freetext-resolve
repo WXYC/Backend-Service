@@ -1,0 +1,46 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /catalog-popularity-freetext-resolve-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./shared/lml-client ./shared/lml-client
+COPY ./jobs/catalog-popularity-freetext-resolve ./jobs/catalog-popularity-freetext-resolve
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/catalog-popularity-freetext-resolve
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /catalog-popularity-freetext-resolve
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/catalog-popularity-freetext-resolve/package* ./jobs/catalog-popularity-freetext-resolve/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
+
+# `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
+# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
+# .npmrc the prod stage's npm install 401s on @wxyc/shared. Mirrors the
+# pattern in Dockerfile.album-level-backfill / Dockerfile.backend.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./catalog-popularity-freetext-resolve-builder/jobs/catalog-popularity-freetext-resolve/dist ./jobs/catalog-popularity-freetext-resolve/dist
+COPY --from=builder ./catalog-popularity-freetext-resolve-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./catalog-popularity-freetext-resolve-builder/shared/lml-client/dist ./shared/lml-client/dist
+
+# Identifies the connection in pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-catalog-popularity-freetext-resolve
+
+# ENTRYPOINT + empty CMD so docker-level args (e.g. `--dry-run`) pass through
+# to the job rather than replacing the launcher. ENTRYPOINT pins the launcher;
+# any args after `<image>` extend it. node resolves `@wxyc/database` etc. via
+# the standard walk up to /catalog-popularity-freetext-resolve/node_modules.
+ENTRYPOINT ["node", "/catalog-popularity-freetext-resolve/jobs/catalog-popularity-freetext-resolve/dist/job.js"]
+CMD []

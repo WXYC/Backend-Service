@@ -1196,6 +1196,60 @@ export const album_metadata = wxyc_schema.table('album_metadata', {
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
+/**
+ * Free-text (artist, album) → Discogs release+master resolution cache
+ * (BS#1491 / catalog-popularity Phase-2 Track 1).
+ *
+ * Lives SEPARATE from `flowsheet` because the mapping is many-to-one: the
+ * ~43% of music plays with `album_id IS NULL` hold tens of thousands of
+ * distinct normalized `(artist, album)` pairs across ~2.6M rows. A per-row
+ * `flowsheet` column couldn't dedup that collapse; this table holds one row
+ * per normalized pair, keyed on the composite PK `(norm_artist, norm_album)`.
+ *
+ * Population: the recurring cron `jobs/catalog-popularity-freetext-resolve/`
+ * enumerates DISTINCT normalized pairs from
+ * `flowsheet WHERE entry_type='track' AND album_id IS NULL`, resolves each
+ * batch via LML `bulkLookupMetadata`, and UPSERTs the verdict here. Track 2's
+ * popularity collapse reads this table to attribute the free-text plays.
+ *
+ * Keys:
+ *   - `norm_artist` = `normalizeArtistName(artist)` (shared/database/src/normalize-artist-name.ts)
+ *   - `norm_album`  = `normalizeAlbumTitle(album)`  (shared/database/src/normalize-album-title.ts)
+ *
+ * Columns:
+ *   - `discogs_release_id` — the LML match's release id (`> 0`); NULL on
+ *     no-match OR on the BS#1185 streaming-only sentinel (`release_id == 0`,
+ *     which is not a linkable release). NULL is the "no usable release" state.
+ *   - `discogs_master_id` — populated once LML Track 0 surfaces `master_id` in
+ *     the lookup result; NULL until then (Track 1 runs in PARALLEL with Track
+ *     0 and needs only the release leg). The cron fills it opportunistically.
+ *   - `match_confidence` — LML's per-result `DiscogsMatchResult.confidence`.
+ *   - `match_source` — provenance string (e.g. `lml_bulk_lookup`); mirrors the
+ *     `library_identity_source.notes` provenance convention.
+ *   - `attempt_at` — attempt-at marker (docs/migrations.md "Attempt-at
+ *     markers"): stamped on a RESPONDED outcome (match OR explicit no-match),
+ *     left NULL on transient LML failure so the row stays retryable. The cron
+ *     re-attempts `attempt_at IS NULL` rows and no-match rows older than a TTL.
+ *   - `resolved_at` — when a release id was last written (NULL while unresolved).
+ */
+export const flowsheet_freetext_resolution = wxyc_schema.table(
+  'flowsheet_freetext_resolution',
+  {
+    norm_artist: text('norm_artist').notNull(),
+    norm_album: text('norm_album').notNull(),
+    discogs_release_id: integer('discogs_release_id'),
+    discogs_master_id: integer('discogs_master_id'),
+    match_confidence: real('match_confidence'),
+    match_source: text('match_source'),
+    attempt_at: timestamp('attempt_at', { withTimezone: true }),
+    resolved_at: timestamp('resolved_at', { withTimezone: true }),
+  },
+  (table) => [primaryKey({ columns: [table.norm_artist, table.norm_album] })]
+);
+
+export type FlowsheetFreetextResolution = InferSelectModel<typeof flowsheet_freetext_resolution>;
+export type NewFlowsheetFreetextResolution = InferInsertModel<typeof flowsheet_freetext_resolution>;
+
 export type NewGenre = InferInsertModel<typeof genres>;
 export type Genre = InferSelectModel<typeof genres>;
 export const genres = wxyc_schema.table('genres', {
