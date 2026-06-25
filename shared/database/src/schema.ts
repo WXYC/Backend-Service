@@ -180,6 +180,32 @@ export const invitation = pgTable(
   (table) => [index('auth_invitation_email_idx').on(table.email)]
 );
 
+// Better-auth device-authorization plugin (RFC 8628). Column shape matches
+// the plugin's adapter schema at node_modules/better-auth/dist/plugins/
+// device-authorization/schema.mjs — drizzle-adapter resolves the
+// `deviceCode` model name to this table via the schema map in
+// auth.definition.ts. See docs/adr/0008.
+export const deviceCode = pgTable(
+  'auth_device_code',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    deviceCode: varchar('device_code', { length: 255 }).notNull(),
+    userCode: varchar('user_code', { length: 255 }).notNull(),
+    userId: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    status: varchar('status', { length: 32 }).notNull(),
+    lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
+    pollingInterval: integer('polling_interval'),
+    clientId: varchar('client_id', { length: 255 }),
+    scope: text('scope'),
+  },
+  (table) => [
+    uniqueIndex('auth_device_code_device_code_key').on(table.deviceCode),
+    uniqueIndex('auth_device_code_user_code_key').on(table.userCode),
+    index('auth_device_code_expires_at_idx').on(table.expiresAt),
+  ]
+);
+
 export type NewDJStats = InferInsertModel<typeof dj_stats>;
 export type DJStats = InferSelectModel<typeof dj_stats>;
 export const dj_stats = wxyc_schema.table('dj_stats', {

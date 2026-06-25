@@ -293,6 +293,16 @@ if (!isTestEnv) {
     '/auth/email-otp/send-verification-otp',
     '/auth/forget-password',
     '/auth/wxyc/lookup-email',
+    // ADR 0008 — QR device-authorization. Including /code (anonymous,
+    // brute-force on the 8-char user_code namespace), /approve (authenticated
+    // state-changing), and /deny (authenticated; bounds noise from a stuck
+    // client). NOT including /auth/device/token — the plugin enforces
+    // pollingInterval server-side via lastPolledAt and returns a structured
+    // `slow_down` JSON body when polling is too fast; an HTTP 429 in front
+    // would shadow it and break every polling client.
+    '/auth/device/code',
+    '/auth/device/approve',
+    '/auth/device/deny',
   ];
 
   for (const path of rateLimitedPaths) {
