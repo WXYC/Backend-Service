@@ -196,6 +196,21 @@ describe('normalizePairs', () => {
     expect(out[0]).toMatchObject({ artist: 'Beach Boys', album: 'Pet Sounds (Remastered)' });
   });
 
+  it('collapses artist whitespace variants to one pair (norm_artist is whitespace-canonical)', () => {
+    // normalizeArtistName only strips a leading "The " + lowercases; it does
+    // NOT trim or collapse internal whitespace. normalizePairs must apply the
+    // same whitespace canonicalization the album leg does, or sloppy free-text
+    // ('J Dilla ', 'J  Dilla') splits into separate rows + duplicate LML
+    // lookups + a split popularity count — the double-count this table avoids.
+    const out = normalizePairs([
+      { artist: 'J Dilla', album: 'Donuts' },
+      { artist: 'J Dilla ', album: 'Donuts' },
+      { artist: 'J  Dilla', album: 'Donuts' },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ norm_artist: 'j dilla', norm_album: 'donuts' });
+  });
+
   it('drops pairs whose normalized artist or album is empty', () => {
     const out = normalizePairs([
       { artist: '   ', album: 'Donuts' },
