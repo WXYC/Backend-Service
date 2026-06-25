@@ -50,6 +50,8 @@ describe('normalizeAlbumTitle', () => {
     ['drops "feat." clause', 'Edits feat. Some Guest', 'edits'],
     ['drops "featuring" clause', 'DAMN. featuring Laraaji', 'damn.'],
     ['drops "ft." clause', 'Donuts ft. J Dilla', 'donuts'],
+    ['drops "feat." with no space after the period', 'Donuts feat.J Dilla', 'donuts'],
+    ['drops "ft." with no space after the period', 'Edits ft.Madlib', 'edits'],
     ['drops parenthetical "(feat. X)" clause', 'Call Your Name (feat. Guest)', 'call your name'],
 
     // The featuring strip must only fire on a real marker (the full word
