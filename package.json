@@ -67,11 +67,11 @@
     "shared/*"
   ],
   "devDependencies": {
-    "@dotenvx/dotenvx": "^1.74.2",
+    "@dotenvx/dotenvx": "^1.75.1",
     "@eslint/js": "^10.0.1",
     "@types/eventsource": "^3.0.0",
     "@types/jest": "^30.0.0",
-    "@types/node": "^25.9.3",
+    "@types/node": "^26.0.1",
     "@types/pg": "^8.20.0",
     "@types/ssh2": "^1.15.5",
     "@types/supertest": "^7.2.0",
@@ -96,9 +96,9 @@
     "ts-node": "^10.9.2",
     "tsup": "^8.5.1",
     "tsx": "^4.22.4",
-    "turbo": "^2.9.18",
+    "turbo": "^2.10.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.61.1",
+    "typescript-eslint": "^8.62.0",
     "wait-on": "^9.0.10",
     "ws": "^8.21.0"
   },
