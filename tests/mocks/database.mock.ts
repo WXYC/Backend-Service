@@ -346,6 +346,7 @@ export type { IntParserOptions } from '../../shared/database/src/env-parsers.js'
 // resolving @wxyc/database via this mock still get the real implementation.
 export { normalizeArtistName } from '../../shared/database/src/normalize-artist-name.js';
 export { normalizeAlbumTitle } from '../../shared/database/src/normalize-album-title.js';
+export { freetextPairKey, normalizeFreetextArtist } from '../../shared/database/src/freetext-norm.js';
 
 // Mock types
 export type AnonymousDevice = {

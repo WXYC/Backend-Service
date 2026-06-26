@@ -729,6 +729,13 @@
       "when": 1781468384350,
       "tag": "0106_freetext-resolution",
       "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1781468384351,
+      "tag": "0107_album-popularity",
+      "breakpoints": true
     }
   ]
 }
