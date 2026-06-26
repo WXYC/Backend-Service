@@ -102,5 +102,6 @@
   "0103_flowsheet-radio-hour": "48ac339af838c8bb6a00e2793d80b57b00f6b9971ed50c7f1e91a4359114fb68",
   "0104_library-watermark": "e9cfb021ab16c8b44c9c9afead1d81ee348521428358536fe62eecfe557605e9",
   "0105_library-watermark-parent-tables": "879a3ac81a8a93b1108db8d72701d5927518d47c2cd006a39a632ac8c801c579",
-  "0106_freetext-resolution": "c9fff323e5eb101fcd755fa682b3bbb9ea84b36c1e470cd1bad05004e66ae0fd"
+  "0106_freetext-resolution": "c9fff323e5eb101fcd755fa682b3bbb9ea84b36c1e470cd1bad05004e66ae0fd",
+  "0107_album-popularity": "1f89b36642cedd0aeddf5062e4dedaf774db7326a661a3366115119373148cd1"
 }

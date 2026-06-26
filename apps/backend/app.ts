@@ -24,6 +24,10 @@ import { playlist_route } from './routes/playlist.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
 import {
+  startAlbumPopularityRefresh,
+  stopAlbumPopularityRefresh,
+} from './services/album-popularity-refresh.service.js';
+import {
   setupCdcWebSocket,
   shutdownCdcWebSocket,
   startCdcDispatcher,
@@ -154,6 +158,7 @@ const server = app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
   startPlaylistProxy();
   startAlbumPlaysRefresh();
+  startAlbumPopularityRefresh();
   startSseMetrics(() => serverEventsMgr.getClientCountByTopic());
   // LISTEN startup runs unconditionally so in-process subscribers
   // (`setupMetadataBroadcast`, future consumers) fire whether or not
@@ -204,6 +209,7 @@ function shutdown(signal: string): void {
   console.log(`[shutdown] Received ${signal}, shutting down...`);
   stopPlaylistProxy();
   stopAlbumPlaysRefresh();
+  stopAlbumPopularityRefresh();
   stopSseMetrics();
   void shutdownCdcWebSocket();
   void shutdownCdcDispatcher();

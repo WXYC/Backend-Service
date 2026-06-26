@@ -40,8 +40,7 @@ import {
   closeDatabaseConnection,
   requireNonNegativeInt,
   requirePositiveInt,
-  normalizeArtistName,
-  normalizeAlbumTitle,
+  freetextPairKey,
 } from '@wxyc/database';
 import { bulkLookupMetadata, type BulkLookupItem, type BulkLookupResponse } from '@wxyc/lml-client';
 import * as Sentry from '@sentry/node';
@@ -161,16 +160,15 @@ export const enumerateFreetextPairs = async (timeoutMs: number = READ_TIMEOUT_DE
 export const normalizePairs = (raw: RawPair[]): NormalizedPair[] => {
   const byKey = new Map<string, NormalizedPair>();
   for (const r of raw) {
-    // `normalizeArtistName` only strips a leading "The " + lowercases; it does
-    // NOT trim or collapse internal whitespace, while `normalizeAlbumTitle`
-    // does. Apply the same whitespace canonicalization to the artist leg so the
-    // dedup key is whitespace-stable on BOTH columns — otherwise 'J Dilla ',
-    // 'J  Dilla', and 'J Dilla' split into distinct rows + duplicate LML
-    // lookups + a split play count, the double-count this table exists to fold.
-    const norm_artist = normalizeArtistName(r.artist)
-      .replace(/[ \t\n\r\f\v]+/g, ' ')
-      .trim();
-    const norm_album = normalizeAlbumTitle(r.album);
+    // The `(norm_artist, norm_album)` key composition lives in
+    // `@wxyc/database`'s `freetextPairKey` so Track 2's popularity refresh
+    // (`apps/backend/services/album-popularity-refresh.service.ts`) re-derives
+    // a byte-identical key when it attributes free-text plays back to these
+    // rows. The artist leg gets a whitespace collapse + trim that
+    // `normalizeArtistName` deliberately omits, so 'J Dilla ' / 'J  Dilla' /
+    // 'J Dilla' don't split into distinct rows + duplicate LML lookups + a
+    // split play count — the double-count this table exists to fold.
+    const { norm_artist, norm_album } = freetextPairKey(r.artist, r.album);
     // Both legs are now trimmed, so an empty normalized key means a usable
     // lookup is impossible; skip it (an empty pair would all collapse to one
     // meaningless ('', '') row).

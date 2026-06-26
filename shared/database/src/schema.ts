@@ -1525,6 +1525,46 @@ export const album_plays = wxyc_schema
   })
   .existing();
 
+/**
+ * Attribution-corrected, master-collapsed catalog popularity (BS#1486 Phase-2
+ * Track 2 / #1492). One row per logical album, keyed by `logical_album_key`:
+ *
+ *   - `master:<discogs_master_id>`  — the dominant case; collapses every
+ *     library pressing AND free-text play of one logical album. Derived from
+ *     `library.canonical_entity_id` (`discogs:master:<id>` for ~90% of
+ *     resolved rows) and from `flowsheet_freetext_resolution.discogs_master_id`.
+ *   - `release:<discogs_release_id>` — master-less fallback (one-offs,
+ *     self-released) so a release is never lost when it has no master.
+ *   - `library:<library_id>`        — linked-but-unresolved fallback
+ *     (`library.canonical_entity_id IS NULL`) so a played library row's plays
+ *     are never lost even though it can't collapse to a Discogs identity.
+ *
+ * `plays = linked_plays + freetext_plays`. `linked_plays` counts `flowsheet`
+ * track rows carrying an `album_id` FK (resolved through `library`);
+ * `freetext_plays` counts the ~43% unlinked plays fuzzy-matched to a
+ * release/master via `flowsheet_freetext_resolution` (Track 1). Unlike the
+ * linked-only, per-pressing `album_plays` MV, this collapses pressings and
+ * folds in the free-text plays that MV cannot see.
+ *
+ * Populated as a plain TABLE (not a materialized view) by
+ * `apps/backend/services/album-popularity-refresh.service.ts`: the free-text
+ * leg requires TS-side normalization (`normalizeArtistName` +
+ * `normalizeAlbumTitle`) to key raw flowsheet text against the resolution
+ * table — work an MV's single SQL SELECT cannot express. Migration 0107
+ * creates it empty; the refresh service rebuilds it on a cadence.
+ * `representative_library_id` is a display join target (a canonical pressing)
+ * for Track 3's export; NULL for free-text-only keys with no library row.
+ */
+export type NewAlbumPopularity = InferInsertModel<typeof album_popularity>;
+export type AlbumPopularity = InferSelectModel<typeof album_popularity>;
+export const album_popularity = wxyc_schema.table('album_popularity', {
+  logical_album_key: text('logical_album_key').primaryKey(),
+  plays: integer('plays').notNull(),
+  linked_plays: integer('linked_plays').notNull().default(0),
+  freetext_plays: integer('freetext_plays').notNull().default(0),
+  representative_library_id: integer('representative_library_id'),
+});
+
 export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {
   return qb
     .select({
