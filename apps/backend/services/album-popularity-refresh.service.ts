@@ -165,15 +165,26 @@ function getRefreshDb(): ReturnType<typeof drizzle> {
 export async function refreshAlbumPopularity(): Promise<void> {
   const refreshDbInstance = getRefreshDb();
 
-  await refreshDbInstance.transaction(async (tx) => {
-    // Read both free-text inputs inside the tx for a consistent snapshot.
-    const resolutions = (await tx.execute(sql`
+  // REPEATABLE READ so every statement in the rebuild reads ONE MVCC snapshot.
+  // The two legs partition `flowsheet` by `album_id`: the free-text rawPlays
+  // SELECT counts `album_id IS NULL` rows, the linked INSERT...SELECT counts
+  // `album_id IS NOT NULL` rows. Under READ COMMITTED each statement re-snapshots,
+  // so a concurrent enrichment-worker link (`album_id` NULL -> set) committing in
+  // the window between them would have the play counted by BOTH legs (a
+  // double-count) — or a library delete (`album_id` set -> NULL via ON DELETE SET
+  // NULL) would drop it from both (an under-count). One snapshot makes the
+  // partition exact. The tx writes only `album_popularity` (single max:1 writer,
+  // no concurrent writer), so the stricter level raises no serialization error.
+  await refreshDbInstance.transaction(
+    async (tx) => {
+      // Read both free-text inputs inside the tx — one consistent snapshot.
+      const resolutions = (await tx.execute(sql`
       SELECT "norm_artist", "norm_album", "discogs_master_id", "discogs_release_id"
       FROM ${flowsheet_freetext_resolution}
       WHERE "discogs_master_id" IS NOT NULL OR "discogs_release_id" IS NOT NULL
     `)) as unknown as ResolutionRow[];
 
-    const rawPlays = (await tx.execute(sql`
+      const rawPlays = (await tx.execute(sql`
       SELECT "artist_name", "album_title", count(*)::int AS "plays"
       FROM ${flowsheet}
       WHERE "entry_type" = 'track'
@@ -183,14 +194,14 @@ export async function refreshAlbumPopularity(): Promise<void> {
       GROUP BY "artist_name", "album_title"
     `)) as unknown as RawFreetextPlays[];
 
-    const freetextByKey = aggregateFreetextPlays(resolutions, rawPlays);
+      const freetextByKey = aggregateFreetextPlays(resolutions, rawPlays);
 
-    // Rebuild from scratch each cycle (full recompute, like the MV refresh).
-    await tx.execute(sql`DELETE FROM ${album_popularity}`);
+      // Rebuild from scratch each cycle (full recompute, like the MV refresh).
+      await tx.execute(sql`DELETE FROM ${album_popularity}`);
 
-    // LINKED leg: one row per logical key, summing pressings that share a
-    // master. `library:<id>` fallback keeps unresolved-but-played rows.
-    await tx.execute(sql`
+      // LINKED leg: one row per logical key, summing pressings that share a
+      // master. `library:<id>` fallback keeps unresolved-but-played rows.
+      await tx.execute(sql`
       INSERT INTO ${album_popularity}
         ("logical_album_key", "plays", "linked_plays", "freetext_plays", "representative_library_id")
       SELECT "key", count(*)::int, count(*)::int, 0, min("library_id")
@@ -219,31 +230,33 @@ export async function refreshAlbumPopularity(): Promise<void> {
       GROUP BY "key"
     `);
 
-    // FREE-TEXT leg: add onto linked rows, or insert fresh free-text-only keys.
-    const entries = [...freetextByKey.entries()];
-    for (let i = 0; i < entries.length; i += UPSERT_BATCH_SIZE) {
-      const batch = entries.slice(i, i + UPSERT_BATCH_SIZE);
-      await tx
-        .insert(album_popularity)
-        .values(
-          batch.map(([logical_album_key, freetext_plays]) => ({
-            logical_album_key,
-            plays: freetext_plays,
-            linked_plays: 0,
-            freetext_plays,
-            representative_library_id: null,
-          }))
-        )
-        .onConflictDoUpdate({
-          target: album_popularity.logical_album_key,
-          set: {
-            freetext_plays: sql`excluded."freetext_plays"`,
-            // plays = existing linked_plays + the new free-text plays.
-            plays: sql`${album_popularity.linked_plays} + excluded."freetext_plays"`,
-          },
-        });
-    }
-  });
+      // FREE-TEXT leg: add onto linked rows, or insert fresh free-text-only keys.
+      const entries = [...freetextByKey.entries()];
+      for (let i = 0; i < entries.length; i += UPSERT_BATCH_SIZE) {
+        const batch = entries.slice(i, i + UPSERT_BATCH_SIZE);
+        await tx
+          .insert(album_popularity)
+          .values(
+            batch.map(([logical_album_key, freetext_plays]) => ({
+              logical_album_key,
+              plays: freetext_plays,
+              linked_plays: 0,
+              freetext_plays,
+              representative_library_id: null,
+            }))
+          )
+          .onConflictDoUpdate({
+            target: album_popularity.logical_album_key,
+            set: {
+              freetext_plays: sql`excluded."freetext_plays"`,
+              // plays = existing linked_plays + the new free-text plays.
+              plays: sql`${album_popularity.linked_plays} + excluded."freetext_plays"`,
+            },
+          });
+      }
+    },
+    { isolationLevel: 'repeatable read' }
+  );
 
   const now = new Date();
   await db

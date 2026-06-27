@@ -42,6 +42,12 @@ const RELEASE_KEY = 'release:99920002';
 const UNRESOLVED_KEY = `library:${UNRESOLVED}`;
 const FREETEXT_ONLY_KEY = 'master:88880003'; // an album we play but don't own
 
+// Free-text probe text for the read-filter guard. Pre-normalized (lowercase,
+// single spaces, no leading "The ", no edition cruft) and unique, so it never
+// collides with the linked probes or the shared shape fixture.
+const FT_ARTIST = 'bs1492 ft artist';
+const FT_ALBUM = 'bs1492 ft album';
+
 /** Mirror of the service's LINKED leg: full DELETE + INSERT...SELECT. */
 async function rebuildLinkedLeg(sql) {
   await sql`DELETE FROM ${sql(SCHEMA)}.album_popularity`;
@@ -105,6 +111,33 @@ async function seedPlays(sql, albumId, count, playOrderBase) {
   }
 }
 
+/** Seed one free-text (album_id NULL) flowsheet row. */
+async function seedFreetextRow(sql, artist, album, entryType, playOrder) {
+  await sql`
+    INSERT INTO ${sql(SCHEMA)}.flowsheet
+      (album_id, entry_type, play_order, artist_name, album_title, track_title)
+    VALUES (NULL, ${entryType}, ${playOrder}, ${artist}, ${album}, 'ft probe')
+  `;
+}
+
+/**
+ * Mirror of the service's FREE-TEXT *read* query — the leg the `upsertFreetext`
+ * helper above does NOT cover. It is the defining filter of "what is a free-text
+ * play": entry_type='track' AND album_id IS NULL AND both text columns NOT NULL.
+ * Keep in lockstep with the service's rawPlays SELECT.
+ */
+async function readFreetextRawPlays(sql) {
+  return sql`
+    SELECT "artist_name", "album_title", count(*)::int AS "plays"
+    FROM ${sql(SCHEMA)}.flowsheet
+    WHERE "entry_type" = 'track'
+      AND "album_id" IS NULL
+      AND "artist_name" IS NOT NULL
+      AND "album_title" IS NOT NULL
+    GROUP BY "artist_name", "album_title"
+  `;
+}
+
 describe('album_popularity rebuild contract (real PG, BS#1492)', () => {
   let sql;
   const libraryIds = [PRESS_A, PRESS_B, REL, UNRESOLVED];
@@ -130,11 +163,18 @@ describe('album_popularity rebuild contract (real PG, BS#1492)', () => {
     for (const id of libraryIds) {
       await sql`DELETE FROM ${sql(SCHEMA)}.flowsheet WHERE album_id = ${id}`;
     }
+    // Free-text probe rows carry NULL album_id (the loop above can't reap them);
+    // they all share FT_ALBUM, so reap by album_title.
+    await sql`DELETE FROM ${sql(SCHEMA)}.flowsheet WHERE album_title = ${FT_ALBUM}`;
     await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${libraryIds})`;
-    // Drop the probe-derived rows so a later test never sees stale popularity.
-    for (const key of [MASTER_KEY, RELEASE_KEY, UNRESOLVED_KEY, FREETEXT_ONLY_KEY]) {
-      await sql`DELETE FROM ${sql(SCHEMA)}.album_popularity WHERE logical_album_key = ${key}`;
-    }
+    // rebuildLinkedLeg() does a whole-table DELETE + repopulate from ALL
+    // flowsheet⋈library rows (not just the probes), so it materializes
+    // library:<id> rows from the shared shape fixture too. A per-key delete would
+    // leak those, and a later spec (Track 3's catalog export reads
+    // album_popularity) would see them. Clear the whole derived table instead —
+    // safe because in the integration DB it is populated ONLY by this spec (the
+    // refresh service's first timer fires one interval / 1h out, never mid-suite).
+    await sql`DELETE FROM ${sql(SCHEMA)}.album_popularity`;
   });
 
   test('linked leg collapses two pressings of one master into a single row summing both plays', async () => {
@@ -187,5 +227,30 @@ describe('album_popularity rebuild contract (real PG, BS#1492)', () => {
     expect(ft.freetext_plays).toBe(4);
     expect(ft.plays).toBe(4);
     expect(ft.representative_library_id).toBeNull();
+  });
+
+  test('free-text read query counts only unlinked track rows with both text columns present', async () => {
+    // The service reads free-text plays with the filter
+    //   entry_type='track' AND album_id IS NULL AND artist_name IS NOT NULL AND album_title IS NOT NULL
+    // This is the definition of a free-text play; guard each clause so a
+    // regression (e.g. dropping `album_id IS NULL`, which would double-count
+    // linked plays as free-text) can't ship green.
+    await seedFreetextRow(sql, FT_ARTIST, FT_ALBUM, 'track', 9180);
+    await seedFreetextRow(sql, FT_ARTIST, FT_ALBUM, 'track', 9181);
+    await seedFreetextRow(sql, FT_ARTIST, FT_ALBUM, 'track', 9182);
+    // Disqualifiers sharing FT_ALBUM that the filter MUST drop:
+    await seedFreetextRow(sql, FT_ARTIST, FT_ALBUM, 'breakpoint', 9183); // non-track entry_type
+    await seedFreetextRow(sql, null, FT_ALBUM, 'track', 9184); // NULL artist_name
+
+    const rows = await readFreetextRawPlays(sql);
+
+    const probe = rows.find((r) => r.artist_name === FT_ARTIST && r.album_title === FT_ALBUM);
+    expect(probe).toBeDefined();
+    expect(probe.plays).toBe(3); // the 3 track rows only — breakpoint + NULL-artist row excluded
+
+    // The `album_id IS NULL` clause: the LINKED probes (album_id set, album
+    // text 'bs1492 probe 7140') must never appear in the free-text read.
+    const linkedLeak = rows.find((r) => r.album_title === 'bs1492 probe 7140');
+    expect(linkedLeak).toBeUndefined();
   });
 });
