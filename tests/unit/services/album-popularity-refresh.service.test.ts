@@ -146,6 +146,10 @@ describe('album-popularity-refresh: lifecycle', () => {
   test('rebuild runs inside a transaction on the dedicated client and records last-run on shared db', async () => {
     await refreshAlbumPopularity();
     expect(dedicatedTransaction).toHaveBeenCalledTimes(1);
+    // REPEATABLE READ so both legs read one MVCC snapshot — without it a
+    // concurrent enrichment-worker link in the window between the free-text
+    // and linked reads would double-count a play across the two legs.
+    expect(dedicatedTransaction.mock.calls[0]?.[1]).toEqual({ isolationLevel: 'repeatable read' });
     // DELETE + linked INSERT + the two free-text reads all go through tx.execute.
     expect(txExecute).toHaveBeenCalled();
     const deleteIssued = txExecute.mock.calls.some((c) => /DELETE FROM/i.test((c[0] as { text: string }).text));
