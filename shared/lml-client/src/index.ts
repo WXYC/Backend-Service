@@ -22,6 +22,7 @@ import type {
 
 export type {
   DiscogsMatchResult,
+  DiscogsWriterCredits,
   DiscogsReleaseMetadata,
   DiscogsTrackItem,
   DiscogsArtistCredit,
