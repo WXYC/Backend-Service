@@ -15,7 +15,9 @@
  * and `normalizeAlbumTitle` has no SQL twin. So we rebuild in two legs:
  *
  *   1. LINKED leg (pure SQL). Every `flowsheet` track row with an `album_id`
- *      FK, keyed by its `library` row's logical key:
+ *      FK, keyed by its `library` row's logical key (the shared
+ *      `logicalAlbumKeySql` fragment from `logical-album-key.service.ts`, the
+ *      SAME builder the catalog-export reader JOINs on so the keys cannot drift):
  *        - `master:<id>` / `release:<id>`  — strip the `discogs:` prefix off
  *          `library.canonical_entity_id` (already `discogs:master:<id>` for
  *          ~90% of resolved rows; see memory/the plan). This IS the collapse:
@@ -67,6 +69,12 @@ import {
   createPostgresClient,
   freetextPairKey,
 } from '@wxyc/database';
+import { logicalAlbumKeySql, freetextLogicalKey } from './logical-album-key.service.js';
+
+// `freetextLogicalKey` lives in `logical-album-key.service.ts` alongside the
+// shared SQL fragment it must stay parity-equivalent to (#1505). Re-exported
+// here for backwards compatibility with existing importers (and the unit suite).
+export { freetextLogicalKey } from './logical-album-key.service.js';
 
 const JOB_NAME = 'album-popularity-refresh';
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000; // 1h, matching album-plays
@@ -81,22 +89,6 @@ let refreshClient: ReturnType<typeof postgres> | null = null;
 let refreshDb: ReturnType<typeof drizzle> | null = null;
 
 // -- Pure, unit-testable core -------------------------------------------------
-
-/**
- * The logical_album_key for a free-text resolution row, or null when the row
- * resolved to neither a master nor a release (a no-match — unattributable, so
- * its plays contribute nothing). Master wins over release so every pressing
- * folds into the master key; this MUST stay identical to the linked leg's
- * `discogs:`-stripped key and to the SQL `freetext_logical_key` expression.
- */
-export const freetextLogicalKey = (row: {
-  discogs_master_id: number | null;
-  discogs_release_id: number | null;
-}): string | null => {
-  if (row.discogs_master_id != null) return `master:${row.discogs_master_id}`;
-  if (row.discogs_release_id != null) return `release:${row.discogs_release_id}`;
-  return null;
-};
 
 export type ResolutionRow = {
   norm_artist: string;
@@ -204,27 +196,21 @@ export async function refreshAlbumPopularity(): Promise<void> {
 
       // LINKED leg: one row per logical key, summing pressings that share a
       // master. `library:<id>` fallback keeps unresolved-but-played rows.
+      //
+      // The key is the shared `logicalAlbumKeySql` derivation (#1505) — the SAME
+      // builder the catalog-export reader JOINs on, so the two SQL sites cannot
+      // drift. The subquery aliases `library` as `l`, so we feed the builder raw
+      // aliased SQL (the reader feeds it Drizzle column refs instead). Note: SQL
+      // comments inside this tagged template must avoid backticks (they would
+      // close the template literal), so the derivation's prose lives here + in
+      // logical-album-key.service.ts.
       await tx.execute(sql`
       INSERT INTO ${album_popularity}
         ("logical_album_key", "plays", "linked_plays", "freetext_plays", "representative_library_id")
       SELECT "key", count(*)::int, count(*)::int, 0, min("library_id")
       FROM (
         SELECT
-          CASE
-            -- 'discogs:master:<id>' / 'discogs:release:<id>' -> 'master:<id>' /
-            -- 'release:<id>' (the ~90%/~10% resolved split). Strip only the
-            -- 'discogs:' namespace; the master/release segment IS the key.
-            WHEN l."canonical_entity_id" LIKE 'discogs:%'
-              THEN substring(l."canonical_entity_id" from 'discogs:(.*)')
-            -- Defensive: a non-'discogs:' scheme should not exist today, but if
-            -- one appears use it verbatim rather than letting substring() return
-            -- NULL and violate the NOT NULL primary key.
-            WHEN l."canonical_entity_id" IS NOT NULL
-              THEN l."canonical_entity_id"
-            -- Unresolved (NULL canonical): keep the row as its own logical album
-            -- so a played library row's plays are never lost.
-            ELSE 'library:' || l."id"::text
-          END AS "key",
+          ${logicalAlbumKeySql(sql.raw('l."canonical_entity_id"'), sql.raw('l."id"'))} AS "key",
           l."id" AS "library_id"
         FROM ${flowsheet} f
         JOIN ${library} l ON l."id" = f."album_id"

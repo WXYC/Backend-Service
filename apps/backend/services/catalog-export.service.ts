@@ -27,6 +27,7 @@ import {
 } from '@wxyc/database';
 import { createWatermarkCache } from './watermark-cache.service.js';
 import { getCatalogLastModifiedAt } from './library.service.js';
+import { logicalAlbumKeySql } from './logical-album-key.service.js';
 
 /**
  * One catalog row as exported to the client. Flat projection over the
@@ -137,8 +138,11 @@ export const serializeCatalogNdjson = (rows: CatalogExportRow[]): string =>
  *    the Track-1-resolved free-text plays. LEFT JOINed by the row's logical key —
  *    the `discogs:`-stripped `canonical_entity_id` (`discogs:master:<id>` ->
  *    `master:<id>`), the value verbatim for any other non-null scheme, else
- *    `library:<id>` — which MUST mirror the CASE the rebuild groups on (a
- *    divergence silently nulls popularity; the pg integration spec guards it).
+ *    `library:<id>`. The derivation is the shared `logicalAlbumKeySql` fragment
+ *    (`logical-album-key.service.ts`), the SAME builder the rebuild groups on, so the
+ *    reader and writer keys cannot drift (a divergence would silently null
+ *    popularity; the pg integration spec + `logical-album-key.service.test.ts`
+ *    guard it).
  *    Unlike `plays`, it is projected RAW (nullable, NOT COALESCEd to 0): `null`
  *    means the logical album has no plays at all (linked or free-text), per the
  *    merged SSOT contract. Same watermark-lag caveat as `plays` (the refresh does
@@ -173,15 +177,10 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
        AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
       LEFT JOIN ${rotation} ON ${rotation.album_id} = ${library.id}
       LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library.id}
-      LEFT JOIN ${album_popularity} ON ${album_popularity.logical_album_key} = (
-        CASE
-          WHEN ${library.canonical_entity_id} LIKE 'discogs:%'
-            THEN substring(${library.canonical_entity_id} from 'discogs:(.*)')
-          WHEN ${library.canonical_entity_id} IS NOT NULL
-            THEN ${library.canonical_entity_id}
-          ELSE 'library:' || ${library.id}::text
-        END
-      )
+      LEFT JOIN ${album_popularity} ON ${album_popularity.logical_album_key} = ${logicalAlbumKeySql(
+        library.canonical_entity_id,
+        library.id
+      )}
     ORDER BY ${library.id}, ${rotation.add_date} DESC, ${rotation.id} DESC
   `);
   return rows as unknown as CatalogExportRow[];
