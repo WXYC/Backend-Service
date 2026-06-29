@@ -91,6 +91,34 @@ const extendedMatchResponse = {
         tracklist: [{ position: '1', title: 'la paradoja', duration: '4:12' }],
         artist_image_url: 'https://i.discogs.com/artist/juana.jpg',
         profile_tokens: [{ type: 'plainText', text: 'Argentine musician' }],
+        // BS#1499: track-level (precise) writer credit. provenance 'track'
+        // → composer_source = 'discogs_track'; composer = joined names.
+        writer_credits: {
+          names: ['Juana Molina'],
+          roles: ['Written-By'],
+          provenance: 'track',
+          track_position: 'A1',
+        },
+      },
+    },
+  ],
+} as unknown as LookupResponse;
+
+// Release-level (approximate) writer credit (BS#1499): provenance 'release'
+// → composer_source = 'discogs_release'. Multiple names join with '; '.
+// Exercises the linked + unlinked match arms with a release-provenance writer.
+const releaseWriterMatchResponse = {
+  results: [
+    {
+      artwork: {
+        artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+        release_url: 'https://discogs.com/release/123',
+        release_year: 2022,
+        writer_credits: {
+          names: ['Sessa', 'Bianca Vianna'],
+          roles: ['Written-By', 'Music By'],
+          provenance: 'release',
+        },
       },
     },
   ],
@@ -122,6 +150,29 @@ describe('finalizeRow (BS#892 PR-2)', () => {
     expect(setCall.soundcloud_url).toContain('soundcloud.com/search');
     expect(setCall.artist_bio).toBe('A great Some Artist from Argentina.');
     expect(setCall.artist_wikipedia_url).toBe('https://en.wikipedia.org/wiki/Juana_Molina');
+    // BS#1499: matchResponse carries no writer_credits → artist-as-proxy.
+    expect(setCall.composer).toBe('Juana Molina');
+    expect(setCall.composer_source).toBe('artist_proxy');
+  });
+
+  it('on match with a track-level writer credit: writes composer + discogs_track on flowsheet (BS#1499)', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(ROW, extendedMatchResponse);
+
+    const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setCall.composer).toBe('Juana Molina');
+    expect(setCall.composer_source).toBe('discogs_track');
+  });
+
+  it('on match with a release-level writer credit: joins names with "; " + discogs_release on flowsheet (BS#1499)', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(ROW, releaseWriterMatchResponse);
+
+    const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setCall.composer).toBe('Sessa; Bianca Vianna');
+    expect(setCall.composer_source).toBe('discogs_release');
   });
 
   it('on no-match: writes 4 synthesized search URLs and flips status to enriched_no_match', async () => {
@@ -146,6 +197,9 @@ describe('finalizeRow (BS#892 PR-2)', () => {
     expect(setCall.youtube_music_url).toContain('music.youtube.com/search');
     expect(setCall.bandcamp_url).toContain('bandcamp.com/search');
     expect(setCall.soundcloud_url).toContain('soundcloud.com/search');
+    // BS#1499: no match → no writer credit → artist-as-proxy composer.
+    expect(setCall.composer).toBe('Juana Molina');
+    expect(setCall.composer_source).toBe('artist_proxy');
   });
 
   it('returns _raced when the UPDATE matches 0 rows (status left enriching between claim and finalize)', async () => {
@@ -289,6 +343,39 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
     expect(setCall.soundcloud_url).toBeUndefined();
     expect(setCall.artist_bio).toBeUndefined();
     expect(setCall.artist_wikipedia_url).toBeUndefined();
+    // BS#1499: composer is the deliberate exception — it IS written on the
+    // flowsheet UPDATE (it's a per-playcut property, not album-level), even
+    // though every other metadata column routes through album_metadata.
+    // matchResponse has no writer_credits → artist-as-proxy fallback.
+    expect(setCall.composer).toBe('Juana Molina');
+    expect(setCall.composer_source).toBe('artist_proxy');
+  });
+
+  it('linked match: composer rides the flowsheet UPDATE, not album_metadata (BS#1499)', async () => {
+    // The load-bearing design decision: composer is a property of the
+    // specific playcut (the track that played), not the album. album_metadata
+    // is album-keyed, so two flowsheet rows that played different tracks off
+    // the same release would clobber each other's composer there. Therefore
+    // composer/composer_source must land on the flowsheet UPDATE and must be
+    // ABSENT from the album_metadata UPSERT (insert + conflict-update) payload.
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(LINKED_ROW, extendedMatchResponse);
+
+    // Flowsheet UPDATE carries composer (track-level credit → discogs_track).
+    const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setCall.composer).toBe('Juana Molina');
+    expect(setCall.composer_source).toBe('discogs_track');
+
+    // album_metadata INSERT payload OMITS composer entirely.
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.composer).toBeUndefined();
+    expect(insertPayload.composer_source).toBeUndefined();
+
+    // album_metadata conflict-update set OMITS composer entirely.
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    expect(conflictCfg.set.composer).toBeUndefined();
+    expect(conflictCfg.set.composer_source).toBeUndefined();
   });
 
   it('on extended match: UPSERTs the 8 LML-only columns into album_metadata (BS#1336)', async () => {
@@ -389,6 +476,14 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
     const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(setCall.metadata_status).toBe('enriched_no_match');
     expect(setCall).not.toHaveProperty('youtube_music_url');
+    // BS#1499: linked no-match still writes composer on the flowsheet UPDATE
+    // (artist-as-proxy, since there's no writer credit) — and never on
+    // album_metadata.
+    expect(setCall.composer).toBe('Juana Molina');
+    expect(setCall.composer_source).toBe('artist_proxy');
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.composer).toBeUndefined();
+    expect(insertPayload.composer_source).toBeUndefined();
   });
 
   it('on match: returns enriched_match_raced when the flowsheet UPDATE matches 0 rows', async () => {
