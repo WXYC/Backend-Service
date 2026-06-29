@@ -32,17 +32,20 @@ const ROW: EnrichRow = {
   album_id: null,
 };
 
-// Helper: build a minimal artwork carrying only the writer_credits we vary.
-const artworkWith = (writer_credits: unknown): DiscogsMatchResult =>
-  ({ writer_credits } as unknown as DiscogsMatchResult);
+// Build a minimal artwork carrying only the writer_credits we vary. Other
+// DiscogsMatchResult fields are irrelevant to resolveComposer, so the literal
+// stays partial; `resolveComposer` only reads `writer_credits`.
+const artworkWith = (artwork: Partial<DiscogsMatchResult>): Partial<DiscogsMatchResult> => artwork;
 
 describe('resolveComposer (BS#1499 PR-3)', () => {
   it("provenance 'track' → joined names + 'discogs_track'", () => {
     const artwork = artworkWith({
-      names: ['Juana Molina'],
-      roles: ['Written-By'],
-      provenance: 'track',
-      track_position: 'A1',
+      writer_credits: {
+        names: ['Juana Molina'],
+        roles: ['Written-By'],
+        provenance: 'track',
+        track_position: 'A1',
+      },
     });
 
     expect(resolveComposer(ROW, artwork)).toEqual({
@@ -53,9 +56,11 @@ describe('resolveComposer (BS#1499 PR-3)', () => {
 
   it("provenance 'release' → joined names + 'discogs_release'", () => {
     const artwork = artworkWith({
-      names: ['Sessa', 'Bianca Vianna'],
-      roles: ['Written-By', 'Music By'],
-      provenance: 'release',
+      writer_credits: {
+        names: ['Sessa', 'Bianca Vianna'],
+        roles: ['Written-By', 'Music By'],
+        provenance: 'release',
+      },
     });
 
     expect(resolveComposer(ROW, artwork)).toEqual({
@@ -66,16 +71,18 @@ describe('resolveComposer (BS#1499 PR-3)', () => {
 
   it("joins multiple names with '; ' (not ',', which Discogs names can contain)", () => {
     const artwork = artworkWith({
-      names: ['Molina, Juana', 'Vianna, Bianca'],
-      provenance: 'track',
-      track_position: 'A1',
+      writer_credits: {
+        names: ['Molina, Juana', 'Vianna, Bianca'],
+        provenance: 'track',
+        track_position: 'A1',
+      },
     });
 
     expect(resolveComposer(ROW, artwork).composer).toBe('Molina, Juana; Vianna, Bianca');
   });
 
   it("match but writer_credits undefined → artist_name + 'artist_proxy'", () => {
-    const artwork = artworkWith(undefined);
+    const artwork = artworkWith({ writer_credits: undefined });
 
     expect(resolveComposer(ROW, artwork)).toEqual({
       composer: 'Juana Molina',
@@ -84,7 +91,7 @@ describe('resolveComposer (BS#1499 PR-3)', () => {
   });
 
   it("writer_credits present but names empty → artist_name + 'artist_proxy'", () => {
-    const artwork = artworkWith({ names: [], provenance: 'release' });
+    const artwork = artworkWith({ writer_credits: { names: [], provenance: 'release' } });
 
     expect(resolveComposer(ROW, artwork)).toEqual({
       composer: 'Juana Molina',

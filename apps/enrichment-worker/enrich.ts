@@ -66,6 +66,40 @@ export type FinalizeOutcome =
   | 'enriched_no_match_raced';
 
 /**
+ * BMI composer provenance (BS#1499). Enum-like text on the flowsheet row,
+ * mirroring the `linkage_source` precedent in the same table — kept open as
+ * text (not a pg enum) so a future source (e.g. `musicbrainz_work`, flagged
+ * by LML#699) needs no enum migration. Const-asserted so every `.set({...})`
+ * call below is type-checked against exactly these three values.
+ */
+export type ComposerSource = 'discogs_track' | 'discogs_release' | 'artist_proxy';
+type ComposerResolution = { composer: string; composer_source: ComposerSource };
+
+/**
+ * Resolve the BMI composer for a playcut from LML's writer credits, with an
+ * artist-as-proxy fallback when nothing resolved (the dominant ~79% case per
+ * LML#699 — expected, not a regression; it mirrors tubafrenzy's existing
+ * auto-fill-BMI_COMPOSER-from-Artist default).
+ *
+ * Names join with `'; '` because Discogs writer names can themselves contain
+ * commas ("Last, First"), so a comma delimiter would be ambiguous; #1500's
+ * BMI export owns the field/record delimiters.
+ *
+ * This ternary is the SOLE site mapping `writer_credits.provenance` →
+ * `composer_source`; no other caller should invent a value.
+ */
+export const resolveComposer = (row: EnrichRow, artwork: DiscogsMatchResult | null): ComposerResolution => {
+  const wc = artwork?.writer_credits;
+  if (wc?.names?.length) {
+    return {
+      composer: wc.names.join('; '),
+      composer_source: wc.provenance === 'track' ? 'discogs_track' : 'discogs_release',
+    };
+  }
+  return { composer: row.artist_name, composer_source: 'artist_proxy' };
+};
+
+/**
  * Synthesized search URLs (per-service semantics deliberately asymmetric):
  *   - Spotify:       trackTitle > albumTitle > artistName. Path-style URL
  *                    matches LML's `_build_streaming_search_url` byte-for-byte
@@ -139,6 +173,10 @@ export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | n
 export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Promise<FinalizeOutcome> => {
   const artwork = extractArtwork(response);
   const searchUrls = synthesizeSearchUrls(row);
+  // BS#1499: composer is a per-playcut property, so it rides the flowsheet
+  // UPDATE in all four arms below (never the album-keyed album_metadata
+  // UPSERT). Resolved once here; artist-as-proxy fallback on absent credit.
+  const { composer, composer_source } = resolveComposer(row, artwork);
 
   if (artwork) {
     if (row.album_id !== null) {
@@ -191,7 +229,9 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
         });
       const updated = await db
         .update(flowsheet)
-        .set({ metadata_status: 'enriched_match' })
+        // composer rides the flowsheet UPDATE, not the album_metadata UPSERT
+        // above (per-playcut, not album-level — BS#1499).
+        .set({ metadata_status: 'enriched_match', composer, composer_source })
         .where(and(eq(flowsheet.id, row.id), eq(flowsheet.metadata_status, 'enriching')))
         .returning({ id: flowsheet.id });
       return updated.length === 0 ? 'enriched_match_raced' : 'enriched_match';
@@ -216,6 +256,9 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
         artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
         artist_wikipedia_url: artwork.wikipedia_url ?? null,
         metadata_status: 'enriched_match',
+        // BS#1499: per-playcut composer, alongside the inline metadata columns.
+        composer,
+        composer_source,
       })
       .where(and(eq(flowsheet.id, row.id), eq(flowsheet.metadata_status, 'enriching')))
       .returning({ id: flowsheet.id });
@@ -255,7 +298,10 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
       });
     const updated = await db
       .update(flowsheet)
-      .set({ metadata_status: 'enriched_no_match' })
+      // composer rides the flowsheet UPDATE, not the album_metadata UPSERT
+      // above (per-playcut, not album-level — BS#1499). On no-match this is
+      // the artist-as-proxy value.
+      .set({ metadata_status: 'enriched_no_match', composer, composer_source })
       .where(and(eq(flowsheet.id, row.id), eq(flowsheet.metadata_status, 'enriching')))
       .returning({ id: flowsheet.id });
     return updated.length === 0 ? 'enriched_no_match_raced' : 'enriched_no_match';
@@ -269,6 +315,9 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
       bandcamp_url: searchUrls.bandcamp_url,
       soundcloud_url: searchUrls.soundcloud_url,
       metadata_status: 'enriched_no_match',
+      // BS#1499: per-playcut composer (artist-as-proxy on no-match).
+      composer,
+      composer_source,
     })
     .where(and(eq(flowsheet.id, row.id), eq(flowsheet.metadata_status, 'enriching')))
     .returning({ id: flowsheet.id });
