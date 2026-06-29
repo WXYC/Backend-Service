@@ -4,8 +4,11 @@
  *
  * Unlike `album_plays` (a linked-only, per-pressing materialized view refreshed
  * with `REFRESH MATERIALIZED VIEW CONCURRENTLY`), `album_popularity` collapses
- * every pressing/format of one logical album AND folds in the ~43% of plays
- * that are free-text/unlinked. It is a plain TABLE, not an MV, because the
+ * the pressings/formats that resolve to one Discogs master into a single
+ * logical-album count AND folds in the free-text/unlinked plays Track 1
+ * resolved to that same master/release (the resolved subset of the ~43%
+ * free-text tail; release-only and unresolved rows keep their own key). It is a
+ * plain TABLE, not an MV, because the
  * free-text leg cannot be expressed as a single SQL SELECT: keying raw
  * `flowsheet` text against `flowsheet_freetext_resolution` requires the SAME
  * JS-side normalization Track 1 used to write that table (`freetextPairKey`),
