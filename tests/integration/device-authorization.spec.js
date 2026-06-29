@@ -151,17 +151,25 @@ describe('QR device-authorization (ADR 0008)', () => {
     await sql.unsafe(`DELETE FROM auth_device_code`);
   });
 
+  test('pre-approval poll returns authorization_pending', async () => {
+    // Documenting RFC 8628's interim polling response. Lives in its own
+    // test (not in the happy path) so the second poll doesn't run inside
+    // the plugin's `pollingInterval` (5s) window — the plugin sets
+    // `lastPolledAt` on every /device/token call and returns `slow_down`
+    // on any subsequent poll within the interval (routes.mjs:201). The
+    // happy path's post-approval poll therefore runs against a fresh row.
+    const { body: codeBody } = await requestDeviceCode(authBaseUrl);
+    const { res: pendingRes, body: pendingBody } = await pollDeviceToken(authBaseUrl, codeBody.device_code);
+    expect(pendingRes.status).toBe(400);
+    expect(pendingBody?.error).toBe('authorization_pending');
+  });
+
   test('happy path: DJ approves, browser receives a 12h session', async () => {
     const { res: codeRes, body: codeBody } = await requestDeviceCode(authBaseUrl);
     expect(codeRes.status).toBe(200);
     expect(typeof codeBody.device_code).toBe('string');
     expect(typeof codeBody.user_code).toBe('string');
     expect(codeBody.verification_uri).toBe('https://dj.wxyc.org/device-auth');
-
-    // First poll before approval → 400 authorization_pending.
-    const { res: pendingRes, body: pendingBody } = await pollDeviceToken(authBaseUrl, codeBody.device_code);
-    expect(pendingRes.status).toBe(400);
-    expect(pendingBody?.error).toBe('authorization_pending');
 
     // iOS scans the QR. /device claims the code (sets userId = DJ's id),
     // then /device/approve flips status to approved.
