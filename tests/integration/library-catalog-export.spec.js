@@ -27,7 +27,16 @@ const PROBE_EXPIRED = 7052;
 const PROBE_PLAYS = 7054; // album with seeded flowsheet track plays (BS#1486)
 const PROBE_PLAYS_COUNT = 5; // number of 'track' flowsheet rows seeded for PROBE_PLAYS
 
-// Exactly the export contract field set (#1468 AC), sorted for comparison.
+// BS#1493 Track 3 popularity probes: two pressings of one Discogs master that
+// MUST collapse to one popularity, plus an unsignaled row that ships raw null.
+const PROBE_POP_A = 7056; // pressing of master 55501, with its own linked plays
+const PROBE_POP_B = 7057; // ANOTHER pressing of master 55501 -> same popularity
+const PROBE_POP_NULL = 7058; // no album_popularity row -> popularity raw null
+const POP_MASTER_KEY = 'master:55501';
+const POP_TOTAL = 9; // seeded album_popularity.plays (linked 6 + free-text 3)
+const PROBE_POP_A_PLAYS = 2; // single-pressing linked plays for PROBE_POP_A
+
+// Exactly the export contract field set (#1468 AC + #1493 popularity), sorted.
 const CONTRACT_KEYS = [
   'album_title',
   'artist_name',
@@ -41,6 +50,7 @@ const CONTRACT_KEYS = [
   'label',
   'on_streaming',
   'plays',
+  'popularity',
   'rotation_bin',
   'rotation_kill_date',
 ].sort();
@@ -149,6 +159,39 @@ describe('GET /library/catalog (BS#1468)', () => {
        VALUES ($1, 'breakpoint', 9100, 'non-track row that must NOT count toward plays')`,
       [PROBE_PLAYS]
     );
+
+    // BS#1493 Track 3: `popularity` is the master-collapsed, free-text-folded
+    // signal from `album_popularity`, LEFT JOINed by the row's logical key (the
+    // `discogs:`-stripped `canonical_entity_id`). Seed two pressings sharing one
+    // master (so they collapse to the same popularity) and an unsignaled row.
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".library
+         (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, canonical_entity_id)
+       VALUES ($1, $4, $5, $6, 'BS#1493 Pop Pressing A', 94, 'Shape Fixture Artist Alpha', 'discogs:master:55501'),
+              ($2, $4, $5, $6, 'BS#1493 Pop Pressing B', 95, 'Shape Fixture Artist Alpha', 'discogs:master:55501'),
+              ($3, $4, $5, $6, 'BS#1493 Pop Unsignaled', 96, 'Shape Fixture Artist Alpha', NULL)
+       ON CONFLICT (id) DO NOTHING`,
+      [PROBE_POP_A, PROBE_POP_B, PROBE_POP_NULL, ART, GEN, FMT]
+    );
+    // Give pressing A its own linked plays so `popularity` (the collapsed master
+    // total) can be asserted >= a single pressing's per-pressing `plays`.
+    for (let i = 0; i < PROBE_POP_A_PLAYS; i++) {
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, play_order, artist_name, album_title, track_title)
+         VALUES ($1, 'track', $2, 'Shape Fixture Artist Alpha', 'BS#1493 Pop Pressing A', $3)`,
+        [PROBE_POP_A, 9200 + i, `pop track ${i}`]
+      );
+    }
+    // The album_popularity row for the shared master, seeded directly (the
+    // refresh service's 1h timer never fires in-suite). plays = linked + free-text.
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".album_popularity
+         (logical_album_key, plays, linked_plays, freetext_plays, representative_library_id)
+       VALUES ($1, $2, 6, 3, $3)
+       ON CONFLICT (logical_album_key) DO UPDATE
+         SET plays = EXCLUDED.plays, representative_library_id = EXCLUDED.representative_library_id`,
+      [POP_MASTER_KEY, POP_TOTAL, PROBE_POP_A]
+    );
   });
 
   afterAll(async () => {
@@ -158,11 +201,17 @@ describe('GET /library/catalog (BS#1468)', () => {
       // unfindable). rotation.album_id is ON DELETE CASCADE, so the library delete
       // reaps the probe rotation rows.
       await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id = $1`, [PROBE_PLAYS]);
-      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN ($1, $2, $3)`, [
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id = $1`, [PROBE_POP_A]);
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN ($1, $2, $3, $4, $5, $6)`, [
         PROBE_ACTIVE,
         PROBE_EXPIRED,
         PROBE_PLAYS,
+        PROBE_POP_A,
+        PROBE_POP_B,
+        PROBE_POP_NULL,
       ]);
+      // album_popularity has no FK to library, so reap the seeded row by its key.
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".album_popularity WHERE logical_album_key = $1`, [POP_MASTER_KEY]);
       // Drop the now-stale PROBE_PLAYS row from the MV so it can't leak into a
       // later test's export.
       await sql.unsafe(`REFRESH MATERIALIZED VIEW "${SCHEMA}".album_plays`);
@@ -261,6 +310,43 @@ describe('GET /library/catalog (BS#1468)', () => {
     const unplayed = byId.get(PROBE_EXPIRED);
     expect(unplayed).toBeDefined();
     expect(unplayed.plays).toBe(0);
+  });
+
+  test('popularity is the master-collapsed album_popularity signal joined by logical key; raw null when unsignaled (BS#1486 Track 3)', async () => {
+    // album_popularity refresh does NOT advance library_watermark, so bump it
+    // (touch a probe) to rebuild the per-watermark export cache against the seeded
+    // album_popularity; refresh album_plays so pressing A's `plays` is current.
+    await sql.unsafe(`REFRESH MATERIALIZED VIEW "${SCHEMA}".album_plays`);
+    await sql.unsafe(`UPDATE "${SCHEMA}".library SET album_title = album_title WHERE id = $1`, [PROBE_POP_A]);
+
+    const byId = new Map(parseRows(await getCatalog(auth)).map((r) => [r.id, r]));
+
+    const a = byId.get(PROBE_POP_A);
+    const b = byId.get(PROBE_POP_B);
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+
+    // Both pressings of master 55501 collapse to the SAME popularity — the join
+    // derives `master:55501` from each row's `discogs:master:55501` canonical id.
+    expect(a.popularity).toBe(POP_TOTAL);
+    expect(b.popularity).toBe(POP_TOTAL);
+
+    // Headline #1493 criterion: the multi-pressing logical album's popularity is
+    // >= a single pressing's per-pressing linked `plays`.
+    expect(a.plays).toBe(PROBE_POP_A_PLAYS);
+    expect(a.popularity).toBeGreaterThanOrEqual(a.plays);
+
+    // Pressing B has no linked plays of its own (plays COALESCEd to 0) yet still
+    // carries the collapsed popularity — exactly what the collapse buys.
+    expect(b.plays).toBe(0);
+    expect(b.popularity).toBe(POP_TOTAL);
+
+    // A row with no album_popularity entry ships popularity RAW null (NOT 0 like
+    // plays): the merged SSOT contract distinguishes "no logical signal" from 0.
+    const unsignaled = byId.get(PROBE_POP_NULL);
+    expect(unsignaled).toBeDefined();
+    expect(unsignaled.popularity).toBeNull();
+    expect(unsignaled.plays).toBe(0);
   });
 
   test('returns 304 when If-Modified-Since matches the current watermark', async () => {

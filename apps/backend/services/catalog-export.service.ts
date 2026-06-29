@@ -23,6 +23,7 @@ import {
   genre_artist_crossreference,
   rotation,
   album_plays,
+  album_popularity,
 } from '@wxyc/database';
 import { createWatermarkCache } from './watermark-cache.service.js';
 import { getCatalogLastModifiedAt } from './library.service.js';
@@ -51,6 +52,7 @@ export type CatalogExportRow = {
   format_name: string;
   on_streaming: boolean | null;
   plays: number | null;
+  popularity: number | null;
   artwork_url: string | null;
   rotation_bin: string | null;
   rotation_kill_date: string | null;
@@ -74,6 +76,7 @@ const projectRow = (row: CatalogExportRow): CatalogExportRow => ({
   format_name: row.format_name,
   on_streaming: row.on_streaming,
   plays: row.plays,
+  popularity: row.popularity,
   artwork_url: row.artwork_url,
   rotation_bin: row.rotation_bin,
   rotation_kill_date: row.rotation_kill_date,
@@ -127,6 +130,19 @@ export const serializeCatalogNdjson = (rows: CatalogExportRow[]): string =>
  *    change surfaces in the export only once the next library/parent write bumps
  *    the watermark and rebuilds the cache below — acceptable day-scale lag for a
  *    slow-moving popularity signal.
+ *  - `popularity` is the attribution-corrected logical-album signal from the
+ *    `album_popularity` table (BS#1486 Phase-2 Track 2, refreshed by
+ *    `album-popularity-refresh.service.ts`), addressing both `plays` limitations
+ *    above: it collapses the pressings sharing one Discogs master and folds in
+ *    the Track-1-resolved free-text plays. LEFT JOINed by the row's logical key —
+ *    the `discogs:`-stripped `canonical_entity_id` (`discogs:master:<id>` ->
+ *    `master:<id>`), the value verbatim for any other non-null scheme, else
+ *    `library:<id>` — which MUST mirror the CASE the rebuild groups on (a
+ *    divergence silently nulls popularity; the pg integration spec guards it).
+ *    Unlike `plays`, it is projected RAW (nullable, NOT COALESCEd to 0): `null`
+ *    means the logical album has no plays at all (linked or free-text), per the
+ *    merged SSOT contract. Same watermark-lag caveat as `plays` (the refresh does
+ *    not advance `library_watermark`).
  *
  * One scan per watermark (cached below), so the full-table cost is paid ~daily.
  */
@@ -144,6 +160,7 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
       ${format.format_name}                    AS format_name,
       ${library.on_streaming}                  AS on_streaming,
       COALESCE(${album_plays.plays}, 0)::int   AS plays,
+      ${album_popularity.plays}::int           AS popularity,
       ${library.artwork_url}                   AS artwork_url,
       ${rotation.rotation_bin}                 AS rotation_bin,
       ${rotation.kill_date}::text              AS rotation_kill_date
@@ -156,6 +173,15 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
        AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
       LEFT JOIN ${rotation} ON ${rotation.album_id} = ${library.id}
       LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library.id}
+      LEFT JOIN ${album_popularity} ON ${album_popularity.logical_album_key} = (
+        CASE
+          WHEN ${library.canonical_entity_id} LIKE 'discogs:%'
+            THEN substring(${library.canonical_entity_id} from 'discogs:(.*)')
+          WHEN ${library.canonical_entity_id} IS NOT NULL
+            THEN ${library.canonical_entity_id}
+          ELSE 'library:' || ${library.id}::text
+        END
+      )
     ORDER BY ${library.id}, ${rotation.add_date} DESC, ${rotation.id} DESC
   `);
   return rows as unknown as CatalogExportRow[];

@@ -260,6 +260,14 @@ components:
         plays:
           type: integer
           nullable: true
+        popularity:
+          type: integer
+          nullable: true
+          description: >
+            Attribution-corrected, master-collapsed popularity (BS#1486 Phase-2):
+            collapses pressings sharing a Discogs master and folds in resolved
+            free-text plays. null when the logical album has no plays. The SSOT
+            (wxyc-shared api.yaml) carries the authoritative description.
         artwork_url:
           type: string
           nullable: true
