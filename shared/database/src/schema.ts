@@ -1530,9 +1530,9 @@ export const album_plays = wxyc_schema
  * Track 2 / #1492). One row per logical album, keyed by `logical_album_key`:
  *
  *   - `master:<discogs_master_id>`  — the dominant case; collapses every
- *     library pressing AND free-text play of one logical album. Derived from
- *     `library.canonical_entity_id` (`discogs:master:<id>` for ~90% of
- *     resolved rows) and from `flowsheet_freetext_resolution.discogs_master_id`.
+ *     library pressing AND every resolved free-text play of one logical album.
+ *     Derived from `library.canonical_entity_id` (`discogs:master:<id>` for
+ *     ~90% of resolved rows) and `flowsheet_freetext_resolution.discogs_master_id`.
  *   - `release:<discogs_release_id>` — master-less fallback (one-offs,
  *     self-released) so a release is never lost when it has no master.
  *   - `library:<library_id>`        — linked-but-unresolved fallback
