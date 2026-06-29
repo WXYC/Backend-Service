@@ -484,6 +484,13 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
     const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(insertPayload.composer).toBeUndefined();
     expect(insertPayload.composer_source).toBeUndefined();
+    // …and not on the album_metadata conflict-update set either (symmetry with
+    // the linked-match load-bearing assertion).
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as {
+      set: Record<string, unknown>;
+    };
+    expect(conflictCfg.set.composer).toBeUndefined();
+    expect(conflictCfg.set.composer_source).toBeUndefined();
   });
 
   it('on match: returns enriched_match_raced when the flowsheet UPDATE matches 0 rows', async () => {
