@@ -99,6 +99,15 @@ describe('resolveComposer (BS#1499 PR-3)', () => {
     });
   });
 
+  it("writer_credits present but names are all blank → artist_name + 'artist_proxy'", () => {
+    const artwork = artworkWith({ writer_credits: { names: ['', '  '], provenance: 'track' } });
+
+    expect(resolveComposer(ROW, artwork)).toEqual({
+      composer: 'Juana Molina',
+      composer_source: 'artist_proxy',
+    });
+  });
+
   it("no-match (artwork null) → artist_name + 'artist_proxy'", () => {
     expect(resolveComposer(ROW, null)).toEqual({
       composer: 'Juana Molina',

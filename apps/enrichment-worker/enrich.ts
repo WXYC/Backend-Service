@@ -90,9 +90,13 @@ type ComposerResolution = { composer: string; composer_source: ComposerSource };
  */
 export const resolveComposer = (row: EnrichRow, artwork: DiscogsMatchResult | null): ComposerResolution => {
   const wc = artwork?.writer_credits;
-  if (wc?.names?.length) {
+  // Drop blank names so a stray empty entry can't yield an empty composer
+  // mislabeled as a real Discogs credit (#1500's BMI export reads this
+  // verbatim); fall through to the artist proxy when nothing real remains.
+  const names = wc?.names?.filter((n) => n.trim());
+  if (wc && names?.length) {
     return {
-      composer: wc.names.join('; '),
+      composer: names.join('; '),
       composer_source: wc.provenance === 'track' ? 'discogs_track' : 'discogs_release',
     };
   }
