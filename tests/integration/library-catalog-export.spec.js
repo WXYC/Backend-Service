@@ -8,7 +8,8 @@
  * shapes, supertest drives the HTTP surface.
  *
  * Probe rows live in the reserved 7000-range (shape fixture's namespace) on ids
- * the fixture leaves free (7050/7052). They reuse fixture artist 7000 (code
+ * the fixture leaves free (this spec owns 7050-7059 + 7061; 7060/7062 belong to
+ * library-query-sort-plays.spec.js). They reuse fixture artist 7000 (code
  * letters 'XA'), genre 11 ('Rock'), format 1 ('cd'), and gac (7000,11)->700, so
  * every joined display field is a known constant.
  */
@@ -35,6 +36,18 @@ const PROBE_POP_NULL = 7058; // no album_popularity row -> popularity raw null
 const POP_MASTER_KEY = 'master:55501';
 const POP_TOTAL = 9; // seeded album_popularity.plays (linked 6 + free-text 3)
 const PROBE_POP_A_PLAYS = 2; // single-pressing linked plays for PROBE_POP_A
+// The reader's logical-key CASE has THREE branches; the master probes above only
+// exercise the `discogs:master:` form of branch 1. These two cover the other
+// join-success branches so a reader/writer divergence on them can't silently null
+// popularity undetected (the largest unguarded class is NULL-canonical, ~34k rows).
+const PROBE_POP_RELEASE = 7059; // canonical 'discogs:release:88812' -> key 'release:88812'
+const POP_RELEASE_KEY = 'release:88812';
+const POP_RELEASE_TOTAL = 4; // seeded album_popularity.plays for the release key
+// 7061, not 7060: library-query-sort-plays.spec.js owns 7060 (PROBE_ZERO) and the
+// pg suite shares one schema under --runInBand, so probe ids must not collide.
+const PROBE_POP_LIBFALLBACK = 7061; // NULL canonical -> ELSE branch key 'library:7061'
+const POP_LIBFALLBACK_KEY = `library:${PROBE_POP_LIBFALLBACK}`;
+const POP_LIBFALLBACK_TOTAL = 7; // seeded album_popularity.plays for the library: key
 
 // Exactly the export contract field set (#1468 AC + #1493 popularity), sorted.
 const CONTRACT_KEYS = [
@@ -167,11 +180,13 @@ describe('GET /library/catalog (BS#1468)', () => {
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".library
          (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, canonical_entity_id)
-       VALUES ($1, $4, $5, $6, 'BS#1493 Pop Pressing A', 94, 'Shape Fixture Artist Alpha', 'discogs:master:55501'),
-              ($2, $4, $5, $6, 'BS#1493 Pop Pressing B', 95, 'Shape Fixture Artist Alpha', 'discogs:master:55501'),
-              ($3, $4, $5, $6, 'BS#1493 Pop Unsignaled', 96, 'Shape Fixture Artist Alpha', NULL)
+       VALUES ($1, $6, $7, $8, 'BS#1493 Pop Pressing A', 94, 'Shape Fixture Artist Alpha', 'discogs:master:55501'),
+              ($2, $6, $7, $8, 'BS#1493 Pop Pressing B', 95, 'Shape Fixture Artist Alpha', 'discogs:master:55501'),
+              ($3, $6, $7, $8, 'BS#1493 Pop Unsignaled', 96, 'Shape Fixture Artist Alpha', NULL),
+              ($4, $6, $7, $8, 'BS#1493 Pop Release', 97, 'Shape Fixture Artist Alpha', 'discogs:release:88812'),
+              ($5, $6, $7, $8, 'BS#1493 Pop LibFallback', 98, 'Shape Fixture Artist Alpha', NULL)
        ON CONFLICT (id) DO NOTHING`,
-      [PROBE_POP_A, PROBE_POP_B, PROBE_POP_NULL, ART, GEN, FMT]
+      [PROBE_POP_A, PROBE_POP_B, PROBE_POP_NULL, PROBE_POP_RELEASE, PROBE_POP_LIBFALLBACK, ART, GEN, FMT]
     );
     // Give pressing A its own linked plays so `popularity` (the collapsed master
     // total) can be asserted >= a single pressing's per-pressing `plays`.
@@ -192,6 +207,25 @@ describe('GET /library/catalog (BS#1468)', () => {
          SET plays = EXCLUDED.plays, representative_library_id = EXCLUDED.representative_library_id`,
       [POP_MASTER_KEY, POP_TOTAL, PROBE_POP_A]
     );
+    // album_popularity rows for the release-form and library-fallback logical keys
+    // so the reader's other two CASE branches are JOIN-tested, not just the master
+    // form. A non-null result here proves the reader derives `release:88812` /
+    // `library:7061` exactly as the writer groups, so the equi-join lands.
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".album_popularity
+         (logical_album_key, plays, linked_plays, freetext_plays, representative_library_id)
+       VALUES ($1, $2, $2, 0, $3), ($4, $5, $5, 0, $6)
+       ON CONFLICT (logical_album_key) DO UPDATE
+         SET plays = EXCLUDED.plays, representative_library_id = EXCLUDED.representative_library_id`,
+      [
+        POP_RELEASE_KEY,
+        POP_RELEASE_TOTAL,
+        PROBE_POP_RELEASE,
+        POP_LIBFALLBACK_KEY,
+        POP_LIBFALLBACK_TOTAL,
+        PROBE_POP_LIBFALLBACK,
+      ]
+    );
   });
 
   afterAll(async () => {
@@ -202,16 +236,22 @@ describe('GET /library/catalog (BS#1468)', () => {
       // reaps the probe rotation rows.
       await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id = $1`, [PROBE_PLAYS]);
       await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id = $1`, [PROBE_POP_A]);
-      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN ($1, $2, $3, $4, $5, $6)`, [
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN ($1, $2, $3, $4, $5, $6, $7, $8)`, [
         PROBE_ACTIVE,
         PROBE_EXPIRED,
         PROBE_PLAYS,
         PROBE_POP_A,
         PROBE_POP_B,
         PROBE_POP_NULL,
+        PROBE_POP_RELEASE,
+        PROBE_POP_LIBFALLBACK,
       ]);
-      // album_popularity has no FK to library, so reap the seeded row by its key.
-      await sql.unsafe(`DELETE FROM "${SCHEMA}".album_popularity WHERE logical_album_key = $1`, [POP_MASTER_KEY]);
+      // album_popularity has no FK to library, so reap the seeded rows by their keys.
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".album_popularity WHERE logical_album_key IN ($1, $2, $3)`, [
+        POP_MASTER_KEY,
+        POP_RELEASE_KEY,
+        POP_LIBFALLBACK_KEY,
+      ]);
       // Drop the now-stale PROBE_PLAYS row from the MV so it can't leak into a
       // later test's export.
       await sql.unsafe(`REFRESH MATERIALIZED VIEW "${SCHEMA}".album_plays`);
@@ -312,7 +352,7 @@ describe('GET /library/catalog (BS#1468)', () => {
     expect(unplayed.plays).toBe(0);
   });
 
-  test('popularity is the master-collapsed album_popularity signal joined by logical key; raw null when unsignaled (BS#1486 Track 3)', async () => {
+  test('popularity is the album_popularity signal joined on every logical-key branch (master-collapsed, release, library-fallback); raw null when unsignaled (BS#1486 Track 3)', async () => {
     // album_popularity refresh does NOT advance library_watermark, so bump it
     // (touch a probe) to rebuild the per-watermark export cache against the seeded
     // album_popularity; refresh album_plays so pressing A's `plays` is current.
@@ -347,6 +387,20 @@ describe('GET /library/catalog (BS#1468)', () => {
     expect(unsignaled).toBeDefined();
     expect(unsignaled.popularity).toBeNull();
     expect(unsignaled.plays).toBe(0);
+
+    // The reader's logical-key CASE has two more JOIN-success branches the master
+    // probes above never reach. These guard reader/writer parity on them (a
+    // divergence here silently nulls popularity for whole row classes):
+    //  - `discogs:release:<id>` -> the substring branch must yield `release:88812`.
+    const release = byId.get(PROBE_POP_RELEASE);
+    expect(release).toBeDefined();
+    expect(release.popularity).toBe(POP_RELEASE_TOTAL);
+    //  - NULL canonical -> the ELSE branch must yield `library:<id>` and join. This
+    //    is the largest class in prod (~34k NULL-canonical rows); distinct from
+    //    PROBE_POP_NULL (which has no album_popularity row -> the null-OUTPUT path).
+    const libFallback = byId.get(PROBE_POP_LIBFALLBACK);
+    expect(libFallback).toBeDefined();
+    expect(libFallback.popularity).toBe(POP_LIBFALLBACK_TOTAL);
   });
 
   test('returns 304 when If-Modified-Since matches the current watermark', async () => {

@@ -17,6 +17,7 @@ const sampleRow = (overrides: Partial<CatalogExportRow> = {}): CatalogExportRow 
   format_name: 'CD',
   on_streaming: true,
   plays: 12,
+  popularity: 17,
   artwork_url: 'https://example.test/doga.jpg',
   rotation_bin: 'H',
   rotation_kill_date: '2026-07-01',
@@ -35,7 +36,7 @@ describe('catalog-export.service: serializeCatalogNdjson', () => {
     expect(JSON.parse(lines[1])).toEqual(rows[1]);
   });
 
-  it('emits exactly the 14 contract fields per line and excludes search_doc', () => {
+  it('emits exactly the 15 contract fields per line and excludes search_doc', () => {
     // The field set is the acceptance criterion for #1468. A row carrying an
     // extra server-only field (e.g. search_doc) must not leak into the export.
     const rowWithExtra = {
@@ -61,6 +62,7 @@ describe('catalog-export.service: serializeCatalogNdjson', () => {
         'label',
         'on_streaming',
         'plays',
+        'popularity',
         'rotation_bin',
         'rotation_kill_date',
       ].sort()
@@ -73,13 +75,23 @@ describe('catalog-export.service: serializeCatalogNdjson', () => {
     expect(serializeCatalogNdjson([])).toBe('');
   });
 
-  it('preserves null rotation/streaming fields (album not in rotation)', () => {
-    const row = sampleRow({ rotation_bin: null, rotation_kill_date: null, on_streaming: null, plays: null });
+  it('preserves null rotation/streaming/popularity fields (album not in rotation, no logical popularity signal)', () => {
+    // `popularity` is the only field whose null is a distinct contract value: it
+    // ships raw-nullable (NOT COALESCEd to 0 like `plays`), so null must round-trip
+    // as JSON null and not be dropped or coerced (BS#1486 Track 3 / SSOT #198).
+    const row = sampleRow({
+      rotation_bin: null,
+      rotation_kill_date: null,
+      on_streaming: null,
+      plays: null,
+      popularity: null,
+    });
     const parsed = JSON.parse(serializeCatalogNdjson([row]));
 
     expect(parsed.rotation_bin).toBeNull();
     expect(parsed.rotation_kill_date).toBeNull();
     expect(parsed.on_streaming).toBeNull();
     expect(parsed.plays).toBeNull();
+    expect(parsed).toHaveProperty('popularity', null);
   });
 });
