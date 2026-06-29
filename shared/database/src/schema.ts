@@ -796,6 +796,15 @@ export const flowsheet = wxyc_schema.table(
     linkage_source: text('linkage_source'),
     linkage_confidence: real('linkage_confidence'),
     linked_at: timestamp('linked_at', { withTimezone: true }),
+    // BMI composer for this playcut, written by apps/enrichment-worker
+    // (enrich.ts finalizeRow) from DiscogsMatchResult.writer_credits, with
+    // artist-as-proxy fallback. NULL until enrichment runs (and on non-track
+    // rows, which never enter the enrichment lifecycle). composer_source is
+    // enum-like text — like linkage_source above, kept text (not a pg enum)
+    // so adding a future source (e.g. musicbrainz_work, LML#699) needs no
+    // enum migration. Values: 'discogs_track' | 'discogs_release' | 'artist_proxy'.
+    composer: text('composer'),
+    composer_source: text('composer_source'),
     // B-0.5 marker: timestamp set when the legacy_release_id → library.id
     // resolver ran for this row and could not link. Lets B-2.2's LML
     // backfill find the broken-FK residual alongside the rows that never
