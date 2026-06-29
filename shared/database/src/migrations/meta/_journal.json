@@ -736,6 +736,13 @@
       "when": 1781468384351,
       "tag": "0107_album-popularity",
       "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1781468384352,
+      "tag": "0108_qr-device-auth",
+      "breakpoints": true
     }
   ]
 }
