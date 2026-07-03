@@ -1,27 +1,27 @@
 // Pin the HTML-entity decode added in BS#1223 and the search_type trust
 // gate added in BS#1516. Rationale for both lives next to the
 // implementation at jobs/rotation-release-id-backfill/lml-fetch.ts.
+beforeEach(() => {
+  jest.resetModules();
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
+
+const loadModule = async (
+  mockLookup: jest.Mock
+): Promise<typeof import('../../../../jobs/rotation-release-id-backfill/lml-fetch.js')> => {
+  jest.doMock('../../../../jobs/rotation-release-id-backfill/lml-limiter.js', () => ({
+    defaultLmlLimiter: { run: jest.fn() },
+  }));
+  jest.doMock('@wxyc/lml-client', () => ({
+    lookupMetadata: mockLookup,
+  }));
+  return import('../../../../jobs/rotation-release-id-backfill/lml-fetch.js');
+};
+
 describe('jobs/rotation-release-id-backfill/lml-fetch (HTML-entity decode)', () => {
-  beforeEach(() => {
-    jest.resetModules();
-  });
-
-  afterEach(() => {
-    jest.restoreAllMocks();
-  });
-
-  const loadModule = async (
-    mockLookup: jest.Mock
-  ): Promise<typeof import('../../../../jobs/rotation-release-id-backfill/lml-fetch.js')> => {
-    jest.doMock('../../../../jobs/rotation-release-id-backfill/lml-limiter.js', () => ({
-      defaultLmlLimiter: { run: jest.fn() },
-    }));
-    jest.doMock('@wxyc/lml-client', () => ({
-      lookupMetadata: mockLookup,
-    }));
-    return import('../../../../jobs/rotation-release-id-backfill/lml-fetch.js');
-  };
-
   it('decodes numeric HTML entities in artist before calling LML', async () => {
     const mockLookup = jest
       .fn()
@@ -132,26 +132,6 @@ describe('jobs/rotation-release-id-backfill/lml-fetch (HTML-entity decode)', () 
 });
 
 describe('jobs/rotation-release-id-backfill/lml-fetch (search_type trust gate, BS#1516)', () => {
-  beforeEach(() => {
-    jest.resetModules();
-  });
-
-  afterEach(() => {
-    jest.restoreAllMocks();
-  });
-
-  const loadModule = async (
-    mockLookup: jest.Mock
-  ): Promise<typeof import('../../../../jobs/rotation-release-id-backfill/lml-fetch.js')> => {
-    jest.doMock('../../../../jobs/rotation-release-id-backfill/lml-limiter.js', () => ({
-      defaultLmlLimiter: { run: jest.fn() },
-    }));
-    jest.doMock('@wxyc/lml-client', () => ({
-      lookupMetadata: mockLookup,
-    }));
-    return import('../../../../jobs/rotation-release-id-backfill/lml-fetch.js');
-  };
-
   it('rejects the artist-fallback answer that caused the Yenbett→Tzenni recurrence (BS#1515)', async () => {
     // LML has no direct match for the typed album, so it answers with other
     // releases by the same artist. results[0] is a DIFFERENT album — trusting

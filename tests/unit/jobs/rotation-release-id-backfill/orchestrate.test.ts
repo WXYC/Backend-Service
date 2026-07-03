@@ -184,10 +184,7 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce({ kind: 'resolved', releaseId: 0 }) // sentinel_rejected
       .mockRejectedValueOnce(new Error('LML socket timeout')) // lml_error
       .mockResolvedValueOnce({ kind: 'resolved', releaseId: 222 }); // raced
-    const write = jest
-      .fn<WriteFn>()
-      .mockResolvedValueOnce({ written: true })
-      .mockResolvedValueOnce({ written: false });
+    const write = jest.fn<WriteFn>().mockResolvedValueOnce({ written: true }).mockResolvedValueOnce({ written: false });
 
     const { totals } = await runBackfill({ loadCandidates, lookup, write });
 
