@@ -73,15 +73,15 @@ JSON log line emitted on `step: finished`:
 
 Invariant: `scanned == resolved + resolved_dry + unresolved + lml_error + raced + sentinel_rejected + trust_rejected`.
 
-| Counter             | Meaning                                                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `scanned`           | Rows visited (matches the candidate query's row count)                                                       |
-| `resolved`          | LML returned a positive release id on a `direct` match AND the UPDATE landed cleanly                         |
-| `resolved_dry`      | LML returned a positive release id on a `direct` match; DRY_RUN suppressed the UPDATE                        |
-| `unresolved`        | LML returned no Discogs match (`response.results[0].artwork.release_id` was null)                            |
-| `lml_error`         | LML call threw (cold-cache timeout, network blip, etc.); row stays NULL for next run                         |
-| `raced`             | UPDATE matched zero rows because a tubafrenzy paste won the race between candidate-select and update         |
-| `sentinel_rejected` | LML returned `<= 0` (cache pollution / upstream regression); pre-empted before write per BS#1429 CHECK fence |
+| Counter             | Meaning                                                                                                                                                                                                                 |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scanned`           | Rows visited (matches the candidate query's row count)                                                                                                                                                                  |
+| `resolved`          | LML returned a positive release id on a `direct` match AND the UPDATE landed cleanly                                                                                                                                    |
+| `resolved_dry`      | LML returned a positive release id on a `direct` match; DRY_RUN suppressed the UPDATE                                                                                                                                   |
+| `unresolved`        | LML returned no Discogs match (`response.results[0].artwork.release_id` was null)                                                                                                                                       |
+| `lml_error`         | LML call threw (cold-cache timeout, network blip, etc.); row stays NULL for next run                                                                                                                                    |
+| `raced`             | UPDATE matched zero rows because a tubafrenzy paste won the race between candidate-select and update                                                                                                                    |
+| `sentinel_rejected` | LML returned `<= 0` (cache pollution / upstream regression); pre-empted before write per BS#1429 CHECK fence                                                                                                            |
 | `trust_rejected`    | LML returned a candidate id on a non-`direct` (or absent) `search_type` — an artist-fallback answer pointing at a **different album**; never persisted (BS#1516, the Yenbett→Tzenni recurrence BS#1515). Row stays NULL |
 
 `trust_rejected` rows are candidates for LML-side match improvements (or the album has no Discogs release yet); `unresolved` rows need Discogs/catalog additions. Both re-enter the candidate set on the next run.
