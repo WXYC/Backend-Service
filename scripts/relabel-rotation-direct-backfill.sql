@@ -58,12 +58,12 @@
 --   -- guard keys on, so it RE-ARMS this script. Do NOT re-run the relabel after
 --   -- reverting unless you have re-confirmed no LML-job `lml_offline_backfill`
 --   -- rows are present — otherwise the re-run repaints them. More generally the
---   -- guard only holds while at least one `discogs_direct_backfill` row persists;
---   -- that population can shrink over time (MD-verification flips rows to
---   -- `tubafrenzy_paste`; the daily rotation-release-id-backfill cron can re-resolve
---   -- the handful of NULL-id rows and retag them `lml_offline_backfill`), though
---   -- today ~172 non-NULL-id rows keep it well above zero. The durable protection
---   -- is the retirement above, not the guard alone.
+--   -- guard only holds while at least one `discogs_direct_backfill` row persists,
+--   -- so treat it as defense-in-depth, not the primary control: the durable
+--   -- protection is the retirement above (do not re-run this script). The
+--   -- population only shrinks slowly — rows leave it when a music director's
+--   -- tubafrenzy paste flips a row to `tubafrenzy_paste` — so accidental drainage
+--   -- to zero is implausible today, but do not depend on it.
 --
 -- Per WXYC data-safety rule: SELECT scope first, then UPDATE.
 
