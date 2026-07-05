@@ -54,17 +54,30 @@
 --   UPDATE wxyc_schema.rotation
 --   SET discogs_release_id_source = 'lml_offline_backfill'
 --   WHERE discogs_release_id_source = 'discogs_direct_backfill';
+--   -- WARNING: this revert zeroes the `discogs_direct_backfill` sentinel the
+--   -- guard keys on, so it RE-ARMS this script. Do NOT re-run the relabel after
+--   -- reverting unless you have re-confirmed no LML-job `lml_offline_backfill`
+--   -- rows are present — otherwise the re-run repaints them. (Same re-arm applies
+--   -- if the `discogs_direct_backfill` population is ever drained to zero by other
+--   -- means, e.g. the migration-0101 cron flipping the 6 NULL-id zombies. The
+--   -- durable protection is the retirement above, not the guard alone.)
 --
 -- Per WXYC data-safety rule: SELECT scope first, then UPDATE.
 
-\echo '-- pre-relabel scope (first legitimate run: to_relabel > 0, already_relabeled = 0):'
+-- These diagnostics count the WHOLE table (no `kill_date` filter) so they mirror
+-- exactly what the guard and UPDATE below act on — both of which are also
+-- kill_date-blind. That equivalence is load-bearing: `already_relabeled = 0` iff
+-- the guard will fire, and `to_relabel` equals the rows the UPDATE will repaint.
+-- A `kill_date IS NULL` filter here would let killed `discogs_direct_backfill`
+-- rows read as `already_relabeled = 0` (looks like a first run) while the guard
+-- is actually armed shut — misleading the operator into a manual unguarded run.
+\echo '-- pre-relabel scope (first legitimate run: to_relabel > 0, already_relabeled = 0 => guard fires):'
 SELECT
   COUNT(*) FILTER (WHERE discogs_release_id_source = 'lml_offline_backfill') AS to_relabel,
   COUNT(*) FILTER (WHERE discogs_release_id_source = 'discogs_direct_backfill') AS already_relabeled,
   COUNT(*) FILTER (WHERE discogs_release_id_source = 'tubafrenzy_paste') AS md_verified,
   COUNT(*) AS total
-FROM wxyc_schema.rotation
-WHERE kill_date IS NULL;
+FROM wxyc_schema.rotation;
 
 BEGIN;
 
@@ -88,8 +101,7 @@ SELECT
   COUNT(*) FILTER (WHERE discogs_release_id_source = 'discogs_direct_backfill') AS direct_backfill,
   COUNT(*) FILTER (WHERE discogs_release_id_source = 'tubafrenzy_paste') AS md_verified,
   COUNT(*) AS total
-FROM wxyc_schema.rotation
-WHERE kill_date IS NULL;
+FROM wxyc_schema.rotation;
 
 COMMIT;
 

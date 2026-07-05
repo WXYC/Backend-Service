@@ -27,24 +27,34 @@ const TEST_SCHEMA = 'relabel_guard_test';
 const SCRIPT_PATH = path.join(__dirname, '..', '..', 'scripts', 'relabel-rotation-direct-backfill.sql');
 
 /**
- * Pull the real, non-commented UPDATE statement out of the operator script and
- * retarget it at the throwaway schema. Comment (`--`) and psql meta (`\`) lines
- * are dropped first so the reversible-UPDATE example in the header comment can't
- * be mistaken for the live statement.
+ * Pull the real, guarded UPDATE statement out of the operator script and retarget
+ * it at the throwaway schema. Two hazards this defends against so the "zero drift"
+ * guarantee can't silently invert (the extracted statement must be exactly the one
+ * prod runs):
+ *   - psql meta (`\`) lines are dropped, and BOTH full-line and trailing inline
+ *     `--` comments are stripped, so a `;` inside a comment can't truncate the
+ *     match before the `AND NOT EXISTS (...)` guard, and the reversible-UPDATE
+ *     example in the header comment can't be mistaken for the live statement.
+ *     (Assumes no `--` inside a string literal and no SQL block comments — both
+ *     hold for this script; revisit if that changes.)
+ *   - it requires EXACTLY ONE UPDATE. If a future edit adds a second UPDATE, this
+ *     throws instead of silently binding the wrong one and validating a statement
+ *     prod never runs.
  */
 function extractGuardedUpdate(scriptText, targetSchema) {
   const sqlOnly = scriptText
     .split('\n')
-    .filter((line) => {
-      const t = line.trim();
-      return t.length > 0 && !t.startsWith('--') && !t.startsWith('\\');
+    .filter((line) => !line.trim().startsWith('\\'))
+    .map((line) => {
+      const comment = line.indexOf('--');
+      return comment === -1 ? line : line.slice(0, comment);
     })
     .join('\n');
-  const match = sqlOnly.match(/UPDATE[\s\S]*?;/i);
-  if (!match) {
-    throw new Error('could not locate the UPDATE statement in relabel-rotation-direct-backfill.sql');
+  const matches = sqlOnly.match(/UPDATE[\s\S]*?;/gi) ?? [];
+  if (matches.length !== 1) {
+    throw new Error(`expected exactly one UPDATE in relabel-rotation-direct-backfill.sql, found ${matches.length}`);
   }
-  return match[0].replace(/wxyc_schema\./g, `${targetSchema}.`);
+  return matches[0].replace(/wxyc_schema\./g, `${targetSchema}.`);
 }
 
 describe('relabel-rotation-direct-backfill re-run safety (BS#1521)', () => {
