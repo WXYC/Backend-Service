@@ -144,21 +144,31 @@ describe('relabel-rotation-direct-backfill re-run safety (BS#1521)', () => {
     expect(counts['discogs_direct_backfill']).toBe(1);
   });
 
-  test('re-running immediately after a completed relabel affects zero rows', async () => {
-    // Arrange: reach the completed state via the script itself (first run).
+  test('a re-run is a genuine no-op even with a fresh LML write present (0 rows, guard-discriminating)', async () => {
+    // Arrange: reach the completed state via the script itself (first run)...
     await sql`
       INSERT INTO ${sql(TEST_SCHEMA)}.rotation (discogs_release_id_source, kill_date)
       VALUES ('lml_offline_backfill', NULL), ('lml_offline_backfill', NULL)
     `;
     await sql.unsafe(guardedUpdate);
+    // ...then the gated LML job writes a fresh lml_offline_backfill row. This row
+    // is what makes `rerun.count === 0` a real assertion about the guard: without
+    // the AND NOT EXISTS clause the re-run would repaint it (count 1). Reaching
+    // the completed state via a manual insert instead would leave zero
+    // lml_offline_backfill rows, so the outer WHERE alone matches nothing and the
+    // no-op would hold even with the guard deleted — a false pin.
+    await sql`
+      INSERT INTO ${sql(TEST_SCHEMA)}.rotation (discogs_release_id_source, kill_date)
+      VALUES ('lml_offline_backfill', NULL)
+    `;
 
-    // Act: the genuine-no-op proof — a second, identical run.
+    // Act: a second run.
     const rerun = await sql.unsafe(guardedUpdate);
 
-    // Assert: zero rows touched, and the distribution is unchanged.
+    // Assert: genuine no-op — the guard suppressed the repaint of the fresh row.
     expect(rerun.count).toBe(0);
     const counts = await sourceCounts();
     expect(counts['discogs_direct_backfill']).toBe(2);
-    expect(counts['lml_offline_backfill']).toBeUndefined();
+    expect(counts['lml_offline_backfill']).toBe(1);
   });
 });

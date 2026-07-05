@@ -57,10 +57,13 @@
 --   -- WARNING: this revert zeroes the `discogs_direct_backfill` sentinel the
 --   -- guard keys on, so it RE-ARMS this script. Do NOT re-run the relabel after
 --   -- reverting unless you have re-confirmed no LML-job `lml_offline_backfill`
---   -- rows are present — otherwise the re-run repaints them. (Same re-arm applies
---   -- if the `discogs_direct_backfill` population is ever drained to zero by other
---   -- means, e.g. the migration-0101 cron flipping the 6 NULL-id zombies. The
---   -- durable protection is the retirement above, not the guard alone.)
+--   -- rows are present — otherwise the re-run repaints them. More generally the
+--   -- guard only holds while at least one `discogs_direct_backfill` row persists;
+--   -- that population can shrink over time (MD-verification flips rows to
+--   -- `tubafrenzy_paste`; the daily rotation-release-id-backfill cron can re-resolve
+--   -- the handful of NULL-id rows and retag them `lml_offline_backfill`), though
+--   -- today ~172 non-NULL-id rows keep it well above zero. The durable protection
+--   -- is the retirement above, not the guard alone.
 --
 -- Per WXYC data-safety rule: SELECT scope first, then UPDATE.
 
