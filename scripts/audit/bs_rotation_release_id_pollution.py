@@ -9,15 +9,37 @@ stored ids. Confirmed instance: rotation row 21529 ("Yenbett" by Noura Mint
 Seymali) stored 5879935 = "Tzenni" (2014); see #1515.
 
 Nothing in the schema records which ``search_type`` produced a stored id, so
-pollution is detected by comparing each stored release's *actual* Discogs
-title/artist (via LML's ``GET /api/v1/discogs/release/{id}``, which fronts the
-discogs-cache — never the Discogs API directly) against the rotation row's
-``album_title``/``artist_name``.
+pollution is detected by comparing each stored release's *actual* Discogs title
+(via LML's ``GET /api/v1/discogs/release/{id}``, which fronts the discogs-cache
+— never the Discogs API directly) against the rotation row's album title.
+
+Reference resolution (#1523 defect 1): the rotation row's identity lives in one
+of two places. Rows added with a free-text form carry ``artist_name`` /
+``album_title`` directly; catalog-linked rows leave those NULL and identify the
+album only through ``album_id -> library.id``. The first prod run compared an
+empty free-text title for the 115/208 catalog-linked ``discogs_direct_backfill``
+rows and flagged every one as a spurious mismatch. We therefore resolve the
+reference title as ``COALESCE(NULLIF(btrim(rotation.album_title), ''),
+library.album_title)`` via a LEFT JOIN on ``album_id`` (the ``title_source``
+column records ``freetext`` vs ``catalog``).
+
+Artist axis (#1523 defect 2): the discogs-cache-backed release payload carries
+no artist for the releases these rows point at (``artist: ''``, ``artists: []``),
+so the right-artist/wrong-album cross-check cannot fire. Rather than emit a
+misleading ``artist_score = 0.0`` for every row, ``artist_score`` is left blank
+(with a ``release_no_artist`` note) whenever the payload has no artist. The
+reference artist is still sourced from ``rotation.artist_name`` / catalog so the
+axis lights up automatically if a future cache re-warm ever populates it.
+Album-title similarity is the load-bearing signal.
 
 Verdict buckets (album-title similarity, 0-100, after normalization):
     ok        >= 80  (consistent with LML's ``_ALBUM_MATCH_FLOOR = 80.0``)
-    suspect   60-79  (triage by hand: diacritics, edition suffixes, split titles)
+    suspect   60-79  (advisory-only: in the 2026-07-05 calibration this band was
+                      100% false-positive — non-Latin romanization appended to
+                      the Discogs title and edition/mixtape suffixes. #1522's
+                      recurring alert should fire on ``mismatch`` only.)
     mismatch  <  60  (candidate for remediation per #1517)
+    error            (LML fetch failed, or no reference title at all)
 
 A parenthetical-stripped secondary score is taken when it improves the match,
 so "Tzenni (Deluxe Edition)" vs "Tzenni" lands in ``ok`` rather than
@@ -33,7 +55,8 @@ rotation set that is ~15 min wall time.
 
 Output:
     CSV, one row per audited rotation row:
-        rotation_id, artist_name, album_title, discogs_release_id, source,
+        rotation_id, source, album_id, artist_name, album_title,
+        ref_artist, ref_album, title_source, discogs_release_id,
         release_title, release_artists, album_score, artist_score, verdict, note
     Markdown summary: bucket counts per source + the full mismatch/suspect lists.
 
@@ -119,27 +142,67 @@ def verdict_for(album_score: float) -> str:
     return "mismatch"
 
 
+def resolve_reference(
+    rot_artist: str | None,
+    rot_album: str | None,
+    lib_artist: str | None,
+    lib_album: str | None,
+) -> tuple[str, str, str]:
+    """Resolve the (artist, album, title_source) to score a stored release against.
+
+    Rotation free-text wins when present; otherwise fall back to the catalog row
+    reached via ``rotation.album_id -> library.id`` (#1523 defect 1). Without the
+    catalog fallback, the 115/208 audited ``discogs_direct_backfill`` rows that
+    carry ``artist_name = album_title = NULL`` scored an empty string against the
+    release title and were flagged as false mismatches.
+
+    Returns ``title_source`` = ``"freetext"`` | ``"catalog"`` | ``"none"``.
+    """
+    rot_album_s = (rot_album or "").strip()
+    lib_album_s = (lib_album or "").strip()
+    if rot_album_s:
+        ref_album, title_source = rot_album_s, "freetext"
+    elif lib_album_s:
+        ref_album, title_source = lib_album_s, "catalog"
+    else:
+        ref_album, title_source = "", "none"
+    ref_artist = (rot_artist or "").strip() or (lib_artist or "").strip()
+    return ref_artist, ref_album, title_source
+
+
+def _append_note(existing: str, addition: str) -> str:
+    return f"{existing}; {addition}" if existing else addition
+
+
 @dataclass
 class AuditRow:
     rotation_id: int
-    artist_name: str
-    album_title: str
+    artist_name: str  # raw rotation.artist_name (may be blank for catalog-linked rows)
+    album_title: str  # raw rotation.album_title (may be blank for catalog-linked rows)
     discogs_release_id: int
     source: str
+    album_id: int | None = None
+    ref_artist: str = ""  # scored artist: rotation free-text else library.artist_name (#1523 defect 2)
+    ref_album: str = ""  # scored album: rotation free-text else library.album_title (#1523 defect 1)
+    title_source: str = ""  # "freetext" | "catalog" | "none"
     release_title: str = ""
     release_artists: str = ""
     album_score: float = 0.0
-    artist_score: float = 0.0
+    artist_score: float | None = None  # None => release payload carried no artist (#1523 defect 2)
     verdict: str = "error"
     note: str = ""
 
 
 def fetch_candidates(conn, sources: list[str], include_killed: bool) -> list[AuditRow]:
     predicate = "" if include_killed else "AND (r.kill_date IS NULL OR r.kill_date > CURRENT_DATE)"
+    # LEFT JOIN library so catalog-linked rows (artist_name = album_title = NULL,
+    # identity via album_id) get a reference title to score against (#1523 defect 1).
     sql = f"""
         SELECT r.id, r.artist_name, r.album_title, r.discogs_release_id,
-               r.discogs_release_id_source
+               r.discogs_release_id_source, r.album_id,
+               l.artist_name AS lib_artist, l.album_title AS lib_album
         FROM wxyc_schema.rotation r
+        LEFT JOIN wxyc_schema.library l ON l.id = r.album_id
         WHERE r.discogs_release_id IS NOT NULL
           AND r.discogs_release_id_source = ANY(%s)
           {predicate}
@@ -148,16 +211,24 @@ def fetch_candidates(conn, sources: list[str], include_killed: bool) -> list[Aud
     with conn.cursor() as cur:
         cur.execute(sql, (sources,))
         rows = cur.fetchall()
-    return [
-        AuditRow(
-            rotation_id=row[0],
-            artist_name=row[1] or "",
-            album_title=row[2] or "",
-            discogs_release_id=row[3],
-            source=row[4],
+    audit_rows: list[AuditRow] = []
+    for row in rows:
+        rot_id, rot_artist, rot_album, release_id, source, album_id, lib_artist, lib_album = row
+        ref_artist, ref_album, title_source = resolve_reference(rot_artist, rot_album, lib_artist, lib_album)
+        audit_rows.append(
+            AuditRow(
+                rotation_id=rot_id,
+                artist_name=rot_artist or "",
+                album_title=rot_album or "",
+                discogs_release_id=release_id,
+                source=source,
+                album_id=album_id,
+                ref_artist=ref_artist,
+                ref_album=ref_album,
+                title_source=title_source,
+            )
         )
-        for row in rows
-    ]
+    return audit_rows
 
 
 class LmlReleaseClient:
@@ -192,17 +263,28 @@ class LmlReleaseClient:
 
 
 def extract_release_fields(payload: dict) -> tuple[str, str]:
-    """Pull (title, joined artist names) defensively from the LML release payload."""
+    """Pull (title, joined artist names) defensively from the LML release payload.
+
+    The discogs-cache-backed ``GET /api/v1/discogs/release/{id}`` payload does not
+    carry artist for the releases these rotation rows point at — ``artists`` is
+    ``[]`` and the scalar ``artist`` is ``''`` (#1523 defect 2). We still read
+    every plausible artist field so the axis lights up if a future cache re-warm
+    populates it, but an empty return means "no release-side artist available",
+    which the caller must treat as blank rather than a zero-similarity signal.
+    """
     title = payload.get("title") or ""
-    artists = payload.get("artists") or []
     names = []
-    for artist in artists:
+    for artist in payload.get("artists") or []:
         if isinstance(artist, dict):
             name = artist.get("name") or artist.get("artist_name") or ""
         else:
             name = str(artist)
         if name:
             names.append(name)
+    if not names:
+        scalar = payload.get("artist") or payload.get("artist_name") or ""
+        if isinstance(scalar, str) and scalar.strip():
+            names.append(scalar.strip())
     return title, ", ".join(names)
 
 
@@ -219,14 +301,25 @@ def audit(rows: list[AuditRow], client: LmlReleaseClient) -> None:
             )
             continue
         row.release_title, row.release_artists = extract_release_fields(payload)
-        row.album_score = round(similarity(row.album_title, row.release_title), 1)
-        row.artist_score = round(similarity(row.artist_name, row.release_artists), 1)
-        row.verdict = verdict_for(row.album_score)
+        row.album_score = round(similarity(row.ref_album, row.release_title), 1)
+        if row.release_artists:
+            row.artist_score = round(similarity(row.ref_artist, row.release_artists), 1)
+        else:
+            # No release-side artist (see extract_release_fields) — leave the
+            # score blank rather than emit a misleading 0.0 (#1523 defect 2).
+            row.artist_score = None
+            row.note = _append_note(row.note, "release_no_artist")
+        if not row.ref_album:
+            # No free-text and no catalog title — unauditable, not a mismatch.
+            row.verdict = "error"
+            row.note = _append_note(row.note, "no_reference_title")
+        else:
+            row.verdict = verdict_for(row.album_score)
         if row.verdict != "ok":
             logger.info(
-                "[%d/%d] rotation_id=%d %s: typed=%r stored release=%r album_score=%.1f",
+                "[%d/%d] rotation_id=%d %s: ref=%r (%s) stored release=%r album_score=%.1f",
                 index, total, row.rotation_id, row.verdict.upper(),
-                row.album_title, row.release_title, row.album_score,
+                row.ref_album, row.title_source, row.release_title, row.album_score,
             )
         elif index % 25 == 0:
             logger.info("[%d/%d] progress: last ok rotation_id=%d", index, total, row.rotation_id)
@@ -237,14 +330,18 @@ def write_csv(rows: list[AuditRow], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow([
-            "rotation_id", "artist_name", "album_title", "discogs_release_id", "source",
-            "release_title", "release_artists", "album_score", "artist_score", "verdict", "note",
+            "rotation_id", "source", "album_id", "artist_name", "album_title",
+            "ref_artist", "ref_album", "title_source", "discogs_release_id",
+            "release_title", "release_artists", "album_score", "artist_score",
+            "verdict", "note",
         ])
         for row in rows:
             writer.writerow([
-                row.rotation_id, row.artist_name, row.album_title, row.discogs_release_id,
-                row.source, row.release_title, row.release_artists, row.album_score,
-                row.artist_score, row.verdict, row.note,
+                row.rotation_id, row.source, row.album_id, row.artist_name, row.album_title,
+                row.ref_artist, row.ref_album, row.title_source, row.discogs_release_id,
+                row.release_title, row.release_artists, row.album_score,
+                "" if row.artist_score is None else row.artist_score,
+                row.verdict, row.note,
             ])
 
 
@@ -263,17 +360,33 @@ def write_summary(rows: list[AuditRow], path: str) -> None:
         lines.append(
             f"| {source} | {bucket['ok']} | {bucket['suspect']} | {bucket['mismatch']} | {bucket['error']} | {total} |"
         )
+    lines += [
+        "",
+        "**Reference resolution (#1523):** the album is scored against rotation free-text when present, "
+        "else the catalog row via `album_id -> library` (`title_src` column records which). Rows with no "
+        "reference title at all are marked `error` / `no_reference_title`, not `mismatch`.",
+        "",
+        "**Artist axis:** LML `GET /discogs/release/{id}` carries no artist for these discogs-cache-backed "
+        "releases, so `artist_score` is blank (`release_no_artist`) rather than a misleading 0.0. Album-title "
+        "similarity is the load-bearing signal.",
+        "",
+        "**Suspect band (60-79) is advisory-only.** In the 2026-07-05 calibration it was 100% false-positive "
+        "(non-Latin romanization appended to the Discogs title; edition/mixtape suffixes). Recurring alerting "
+        "(#1522) should fire on `mismatch` only.",
+    ]
     for verdict in ("mismatch", "suspect", "error"):
         matching = [row for row in rows if row.verdict == verdict]
         if not matching:
             continue
         lines += ["", f"## {verdict} rows", ""]
-        lines.append("| rotation_id | source | typed artist — album | stored release (artist — title) | album_score | note |")
-        lines.append("|---|---|---|---|---|---|")
+        lines.append("| rotation_id | source | title_src | reference (artist — album) | stored release (artist — title) | album_score | note |")
+        lines.append("|---|---|---|---|---|---|---|")
         for row in matching:
+            release_artist = row.release_artists or "(no artist in payload)"
             lines.append(
-                f"| {row.rotation_id} | {row.source} | {row.artist_name} — {row.album_title} | "
-                f"{row.release_artists} — {row.release_title} (release {row.discogs_release_id}) | "
+                f"| {row.rotation_id} | {row.source} | {row.title_source} | "
+                f"{row.ref_artist} — {row.ref_album} | "
+                f"{release_artist} — {row.release_title} (release {row.discogs_release_id}) | "
                 f"{row.album_score} | {row.note} |"
             )
     lines += [
@@ -289,23 +402,46 @@ def write_summary(rows: list[AuditRow], path: str) -> None:
 
 
 def self_test() -> int:
-    """Sanity checks for the pure helpers (no DB/LML needed): exercises the
-    confirmed #1515 pair and the normalization edge cases the buckets rely on."""
-    cases = [
+    """Sanity checks for the pure helpers (no DB/LML needed): the confirmed #1515
+    pair + normalization edge cases, the #1523 catalog-join reference fallback, and
+    the empty-release-artist payload shape."""
+    failures = 0
+
+    def check(label: str, actual, expected) -> None:
+        nonlocal failures
+        ok = actual == expected
+        if not ok:
+            failures += 1
+        print(f"{'PASS' if ok else 'FAIL'}: {label} = {actual!r} (expected {expected!r})")
+
+    # 1. scoring -> verdict buckets
+    for typed, stored, expected in [
         ("Yenbett", "Tzenni", "mismatch"),
         ("Tzenni", "Tzenni", "ok"),
         ("Tzenni", "Tzenni (Deluxe Edition)", "ok"),
         ("Guereh", "Guéreh", "ok"),
         ("On Your Own Love Again", "On Your Own Love Again", "ok"),
-    ]
-    failures = 0
-    for typed, stored, expected in cases:
+    ]:
         score = similarity(typed, stored)
-        actual = verdict_for(score)
-        status = "PASS" if actual == expected else "FAIL"
-        if actual != expected:
-            failures += 1
-        print(f"{status}: similarity({typed!r}, {stored!r}) = {score:.1f} -> {actual} (expected {expected})")
+        check(f"verdict_for(similarity({typed!r}, {stored!r})={score:.1f})", verdict_for(score), expected)
+
+    # 2. reference resolution (#1523 defect 1: album_id -> library fallback)
+    for args_in, expected in [
+        (("My Bloody Valentine", "m b v", "MBV", "Loveless"), ("My Bloody Valentine", "m b v", "freetext")),
+        ((None, None, "Juana Molina", "DOGA"), ("Juana Molina", "DOGA", "catalog")),
+        (("  ", "  ", "Stereolab", "Dots and Loops"), ("Stereolab", "Dots and Loops", "catalog")),
+        ((None, None, None, None), ("", "", "none")),
+    ]:
+        check(f"resolve_reference{args_in}", resolve_reference(*args_in), expected)
+
+    # 3. release-field extraction (#1523 defect 2: empty-artist payload)
+    for payload, expected in [
+        ({"title": "Isn't Anything", "artists": [], "artist": ""}, ("Isn't Anything", "")),
+        ({"title": "DOGA", "artists": [{"name": "Juana Molina"}]}, ("DOGA", "Juana Molina")),
+        ({"title": "Edits", "artist": "Chuquimamani-Condori"}, ("Edits", "Chuquimamani-Condori")),
+    ]:
+        check(f"extract_release_fields({payload})", extract_release_fields(payload), expected)
+
     return 1 if failures else 0
 
 
