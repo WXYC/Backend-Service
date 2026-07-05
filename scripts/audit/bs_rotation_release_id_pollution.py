@@ -469,7 +469,7 @@ def self_test() -> int:
             discogs_release_id=1, source="test",
             ref_artist=ref_artist, ref_album=ref_album, title_source="catalog",
         )
-        audit([row], _StubClient(payload))  # type: ignore[arg-type]
+        audit([row], _StubClient(payload))  # _StubClient structurally matches LmlReleaseClient
         return row
 
     ok_row = run_audit("Juana Molina", "DOGA", {"title": "DOGA", "artists": [{"name": "Juana Molina"}]})
@@ -484,6 +484,10 @@ def self_test() -> int:
     check("audit blank-reference-artist verdict", no_ref_artist.verdict, "ok")
     check("audit blank-reference-artist artist_score", no_ref_artist.artist_score, None)
     check("audit blank-reference-artist note", "reference_no_artist" in no_ref_artist.note, True)
+
+    no_ref_title = run_audit("", "", {"title": "Dots and Loops", "artists": []})
+    check("audit no-reference-title verdict", no_ref_title.verdict, "error")
+    check("audit no-reference-title note", "no_reference_title" in no_ref_title.note, True)
 
     return 1 if failures else 0
 
