@@ -39,7 +39,7 @@ Verdict buckets (album-title similarity, 0-100, after normalization):
                       the Discogs title and edition/mixtape suffixes. #1522's
                       recurring alert should fire on ``mismatch`` only.)
     mismatch  <  60  (candidate for remediation per #1517)
-    error            (LML fetch failed, or no reference title at all)
+    error            (LML fetch failed, or neither side has a title to compare)
 
 A parenthetical-stripped secondary score is taken when it improves the match,
 so "Tzenni (Deluxe Edition)" vs "Tzenni" lands in ``ok`` rather than
@@ -302,17 +302,26 @@ def audit(rows: list[AuditRow], client: LmlReleaseClient) -> None:
             continue
         row.release_title, row.release_artists = extract_release_fields(payload)
         row.album_score = round(similarity(row.ref_album, row.release_title), 1)
-        if row.release_artists:
+        if row.ref_artist and row.release_artists:
             row.artist_score = round(similarity(row.ref_artist, row.release_artists), 1)
         else:
-            # No release-side artist (see extract_release_fields) — leave the
-            # score blank rather than emit a misleading 0.0 (#1523 defect 2).
+            # A missing artist on either side — a blank reference (both rotation
+            # and library artist NULL) or a payload with no artist (see
+            # extract_release_fields) — leaves the axis blank rather than a
+            # misleading 0.0 (#1523 defect 2).
             row.artist_score = None
-            row.note = _append_note(row.note, "release_no_artist")
+            row.note = _append_note(
+                row.note, "release_no_artist" if not row.release_artists else "reference_no_artist"
+            )
         if not row.ref_album:
             # No free-text and no catalog title — unauditable, not a mismatch.
             row.verdict = "error"
             row.note = _append_note(row.note, "no_reference_title")
+        elif not row.release_title:
+            # Fetched, but the cached release carries no title — unverifiable,
+            # not a mismatch (symmetric to the no_reference_title guard, #1523).
+            row.verdict = "error"
+            row.note = _append_note(row.note, "release_no_title")
         else:
             row.verdict = verdict_for(row.album_score)
         if row.verdict != "ok":
@@ -363,8 +372,9 @@ def write_summary(rows: list[AuditRow], path: str) -> None:
     lines += [
         "",
         "**Reference resolution (#1523):** the album is scored against rotation free-text when present, "
-        "else the catalog row via `album_id -> library` (`title_src` column records which). Rows with no "
-        "reference title at all are marked `error` / `no_reference_title`, not `mismatch`.",
+        "else the catalog row via `album_id -> library` (`title_source` column records which). Rows with no "
+        "reference title — or a release payload with no title — are marked `error` "
+        "(`no_reference_title` / `release_no_title`), not `mismatch`.",
         "",
         "**Artist axis:** LML `GET /discogs/release/{id}` carries no artist for these discogs-cache-backed "
         "releases, so `artist_score` is blank (`release_no_artist`) rather than a misleading 0.0. Album-title "
@@ -402,9 +412,10 @@ def write_summary(rows: list[AuditRow], path: str) -> None:
 
 
 def self_test() -> int:
-    """Sanity checks for the pure helpers (no DB/LML needed): the confirmed #1515
-    pair + normalization edge cases, the #1523 catalog-join reference fallback, and
-    the empty-release-artist payload shape."""
+    """Sanity checks (no DB/LML needed): the confirmed #1515 pair + normalization
+    edge cases, the #1523 catalog-join reference fallback, the empty-release-artist
+    payload shape, and the audit() classification guards that keep an unverifiable
+    row out of the mismatch bucket (empty release title / blank reference artist)."""
     failures = 0
 
     def check(label: str, actual, expected) -> None:
@@ -427,7 +438,7 @@ def self_test() -> int:
 
     # 2. reference resolution (#1523 defect 1: album_id -> library fallback)
     for args_in, expected in [
-        (("My Bloody Valentine", "m b v", "MBV", "Loveless"), ("My Bloody Valentine", "m b v", "freetext")),
+        (("Cat Power", "Moon Pix", "Cat Power", "The Greatest"), ("Cat Power", "Moon Pix", "freetext")),
         ((None, None, "Juana Molina", "DOGA"), ("Juana Molina", "DOGA", "catalog")),
         (("  ", "  ", "Stereolab", "Dots and Loops"), ("Stereolab", "Dots and Loops", "catalog")),
         ((None, None, None, None), ("", "", "none")),
@@ -436,11 +447,43 @@ def self_test() -> int:
 
     # 3. release-field extraction (#1523 defect 2: empty-artist payload)
     for payload, expected in [
-        ({"title": "Isn't Anything", "artists": [], "artist": ""}, ("Isn't Anything", "")),
+        ({"title": "Sun", "artists": [], "artist": ""}, ("Sun", "")),
         ({"title": "DOGA", "artists": [{"name": "Juana Molina"}]}, ("DOGA", "Juana Molina")),
         ({"title": "Edits", "artist": "Chuquimamani-Condori"}, ("Edits", "Chuquimamani-Condori")),
     ]:
         check(f"extract_release_fields({payload})", extract_release_fields(payload), expected)
+
+    # 4. audit() classification guards (#1523): a catalog-linked hit scores ok,
+    #    while an empty release title or a blank reference artist stay out of the
+    #    mismatch bucket (error / blank axis) rather than firing a false positive.
+    class _StubClient:
+        def __init__(self, payload: dict | None):
+            self._payload = payload
+
+        def get_release(self, _release_id: int) -> tuple[dict | None, str]:
+            return self._payload, ""
+
+    def run_audit(ref_artist: str, ref_album: str, payload: dict | None) -> AuditRow:
+        row = AuditRow(
+            rotation_id=1, artist_name=ref_artist, album_title=ref_album,
+            discogs_release_id=1, source="test",
+            ref_artist=ref_artist, ref_album=ref_album, title_source="catalog",
+        )
+        audit([row], _StubClient(payload))  # type: ignore[arg-type]
+        return row
+
+    ok_row = run_audit("Juana Molina", "DOGA", {"title": "DOGA", "artists": [{"name": "Juana Molina"}]})
+    check("audit catalog-linked verdict", ok_row.verdict, "ok")
+    check("audit catalog-linked album_score", ok_row.album_score, 100.0)
+
+    no_title = run_audit("Cat Power", "Moon Pix", {"title": "", "artists": []})
+    check("audit empty-release-title verdict", no_title.verdict, "error")
+    check("audit empty-release-title note", "release_no_title" in no_title.note, True)
+
+    no_ref_artist = run_audit("", "Sun", {"title": "Sun", "artist": "Cat Power"})
+    check("audit blank-reference-artist verdict", no_ref_artist.verdict, "ok")
+    check("audit blank-reference-artist artist_score", no_ref_artist.artist_score, None)
+    check("audit blank-reference-artist note", "reference_no_artist" in no_ref_artist.note, True)
 
     return 1 if failures else 0
 
