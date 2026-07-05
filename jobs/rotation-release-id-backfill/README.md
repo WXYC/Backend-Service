@@ -14,6 +14,12 @@ This is a **one-shot**, **manually triggered** job:
 
 Cron registration is intentionally absent (`"job-type": "one-shot"` in `package.json`). Re-running after LML's catalog improves is a deliberate operator decision, not a scheduled tick.
 
+### Sole sanctioned offline writer (BS#1521, Option A, 2026-07-05)
+
+**This gated LML job is the ONLY sanctioned offline writer of `rotation.discogs_release_id`.** The 2026-05-29 operator-run bypass-LML rescue — which hit `api.discogs.com/database/search` directly, bypassing every `search_type` trust gate, and stamped `discogs_release_id_source = 'discogs_direct_backfill'` — is **retired**. It produced the one demonstrated wrong-album write in the rotation trusted-store incident family ([BS#1515](https://github.com/WXYC/Backend-Service/issues/1515), Yenbett → Tzenni). Do not re-run it. This job's `search_type` trust gate ([PR #1519](https://github.com/WXYC/Backend-Service/pull/1519)) — which landed the sequencing prerequisite for the retirement — makes it the safe replacement for pool refreshes.
+
+Any **new** `discogs_direct_backfill` row appearing after 2026-07-05 is an anomaly: the [#1517](https://github.com/WXYC/Backend-Service/issues/1517) audit treats that lineage as its priority-1 bucket, and the [#1522](https://github.com/WXYC/Backend-Service/issues/1522) recurring check flags it automatically. The rescue's companion relabel (`scripts/relabel-rotation-direct-backfill.sql`) is neutered against re-runs so it can never repaint this job's `lml_offline_backfill` writes.
+
 ## Invocation
 
 ```sh
