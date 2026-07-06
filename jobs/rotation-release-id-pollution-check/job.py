@@ -72,36 +72,42 @@ DEFAULT_SOURCES = ["lml_offline_backfill", "discogs_direct_backfill"]
 # set data-side. Populate with those ids only if the flip is declined/delayed.
 KNOWN_ACCEPTED_ROTATION_IDS: frozenset[int] = frozenset()
 
-# The set of rotation ids stamped `discogs_direct_backfill` as of the 2026-07-05
-# prod audit (pre-#1517-remediation, so a deliberate superset: the 31 #1517
-# NULL-and-resets and the 8 #1528 repoints/NULLs have since LEFT the stamped set,
-# which is harmless — ids listed here that no longer carry the stamp simply never
-# match the provenance query). Source artifact: the #1523-fixed 2026-07-05 17:45
-# prod run CSV (207 discogs_direct_backfill rows of 208 audited). Verified
-# against prod (including killed rows, which the active-only audit could not
-# see) during the #1522 go-live session — see README "Provenance baseline".
+# The full set of rotation ids stamped `discogs_direct_backfill` in prod — active
+# AND killed — snapshotted during the #1522 go-live session (2026-07-06), after
+# the #1528 "leave" rows (8276, 8277, 15726) were flipped to md_verified. This
+# CORRECTS the original active-only baseline (207 ids from the 2026-07-05 audit
+# CSV): that CSV was `include_killed=False`, so it missed 32 killed stragglers
+# (rows stamped before the #1521 retirement that later aged out on kill_date) —
+# the provenance query has no kill filter, so those 32 false-alerted on the
+# go-live DRY_RUN smoke (38 total anomalies vs. the active-only baseline). A
+# read-only classifier confirmed 0 post-retirement active adds, i.e. no genuine
+# writer regression — the anomalies were purely a baseline-coverage gap.
+#
+# Update rule (see README "Provenance baseline"): a SUPERSET is safe, a subset
+# false-alerts. Ids that leave the stamped set (remediation / md_verified flips)
+# never re-appear in the query, so shrinkage needs no edit here. Only an ADDITION
+# matters, and it should only ever happen as the acknowledgment of an investigated
+# `provenance` alert. Recompute for verification with:
+#   SELECT id FROM wxyc_schema.rotation
+#    WHERE discogs_release_id_source = 'discogs_direct_backfill' ORDER BY id;
 PROVENANCE_BASELINE: frozenset[int] = frozenset([
-    7960, 7961, 8187, 8247, 8248, 8267, 8268, 8276, 8277, 8499, 9296, 9882,
-    9884, 9885, 10562, 10563, 10564, 10565, 10566, 10567, 10568, 10569, 10578,
-    11069, 11325, 11326, 11327, 11343, 11344, 11345, 11507, 11557, 12028,
-    12029, 12452, 12474, 12650, 13262, 13263, 13264, 13265, 13372, 13373,
-    13374, 13704, 14009, 14144, 14145, 14146, 14147, 14148, 14149, 14164,
-    14824, 14825, 14826, 15065, 15132, 15133, 15717, 15726, 15949, 15950,
-    15951, 15952, 16018, 16019, 16020, 16023, 16688, 16690, 16715, 16716,
-    16717, 16718, 16795, 16796, 16797, 16799, 16861, 16862, 16892, 16901,
-    16902, 16951, 16955, 17004, 17007, 17266, 18428, 18429, 18430, 18431,
-    18434, 18454, 18455, 18961, 18962, 18963, 18964, 18995, 18996, 18997,
-    18998, 18999, 19016, 19017, 19024, 19077, 19078, 19079, 19155, 19160,
-    19164, 19165, 19166, 19167, 19168, 19169, 19170, 19171, 19224, 19342,
-    19574, 20468, 20469, 20832, 20833, 20834, 20835, 20836, 20837, 20838,
-    21319, 21320, 21321, 21422, 21434, 21435, 21442, 21451, 21456, 21458,
-    21462, 21474, 21480, 21482, 21488, 21490, 21491, 21492, 21494, 21496,
-    21497, 21500, 21501, 21503, 21504, 21505, 21506, 21507, 21508, 21509,
-    21510, 21511, 21512, 21516, 21518, 21525, 21526, 21527, 21528, 21529,
-    21530, 21531, 21532, 21533, 21534, 21535, 21536, 21537, 21539, 21540,
-    21541, 21545, 21546, 21547, 21551, 21552, 21555, 21556, 21560, 21565,
-    21567, 21569, 21572, 21573, 21574, 21581, 21583, 21585, 43154, 43155,
-    43156, 43160, 43162, 43164,
+    7960, 7961, 8207, 8255, 8256, 8499, 9192, 9296, 9882, 9884, 9885, 10562,
+    10563, 10564, 10565, 10566, 10567, 10568, 10569, 10578, 11069, 11343, 11344, 11345,
+    11507, 11557, 12028, 12029, 12452, 12474, 12650, 13262, 13263, 13264, 13265, 13372,
+    13373, 13374, 13704, 14009, 14144, 14145, 14146, 14147, 14148, 14149, 14164, 15065,
+    15132, 15133, 15717, 15949, 15950, 15951, 15952, 16018, 16019, 16020, 16023, 16688,
+    16690, 16715, 16716, 16717, 16718, 16795, 16796, 16797, 16799, 16861, 16862, 16892,
+    16901, 16902, 16951, 16955, 17004, 17007, 17266, 18428, 18429, 18430, 18431, 18434,
+    18454, 18455, 18961, 18962, 18963, 18964, 18995, 18996, 18997, 18998, 18999, 19016,
+    19017, 19024, 19077, 19078, 19079, 19155, 19160, 19164, 19165, 19166, 19167, 19168,
+    19169, 19170, 19171, 19224, 19342, 19574, 20468, 20469, 20832, 20833, 20834, 20835,
+    20836, 20837, 20838, 21318, 21319, 21320, 21321, 21396, 21413, 21417, 21422, 21426,
+    21431, 21433, 21434, 21435, 21436, 21438, 21439, 21440, 21441, 21442, 21446, 21449,
+    21451, 21453, 21454, 21458, 21462, 21463, 21467, 21469, 21471, 21476, 21477, 21478,
+    21480, 21481, 21482, 21484, 21485, 21488, 21490, 21493, 21494, 21495, 21498, 21501,
+    21503, 21505, 21506, 21507, 21508, 21512, 21516, 21518, 21519, 21521, 21522, 21524,
+    21526, 21528, 21529, 21530, 21531, 21534, 21535, 21537, 21541, 21545, 21546, 21547,
+    21551, 21555, 21556, 21560, 21569, 21581, 21584, 21585, 43154, 43160, 43162,
 ])
 
 # Run-degraded threshold: an LML outage turns most rows into `error`; one
@@ -310,11 +316,15 @@ def self_test() -> int:
           ["rotation-release-id-pollution-check", "provenance", "99999"])
 
     # Provenance: in-baseline ids never alert; unknown ids do; shrinkage is silent.
-    check("provenance in-baseline quiet", provenance_anomalies([7960, 43164], PROVENANCE_BASELINE), [])
+    check("provenance in-baseline quiet", provenance_anomalies([7960, 43162], PROVENANCE_BASELINE), [])
     check("provenance new id alerts", provenance_anomalies([7960, 99999], PROVENANCE_BASELINE), [99999])
     check("provenance empty set quiet", provenance_anomalies([], PROVENANCE_BASELINE), [])
     check("provenance sorted + deduped", provenance_anomalies([5, 99999, 5], frozenset([1])), [5, 99999])
-    check("provenance baseline holds #1528 leaves", {8276, 8277, 15726} <= PROVENANCE_BASELINE, True)
+    # The #1528 leaves (8276/8277/15726) and repoints (incl. 43164) were flipped
+    # to md_verified in the go-live session, so they are OUT of the stamped set
+    # and correctly absent from the corrected baseline.
+    check("provenance baseline excludes md_verified rows", {8276, 8277, 15726, 43164} & PROVENANCE_BASELINE, set())
+    check("provenance baseline size (2026-07-06 prod snapshot)", len(PROVENANCE_BASELINE), 203)
 
     def mk(verdict: str, rotation_id: int = 1) -> AuditRow:
         return AuditRow(rotation_id=rotation_id, artist_name="", album_title="",
