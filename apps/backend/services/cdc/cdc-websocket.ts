@@ -210,6 +210,13 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
   heartbeatTimer.unref();
 
   // Per-event fan-out to connected WebSocket clients.
+  //
+  // The event carries the FULL row (`to_jsonb(NEW)`), unprojected — including
+  // the internal flowsheet columns that BS#1513 strips from the HTTP mutation /
+  // peek responses. That is deliberate: `/cdc` is CDC_SECRET-gated and
+  // internal-trusted, and its consumer (the reconciliation monitor) needs the
+  // complete row to diff against the source of truth. See docs/cdc.md
+  // "Payload shape and exposure" before adding any untrusted consumer.
   onCdcEvent((event: CdcEvent) => {
     if (!wss || wss.clients.size === 0) return;
     const msg = JSON.stringify(event);

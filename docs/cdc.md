@@ -24,6 +24,12 @@ PostgreSQL triggers (`cdc_notify()`) fire `pg_notify('cdc', payload)` on every I
 
 **Load-bearing dependency: "captures all changes" is only true while a consumer is connected.** `pg_notify` is fire-and-forget — Postgres does not durably queue notifications for absent listeners, and the in-Node LISTEN buffer is bounded. A WebSocket consumer that drops its connection (network blip, restart, backpressure) misses every event between disconnect and reconnect, and there is no replay endpoint. Consumers that need a complete change record must compare against the source of truth on reconnect — the reconciliation monitor below is the canonical example, not a generic utility. Any new consumer that treats the CDC stream as a reliable event log without an out-of-band catch-up path will silently lose events.
 
+## Payload shape and exposure (BS#1513)
+
+The `data` field is the **full row** — the trigger emits `to_jsonb(NEW)` (or `OLD` on DELETE), every column, unprojected. For `flowsheet` events this therefore includes the internal columns that the HTTP surfaces deliberately withhold (BS#1513 projects mutation / DJ-peek responses through the `flowsheet-projection.ts` allow-list): `search_doc`, `updated_at`, `metadata_status`, `enriching_since`, `metadata_attempt_at`, `legacy_link_attempted_at`, `linkage_source` / `linkage_confidence` / `linked_at`, `composer` / `composer_source`, and `legacy_entry_id` / `legacy_release_id`.
+
+This is intentional and stays unprojected: the `/cdc` channel is **internal-trusted**, hard-gated on `CDC_SECRET`, and its sole consumer is the reconciliation monitor, which needs the complete row to diff against the source of truth. Projecting the fan-out would defeat that purpose and require touching the trigger SQL. A new internal column added to `flowsheet` _will_ appear on this stream — that is acceptable here (unlike the HTTP responses) precisely because the audience is trusted and the payload is a verification artifact, not a client contract. If an untrusted consumer is ever added, project at that consumer's boundary rather than widening this channel's contract.
+
 ## Key files
 
 - `shared/database/src/migrations/0045_cdc_notify_triggers.sql` — trigger function + per-table triggers

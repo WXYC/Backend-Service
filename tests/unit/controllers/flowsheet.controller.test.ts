@@ -16,6 +16,8 @@ const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
 const mockUpdateEntry = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockRemoveTrack = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockChangeOrder = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockStartShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockAddDJToShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockEndShow = jest.fn<() => Promise<Record<string, unknown>>>();
@@ -32,11 +34,17 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
   resolveDjNameForShow: mockResolveDjNameForShow,
   updateEntry: mockUpdateEntry,
+  removeTrack: mockRemoveTrack,
+  changeOrder: mockChangeOrder,
   startShow: mockStartShow,
   addDJToShow: mockAddDJToShow,
   endShow: mockEndShow,
   leaveShow: mockServiceLeaveShow,
 }));
+
+// flowsheet-projection is intentionally NOT mocked — the controller boundary
+// runs the real allow-list projector so these tests observe the actual
+// client-facing payload (BS#1513).
 
 import {
   getEntries,
@@ -44,6 +52,8 @@ import {
   getShowInfo,
   addEntry,
   updateEntry,
+  deleteEntry,
+  changeOrder,
   joinShow,
   leaveShow,
 } from '../../../apps/backend/controllers/flowsheet.controller';
@@ -1177,6 +1187,160 @@ describe('flowsheet.controller', () => {
       expect(mockServiceLeaveShow).toHaveBeenCalledWith('guest-dj', expect.objectContaining({ id: 1 }));
       expect(mockEndShow).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
+    });
+  });
+
+  describe('does not leak internal flowsheet columns (BS#1513)', () => {
+    // A fully-populated raw flowsheet row — every internal column set to a
+    // truthy value so an accidental leak surfaces loudly.
+    const makeRawRow = () => ({
+      id: 42,
+      show_id: 42,
+      album_id: 20,
+      rotation_id: 7,
+      entry_type: 'track',
+      artist_name: 'Juana Molina',
+      album_title: 'DOGA',
+      track_title: 'la paradoja',
+      track_position: 'A1',
+      record_label: 'Sonamos',
+      label_id: 3,
+      play_order: 5,
+      request_flag: false,
+      segue: true,
+      message: null,
+      add_time: new Date(),
+      radio_hour: null,
+      dj_name: 'DJ Test',
+      artwork_url: 'https://example.com/art.jpg',
+      discogs_url: 'https://discogs.com/release/1',
+      release_year: 2022,
+      spotify_url: 'https://open.spotify.com/album/1',
+      apple_music_url: null,
+      youtube_music_url: null,
+      bandcamp_url: null,
+      soundcloud_url: null,
+      artist_bio: 'Argentine musician.',
+      artist_wikipedia_url: null,
+      // Internal columns — must never reach the client.
+      updated_at: new Date(),
+      metadata_status: 'enriched_match',
+      enriching_since: new Date(),
+      metadata_attempt_at: new Date(),
+      legacy_link_attempted_at: new Date(),
+      linkage_source: 'lml_high_confidence',
+      linkage_confidence: 0.98,
+      linked_at: new Date(),
+      composer: 'Juana Molina',
+      composer_source: 'artist_proxy',
+      legacy_entry_id: 9999,
+      legacy_release_id: 8888,
+      search_doc: "'juana':1A",
+    });
+
+    const INTERNAL_KEYS = [
+      'search_doc',
+      'updated_at',
+      'metadata_status',
+      'enriching_since',
+      'metadata_attempt_at',
+      'legacy_link_attempted_at',
+      'linkage_source',
+      'linkage_confidence',
+      'linked_at',
+      'composer',
+      'composer_source',
+      'legacy_entry_id',
+      'legacy_release_id',
+    ];
+
+    const lastJsonPayload = (res: Partial<Response>) => {
+      const calls = (res.json as unknown as jest.Mock).mock.calls;
+      return calls[calls.length - 1][0] as Record<string, unknown>;
+    };
+
+    const expectProjected = (payload: Record<string, unknown>) => {
+      for (const key of INTERNAL_KEYS) {
+        expect(payload).not.toHaveProperty(key);
+      }
+      // Client-facing fields survive.
+      expect(payload).toMatchObject({
+        id: 42,
+        entry_type: 'track',
+        artist_name: 'Juana Molina',
+        track_title: 'la paradoja',
+        artwork_url: 'https://example.com/art.jpg',
+      });
+    };
+
+    it('addEntry projects the raw insert row (message branch)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 42, end_time: null });
+      mockAddTrack.mockResolvedValue(makeRawRow());
+
+      const req = { body: { message: 'Talkset' } } as unknown as Request;
+      const res = createMockRes();
+
+      await addEntry(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(201);
+      expectProjected(lastJsonPayload(res));
+    });
+
+    it('addEntry projects the raw insert row (free-form track branch)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 42, end_time: null });
+      mockResolveDjNameForShow.mockResolvedValue('DJ Test');
+      mockAddTrack.mockResolvedValue(makeRawRow());
+
+      const req = {
+        body: {
+          artist_name: 'Juana Molina',
+          album_title: 'DOGA',
+          track_title: 'la paradoja',
+          record_label: 'Sonamos',
+        },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await addEntry(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(201);
+      expectProjected(lastJsonPayload(res));
+    });
+
+    it('deleteEntry projects the raw deleted row', async () => {
+      mockRemoveTrack.mockResolvedValue(makeRawRow());
+
+      const req = { body: { entry_id: 42 } } as unknown as Request;
+      const res = createMockRes();
+
+      await deleteEntry(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expectProjected(lastJsonPayload(res));
+    });
+
+    it('updateEntry projects the raw updated row', async () => {
+      mockUpdateEntry.mockResolvedValue(makeRawRow());
+
+      const req = { body: { entry_id: 42, data: { track_title: 'la paradoja' } } } as unknown as Request;
+      const res = createMockRes();
+
+      await updateEntry(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expectProjected(lastJsonPayload(res));
+    });
+
+    it('changeOrder projects the raw reordered row', async () => {
+      mockChangeOrder.mockResolvedValue(makeRawRow());
+
+      const req = { body: { entry_id: 42, new_position: 3 } } as unknown as Request;
+      const res = createMockRes();
+
+      await changeOrder(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expectProjected(lastJsonPayload(res));
     });
   });
 });

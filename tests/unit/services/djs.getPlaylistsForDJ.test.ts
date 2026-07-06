@@ -136,6 +136,92 @@ describe('djs.service - getPlaylistsForDJ', () => {
     expect(totalSelectCalls).toBeLessThanOrEqual(MAX_ALLOWED_SELECTS);
   });
 
+  it('does not leak internal flowsheet columns onto preview rows (BS#1513)', async () => {
+    const showDjRows = makeShowDjRows(1);
+    const showRows = makeShowRows(1);
+    const djRows = makeDjsForShows(1);
+    const specialtyRows = [{ id: 10, specialty_name: 'Jazz After Hours' }];
+    // A preview row carrying every internal column set to a truthy value.
+    const rawRow = {
+      id: 1,
+      show_id: 1,
+      album_id: 20,
+      rotation_id: 7,
+      entry_type: 'track',
+      track_title: 'la paradoja',
+      album_title: 'DOGA',
+      artist_name: 'Juana Molina',
+      record_label: 'Sonamos',
+      label_id: 3,
+      track_position: 'A1',
+      play_order: 1,
+      request_flag: false,
+      segue: true,
+      message: null,
+      add_time: new Date(),
+      radio_hour: null,
+      dj_name: 'DJ One',
+      artwork_url: 'https://example.com/art.jpg',
+      discogs_url: null,
+      release_year: 2022,
+      spotify_url: null,
+      apple_music_url: null,
+      youtube_music_url: null,
+      bandcamp_url: null,
+      soundcloud_url: null,
+      artist_bio: null,
+      artist_wikipedia_url: null,
+      // Internal columns — must be stripped from the peek preview.
+      updated_at: new Date(),
+      metadata_status: 'enriched_match',
+      enriching_since: new Date(),
+      metadata_attempt_at: new Date(),
+      legacy_link_attempted_at: new Date(),
+      linkage_source: 'lml_high_confidence',
+      linkage_confidence: 0.98,
+      linked_at: new Date(),
+      composer: 'Juana Molina',
+      composer_source: 'artist_proxy',
+      legacy_entry_id: 9999,
+      legacy_release_id: 8888,
+      search_doc: "'juana':1A",
+    };
+
+    queryResults.push(showDjRows);
+    queryResults.push(showRows);
+    queryResults.push(djRows);
+    queryResults.push(specialtyRows);
+    queryResults.push([rawRow]);
+
+    const result = await getPlaylistsForDJ(DJ_ID);
+
+    const previewRow = result[0].preview[0] as Record<string, unknown>;
+    for (const internalKey of [
+      'search_doc',
+      'updated_at',
+      'metadata_status',
+      'enriching_since',
+      'metadata_attempt_at',
+      'legacy_link_attempted_at',
+      'linkage_source',
+      'linkage_confidence',
+      'linked_at',
+      'composer',
+      'composer_source',
+      'legacy_entry_id',
+      'legacy_release_id',
+    ]) {
+      expect(previewRow).not.toHaveProperty(internalKey);
+    }
+    // Client-facing fields survive.
+    expect(previewRow).toMatchObject({
+      id: 1,
+      entry_type: 'track',
+      artist_name: 'Juana Molina',
+      track_title: 'la paradoja',
+    });
+  });
+
   it('returns correct ShowPeek structures', async () => {
     const showDjRows = makeShowDjRows(2);
     const showRows = makeShowRows(2);

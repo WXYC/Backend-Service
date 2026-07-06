@@ -5,6 +5,7 @@ import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/datab
 // play_order is computed by the service layer, not provided by controllers
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
+import { projectFlowsheetEntry } from '../utils/flowsheet-projection.js';
 import WxycError from '../utils/error.js';
 
 export type QueryParams = {
@@ -190,7 +191,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       dj_name,
     };
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    res.status(201).json(completedEntry);
+    res.status(201).json(projectFlowsheetEntry(completedEntry));
     return;
   }
 
@@ -238,7 +239,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    res.status(201).json(completedEntry);
+    res.status(201).json(projectFlowsheetEntry(completedEntry));
   } else if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
     throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
   } else {
@@ -267,7 +268,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    res.status(201).json(completedEntry);
+    res.status(201).json(projectFlowsheetEntry(completedEntry));
   }
 };
 
@@ -278,7 +279,7 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   }
 
   const removedEntry: FSEntry = await flowsheet_service.removeTrack(entry_id);
-  res.status(200).json(removedEntry);
+  res.status(200).json(projectFlowsheetEntry(removedEntry));
 };
 
 export type UpdateRequestBody = {
@@ -336,7 +337,7 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
   }
 
   const updatedEntry: FSEntry = await flowsheet_service.updateEntry(entry_id, pickUpdateEntryFields(data ?? {}));
-  res.status(200).json(updatedEntry);
+  res.status(200).json(projectFlowsheetEntry(updatedEntry));
 };
 
 export type JoinRequestBody = {
@@ -470,7 +471,7 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   const release = await orderMutex.acquire();
   try {
     const updatedEntry = await flowsheet_service.changeOrder(entry_id, new_position);
-    res.status(200).json(updatedEntry);
+    res.status(200).json(projectFlowsheetEntry(updatedEntry));
   } finally {
     release();
   }
