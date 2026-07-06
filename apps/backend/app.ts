@@ -43,7 +43,7 @@ import errorHandler from './middleware/errorHandler.js';
 import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { responseMetricsMiddleware } from './middleware/responseMetrics.js';
-import { requirePermissions } from '@wxyc/authentication';
+import { requirePermissions, resolveCorsOrigin } from '@wxyc/authentication';
 import { closeDatabaseConnection, db } from '@wxyc/database';
 import { sql } from 'drizzle-orm';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
@@ -66,10 +66,15 @@ app.use(requestIdMiddleware);
 // filter inside the listener keeps emission scoped to mutation routes only.
 app.use(responseMetricsMiddleware);
 
-//CORS
+// CORS. Fail closed when FRONTEND_SOURCE is unset (BS#1107): the old
+// `|| '*'` fallback combined with `credentials: true` reflected any request
+// origin with Access-Control-Allow-Credentials, so a deploy that forgot the
+// env var silently allowed credentialed cross-origin calls from the open web.
+// `resolveCorsOrigin` returns `false` (cors middleware disabled, no CORS
+// headers served) and logs at error level instead.
 app.use(
   cors({
-    origin: process.env.FRONTEND_SOURCE || '*',
+    origin: resolveCorsOrigin(process.env),
     methods: ['GET', 'POST', 'DELETE', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'X-Internal-Key'],
     exposedHeaders: ['X-Request-Id'],

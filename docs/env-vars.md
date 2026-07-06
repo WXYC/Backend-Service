@@ -37,8 +37,8 @@ Full reference. CLAUDE.md links here. Variables marked _required_ have no defaul
 - `BETTER_AUTH_JWKS_URL` — e.g. `http://localhost:8082/auth/jwks`
 - `BETTER_AUTH_ISSUER` — e.g. `http://localhost:8082`
 - `BETTER_AUTH_AUDIENCE` — e.g. `http://localhost:8082`
-- `BETTER_AUTH_TRUSTED_ORIGINS` — Comma-separated CORS origins
-- `FRONTEND_SOURCE` — Frontend origin for CORS and redirects
+- `BETTER_AUTH_TRUSTED_ORIGINS` — Comma-separated CORS origins. Consumed by better-auth's `trustedOrigins` (`auth.definition.ts`) and, since BS#1107, as the auth service's Express-level CORS fallback when `FRONTEND_SOURCE` is unset.
+- `FRONTEND_SOURCE` — Frontend origin for CORS and redirects. Accepts a single origin or a comma-separated list (`resolveCorsOrigin` in `shared/authentication/src/cors-origin.ts`). **No wildcard fallback** (BS#1107): when unset, both apps serve no CORS headers at all (cross-origin browser calls fail closed) and log a `[cors]` error at startup — the old `|| '*'` fallback combined with `credentials: true` let any web origin make credentialed requests. The backend consults only this var; the auth service falls back to `BETTER_AUTH_TRUSTED_ORIGINS` before failing closed.
 
 ### OIDC trustedClients (better-auth `oidcProvider`)
 
