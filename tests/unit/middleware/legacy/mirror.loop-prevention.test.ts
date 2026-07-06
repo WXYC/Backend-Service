@@ -86,61 +86,7 @@ jest.mock('../../../../apps/backend/middleware/legacy/rotation-match.mirror', ()
   isActiveRotationMatch: mockIsActiveRotationMatch,
 }));
 
-import { EventEmitter } from 'events';
-
-// Helper: create mock Express response that simulates the middleware lifecycle
-function createMockRes(statusCode: number, body: Record<string, unknown>) {
-  const emitter = new EventEmitter();
-  const locals: Record<string, unknown> = {};
-  const res = {
-    statusCode,
-    locals,
-    getHeader: jest.fn().mockReturnValue('application/json'),
-    send: jest.fn(),
-    once: emitter.once.bind(emitter),
-    on: emitter.on.bind(emitter),
-    emit: emitter.emit.bind(emitter),
-    _body: body,
-  };
-
-  // After send is called, emit 'finish' to trigger mirror logic
-  res.send.mockImplementation((data: unknown) => {
-    locals.mirrorData = typeof data === 'string' ? JSON.parse(data) : data;
-    // Simulate Express: emit finish after send
-    setTimeout(() => emitter.emit('finish'), 0);
-    return res;
-  });
-
-  return res;
-}
-
-function createMockReq() {
-  return {
-    ip: '127.0.0.1',
-    user: { id: 'test-user' },
-  };
-}
-
-// Helper: call middleware and wait for the async finish handler
-async function runMiddleware(
-  middleware: (req: any, res: any, next: any) => Promise<void> | void,
-  entry: Record<string, unknown>,
-  statusCode = 201
-) {
-  const req = createMockReq();
-  const res = createMockRes(statusCode, entry);
-  const next = jest.fn();
-
-  // Middleware may or may not return a promise
-  void middleware(req, res, next);
-  expect(next).toHaveBeenCalled();
-
-  // Trigger send (which populates mirrorData and emits finish)
-  res.send(JSON.stringify(entry));
-
-  // Wait for async finish handler to complete
-  await new Promise((resolve) => setTimeout(resolve, 50));
-}
+import { runMiddleware } from './http-mirror-harness';
 
 // Import the middleware AFTER all mocks are set up
 import { flowsheetMirror } from '../../../../apps/backend/middleware/legacy/flowsheet.mirror';

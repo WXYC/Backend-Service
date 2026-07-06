@@ -79,6 +79,12 @@ const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
 });
 
 export const endShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
+  // BS#1119: /flowsheet/end serves leave semantics too — a guest-DJ leave (or
+  // the Auto-DJ orchestrator's restart recovery) responds with a ShowDJ, which
+  // has no `id`. Only a finalized Show carries the serial PK; discriminate on
+  // it rather than primary_dj_id, which is nullable on a real Show.
+  if (show.id == null) return;
+
   const endMs = toMs(show.end_time ?? Date.now());
 
   // Resolve tubafrenzy show ID: in-memory cache → persisted legacy_show_id
