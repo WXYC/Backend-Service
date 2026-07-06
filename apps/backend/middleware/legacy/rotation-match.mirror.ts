@@ -48,8 +48,11 @@ export interface RotationMatchEntry {
  *   (b) (artist_name, album_title) matches rotation's denormalized snapshot
  *   (c) (artist_name, album_title) matches through library + artists join
  *
- * `kill_date` is compared against `add_time` so historical shows are
- * classified using the rotation state at the time of the play, not now.
+ * The rotation window is bounded on both sides against `add_time` so historical
+ * shows are classified using the rotation state at the time of the play, not now:
+ * `add_date <= add_time` (inclusive lower bound — a play before the release
+ * entered rotation is not matched; BS#1526) and `kill_date IS NULL OR
+ * kill_date > add_time` (exclusive upper bound).
  *
  * Returns false immediately — without querying the DB — when:
  *   - `rotation_id` is non-NULL (matches the read-path `IS NULL` gate; the
@@ -93,7 +96,7 @@ export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<
     const albumIdCohort = entry.album_id != null ? sql`r2.album_id = ${entry.album_id}` : sql`false`;
 
     // Cohort SQL is structurally identical to the read-path subquery's
-    // WHERE clause (flowsheet.service.ts:147-165). Bound values
+    // WHERE clause (flowsheet.service.ts:150-168). Bound values
     // (artistName, albumTitle) are non-null JS strings post `?? ''` plus
     // the empty-guard above, so no inner `coalesce(..., '')` is needed on
     // the JS-bound side — matches the read path's column-ref shape exactly.
@@ -103,7 +106,8 @@ export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<
         FROM ${rotation} r2
         LEFT JOIN ${library} l2 ON l2.id = r2.album_id
         LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
-        WHERE (r2.kill_date IS NULL OR r2.kill_date > ${addTime}::date)
+        WHERE r2.add_date <= ${addTime}::date
+          AND (r2.kill_date IS NULL OR r2.kill_date > ${addTime}::date)
           AND (
             ${albumIdCohort}
             OR (
