@@ -90,6 +90,50 @@ describe('mirror middleware stash (BS#1513)', () => {
     expect(received[0]).toEqual({ id: 7, play_order: 1 });
   });
 
+  it('treats a nullish stash as a no-op so the tap still captures the response body', async () => {
+    const received: unknown[] = [];
+    const mw = createHttpMirrorMiddleware<Record<string, unknown>>((_req, data) => {
+      received.push(data);
+      return Promise.resolve();
+    });
+    const res = makeRes();
+    await mw({} as never, res as never, jest.fn());
+
+    // A future call site stashing a service result without a missing-row
+    // guard must not crash the request or silently disable the mirror — the
+    // tap falls through to the response body, exactly the pre-stash behavior.
+    stashMirrorData(res as never, undefined);
+    stashMirrorData(res as never, null);
+    res.send(JSON.stringify({ id: 7, play_order: 1 }));
+    res.emit('finish');
+    await flush();
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({ id: 7, play_order: 1 });
+  });
+
+  it('keeps last-write-wins for unstashed re-entrant sends (res.send(object) delegating through res.json)', async () => {
+    const received: unknown[] = [];
+    const mw = createHttpMirrorMiddleware<Record<string, unknown>>((_req, data) => {
+      received.push(data);
+      return Promise.resolve();
+    });
+    const res = makeRes();
+    await mw({} as never, res as never, jest.fn());
+
+    // Express's res.send(obj) re-enters the tapped send: first with the live
+    // object, then (via res.json) with the serialized string. The parsed
+    // string must win — the shape the mirror handlers were built against —
+    // as it did before the stash guard existed.
+    res.send({ id: 7, add_time: new Date('2024-02-01T12:00:00Z') });
+    res.send(JSON.stringify({ id: 7, add_time: '2024-02-01T12:00:00.000Z' }));
+    res.emit('finish');
+    await flush();
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({ id: 7, add_time: '2024-02-01T12:00:00.000Z' });
+  });
+
   it('does not run mirror work for non-2xx responses even when a row was stashed', async () => {
     const received: unknown[] = [];
     const mw = createHttpMirrorMiddleware<Record<string, unknown>>((_req, data) => {

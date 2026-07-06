@@ -99,7 +99,10 @@ export const getPlaylistsForDJ = async (dj_id: string) => {
   const allEntries: FSEntry[] = await db
     .select()
     .from(flowsheet)
-    .where(and(inArray(flowsheet.show_id, showIds), isNull(flowsheet.message)));
+    .where(and(inArray(flowsheet.show_id, showIds), isNull(flowsheet.message)))
+    // Deterministic preview: without an ORDER BY the 4-row slice below is
+    // arbitrary heap order (enrichment UPDATEs relocate tuples), not show order.
+    .orderBy(flowsheet.play_order);
 
   const specialtyMap = new Map(allSpecialties.map((s) => [s.id, s.specialty_name]));
   const djsByShow = new Map<number, { dj_id: string; dj_name: string | null }[]>();
@@ -127,24 +130,4 @@ export const getPlaylistsForDJ = async (dj_id: string) => {
       preview,
     } satisfies ShowPeek;
   });
-};
-
-export const getPlaylist = async (show_id: number) => {
-  const show = await db.select().from(shows).where(eq(shows.id, show_id));
-
-  const entries = await db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id));
-
-  let specialty_show_name = '';
-  if (show[0].specialty_id != null) {
-    const specialty_show = await db.select().from(specialty_shows).where(eq(specialty_shows.id, show[0].specialty_id));
-    specialty_show_name = specialty_show[0].specialty_name;
-  }
-
-  return {
-    show_name: show[0].show_name ?? '',
-    specialty_show: specialty_show_name,
-    date: show[0].start_time,
-    // Projected to the client-facing allow-list (BS#1513).
-    entries: entries.map(projectFlowsheetEntry),
-  };
 };

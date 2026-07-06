@@ -1,4 +1,4 @@
-import { Request, RequestHandler } from 'express';
+import { Request, RequestHandler, Response } from 'express';
 import { Mutex } from 'async-mutex';
 import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/database';
 
@@ -171,6 +171,20 @@ export type FSEntryRequestBody = {
   entry_type?: NewFSEntry['entry_type'];
 };
 
+/**
+ * Shared egress for the flowsheet mutation echoes (BS#1513 / PR #1532): stash
+ * the UNPROJECTED row for the legacy mirror middleware — whose BS#908 loop
+ * guards read `legacy_entry_id`, a column the client projection strips — then
+ * send the client-facing projection. Keeping the pair in one call means a new
+ * mutation site can't pick up the projection without the stash. The stash is
+ * inert on routes with no mirror middleware attached (changeOrder today) and
+ * becomes load-bearing automatically if one is wired up.
+ */
+const sendProjectedEntry = (res: Response, statusCode: number, entry: FSEntry): void => {
+  stashMirrorData(res, entry);
+  res.status(statusCode).json(projectFlowsheetEntry(entry));
+};
+
 // either an id is provided (meaning it came from the user's bin or was fuzzy found)
 // or it's not provided in which case whe just throw the data provided into the table w/ album_id = NULL
 export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res) => {
@@ -197,10 +211,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       dj_name,
     };
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    // The legacy mirror consumes the tapped response body; hand it the raw
-    // row so its legacy_entry_id loop guards keep working (BS#1513/BS#908).
-    stashMirrorData(res, completedEntry);
-    res.status(201).json(projectFlowsheetEntry(completedEntry));
+    sendProjectedEntry(res, 201, completedEntry);
     return;
   }
 
@@ -248,8 +259,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    stashMirrorData(res, completedEntry);
-    res.status(201).json(projectFlowsheetEntry(completedEntry));
+    sendProjectedEntry(res, 201, completedEntry);
   } else if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
     throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
   } else {
@@ -278,8 +288,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    stashMirrorData(res, completedEntry);
-    res.status(201).json(projectFlowsheetEntry(completedEntry));
+    sendProjectedEntry(res, 201, completedEntry);
   }
 };
 
@@ -297,8 +306,7 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   if (!removedEntry) {
     throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
   }
-  stashMirrorData(res, removedEntry);
-  res.status(200).json(projectFlowsheetEntry(removedEntry));
+  sendProjectedEntry(res, 200, removedEntry);
 };
 
 export type UpdateRequestBody = {
@@ -355,14 +363,20 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
     throw new WxycError('Bad Request, Missing entry identifier: entry_id', 400);
   }
 
-  const updatedEntry = await flowsheet_service.updateEntry(entry_id, pickUpdateEntryFields(data ?? {}));
+  const picked = pickUpdateEntryFields(data ?? {});
+  // An empty (or fully-filtered) patch would reach drizzle's `.set({})`,
+  // which throws `No values to set` — a 500 for what is a malformed request.
+  if (Object.keys(picked).length === 0) {
+    throw new WxycError('Bad Request, No updatable fields provided in: data', 400);
+  }
+
+  const updatedEntry = await flowsheet_service.updateEntry(entry_id, picked);
   // UPDATE matched no row (entry deleted out from under the edit). See the
   // 404 rationale on deleteEntry above.
   if (!updatedEntry) {
     throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
   }
-  stashMirrorData(res, updatedEntry);
-  res.status(200).json(projectFlowsheetEntry(updatedEntry));
+  sendProjectedEntry(res, 200, updatedEntry);
 };
 
 export type JoinRequestBody = {
@@ -502,7 +516,7 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
     if (!updatedEntry) {
       throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
     }
-    res.status(200).json(projectFlowsheetEntry(updatedEntry));
+    sendProjectedEntry(res, 200, updatedEntry);
   } finally {
     release();
   }

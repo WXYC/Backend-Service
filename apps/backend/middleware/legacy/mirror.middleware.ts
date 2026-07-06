@@ -93,38 +93,51 @@ export const createHttpMirrorMiddleware =
  * tap then leaves the stashed value in place. The JSON round-trip reproduces
  * the exact parsed-body shape the mirror handlers were built against (dates
  * as ISO strings, `undefined` keys dropped).
+ *
+ * A nullish row is a no-op — not a crash, not a poisoned stash: the tap falls
+ * back to capturing the response body, exactly the pre-stash behavior. That
+ * keeps a future call site that stashes before its missing-row guard from
+ * turning a committed mutation into a 500 (or silently unplugging the mirror).
  */
 export function stashMirrorData(res: Response, row: unknown): void {
+  if (row == null) return;
   (res.locals as any).mirrorData = JSON.parse(JSON.stringify(row));
+  (res.locals as any).mirrorDataStashed = true;
 }
 
 function tapJsonResponse(res: Response) {
   const origSend = res.send.bind(res);
 
   res.send = ((body?: any) => {
-    // A controller may have pre-stashed the unprojected row via
-    // `stashMirrorData` (BS#1513); don't clobber it with the projected body.
-    if ((res.locals as any).mirrorData === undefined) {
-      let captured: unknown = body;
-
-      const ct = (res.getHeader('content-type') || '').toString().toLowerCase();
-      if (typeof body === 'string' && ct.includes('application/json')) {
-        try {
-          captured = JSON.parse(body);
-        } catch {
-          // ignore parse errors; keep raw string
-        }
-      }
-
-      if (Buffer.isBuffer(body) && ct.includes('application/json')) {
-        try {
-          captured = JSON.parse(body.toString('utf8'));
-        } catch {
-          /* ignore */
-        }
-      }
-      (res.locals as any).mirrorData = captured;
+    // A controller pre-stashed the unprojected row via `stashMirrorData`
+    // (BS#1513); don't clobber it with the projected body. Keyed on the flag
+    // rather than `mirrorData === undefined` so the unstashed tap stays
+    // last-write-wins: `res.send(object)` re-enters this wrapper through
+    // `res.json`, and the final, serialized pass — the parsed-JSON shape the
+    // mirror handlers were built against — must be the one captured.
+    if ((res.locals as any).mirrorDataStashed) {
+      return origSend(body);
     }
+
+    let captured: unknown = body;
+
+    const ct = (res.getHeader('content-type') || '').toString().toLowerCase();
+    if (typeof body === 'string' && ct.includes('application/json')) {
+      try {
+        captured = JSON.parse(body);
+      } catch {
+        // ignore parse errors; keep raw string
+      }
+    }
+
+    if (Buffer.isBuffer(body) && ct.includes('application/json')) {
+      try {
+        captured = JSON.parse(body.toString('utf8'));
+      } catch {
+        /* ignore */
+      }
+    }
+    (res.locals as any).mirrorData = captured;
     return origSend(body);
   }) as any;
 }

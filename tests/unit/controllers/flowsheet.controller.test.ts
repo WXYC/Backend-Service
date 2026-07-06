@@ -58,6 +58,7 @@ import {
   leaveShow,
 } from '../../../apps/backend/controllers/flowsheet.controller';
 import WxycError from '../../../apps/backend/utils/error';
+import { INTERNAL_FLOWSHEET_COLUMNS, makeFullFlowsheetRow } from '../../fixtures/flowsheet-row.fixture';
 
 // Helper to create mock Express req/res/next
 const createMockReq = (query: Record<string, string> = {}): Partial<Request> => ({
@@ -1192,67 +1193,10 @@ describe('flowsheet.controller', () => {
   });
 
   describe('does not leak internal flowsheet columns (BS#1513)', () => {
-    // A fully-populated raw flowsheet row — every internal column set to a
-    // truthy value so an accidental leak surfaces loudly.
-    const makeRawRow = () => ({
-      id: 42,
-      show_id: 42,
-      album_id: 20,
-      rotation_id: 7,
-      entry_type: 'track',
-      artist_name: 'Juana Molina',
-      album_title: 'DOGA',
-      track_title: 'la paradoja',
-      track_position: 'A1',
-      record_label: 'Sonamos',
-      label_id: 3,
-      play_order: 5,
-      request_flag: false,
-      segue: true,
-      message: null,
-      add_time: new Date(),
-      radio_hour: null,
-      dj_name: 'DJ Test',
-      artwork_url: 'https://example.com/art.jpg',
-      discogs_url: 'https://discogs.com/release/1',
-      release_year: 2022,
-      spotify_url: 'https://open.spotify.com/album/1',
-      apple_music_url: null,
-      youtube_music_url: null,
-      bandcamp_url: null,
-      soundcloud_url: null,
-      artist_bio: 'Argentine musician.',
-      artist_wikipedia_url: null,
-      metadata_status: 'enriched_match',
-      // Internal columns — must never reach the client.
-      updated_at: new Date(),
-      enriching_since: new Date(),
-      metadata_attempt_at: new Date(),
-      legacy_link_attempted_at: new Date(),
-      linkage_source: 'lml_high_confidence',
-      linkage_confidence: 0.98,
-      linked_at: new Date(),
-      composer: 'Juana Molina',
-      composer_source: 'artist_proxy',
-      legacy_entry_id: 9999,
-      legacy_release_id: 8888,
-      search_doc: "'juana':1A",
-    });
-
-    const INTERNAL_KEYS = [
-      'search_doc',
-      'updated_at',
-      'enriching_since',
-      'metadata_attempt_at',
-      'legacy_link_attempted_at',
-      'linkage_source',
-      'linkage_confidence',
-      'linked_at',
-      'composer',
-      'composer_source',
-      'legacy_entry_id',
-      'legacy_release_id',
-    ];
+    // Fully-populated raw row + internal-column deny-list shared with the
+    // projector and DJ-peek leak suites (tests/fixtures/flowsheet-row.fixture.ts)
+    // so a new internal column is covered everywhere from one update site.
+    const makeRawRow = () => makeFullFlowsheetRow() as unknown as Record<string, unknown>;
 
     const lastJsonPayload = (res: Partial<Response>) => {
       const calls = (res.json as unknown as jest.Mock).mock.calls;
@@ -1260,7 +1204,7 @@ describe('flowsheet.controller', () => {
     };
 
     const expectProjected = (payload: Record<string, unknown>) => {
-      for (const key of INTERNAL_KEYS) {
+      for (const key of INTERNAL_FLOWSHEET_COLUMNS) {
         expect(payload).not.toHaveProperty(key);
       }
       // Client-facing fields survive.
@@ -1403,6 +1347,37 @@ describe('flowsheet.controller', () => {
 
         const stashed = stashedOf(res);
         expect(stashed).toMatchObject({ id: 42, legacy_entry_id: 9999 });
+      });
+
+      it('changeOrder stashes the full row too (inert today — its mirror is commented out in the route — but correct-by-default if re-enabled)', async () => {
+        mockChangeOrder.mockResolvedValue(makeRawRow());
+
+        const req = { body: { entry_id: 42, new_position: 3 } } as unknown as Request;
+        const res = createMockRes();
+
+        await changeOrder(req, res as Response, mockNext);
+
+        const stashed = stashedOf(res);
+        expect(stashed).toMatchObject({ id: 42, legacy_entry_id: 9999 });
+      });
+    });
+
+    describe('updateEntry rejects empty patches (PR #1532 review follow-up)', () => {
+      // An empty (or fully-filtered) patch would reach drizzle's `.set({})`,
+      // which throws `No values to set` — surfacing as a 500 for what is a
+      // malformed request. The controller rejects it with a 400 before the
+      // service runs.
+      it.each([
+        ['an empty data object', {}],
+        ['data omitted entirely', undefined],
+        ['data containing only non-updatable keys', { metadata_status: 'enriched_match', legacy_entry_id: 1 }],
+      ])('400s on %s instead of letting drizzle 500', async (_name, data) => {
+        const req = { body: { entry_id: 42, data } } as unknown as Request;
+        const res = createMockRes();
+
+        await expect(updateEntry(req, res as Response, mockNext)).rejects.toMatchObject({ statusCode: 400 });
+        expect(mockUpdateEntry).not.toHaveBeenCalled();
+        expect(res.json).not.toHaveBeenCalled();
       });
     });
 

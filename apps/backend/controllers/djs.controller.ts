@@ -53,12 +53,3 @@ export const getPlaylistsForDJ: RequestHandler<object, unknown, object, { dj_id:
   const playlists = await DJService.getPlaylistsForDJ(req.query.dj_id);
   res.status(200).json(playlists);
 };
-
-export const getPlaylist: RequestHandler<object, unknown, object, { playlist_id: string }> = async (req, res) => {
-  if (req.query.playlist_id === undefined) {
-    throw new WxycError('Bad Request, Missing Playlist Identifier: playlist_id', 400);
-  }
-
-  const playlist = await DJService.getPlaylist(parseInt(req.query.playlist_id));
-  res.status(200).json(playlist);
-};
