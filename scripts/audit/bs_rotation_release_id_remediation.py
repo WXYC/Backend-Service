@@ -1,6 +1,8 @@
 """Remediate the #1517 confirmed wrong-album rotation.discogs_release_id rows.
 
-Companion to the read-only auditor `bs_rotation_release_id_pollution.py` (#1520).
+Companion to the read-only auditor `bs_rotation_release_id_pollution.py` (#1520;
+since #1522 a thin wrapper — the engine's canonical home is
+`jobs/rotation-release-id-pollution-check/pollution_engine.py`).
 This is the committed provenance of the 2026-07-06 remediation run: the 31 rows
 in REMEDIATE_IDS were resolved and, because LML returned a non-`direct` answer
 (`alternative`/`fallback`) for every one — it has no trusted direct match for

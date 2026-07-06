@@ -1,0 +1,24 @@
+# Weekly rotation release-id pollution check (BS#1522). First Python job in the
+# fleet: deploy-base.yml treats every job as an opaque Docker target (build is
+# `docker build -f Dockerfile.<target>`, cron metadata comes from the job's
+# package.json, the crontab line is a generic `docker run --env-file .env`), so
+# no Node scaffolding is required. Single stage — there is no compile step, so
+# the builder/prod split the Node jobs use buys nothing here.
+FROM python:3.12-slim
+
+WORKDIR /rotation-release-id-pollution-check
+
+COPY ./jobs/rotation-release-id-pollution-check/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY ./jobs/rotation-release-id-pollution-check/ ./
+
+# Build gate: a scoring or job-logic regression fails the image build in both
+# CI and deploy-base — the role tsup/tsc plays for the Node jobs. The self-tests
+# are pure functions (no DB/LML/Sentry), so they run cleanly at build time.
+RUN python3 pollution_engine.py --self-test && python3 job.py --self-test
+
+# Identifies the connection in pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-rotation-release-id-pollution-check
+
+CMD ["python3", "job.py"]

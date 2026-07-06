@@ -127,6 +127,10 @@ Daily cron job for BS#1381. One BS call here = one batch of up to 50 `lml_identi
 - `BACKFILL_LML_BATCH_TIMEOUT_MS` (default `360000` / 6 min) — BS-side `AbortController` budget per `refreshForIdentities` call. Sized to clear LML's worst-case ~4 min cold-cache fan-out (50 release + ~150 artist Discogs calls at LML's 50 req/min cap) PLUS Railway's ~5 min request-timeout ceiling with a 1-min safety margin. Distinct from `BACKFILL_LML_PER_CALL_TIMEOUT_MS` (per-row LML `/lookup`, sized for LML#370's 25 s cascade-exhaustion cap) because the batch-fanout topology is different. If LML's Railway request timeout changes, recalibrate this var.
 - `DRY_RUN` (default unset / `false`) — when `'true'` or `'1'`, enumerate identity cardinality but skip refresh calls.
 
+### Rotation release-id pollution check (`jobs/rotation-release-id-pollution-check`)
+
+Weekly Python cron for BS#1522 — no new env names. Reuses the existing contracts with in-code defaults when a var is absent from `.env`: `BACKFILL_LML_RATE_PER_MIN` (20, applied to the engine's release GETs), `BACKFILL_LML_RESOLVE_TIMEOUT_MS` (15000, per LML call), `LIVE_ACTIVITY_LOOKBACK_SECONDS` / `LIVE_ACTIVITY_PAUSE_MS` (cooperative pause, same semantics as the TS jobs), `WXYC_SCHEMA_NAME`, and `DRY_RUN` (log would-fire alerts instead of sending). Required set: `DB_*`, `LIBRARY_METADATA_URL`, `LML_API_KEY`, plus `SENTRY_DSN` unless `DRY_RUN` — the job aborts at init rather than run without the ability to alert. Full runbook in `jobs/rotation-release-id-pollution-check/README.md`.
+
 ### Bulk backfill (`jobs/album-level-backfill`)
 
 Knobs for the one-shot album-level historical backfill (BS#1041). Separate from `BACKFILL_LML_*` above because this job calls LML's bulk endpoint (`/api/v1/lookup/bulk`, LML#368), where the natural unit is the batch, not the row. Defaults are tuned to let this job run concurrently with the per-row drain cron without saturating LML's serial Discogs fan-out. All are positive integers; non-positive or unparseable values throw at job startup.

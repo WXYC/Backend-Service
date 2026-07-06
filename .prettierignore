@@ -6,4 +6,7 @@ node_modules
 shared/database/src/migrations
 *.sql
 audit
+# Prettier has no Python parser; directory-expansion (`--check .`) already
+# skips .py silently, but glob-form invocations error on them (BS#1522).
+*.py
 
