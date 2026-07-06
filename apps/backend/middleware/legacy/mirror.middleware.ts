@@ -95,9 +95,12 @@ export const createHttpMirrorMiddleware =
  * as ISO strings, `undefined` keys dropped).
  *
  * A nullish row is a no-op — not a crash, not a poisoned stash: the tap falls
- * back to capturing the response body, exactly the pre-stash behavior. That
- * keeps a future call site that stashes before its missing-row guard from
- * turning a committed mutation into a 500 (or silently unplugging the mirror).
+ * back to capturing the response body, exactly the pre-stash behavior. This
+ * protects the mirror seam only (a `JSON.parse(String(undefined))` SyntaxError,
+ * or a `null` stash that silently unplugs the mirror). It does NOT keep the
+ * response itself from 500ing — `sendProjectedEntry` calls `projectFlowsheetEntry`
+ * on the same row, which throws on undefined; the callers' missing-row 404
+ * guards are what stop that, and every mutation site has one.
  */
 export function stashMirrorData(res: Response, row: unknown): void {
   if (row == null) return;

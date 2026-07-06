@@ -165,8 +165,8 @@ describe('djs.service - getPlaylistsForDJ', () => {
       entry_type: 'track',
       artist_name: 'Juana Molina',
       track_title: 'la paradoja',
-      // Client-facing per the FlowsheetEntryResponse SSOT (see the
-      // flowsheet-projection unit test for the full rationale).
+      // Client-facing per the FlowsheetEntryResponse SSOT (rationale in the
+      // flowsheet-projection.ts module docstring).
       metadata_status: 'enriched_match',
     });
   });
