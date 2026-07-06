@@ -16,12 +16,20 @@
  *   - data.metadata_status is a terminal state
  *     ('enriched_match' | 'enriched_no_match' | 'failed_no_retry')
  *
- * Payload is the full flowsheet row from `event.data` (BS-2). dj-site's
- * listener middleware patches the row into its RTK Query cache directly —
- * a /live viewer that just opened the page sees post-enrichment fields
- * (`artwork_url`, `release_year`, etc.) without a follow-up GET.
- * `wxyc-shared`'s `LiveFsUpdateEvent` is the canonical cross-language
- * shape; this file's `LiveFsUpdatePayload` mirrors that contract.
+ * Payload is the flowsheet row from `event.data`, projected through the
+ * client-facing `CLIENT_FACING_FLOWSHEET_COLUMNS` allow-list (BS-2 inlined
+ * the row; BS#1534 projects it). dj-site's listener middleware patches the
+ * row into its RTK Query cache directly — a /live viewer that just opened
+ * the page sees post-enrichment fields (`artwork_url`, `release_year`, etc.)
+ * without a follow-up GET. The `/events/stream` topic is anonymous
+ * (`Topics.liveFs` authz `[]`), so the projection keeps the raw CDC row's
+ * internal columns (`search_doc`, `composer`, `legacy_*`, `linkage_*`, …)
+ * off the public stream — the same allow-list the mutation echoes and DJ
+ * peek use (BS#1513). `wxyc-shared`'s `LiveFsUpdateEvent` is the canonical
+ * cross-language shape; this file's `LiveFsUpdatePayload` mirrors that
+ * contract. (The `/cdc` WebSocket fan-out stays unprojected by design — it
+ * is `CDC_SECRET`-gated and its reconciliation-monitor consumer needs the
+ * complete row; see `docs/cdc.md`.)
  *
  * False positives: the filter matches any flowsheet UPDATE that lands in
  * a terminal metadata_status. The historical `flowsheet-metadata-backfill`
@@ -39,15 +47,17 @@ import * as Sentry from '@sentry/node';
 import type { CdcEvent } from '@wxyc/database';
 import { onCdcEvent } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../../utils/serverEvents.js';
+import { pickClientFacingColumns } from '../../utils/flowsheet-projection.js';
 
 const TERMINAL_STATUSES = new Set(['enriched_match', 'enriched_no_match', 'failed_no_retry']);
 
 /**
  * Wire shape of the `liveFs:update` payload. Mirrors `LiveFsUpdateEvent` in
  * `wxyc-shared/api.yaml`. The two required fields (`id`, `metadata_status`)
- * are pinned because we assert them at the filter boundary; the rest of the
- * flowsheet columns (`artist_name`, `album_title`, `artwork_url`, ...) ride
- * along untyped at this seam — dj-site / iOS receive them via the typed
+ * are pinned because we assert them at the filter boundary; the remaining
+ * columns are the `CLIENT_FACING_FLOWSHEET_COLUMNS` allow-list subset
+ * (`artist_name`, `album_title`, `artwork_url`, ...) that `pickClientFacingColumns`
+ * projects (BS#1534) — dj-site / iOS receive them via the typed
  * `FlowsheetSongEntry` schema generated from `@wxyc/shared`, which is the
  * cross-language source of truth.
  */
@@ -70,8 +80,11 @@ export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | nul
   const id = data.id;
   if (typeof id !== 'number') return null;
 
+  // Project through the client-facing allow-list before the row hits the
+  // anonymous `/events/stream` (BS#1534): internal CDC columns (`search_doc`,
+  // `composer`, `legacy_*`, `linkage_*`, …) must not ride the public stream.
   return {
-    ...data,
+    ...pickClientFacingColumns(data),
     id,
     metadata_status: status as LiveFsUpdatePayload['metadata_status'],
   };

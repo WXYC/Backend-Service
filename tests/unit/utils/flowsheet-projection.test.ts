@@ -1,5 +1,6 @@
 import {
   projectFlowsheetEntry,
+  pickClientFacingColumns,
   CLIENT_FACING_FLOWSHEET_COLUMNS,
 } from '../../../apps/backend/utils/flowsheet-projection';
 import { INTERNAL_FLOWSHEET_COLUMNS, makeFullFlowsheetRow } from '../../fixtures/flowsheet-row.fixture';
@@ -82,5 +83,39 @@ describe('projectFlowsheetEntry (BS#1513)', () => {
     expect(projected.message).toBe('Talkset');
     expect(projected.entry_type).toBe('talkset');
     expect(projected).not.toHaveProperty('search_doc');
+  });
+});
+
+describe('pickClientFacingColumns (BS#1534)', () => {
+  // JSON-tolerant sibling for parsed-JSON rows (the CDC `to_jsonb(NEW)` payload
+  // on the anonymous SSE stream). Loops the same allow-list, so the leak-defense
+  // coverage carries over; these tests pin the JSON-specific behaviors.
+
+  it('drops every internal column and keeps the client columns from a full parsed row', () => {
+    // Emulate the parsed-JSON shape: dates arrive as ISO strings, not Dates.
+    const raw = JSON.parse(JSON.stringify(makeFullFlowsheetRow())) as Record<string, unknown>;
+    const picked = pickClientFacingColumns(raw);
+    for (const internalKey of INTERNAL_FLOWSHEET_COLUMNS) {
+      expect(picked).not.toHaveProperty(internalKey);
+    }
+    expect(new Set(Object.keys(picked))).toEqual(new Set(CLIENT_FACING_FLOWSHEET_COLUMNS));
+  });
+
+  it('copies only the columns actually present — a partial row is not padded with invented keys', () => {
+    const picked = pickClientFacingColumns({ id: 7, artist_name: 'Jessica Pratt', legacy_entry_id: 9999 });
+    expect(picked).toEqual({ id: 7, artist_name: 'Jessica Pratt' });
+    expect(picked).not.toHaveProperty('album_title');
+    expect(picked).not.toHaveProperty('legacy_entry_id');
+  });
+
+  it('passes values through untouched (ISO-string date stays a string)', () => {
+    const picked = pickClientFacingColumns({ id: 7, add_time: '2024-02-01T12:00:00.000Z' });
+    expect(picked.add_time).toBe('2024-02-01T12:00:00.000Z');
+  });
+
+  it('ignores a prototype-polluting key that collides with nothing in the allow-list', () => {
+    const picked = pickClientFacingColumns(JSON.parse('{"id":7,"__proto__":{"polluted":true}}'));
+    expect(picked).toEqual({ id: 7 });
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });
