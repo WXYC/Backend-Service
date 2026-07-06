@@ -19,3 +19,9 @@ export function requirePermissions(_required: Record<string, string[]>) {
     return next();
   };
 }
+
+// Real implementation, not a stub: `resolveCorsOrigin` is pure env parsing
+// with no auth/database dependencies, so consumers under unit test get the
+// production behavior (BS#1107).
+export { resolveCorsOrigin } from '../../shared/authentication/src/cors-origin';
+export type { ResolvedCorsOrigin } from '../../shared/authentication/src/cors-origin';

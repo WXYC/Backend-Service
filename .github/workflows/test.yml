@@ -347,6 +347,12 @@ jobs:
         env:
           NODE_ENV: test
           USE_MOCK_SERVICES: 'false'
+          # CORS fails closed when FRONTEND_SOURCE is unset (BS#1107). The
+          # integration suite never asserts CORS headers, but set it
+          # explicitly so both services take the configured-origin path and
+          # startup logs stay clean. Matches the ci-profile compose default
+          # in dev_env/docker-compose.yml.
+          FRONTEND_SOURCE: http://localhost:3000
           ANON_DEVICE_JWT_SECRET: ci-test-secret-key-for-anonymous-devices
           LIBRARY_METADATA_URL: http://localhost:9090
           SLACK_WEBHOOK_URL: http://localhost:9090

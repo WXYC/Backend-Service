@@ -6,7 +6,7 @@ import * as Sentry from '@sentry/node';
 import { config } from 'dotenv';
 config();
 
-import { auth } from '@wxyc/authentication';
+import { auth, resolveCorsOrigin } from '@wxyc/authentication';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
 import express from 'express';
@@ -37,10 +37,19 @@ app.set('trust proxy', true);
 // Parse JSON bodies first (needed for auth endpoints)
 app.use(express.json());
 
-// Apply CORS globally to all routes (must be before auth handler)
+// Apply CORS globally to all routes (must be before auth handler).
+// Fail closed when neither FRONTEND_SOURCE nor BETTER_AUTH_TRUSTED_ORIGINS is
+// set (BS#1107): the old `|| '*'` fallback combined with `credentials: true`
+// reflected any request origin with Access-Control-Allow-Credentials, exposing
+// every cookie-authenticated better-auth route (including /auth/admin/*) to
+// credentialed calls from arbitrary web origins. `resolveCorsOrigin` returns
+// `false` (cors middleware disabled, no CORS headers served) and logs at
+// error level instead. BETTER_AUTH_TRUSTED_ORIGINS is consulted second so a
+// deploy that configures better-auth's trusted origins but not
+// FRONTEND_SOURCE keeps serving its login flow.
 app.use(
   cors({
-    origin: process.env.FRONTEND_SOURCE || '*',
+    origin: resolveCorsOrigin(process.env, ['FRONTEND_SOURCE', 'BETTER_AUTH_TRUSTED_ORIGINS']),
     credentials: true,
     // X-Device-Fingerprint is sent on /auth/check-request-ban (BS#1261).
     // Add here so a future browser-origin caller (dj-site admin tool, iOS
