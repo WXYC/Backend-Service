@@ -1,0 +1,41 @@
+-- precondition-guard: not-required (ALTER TYPE ... ADD VALUE has no
+--   row-level invariants to violate; the value is type-system metadata.)
+-- 0109 — add `md_verified` provenance value for
+--   `rotation.discogs_release_id_source` (BS#1528).
+--
+-- New value:
+--   md_verified — written only by operator-run remediation scripts after a
+--                 human verified the release id against Discogs. First use:
+--                 the BS#1528 MD pass over the #1517 audit's 11 held
+--                 degenerate-reference rows, executed by
+--                 scripts/audit/bs_1528_md_remediation.py (4 repoints whose
+--                 correct ids were confirmed row-by-row against the Discogs
+--                 API and the rotation rows' label/add_date context). No
+--                 runtime writer emits this value.
+--
+-- Why a distinct value: the repointed ids are human-verified, not
+-- LML-resolved, so `lml_offline_backfill` would misstate provenance (and
+-- prod's "0 lml_offline_backfill rows" state is itself a forensic signal of
+-- the #1521 relabel repaint — writing new rows under that label would muddy
+-- it). `discogs_direct_backfill` is the audited/polluted bypass-LML lineage
+-- and would put the rows straight back into the #1522 recurring auditor's
+-- mismatch bucket. These rows' free-text references are degenerate
+-- (self-titled / catalog code / artist-as-title / single letter), so they
+-- score low on title similarity by construction; the recurring auditor's
+-- default --sources scope deliberately excludes `md_verified`.
+--
+-- The rotation-etl ON CONFLICT flip-back logic at jobs/rotation-etl/job.ts
+-- preserves `md_verified` rows the same way it preserves the backfill
+-- provenances: if tubafrenzy later contributes a non-NULL
+-- discogs_release_id, the source correctly flips to `tubafrenzy_paste` (a
+-- fresh MD paste outranks an old MD verification); otherwise the persisted
+-- source stays untouched.
+--
+-- DDL-only. PG12+ allows ALTER TYPE ... ADD VALUE inside a transaction but
+-- the new value is not usable until commit — nothing else in this migration
+-- references it (same shape as 0086).
+--
+-- @no-analyze-needed: ALTER TYPE ADD VALUE is type-system metadata only.
+-- No rows are rewritten, no planner stats to refresh.
+
+ALTER TYPE "wxyc_schema"."discogs_release_id_source_enum" ADD VALUE 'md_verified';
