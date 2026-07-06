@@ -125,8 +125,11 @@ const FSEntryFieldsRaw = {
   //       (library-unlinked rotation rows hold the snapshot directly);
   //   (c) (artist, album) matches the library+artists join on an active rotation row's
   //       album_id (library-linked rows whose denorm fields are NULL).
-  // kill_date is compared against the flowsheet entry's add_time so historical rotation
-  // status is preserved — mirrors how tubafrenzy classifies at mirror time (WXYC/dj-site#750).
+  // The rotation window is bounded on BOTH sides against the flowsheet entry's add_time so
+  // historical rotation status is preserved: add_date <= add_time (inclusive lower bound —
+  // a play that aired before the release entered rotation is not badged; BS#1526) and
+  // kill_date IS NULL OR kill_date > add_time (exclusive upper bound). Mirrors how tubafrenzy
+  // classifies at mirror time (WXYC/dj-site#750).
   // Subquery only fires per-row on a missed FK join; on rows with a populated rotation_id
   // COALESCE short-circuits and the subquery is not evaluated.
   //
@@ -135,7 +138,7 @@ const FSEntryFieldsRaw = {
   // (re-bins, re-adds, label-driven re-promotes). Picking the lowest `id` (oldest active
   // row) is a deliberate, stable choice for the badge UX — when an album has been re-binned
   // L → M, the badge reports its original cohort rather than flipping retroactively. This
-  // matches the historical-correctness story above (kill_date filtering against add_time).
+  // matches the historical-correctness story above (add_date/kill_date window filtered against add_time).
   // The primary FK join via flowsheet.rotation_id remains canonical when present.
   rotation_bin: sql<string | null>`
     COALESCE(
@@ -148,7 +151,8 @@ const FSEntryFieldsRaw = {
         FROM ${rotation} r2
         LEFT JOIN ${library} l2 ON l2.id = r2.album_id
         LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
-        WHERE (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
+        WHERE r2.add_date <= ${flowsheet.add_time}::date
+          AND (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
           AND (
             (${flowsheet.album_id} IS NOT NULL AND r2.album_id = ${flowsheet.album_id})
             OR (

@@ -973,6 +973,99 @@ describe('rotation_bin read-path fallback (dj-site#750)', () => {
     expect(track.rotation_id).toBeNull();
     expect(track.rotation_bin).toBeNull();
   });
+
+  test('rotation_bin stays NULL when flowsheet add_time precedes rotation add_date (retroactive; BS#1526)', async () => {
+    // BS#1526: the fallback must not retroactively badge a play that aired
+    // BEFORE the release entered rotation. POST /flowsheet stamps
+    // add_time = NOW(), so provision a rotation row with a FUTURE add_date
+    // (the mirror image of the historical retroactive case) and confirm the
+    // just-now play is not badged. Without the add_date lower bound this row's
+    // NULL kill_date makes it "active forever" and the play gets an 'H' badge.
+    const inserted = await sql`
+      INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title, add_date, kill_date)
+      VALUES (NULL, 'H', 'Future Artist', 'Future Album', (CURRENT_DATE + 30), NULL)
+      RETURNING id
+    `;
+    extraRotationIds.push(inserted[0].id);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Future Artist',
+        album_title: 'Future Album',
+        track_title: 'Premature Track',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Premature Track');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toBeNull();
+  });
+
+  test('rotation_bin populated when play falls inside the rotation window (past add_date, open kill_date; BS#1526)', async () => {
+    // Over-suppression guard: the new add_date lower bound must not drop a play
+    // that aired well inside the window — release added in the past, not yet
+    // killed. A just-now play sits strictly after add_date and before the open
+    // kill_date, so it stays badged.
+    const inserted = await sql`
+      INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title, add_date, kill_date)
+      VALUES (NULL, 'H', 'Inwindow Artist', 'Inwindow Album', '2024-01-01', NULL)
+      RETURNING id
+    `;
+    extraRotationIds.push(inserted[0].id);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Inwindow Artist',
+        album_title: 'Inwindow Album',
+        track_title: 'Inwindow Track',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Inwindow Track');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toEqual('H');
+  });
+
+  test('rotation_bin populated when rotation add_date equals flowsheet add_time date (inclusive same-day boundary; BS#1526)', async () => {
+    // Day-precision boundary: a play on the SAME day the release was added is
+    // still badged. The floor is inclusive (`add_date <= add_time::date`) — the
+    // safer direction at day precision, since a strict `<` would drop a play
+    // aired later the same day the release was added. Provision a row added
+    // today; the just-now play (add_time = NOW(), same calendar day) must badge.
+    const inserted = await sql`
+      INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title, add_date, kill_date)
+      VALUES (NULL, 'H', 'Sameday Artist', 'Sameday Album', CURRENT_DATE, NULL)
+      RETURNING id
+    `;
+    extraRotationIds.push(inserted[0].id);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Sameday Artist',
+        album_title: 'Sameday Album',
+        track_title: 'Sameday Track',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Sameday Track');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toEqual('H');
+  });
 });
 
 describe('Delete Flowsheet Entries', () => {
