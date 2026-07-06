@@ -508,7 +508,7 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
   'failed_no_retry',
 ]);
 
-// Provenance for `rotation.discogs_release_id` (BS#1029). Four values:
+// Provenance for `rotation.discogs_release_id` (BS#1029). Five values:
 //
 //   tubafrenzy_paste        — mirrored from tubafrenzy ROTATION_RELEASE
 //                             .DISCOGS_RELEASE_ID by `jobs/rotation-etl`,
@@ -542,6 +542,22 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
 //                             source-of-the-Discogs-id is library_identity
 //                             regardless of whether the lml mint succeeded
 //                             (BS#1380).
+//   md_verified             — written only by operator-run remediation
+//                             scripts after a human verified the release id
+//                             against Discogs (first use: the BS#1528 MD
+//                             pass over the #1517 audit's held rows, via
+//                             scripts/audit/bs_1528_md_remediation.py). No
+//                             runtime writer emits this value. The #1522
+//                             recurring auditor's default --sources scope
+//                             deliberately excludes it: these rows are
+//                             human-verified and score low on free-text
+//                             title similarity by construction (degenerate
+//                             references), so re-auditing them would only
+//                             re-flag known-good ids. rotation-etl's
+//                             flip-back CASE still supersedes it with
+//                             `tubafrenzy_paste` if tubafrenzy later
+//                             contributes a non-NULL id — a fresh MD paste
+//                             outranks an old MD verification.
 //
 // Column default is `tubafrenzy_paste` so existing pre-migration rows
 // (PG11+ `attmissingval` virtual default) and new rotation-etl inserts
@@ -556,6 +572,7 @@ export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_s
   'lml_offline_backfill',
   'discogs_direct_backfill',
   'library_identity',
+  'md_verified',
 ]);
 /**
  * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes

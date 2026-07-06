@@ -32,6 +32,14 @@ Trust-gated repoint (per the #1517 "repoint where unambiguous" decision):
 Read-only by default (--dry-run): resolves + prints the plan, no UPDATE.
 --execute: per-row guarded UPDATE (WHERE id=? AND discogs_release_id=<old>
 AND source='discogs_direct_backfill'), SELECT-after, per-row commit.
+
+Both UPDATE branches also clear `lml_identity_id` (BS#1380 invariant: an
+identity minted against the old id is stale once the effective
+discogs_release_id changes; a NULLed row with a stale identity also escapes
+the identity-mint sweep, whose predicate requires a non-NULL release id).
+NOTE: the 2026-07-06 run predates this clause and left stale identities on
+the 31 NULL-and-reset rows — the retroactive scrub lives in
+`bs_1528_md_remediation.py` (RETRO_SCRUB_IDS).
 """
 from __future__ import annotations
 
@@ -397,7 +405,8 @@ def main() -> int:
                     if action == "repoint":
                         cur.execute(
                             """UPDATE wxyc_schema.rotation
-                                  SET discogs_release_id = %s, discogs_release_id_source = 'lml_offline_backfill'
+                                  SET discogs_release_id = %s, discogs_release_id_source = 'lml_offline_backfill',
+                                      lml_identity_id = NULL
                                 WHERE id = %s AND discogs_release_id = %s
                                   AND discogs_release_id_source = 'discogs_direct_backfill'""",
                             (new_id, rid, old_id),
@@ -405,7 +414,8 @@ def main() -> int:
                     else:
                         cur.execute(
                             """UPDATE wxyc_schema.rotation
-                                  SET discogs_release_id = NULL, discogs_release_id_source = 'tubafrenzy_paste'
+                                  SET discogs_release_id = NULL, discogs_release_id_source = 'tubafrenzy_paste',
+                                      lml_identity_id = NULL
                                 WHERE id = %s AND discogs_release_id = %s
                                   AND discogs_release_id_source = 'discogs_direct_backfill'""",
                             (rid, old_id),
