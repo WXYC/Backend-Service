@@ -1,0 +1,14 @@
+{
+  "name": "@wxyc/rotation-release-id-pollution-check",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Weekly recurring rotation release-id pollution check (BS#1522): re-runs the #1517 audit scoring against prod and alerts per-rotation_id on mismatch + provenance anomalies",
+  "job-type": "cron",
+  "cron-schedule": "0 7 * * 1",
+  "scripts": {
+    "build": "echo 'python job: no compile step'",
+    "start": "python3 job.py",
+    "self-test": "python3 pollution_engine.py --self-test && python3 job.py --self-test",
+    "docker:build": "docker build -t wxyc_rotation_release_id_pollution_check:ci -f ../../Dockerfile.rotation-release-id-pollution-check ../../"
+  }
+}
