@@ -83,29 +83,48 @@ export const createHttpMirrorMiddleware =
     next();
   };
 
+/**
+ * Stash the UNPROJECTED row for the mirror before the controller sends the
+ * projected client response (BS#1513 / PR #1532). `tapJsonResponse` captures
+ * the HTTP body into `res.locals.mirrorData`, but the flowsheet mutation
+ * responses are projected through the client-facing allow-list — which strips
+ * `legacy_entry_id`, the column the flowsheet mirror's BS#908 loop guards and
+ * restart fallback read. Controllers call this with the raw service row; the
+ * tap then leaves the stashed value in place. The JSON round-trip reproduces
+ * the exact parsed-body shape the mirror handlers were built against (dates
+ * as ISO strings, `undefined` keys dropped).
+ */
+export function stashMirrorData(res: Response, row: unknown): void {
+  (res.locals as any).mirrorData = JSON.parse(JSON.stringify(row));
+}
+
 function tapJsonResponse(res: Response) {
   const origSend = res.send.bind(res);
 
   res.send = ((body?: any) => {
-    let captured: unknown = body;
+    // A controller may have pre-stashed the unprojected row via
+    // `stashMirrorData` (BS#1513); don't clobber it with the projected body.
+    if ((res.locals as any).mirrorData === undefined) {
+      let captured: unknown = body;
 
-    const ct = (res.getHeader('content-type') || '').toString().toLowerCase();
-    if (typeof body === 'string' && ct.includes('application/json')) {
-      try {
-        captured = JSON.parse(body);
-      } catch {
-        // ignore parse errors; keep raw string
+      const ct = (res.getHeader('content-type') || '').toString().toLowerCase();
+      if (typeof body === 'string' && ct.includes('application/json')) {
+        try {
+          captured = JSON.parse(body);
+        } catch {
+          // ignore parse errors; keep raw string
+        }
       }
-    }
 
-    if (Buffer.isBuffer(body) && ct.includes('application/json')) {
-      try {
-        captured = JSON.parse(body.toString('utf8'));
-      } catch {
-        /* ignore */
+      if (Buffer.isBuffer(body) && ct.includes('application/json')) {
+        try {
+          captured = JSON.parse(body.toString('utf8'));
+        } catch {
+          /* ignore */
+        }
       }
+      (res.locals as any).mirrorData = captured;
     }
-    (res.locals as any).mirrorData = captured;
     return origSend(body);
   }) as any;
 }
