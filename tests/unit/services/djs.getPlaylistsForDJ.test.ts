@@ -40,6 +40,7 @@ jest.mock('drizzle-orm', () => ({
 }));
 
 import { getPlaylistsForDJ } from '../../../apps/backend/services/djs.service';
+import { INTERNAL_FLOWSHEET_COLUMNS, makeFullFlowsheetRow } from '../../fixtures/flowsheet-row.fixture';
 
 const DJ_ID = 'dj-1';
 
@@ -141,51 +142,10 @@ describe('djs.service - getPlaylistsForDJ', () => {
     const showRows = makeShowRows(1);
     const djRows = makeDjsForShows(1);
     const specialtyRows = [{ id: 10, specialty_name: 'Jazz After Hours' }];
-    // A preview row carrying every internal column set to a truthy value.
-    const rawRow = {
-      id: 1,
-      show_id: 1,
-      album_id: 20,
-      rotation_id: 7,
-      entry_type: 'track',
-      track_title: 'la paradoja',
-      album_title: 'DOGA',
-      artist_name: 'Juana Molina',
-      record_label: 'Sonamos',
-      label_id: 3,
-      track_position: 'A1',
-      play_order: 1,
-      request_flag: false,
-      segue: true,
-      message: null,
-      add_time: new Date(),
-      radio_hour: null,
-      dj_name: 'DJ One',
-      artwork_url: 'https://example.com/art.jpg',
-      discogs_url: null,
-      release_year: 2022,
-      spotify_url: null,
-      apple_music_url: null,
-      youtube_music_url: null,
-      bandcamp_url: null,
-      soundcloud_url: null,
-      artist_bio: null,
-      artist_wikipedia_url: null,
-      metadata_status: 'enriched_match',
-      // Internal columns — must be stripped from the peek preview.
-      updated_at: new Date(),
-      enriching_since: new Date(),
-      metadata_attempt_at: new Date(),
-      legacy_link_attempted_at: new Date(),
-      linkage_source: 'lml_high_confidence',
-      linkage_confidence: 0.98,
-      linked_at: new Date(),
-      composer: 'Juana Molina',
-      composer_source: 'artist_proxy',
-      legacy_entry_id: 9999,
-      legacy_release_id: 8888,
-      search_doc: "'juana':1A",
-    };
+    // A preview row carrying every internal column set to a truthy value —
+    // shared with the projector and controller leak suites
+    // (tests/fixtures/flowsheet-row.fixture.ts).
+    const rawRow = makeFullFlowsheetRow({ id: 1, show_id: 1, play_order: 1, dj_name: 'DJ One' });
 
     queryResults.push(showDjRows);
     queryResults.push(showRows);
@@ -196,20 +156,7 @@ describe('djs.service - getPlaylistsForDJ', () => {
     const result = await getPlaylistsForDJ(DJ_ID);
 
     const previewRow = result[0].preview[0] as Record<string, unknown>;
-    for (const internalKey of [
-      'search_doc',
-      'updated_at',
-      'enriching_since',
-      'metadata_attempt_at',
-      'legacy_link_attempted_at',
-      'linkage_source',
-      'linkage_confidence',
-      'linked_at',
-      'composer',
-      'composer_source',
-      'legacy_entry_id',
-      'legacy_release_id',
-    ]) {
+    for (const internalKey of INTERNAL_FLOWSHEET_COLUMNS) {
       expect(previewRow).not.toHaveProperty(internalKey);
     }
     // Client-facing fields survive.

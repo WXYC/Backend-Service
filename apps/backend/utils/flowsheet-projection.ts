@@ -7,8 +7,8 @@ import type { FSEntry } from '@wxyc/database';
  * `flowsheet` row straight to clients:
  *   - the mutation handlers (`addEntry` / `deleteEntry` / `updateEntry` /
  *     `changeOrder`) returned the Drizzle `.returning()` row;
- *   - the DJ peek/playlist (`djs.service` `getPlaylistsForDJ` / `getPlaylist`)
- *     returned `db.select().from(flowsheet)` rows.
+ *   - the DJ peek (`djs.service` `getPlaylistsForDJ`) returned
+ *     `db.select().from(flowsheet)` rows.
  *
  * Both bypassed the V2 read-path projection (`FSEntryFieldsRaw` + `transformToV2`),
  * so internal-only columns rode client-facing payloads — search internals, the
