@@ -263,6 +263,32 @@ describe('End Show', () => {
       .expect(200);
   });
 
+  test('Non-member with valid write auth cannot end the show (BS#1533)', async () => {
+    // showMemberMiddleware runs for real in the integration env — the
+    // AUTH_BYPASS short-circuit is development-only post-BS#1533. The
+    // secondary DJ never joined this show, so the outermost guard must 400
+    // before the mirror or controller run. This is the contract protecting
+    // a live human DJ's show from an Auto-DJ recovery end()
+    // (WXYC/auto-dj-orchestrator#13).
+    const res = await request
+      .post('/flowsheet/end')
+      .set('Authorization', global.secondary_access_token)
+      .send({
+        dj_id: global.secondary_dj_id,
+      })
+      .expect(400);
+    expect(res.body.message).toBe('Bad Request: DJ not a member of show');
+
+    // The show must remain open: the primary DJ still reads as on air,
+    // which requires shows.end_time to still be null.
+    const onAir = await request
+      .get('/flowsheet/on-air')
+      .query({ dj_id: global.primary_dj_id })
+      .set('Authorization', global.access_token)
+      .expect(200);
+    expect(onAir.body.is_live).toBe(true);
+  });
+
   test('No Active Show Session', async () => {
     // End active show
     await request.post('/flowsheet/end').set('Authorization', global.access_token).send({
@@ -271,8 +297,9 @@ describe('End Show', () => {
 
     // Secondary DJ attempts to /flowsheet/end after the show is over.
     // BS#1102: dj_id must match the authenticated caller, so the secondary
-    // DJ has to send their own Bearer to get past the auth check; the
-    // 400 then comes from "No active show".
+    // DJ has to send their own Bearer to get past the auth check. With no
+    // active show the 400 comes from showMemberMiddleware (empty member
+    // list — the middleware runs for real in this env post-BS#1533).
     const res = await request
       .post('/flowsheet/end')
       .set('Authorization', global.secondary_access_token)
@@ -336,6 +363,8 @@ describe('Leave Show', () => {
 
     // Secondary DJ attempts to /flowsheet/end the (now-ended) show. BS#1102
     // requires the secondary's own Bearer for the dj_id=auth.id cross-check.
+    // With no active show the 400 comes from showMemberMiddleware's empty
+    // member list (the middleware runs for real in this env post-BS#1533).
     const res = await request
       .post('/flowsheet/end')
       .set('Authorization', global.secondary_access_token)
@@ -1297,6 +1326,36 @@ describe('On Air Status', () => {
       expect(res.body).toBeDefined();
       expect(res.body.id).toBe(global.primary_dj_id);
       expect(res.body.is_live).toBe(true);
+
+      // Clean up
+      await fls_util.leave_show(global.primary_dj_id, global.access_token);
+    });
+
+    test('returns false for a real DJ who is not in the active show (BS#1533)', async () => {
+      // The dj-scoping contract the Auto-DJ orchestrator's restart-recovery
+      // probe depends on (WXYC/auto-dj-orchestrator#13): another DJ's live
+      // show must not read as "on air" for a DJ who is not in it. A
+      // regression that answered "any show is on air" would pass the other
+      // tests in this block but not this one.
+      await fls_util.join_show(global.primary_dj_id, global.access_token);
+
+      const res = await request
+        .get('/flowsheet/on-air')
+        .query({ dj_id: global.secondary_dj_id })
+        .set('Authorization', global.access_token)
+        .expect(200);
+
+      expect(res.body.id).toBe(global.secondary_dj_id);
+      expect(res.body.is_live).toBe(false);
+
+      // Same probe for the DJ who IS in the show, pinning the discrimination
+      // within a single show lifetime (not just "everything reads false").
+      const primaryRes = await request
+        .get('/flowsheet/on-air')
+        .query({ dj_id: global.primary_dj_id })
+        .set('Authorization', global.access_token)
+        .expect(200);
+      expect(primaryRes.body.is_live).toBe(true);
 
       // Clean up
       await fls_util.leave_show(global.primary_dj_id, global.access_token);

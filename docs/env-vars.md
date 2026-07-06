@@ -62,7 +62,7 @@ The Backend container does not call SES, so no additional AWS credentials are ne
 
 ## Testing
 
-- `AUTH_BYPASS` — Set `true` to skip JWT verification in tests
+- `AUTH_BYPASS` — Set `true` to skip JWT verification in tests. Honored only when `NODE_ENV` is `development` or `test` (positive-list gate, BS#1097). Note: `showMemberMiddleware`'s bypass is narrower — `development` only (BS#1533) — so show-membership checks run for real in the integration env; the auth bypass still populates `req.auth.id` from the Bearer (JWT decode or raw user-id fallback), which is what the membership check reads.
 - `AUTH_USERNAME`, `AUTH_PASSWORD` — Test account credentials (when `AUTH_BYPASS=false`)
 - `TEST_HOST` — Test server host
 
