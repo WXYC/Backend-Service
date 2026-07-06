@@ -1222,9 +1222,9 @@ describe('flowsheet.controller', () => {
       soundcloud_url: null,
       artist_bio: 'Argentine musician.',
       artist_wikipedia_url: null,
+      metadata_status: 'enriched_match',
       // Internal columns — must never reach the client.
       updated_at: new Date(),
-      metadata_status: 'enriched_match',
       enriching_since: new Date(),
       metadata_attempt_at: new Date(),
       legacy_link_attempted_at: new Date(),
@@ -1241,7 +1241,6 @@ describe('flowsheet.controller', () => {
     const INTERNAL_KEYS = [
       'search_doc',
       'updated_at',
-      'metadata_status',
       'enriching_since',
       'metadata_attempt_at',
       'legacy_link_attempted_at',
@@ -1270,6 +1269,9 @@ describe('flowsheet.controller', () => {
         artist_name: 'Juana Molina',
         track_title: 'la paradoja',
         artwork_url: 'https://example.com/art.jpg',
+        // Client-facing per the FlowsheetEntryResponse SSOT (see the
+        // flowsheet-projection unit test for the full rationale).
+        metadata_status: 'enriched_match',
       });
     };
 

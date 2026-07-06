@@ -27,10 +27,6 @@ import type { FSEntry } from '@wxyc/database';
  *   - `search_doc`            — STORED GENERATED tsvector, search hot path only
  *   - `updated_at`            — row watermark (conditional-GET reads the sibling
  *                               `flowsheet_watermark` table, never this column)
- *   - `metadata_status`       — enrichment lifecycle; surfaced on the V2 *read*
- *                               wire (`transformToV2`) for iOS branch logic, but
- *                               always `'pending'` on a fresh mutation echo and
- *                               unread by write-side consumers
  *   - `enriching_since`       — enrichment claim timestamp
  *   - `metadata_attempt_at`   — metadata-backfill marker
  *   - `legacy_link_attempted_at` — broken-FK-recovery marker
@@ -38,6 +34,14 @@ import type { FSEntry } from '@wxyc/database';
  *   - `composer` / `composer_source` — BS#1499 write-only BMI export columns
  *   - `legacy_entry_id` / `legacy_release_id` — tubafrenzy surrogate keys /
  *                               mirror loop-guard; never on the V2 client wire
+ *
+ * `metadata_status` IS retained — a deliberate deviation from #1513's AC
+ * wording (PR #1532 review): the wxyc-shared api.yaml SSOT declares it on
+ * `FlowsheetEntryResponse` (the documented 200 of all four mutation endpoints),
+ * `transformToV2` emits it on V2 track reads for iOS branch logic
+ * (wxyc-ios-64#270), and `LiveFsUpdateEvent` requires it. The internal aspect
+ * is write-protection — `pickUpdateEntryFields` blocks clients from *setting*
+ * it — not read visibility.
  *
  * The retained set mirrors the flat descriptive fields the V2 wire already
  * carries (plus the inline metadata columns), so `dj-site`'s `convertV2Entry`
@@ -62,6 +66,7 @@ export const CLIENT_FACING_FLOWSHEET_COLUMNS = [
   'add_time',
   'radio_hour',
   'dj_name',
+  'metadata_status',
   'artwork_url',
   'discogs_url',
   'release_year',
@@ -103,6 +108,7 @@ export function projectFlowsheetEntry(row: FSEntry): ClientFacingFSEntry {
     add_time: row.add_time,
     radio_hour: row.radio_hour,
     dj_name: row.dj_name,
+    metadata_status: row.metadata_status,
     artwork_url: row.artwork_url,
     discogs_url: row.discogs_url,
     release_year: row.release_year,

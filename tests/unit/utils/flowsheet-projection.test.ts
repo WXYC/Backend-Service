@@ -20,7 +20,6 @@ import {
 const INTERNAL_COLUMNS = [
   'search_doc',
   'updated_at',
-  'metadata_status',
   'enriching_since',
   'metadata_attempt_at',
   'legacy_link_attempted_at',
@@ -129,6 +128,18 @@ describe('projectFlowsheetEntry (BS#1513)', () => {
     ] as const) {
       expect(projected).toHaveProperty(key);
     }
+  });
+
+  it('keeps metadata_status — client-facing per the SSOT, not internal', () => {
+    // Deliberate deviation from #1513's AC wording (PR #1532 review):
+    // `FlowsheetEntryResponse` in wxyc-shared/api.yaml declares metadata_status
+    // on the documented 200 of all four mutation endpoints, transformToV2
+    // emits it on V2 track reads for iOS branch logic (wxyc-ios-64#270), and
+    // LiveFsUpdateEvent requires it. The internal aspect is write-protection
+    // (pickUpdateEntryFields blocks clients from SETTING it), not read
+    // visibility.
+    const projected = projectFlowsheetEntry(makeFullRow());
+    expect(projected.metadata_status).toBe('enriched_match');
   });
 
   it('does not mutate the input row', () => {

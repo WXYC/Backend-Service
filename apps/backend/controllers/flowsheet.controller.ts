@@ -57,6 +57,11 @@ export interface IFSEntryMetadata {
 // BMI export-successor (#1500) to read directly off flowsheet rows. They are
 // deliberately NOT projected onto the V2 wire format, so they're excluded here
 // alongside the other internal markers.
+//
+// Sibling allow-list: the mutation/peek echoes project through
+// CLIENT_FACING_FLOWSHEET_COLUMNS in ../utils/flowsheet-projection.ts (BS#1513).
+// A new client-facing column must be added there too, or the POST/PATCH/DELETE
+// echoes and the DJ peek won't carry it.
 export interface IFSEntry extends Omit<
   FSEntry,
   'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at' | 'updated_at' | 'composer' | 'composer_source'
@@ -480,10 +485,6 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
 export interface ShowMetadata extends Show {
   specialty_show_name: string;
   show_djs: { id: string | null; dj_name: string | null }[];
-}
-
-export interface ShowInfo extends ShowMetadata {
-  entries: FSEntry[];
 }
 
 export const getShowInfo: RequestHandler<object, unknown, object, { show_id: string }> = async (req, res) => {

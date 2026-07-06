@@ -20,7 +20,7 @@ import {
   specialty_shows,
   album_metadata,
 } from '@wxyc/database';
-import { IFSEntry, ShowInfo, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
+import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 /**
@@ -105,6 +105,10 @@ export const getLastModifiedAt = async (): Promise<Date> => {
 };
 
 // SQL query fields (flat structure from database)
+//
+// Adding a client-facing column here (or emitting it in transformToV2)? Also
+// add it to CLIENT_FACING_FLOWSHEET_COLUMNS in ../utils/flowsheet-projection.ts
+// (BS#1513), or the mutation/peek echoes won't carry it.
 const FSEntryFieldsRaw = {
   id: flowsheet.id,
   show_id: flowsheet.show_id,
@@ -964,18 +968,6 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> =>
     ...show[0],
     specialty_show_name: specialty_show_name,
     show_djs: showDJs,
-  };
-};
-
-export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
-  const [metadata, entries] = await Promise.all([
-    getShowMetadata(show_id),
-    db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id)),
-  ]);
-
-  return {
-    ...metadata,
-    entries,
   };
 };
 

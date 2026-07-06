@@ -171,9 +171,9 @@ describe('djs.service - getPlaylistsForDJ', () => {
       soundcloud_url: null,
       artist_bio: null,
       artist_wikipedia_url: null,
+      metadata_status: 'enriched_match',
       // Internal columns — must be stripped from the peek preview.
       updated_at: new Date(),
-      metadata_status: 'enriched_match',
       enriching_since: new Date(),
       metadata_attempt_at: new Date(),
       legacy_link_attempted_at: new Date(),
@@ -199,7 +199,6 @@ describe('djs.service - getPlaylistsForDJ', () => {
     for (const internalKey of [
       'search_doc',
       'updated_at',
-      'metadata_status',
       'enriching_since',
       'metadata_attempt_at',
       'legacy_link_attempted_at',
@@ -219,6 +218,9 @@ describe('djs.service - getPlaylistsForDJ', () => {
       entry_type: 'track',
       artist_name: 'Juana Molina',
       track_title: 'la paradoja',
+      // Client-facing per the FlowsheetEntryResponse SSOT (see the
+      // flowsheet-projection unit test for the full rationale).
+      metadata_status: 'enriched_match',
     });
   });
 
