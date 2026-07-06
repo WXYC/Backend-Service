@@ -16,7 +16,7 @@ import {
   user,
 } from '@wxyc/database';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
-import { projectFlowsheetEntry, ClientFacingFSEntry } from '../utils/flowsheet-projection.js';
+import { projectFlowsheetEntry, type ClientFacingFSEntry } from '../utils/flowsheet-projection.js';
 
 export const addToBin = async (bin_entry: NewBinEntry): Promise<BinEntry> => {
   const added_bin_entry = await db.insert(bins).values(bin_entry).returning();
