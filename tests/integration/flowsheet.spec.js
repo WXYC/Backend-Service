@@ -266,15 +266,29 @@ describe('End Show', () => {
   test('Non-member with valid write auth cannot end the show (BS#1533)', async () => {
     // showMemberMiddleware runs for real in the integration env — the
     // AUTH_BYPASS short-circuit is development-only post-BS#1533. The
-    // secondary DJ never joined this show, so the outermost guard must 400
+    // secondary DJ never joined this show, so showMemberMiddleware must 400
     // before the mirror or controller run. This is the contract protecting
     // a live human DJ's show from an Auto-DJ recovery end()
     // (WXYC/auto-dj-orchestrator#13).
+    //
+    // dj_id is the PRIMARY's id on purpose, so this test actually pins the
+    // middleware. If it were the secondary's own id, reverting the BS#1533
+    // gate would still yield a byte-identical 400: the request would fall
+    // through to the controller (dj_id === auth.id passes the BS#1102 check),
+    // take the co-host leaveShow branch, and flowsheet.service.leaveShow would
+    // throw the same 'DJ not a member of show' 400 on its 0-row UPDATE — so the
+    // assertion could not distinguish "middleware fired" from "middleware
+    // bypassed". Naming the primary makes the two states diverge: with the
+    // middleware present it 400s here (secondary is not a member, checked ahead
+    // of the controller); on a gate revert the controller's BS#1102 guard fires
+    // instead with a 403 (dj_id=primary !== auth.id=secondary — the same path
+    // the 'Forbidden when dj_id does not match' test below pins), failing this
+    // assertion and surfacing the regression.
     const res = await request
       .post('/flowsheet/end')
       .set('Authorization', global.secondary_access_token)
       .send({
-        dj_id: global.secondary_dj_id,
+        dj_id: global.primary_dj_id,
       })
       .expect(400);
     expect(res.body.message).toBe('Bad Request: DJ not a member of show');
@@ -300,6 +314,8 @@ describe('End Show', () => {
     // DJ has to send their own Bearer to get past the auth check. With no
     // active show the 400 comes from showMemberMiddleware (empty member
     // list — the middleware runs for real in this env post-BS#1533).
+    // Pin the exact message: on a gate revert the controller's "No active
+    // show session found." 400 fires instead, so this discriminates the two.
     const res = await request
       .post('/flowsheet/end')
       .set('Authorization', global.secondary_access_token)
@@ -307,7 +323,7 @@ describe('End Show', () => {
         dj_id: global.secondary_dj_id,
       })
       .expect(400);
-    expect(res.body.message).toBeDefined();
+    expect(res.body.message).toBe('Bad Request: DJ not a member of show');
   });
 });
 
@@ -365,6 +381,8 @@ describe('Leave Show', () => {
     // requires the secondary's own Bearer for the dj_id=auth.id cross-check.
     // With no active show the 400 comes from showMemberMiddleware's empty
     // member list (the middleware runs for real in this env post-BS#1533).
+    // Pin the exact message: on a gate revert the controller's "No active
+    // show session found." 400 fires instead, so this discriminates the two.
     const res = await request
       .post('/flowsheet/end')
       .set('Authorization', global.secondary_access_token)
@@ -372,7 +390,7 @@ describe('Leave Show', () => {
         dj_id: global.secondary_dj_id,
       })
       .expect(400);
-    expect(res.body.message).toBeDefined();
+    expect(res.body.message).toBe('Bad Request: DJ not a member of show');
   });
 });
 
