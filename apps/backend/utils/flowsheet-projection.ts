@@ -121,3 +121,24 @@ export function projectFlowsheetEntry(row: FSEntry): ClientFacingFSEntry {
     artist_wikipedia_url: row.artist_wikipedia_url,
   };
 }
+
+/**
+ * JSON-tolerant sibling of {@link projectFlowsheetEntry} for flowsheet rows
+ * that arrive as parsed JSON rather than a typed `FSEntry` — notably the CDC
+ * `to_jsonb(NEW)` payload the anonymous `liveFs:update` SSE broadcast forwards
+ * (BS#1534), where dates are ISO strings and the static `FSEntry` shape doesn't
+ * apply. It loops the same `CLIENT_FACING_FLOWSHEET_COLUMNS` allow-list — one
+ * list, zero drift with the typed projector — and copies only the columns
+ * actually present on the row, so a partial row is not padded with invented
+ * keys. Values pass through untouched (an ISO-string date stays an ISO string).
+ */
+export function pickClientFacingColumns(row: Record<string, unknown>): Record<string, unknown> {
+  const projected: Record<string, unknown> = {};
+  for (const column of CLIENT_FACING_FLOWSHEET_COLUMNS) {
+    if (Object.hasOwn(row, column)) {
+      // eslint-disable-next-line security/detect-object-injection -- keys are the fixed allow-list const, not caller input
+      projected[column] = row[column];
+    }
+  }
+  return projected;
+}

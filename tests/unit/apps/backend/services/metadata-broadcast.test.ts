@@ -12,6 +12,7 @@
  */
 
 import type { CdcEvent } from '@wxyc/database';
+import { INTERNAL_FLOWSHEET_COLUMNS, makeFullFlowsheetRow } from '../../../../fixtures/flowsheet-row.fixture';
 
 jest.mock('@sentry/node', () => ({
   captureException: jest.fn(),
@@ -50,18 +51,26 @@ const flowsheetUpdate = (overrides: Partial<Record<string, unknown>> = {}): CdcE
 describe('filterMetadataUpdate (BS#892 PR-2)', () => {
   // Pre-BS-2 payload was `{id, metadata_status}` — dj-site's listener
   // middleware would patch only those two fields and rely on the rest
-  // already being in the local cache. BS-2 inlines the full row so
-  // newly-mounted clients (a /live viewer that just opened the page) can
-  // surface metadata-enriched fields like `artwork_url` without a follow-up
-  // GET. The wxyc-shared `LiveFsUpdateEvent` contract pins this shape.
+  // already being in the local cache. BS-2 inlined the row so newly-mounted
+  // clients (a /live viewer that just opened the page) can surface
+  // metadata-enriched fields like `artwork_url` without a follow-up GET.
+  // BS#1534 projects that row through the CLIENT_FACING_FLOWSHEET_COLUMNS
+  // allow-list before it hits the anonymous SSE stream: the payload stays
+  // rich enough to cache-patch (the `LiveFsUpdateEvent` contract), but the
+  // internal columns (search_doc, composer, legacy_*, linkage_*, …) that the
+  // raw CDC `to_jsonb(NEW)` row carried no longer ride the public broadcast.
 
-  it('returns the full row data as the payload (BS-2)', () => {
+  it('projects the client-facing row as the payload, dropping internal columns (BS#1534)', () => {
     const event = flowsheetUpdate({
       artist_name: 'Juana Molina',
       album_title: 'DOGA',
       track_title: 'la paradoja',
       record_label: 'Sonamos',
       artwork_url: 'https://example.com/doga.jpg',
+      // Internal columns present on the raw CDC row — must be stripped.
+      search_doc: "'juana':1A",
+      composer: 'Juana Molina',
+      legacy_entry_id: 9999,
     });
     expect(filterMetadataUpdate(event)).toEqual({
       id: 42,
@@ -71,6 +80,27 @@ describe('filterMetadataUpdate (BS#892 PR-2)', () => {
       track_title: 'la paradoja',
       record_label: 'Sonamos',
       artwork_url: 'https://example.com/doga.jpg',
+    });
+  });
+
+  it('strips every internal column and keeps every client column from a full CDC row (BS#1534)', () => {
+    // The shared leak fixture carries all 12 internal columns truthy alongside
+    // the client set — same fixture the mutation/peek leak suites use, so a new
+    // internal column is covered here from the one update site.
+    const payload = filterMetadataUpdate(flowsheetUpdate(makeFullFlowsheetRow()));
+    expect(payload).not.toBeNull();
+    for (const internalKey of INTERNAL_FLOWSHEET_COLUMNS) {
+      expect(payload).not.toHaveProperty(internalKey);
+    }
+    // A representative slice of client-facing columns survives, including the
+    // enrichment fields the SSE consumer exists to receive.
+    expect(payload).toMatchObject({
+      id: 42,
+      metadata_status: 'enriched_match',
+      artist_name: 'Juana Molina',
+      album_title: 'DOGA',
+      artwork_url: 'https://example.com/art.jpg',
+      release_year: 2022,
     });
   });
 
