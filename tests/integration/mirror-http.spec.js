@@ -147,3 +147,77 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
     }
   });
 });
+
+/**
+ * BS#1119: POST /flowsheet/end serves leave semantics too — a guest-DJ leave
+ * returns a ShowDJ, not a Show, through the same route. The endShow mirror
+ * must not sign off (or run any endShow logic) on that payload. The
+ * primary-plus-guest fixture here is the one BS#1533's dj-scoping tests want.
+ */
+describe('endShow mirror shape guard on guest-DJ leave (BS#1119)', () => {
+  const isSignoff = (r) => r.method === 'POST' && r.path.includes('/api/radioShow/signoff');
+
+  afterEach(async () => {
+    if (!mockApiAvailable) return;
+    // Best-effort cleanup so a mid-test failure can't leak an open show into
+    // later specs (suite runs --runInBand against shared show state).
+    await fls_util.leave_show(global.secondary_dj_id, global.secondary_access_token);
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('guest-DJ leave does not sign off the show; primary end signs off once', async () => {
+    if (!mockApiAvailable) return;
+
+    await resetMockApi();
+
+    // Primary A starts the show, guest B joins as co-host
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+    await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token);
+
+    const addRes = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+      })
+      .expect(201);
+    const entryId = addRes.body.id;
+
+    // Let join/add mirror traffic flush, then observe only the leave
+    await new Promise((r) => setTimeout(r, 300));
+    await resetMockApi();
+
+    // Guest B calls /flowsheet/end — leave semantics, controller returns ShowDJ
+    const leaveRes = await fls_util.leave_show(global.secondary_dj_id, global.secondary_access_token);
+    expect(leaveRes.status).toBe(200);
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    // (a) No signoff reached tubafrenzy
+    const afterLeave = await getMockRequests('tubafrenzy');
+    expect(afterLeave.filter(isSignoff)).toHaveLength(0);
+
+    // (b) The show is still live for primary A
+    const onAirRes = await request.get('/flowsheet/on-air').query({ dj_id: global.primary_dj_id }).expect(200);
+    expect(onAirRes.body.is_live).toBe(true);
+
+    // (c) The prior flowsheet entry is untouched
+    const entriesRes = await request.get('/flowsheet').query({ limit: 10 }).expect(200);
+    const entry = entriesRes.body.entries.find((e) => e.id === entryId);
+    expect(entry).toBeDefined();
+    expect(entry.track_title).toBe('la paradoja');
+    expect(entry.artist_name).toBe('Juana Molina');
+
+    // Positive control: primary A ends the show → exactly one signoff
+    await resetMockApi();
+    const endRes = await fls_util.leave_show(global.primary_dj_id, global.access_token);
+    expect(endRes.status).toBe(200);
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    const afterEnd = await getMockRequests('tubafrenzy');
+    expect(afterEnd.filter(isSignoff)).toHaveLength(1);
+  });
+});
