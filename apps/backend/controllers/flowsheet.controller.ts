@@ -6,6 +6,7 @@ import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/datab
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import { projectFlowsheetEntry } from '../utils/flowsheet-projection.js';
+import { stashMirrorData } from '../middleware/legacy/mirror.middleware.js';
 import WxycError from '../utils/error.js';
 
 export type QueryParams = {
@@ -196,6 +197,9 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       dj_name,
     };
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+    // The legacy mirror consumes the tapped response body; hand it the raw
+    // row so its legacy_entry_id loop guards keep working (BS#1513/BS#908).
+    stashMirrorData(res, completedEntry);
     res.status(201).json(projectFlowsheetEntry(completedEntry));
     return;
   }
@@ -244,6 +248,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+    stashMirrorData(res, completedEntry);
     res.status(201).json(projectFlowsheetEntry(completedEntry));
   } else if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
     throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
@@ -273,6 +278,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+    stashMirrorData(res, completedEntry);
     res.status(201).json(projectFlowsheetEntry(completedEntry));
   }
 };
@@ -283,7 +289,15 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
     throw new WxycError('Bad Request, Missing entry identifier: entry_id', 400);
   }
 
-  const removedEntry: FSEntry = await flowsheet_service.removeTrack(entry_id);
+  const removedEntry = await flowsheet_service.removeTrack(entry_id);
+  // `.returning()` matched no row (double delete / already-gone id). Pre-#1532
+  // this serialized as a misleading 200-with-empty-body; projecting undefined
+  // would be a bare TypeError -> 500 (the BS#1271 class). 404 is the honest
+  // answer, matching changeOrder's existing missing-row behavior.
+  if (!removedEntry) {
+    throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
+  }
+  stashMirrorData(res, removedEntry);
   res.status(200).json(projectFlowsheetEntry(removedEntry));
 };
 
@@ -341,7 +355,13 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
     throw new WxycError('Bad Request, Missing entry identifier: entry_id', 400);
   }
 
-  const updatedEntry: FSEntry = await flowsheet_service.updateEntry(entry_id, pickUpdateEntryFields(data ?? {}));
+  const updatedEntry = await flowsheet_service.updateEntry(entry_id, pickUpdateEntryFields(data ?? {}));
+  // UPDATE matched no row (entry deleted out from under the edit). See the
+  // 404 rationale on deleteEntry above.
+  if (!updatedEntry) {
+    throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
+  }
+  stashMirrorData(res, updatedEntry);
   res.status(200).json(projectFlowsheetEntry(updatedEntry));
 };
 
@@ -476,6 +496,12 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   const release = await orderMutex.acquire();
   try {
     const updatedEntry = await flowsheet_service.changeOrder(entry_id, new_position);
+    // The service 404s when the entry is missing at transaction start, but its
+    // confirmation read runs post-commit — a concurrent delete landing in that
+    // window returns undefined. See the 404 rationale on deleteEntry above.
+    if (!updatedEntry) {
+      throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
+    }
     res.status(200).json(projectFlowsheetEntry(updatedEntry));
   } finally {
     release();

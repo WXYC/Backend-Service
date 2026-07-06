@@ -495,7 +495,9 @@ export const addTrack = async (entry: Omit<NewFSEntry, 'play_order'>): Promise<F
   return response[0];
 };
 
-export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
+// Returns undefined when no row matches entry_id (double delete / stale id);
+// the controller maps that to a 404 (PR #1532 review).
+export const removeTrack = async (entry_id: number): Promise<FSEntry | undefined> => {
   /*
     TODO: logic for updating album playcount
    */
@@ -552,7 +554,9 @@ function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null |
   return qb;
 }
 
-export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry> => {
+// Returns undefined when the UPDATE matches no row (entry deleted out from
+// under the edit); the controller maps that to a 404 (PR #1532 review).
+export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry | undefined> => {
   // Defense in depth (BS#1099): construct the update object from named
   // fields so even if a future controller starts passing the raw body,
   // mass-assignment of internal columns (metadata_status, legacy_entry_id,
@@ -881,7 +885,11 @@ export const getAlbumFromDB = async (album_id: number) => {
 
 // We use entry_id in order to avoid a race condition here.
 // Using the id ensures we are pointing to a specific entry.
-export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry> => {
+// Returns undefined when the post-commit confirmation read finds the row gone
+// (a concurrent delete landed after the reorder transaction committed); the
+// controller maps that to a 404 (PR #1532 review). A missing row at
+// transaction START still throws the 404 WxycError inside the transaction.
+export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry | undefined> => {
   await db.transaction(
     async (trx) => {
       const result = await trx
