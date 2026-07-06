@@ -12,6 +12,9 @@ const { isMockApiAvailable, resetMockApi, getMockRequests, simulateError } = req
  *
  * NOTE: Mirror is ON by default when POSTHOG_API_KEY is unset (CI case).
  * Uses secondary_dj_id to avoid conflicts with other flowsheet tests.
+ * Mutations must use secondary_access_token: showMemberMiddleware runs for
+ * real in this env (BS#1533), so the caller has to be a member of the show
+ * this suite joins as the secondary DJ.
  */
 
 let mockApiAvailable = false;
@@ -41,7 +44,7 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
 
     await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         artist_name: 'Autechre',
         album_title: 'Confield',
@@ -67,7 +70,7 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
 
     await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         artist_name: 'Jessica Pratt',
         album_title: 'On Your Own Love Again',
@@ -92,7 +95,7 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
 
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         artist_name: 'Chuquimamani-Condori',
         album_title: 'Edits',
@@ -109,7 +112,7 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
 
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         artist_name: 'Autechre',
         album_title: 'Confield',
@@ -126,7 +129,7 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
     // Update the entry
     await request
       .patch('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         entry_id: entryId,
         data: { track_title: 'Cfern (Updated)' },

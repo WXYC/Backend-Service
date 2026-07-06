@@ -77,16 +77,20 @@ describe('showMemberMiddleware', () => {
       expect(next).not.toHaveBeenCalled();
     });
 
-    it('short-circuits when AUTH_BYPASS=true and NODE_ENV=test', async () => {
+    it('does NOT short-circuit when AUTH_BYPASS=true and NODE_ENV=test (BS#1533)', async () => {
+      // The integration env runs with AUTH_BYPASS=true + NODE_ENV=test; the
+      // membership check must run for real there so the deployed middleware
+      // chain is exercised. Only NODE_ENV=development keeps the hatch.
       process.env.AUTH_BYPASS = 'true';
       process.env.NODE_ENV = 'test';
+      mockGetDJsInCurrentShow.mockResolvedValue([{ id: 'dj-alice' }]);
 
       const { req, res, next, statusMock } = createMockReqResNext('dj-charlie');
 
       await showMemberMiddleware(req, res, next);
 
-      expect(next).toHaveBeenCalled();
-      expect(statusMock).not.toHaveBeenCalled();
+      expect(statusMock).toHaveBeenCalledWith(400);
+      expect(next).not.toHaveBeenCalled();
     });
 
     it('short-circuits when AUTH_BYPASS=true and NODE_ENV=development', async () => {
