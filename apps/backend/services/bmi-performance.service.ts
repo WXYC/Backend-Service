@@ -223,11 +223,14 @@ export function summarizeCoverage(rows: BmiPerformanceRow[]): BmiCoverage {
  * Read the played works in the window: `flowsheet` track rows with a usable
  * artist, `add_time` inside `[fromDate, toExclusive)`, ordered chronologically.
  * `entry_type = 'track'` excludes breakpoints/talksets/marker rows. The artist
- * guard drops malformed rows with no artist — both NULL and empty/whitespace-only,
- * since the live free-text insert path (flowsheet.controller.ts) only rejects an
- * absent `artist_name`, so a blank one is writable. Mirrors the stricter sibling
- * read `coalesce(artist_name,'') <> ''` (flowsheet.service.ts). Read-only — no
- * mutation, matching the `exportCatalog` read pattern.
+ * guard drops malformed rows with no usable artist — NULL, empty, and
+ * whitespace-only — via `~ '[^[:space:]]'` (has at least one non-whitespace
+ * char). The live free-text insert path (flowsheet.controller.ts) only rejects an
+ * absent `artist_name`, so a blank or whitespace one is writable. This is stricter
+ * than the sibling read `coalesce(artist_name,'') <> ''` (flowsheet.service.ts),
+ * which drops only NULL/empty; the regex additionally catches tabs/newlines that a
+ * `trim()`-and-compare would leave through. Read-only — no mutation, matching the
+ * `exportCatalog` read pattern.
  */
 export async function getBmiPerformanceRows(range: BmiDateRange): Promise<BmiPerformanceRow[]> {
   const rows = await db
@@ -244,7 +247,7 @@ export async function getBmiPerformanceRows(range: BmiDateRange): Promise<BmiPer
     .where(
       and(
         eq(flowsheet.entry_type, 'track'),
-        sql`coalesce(trim(${flowsheet.artist_name}), '') <> ''`,
+        sql`coalesce(${flowsheet.artist_name}, '') ~ '[^[:space:]]'`,
         gte(flowsheet.add_time, range.fromDate),
         lt(flowsheet.add_time, range.toExclusive)
       )

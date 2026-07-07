@@ -128,6 +128,11 @@ describe('bmi-performance.service: projectBmiRow', () => {
 });
 
 describe('bmi-performance.service: summarizeCoverage', () => {
+  // Restore any console.warn spy even if an assertion in a test throws first — the unit
+  // config sets clearMocks (call data) but not restoreMocks (original impl), so without
+  // this a thrown assertion would leave console.warn stubbed for the rest of the worker.
+  afterEach(() => jest.restoreAllMocks());
+
   const row = (composer_source: string | null, composer: string | null): BmiPerformanceRow => ({
     artist_name: 'Jessica Pratt',
     track_title: 'Back, Baby',
@@ -175,7 +180,7 @@ describe('bmi-performance.service: summarizeCoverage', () => {
     });
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('musicbrainz_work'));
-    warn.mockRestore();
+    // Restore is handled by afterEach so a thrown assertion above still cleans up.
   });
 
   it('summarizes an empty list to all-zero counts', () => {
