@@ -60,17 +60,20 @@ describe('GET /library/bmi-performance-list (BS#1500)', () => {
       CLEANUP_TO,
     ]);
 
-    // Four in-window TRACK rows, one per composer provenance, at DISTINCT ascending
-    // timestamps so ORDER BY add_time ASC is assertable. The first sits exactly at the
-    // lower bound (00:00 == fromDate) to pin the inclusive `gte` boundary.
+    // Four in-window TRACK rows, one per composer provenance, at DISTINCT timestamps
+    // (00:00/06:00/12:00/18:00) so ORDER BY add_time ASC is assertable. The 00:00 row
+    // sits exactly at the lower bound (== fromDate) to pin the inclusive `gte` boundary.
+    // Deliberately INSERTED in reverse-chronological order: neither insertion order nor
+    // the DESC add_time index yields the asserted ascending order, so a DROPPED (not just
+    // flipped) `orderBy` fails the ordering assertion too.
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".flowsheet
          (entry_type, play_order, artist_name, track_title, album_title, record_label, composer, composer_source, add_time)
        VALUES
-         ('track', 8500, $1, 'real-track cut',   'Album A', 'Label A', 'Composer A', 'discogs_track',   '2013-07-04T00:00:00.000Z'),
-         ('track', 8501, $1, 'real-release cut', 'Album B', 'Label B', 'Composer B', 'discogs_release', '2013-07-04T06:00:00.000Z'),
-         ('track', 8502, $1, 'proxy cut',        'Album C', 'Label C', $1,           'artist_proxy',    '2013-07-04T12:00:00.000Z'),
-         ('track', 8503, $1, 'unenriched cut',   'Album D', 'Label D', NULL,          NULL,             '2013-07-04T18:00:00.000Z')`,
+         ('track', 8500, $1, 'unenriched cut',   'Album D', 'Label D', NULL,          NULL,             '2013-07-04T18:00:00.000Z'),
+         ('track', 8501, $1, 'proxy cut',        'Album C', 'Label C', $1,           'artist_proxy',    '2013-07-04T12:00:00.000Z'),
+         ('track', 8502, $1, 'real-release cut', 'Album B', 'Label B', 'Composer B', 'discogs_release', '2013-07-04T06:00:00.000Z'),
+         ('track', 8503, $1, 'real-track cut',   'Album A', 'Label A', 'Composer A', 'discogs_track',   '2013-07-04T00:00:00.000Z')`,
       [ARTIST]
     );
 
@@ -80,14 +83,16 @@ describe('GET /library/bmi-performance-list (BS#1500)', () => {
        VALUES ('breakpoint', 8504, 'BS#1500 breakpoint probe', '2013-07-04T12:00:00.000Z')`
     );
     // Excluded: track rows with no usable artist — NULL, empty, and whitespace-only.
-    // The live free-text insert path only rejects an ABSENT artist_name, so '' and '   '
-    // are writable; the read must drop them (coalesce(trim(artist_name),'') <> '').
+    // The live free-text insert path only rejects an ABSENT artist_name, so '', spaces,
+    // and tabs/newlines are all writable; the read drops them via `~ '[^[:space:]]'`.
+    // The tab+newline+space row would survive a `trim()`-and-compare (trim strips only
+    // ASCII spaces), so it pins the regex predicate specifically.
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".flowsheet (entry_type, play_order, artist_name, track_title, add_time)
        VALUES
-         ('track', 8505, NULL,  'null-artist cut',       '2013-07-04T12:00:00.000Z'),
-         ('track', 8506, '',    'blank-artist cut',      '2013-07-04T12:00:00.000Z'),
-         ('track', 8507, '   ', 'whitespace-artist cut', '2013-07-04T12:00:00.000Z')`
+         ('track', 8505, NULL,       'null-artist cut',       '2013-07-04T12:00:00.000Z'),
+         ('track', 8506, '',         'blank-artist cut',      '2013-07-04T12:00:00.000Z'),
+         ('track', 8507, E'\t\n ',   'whitespace-artist cut', '2013-07-04T12:00:00.000Z')`
     );
     // Excluded: an in-artist track just BEFORE the window and one AT the exclusive
     // upper bound (proves the half-open [from, toExclusive) interval).
