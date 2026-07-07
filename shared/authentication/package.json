@@ -19,8 +19,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@aws-sdk/client-ses": "^3.1073.0",
-    "@sentry/node": "^10.59.0",
+    "@aws-sdk/client-ses": "^3.1080.0",
+    "@sentry/node": "^10.63.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/shared": "^1.12.0",
     "better-auth": "^1.6.23",
