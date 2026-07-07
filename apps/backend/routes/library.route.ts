@@ -27,6 +27,17 @@ library_route.get(
   libraryController.exportCatalog
 );
 
+// BMI played-works export (BS#1500 — tubafrenzy `recentBMI` successor). Gated
+// to MD/SM via `catalog:['write']` (DJs/members lack it), which is exactly the
+// librarian/MD submission audience with no new permission minted. Keyed on a
+// real `?from=&to=` date range. Output *format* + artist-proxy default are
+// finalized in #1507; the range/filter/coverage contract lands here.
+library_route.get(
+  '/bmi-performance-list',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.exportBmiPerformanceList
+);
+
 library_route.post('/', requirePermissions({ catalog: ['write'] }), libraryController.addAlbum);
 
 library_route.get('/rotation', requirePermissions({ catalog: ['read'] }), libraryController.getRotation);
