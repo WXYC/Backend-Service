@@ -150,9 +150,15 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
 
 /**
  * BS#1119: POST /flowsheet/end serves leave semantics too — a guest-DJ leave
- * returns a ShowDJ, not a Show, through the same route. The endShow mirror
- * must not sign off (or run any endShow logic) on that payload. The
- * primary-plus-guest fixture here is the one BS#1533's dj-scoping tests want.
+ * returns a ShowDJ, not a Show, through the same route. This locks the
+ * end-to-end signoff CONTRACT: a guest leave signs off zero times and leaves
+ * the show live, while the primary's end signs off exactly once.
+ *
+ * The guard's unit-level regression pin lives in endshow-shape-guard.test.ts.
+ * These black-box assertions hold with or without the `show.id == null` guard —
+ * signoff is separately gated on a resolved tubafrenzy show id, so it stays
+ * silent for a ShowDJ either way — so their value here is contract coverage
+ * plus the primary-plus-guest fixture BS#1533's dj-scoping tests reuse.
  */
 describe('endShow mirror shape guard on guest-DJ leave (BS#1119)', () => {
   const isSignoff = (r) => r.method === 'POST' && r.path.includes('/api/radioShow/signoff');

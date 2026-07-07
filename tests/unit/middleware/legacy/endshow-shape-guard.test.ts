@@ -66,7 +66,18 @@ jest.mock('@wxyc/database', () => ({
 }));
 
 jest.mock('drizzle-orm', () => ({
-  eq: jest.fn((...args: unknown[]) => args),
+  // Faithfully simulate postgres-js rejecting an `undefined` bind. The BS#1119
+  // prod symptom is the show_end announcement re-query binding
+  // `eq(flowsheet.show_id, undefined)` — a ShowDJ has no `id` — which throws in
+  // the driver and lands in Sentry once per guest leave. Making eq() throw on an
+  // undefined operand lets the ShowDJ test pin that exact symptom (the mirror
+  // catching into Sentry) rather than only the proxy "db.select was reached".
+  eq: jest.fn((column: unknown, value: unknown) => {
+    if (value === undefined) {
+      throw new Error('cannot bind undefined to a query parameter (simulated postgres-js undefined bind)');
+    }
+    return [column, value];
+  }),
   desc: jest.fn(),
   asc: jest.fn(),
 }));
@@ -111,11 +122,16 @@ describe('endShow mirror payload shape guard (BS#1119)', () => {
   it('executes no endShow logic when a guest-DJ leave returns a ShowDJ payload', async () => {
     await runMiddleware(flowsheetMirror.endShow, showDJPayload);
 
-    // No signoff, no announcement re-query (the re-query is what throws on the
-    // undefined show_id bind in production and lands in Sentry), no error.
-    expect(mockMirrorSignoffShow).not.toHaveBeenCalled();
+    // Two independent regression pins — both flip red if the `show.id == null`
+    // guard is removed. Without the guard the show_end announcement re-query
+    // runs (mockDbSelect) and binds `show_id = undefined`, which the eq() mock
+    // rejects exactly as postgres-js does in prod — the mirror catches that
+    // throw into Sentry once per guest leave (mockCaptureException). The signoff
+    // is a secondary check: it stays silent either way because it is separately
+    // gated on a resolved tubafrenzy show id.
     expect(mockDbSelect).not.toHaveBeenCalled();
     expect(mockCaptureException).not.toHaveBeenCalled();
+    expect(mockMirrorSignoffShow).not.toHaveBeenCalled();
   });
 
   it('still signs off and mirrors the announcement when the primary DJ ends the show', async () => {
