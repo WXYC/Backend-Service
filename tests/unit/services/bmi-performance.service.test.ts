@@ -1,4 +1,4 @@
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, jest } from '@jest/globals';
 import {
   parseBmiDateRange,
   summarizeCoverage,
@@ -72,6 +72,24 @@ describe('bmi-performance.service: parseBmiDateRange', () => {
     expect(range.fromDate.toISOString()).toBe('2026-03-15T00:00:00.000Z');
     expect(range.toExclusive.toISOString()).toBe('2026-03-16T00:00:00.000Z');
   });
+
+  it('accepts a range at the maximum window width (366 inclusive days)', () => {
+    // 2024 is a leap year: 2024-01-01..2024-12-31 is exactly 366 inclusive days.
+    const range = parseBmiDateRange('2024-01-01', '2024-12-31');
+    expect(range.fromDate.toISOString()).toBe('2024-01-01T00:00:00.000Z');
+    expect(range.toExclusive.toISOString()).toBe('2025-01-01T00:00:00.000Z');
+  });
+
+  it('throws WxycError(400) when the window exceeds the maximum width', () => {
+    // 367 inclusive days — one past the cap. Guards the unbounded-result-set /
+    // event-loop-block risk (the underlying read has no LIMIT).
+    expect(() => parseBmiDateRange('2024-01-01', '2025-01-01')).toThrow(WxycError);
+    try {
+      parseBmiDateRange('2024-01-01', '2025-01-01');
+    } catch (e) {
+      expect((e as WxycError).statusCode).toBe(400);
+    }
+  });
 });
 
 describe('bmi-performance.service: projectBmiRow', () => {
@@ -100,6 +118,13 @@ describe('bmi-performance.service: projectBmiRow', () => {
     expect(projected.composer).toBeNull();
     expect(projected.composer_source).toBeNull();
   });
+
+  it('preserves an unrecognized composer_source verbatim rather than coercing it', () => {
+    // `composer_source` is open-ended text; a source added after this shell
+    // (e.g. `musicbrainz_work`) must survive on the row, not be dropped/cast away.
+    const projected = projectBmiRow(rawRow({ composer_source: 'musicbrainz_work' }));
+    expect(projected.composer_source).toBe('musicbrainz_work');
+  });
 });
 
 describe('bmi-performance.service: summarizeCoverage', () => {
@@ -109,7 +134,7 @@ describe('bmi-performance.service: summarizeCoverage', () => {
     album_title: 'On Your Own Love Again',
     record_label: 'Drag City',
     composer,
-    composer_source: composer_source as BmiPerformanceRow['composer_source'],
+    composer_source,
     played_at: '2026-03-15T18:42:00.000Z',
   });
 
@@ -128,7 +153,29 @@ describe('bmi-performance.service: summarizeCoverage', () => {
       real_release: 1,
       artist_proxy: 1,
       none: 1,
+      unknown: 0,
     });
+  });
+
+  it('counts an unrecognized composer_source as `unknown`, never as `none`, and warns once', () => {
+    // A future provenance (added without a migration, e.g. `musicbrainz_work`) is a
+    // real writer credit; folding it into `none` would tell the librarian a credited
+    // play has no composer. It must land in `unknown`, distinct from the null case,
+    // and surface a single warn naming the unrecognized value.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const rows = [row('musicbrainz_work', 'X'), row('musicbrainz_work', 'Y'), row(null, null)];
+
+    expect(summarizeCoverage(rows)).toEqual({
+      total: 3,
+      real_track: 0,
+      real_release: 0,
+      artist_proxy: 0,
+      none: 1,
+      unknown: 2,
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('musicbrainz_work'));
+    warn.mockRestore();
   });
 
   it('summarizes an empty list to all-zero counts', () => {
@@ -138,6 +185,7 @@ describe('bmi-performance.service: summarizeCoverage', () => {
       real_release: 0,
       artist_proxy: 0,
       none: 0,
+      unknown: 0,
     });
   });
 });

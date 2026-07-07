@@ -279,6 +279,79 @@ components:
           format: date
           nullable: true
 
+    BmiPerformanceRow:
+      type: object
+      description: >
+        One played musical work in the `GET /library/bmi-performance-list` export
+        (BS#1500). Flat projection of a `flowsheet` track row with a usable artist.
+        `composer_source` is raw open-ended text (a source added after the endpoint,
+        e.g. `musicbrainz_work`, can appear); consumers should not treat it as a
+        closed enum.
+      properties:
+        artist_name:
+          type: string
+        track_title:
+          type: string
+          nullable: true
+        album_title:
+          type: string
+          nullable: true
+        record_label:
+          type: string
+          nullable: true
+        composer:
+          type: string
+          nullable: true
+        composer_source:
+          type: string
+          nullable: true
+          description: 'Provenance of `composer`: discogs_track | discogs_release | artist_proxy | a later source | null.'
+        played_at:
+          type: string
+          format: date-time
+          description: The play's logging instant (`flowsheet.add_time`), ISO-8601.
+
+    BmiCoverage:
+      type: object
+      description: >
+        Composer-provenance breakdown for the pre-submit preview. The five counts
+        partition `total`. `none` = no composer credit at all; `unknown` = a non-null
+        `composer_source` outside the known set (a real credit from a later source),
+        kept distinct from `none` so a credited play is never reported as having no composer.
+      properties:
+        total:
+          type: integer
+        real_track:
+          type: integer
+        real_release:
+          type: integer
+        artist_proxy:
+          type: integer
+        none:
+          type: integer
+        unknown:
+          type: integer
+
+    BmiPerformanceList:
+      type: object
+      description: The `GET /library/bmi-performance-list` response envelope (BS#1500).
+      properties:
+        range:
+          type: object
+          properties:
+            from:
+              type: string
+              format: date
+            to:
+              type: string
+              format: date
+        coverage:
+          $ref: '#/components/schemas/BmiCoverage'
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/BmiPerformanceRow'
+
     Rotation:
       type: object
       properties:
@@ -960,6 +1033,49 @@ paths:
           description: Catalog unchanged since `If-Modified-Since` / `since`.
         '401':
           description: Missing or invalid bearer token.
+
+  /library/bmi-performance-list:
+    get:
+      summary: BMI played-works export for a date range (BS#1500)
+      description: >
+        Successor to tubafrenzy's `recentBMI` servlet: the played musical works the
+        station librarian submits to BMI for royalty reporting. Reads `flowsheet` track
+        rows with a usable artist whose `add_time` falls in the half-open `[from, to]`
+        window (the whole `to` day is included), ordered chronologically, and returns the
+        rows plus a composer-provenance `coverage` summary the dj-site admin tool previews
+        before submit. Gated to MD/SM via `catalog:['write']`. The window width is capped
+        (max 366 days); the exact BMI submission text format and the artist-proxy inclusion
+        default are finalized in #1507 and do not change this envelope.
+      security:
+        - BearerAuth: ['catalog-write']
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inclusive start of the window, `YYYY-MM-DD` (UTC-day boundary).
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: true
+          description: Inclusive end of the window, `YYYY-MM-DD`. Must not precede `from`; the window may span at most 366 days.
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Played works in the window plus the coverage summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BmiPerformanceList'
+        '400':
+          description: Missing, malformed, out-of-order, or too-wide `from`/`to` range.
+        '401':
+          description: Missing or invalid bearer token.
+        '403':
+          description: Authenticated role lacks `catalog:write` (below musicDirector).
 
   /library/rotation:
     get:
