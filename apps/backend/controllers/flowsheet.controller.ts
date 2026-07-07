@@ -118,19 +118,26 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   if (isNaN(page) || page < 0) throw new WxycError('page must be a non-negative number', 400);
 
   const offset = page * limit;
-  const [entries, total] = await Promise.all([
+  const [entries, total, onAirDjName] = await Promise.all([
     flowsheet_service.getEntriesByPage(offset, limit),
     flowsheet_service.getEntryCount(),
+    flowsheet_service.getOnAirDJName(),
   ]);
 
   const totalPages = Math.ceil(total / limit);
 
+  // `on_air` lets clients render the on-air banner without scanning the fetched
+  // entry window for a show_start marker (which can fall outside a 30-entry
+  // page). An OnAirInfo object means a named DJ is live; `null` means confirmed
+  // automation. Only the default paginated branch carries it — the iOS app
+  // polls this branch. See wxyc-shared api.yaml FlowsheetV2PaginatedResponse.
   res.status(200).json({
     entries: entries.map(flowsheet_service.transformToV2),
     total,
     page,
     limit,
     totalPages,
+    on_air: onAirDjName ? { dj_name: onAirDjName } : null,
   });
 };
 

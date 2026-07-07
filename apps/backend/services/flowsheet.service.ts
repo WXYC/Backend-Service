@@ -829,6 +829,34 @@ export const getLatestShow = async (): Promise<Show | undefined> => {
   return (await getNShows(1))[0];
 };
 
+/**
+ * Resolve the display name of the DJ currently on air, or `null` when the
+ * station is on automation.
+ *
+ * Backs the `on_air` field on the default paginated GET /flowsheet response.
+ * A show is "on air" when the latest show (`MAX(shows.id)`) has no `end_time`;
+ * its display name comes from `resolveDjNameForShow`, the same precedence chain
+ * (`dj_name_override` → primary DJ's `user.djName` → `legacy_dj_name`) used to
+ * denormalize DJ names onto flowsheet rows.
+ *
+ * Deliberately does NOT consult the `show_djs` join table the way
+ * `getDJsInCurrentShow`/`getOnAirStatusForDJ` do: tubafrenzy-mirrored shows have
+ * no `show_djs` rows (the DJ has no Backend-Service account), so a join-table
+ * read reports automation for essentially every legacy live show — the "AUTO DJ
+ * while a human DJ is live" bug. `legacy_dj_name` is the authoritative identity
+ * for those shows, and `resolveDjNameForShow` already reads it.
+ *
+ * @returns the on-air DJ's display name, or `null` when no show is open or the
+ *   open show has no resolvable name.
+ */
+export const getOnAirDJName = async (): Promise<string | null> => {
+  const latest_show = await getLatestShow();
+  if (!latest_show || latest_show.end_time !== null) {
+    return null;
+  }
+  return await resolveDjNameForShow(latest_show);
+};
+
 export const getOnAirStatusForDJ = async (dj_id: string): Promise<boolean> => {
   const latest_show = await getLatestShow();
   if (!latest_show || latest_show.end_time !== null) {
