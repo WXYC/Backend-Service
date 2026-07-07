@@ -12,6 +12,7 @@ import {
 import { gunzipSync } from 'node:zlib';
 import * as libraryService from '../services/library.service.js';
 import * as catalogExportService from '../services/catalog-export.service.js';
+import * as bmiPerformanceService from '../services/bmi-performance.service.js';
 import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
@@ -645,4 +646,27 @@ export const exportCatalog: RequestHandler = async (req, res) => {
   const inflated = gunzipSync(gzipped);
   res.setHeader('Content-Length', inflated.length);
   res.status(200).end(inflated);
+};
+
+// ---------------------------------------------------------------------------
+// GET /library/bmi-performance-list — played-works export for BMI (BS#1500)
+// ---------------------------------------------------------------------------
+
+/**
+ * Successor to tubafrenzy's `recentBMI` servlet: the played-works list the
+ * station librarian submits to BMI for royalty reporting. Gated to MD/SM via
+ * `catalog:['write']` (the route), keyed on a real `from`/`to` date range
+ * (deliberately not `recentBMI`'s stateless "recent 1000"), and returns
+ * structured JSON — the rows plus a composer-provenance coverage summary the
+ * dj-site admin tool previews before the librarian submits.
+ *
+ * The exact BMI submission *format* and the artist-proxy inclusion default are
+ * deferred to #1507; the range/filter/coverage contract here does not depend on
+ * either and the dj-site shell reads this JSON directly. A malformed range
+ * throws `WxycError(400)`, which the async handler forwards to `errorHandler`.
+ */
+export const exportBmiPerformanceList: RequestHandler = async (req, res) => {
+  const range = bmiPerformanceService.parseBmiDateRange(req.query.from, req.query.to);
+  const payload = await bmiPerformanceService.getBmiPerformanceList(range);
+  res.status(200).json(payload);
 };
