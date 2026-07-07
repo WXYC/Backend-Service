@@ -88,6 +88,20 @@ components:
           type: integer
         totalPages:
           type: integer
+        on_air:
+          allOf:
+            - $ref: '#/components/schemas/OnAirInfo'
+          nullable: true
+          description: >-
+            The DJ currently on air, when known. An OnAirInfo object means a named DJ is live; JSON null means the station is confirmed on automation ("Auto DJ"); the field being absent means the server does not report on-air status and clients should treat it as unknown. Not in required so absence stays distinct from an explicit null.
+
+    OnAirInfo:
+      type: object
+      required: [dj_name]
+      properties:
+        dj_name:
+          type: string
+          description: Display name of the DJ currently on air.
 
     FlowsheetEntryAdd:
       type: object

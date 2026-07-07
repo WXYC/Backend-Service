@@ -13,6 +13,7 @@ const mockGetShowMetadata = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...(entry as Record<string, unknown>), v2: true }));
 const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
+const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>();
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
 const mockUpdateEntry = jest.fn<() => Promise<Record<string, unknown>>>();
@@ -31,6 +32,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   transformToV2: mockTransformToV2,
   addTrack: mockAddTrack,
   getLatestShow: mockGetLatestShow,
+  getOnAirDJName: mockGetOnAirDJName,
   getAlbumFromDB: mockGetAlbumFromDB,
   resolveDjNameForShow: mockResolveDjNameForShow,
   updateEntry: mockUpdateEntry,
@@ -96,6 +98,7 @@ describe('flowsheet.controller', () => {
       const entries = [createMockEntry(1), createMockEntry(2)];
       mockGetEntriesByPage.mockResolvedValue(entries);
       mockGetEntryCount.mockResolvedValue(2);
+      mockGetOnAirDJName.mockResolvedValue(null);
 
       const req = createMockReq();
       const res = createMockRes();
@@ -111,7 +114,39 @@ describe('flowsheet.controller', () => {
         page: 0,
         limit: 30,
         totalPages: 1,
+        on_air: null,
       });
+    });
+
+    // on_air (BS on-air-banner fix): the default paginated branch carries the
+    // current on-air DJ so clients render the banner without scanning the
+    // fetched entry window for a show_start marker. An OnAirInfo object means a
+    // named DJ is live; JSON null means confirmed automation ("Auto DJ").
+    it('includes on_air with the DJ name when a DJ is live', async () => {
+      mockGetEntriesByPage.mockResolvedValue([createMockEntry(1)]);
+      mockGetEntryCount.mockResolvedValue(1);
+      mockGetOnAirDJName.mockResolvedValue('DJ MONSTER');
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getEntries(req as Request, res as Response, mockNext);
+
+      expect(mockGetOnAirDJName).toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ on_air: { dj_name: 'DJ MONSTER' } }));
+    });
+
+    it('sets on_air to null when the station is on automation', async () => {
+      mockGetEntriesByPage.mockResolvedValue([createMockEntry(1)]);
+      mockGetEntryCount.mockResolvedValue(1);
+      mockGetOnAirDJName.mockResolvedValue(null);
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getEntries(req as Request, res as Response, mockNext);
+
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ on_air: null }));
     });
 
     it('calculates offset from page and limit', async () => {
