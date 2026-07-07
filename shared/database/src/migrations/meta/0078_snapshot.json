@@ -1,6 +1,6 @@
 {
-  "id": "be88e1d9-995e-4f74-941b-20eaeb09a44b",
-  "prevId": "54a7dea3-b580-4a40-9cff-29f61879afd2",
+  "id": "54a7dea3-b580-4a40-9cff-29f61879afd2",
+  "prevId": "5c48e8da-c661-49dc-badf-48bcb9ec1c69",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -956,20 +956,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "metadata_status": {
-          "name": "metadata_status",
-          "type": "metadata_status_enum",
-          "typeSchema": "wxyc_schema",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        },
-        "enriching_since": {
-          "name": "enriching_since",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "search_doc": {
           "name": "search_doc",
           "type": "tsvector",
@@ -1192,38 +1178,6 @@
           ],
           "isUnique": false,
           "where": "\"wxyc_schema\".\"flowsheet\".\"entry_type\" = 'track' AND \"wxyc_schema\".\"flowsheet\".\"artist_name\" IS NOT NULL AND \"wxyc_schema\".\"flowsheet\".\"metadata_attempt_at\" IS NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "flowsheet_metadata_status_pending_idx": {
-          "name": "flowsheet_metadata_status_pending_idx",
-          "columns": [
-            {
-              "expression": "id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"wxyc_schema\".\"flowsheet\".\"entry_type\" = 'track' AND \"wxyc_schema\".\"flowsheet\".\"artist_name\" IS NOT NULL AND \"wxyc_schema\".\"flowsheet\".\"metadata_status\" = 'pending'",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "flowsheet_metadata_status_enriching_stale_idx": {
-          "name": "flowsheet_metadata_status_enriching_stale_idx",
-          "columns": [
-            {
-              "expression": "enriching_since",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"wxyc_schema\".\"flowsheet\".\"metadata_status\" = 'enriching'",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -3688,17 +3642,6 @@
         "M",
         "H",
         "N"
-      ]
-    },
-    "wxyc_schema.metadata_status_enum": {
-      "name": "metadata_status_enum",
-      "schema": "wxyc_schema",
-      "values": [
-        "pending",
-        "enriching",
-        "enriched_match",
-        "enriched_no_match",
-        "failed_no_retry"
       ]
     }
   },

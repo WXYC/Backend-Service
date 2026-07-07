@@ -1,6 +1,6 @@
 {
-  "id": "dd317cc9-295e-47fe-8b73-ec9e833385cd",
-  "prevId": "1fc2b441-b64e-47d0-88b1-60329f3c5fbf",
+  "id": "1fc2b441-b64e-47d0-88b1-60329f3c5fbf",
+  "prevId": "9ff7bed5-9ea8-4a21-8f2c-925b497c05fa",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -479,142 +479,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "wxyc_schema.artist_search_alias": {
-      "name": "artist_search_alias",
-      "schema": "wxyc_schema",
-      "columns": {
-        "artist_id": {
-          "name": "artist_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "variant": {
-          "name": "variant",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "related_artist_id": {
-          "name": "related_artist_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "external_subject_id": {
-          "name": "external_subject_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "external_object_id": {
-          "name": "external_object_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "active": {
-          "name": "active",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "method": {
-          "name": "method",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "confidence": {
-          "name": "confidence",
-          "type": "real",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "last_verified_at": {
-          "name": "last_verified_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {
-        "artist_search_alias_variant_trgm_idx": {
-          "name": "artist_search_alias_variant_trgm_idx",
-          "columns": [
-            {
-              "expression": "\"variant\" gin_trgm_ops",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "gin",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "artist_search_alias_artist_id_artists_id_fk": {
-          "name": "artist_search_alias_artist_id_artists_id_fk",
-          "tableFrom": "artist_search_alias",
-          "tableTo": "artists",
-          "schemaTo": "wxyc_schema",
-          "columnsFrom": [
-            "artist_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "artist_search_alias_related_artist_id_artists_id_fk": {
-          "name": "artist_search_alias_related_artist_id_artists_id_fk",
-          "tableFrom": "artist_search_alias",
-          "tableTo": "artists",
-          "schemaTo": "wxyc_schema",
-          "columnsFrom": [
-            "related_artist_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "artist_search_alias_pkey": {
-          "name": "artist_search_alias_pkey",
-          "columns": [
-            "artist_id",
-            "source",
-            "variant"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "artist_search_alias_confidence_range": {
-          "name": "artist_search_alias_confidence_range",
-          "value": "\"wxyc_schema\".\"artist_search_alias\".\"confidence\" BETWEEN 0 AND 1"
-        },
-        "artist_search_alias_variant_nonblank": {
-          "name": "artist_search_alias_variant_nonblank",
-          "value": "length(trim(\"wxyc_schema\".\"artist_search_alias\".\"variant\")) > 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
     "wxyc_schema.artists": {
       "name": "artists",
       "schema": "wxyc_schema",
@@ -727,81 +591,6 @@
         }
       },
       "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "wxyc_schema.banned_fingerprints": {
-      "name": "banned_fingerprints",
-      "schema": "wxyc_schema",
-      "columns": {
-        "fingerprint": {
-          "name": "fingerprint",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "banned_at": {
-          "name": "banned_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "ban_reason": {
-          "name": "ban_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "ban_expires_at": {
-          "name": "ban_expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "banned_by_user_id": {
-          "name": "banned_by_user_id",
-          "type": "varchar(255)",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "banned_fingerprints_ban_expires_at_idx": {
-          "name": "banned_fingerprints_ban_expires_at_idx",
-          "columns": [
-            {
-              "expression": "ban_expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"wxyc_schema\".\"banned_fingerprints\".\"ban_expires_at\" IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "banned_fingerprints_banned_by_user_id_auth_user_id_fk": {
-          "name": "banned_fingerprints_banned_by_user_id_auth_user_id_fk",
-          "tableFrom": "banned_fingerprints",
-          "tableTo": "auth_user",
-          "columnsFrom": [
-            "banned_by_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -4043,6 +3832,81 @@
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
+    },
+    "wxyc_schema.banned_fingerprints": {
+      "name": "banned_fingerprints",
+      "schema": "wxyc_schema",
+      "columns": {
+        "fingerprint": {
+          "name": "fingerprint",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "banned_at": {
+          "name": "banned_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "ban_reason": {
+          "name": "ban_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ban_expires_at": {
+          "name": "ban_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "banned_by_user_id": {
+          "name": "banned_by_user_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "banned_fingerprints_ban_expires_at_idx": {
+          "name": "banned_fingerprints_ban_expires_at_idx",
+          "columns": [
+            {
+              "expression": "ban_expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"wxyc_schema\".\"banned_fingerprints\".\"ban_expires_at\" IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "banned_fingerprints_banned_by_user_id_auth_user_id_fk": {
+          "name": "banned_fingerprints_banned_by_user_id_auth_user_id_fk",
+          "tableFrom": "banned_fingerprints",
+          "tableTo": "auth_user",
+          "columnsFrom": [
+            "banned_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
     }
   },
   "enums": {
@@ -4241,15 +4105,9 @@
           "type": "varchar(255)",
           "primaryKey": false,
           "notNull": false
-        },
-        "artist_id": {
-          "name": "artist_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
         }
       },
-      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\", \"wxyc_schema\".\"library\".\"on_streaming\", \"wxyc_schema\".\"library\".\"album_artist\", \"wxyc_schema\".\"library\".\"plays\", \"wxyc_schema\".\"library\".\"artwork_url\", \"wxyc_schema\".\"artists\".\"discogs_artist_id\", \"wxyc_schema\".\"artists\".\"musicbrainz_artist_id\", \"wxyc_schema\".\"artists\".\"wikidata_qid\", \"wxyc_schema\".\"artists\".\"spotify_artist_id\", \"wxyc_schema\".\"artists\".\"apple_music_artist_id\", \"wxyc_schema\".\"artists\".\"bandcamp_id\", \"wxyc_schema\".\"library\".\"artist_id\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL)",
+      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\", \"wxyc_schema\".\"library\".\"on_streaming\", \"wxyc_schema\".\"library\".\"album_artist\", \"wxyc_schema\".\"library\".\"plays\", \"wxyc_schema\".\"library\".\"artwork_url\", \"wxyc_schema\".\"artists\".\"discogs_artist_id\", \"wxyc_schema\".\"artists\".\"musicbrainz_artist_id\", \"wxyc_schema\".\"artists\".\"wikidata_qid\", \"wxyc_schema\".\"artists\".\"spotify_artist_id\", \"wxyc_schema\".\"artists\".\"apple_music_artist_id\", \"wxyc_schema\".\"artists\".\"bandcamp_id\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL)",
       "name": "library_artist_view",
       "schema": "wxyc_schema",
       "isExisting": false,

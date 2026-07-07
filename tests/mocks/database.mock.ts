@@ -144,6 +144,7 @@ export const concerts = {
   status: 'status',
   raw_data: 'raw_data',
   scraped_at: 'scraped_at',
+  first_scraped_at: 'first_scraped_at',
   last_modified: 'last_modified',
 };
 export const album_plays = {
@@ -193,6 +194,10 @@ export const flowsheet_watermark = {
   id: 'id',
   last_modified_at: 'last_modified_at',
 };
+export const library_watermark = {
+  id: 'id',
+  last_modified_at: 'last_modified_at',
+};
 export const album_metadata = {
   album_id: 'album_id',
   artwork_url: 'artwork_url',
@@ -206,6 +211,16 @@ export const album_metadata = {
   artist_bio: 'artist_bio',
   artist_wikipedia_url: 'artist_wikipedia_url',
   updated_at: 'updated_at',
+};
+export const flowsheet_freetext_resolution = {
+  norm_artist: 'norm_artist',
+  norm_album: 'norm_album',
+  discogs_release_id: 'discogs_release_id',
+  discogs_master_id: 'discogs_master_id',
+  match_confidence: 'match_confidence',
+  match_source: 'match_source',
+  attempt_at: 'attempt_at',
+  resolved_at: 'resolved_at',
 };
 export const flowsheet_linkage_review = {
   id: 'id',
@@ -326,6 +341,12 @@ export const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValu
 
 export { requirePositiveInt, requireNonNegativeInt } from '../../shared/database/src/env-parsers.js';
 export type { IntParserOptions } from '../../shared/database/src/env-parsers.js';
+
+// Pure normalizers (no DB dependency) re-exported from source so consumer jobs
+// resolving @wxyc/database via this mock still get the real implementation.
+export { normalizeArtistName } from '../../shared/database/src/normalize-artist-name.js';
+export { normalizeAlbumTitle } from '../../shared/database/src/normalize-album-title.js';
+export { freetextPairKey, normalizeFreetextArtist } from '../../shared/database/src/freetext-norm.js';
 
 // Mock types
 export type AnonymousDevice = {

@@ -12,15 +12,18 @@
  *     don't hold one of LML's serialized Discogs fan-out slots for the
  *     runtime path's 30 s (BS#994 / BS#1017).
  *
- * Returns the resolved Discogs release id (or null when LML found no
- * Discogs match). Mirrors the runtime tier-3 path's extraction at
- * `apps/backend/services/library.service.ts:492` so the SAME entity is
- * persisted whether the resolution happened at runtime or offline.
+ * Returns a discriminated `LookupOutcome`: `resolved` (a `direct`-match
+ * Discogs release id), `no_match` (LML found no candidate id), or
+ * `trust_rejected` (a candidate id arrived on a non-`direct` — or absent —
+ * `search_type` and must not be persisted; BS#1516). Mirrors the runtime
+ * tier-3 path's extraction plus its BS#1351/BS#1355 trust gate so the SAME
+ * entity is persisted whether the resolution happened at runtime or offline.
  */
 
 import { lookupMetadata as sharedLookupMetadata } from '@wxyc/lml-client';
 
 import { defaultLmlLimiter } from './lml-limiter.js';
+import type { LookupOutcome } from './orchestrate.js';
 
 const envInt = (name: string, fallback: number): number => {
   const raw = process.env[name];
@@ -61,10 +64,25 @@ const decodeHtmlEntities = (input: string): string =>
     return String.fromCodePoint(codepoint);
   });
 
-export const lookupReleaseId = async (artist: string, album: string): Promise<number | null> => {
+export const lookupReleaseId = async (artist: string, album: string): Promise<LookupOutcome> => {
   const response = await sharedLookupMetadata(decodeHtmlEntities(artist), decodeHtmlEntities(album), undefined, {
     limiter: defaultLmlLimiter,
     timeoutMs: TIMEOUT_MS,
   });
-  return response.results?.[0]?.artwork?.release_id ?? null;
+  const releaseId = response.results?.[0]?.artwork?.release_id ?? null;
+  if (releaseId === null) return { kind: 'no_match' };
+  // BS#1516: only a `direct` match may be persisted. Non-direct
+  // `search_type` values are artist-fallback answers — `results[0]` is a
+  // DIFFERENT album by the same artist (the Yenbett→Tzenni recurrence,
+  // BS#1515), and a persisted wrong id is served by tier 1 forever; the
+  // runtime BS#1351 gate never re-checks stored ids. Fail closed when
+  // `search_type` is absent: no trust signal, no persist. Mirrors the
+  // coordinator's `requireSearchType: 'direct'` (BS#1355), which this job
+  // can't use because it imports `@wxyc/lml-client` directly.
+  if (response.search_type !== 'direct') {
+    return { kind: 'trust_rejected', searchType: response.search_type ?? 'absent' };
+  }
+  // `release_id: 0` (BS#1185 streaming-only sentinel) intentionally passes
+  // through as `resolved` — the orchestrator owns sentinel counting (BS#1429).
+  return { kind: 'resolved', releaseId };
 };

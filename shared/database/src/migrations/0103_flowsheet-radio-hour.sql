@@ -1,0 +1,18 @@
+-- 0103: add flowsheet.radio_hour
+--
+-- A breakpoint's add_time is the row's logging instant (~1 min before the top of
+-- the hour); the authoritative top-of-hour it marks lives in tubafrenzy's
+-- RADIO_HOUR. Without a column for it, V2 breakpoint entries can only surface
+-- add_time, and clients floor it across the boundary and render the hour-marker
+-- one early (#1447). This nullable column carries the real hour; the ETL + webhook
+-- (#1449) populate it for breakpoint rows and transformToV2 serializes it.
+--
+-- Additive, nullable, no backfill in-migration (DDL-only). Existing breakpoint
+-- rows stay NULL until refilled: the flowsheet-etl upsert (#1449) heals re-synced
+-- rows, and live breakpoints arrive correct via the webhook once #1449 + the
+-- tubafrenzy radioHour change (#593) deploy. Pre-existing rows in the live
+-- recently-played window fall back to add_time (≤ ~2 h) until aged out; an
+-- optional one-shot backfill keyed on RADIO_HOUR can warm them immediately if
+-- desired (see #1447). No index — read only as part of the recent-entries row
+-- projection.
+ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "radio_hour" timestamp with time zone;

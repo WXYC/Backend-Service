@@ -40,6 +40,7 @@ jest.mock('drizzle-orm', () => ({
 }));
 
 import { getPlaylistsForDJ } from '../../../apps/backend/services/djs.service';
+import { INTERNAL_FLOWSHEET_COLUMNS, makeFullFlowsheetRow } from '../../fixtures/flowsheet-row.fixture';
 
 const DJ_ID = 'dj-1';
 
@@ -134,6 +135,40 @@ describe('djs.service - getPlaylistsForDJ', () => {
 
     const totalSelectCalls = selectSpy.mock.calls.length;
     expect(totalSelectCalls).toBeLessThanOrEqual(MAX_ALLOWED_SELECTS);
+  });
+
+  it('does not leak internal flowsheet columns onto preview rows (BS#1513)', async () => {
+    const showDjRows = makeShowDjRows(1);
+    const showRows = makeShowRows(1);
+    const djRows = makeDjsForShows(1);
+    const specialtyRows = [{ id: 10, specialty_name: 'Jazz After Hours' }];
+    // A preview row carrying every internal column set to a truthy value —
+    // shared with the projector and controller leak suites
+    // (tests/fixtures/flowsheet-row.fixture.ts).
+    const rawRow = makeFullFlowsheetRow({ id: 1, show_id: 1, play_order: 1, dj_name: 'DJ One' });
+
+    queryResults.push(showDjRows);
+    queryResults.push(showRows);
+    queryResults.push(djRows);
+    queryResults.push(specialtyRows);
+    queryResults.push([rawRow]);
+
+    const result = await getPlaylistsForDJ(DJ_ID);
+
+    const previewRow = result[0].preview[0] as Record<string, unknown>;
+    for (const internalKey of INTERNAL_FLOWSHEET_COLUMNS) {
+      expect(previewRow).not.toHaveProperty(internalKey);
+    }
+    // Client-facing fields survive.
+    expect(previewRow).toMatchObject({
+      id: 1,
+      entry_type: 'track',
+      artist_name: 'Juana Molina',
+      track_title: 'la paradoja',
+      // Client-facing per the FlowsheetEntryResponse SSOT (rationale in the
+      // flowsheet-projection.ts module docstring).
+      metadata_status: 'enriched_match',
+    });
   });
 
   it('returns correct ShowPeek structures', async () => {

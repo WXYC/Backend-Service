@@ -17,6 +17,8 @@ const nullMetadata: IFSEntryMetadata = {
   soundcloud_url: null,
   artist_bio: null,
   artist_wikipedia_url: null,
+  genres: null,
+  styles: null,
 };
 
 // Helper to create a base entry with common fields
@@ -39,6 +41,7 @@ const createBaseEntry = (overrides: Partial<IFSEntry & { metadata?: Partial<IFSE
     segue: false,
     message: null,
     add_time: new Date('2024-01-15T12:00:00Z'),
+    radio_hour: null,
     dj_name: null,
     rotation_bin: null,
     on_streaming: null,
@@ -239,6 +242,48 @@ describe('flowsheet.service', () => {
         expect(result.artist_bio).toBe('A great band');
         expect(result.artist_wikipedia_url).toBe('wiki.com');
       });
+
+      // BS#1441: genres/styles are album_metadata-only arrays. Unlike the
+      // scalar siblings (plain `?? null`), they coerce empty→null so the wire
+      // has one canonical "no genres" value matching the LEFT-JOIN-miss case.
+      it('projects populated genres/styles arrays for tracks', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          metadata: {
+            genres: ['Rock', 'Electronic'],
+            styles: ['Post-Rock', 'Ambient'],
+          },
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.genres).toEqual(['Rock', 'Electronic']);
+        expect(result.styles).toEqual(['Post-Rock', 'Ambient']);
+      });
+
+      it('coerces empty genres/styles arrays to null', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          metadata: {
+            genres: [],
+            styles: [],
+          },
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.genres).toBeNull();
+        expect(result.styles).toBeNull();
+      });
+
+      it('projects null genres/styles when metadata has none', () => {
+        const entry = createBaseEntry({ entry_type: 'track' });
+
+        const result = transformToV2(entry);
+
+        expect(result.genres).toBeNull();
+        expect(result.styles).toBeNull();
+      });
     });
 
     describe('show_start entries', () => {
@@ -437,6 +482,47 @@ describe('flowsheet.service', () => {
 
         expect(result.entry_type).toBe('breakpoint');
         expect(result.message).toBeNull();
+      });
+
+      it('emits radio_hour as the breakpoint top-of-hour Date (BS#1449)', () => {
+        // add_time is the early logging instant; radio_hour is the authoritative
+        // top-of-hour that clients should format instead.
+        const topOfHour = new Date('2024-06-18T16:00:00Z');
+        const entry = createBaseEntry({
+          entry_type: 'breakpoint',
+          message: '--- 12:00 PM BREAKPOINT ---',
+          add_time: new Date('2024-06-18T15:58:42Z'),
+          radio_hour: topOfHour,
+        });
+
+        const result = transformToV2(entry);
+
+        // transformToV2 emits the Date; Express res.json serializes it to ISO.
+        expect(result.radio_hour).toEqual(topOfHour);
+      });
+
+      it('emits radio_hour as null when the breakpoint has none', () => {
+        const entry = createBaseEntry({
+          entry_type: 'breakpoint',
+          message: '--- breakpoint ---',
+          radio_hour: null,
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.radio_hour).toBeNull();
+      });
+
+      it('omits radio_hour entirely for non-breakpoint (track) entries', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          artist_name: 'Juana Molina',
+          radio_hour: new Date('2024-06-18T16:00:00Z'),
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.radio_hour).toBeUndefined();
       });
     });
 

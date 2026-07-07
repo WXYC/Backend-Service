@@ -122,7 +122,9 @@ services:
       - BETTER_AUTH_ISSUER=http://auth:8080
       - BETTER_AUTH_AUDIENCE=http://auth:8080
       - BETTER_AUTH_TRUSTED_ORIGINS=${BETTER_AUTH_TRUSTED_ORIGINS}
-      - FRONTEND_SOURCE=${FRONTEND_SOURCE}
+      # Explicit default (BS#1107): CORS now fails closed when the value is
+      # empty, so an unset host var must not propagate as an empty string.
+      - FRONTEND_SOURCE=${FRONTEND_SOURCE:-http://localhost:3000}
       - DEFAULT_ORG_SLUG=${DEFAULT_ORG_SLUG}
       - DEFAULT_ORG_NAME=${DEFAULT_ORG_NAME}
       - DEFAULT_USER_EMAIL=${DEFAULT_USER_EMAIL}
@@ -188,6 +190,12 @@ services:
       - BETTER_AUTH_AUDIENCE=http://auth:8080
       - BETTER_AUTH_ISSUER=http://auth:8080
       - BETTER_AUTH_JWKS_URL=http://auth:8080/auth/jwks
+      # Explicit value (BS#1107): CORS now fails closed (no headers + error
+      # log) when FRONTEND_SOURCE is unset; this service previously relied on
+      # the removed `|| '*'` fallback. No test asserts CORS headers, but the
+      # explicit origin keeps the container's startup log clean and mirrors
+      # the e2e-backend service below.
+      - FRONTEND_SOURCE=${FRONTEND_SOURCE:-http://localhost:3000}
       # Metadata: route through mock LML server
       - LIBRARY_METADATA_URL=http://mock-api:9090
       - METADATA_ALBUM_CACHE_MAX_SIZE=${METADATA_ALBUM_CACHE_MAX_SIZE:-1000}
@@ -342,6 +350,18 @@ services:
         NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [e2e]
     environment:
+      # Override the Dockerfile's `ENV NODE_ENV=production` pin (BS#1097) so
+      # the production-shaped guards in shared/authentication (buildLoginPage
+      # fail-loud when FRONTEND_SOURCE is unset) don't fire in tests.
+      # Matches the ci-profile backend at line 173.
+      - NODE_ENV=test
+      # `apps/backend/app.ts` imports `requirePermissions` from
+      # `@wxyc/authentication`, which evaluates `betterAuth({...})` at module
+      # load and calls buildLoginPage(process.env). Without FRONTEND_SOURCE
+      # the helper falls back to localhost — fine here because the e2e
+      # backend never serves the OIDC redirect, but the value still has to
+      # be present for the dev-fallback branch to fire.
+      - FRONTEND_SOURCE=http://e2e-frontend:3000
       - DB_HOST=e2e-db
       - DB_PORT=5432
       - DB_USERNAME=${DB_USERNAME:-e2euser}

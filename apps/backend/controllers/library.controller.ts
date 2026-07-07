@@ -9,7 +9,10 @@ import {
   NewRotationRelease,
   RotationRelease,
 } from '@wxyc/database';
+import { gunzipSync } from 'node:zlib';
 import * as libraryService from '../services/library.service.js';
+import * as catalogExportService from '../services/catalog-export.service.js';
+import * as bmiPerformanceService from '../services/bmi-performance.service.js';
 import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
@@ -350,12 +353,43 @@ export const getRotation: RequestHandler = async (req, res) => {
 };
 
 export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
+
+/**
+ * Pick only the fields the client is allowed to write through the public
+ * `POST /library/rotation` endpoint (BS#1380). Mirrors
+ * `pickUpdateEntryFields()` in flowsheet.controller.ts (BS#1099).
+ *
+ * Server-derived columns (`legacy_rotation_id`, `legacy_library_release_id`,
+ * `discogs_release_id`, `discogs_release_id_source`, `lml_identity_id`,
+ * `tracklist_lookup_attempted_at`, `kill_date`) and tubafrenzy-ETL-only
+ * snapshot columns (`add_date`, `artist_name`, `album_title`,
+ * `record_label`) must never be client-supplied through this endpoint —
+ * `addToRotation` derives the LML-handle columns from `library_identity`
+ * and the synchronous `resolveIdentity` hop, and tubafrenzy is the only
+ * legitimate source for the snapshot columns.
+ *
+ * Phrased as an allowlist (signature-typed accept list) so a future column
+ * addition to `rotation` is implicitly rejected by typecheck until
+ * explicitly added to the signature. Matches dj-site's `RotationParams`
+ * (`{ album_id, rotation_bin }`); widen the signature here when a future
+ * caller legitimately needs another field.
+ */
+type AddRotationAllowlist = Pick<NewRotationRelease, 'album_id' | 'rotation_bin'>;
+
+export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRotationAllowlist {
+  const picked = {} as AddRotationAllowlist;
+  if (body.album_id !== undefined) picked.album_id = body.album_id;
+  if (body.rotation_bin !== undefined) picked.rotation_bin = body.rotation_bin;
+  return picked;
+}
+
 export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res) => {
   if (req.body.album_id === undefined || req.body.rotation_bin === undefined) {
     throw new WxycError('Missing Parameters: album_id or rotation_bin', 400);
   }
 
-  const rotationRelease: RotationRelease = await libraryService.addToRotation(req.body);
+  const picked = pickAddRotationFields(req.body);
+  const rotationRelease: RotationRelease = await libraryService.addToRotation(picked);
   res.status(201).json(rotationRelease);
 };
 
@@ -863,4 +897,69 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
   });
   const totalPages = Math.ceil(total / limit);
   res.status(200).json({ results, total, page, totalPages });
+};
+
+// ---------------------------------------------------------------------------
+// GET /library/catalog — full catalog bulk export (BS#1468 / Epic F, #1466)
+// ---------------------------------------------------------------------------
+
+/**
+ * Stream the entire catalog as one gzipped NDJSON body so the iOS app can clone
+ * it for on-device Spotlight indexing. Freshness is handled upstream by the
+ * `conditionalGet(getCatalogLastModifiedAt)` middleware (which sets
+ * `Last-Modified` and short-circuits to `304` on `If-Modified-Since` / `?since=`
+ * when the `library_watermark` hasn't advanced); by the time this handler runs
+ * the catalog has changed and a full `200` is owed.
+ *
+ * The payload is pre-gzipped and cached per watermark (one shared copy per pod),
+ * so this is a memcpy on the hot path. There is no `compression` middleware in
+ * the app, so we set `Content-Encoding` ourselves and honor the request's
+ * `Accept-Encoding`: gzip-capable clients (iOS `URLSession` inflates
+ * transparently) get the cached bytes as-is with a correct `Content-Length`; the
+ * rare client that doesn't accept gzip gets a one-off inflate.
+ */
+export const exportCatalog: RequestHandler = async (req, res) => {
+  const gzipped = await catalogExportService.getCatalogExportGzip();
+  // Use Express's content-negotiation (the `accepts` library) rather than a
+  // substring match: it honors q-values, so `gzip;q=0` (an explicit refusal)
+  // correctly returns false, and `Accept-Encoding: *` correctly returns gzip —
+  // both of which `String.includes('gzip')` gets wrong.
+  const acceptsGzip = req.acceptsEncodings('gzip') === 'gzip';
+
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Vary', 'Accept-Encoding');
+
+  if (acceptsGzip) {
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Content-Length', gzipped.length);
+    res.status(200).end(gzipped);
+    return;
+  }
+
+  const inflated = gunzipSync(gzipped);
+  res.setHeader('Content-Length', inflated.length);
+  res.status(200).end(inflated);
+};
+
+// ---------------------------------------------------------------------------
+// GET /library/bmi-performance-list — played-works export for BMI (BS#1500)
+// ---------------------------------------------------------------------------
+
+/**
+ * Successor to tubafrenzy's `recentBMI` servlet: the played-works list the
+ * station librarian submits to BMI for royalty reporting. Gated to MD/SM via
+ * `catalog:['write']` (the route), keyed on a real `from`/`to` date range
+ * (deliberately not `recentBMI`'s stateless "recent 1000"), and returns
+ * structured JSON — the rows plus a composer-provenance coverage summary the
+ * dj-site admin tool previews before the librarian submits.
+ *
+ * The exact BMI submission *format* and the artist-proxy inclusion default are
+ * deferred to #1507; the range/filter/coverage contract here does not depend on
+ * either and the dj-site shell reads this JSON directly. A malformed range
+ * throws `WxycError(400)`, which the async handler forwards to `errorHandler`.
+ */
+export const exportBmiPerformanceList: RequestHandler = async (req, res) => {
+  const range = bmiPerformanceService.parseBmiDateRange(req.query.from, req.query.to);
+  const payload = await bmiPerformanceService.getBmiPerformanceList(range);
+  res.status(200).json(payload);
 };

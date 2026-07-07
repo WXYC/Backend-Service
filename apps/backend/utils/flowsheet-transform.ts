@@ -5,6 +5,8 @@
  * entry type codes or truncation rules change.
  */
 
+import { epochMsToDate } from '@wxyc/database';
+
 export type BackendEntryType =
   | 'track'
   | 'show_start'
@@ -47,6 +49,19 @@ export const mapProdEntryType = (typeCode: number): BackendEntryType => {
 /** Entry types whose legacy ARTIST_NAME text is display content, not a real artist. */
 export const isMessageEntryType = (entryType: string): boolean =>
   entryType === 'breakpoint' || entryType === 'talkset' || entryType === 'message';
+
+/**
+ * Resolve the breakpoint top-of-hour for a flowsheet entry (BS#1449).
+ *
+ * tubafrenzy's RADIO_HOUR (epoch ms) is the authoritative top-of-hour a
+ * breakpoint marks, distinct from the ~1-min-early add_time. Only breakpoint
+ * rows carry it; every other type stores null. Routing through epochMsToDate
+ * (rather than a bare `new Date`) maps 0/absent/non-finite/Invalid → null, so a
+ * missing OR malformed RADIO_HOUR yields null instead of an Invalid Date.
+ * Mirrors resolveRadioHour in jobs/flowsheet-etl/transform.ts.
+ */
+export const resolveRadioHour = (entryType: BackendEntryType, radioHourMs: number | null): Date | null =>
+  entryType === 'breakpoint' ? epochMsToDate(radioHourMs) : null;
 
 /**
  * Truncate a string to a max length, returning null if empty.

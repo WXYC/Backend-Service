@@ -18,6 +18,7 @@ import {
   mapShowToTubafrenzy,
   mapUpdateToTubafrenzy,
 } from './http.mirror.js';
+import { isActiveRotationMatch } from './rotation-match.mirror.js';
 
 const FLOWSHEET_ENTRY_TABLE = 'FLOWSHEET_ENTRY_PROD';
 const RADIO_SHOW_TABLE = 'FLOWSHEET_RADIO_SHOW_PROD';
@@ -78,6 +79,12 @@ const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
 });
 
 export const endShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
+  // BS#1119: /flowsheet/end serves leave semantics too — a guest-DJ leave (or
+  // the Auto-DJ orchestrator's restart recovery) responds with a ShowDJ, which
+  // has no `id`. Only a finalized Show carries the serial PK; discriminate on
+  // it rather than primary_dj_id, which is nullable on a real Show.
+  if (show.id == null) return;
+
   const endMs = toMs(show.end_time ?? Date.now());
 
   // Resolve tubafrenzy show ID: in-memory cache → persisted legacy_show_id
@@ -300,7 +307,8 @@ export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) 
     }
   }
 
-  const body = mapEntryToTubafrenzy(entry, radioShowID);
+  const isRotationMatch = await isActiveRotationMatch(entry);
+  const body = mapEntryToTubafrenzy(entry, radioShowID, isRotationMatch);
   const tubafrenzyId = await mirrorCreateEntry(body);
   if (tubafrenzyId != null) {
     cacheEntryId(entry.play_order, tubafrenzyId);
@@ -330,7 +338,8 @@ export const updateEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entr
     return;
   }
 
-  const body = mapUpdateToTubafrenzy(entry);
+  const isRotationMatch = await isActiveRotationMatch(entry);
+  const body = mapUpdateToTubafrenzy(entry, isRotationMatch);
   await mirrorUpdateEntry(tubafrenzyId, body);
 });
 

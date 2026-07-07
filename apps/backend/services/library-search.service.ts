@@ -1,6 +1,14 @@
 import * as Sentry from '@sentry/node';
 import { inArray, sql, type SQL } from 'drizzle-orm';
-import { db, library, library_artist_view, genres, format as formatTable, artist_search_alias } from '@wxyc/database';
+import {
+  db,
+  library,
+  library_artist_view,
+  genres,
+  format as formatTable,
+  artist_search_alias,
+  album_plays,
+} from '@wxyc/database';
 import type { TrackMatchHint } from '@wxyc/shared/dtos';
 import {
   parseSearchQuery,
@@ -63,21 +71,50 @@ const FIELD_COLUMNS: Record<CatalogField, SQL> = {
   label: sql`${library_artist_view.label}`,
 };
 
-// Plain identifiers (not view-qualified column refs) because the data query
-// sorts the deduped subquery's projection, where qualified names would not
-// resolve. Keys come from the fixed CatalogSort union, never user input.
-const SORT_IDENT: Record<CatalogSort, string> = {
-  artist: 'artist_name',
-  album: 'album_title',
-  plays: 'plays',
-  date: 'add_date',
+// BS#1489: `library_artist_view.plays` projects the physical `library.plays`
+// column, which nothing maintains — it is 0 for every row, so `sort=plays`
+// ordered a constant (silently a no-op, falling through to the secondary
+// tiebreak). The real per-album play count lives in the `album_plays` MV
+// (migration 0059) — the same live `COUNT(*)` over flowsheet track entries the
+// catalog export and the tsvector ranker read. Scope a LEFT JOIN to it into the
+// search query and source `plays` from it, rather than redefining the view (the
+// view is read by several other code paths; this keeps the blast radius on the
+// one surface with the bug). The join is 1:1 (unique index on
+// `album_plays.album_id`), so it never changes the result set or `COUNT(*)`;
+// COALESCE 0 covers never-played albums, which have no MV row.
+const albumPlaysJoin = sql`LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library_artist_view.id}`;
+const playsColumn = sql`COALESCE(${album_plays.plays}, 0)`;
+
+const SORT_COLUMNS: Record<CatalogSort, SQL> = {
+  artist: sql`${library_artist_view.artist_name}`,
+  album: sql`${library_artist_view.album_title}`,
+  plays: playsColumn,
+  date: sql`${library_artist_view.add_date}`,
 };
 
-const SECONDARY_SORT_IDENT: Record<CatalogSort, string> = {
-  artist: 'album_title',
-  album: 'artist_name',
-  plays: 'artist_name',
-  date: 'artist_name',
+const SECONDARY_SORT: Record<CatalogSort, SQL> = {
+  artist: sql`${library_artist_view.album_title}`,
+  album: sql`${library_artist_view.artist_name}`,
+  plays: sql`${library_artist_view.artist_name}`,
+  date: sql`${library_artist_view.artist_name}`,
+};
+
+// Bare-column variants for use in an outer ORDER BY after a UNION ALL — once
+// the union closes, the outer query sees the combined column set by SELECT
+// alias, not by underlying table. The qualified `library_artist_view.col`
+// reference in SORT_COLUMNS / SECONDARY_SORT wouldn't resolve at that level.
+const SORT_COLUMNS_UNQUALIFIED: Record<CatalogSort, SQL> = {
+  artist: sql`artist_name`,
+  album: sql`album_title`,
+  plays: sql`plays`,
+  date: sql`add_date`,
+};
+
+const SECONDARY_SORT_UNQUALIFIED: Record<CatalogSort, SQL> = {
+  artist: sql`album_title`,
+  album: sql`artist_name`,
+  plays: sql`artist_name`,
+  date: sql`artist_name`,
 };
 
 export const MIN_CASCADE_QUERY_LENGTH = 4;
@@ -109,60 +146,64 @@ export async function searchLibrary(
   await validateEnumFilters(params.genres, params.formats);
 
   const conditions = parseSearchQuery(params.q, CATALOG_PARSER_CONFIG);
-  // Alias is keyed on the raw `q` (matched as a single string by the LATERAL).
-  // Read once per request so a `getConfig()` invalidation mid-call doesn't
-  // give the SELECT projection and the WHERE predicate different views of
-  // the flag — alias rows would surface in the SELECT but get re-filtered
-  // out by the WHERE.
+  // Alias is keyed on the raw `q` (matched as a single string in the
+  // alias_hits CTE). Read once per request so a `getConfig()` invalidation
+  // mid-call doesn't give the SELECT projection and the WHERE predicate
+  // different views of the flag — alias rows would surface in the SELECT
+  // but get re-filtered out by the WHERE.
   //
-  // Also gate on `hasAllField`: only `field === 'all'` conditions ever inject
-  // the alias OR predicate via buildAllFieldMatch. A pure field-specific
-  // query (`artist:foo`, `album:bar`) would otherwise still pay the LATERAL
-  // cost per candidate row with no chance of an alias-only hit surviving
-  // WHERE. The result set is identical to the flag-off path in that case, so
-  // skip the join entirely.
+  // Also gate on `hasAllField`: alias substrate matching is only routed
+  // for queries that include at least one `field === 'all'` condition.
+  // Field-specific queries (`artist:foo`, `album:bar`) stay on the legacy
+  // single-SELECT plan — they're narrow searches where alias expansion
+  // would surface canonical-name-mismatched rows that the user explicitly
+  // scoped against. Preserves pre-#1318 behavior for those paths; opening
+  // alias expansion to field-specific queries is a future product call.
   const hasAllFieldCondition = conditions.some((c) => c.field === 'all');
   const aliasActive = getCatalogSearchAliasConfig().enabled && params.q.trim().length > 0 && hasAllFieldCondition;
-  const queryWhere = buildWhereClause(conditions, aliasActive);
   const filterWhere = buildFilterClause(params);
 
-  const where = combineWhere(queryWhere, filterWhere);
-
-  const orderDirection = params.order === 'asc' ? 'ASC' : 'DESC';
-  const orderBy = sql.raw(
-    `"${SORT_IDENT[params.sort]}" ${orderDirection}, "${SECONDARY_SORT_IDENT[params.sort]}" ASC, "id" ASC`
-  );
-
+  const orderDirection = params.order === 'asc' ? sql`ASC` : sql`DESC`;
   const offset = params.page * params.limit;
-  const aliasJoin = aliasActive
-    ? sql`LEFT JOIN LATERAL (
-        SELECT MAX(similarity(asa.variant, ${params.q})) AS max_sim,
-               (array_agg(asa.variant ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_variant,
-               (array_agg(asa.source ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_source
-        FROM ${artist_search_alias} asa
-        WHERE asa.artist_id = ${library_artist_view.artist_id}
-          AND asa.variant % ${params.q}
-      ) alias_hit ON true`
-    : sql``;
-  const fromClause = where
-    ? sql`FROM ${library_artist_view} ${aliasJoin} WHERE ${where}`
-    : sql`FROM ${library_artist_view} ${aliasJoin}`;
 
-  const aliasProjection = aliasActive
-    ? sql`,
-      alias_hit.max_sim AS alias_max_sim,
-      alias_hit.matched_variant AS alias_matched_variant,
-      alias_hit.matched_source AS alias_matched_source`
-    : sql``;
+  let dataQuery: SQL;
+  let countQuery: SQL;
+  if (aliasActive) {
+    // ALT1 UNION ALL (BS#1318). The CTE runs the trigram bitmap scan over
+    // `artist_search_alias` once, then we emit two branches:
+    //   (a) byte-identical to the alias-OFF path — query conditions
+    //       evaluated WITHOUT the alias-OR — so the planner can pick the
+    //       same per-column GIN trigram / ILIKE plan it picks today, and
+    //       LIMIT pushdown stays intact.
+    //   (b) alias-only hits, INNER JOIN'd to alias_hits on artist_id, with
+    //       a dedupe predicate that excludes anything already in (a).
+    //
+    // The (a)-shaped WHERE is referenced by reference equality in (b)'s
+    // dedupe so the two branches can't drift on what counts as a match.
+    const queryWhereAliasOff = buildWhereClause(conditions);
+    const branchAWhere = combineWhere(queryWhereAliasOff, filterWhere);
+    // Branch (b): the row satisfies `filterWhere` AND its artist_id has an
+    // alias hit AND the row would NOT have matched branch (a). When
+    // queryWhereAliasOff is null (defensive — aliasActive gates on
+    // hasAllFieldCondition so this is unreachable today), the NOT becomes
+    // vacuously false and (b) emits nothing, which is what we want.
+    const dedupeWhere = queryWhereAliasOff ? sql`NOT ${queryWhereAliasOff}` : sql`FALSE`;
+    const branchBWhere = combineWhere(dedupeWhere, filterWhere);
 
-  // DISTINCT ON dedupes albums carrying multiple active rotation rows — the
-  // rotation table explicitly permits several unkilled rows per
-  // (album_id, rotation_bin) across re-bins/re-promotes, and the view's LEFT
-  // JOIN emits one row per rotation row (review issue 15). The inner ORDER BY
-  // picks a deterministic rotation_bin per album; the outer query applies
-  // the caller's sort over the deduped set.
-  const dedupedSelect = sql`
-    SELECT DISTINCT ON (${library_artist_view.id})
+    const orderBy = sql`${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
+
+    const cte = sql`WITH alias_hits AS (
+      SELECT
+        asa.artist_id,
+        MAX(similarity(asa.variant, ${params.q})) AS max_sim,
+        (array_agg(asa.variant ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_variant,
+        (array_agg(asa.source ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_source
+      FROM ${artist_search_alias} asa
+      WHERE asa.variant % ${params.q}
+      GROUP BY asa.artist_id
+    )`;
+
+    const branchAProjection = sql`
       ${library_artist_view.id} AS id,
       ${library_artist_view.add_date} AS add_date,
       ${library_artist_view.album_title} AS album_title,
@@ -175,19 +216,108 @@ export async function searchLibrary(
       ${library_artist_view.label} AS label,
       ${library_artist_view.label_id} AS label_id,
       ${library_artist_view.rotation_bin} AS rotation_bin,
-      ${library_artist_view.plays} AS plays,
+      ${playsColumn} AS plays,
       ${library_artist_view.on_streaming} AS on_streaming,
-      ${library_artist_view.album_artist} AS album_artist
-      ${aliasProjection}
-    ${fromClause}
-    ORDER BY ${library_artist_view.id} ASC, ${library_artist_view.rotation_bin} ASC
-  `;
-  const dataQuery = sql`
-    SELECT * FROM (${dedupedSelect}) AS deduped
-    ORDER BY ${orderBy}
-    LIMIT ${params.limit} OFFSET ${offset}
-  `;
-  const countQuery = sql`SELECT COUNT(DISTINCT ${library_artist_view.id})::int AS total ${fromClause}`;
+      ${library_artist_view.album_artist} AS album_artist,
+      NULL::real AS alias_max_sim,
+      NULL::text AS alias_matched_variant,
+      NULL::text AS alias_matched_source`;
+    const branchBProjection = sql`
+      ${library_artist_view.id} AS id,
+      ${library_artist_view.add_date} AS add_date,
+      ${library_artist_view.album_title} AS album_title,
+      ${library_artist_view.artist_name} AS artist_name,
+      ${library_artist_view.code_letters} AS code_letters,
+      ${library_artist_view.code_number} AS code_number,
+      ${library_artist_view.code_artist_number} AS code_artist_number,
+      ${library_artist_view.format_name} AS format_name,
+      ${library_artist_view.genre_name} AS genre_name,
+      ${library_artist_view.label} AS label,
+      ${library_artist_view.label_id} AS label_id,
+      ${library_artist_view.rotation_bin} AS rotation_bin,
+      ${playsColumn} AS plays,
+      ${library_artist_view.on_streaming} AS on_streaming,
+      ${library_artist_view.album_artist} AS album_artist,
+      alias_hits.max_sim AS alias_max_sim,
+      alias_hits.matched_variant AS alias_matched_variant,
+      alias_hits.matched_source AS alias_matched_source`;
+
+    const branchAFrom = branchAWhere
+      ? sql`FROM ${library_artist_view} ${albumPlaysJoin} WHERE ${branchAWhere}`
+      : sql`FROM ${library_artist_view} ${albumPlaysJoin}`;
+    const branchBFrom = branchBWhere
+      ? sql`FROM ${library_artist_view} INNER JOIN alias_hits ON alias_hits.artist_id = ${library_artist_view.artist_id} ${albumPlaysJoin} WHERE ${branchBWhere}`
+      : sql`FROM ${library_artist_view} INNER JOIN alias_hits ON alias_hits.artist_id = ${library_artist_view.artist_id} ${albumPlaysJoin}`;
+
+    const unionBody = sql`(
+      SELECT ${branchAProjection}
+      ${branchAFrom}
+    )
+    UNION ALL
+    (
+      SELECT ${branchBProjection}
+      ${branchBFrom}
+    )`;
+
+    dataQuery = sql`
+      ${cte}
+      SELECT * FROM (
+        SELECT DISTINCT ON (id) * FROM (${unionBody}) AS raw
+        ORDER BY id ASC, rotation_bin ASC
+      ) AS deduped
+      ORDER BY ${orderBy}
+      LIMIT ${params.limit} OFFSET ${offset}
+    `;
+    countQuery = sql`
+      ${cte}
+      SELECT COUNT(*)::int AS total FROM (
+        SELECT DISTINCT ON (id) id FROM (${unionBody}) AS raw
+        ORDER BY id ASC, rotation_bin ASC
+      ) AS deduped
+    `;
+  } else {
+    // Alias OFF (legacy path). Single SELECT against library_artist_view,
+    // no CTE, no UNION ALL — byte-identical to pre-#1318 behavior.
+    const queryWhere = buildWhereClause(conditions);
+    const where = combineWhere(queryWhere, filterWhere);
+    const fromClause = where
+      ? sql`FROM ${library_artist_view} ${albumPlaysJoin} WHERE ${where}`
+      : sql`FROM ${library_artist_view} ${albumPlaysJoin}`;
+    const orderBy = sql`${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
+    const innerSelect = sql`
+      SELECT
+        ${library_artist_view.id} AS id,
+        ${library_artist_view.add_date} AS add_date,
+        ${library_artist_view.album_title} AS album_title,
+        ${library_artist_view.artist_name} AS artist_name,
+        ${library_artist_view.code_letters} AS code_letters,
+        ${library_artist_view.code_number} AS code_number,
+        ${library_artist_view.code_artist_number} AS code_artist_number,
+        ${library_artist_view.format_name} AS format_name,
+        ${library_artist_view.genre_name} AS genre_name,
+        ${library_artist_view.label} AS label,
+        ${library_artist_view.label_id} AS label_id,
+        ${library_artist_view.rotation_bin} AS rotation_bin,
+        ${playsColumn} AS plays,
+        ${library_artist_view.on_streaming} AS on_streaming,
+        ${library_artist_view.album_artist} AS album_artist
+      ${fromClause}
+    `;
+    dataQuery = sql`
+      SELECT * FROM (
+        SELECT DISTINCT ON (id) * FROM (${innerSelect}) AS raw
+        ORDER BY id ASC, rotation_bin ASC
+      ) AS deduped
+      ORDER BY ${orderBy}
+      LIMIT ${params.limit} OFFSET ${offset}
+    `;
+    countQuery = sql`
+      SELECT COUNT(*)::int AS total FROM (
+        SELECT DISTINCT ON (id) id FROM (${innerSelect}) AS raw
+        ORDER BY id ASC, rotation_bin ASC
+      ) AS deduped
+    `;
+  }
 
   const [dataRows, countRows] = await Promise.all([db.execute(dataQuery), db.execute(countQuery)]);
 
@@ -201,10 +331,7 @@ export async function searchLibrary(
   // LML's `Semaphore(5) + TokenBucket(50/min)` chokepoint; pagination beyond
   // page 0 stays empty so clients don't scroll a bounded fallback list.
   if (params.page !== 0) return { results, total };
-  // Cascade rows (`TaggedLibraryViewEntry`) carry no date_lost/date_found, so
-  // neither `missing=true` nor `missing=false` can be honored in-memory —
-  // skip the cascade entirely rather than leak CTA/LML rows into the
-  // librarian-facing missing view.
+  // Cascade rows carry no date_lost/date_found — skip when missing filter is set.
   if (params.missing !== undefined) return { results, total };
   const trimmed = params.q.trim();
   if (!passesCascadeGate(trimmed, conditions)) return { results, total };
@@ -363,11 +490,11 @@ function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
   return projected;
 }
 
-function buildWhereClause(conditions: SearchCondition<CatalogField>[], aliasActive: boolean): SQL | null {
+function buildWhereClause(conditions: SearchCondition<CatalogField>[]): SQL | null {
   if (conditions.length === 0) return null;
 
   const fragments = conditions
-    .map((c) => ({ operator: c.operator, fragment: buildConditionFragment(c, aliasActive) }))
+    .map((c) => ({ operator: c.operator, fragment: buildConditionFragment(c) }))
     .filter((f): f is { operator: 'AND' | 'OR'; fragment: SQL } => f.fragment !== null);
 
   if (fragments.length === 0) return null;
@@ -380,10 +507,9 @@ function buildWhereClause(conditions: SearchCondition<CatalogField>[], aliasActi
   return sql`(${result})`;
 }
 
-function buildConditionFragment(condition: SearchCondition<CatalogField>, aliasActive: boolean): SQL | null {
+function buildConditionFragment(condition: SearchCondition<CatalogField>): SQL | null {
   const { field, value, exact, negated } = condition;
-  const fragment =
-    field === 'all' ? buildAllFieldMatch(value, exact, aliasActive) : buildColumnMatch(field, value, exact);
+  const fragment = field === 'all' ? buildAllFieldMatch(value, exact) : buildColumnMatch(field, value, exact);
   return negated ? sql`NOT (${fragment})` : fragment;
 }
 
@@ -395,7 +521,7 @@ function buildColumnMatch(field: CatalogField, value: string, exact: boolean): S
   return sql`${col} ILIKE ${'%' + value + '%'}`;
 }
 
-function buildAllFieldMatch(value: string, exact: boolean, aliasActive: boolean): SQL {
+function buildAllFieldMatch(value: string, exact: boolean): SQL {
   if (exact) {
     // Exact matching skips the alias path — alias variants are normalized
     // strings, not exact matches against the canonical name.
@@ -405,12 +531,13 @@ function buildAllFieldMatch(value: string, exact: boolean, aliasActive: boolean)
   // deferred follow-up flagged in the plan (add `label` to library.search_doc
   // first, then route this branch through it); v1 stays correct and reviewable
   // with the same path the flowsheet trigram fallback uses.
+  //
+  // Alias substrate matching does not route through here — under the
+  // UNION ALL design (BS#1318) alias-only hits surface from branch (b)'s
+  // INNER JOIN against the `alias_hits` CTE, not from an OR predicate
+  // injected into this fragment.
   const pattern = '%' + value + '%';
-  // When alias is active the LATERAL JOIN in the FROM clause exposes
-  // `alias_hit.max_sim`; OR it into the all-field branch so an alias-only
-  // hit (variant trigram match but no canonical-name match) still surfaces.
-  const aliasOr = aliasActive ? sql` OR alias_hit.max_sim IS NOT NULL` : sql``;
-  return sql`(${library_artist_view.artist_name} ILIKE ${pattern} OR ${library_artist_view.album_title} ILIKE ${pattern} OR ${library_artist_view.label} ILIKE ${pattern}${aliasOr})`;
+  return sql`(${library_artist_view.artist_name} ILIKE ${pattern} OR ${library_artist_view.album_title} ILIKE ${pattern} OR ${library_artist_view.label} ILIKE ${pattern})`;
 }
 
 function buildFilterClause(params: LibraryQueryParams): SQL | null {
@@ -426,8 +553,6 @@ function buildFilterClause(params: LibraryQueryParams): SQL | null {
         AND (${library.date_found} IS NULL OR ${library.date_found} < ${library.date_lost})
     )`);
   } else if (params.missing === false) {
-    // Inverse arm so a UI toggle that round-trips both states filters in both
-    // directions instead of silently no-opping on false (review issue 9).
     parts.push(sql`NOT EXISTS (
       SELECT 1 FROM ${library}
       WHERE ${library.id} = ${library_artist_view.id}

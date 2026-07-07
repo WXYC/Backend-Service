@@ -229,6 +229,24 @@ function populateCommonMetadataFields(metadata: Record<string, unknown>, artwork
 }
 
 /**
+ * Project an LML `DiscogsTrackItem[]` to the iOS-facing wire shape
+ * (`{ position, title, duration }`). Shared by `populateReleaseMetadata`
+ * (cold LML-fallthrough) and `buildLocalMetadataResponse` (BS#1331 cache
+ * hit, BS#1336) so the two paths emit byte-identical tracklist entries.
+ * Returns `undefined` for null/empty input to match the "omit when empty"
+ * wire convention. The `.map` produces fresh objects, so the result is
+ * always safe to assign without a further defensive copy.
+ */
+function projectTracklistForWire(tracklist: DiscogsTrackItem[] | null | undefined) {
+  if (!tracklist || tracklist.length === 0) return undefined;
+  return tracklist.map((t) => ({
+    position: t.position,
+    title: t.title,
+    duration: t.duration ?? undefined,
+  }));
+}
+
+/**
  * Populate the release-detail fields (tracklist, genres, styles, label,
  * full release date, discogs artist id, release year) from the
  * `DiscogsMatchResult.artwork` block — the coordinator forces `extended:
@@ -263,16 +281,15 @@ function populateReleaseMetadata(
   metadata.releaseYear = release.year || undefined;
   metadata.genres = release.genres && release.genres.length > 0 ? [...release.genres] : undefined;
   metadata.styles = release.styles && release.styles.length > 0 ? [...release.styles] : undefined;
-  metadata.label = release.label ?? undefined;
+  // `|| undefined` (not `?? undefined`) so an empty-string label/date is
+  // omitted rather than emitted as `""` — matches the `releaseYear` line above
+  // and the local-hit branch's truthy guard (`if (persisted.label)`), so the
+  // two branches stay property-for-property equivalent on empty-string input.
+  metadata.label = release.label || undefined;
   metadata.discogsArtistId = release.artist_id ?? null;
-  metadata.fullReleaseDate = release.released ?? undefined;
-  if (release.tracklist && release.tracklist.length > 0) {
-    metadata.tracklist = release.tracklist.map((t) => ({
-      position: t.position,
-      title: t.title,
-      duration: t.duration ?? undefined,
-    }));
-  }
+  metadata.fullReleaseDate = release.released || undefined;
+  const tracklist = projectTracklistForWire(release.tracklist);
+  if (tracklist) metadata.tracklist = tracklist;
   // Filter spacer.gif placeholders (#649) and surface the artwork URL.
   // On the extended-lookup path this is the same value already set by
   // `populateCommonMetadataFields`; the assignment is idempotent.
@@ -283,23 +300,35 @@ function populateReleaseMetadata(
 /**
  * Build the proxy-album response from BS's own persisted state.
  *
- * Wire-shape parity with the LML-fallthrough path is *almost* but not
- * exact. Eight LML-only fields aren't on `album_metadata`:
- * `discogsArtistId`, `genres`, `styles`, `label`, `fullReleaseDate`,
- * `tracklist`, `artistImageUrl`, `bioTokens`. Seven of those are
- * assigned `?? undefined` / `|| undefined` / conditional-when-non-empty
- * on the LML branch and dropped by `JSON.stringify`, so the wire output
- * is the same as this branch's "key omitted" shape. The one real
- * divergence is `discogsArtistId`, which the LML branch assigns as
- * `?? null` (always present, sometimes literal `null`) and this branch
- * omits entirely. iOS V1 and dj-site `AlbumDetailPanel` gate the
- * artist sub-panel on a truthy `discogsArtistId`, so cache-hit cohorts
- * silently lose the artist subtree until #1336 extends the
- * `album_metadata` schema to carry the LML-only enrichment fields.
+ * Wire-shape parity with the LML-fallthrough path. As of BS#1336 the
+ * eight formerly-LML-only fields (`discogsArtistId`, `genres`, `styles`,
+ * `label`, `fullReleaseDate`, `tracklist`, `artistImageUrl`, `bioTokens`)
+ * are persisted on `album_metadata` (enrichment-worker, `extended: true`)
+ * and emitted here using the same conventions as the LML branch
+ * (`populateCommonMetadataFields` + `populateReleaseMetadata`):
  *
- * iOS decoders that use `decodeIfPresent` (and frontend code that
- * uses optional chaining) see a decode-compatible shape on both
- * branches.
+ *   - `discogsArtistId` is the one field the LML *match* branch always
+ *     emits (`?? null`, key present even when null). To match it
+ *     property-for-property, this branch emits it inside the
+ *     `discogs_url`-present block — i.e. on match-shaped rows. No-match-
+ *     shaped persisted rows (`discogs_url` null — the no-match UPSERT only
+ *     writes search URLs) omit it, exactly as the LML no-match branch does.
+ *   - the other seven are `|| undefined` / conditional-when-non-empty on the
+ *     LML branch and dropped by `JSON.stringify`; this branch omits them
+ *     when empty, so the serialized JSON is identical.
+ *
+ * Two residual divergences are out of scope here and decode-safe: (1) on a
+ * synthetic-artwork match (`discogs_url = ''`) the LML branch emits
+ * `discogsArtistId: null` while this branch omits it — both falsy, the
+ * artist sub-panel renders identically; (2) `artistBio` is the persisted
+ * (markup-stripped via `cleanDiscogsBio`) string here vs the raw Discogs
+ * markup on the LML branch — a pre-existing write-time-cleaning question
+ * tracked separately in BS#1360, not introduced by the BS#1336 field set.
+ *
+ * dj-site `AlbumDetailPanel` and iOS V1 gate the artist sub-panel on a
+ * truthy `discogsArtistId`, so a cache hit now renders the artist subtree
+ * without the cold-path LML round-trip. iOS decoders using `decodeIfPresent`
+ * (and frontend optional chaining) stay decode-compatible on both branches.
  *
  * `filterSpacerGif` scrubs the Discogs 1×1 placeholder URL on `artworkUrl`
  * just as the LML-fallthrough path does (`populateCommonMetadataFields`).
@@ -332,6 +361,9 @@ function buildLocalMetadataResponse(persisted: PersistedAlbumMetadata): Record<s
     metadata.discogsUrl = persisted.discogs_url;
     const releaseId = parseDiscogsReleaseIdFromUrl(persisted.discogs_url);
     if (releaseId !== undefined) metadata.discogsReleaseId = releaseId;
+    // Match the LML match branch's always-present `discogsArtistId` (`?? null`).
+    // Gated on `discogs_url` so no-match-shaped rows omit it like the cold path.
+    metadata.discogsArtistId = persisted.discogs_artist_id ?? null;
   }
   // Discogs returns 0 as "year unknown"; the write path persists either a
   // real year or null, but check for both shapes defensively (mirrors
@@ -344,6 +376,22 @@ function buildLocalMetadataResponse(persisted: PersistedAlbumMetadata): Record<s
   if (persisted.soundcloud_url) metadata.soundcloudUrl = persisted.soundcloud_url;
   if (persisted.artist_bio) metadata.artistBio = persisted.artist_bio;
   if (persisted.artist_wikipedia_url) metadata.artistWikipediaUrl = persisted.artist_wikipedia_url;
+  // LML-only enrichment fields (BS#1336). The `[...]` array copies match the
+  // LML branch's convention and future-proof the field against a cached
+  // lookup layer: `lookupAlbumMetadataByKey` reads fresh from the DB today (no
+  // aliasing hazard), but proxy.controller is cache-heavy and the cache-
+  // hierarchy work (project #32) may front this lookup with an LRU — at which
+  // point an uncopied array assigned onto the response could be mutated by a
+  // downstream caller and poison the shared cache. Copying now keeps that
+  // future change safe; the cost is one small-array allocation per cache hit.
+  if (persisted.label) metadata.label = persisted.label;
+  if (persisted.full_release_date) metadata.fullReleaseDate = persisted.full_release_date;
+  if (persisted.genres && persisted.genres.length > 0) metadata.genres = [...persisted.genres];
+  if (persisted.styles && persisted.styles.length > 0) metadata.styles = [...persisted.styles];
+  const tracklist = projectTracklistForWire(persisted.tracklist);
+  if (tracklist) metadata.tracklist = tracklist;
+  if (persisted.artist_image_url) metadata.artistImageUrl = persisted.artist_image_url;
+  if (persisted.bio_tokens && persisted.bio_tokens.length > 0) metadata.bioTokens = [...persisted.bio_tokens];
   return metadata;
 }
 

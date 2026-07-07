@@ -84,4 +84,16 @@ describe('scripts/resolve-cron-schedule.sh', () => {
     expect(status).toBe(1);
     expect(stderr).toMatch(/Missing jobs\/nonexistent-job\/package\.json/);
   });
+
+  // BS#1380: extend the override allowlist to include rotation-lml-identity-backfill.
+  // Same operational story as flowsheet-metadata-backfill — both are LML-bounded
+  // drift-repair crons whose cadence ops occasionally tightens. The allowlist
+  // stays narrow and explicit.
+  it('returns override when BACKFILL_CRON_SCHEDULE is set and target = rotation-lml-identity-backfill', () => {
+    const { stdout, status } = run('rotation-lml-identity-backfill', {
+      BACKFILL_CRON_SCHEDULE: '*/30 * * * *',
+    });
+    expect(status).toBe(0);
+    expect(stdout.trim()).toBe('*/30 * * * *');
+  });
 });

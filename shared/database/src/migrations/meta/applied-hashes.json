@@ -88,5 +88,22 @@
   "0088_banned-fingerprints": "fc26aef561df95cfa32e09892440b7a9ba614c1cb648a251708ced5e7419b059",
   "0089_artist-search-alias": "267ecc41f1b0a0cc16805cbff13ad865a06bf430ba440b7441b57fdb6977068b",
   "0090_shows-dj-name-override": "bcbfc0a86ec437c1f11246192d67bfbc291e3f1194014d8bcec718f344c8ed6f",
-  "0091_venues-and-concerts": "e738de9bdb0ab762c982a6e31f664f88705bc2b7336bbd57a15efe3b250e6e87"
+  "0091_venues-and-concerts": "e738de9bdb0ab762c982a6e31f664f88705bc2b7336bbd57a15efe3b250e6e87",
+  "0092_normalize-artist-name": "57bf7f03733591917917c5a19b9b67d8527a64ccce224cdc3f1102f4a9cca368",
+  "0093_concerts-first-scraped-at": "bbeee146c92ab63fa70e9f2c537d5a06a13f80a5f52c23cb5a1bed1432057421",
+  "0094_rotation-lml-identity-id": "10134a18381f7daad56ca2d8cae80723832be3158cbe6dd01aae2f8e6afcaaa0",
+  "0095_drop-stale-trigram-indexes": "aba5b26a66102d427e1abd6520aa1f7ef14b776eaaa87ea8b99c3b97e79d24c7",
+  "0096_cdc_oversized_fallback": "5615c7a6aa7514b139340ef6c8ba86a548ac6e7b6f9f0c39241bea2a62a1274b",
+  "0097_fix-fk-on-delete-flowsheet-rotation-reviews": "f13d8eed11d7da774cbdf92abe12cd45440ac7bff594226364c387bd378e4224",
+  "0098_flowsheet-show-id-play-order-idx": "4599512035c91ad0d41d6e73f34c27edcbc00bcd15ad6093ed18c338273cc417",
+  "0099_cta-unique-null-track-partial": "9ab35148120ee357c2a12b6c2733f048ad3c194837d438aa50d94656f366890d",
+  "0101_rotation-discogs-release-id-not-sentinel": "19c3889d8859246d561ad250aac5a8f891afe60a6474e3fa4b4568c96bcb6908",
+  "0102_album-metadata-lml-fields": "43425ee132e94b7962fe67a60b3b3cb979726179362e481986cef8cb217faebe",
+  "0103_flowsheet-radio-hour": "48ac339af838c8bb6a00e2793d80b57b00f6b9971ed50c7f1e91a4359114fb68",
+  "0104_library-watermark": "e9cfb021ab16c8b44c9c9afead1d81ee348521428358536fe62eecfe557605e9",
+  "0105_library-watermark-parent-tables": "879a3ac81a8a93b1108db8d72701d5927518d47c2cd006a39a632ac8c801c579",
+  "0106_freetext-resolution": "c9fff323e5eb101fcd755fa682b3bbb9ea84b36c1e470cd1bad05004e66ae0fd",
+  "0107_album-popularity": "1f89b36642cedd0aeddf5062e4dedaf774db7326a661a3366115119373148cd1",
+  "0108_flowsheet-composer": "6ac7db945d6624bb764b7882627cbfc9d01f9fde5d04897f84ba592da0da40cd",
+  "0109_md-verified-release-id-source": "375bf7877d19df633615ce8be9e052b0a5a89c7e9fda13748f3f498e3a11eb12"
 }

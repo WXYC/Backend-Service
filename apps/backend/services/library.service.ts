@@ -20,6 +20,7 @@ import {
   genres,
   library,
   library_identity,
+  library_watermark,
   rotation,
   LibraryArtistViewEntry,
 } from '@wxyc/database';
@@ -36,6 +37,7 @@ import {
   isLmlConfigured,
   envInt,
   LmlClientError,
+  resolveIdentity,
   type LookupResponse,
   type DiscogsTrackItem,
   type DiscogsReleaseMetadata,
@@ -46,6 +48,28 @@ import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.se
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
+
+/**
+ * Catalog freshness watermark for the conditional-GET path (BS#1467 / Epic F
+ * pattern). Returns `library_watermark.last_modified_at`, the single-row
+ * sibling table advanced by the `touch_library_watermark` AFTER STATEMENT
+ * trigger on `library` (migration 0104). The trigger fires on every
+ * INSERT/UPDATE/DELETE — including the daily `jobs/library-etl/` write that
+ * bypasses this service layer — so the watermark is correct even though most
+ * catalog mutations never call into `library.service`.
+ *
+ * The conditional-GET middleware (`conditionalGet(getCatalogLastModifiedAt)`)
+ * reads this on every poll; PK lookup is O(1). Returns the epoch
+ * (`new Date(0)`) only as a defensive fallback — the migration seeds the
+ * singleton row at apply time, so in production the SELECT always returns
+ * exactly one row.
+ *
+ * Analogue of `flowsheet.service.getLastModifiedAt`.
+ */
+export const getCatalogLastModifiedAt = async (): Promise<Date> => {
+  const result = await db.select({ at: library_watermark.last_modified_at }).from(library_watermark).limit(1);
+  return result[0]?.at ?? new Date(0);
+};
 
 /**
  * Source columns on `artists` (and any joined / view-projected row) that
@@ -67,10 +91,10 @@ type ReconciledIdentityKey = (typeof RECONCILED_IDENTITY_KEYS)[number];
  * A library_artist_view row that may carry an attached `matched_via` hint when
  * the cascade's CTA or LML `/lookup` fallback surfaced it (catalog-track-search
  * plan §5.1), or a `matched_via_alias` hint when the artist-search-alias
- * LATERAL JOIN surfaced it (artist-search-alias plan §PR 5). Wraps
- * `LibraryArtistViewEntry` rather than replacing it so downstream functions
- * (enrichWithArtwork, serializeReconciledIdentity) accept tagged rows without
- * signature changes.
+ * UNION ALL branch surfaced it (artist-search-alias plan §PR 5, post-#1318).
+ * Wraps `LibraryArtistViewEntry` rather than replacing it so downstream
+ * functions (enrichWithArtwork, serializeReconciledIdentity) accept tagged
+ * rows without signature changes.
  */
 export type TaggedLibraryViewEntry = LibraryArtistViewEntry & {
   matched_via?: TrackMatchHint[];
@@ -78,9 +102,9 @@ export type TaggedLibraryViewEntry = LibraryArtistViewEntry & {
 };
 
 /**
- * Raw projection fields appended to the SELECT when the alias LATERAL is on.
- * Returned as nullable columns so callers can detect a no-hit row by
- * `alias_max_sim === null` without forcing a separate query.
+ * Raw projection fields appended to the SELECT when the alias UNION ALL
+ * branch is on (BS#1318). Returned as nullable columns so callers can detect
+ * a no-hit row by `alias_max_sim === null` without forcing a separate query.
  */
 type AliasHitFields = {
   alias_max_sim: number | null;
@@ -89,16 +113,16 @@ type AliasHitFields = {
 };
 
 /**
- * Attach `matched_via_alias` to a tagged row when the LATERAL JOIN surfaced a
- * non-null hit. No-op when all three alias fields are null (the row matched
- * via the underlying trigram predicate, not via the alias cache).
+ * Attach `matched_via_alias` to a tagged row when the alias UNION ALL branch
+ * surfaced a non-null hit. No-op when all three alias fields are null (the
+ * row matched via the underlying trigram predicate, not via the alias cache).
  */
 function attachAliasHint<R extends LibraryArtistViewEntry & AliasHitFields>(row: R): TaggedLibraryViewEntry {
   // Strip the alias-only fields off the wire-shape; matched_via_alias carries
   // the same information in the public sibling-type shape.
   const { alias_max_sim, alias_matched_variant, alias_matched_source, ...rest } = row;
   // Defensive: require non-nullish numeric and truthy variant + source. The
-  // LATERAL JOIN should never emit empty-string fields, but mirror the same
+  // alias branch should never emit empty-string fields, but mirror the same
   // guard `toAlbumSearchResultRow` uses in library-search.service so the
   // catalog (/library/query) and request-line surfaces agree on what counts
   // as an alias hit.
@@ -340,8 +364,142 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
   return rows.map((row) => serializeReconciledIdentity(row));
 };
 
+/**
+ * BS#1380: Sentry counter `lml.resolve.fallback_to_null` reason buckets.
+ * Each value signals a different operational response:
+ *   - `timeout`: LML latency/capacity (look at LML p95)
+ *   - `5xx`:     LML deploy regression (look at LML release notes)
+ *   - `4xx`:     BS-side caller bug (the library_identity row pointed at
+ *                a sentinel ID LML rejects, etc.)
+ *   - `network`: infra noise (transient TCP/DNS failures)
+ *   - `other`:   uncategorised — investigate per-event
+ *
+ * Surfaced separately so a per-bucket regression doesn't get masked by the
+ * rollup. Revisit (split the knob or tune the value) if Sentry shows p95
+ * user-facing add-to-rotation > 2.5 s OR fallback rate > 5% in any bucket.
+ */
+export type LmlResolveFallbackReason = 'timeout' | '5xx' | '4xx' | 'network' | 'other';
+
+/**
+ * Classify the error caught from `resolveIdentity(...)` into one of the
+ * five operational buckets above. Pulled out so the unit test can
+ * exhaustively exercise every branch without spinning up an LML server.
+ *
+ * `LmlClientError` is the wrapper `lmlFetch` throws; its `statusCode` was
+ * already translated upstream (5xx → 502, AbortError → 504). The catch
+ * here untranslates so the Sentry attribute reads as the original
+ * operational signal.
+ */
+export function classifyLmlResolveError(err: unknown): LmlResolveFallbackReason {
+  if (!err || typeof err !== 'object') return 'other';
+  const e = err as { name?: string; code?: string; statusCode?: number; message?: string };
+  if (e.name === 'AbortError') return 'timeout';
+  if (err instanceof LmlClientError) {
+    // `lmlFetch` translates `AbortError` → 504 and upstream 5xx → 502; restore
+    // the operational bucket from those translations + the raw status range.
+    if (e.statusCode === 504) return 'timeout';
+    if (e.statusCode === 502) {
+      // 502 is overloaded: it's the wrapper for both upstream 5xx and a raw
+      // fetch failure (the catch-all in `lmlFetch`). Disambiguate from the
+      // message — "LML request failed" is the fetch-threw path.
+      return typeof e.message === 'string' && e.message.startsWith('LML request failed') ? 'network' : '5xx';
+    }
+    if (typeof e.statusCode === 'number') {
+      if (e.statusCode >= 500) return '5xx';
+      if (e.statusCode >= 400) return '4xx';
+    }
+    return 'other';
+  }
+  if (e.code === 'ECONNRESET' || e.code === 'ENOTFOUND' || e.code === 'ECONNREFUSED') {
+    return 'network';
+  }
+  return 'other';
+}
+
+/**
+ * Add an album to rotation (dj-site path, `POST /library/rotation`).
+ *
+ * Synchronously triple-writes `(discogs_release_id, discogs_release_id_source =
+ * 'library_identity', lml_identity_id)` when the album's `library_identity`
+ * row supplies a non-NULL `discogs_release_id` (BS#1380):
+ *
+ *   1. Read `library_identity.discogs_release_id` for the requested
+ *      `album_id`. `library_identity.library_id` is the PRIMARY KEY
+ *      (see schema.ts:1391-1393); `LIMIT 1` is defensive.
+ *   2. If non-NULL, `await resolveIdentity({kind:'release',
+ *      source:'discogs_release', external_id})` to mint a stable
+ *      `lml_identity_id`. The hop runs inside this handler — the response
+ *      row carries the populated columns without needing a follow-up
+ *      patch.
+ *   3. INSERT all three columns. On resolve failure (timeout / 5xx /
+ *      network), `lml_identity_id` falls back to NULL but
+ *      `discogs_release_id` + `discogs_release_id_source = 'library_identity'`
+ *      still land — the *source of the Discogs id* is library_identity
+ *      regardless of whether the mint succeeded. The daily backfill cron
+ *      catches up within ~24h.
+ *
+ * Rationale for synchronous-before-INSERT: dj-site's optimistic UI
+ * (WXYC/dj-site#648) covers the latency tail at the client side — the row
+ * appears in-rotation immediately on click. Blocking the music director on
+ * an LML outage is worse than a temporarily-incomplete row, so the catch
+ * arm proceeds rather than rethrowing.
+ */
 export const addToRotation = async (newRotation: RotationAddRequest) => {
-  const insertedRotation: RotationRelease[] = await db.insert(rotation).values(newRotation).returning();
+  const values: RotationAddRequest = { ...newRotation };
+
+  // Allowlist guard already runs at the controller layer, but the server-
+  // derived fields below must always come from this function, not the
+  // request — defense in depth.
+  if (values.album_id != null) {
+    const [identityRow] = await db
+      .select({ discogs_release_id: library_identity.discogs_release_id })
+      .from(library_identity)
+      .where(eq(library_identity.library_id, values.album_id))
+      .limit(1);
+    const discogsReleaseId = identityRow?.discogs_release_id ?? null;
+
+    // BS#1429: rotation.discogs_release_id rejects `0` and negative ids via
+    // CHECK constraint. library_identity.discogs_release_id has no such
+    // fence today, so a poisoned upstream value would 23514 this INSERT and
+    // surface as a 5xx to the music director. Treat any non-positive value
+    // as "no Discogs handle" — same graceful-degradation path the LML
+    // resolve-failure catch arm already takes.
+    if (discogsReleaseId != null && discogsReleaseId > 0) {
+      // The source-of-the-Discogs-id is library_identity, regardless of
+      // whether the LML mint that follows succeeds.
+      values.discogs_release_id = discogsReleaseId;
+      values.discogs_release_id_source = 'library_identity';
+
+      let lmlIdentityId: number | null = null;
+      try {
+        const resolved = await resolveIdentity({
+          kind: 'release',
+          source: 'discogs_release',
+          external_id: String(discogsReleaseId),
+        });
+        lmlIdentityId = resolved.identity_id;
+      } catch (err) {
+        const reason = classifyLmlResolveError(err);
+        // BS#1380: classify once at fallback time so each reason bucket
+        // signals a different operational response (timeout → LML
+        // latency, 5xx → LML deploy regression, 4xx → BS-side caller bug,
+        // network → infra noise). v10 SDK shape — `Sentry.metrics.count(
+        // name, value, {attributes})`. Pre-v8
+        // `Sentry.metrics.increment(..., {tags})` was removed.
+        try {
+          Sentry.metrics.count('lml.resolve.fallback_to_null', 1, {
+            attributes: { caller: 'add_to_rotation', reason },
+          });
+        } catch {
+          // Observability must never break the request path; swallow.
+        }
+        // lml_identity_id stays NULL; INSERT proceeds.
+      }
+      values.lml_identity_id = lmlIdentityId;
+    }
+  }
+
+  const insertedRotation: RotationRelease[] = await db.insert(rotation).values(values).returning();
   return insertedRotation[0];
 };
 
@@ -970,8 +1128,8 @@ const LIBRARY_VIEW_PROJECTION = {
 /**
  * Raw SQL mirror of `libraryViewQuery(false)`'s join chain. Used when the
  * caller needs a query shape Drizzle's chained builder can't express
- * (`LEFT JOIN LATERAL` for the alias path). Schema is named once here so a
- * future column change is a single edit.
+ * (the UNION ALL alias path emitted by `buildAliasHitsCte`). Schema is
+ * named once here so a future column change is a single edit.
  */
 const LIBRARY_VIEW_JOINS_RAW = sql`
   INNER JOIN ${artists} ON ${artists.id} = ${library.artist_id}
@@ -1014,32 +1172,43 @@ const LIBRARY_VIEW_PROJECTION_RAW = sql`
 `;
 
 /**
- * The alias LATERAL JOIN fragment plus its associated SELECT projection,
- * WHERE-list contribution, and ORDER BY ranking term. Keyed on
- * `library.artist_id` (the catalog read paths all project it through their
- * underlying `FROM library` joins). Multiple cached variants for the same
- * artist collapse to a single row via MAX/array_agg ORDER BY similarity
- * (the highest-similarity variant + its source win).
+ * Build the `alias_hits` CTE used by the UNION ALL alias-aware search paths
+ * (BS#1318). The CTE runs the trigram bitmap scan over `artist_search_alias`
+ * exactly once and groups by `artist_id`, yielding (artist_id, max_sim,
+ * matched_variant, matched_source) for every artist whose alias substrate
+ * matches `query`. Callers join this CTE on `artist_id` rather than running
+ * a correlated LATERAL per candidate row.
+ *
+ * Replacement for the previous `LEFT JOIN LATERAL` design: the LATERAL was
+ * correlated on `asa.artist_id = library.artist_id`, which steered the
+ * planner onto the PK btree and filtered `variant % q` row-by-row, never
+ * touching the GIN trigram index. The CTE form lets the planner pick the
+ * trigram bitmap scan once and hash-join into the outer query.
  */
-function buildAliasLateralFragments(query: string) {
-  return {
-    projection: sql`,
-      alias_hit.max_sim AS alias_max_sim,
-      alias_hit.matched_variant AS alias_matched_variant,
-      alias_hit.matched_source AS alias_matched_source`,
-    join: sql`
-      LEFT JOIN LATERAL (
-        SELECT MAX(similarity(asa.variant, ${query})) AS max_sim,
-               (array_agg(asa.variant ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_variant,
-               (array_agg(asa.source ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_source
-        FROM ${artist_search_alias} asa
-        WHERE asa.artist_id = ${library.artist_id}
-          AND asa.variant % ${query}
-      ) alias_hit ON true`,
-    predicate: sql`OR alias_hit.max_sim IS NOT NULL`,
-    rankTerm: sql`, COALESCE(alias_hit.max_sim, 0)`,
-  };
+function buildAliasHitsCte(query: string) {
+  return sql`WITH alias_hits AS (
+    SELECT
+      asa.artist_id,
+      MAX(similarity(asa.variant, ${query})) AS max_sim,
+      (array_agg(asa.variant ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_variant,
+      (array_agg(asa.source ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_source
+    FROM ${artist_search_alias} asa
+    WHERE asa.variant % ${query}
+    GROUP BY asa.artist_id
+  )`;
 }
+
+/** Projection columns emitted by the alias branch of a UNION ALL search query. */
+const ALIAS_HITS_PROJECTION = sql`,
+  alias_hits.max_sim AS alias_max_sim,
+  alias_hits.matched_variant AS alias_matched_variant,
+  alias_hits.matched_source AS alias_matched_source`;
+
+/** NULL placeholders for the alias-shape columns on the non-alias UNION ALL branch. */
+const ALIAS_HITS_PROJECTION_NULLS = sql`,
+  NULL::real AS alias_max_sim,
+  NULL::text AS alias_matched_variant,
+  NULL::text AS alias_matched_source`;
 
 /**
  * Build the `FROM library` query shape with the joins needed to project the
@@ -1126,26 +1295,48 @@ async function searchLibraryByTrigramBoth(
       .limit(n) as unknown as Promise<TaggedLibraryViewEntry[]>;
   }
 
-  // Alias-enabled path: raw SQL with `LEFT JOIN LATERAL` against the alias
-  // cache. The OR-trigram predicate stays, plus the alias hit; rank widens
-  // to GREATEST(artist_sim, album_sim, COALESCE(alias_sim, 0)).
-  const alias = buildAliasLateralFragments(query);
+  // Alias-enabled path: ALT1 UNION ALL (BS#1318). The CTE runs the trigram
+  // bitmap scan once over `artist_search_alias`; branch (a) is the
+  // byte-identical alias-OFF trigram predicate against `library`, branch (b)
+  // joins the CTE on `artist_id` and dedupes against branch (a) via NOT-of
+  // the same trigram predicate.
+  //
+  // The trigram OR-predicate is evaluated twice — once positively in (a),
+  // once negated in (b) — but each is bitmap-indexable on its own, so the
+  // total cost is dominated by the substrate scan + LIMIT pushdown on the
+  // outer LAV scan rather than the correlated LATERAL's per-row scan.
+  //
+  // The UNION ALL is wrapped in a subquery so the outer ORDER BY can
+  // reference both the trigram similarity and the CTE-provided
+  // `alias_max_sim`. Postgres forbids expression-shaped ORDER BY directly on
+  // a UNION result (column names only); the subquery lifts the union's
+  // columns into a scope where `similarity(...)` is a legal ORDER BY term.
   const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
+  const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
   const rows = (await db.execute(sql`
-    SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${alias.projection}
-    FROM ${library}
-    ${LIBRARY_VIEW_JOINS_RAW}
-    ${alias.join}
-    WHERE (
-      ${library.artist_name} % ${query}
-      OR ${library.album_title} % ${query}
-      ${alias.predicate}
-    )
-    ${streamingClause}
+    ${buildAliasHitsCte(query)}
+    SELECT * FROM (
+      (
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        WHERE ${trigramPredicate}
+        ${streamingClause}
+      )
+      UNION ALL
+      (
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
+        WHERE NOT ${trigramPredicate}
+        ${streamingClause}
+      )
+    ) alias_search
     ORDER BY GREATEST(
-      similarity(${library.artist_name}, ${query}),
-      similarity(${library.album_title}, ${query})
-      ${alias.rankTerm}
+      similarity(artist_name, ${query}),
+      similarity(album_title, ${query}),
+      COALESCE(alias_max_sim, 0)
     ) DESC
     LIMIT ${n}
   `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];
@@ -2041,22 +2232,36 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
     return rows.map((row) => enrichLibraryResult(viewRowToLibraryResult(row)));
   }
 
-  // Alias-enabled: single-column trigram on artist_name, OR'd with the
-  // LATERAL alias hit. GREATEST collapses to MAX of two terms since there's
-  // no album_title predicate here.
-  const alias = buildAliasLateralFragments(artistName);
+  // Alias-enabled: ALT1 UNION ALL (BS#1318). Single-column trigram on
+  // `library.artist_name` as branch (a); branch (b) joins the CTE on
+  // `artist_id` and excludes rows already matched by (a). GREATEST collapses
+  // to MAX of two terms since there's no album_title predicate here.
+  //
+  // Wrap the UNION ALL in a subquery so the outer ORDER BY can use
+  // expression-shaped terms (`similarity(...)`); Postgres forbids
+  // expression ORDER BY directly on a UNION result.
+  const trigramPredicate = sql`${library.artist_name} % ${artistName}`;
   const rows = (await db.execute(sql`
-    SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${alias.projection}
-    FROM ${library}
-    ${LIBRARY_VIEW_JOINS_RAW}
-    ${alias.join}
-    WHERE (
-      ${library.artist_name} % ${artistName}
-      ${alias.predicate}
-    )
+    ${buildAliasHitsCte(artistName)}
+    SELECT * FROM (
+      (
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        WHERE ${trigramPredicate}
+      )
+      UNION ALL
+      (
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
+        WHERE NOT ${trigramPredicate}
+      )
+    ) alias_search
     ORDER BY GREATEST(
-      similarity(${library.artist_name}, ${artistName})
-      ${alias.rankTerm}
+      similarity(artist_name, ${artistName}),
+      COALESCE(alias_max_sim, 0)
     ) DESC
     LIMIT ${limit}
   `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];

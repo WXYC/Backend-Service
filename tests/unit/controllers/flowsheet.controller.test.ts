@@ -16,6 +16,8 @@ const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
 const mockUpdateEntry = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockRemoveTrack = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockChangeOrder = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockStartShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockAddDJToShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockEndShow = jest.fn<() => Promise<Record<string, unknown>>>();
@@ -32,11 +34,17 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
   resolveDjNameForShow: mockResolveDjNameForShow,
   updateEntry: mockUpdateEntry,
+  removeTrack: mockRemoveTrack,
+  changeOrder: mockChangeOrder,
   startShow: mockStartShow,
   addDJToShow: mockAddDJToShow,
   endShow: mockEndShow,
   leaveShow: mockServiceLeaveShow,
 }));
+
+// flowsheet-projection is intentionally NOT mocked — the controller boundary
+// runs the real allow-list projector so these tests observe the actual
+// client-facing payload (BS#1513).
 
 import {
   getEntries,
@@ -44,10 +52,13 @@ import {
   getShowInfo,
   addEntry,
   updateEntry,
+  deleteEntry,
+  changeOrder,
   joinShow,
   leaveShow,
 } from '../../../apps/backend/controllers/flowsheet.controller';
 import WxycError from '../../../apps/backend/utils/error';
+import { INTERNAL_FLOWSHEET_COLUMNS, makeFullFlowsheetRow } from '../../fixtures/flowsheet-row.fixture';
 
 // Helper to create mock Express req/res/next
 const createMockReq = (query: Record<string, string> = {}): Partial<Request> => ({
@@ -56,6 +67,7 @@ const createMockReq = (query: Record<string, string> = {}): Partial<Request> => 
 
 const createMockRes = () => {
   const res: Partial<Response> = {};
+  res.locals = {} as Response['locals'];
   res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
   res.json = jest.fn().mockReturnValue(res) as unknown as Response['json'];
   res.send = jest.fn().mockReturnValue(res) as unknown as Response['send'];
@@ -1177,6 +1189,238 @@ describe('flowsheet.controller', () => {
       expect(mockServiceLeaveShow).toHaveBeenCalledWith('guest-dj', expect.objectContaining({ id: 1 }));
       expect(mockEndShow).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
+    });
+  });
+
+  describe('does not leak internal flowsheet columns (BS#1513)', () => {
+    // Fully-populated raw row + internal-column deny-list shared with the
+    // projector and DJ-peek leak suites (tests/fixtures/flowsheet-row.fixture.ts)
+    // so a new internal column is covered everywhere from one update site.
+    const makeRawRow = () => makeFullFlowsheetRow() as unknown as Record<string, unknown>;
+
+    const lastJsonPayload = (res: Partial<Response>) => {
+      const calls = (res.json as unknown as jest.Mock).mock.calls;
+      return calls[calls.length - 1][0] as Record<string, unknown>;
+    };
+
+    const expectProjected = (payload: Record<string, unknown>) => {
+      for (const key of INTERNAL_FLOWSHEET_COLUMNS) {
+        expect(payload).not.toHaveProperty(key);
+      }
+      // Client-facing fields survive.
+      expect(payload).toMatchObject({
+        id: 42,
+        entry_type: 'track',
+        artist_name: 'Juana Molina',
+        track_title: 'la paradoja',
+        artwork_url: 'https://example.com/art.jpg',
+        // Client-facing per the FlowsheetEntryResponse SSOT (rationale in the
+        // flowsheet-projection.ts module docstring).
+        metadata_status: 'enriched_match',
+      });
+    };
+
+    it('addEntry projects the raw insert row (message branch)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 42, end_time: null });
+      mockAddTrack.mockResolvedValue(makeRawRow());
+
+      const req = { body: { message: 'Talkset' } } as unknown as Request;
+      const res = createMockRes();
+
+      await addEntry(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(201);
+      expectProjected(lastJsonPayload(res));
+    });
+
+    it('addEntry projects the raw insert row (free-form track branch)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 42, end_time: null });
+      mockResolveDjNameForShow.mockResolvedValue('DJ Test');
+      mockAddTrack.mockResolvedValue(makeRawRow());
+
+      const req = {
+        body: {
+          artist_name: 'Juana Molina',
+          album_title: 'DOGA',
+          track_title: 'la paradoja',
+          record_label: 'Sonamos',
+        },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      await addEntry(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(201);
+      expectProjected(lastJsonPayload(res));
+    });
+
+    it('deleteEntry projects the raw deleted row', async () => {
+      mockRemoveTrack.mockResolvedValue(makeRawRow());
+
+      const req = { body: { entry_id: 42 } } as unknown as Request;
+      const res = createMockRes();
+
+      await deleteEntry(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expectProjected(lastJsonPayload(res));
+    });
+
+    it('updateEntry projects the raw updated row', async () => {
+      mockUpdateEntry.mockResolvedValue(makeRawRow());
+
+      const req = { body: { entry_id: 42, data: { track_title: 'la paradoja' } } } as unknown as Request;
+      const res = createMockRes();
+
+      await updateEntry(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expectProjected(lastJsonPayload(res));
+    });
+
+    it('changeOrder projects the raw reordered row', async () => {
+      mockChangeOrder.mockResolvedValue(makeRawRow());
+
+      const req = { body: { entry_id: 42, new_position: 3 } } as unknown as Request;
+      const res = createMockRes();
+
+      await changeOrder(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expectProjected(lastJsonPayload(res));
+    });
+
+    describe('feeds the legacy mirror the unprojected row (PR #1532 review follow-up)', () => {
+      // The mirror middleware taps the HTTP response body into
+      // res.locals.mirrorData (tapJsonResponse), and its BS#908 loop guards +
+      // restart fallback read `legacy_entry_id` off that data — a column the
+      // projection strips. Controllers therefore pre-stash the raw row via
+      // stashMirrorData before res.json; these tests pin that the stash
+      // happens on every mirrored mutation and carries the internal columns
+      // in the parsed-JSON shape the mirror handlers were built against.
+      const stashedOf = (res: Partial<Response>) =>
+        (res.locals as Record<string, unknown>).mirrorData as Record<string, unknown>;
+
+      it('addEntry stashes the full row for the mirror', async () => {
+        mockGetLatestShow.mockResolvedValue({ id: 42, end_time: null });
+        mockResolveDjNameForShow.mockResolvedValue('DJ Test');
+        mockAddTrack.mockResolvedValue(makeRawRow());
+
+        const req = {
+          body: {
+            artist_name: 'Juana Molina',
+            album_title: 'DOGA',
+            track_title: 'la paradoja',
+            record_label: 'Sonamos',
+          },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await addEntry(req, res as Response, mockNext);
+
+        const stashed = stashedOf(res);
+        expect(stashed).toMatchObject({ id: 42, legacy_entry_id: 9999 });
+        expect(stashed).toHaveProperty('search_doc');
+        // JSON-parity with the pre-projection tapped body: dates as ISO strings.
+        expect(typeof stashed.add_time).toBe('string');
+      });
+
+      it('deleteEntry stashes the full row for the mirror', async () => {
+        mockRemoveTrack.mockResolvedValue(makeRawRow());
+
+        const req = { body: { entry_id: 42 } } as unknown as Request;
+        const res = createMockRes();
+
+        await deleteEntry(req, res as Response, mockNext);
+
+        const stashed = stashedOf(res);
+        expect(stashed).toMatchObject({ id: 42, legacy_entry_id: 9999, play_order: 5 });
+      });
+
+      it('updateEntry stashes the full row for the mirror', async () => {
+        mockUpdateEntry.mockResolvedValue(makeRawRow());
+
+        const req = { body: { entry_id: 42, data: { track_title: 'la paradoja' } } } as unknown as Request;
+        const res = createMockRes();
+
+        await updateEntry(req, res as Response, mockNext);
+
+        const stashed = stashedOf(res);
+        expect(stashed).toMatchObject({ id: 42, legacy_entry_id: 9999 });
+      });
+
+      it('changeOrder stashes the full row too (inert today — its mirror is commented out in the route — but correct-by-default if re-enabled)', async () => {
+        mockChangeOrder.mockResolvedValue(makeRawRow());
+
+        const req = { body: { entry_id: 42, new_position: 3 } } as unknown as Request;
+        const res = createMockRes();
+
+        await changeOrder(req, res as Response, mockNext);
+
+        const stashed = stashedOf(res);
+        expect(stashed).toMatchObject({ id: 42, legacy_entry_id: 9999 });
+      });
+    });
+
+    describe('updateEntry rejects empty patches (PR #1532 review follow-up)', () => {
+      // An empty (or fully-filtered) patch would reach drizzle's `.set({})`,
+      // which throws `No values to set` — surfacing as a 500 for what is a
+      // malformed request. The controller rejects it with a 400 before the
+      // service runs.
+      it.each([
+        ['an empty data object', {}],
+        ['data omitted entirely', undefined],
+        ['data containing only non-updatable keys', { metadata_status: 'enriched_match', legacy_entry_id: 1 }],
+      ])('400s on %s instead of letting drizzle 500', async (_name, data) => {
+        const req = { body: { entry_id: 42, data } } as unknown as Request;
+        const res = createMockRes();
+
+        await expect(updateEntry(req, res as Response, mockNext)).rejects.toMatchObject({ statusCode: 400 });
+        expect(mockUpdateEntry).not.toHaveBeenCalled();
+        expect(res.json).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('404s cleanly when the target row is missing (PR #1532 review follow-up)', () => {
+      // removeTrack / updateEntry / changeOrder return `.returning()[0]` /
+      // a post-commit re-read — `undefined` when no row matches (double
+      // delete, PATCH racing a delete, delete landing between changeOrder's
+      // commit and its confirmation read). Pre-#1532 that serialized as a
+      // misleading 200-with-empty-body; with the projection it would be a
+      // bare TypeError -> 500 internal_error (the BS#1271 class). Pin the
+      // clean 404 instead.
+      it('deleteEntry throws 404 when removeTrack matches no row', async () => {
+        mockRemoveTrack.mockResolvedValue(undefined);
+
+        const req = { body: { entry_id: 424242 } } as unknown as Request;
+        const res = createMockRes();
+
+        await expect(deleteEntry(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+        await expect(deleteEntry(req, res as Response, mockNext)).rejects.toMatchObject({ statusCode: 404 });
+        expect(res.json).not.toHaveBeenCalled();
+      });
+
+      it('updateEntry throws 404 when the UPDATE matches no row', async () => {
+        mockUpdateEntry.mockResolvedValue(undefined);
+
+        const req = { body: { entry_id: 424242, data: { track_title: 'x' } } } as unknown as Request;
+        const res = createMockRes();
+
+        await expect(updateEntry(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+        await expect(updateEntry(req, res as Response, mockNext)).rejects.toMatchObject({ statusCode: 404 });
+        expect(res.json).not.toHaveBeenCalled();
+      });
+
+      it('changeOrder throws 404 when the confirmation read finds the row deleted mid-flight', async () => {
+        mockChangeOrder.mockResolvedValue(undefined);
+
+        const req = { body: { entry_id: 424242, new_position: 2 } } as unknown as Request;
+        const res = createMockRes();
+
+        await expect(changeOrder(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+        await expect(changeOrder(req, res as Response, mockNext)).rejects.toMatchObject({ statusCode: 404 });
+        expect(res.json).not.toHaveBeenCalled();
+      });
     });
   });
 });

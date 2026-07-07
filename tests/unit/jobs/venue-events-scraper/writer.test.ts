@@ -16,7 +16,7 @@ import { ensureVenue, upsertConcert } from '../../../../jobs/venue-events-scrape
 import type { ParsedConcert } from '../../../../jobs/venue-events-scraper/rhp-types';
 
 type MockDb = typeof db & {
-  _chain: { returning: jest.Mock; limit: jest.Mock };
+  _chain: { returning: jest.Mock; limit: jest.Mock; onConflictDoUpdate: jest.Mock; values: jest.Mock };
 };
 
 const mockDb = db as MockDb;
@@ -75,6 +75,85 @@ describe('upsertConcert', () => {
     // here would surface as ERR_INVALID_ARG_TYPE inside Buffer.byteLength
     // (the BS#802 failure mode).
     await expect(upsertConcert(fakeParsed('date-shape'), 1, new Date('2026-06-05T12:00:00Z'))).resolves.toBeDefined();
+  });
+
+  // BS#1385 — `first_scraped_at` is the INSERT-only scraper-stability
+  // anchor: the schema's `DEFAULT now()` populates it on INSERT, and the
+  // ON CONFLICT `set:` clause must omit it so re-UPSERT preserves the
+  // insert-time value. One decision (omit the column from the upsert
+  // payload), pinned at both read-positions.
+  describe('first_scraped_at INSERT-only invariant (BS#1385)', () => {
+    // Normalize Drizzle's `values(obj | obj[])` overload — return EVERY
+    // row so a future refactor to a batched `values([r0, r1, ...])` call
+    // can't slip a regression past us by only adding first_scraped_at to
+    // r1+. Plain-object form is wrapped to a 1-element array for uniform
+    // iteration below.
+    const concertRows = (arg: unknown): Record<string, unknown>[] => {
+      const rows = Array.isArray(arg) ? arg : [arg];
+      return rows.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object');
+    };
+
+    // Structural discriminator — pick the concerts upsert out of any
+    // co-located mock invocations (e.g. ensureVenue under a future
+    // refactor) by keys that uniquely belong to concerts and NOT to
+    // venues' payload: `source_id` (venues uses `slug`) + `venue_id`
+    // (an FK that venues' own row has no reason to carry). Deliberately
+    // does NOT include `scraped_at` so the separate scraped_at-presence
+    // anchor below can actually fire if the writer ever drops it.
+    // Keeps the test green if the writer ever routes `source` through a
+    // constant / enum reference instead of the literal 'rhp_scrape'.
+    const isConcertRow = (r: Record<string, unknown>): boolean => 'source_id' in r && 'venue_id' in r;
+
+    it('omits first_scraped_at from both the INSERT values and the ON CONFLICT set', async () => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
+
+      await upsertConcert(fakeParsed('insert-only'), 1, new Date('2026-06-05T12:00:00Z'));
+
+      // INSERT-side: locate every concerts row across all values() calls
+      // (including any array-form batched call) and assert the column is
+      // absent everywhere — the schema's DEFAULT now() is what populates
+      // it; spelling it in `values` would shadow the DEFAULT and
+      // re-collapse the stability clock into per-writer wall-clock noise.
+      const allInsertRows = mockDb._chain.values.mock.calls.flatMap((c: unknown[]) => concertRows(c[0]));
+      const concertInserts = allInsertRows.filter(isConcertRow);
+      // Sanity-anchor: at least one concerts INSERT row materialized AND
+      // the writer still spells `scraped_at` (which BS#1385's clock
+      // contrast hangs on). Pinning the anchor explicitly means a future
+      // refactor that drops `scraped_at` fails with a clear "missing
+      // scraped_at" message rather than a confusing "expected length > 0"
+      // on a test named for `first_scraped_at`.
+      expect(concertInserts.length).toBeGreaterThan(0);
+      expect(concertInserts[0]).toHaveProperty('scraped_at');
+      for (const row of concertInserts) {
+        expect(row).not.toHaveProperty('first_scraped_at');
+      }
+
+      // UPDATE-side: the writer's ON CONFLICT set: clause must omit
+      // first_scraped_at. Guard with toHaveBeenCalled so a future
+      // refactor that drops .onConflictDoUpdate() (split INSERT/UPDATE,
+      // raw SQL, etc.) doesn't make the loop body silently vacuous.
+      expect(mockDb._chain.onConflictDoUpdate).toHaveBeenCalled();
+      const concertSetClauses = mockDb._chain.onConflictDoUpdate.mock.calls
+        .map((c: unknown[]) => (c[0] as { set?: Record<string, unknown> } | undefined)?.set)
+        // Discriminate via `venue_id` — concerts' set: lists it; venues'
+        // seeded-path set: lists name/city/state/address/last_modified
+        // only. Excluding `scraped_at` from the discriminator keeps the
+        // independent anchor below meaningful.
+        .filter((set): set is Record<string, unknown> => !!set && 'venue_id' in set);
+      // Same anchor on the UPDATE side: at least one concerts set: clause
+      // present, and `scraped_at` is still in it (the contrast that
+      // motivates first_scraped_at). Catches a future refactor that
+      // reformulates "last successful sweep" via a different column
+      // before it silently disables the BS#1385 guard.
+      expect(concertSetClauses.length).toBeGreaterThan(0);
+      expect(concertSetClauses[0]).toHaveProperty('scraped_at');
+      for (const set of concertSetClauses) {
+        // Adding first_scraped_at to `set` would overwrite the insert
+        // moment on every nightly re-scrape — the exact failure mode
+        // scraped_at already has, and the reason this column exists.
+        expect(set).not.toHaveProperty('first_scraped_at');
+      }
+    });
   });
 });
 

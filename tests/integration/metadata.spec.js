@@ -29,6 +29,10 @@ function makeSql() {
  *
  * NOTE: Uses secondary_dj_id to avoid conflicts with flowsheet.spec.js
  * which uses primary_dj_id. This allows parallel test execution.
+ *
+ * Mutations must use secondary_access_token: showMemberMiddleware runs for
+ * real in this env (BS#1533), so the caller has to be a member of the show
+ * this suite joins as the secondary DJ.
  */
 
 // Use secondary DJ to avoid conflicts with flowsheet.spec.js
@@ -47,7 +51,7 @@ describe('Metadata Fields in Flowsheet Response', () => {
     // Add a track (uses album 4 to avoid conflicts with flowsheet.spec.js in parallel)
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 4, // Sufjan Stevens - Illinois
         track_title: 'Chicago',
@@ -78,7 +82,7 @@ describe('Metadata Fields in Flowsheet Response', () => {
   test('/flowsheet/latest includes metadata fields', async () => {
     await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 5, // Kendrick Lamar - To Pimp a Butterfly
         track_title: 'Alright',
@@ -110,7 +114,7 @@ describe('Fire-and-Forget Metadata Fetch', () => {
     // even though metadata fetch is triggered in the background
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 4, // Sufjan Stevens - Illinois
         track_title: 'Casimir Pulaski Day',
@@ -136,7 +140,7 @@ describe('Fire-and-Forget Metadata Fetch', () => {
     // Add a track without album_id (non-library entry)
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         artist_name: 'Radiohead',
         album_title: 'OK Computer',
@@ -159,7 +163,7 @@ describe('Fire-and-Forget Metadata Fetch', () => {
     // Add a message (no artist_name)
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         message: 'PSA: Station ID at the top of the hour',
       })
@@ -196,7 +200,7 @@ describe('Flowsheet CRUD with Metadata', () => {
     // Add a new track (uses album 5 to avoid conflicts with flowsheet.spec.js)
     await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 5,
         track_title: 'CRUD Test Track',
@@ -214,7 +218,7 @@ describe('Flowsheet CRUD with Metadata', () => {
     // Add a track to delete (uses album 6 to avoid conflicts with flowsheet.spec.js)
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 6,
         track_title: 'Delete Test Track',
@@ -230,7 +234,7 @@ describe('Flowsheet CRUD with Metadata', () => {
     // Delete the track
     await request
       .delete('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({ entry_id: entryId })
       .expect(200);
 
@@ -243,7 +247,7 @@ describe('Flowsheet CRUD with Metadata', () => {
     // Add a track (uses album 4 to avoid conflicts with flowsheet.spec.js)
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 4,
         track_title: 'Update Test Original',
@@ -255,7 +259,7 @@ describe('Flowsheet CRUD with Metadata', () => {
     // Update the track
     await request
       .patch('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         entry_id: entryId,
         data: { track_title: 'Update Test Modified' },
@@ -291,7 +295,7 @@ describe('Metadata with Rotation Entries', () => {
     // Add a track with rotation_id (album_id 4 is in rotation per seed with rotation_id 2)
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 4,
         track_title: 'Rotation Test Track',
@@ -397,7 +401,7 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
     // arm's ON CONFLICT DO NOTHING — sentinel survives intact.
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: SENTINEL_ALBUM_ID,
         track_title: 'BS897 projection test track',
@@ -429,7 +433,7 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
     // the sentinel values from the previous test must NOT leak.
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: SENTINEL_ALBUM_ID,
         track_title: 'BS897 fallthrough test track',
@@ -444,6 +448,127 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
     expect(entry.artwork_url).not.toEqual(SENTINEL.artwork_url);
     expect(entry.discogs_url).not.toEqual(SENTINEL.discogs_url);
     expect(entry.artist_bio).not.toEqual(SENTINEL.artist_bio);
+  });
+});
+
+describe('V2 flowsheet genres/styles projection (BS#1441)', () => {
+  // iOS's Playcut Detail card renders genre/style capsules from inline
+  // `genres`/`styles` on the V2 track entry (wxyc-ios-64#402). Unlike the
+  // 10 sibling metadata fields, genres/styles live ONLY on `album_metadata`
+  // (not the flowsheet inline columns), so `transformToV2` reads them
+  // straight from the nested metadata view with no COALESCE fallback.
+  //
+  // The one wire-shape decision (see the plan's empty-vs-null section): an
+  // empty array carries no information, so a `'{}'` album_metadata row
+  // collapses to the same `null` the contract uses for an absent row. Both
+  // the empty and the missing-row cases therefore present as `null`.
+  //
+  // As in the BS#897 block above, force LML to 500 so the runtime
+  // fire-and-forget enrichment's catch arm (an `onConflictDoNothing` INSERT
+  // that writes only URL fields) can neither clobber the seeded sentinel row
+  // nor synthesize genres/styles from a live LML response.
+
+  let sql;
+  let mockApiAvailable = false;
+  const SENTINEL_ALBUM_ID = 5; // real library.id; FK album_metadata.album_id ON DELETE CASCADE
+  // Discogs-style genre/style taxonomy labels (not artist names); the values
+  // are what LML would surface for a WXYC-representative release.
+  const GENRES = ['Rock', 'Electronic'];
+  const STYLES = ['Post-Rock', 'Ambient'];
+
+  beforeAll(async () => {
+    sql = makeSql();
+    mockApiAvailable = await isMockApiAvailable();
+  });
+
+  afterAll(async () => {
+    if (sql) await sql.end();
+  });
+
+  beforeEach(async () => {
+    // Clear before each case so an interrupted prior run can't leave a stale
+    // sentinel row that poisons the next (BS#897 cleans up the same id 5).
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
+    if (mockApiAvailable) await resetMockApi();
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
+  });
+
+  afterEach(async () => {
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
+    if (mockApiAvailable) await resetMockApi();
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
+  });
+
+  // Add a track linked to the sentinel album and read it back through the V2
+  // serializer (GET /flowsheet maps every entry through transformToV2).
+  const addTrackAndRead = async (title) => {
+    const addRes = await request
+      .post('/flowsheet')
+      .set('Authorization', global.secondary_access_token)
+      .send({ album_id: SENTINEL_ALBUM_ID, track_title: title })
+      .expect(201);
+
+    const getRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+    const entry = getRes.body.entries.find((e) => e.id === addRes.body.id);
+    expect(entry).toBeDefined();
+    return entry;
+  };
+
+  test('populated album_metadata genres/styles project onto the V2 track entry', async () => {
+    if (!mockApiAvailable) {
+      console.warn('Skipping: mock API server not available for LML failure simulation');
+      return;
+    }
+    await simulateError('lml', '/api/v1/lookup', 500);
+
+    // Parameterized array binding (not a `'{...}'::text[]` literal) so genre
+    // labels round-trip without element-boundary corruption.
+    await sql`
+      INSERT INTO ${sql(`${SCHEMA}.album_metadata`)} (album_id, genres, styles)
+      VALUES (${SENTINEL_ALBUM_ID}, ${GENRES}::text[], ${STYLES}::text[])
+    `;
+
+    const entry = await addTrackAndRead('BS1441 populated genres/styles track');
+    expect(entry.genres).toEqual(GENRES);
+    expect(entry.styles).toEqual(STYLES);
+  });
+
+  test('empty genres/styles arrays coerce to null on the wire', async () => {
+    if (!mockApiAvailable) {
+      console.warn('Skipping: mock API server not available for LML failure simulation');
+      return;
+    }
+    await simulateError('lml', '/api/v1/lookup', 500);
+
+    // Empty-array literal is safe here (no values → no comma-boundary trap).
+    await sql`
+      INSERT INTO ${sql(`${SCHEMA}.album_metadata`)} (album_id, genres, styles)
+      VALUES (${SENTINEL_ALBUM_ID}, '{}'::text[], '{}'::text[])
+    `;
+
+    const entry = await addTrackAndRead('BS1441 empty genres/styles track');
+    expect(entry.genres).toBeNull();
+    expect(entry.styles).toBeNull();
+  });
+
+  test('no album_metadata row yields null genres/styles (no leak from populated case)', async () => {
+    if (!mockApiAvailable) {
+      console.warn('Skipping: mock API server not available for LML failure simulation');
+      return;
+    }
+    // No insert: beforeEach cleared the sentinel row. With LML forced to 500
+    // the catch arm only ever writes URL fields, so genres/styles read as SQL
+    // NULL regardless of whether the LEFT JOIN misses (no row) or hits a
+    // URL-only fallback row — either way `null` on the wire.
+    await simulateError('lml', '/api/v1/lookup', 500);
+
+    const entry = await addTrackAndRead('BS1441 no-row genres/styles track');
+    expect(entry.genres).toBeNull();
+    expect(entry.styles).toBeNull();
+    // The populated-case sentinel arrays must not leak in (guard style mirrors
+    // the BS#897 fallthrough test).
+    expect(entry.genres).not.toEqual(GENRES);
+    expect(entry.styles).not.toEqual(STYLES);
   });
 });
 
@@ -469,7 +594,7 @@ describe('Flowsheet Cache Behavior', () => {
     // Add a track to ensure there's data
     await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 4,
         track_title: 'Cache Consistency Test',
@@ -492,7 +617,7 @@ describe('Flowsheet Cache Behavior', () => {
     // Add a new track
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 5,
         track_title: 'Cache Invalidation Test Add',
@@ -510,7 +635,7 @@ describe('Flowsheet Cache Behavior', () => {
     // Add a track first
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 4,
         track_title: 'Cache Invalidation Test Delete',
@@ -526,7 +651,7 @@ describe('Flowsheet Cache Behavior', () => {
     // Delete the track
     await request
       .delete('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({ entry_id: entryId })
       .expect(200);
 
@@ -539,7 +664,7 @@ describe('Flowsheet Cache Behavior', () => {
     // Add a track
     const addRes = await request
       .post('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         album_id: 4,
         track_title: 'Cache Update Original',
@@ -556,7 +681,7 @@ describe('Flowsheet Cache Behavior', () => {
     // Update the track
     await request
       .patch('/flowsheet')
-      .set('Authorization', global.access_token)
+      .set('Authorization', global.secondary_access_token)
       .send({
         entry_id: entryId,
         data: { track_title: 'Cache Update Modified' },
@@ -620,7 +745,7 @@ describe('Conditional GET (304 Not Modified)', () => {
       // Add a track first so there's data (uses album 4 to avoid conflicts)
       await request
         .post('/flowsheet')
-        .set('Authorization', global.access_token)
+        .set('Authorization', global.secondary_access_token)
         .send({
           album_id: 4,
           track_title: 'Last-Modified Header Test',
@@ -660,7 +785,7 @@ describe('Conditional GET (304 Not Modified)', () => {
       // Add a new track to modify the flowsheet
       await request
         .post('/flowsheet')
-        .set('Authorization', global.access_token)
+        .set('Authorization', global.secondary_access_token)
         .send({
           album_id: 4,
           track_title: 'Modification Test Track',
@@ -685,7 +810,7 @@ describe('Conditional GET (304 Not Modified)', () => {
       // Add a track so there's data (uses album 5 to avoid conflicts)
       await request
         .post('/flowsheet')
-        .set('Authorization', global.access_token)
+        .set('Authorization', global.secondary_access_token)
         .send({
           album_id: 5,
           track_title: 'Latest 304 Test',
@@ -731,7 +856,7 @@ describe('Conditional GET (304 Not Modified)', () => {
       // Add a new track to modify the flowsheet (uses album 4 to avoid conflicts)
       await request
         .post('/flowsheet')
-        .set('Authorization', global.access_token)
+        .set('Authorization', global.secondary_access_token)
         .send({
           album_id: 4,
           track_title: 'Since Query Param Test',
@@ -757,7 +882,7 @@ describe('Conditional GET (304 Not Modified)', () => {
       // Add a track to modify the flowsheet (uses album 4 to avoid conflicts)
       await request
         .post('/flowsheet')
-        .set('Authorization', global.access_token)
+        .set('Authorization', global.secondary_access_token)
         .send({
           album_id: 4,
           track_title: 'Precedence Test Track',
@@ -781,7 +906,7 @@ describe('Conditional GET (304 Not Modified)', () => {
       // Add a track so there's data (uses album 5 to avoid conflicts)
       await request
         .post('/flowsheet')
-        .set('Authorization', global.access_token)
+        .set('Authorization', global.secondary_access_token)
         .send({
           album_id: 5,
           track_title: 'Latest Since Test',

@@ -18,12 +18,14 @@ import {
   closeDatabaseConnection,
   enableLivenessProbe,
   onCdcConnectionStateChange,
+  onCdcErrorEvent,
   onCdcEvent,
+  onCdcOversizedEvent,
   startCdcListener,
   stopCdcListener,
 } from '@wxyc/database';
 import { envInt } from '@wxyc/lml-client';
-import { makeEnrichmentHandler } from './handler.js';
+import { drainInFlightCandidates, makeEnrichmentHandler } from './handler.js';
 import { startHealthcheckServer, type HealthState } from './healthcheck.js';
 import { sweepStrandedClaims } from './sweep.js';
 
@@ -45,6 +47,41 @@ const SWEEP_INTERVAL_MS = envInt('ENRICHMENT_SWEEP_INTERVAL_MS', 60_000);
  * `process.exit(0)` fires unconditionally in the outer finally.
  */
 const SHUTDOWN_STEP_BOUND_MS = 5_000;
+
+/**
+ * Hard ceiling on the in-flight candidate drain budget. The worker runs in
+ * a Docker container stopped with `docker stop $TARGET_APP` (no `-t` flag —
+ * see `.github/actions/deploy-service/action.yml`), so SIGTERM-to-SIGKILL
+ * is the Docker default of 10s. The drain step runs after `stop_cdc` and
+ * `drain_sweep` (each bounded by SHUTDOWN_STEP_BOUND_MS=5s), so by the
+ * time control reaches the drain Docker has at most ~10s left in absolute
+ * terms — any deadline above ~5s is dead budget. Clamp the env override at
+ * SHUTDOWN_STEP_BOUND_MS so a deploy-config typo can't push the deadline
+ * past Docker's kill window.
+ */
+const WORKER_DRAIN_DEADLINE_CEILING_MS = SHUTDOWN_STEP_BOUND_MS;
+
+/**
+ * In-flight candidate drain budget (BS#1108). Matches the backend's
+ * ENRICHMENT_DRAIN_DEADLINE_MS=2_000 (apps/backend/app.ts) — tuned to the
+ * same 10s docker-stop grace window. A hung LML call is bounded by this
+ * ceiling so it can't block deploy past Docker's SIGKILL. Override via env
+ * for tighter integration runs; the override is clamped at
+ * WORKER_DRAIN_DEADLINE_CEILING_MS so an over-eager deploy variable can't
+ * blow past the grace window.
+ *
+ * Note: this is the deadline for `drainInFlightCandidates` *itself*, NOT a
+ * `runShutdownStep` bound — drain owns its own internal timeout (the
+ * `Promise.race` inside `drainInFlightCandidates`), and the per-step bound
+ * would cap it lower than the drain deadline. The drain step is invoked
+ * without `runShutdownStep` so the full WORKER_DRAIN_DEADLINE_MS budget is
+ * available; its rejection-safe contract removes the need for outer
+ * try/catch.
+ */
+const WORKER_DRAIN_DEADLINE_MS = Math.min(
+  envInt('ENRICHMENT_WORKER_DRAIN_DEADLINE_MS', 2_000),
+  WORKER_DRAIN_DEADLINE_CEILING_MS
+);
 
 /**
  * Run a shutdown step with a per-step bound and a swallow-and-capture
@@ -115,11 +152,42 @@ const main = async (): Promise<void> => {
       //      don't fire fresh DB writes during the sweep wait.
       //   2. Drain any in-flight sweep so closeDatabaseConnection
       //      doesn't tear its UPDATE.
-      //   3. Close the pool, then the healthcheck server.
-      //   4. Flush Sentry LAST so captures from earlier steps also land.
+      //   3. Drain in-flight `handleCandidate` invocations (BS#1108) so
+      //      pending LML lookups can finalize their `metadata_status`
+      //      write before the pool closes. Bounded by
+      //      WORKER_DRAIN_DEADLINE_MS internally — bypasses
+      //      runShutdownStep so the full deadline is available (the
+      //      per-step bound would cap it lower).
+      //   4. Close the pool, then the healthcheck server.
+      //   5. Flush Sentry LAST so captures from earlier steps also land.
       await runShutdownStep('stop_cdc', stopCdcListener);
       if (activeSweep !== null) {
         await runShutdownStep('drain_sweep', activeSweep);
+      }
+      // BS#1108: signal-driven count of candidates that didn't finish in
+      // time. Mirrors the backend's `metric: 'in_flight_dropped'` tag
+      // shape so a single Sentry alert can fan over both surfaces.
+      try {
+        const remaining = await drainInFlightCandidates(WORKER_DRAIN_DEADLINE_MS);
+        if (remaining > 0) {
+          Sentry.captureMessage(`enrichment-worker exiting with ${remaining} in-flight candidate(s)`, {
+            level: 'warning',
+            tags: {
+              component: 'enrichment-worker',
+              subsystem: 'metadata',
+              metric: 'in_flight_dropped',
+            },
+            extra: { remaining, signal, deadline_ms: WORKER_DRAIN_DEADLINE_MS },
+          });
+          console.warn(`[enrichment-worker] drained shutdown with ${remaining} in-flight candidate(s)`);
+        }
+      } catch (err) {
+        // Defensive: drainInFlightCandidates is contractually
+        // non-throwing, but if a future change reintroduces a throw we'd
+        // rather capture it than skip the close_db step below.
+        Sentry.captureException(err, {
+          tags: { component: 'enrichment-worker', step: 'shutdown_drain_in_flight' },
+        });
       }
       await runShutdownStep('close_db', closeDatabaseConnection);
       await runShutdownStep(
@@ -148,6 +216,51 @@ const main = async (): Promise<void> => {
   });
 
   onCdcEvent(makeEnrichmentHandler());
+
+  // BS#1120: wire the migration-0094 fallback channels to Sentry so a dropped
+  // primary `cdc` payload (oversized row) or an unexpected trigger exception
+  // produces a metric the alert can fire on. Both the worker and the
+  // backend's CDC dispatcher subscribe; they're independent LISTEN
+  // connections, so each process needs its own sink.
+  onCdcOversizedEvent((event) => {
+    Sentry.captureMessage('cdc.oversized_payload', {
+      level: 'warning',
+      tags: {
+        subsystem: 'cdc',
+        consumer: 'enrichment-worker',
+        table: event.table,
+        action: event.action,
+        reason: event.reason,
+      },
+      extra: {
+        schema: event.schema,
+        primary_key: event.primary_key,
+        payload_bytes: event.payload_bytes,
+        timestamp: event.timestamp,
+      },
+      fingerprint: ['cdc-oversized-payload'],
+    });
+  });
+  onCdcErrorEvent((event) => {
+    Sentry.captureMessage('cdc.trigger_exception', {
+      level: 'error',
+      tags: {
+        subsystem: 'cdc',
+        consumer: 'enrichment-worker',
+        table: event.table,
+        action: event.action,
+        reason: event.reason,
+        sqlstate: event.sqlstate,
+      },
+      extra: {
+        schema: event.schema,
+        sqlerrm: event.sqlerrm,
+        timestamp: event.timestamp,
+      },
+      fingerprint: ['cdc-trigger-exception'],
+    });
+  });
+
   await startCdcListener();
   // Belt-and-suspenders: the onlisten hook should have already flipped this
   // to true; re-assert in case a future cdc-listener change skips dispatch.

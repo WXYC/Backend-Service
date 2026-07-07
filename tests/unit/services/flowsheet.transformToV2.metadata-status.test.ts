@@ -16,6 +16,8 @@ const nullMetadata: IFSEntryMetadata = {
   soundcloud_url: null,
   artist_bio: null,
   artist_wikipedia_url: null,
+  genres: null,
+  styles: null,
 };
 
 const createTrackEntry = (overrides: Partial<IFSEntry> = {}): IFSEntry => ({
@@ -45,6 +47,7 @@ const createTrackEntry = (overrides: Partial<IFSEntry> = {}): IFSEntry => ({
   linked_at: null,
   metadata_status: 'pending',
   enriching_since: null,
+  radio_hour: null,
   metadata: nullMetadata,
   ...overrides,
 });

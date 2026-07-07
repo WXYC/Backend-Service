@@ -263,6 +263,46 @@ describe('End Show', () => {
       .expect(200);
   });
 
+  test('Non-member with valid write auth cannot end the show (BS#1533)', async () => {
+    // showMemberMiddleware runs for real in the integration env — the
+    // AUTH_BYPASS short-circuit is development-only post-BS#1533. The
+    // secondary DJ never joined this show, so showMemberMiddleware must 400
+    // before the mirror or controller run. This is the contract protecting
+    // a live human DJ's show from an Auto-DJ recovery end()
+    // (WXYC/auto-dj-orchestrator#13).
+    //
+    // dj_id is the PRIMARY's id on purpose, so this test actually pins the
+    // middleware. If it were the secondary's own id, reverting the BS#1533
+    // gate would still yield a byte-identical 400: the request would fall
+    // through to the controller (dj_id === auth.id passes the BS#1102 check),
+    // take the co-host leaveShow branch, and flowsheet.service.leaveShow would
+    // throw the same 'DJ not a member of show' 400 on its 0-row UPDATE — so the
+    // assertion could not distinguish "middleware fired" from "middleware
+    // bypassed". Naming the primary makes the two states diverge: with the
+    // middleware present it 400s here (secondary is not a member, checked ahead
+    // of the controller); on a gate revert the controller's BS#1102 guard fires
+    // instead with a 403 (dj_id=primary !== auth.id=secondary — the same path
+    // the 'Forbidden when dj_id does not match' test below pins), failing this
+    // assertion and surfacing the regression.
+    const res = await request
+      .post('/flowsheet/end')
+      .set('Authorization', global.secondary_access_token)
+      .send({
+        dj_id: global.primary_dj_id,
+      })
+      .expect(400);
+    expect(res.body.message).toBe('Bad Request: DJ not a member of show');
+
+    // The show must remain open: the primary DJ still reads as on air,
+    // which requires shows.end_time to still be null.
+    const onAir = await request
+      .get('/flowsheet/on-air')
+      .query({ dj_id: global.primary_dj_id })
+      .set('Authorization', global.access_token)
+      .expect(200);
+    expect(onAir.body.is_live).toBe(true);
+  });
+
   test('No Active Show Session', async () => {
     // End active show
     await request.post('/flowsheet/end').set('Authorization', global.access_token).send({
@@ -271,8 +311,11 @@ describe('End Show', () => {
 
     // Secondary DJ attempts to /flowsheet/end after the show is over.
     // BS#1102: dj_id must match the authenticated caller, so the secondary
-    // DJ has to send their own Bearer to get past the auth check; the
-    // 400 then comes from "No active show".
+    // DJ has to send their own Bearer to get past the auth check. With no
+    // active show the 400 comes from showMemberMiddleware (empty member
+    // list — the middleware runs for real in this env post-BS#1533).
+    // Pin the exact message: on a gate revert the controller's "No active
+    // show session found." 400 fires instead, so this discriminates the two.
     const res = await request
       .post('/flowsheet/end')
       .set('Authorization', global.secondary_access_token)
@@ -280,7 +323,7 @@ describe('End Show', () => {
         dj_id: global.secondary_dj_id,
       })
       .expect(400);
-    expect(res.body.message).toBeDefined();
+    expect(res.body.message).toBe('Bad Request: DJ not a member of show');
   });
 });
 
@@ -336,6 +379,10 @@ describe('Leave Show', () => {
 
     // Secondary DJ attempts to /flowsheet/end the (now-ended) show. BS#1102
     // requires the secondary's own Bearer for the dj_id=auth.id cross-check.
+    // With no active show the 400 comes from showMemberMiddleware's empty
+    // member list (the middleware runs for real in this env post-BS#1533).
+    // Pin the exact message: on a gate revert the controller's "No active
+    // show session found." 400 fires instead, so this discriminates the two.
     const res = await request
       .post('/flowsheet/end')
       .set('Authorization', global.secondary_access_token)
@@ -343,7 +390,7 @@ describe('Leave Show', () => {
         dj_id: global.secondary_dj_id,
       })
       .expect(400);
-    expect(res.body.message).toBeDefined();
+    expect(res.body.message).toBe('Bad Request: DJ not a member of show');
   });
 });
 
@@ -973,6 +1020,99 @@ describe('rotation_bin read-path fallback (dj-site#750)', () => {
     expect(track.rotation_id).toBeNull();
     expect(track.rotation_bin).toBeNull();
   });
+
+  test('rotation_bin stays NULL when flowsheet add_time precedes rotation add_date (retroactive; BS#1526)', async () => {
+    // BS#1526: the fallback must not retroactively badge a play that aired
+    // BEFORE the release entered rotation. POST /flowsheet stamps
+    // add_time = NOW(), so provision a rotation row with a FUTURE add_date
+    // (the mirror image of the historical retroactive case) and confirm the
+    // just-now play is not badged. Without the add_date lower bound this row's
+    // NULL kill_date makes it "active forever" and the play gets an 'H' badge.
+    const inserted = await sql`
+      INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title, add_date, kill_date)
+      VALUES (NULL, 'H', 'Future Artist', 'Future Album', (CURRENT_DATE + 30), NULL)
+      RETURNING id
+    `;
+    extraRotationIds.push(inserted[0].id);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Future Artist',
+        album_title: 'Future Album',
+        track_title: 'Premature Track',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Premature Track');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toBeNull();
+  });
+
+  test('rotation_bin populated when play falls inside the rotation window (past add_date, open kill_date; BS#1526)', async () => {
+    // Over-suppression guard: the new add_date lower bound must not drop a play
+    // that aired well inside the window — release added in the past, not yet
+    // killed. A just-now play sits strictly after add_date and before the open
+    // kill_date, so it stays badged.
+    const inserted = await sql`
+      INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title, add_date, kill_date)
+      VALUES (NULL, 'H', 'Inwindow Artist', 'Inwindow Album', '2024-01-01', NULL)
+      RETURNING id
+    `;
+    extraRotationIds.push(inserted[0].id);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Inwindow Artist',
+        album_title: 'Inwindow Album',
+        track_title: 'Inwindow Track',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Inwindow Track');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toEqual('H');
+  });
+
+  test('rotation_bin populated when rotation add_date equals flowsheet add_time date (inclusive same-day boundary; BS#1526)', async () => {
+    // Day-precision boundary: a play on the SAME day the release was added is
+    // still badged. The floor is inclusive (`add_date <= add_time::date`) — the
+    // safer direction at day precision, since a strict `<` would drop a play
+    // aired later the same day the release was added. Provision a row added
+    // today; the just-now play (add_time = NOW(), same calendar day) must badge.
+    const inserted = await sql`
+      INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title, add_date, kill_date)
+      VALUES (NULL, 'H', 'Sameday Artist', 'Sameday Album', CURRENT_DATE, NULL)
+      RETURNING id
+    `;
+    extraRotationIds.push(inserted[0].id);
+
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: null,
+        artist_name: 'Sameday Artist',
+        album_title: 'Sameday Album',
+        track_title: 'Sameday Track',
+      })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+    const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Sameday Track');
+    expect(track).toBeDefined();
+    expect(track.rotation_id).toBeNull();
+    expect(track.rotation_bin).toEqual('H');
+  });
 });
 
 describe('Delete Flowsheet Entries', () => {
@@ -1204,6 +1344,36 @@ describe('On Air Status', () => {
       expect(res.body).toBeDefined();
       expect(res.body.id).toBe(global.primary_dj_id);
       expect(res.body.is_live).toBe(true);
+
+      // Clean up
+      await fls_util.leave_show(global.primary_dj_id, global.access_token);
+    });
+
+    test('returns false for a real DJ who is not in the active show (BS#1533)', async () => {
+      // The dj-scoping contract the Auto-DJ orchestrator's restart-recovery
+      // probe depends on (WXYC/auto-dj-orchestrator#13): another DJ's live
+      // show must not read as "on air" for a DJ who is not in it. A
+      // regression that answered "any show is on air" would pass the other
+      // tests in this block but not this one.
+      await fls_util.join_show(global.primary_dj_id, global.access_token);
+
+      const res = await request
+        .get('/flowsheet/on-air')
+        .query({ dj_id: global.secondary_dj_id })
+        .set('Authorization', global.access_token)
+        .expect(200);
+
+      expect(res.body.id).toBe(global.secondary_dj_id);
+      expect(res.body.is_live).toBe(false);
+
+      // Same probe for the DJ who IS in the show, pinning the discrimination
+      // within a single show lifetime (not just "everything reads false").
+      const primaryRes = await request
+        .get('/flowsheet/on-air')
+        .query({ dj_id: global.primary_dj_id })
+        .set('Authorization', global.access_token)
+        .expect(200);
+      expect(primaryRes.body.is_live).toBe(true);
 
       // Clean up
       await fls_util.leave_show(global.primary_dj_id, global.access_token);

@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/catalog-popularity-freetext-resolve",
+  "cron-schedule": "45 4 * * *",
+  "version": "1.0.0",
+  "description": "WXYC recurring cron (BS#1491 / catalog-popularity Phase-2 Track 1): resolve every distinct free-text (artist, album) pair from the flowsheet (album_id IS NULL) to a Discogs release (+master once LML Track 0 ships) via LML bulkLookupMetadata, UPSERTing verdicts into flowsheet_freetext_resolution. Re-attempts attempt_at IS NULL rows and no-match rows past a TTL. Default schedule 04:45 UTC; cooperative pause defers when DJs are active.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_catalog_popularity_freetext_resolve:ci -f ../../Dockerfile.catalog-popularity-freetext-resolve ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.59.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

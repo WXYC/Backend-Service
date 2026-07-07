@@ -346,6 +346,61 @@ describe('Library Rotation', () => {
 
       expectErrorContains(res, 'Missing Parameters');
     });
+
+    // BS#1380 — pickAddRotationFields allowlist. A client that includes
+    // server-derived (`discogs_release_id`, `discogs_release_id_source`,
+    // `lml_identity_id`, `legacy_rotation_id`, `legacy_library_release_id`,
+    // `tracklist_lookup_attempted_at`, `kill_date`) or ETL-only
+    // (`add_date`, `artist_name`, `album_title`, `record_label`) fields
+    // in the request body must not be able to set them through this
+    // endpoint. Persisted row must reflect server defaults / NULL.
+    test('allowlist drops client-supplied non-allowlisted fields', async () => {
+      const res = await auth
+        .post('/library/rotation')
+        .send({
+          album_id: 3,
+          rotation_bin: 'L',
+          // Forbidden fields the allowlist must drop.
+          discogs_release_id: 999777,
+          discogs_release_id_source: 'discogs_direct_backfill',
+          lml_identity_id: 8888888,
+          legacy_rotation_id: 555_000_001,
+          legacy_library_release_id: 555_000_002,
+          kill_date: '2027-01-01',
+          artist_name: 'Forged Artist',
+          album_title: 'Forged Album',
+          record_label: 'Forged Label',
+        })
+        .expect(201);
+
+      // Server-derived fields land NULL when library_identity has no row
+      // (seed_db.sql ships no library_identity rows for album_id=3) and
+      // operator-only fields stay NULL.
+      expect(res.body.discogs_release_id).toBeNull();
+      expect(res.body.lml_identity_id).toBeNull();
+      expect(res.body.legacy_rotation_id).toBeNull();
+      expect(res.body.legacy_library_release_id).toBeNull();
+      expect(res.body.kill_date).toBeNull();
+      // ETL-only denormalized snapshot fields stay NULL.
+      expect(res.body.artist_name).toBeNull();
+      expect(res.body.album_title).toBeNull();
+      expect(res.body.record_label).toBeNull();
+      // The two allowed fields land verbatim.
+      expect(res.body.album_id).toBe(3);
+      expect(res.body.rotation_bin).toBe('L');
+      // discogs_release_id_source falls back to the column default
+      // ('tubafrenzy_paste') when addToRotation doesn't supply
+      // library_identity. This is acceptable today for the no-
+      // library_identity path; the BS#1380 plan is honest about it
+      // (the library_identity branch tags 'library_identity' explicitly,
+      // the no-library_identity branch leaves the column default).
+      expect(res.body.discogs_release_id_source).toBe('tubafrenzy_paste');
+
+      // Clean up.
+      if (res.body.id) {
+        await auth.patch('/library/rotation').send({ rotation_id: res.body.id });
+      }
+    });
   });
 
   describe('PATCH /library/rotation (Kill Rotation)', () => {

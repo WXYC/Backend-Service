@@ -11,19 +11,94 @@
  * `setupMetadataBroadcast()` work whether or not `CDC_SECRET` is configured.
  * This module owns only the external WebSocket exposure and remains
  * hard-gated on `CDC_SECRET`.
+ *
+ * Back-pressure & liveness (BS#1134). The previous implementation called
+ * `client.send(msg, errCb)` for every CDC event with no `bufferedAmount`
+ * check — a slow consumer (paused tab, suspended mobile network, paused
+ * iOS test harness) accumulated outbound bytes in the `ws` library buffer
+ * and Node's socket buffer with no upper bound. The 30s app-level
+ * heartbeat only terminated on a send-callback error; a quietly-buffering
+ * dead-but-not-closed TCP connection never tripped it. Two guards now
+ * cap that growth:
+ *
+ *   1. `BACKPRESSURE_THRESHOLD_BYTES` (1 MiB): before every send (fan-out
+ *      and heartbeat) we check `client.bufferedAmount`. Over the threshold,
+ *      we `terminate()` and surface a Sentry warning
+ *      (`cdc_ws.buffered_amount_high`). The CDC stream offers no replay,
+ *      so dropping a single event for a slow consumer is no worse than
+ *      what already happens when they reconnect — see `docs/cdc.md` for
+ *      the "consumers reconcile out-of-band" contract.
+ *
+ *   2. Native WebSocket ping/pong on the heartbeat timer. Each tick pings
+ *      every client; clients reset `isAlive=true` on `'pong'`. A client
+ *      that hasn't ponged since the previous tick is terminated with a
+ *      Sentry warning (`cdc_ws.missed_pong`). This decouples "client is
+ *      gone" from "client is slow" — pre-#1134 a single signal mixed both.
  */
 
 import { Server as HttpServer, IncomingMessage } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { URL } from 'url';
+import * as Sentry from '@sentry/node';
 import { onCdcEvent } from '@wxyc/database';
 import type { CdcEvent } from '@wxyc/database';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CDC_PATH = '/cdc';
 
+/**
+ * Per-client outbound-buffer ceiling, in bytes. A consumer that exceeds
+ * this is terminated rather than accumulating unbounded memory. 1 MiB is
+ * the issue body's recommendation — large enough to absorb routine bursts
+ * (a CDC event is typically <10 KiB), small enough that even a few hundred
+ * connected clients can't aggregate into runaway RSS growth.
+ */
+const BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
+
+/**
+ * Per-client liveness flag. Set true on `'pong'` arrival, cleared at the
+ * start of each heartbeat tick after we ping. A client whose flag is still
+ * false on the next tick has missed a pong round-trip and is terminated.
+ *
+ * Held as a `WeakMap` so closing the underlying connection lets the GC
+ * release the bookkeeping — we never see `'close'` for a `terminate()`d
+ * synthetic client in tests, and never want stale state to outlive a real
+ * client.
+ */
+const isAlive = new WeakMap<WebSocket, boolean>();
+
 let wss: WebSocketServer | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Sends `msg` to `client` after a `bufferedAmount` check. If the buffer is
+ * already over the threshold the client is terminated, a Sentry warning is
+ * surfaced, and the send is skipped. Returns whether the message was sent.
+ */
+function safeSend(client: WebSocket, msg: string): boolean {
+  if (client.bufferedAmount > BACKPRESSURE_THRESHOLD_BYTES) {
+    Sentry.captureMessage(
+      `cdc_ws.buffered_amount_high — terminating slow consumer (${client.bufferedAmount} bytes buffered)`,
+      {
+        level: 'warning',
+        tags: { tool: 'cdc-ws', step: 'backpressure' },
+        extra: {
+          bufferedAmount: client.bufferedAmount,
+          threshold: BACKPRESSURE_THRESHOLD_BYTES,
+        },
+      }
+    );
+    console.warn(
+      `[cdc-ws] Terminating slow consumer: bufferedAmount=${client.bufferedAmount} > ${BACKPRESSURE_THRESHOLD_BYTES}`
+    );
+    client.terminate();
+    return false;
+  }
+  client.send(msg, (err) => {
+    if (err) client.terminate();
+  });
+  return true;
+}
 
 /**
  * Sets up the CDC WebSocket server on the given HTTP server.
@@ -63,14 +138,22 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
   });
 
   wss.on('connection', (ws: WebSocket) => {
+    // Track liveness for native ping/pong (BS#1134). A client is "alive"
+    // immediately on connect; the first heartbeat tick will ping it.
+    isAlive.set(ws, true);
+    ws.on('pong', () => {
+      isAlive.set(ws, true);
+    });
+
     const connected = JSON.stringify({
       type: 'connected',
       serverTime: Date.now(),
     });
-    ws.send(connected);
+    safeSend(ws, connected);
     console.log(`[cdc-ws] Client connected, total=${wss!.clients.size}`);
 
     ws.on('close', () => {
+      isAlive.delete(ws);
       console.log(`[cdc-ws] Client disconnected, total=${wss!.clients.size}`);
     });
 
@@ -79,29 +162,67 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
     });
   });
 
-  // Start heartbeat
+  // Heartbeat: native WebSocket ping/pong (BS#1134). On each tick we
+  // terminate any client that didn't pong since the previous tick (dead
+  // socket), then ping the survivors and clear their flag for next tick.
+  // Pre-#1134 this was an app-level JSON message which couldn't distinguish
+  // a wedged client from a slow one.
   heartbeatTimer = setInterval(() => {
     if (!wss || wss.clients.size === 0) return;
-    const msg = JSON.stringify({ type: 'heartbeat', timestamp: Date.now() });
     for (const client of wss.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(msg, (err) => {
-          if (err) client.terminate();
+      if (client.readyState !== WebSocket.OPEN) continue;
+
+      if (isAlive.get(client) === false) {
+        Sentry.captureMessage('cdc_ws.missed_pong — terminating unresponsive consumer', {
+          level: 'warning',
+          tags: { tool: 'cdc-ws', step: 'missed-pong' },
         });
+        console.warn('[cdc-ws] Terminating unresponsive consumer (missed pong)');
+        client.terminate();
+        continue;
       }
+
+      // Back-pressure check before issuing the ping — a wedged outbound
+      // buffer means the ping won't reach the wire either.
+      if (client.bufferedAmount > BACKPRESSURE_THRESHOLD_BYTES) {
+        Sentry.captureMessage(
+          `cdc_ws.buffered_amount_high — terminating slow consumer (${client.bufferedAmount} bytes buffered)`,
+          {
+            level: 'warning',
+            tags: { tool: 'cdc-ws', step: 'backpressure-heartbeat' },
+            extra: {
+              bufferedAmount: client.bufferedAmount,
+              threshold: BACKPRESSURE_THRESHOLD_BYTES,
+            },
+          }
+        );
+        console.warn(
+          `[cdc-ws] Terminating slow consumer on heartbeat: bufferedAmount=${client.bufferedAmount} > ${BACKPRESSURE_THRESHOLD_BYTES}`
+        );
+        client.terminate();
+        continue;
+      }
+
+      isAlive.set(client, false);
+      client.ping();
     }
   }, HEARTBEAT_INTERVAL_MS);
   heartbeatTimer.unref();
 
   // Per-event fan-out to connected WebSocket clients.
+  //
+  // The event carries the FULL row (`to_jsonb(NEW)`), unprojected — including
+  // the internal flowsheet columns that BS#1513 strips from the HTTP mutation /
+  // peek responses. That is deliberate: `/cdc` is CDC_SECRET-gated and
+  // internal-trusted, and its consumer (the reconciliation monitor) needs the
+  // complete row to diff against the source of truth. See docs/cdc.md
+  // "Payload shape and exposure" before adding any untrusted consumer.
   onCdcEvent((event: CdcEvent) => {
     if (!wss || wss.clients.size === 0) return;
     const msg = JSON.stringify(event);
     for (const client of wss.clients) {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(msg, (err) => {
-          if (err) client.terminate();
-        });
+        safeSend(client, msg);
       }
     }
   });

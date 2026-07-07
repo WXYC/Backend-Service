@@ -1,6 +1,6 @@
 {
-  "id": "5f31cf59-178c-491e-b169-269764bacf9f",
-  "prevId": "71d7f75b-12a0-40d1-954e-2caee947ea10",
+  "id": "71d7f75b-12a0-40d1-954e-2caee947ea10",
+  "prevId": "cf3ac067-9bbd-456a-a8ef-20bd149b2ede",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -940,12 +940,6 @@
         },
         "legacy_link_attempted_at": {
           "name": "legacy_link_attempted_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "metadata_attempt_at": {
-          "name": "metadata_attempt_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

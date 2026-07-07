@@ -29,6 +29,7 @@ type FetchBulkFn = (names: string[]) => Promise<ArtistSearchAliasesBulkResponse>
 type FetchAltsFn = (artistIds: number[]) => Promise<Map<number, string[]>>;
 type WriteFn = (
   artist_id: number,
+  canonicalName: string,
   variants: unknown[],
   sourcesPresent: string[]
 ) => Promise<{ variants_written: number }>;
@@ -85,7 +86,7 @@ describe('runConsumer — happy path', () => {
     const fetchAlts = jest.fn<FetchAltsFn>().mockResolvedValue(new Map());
     const writeArtistVariants = jest
       .fn<WriteFn>()
-      .mockImplementation((_id, variants) => Promise.resolve({ variants_written: variants.length }));
+      .mockImplementation((_id, _canonicalName, variants) => Promise.resolve({ variants_written: variants.length }));
 
     const result = await runConsumer({
       loadNameGroups,
@@ -110,10 +111,11 @@ describe('runConsumer — happy path', () => {
     // sources (the LML composer didn't run those legs for it).
     const missingCall = writeArtistVariants.mock.calls.find(
       (c) => (c as unknown as [number])[0] === 9999
-    ) as unknown as [number, unknown[], string[]] | undefined;
+    ) as unknown as [number, string, unknown[], string[]] | undefined;
     expect(missingCall).toBeDefined();
-    expect(missingCall?.[1]).toEqual([]);
-    expect(missingCall?.[2]).toEqual(['wxyc_library_alt']);
+    // missingCall: [artist_id, canonicalName, variants, sourcesPresent]
+    expect(missingCall?.[2]).toEqual([]);
+    expect(missingCall?.[3]).toEqual(['wxyc_library_alt']);
 
     expect(result.totals.names_scanned).toBe(3);
     expect(result.totals.names_resolved).toBe(2);
@@ -228,7 +230,9 @@ describe('runConsumer — happy path', () => {
       dryRun: false,
     });
 
-    const sourcesPresentArg = (writeArtistVariants.mock.calls[0] as unknown as [number, unknown[], string[]])[2];
+    const sourcesPresentArg = (
+      writeArtistVariants.mock.calls[0] as unknown as [number, string, unknown[], string[]]
+    )[3];
     expect(sourcesPresentArg).toContain('discogs_name_variation');
     expect(sourcesPresentArg).toContain('wxyc_library_alt');
   });
@@ -258,10 +262,11 @@ describe('runConsumer — happy path', () => {
 
     const writeArgs = writeArtistVariants.mock.calls[0] as unknown as [
       number,
+      string,
       Array<Record<string, unknown>>,
       string[],
     ];
-    const variants = writeArgs[1];
+    const variants = writeArgs[2];
     expect(variants.length).toBe(2);
     variants.forEach((v) => {
       expect(v.source).toBe('wxyc_library_alt');
@@ -391,6 +396,44 @@ describe('runConsumer — happy path', () => {
     expect(result.totals.names_resolved).toBe(1);
     expect(result.totals.names_missing).toBe(0); // NOT bucketed as missing.
     expect(result.totals.names_unaccounted).toBe(1);
+  });
+
+  it("BS#1382: forwards the group's canonical artist_name to writeArtistVariants so the writer can gate no-op variants", async () => {
+    // The writer's no-op-discogs_name_variation filter requires the
+    // canonical `artists.artist_name` to normalize-compare against. The
+    // orchestrator passes `group.artist_name` (the canonical it grouped
+    // by) so the filter doesn't pay an extra DB round-trip per artist.
+    // The audit case from BS#1368: canonical 'The Format', variant
+    // 'Format'. We assert the canonical reaches the writer; the no-op
+    // filter is verified in writer.test.ts.
+    const batch: NameGroup[] = [{ artist_name: 'The Format', artist_ids: [260, 261] }];
+    const loadNameGroups = jest.fn<LoadNameGroupsFn>().mockResolvedValueOnce(batch).mockResolvedValue([]);
+
+    const fetchBulk = jest.fn<FetchBulkFn>().mockResolvedValue({
+      artists: [makeLmlResult('The Format', 1)],
+      missing: [],
+    });
+    const fetchAlts = jest.fn<FetchAltsFn>().mockResolvedValue(new Map());
+    const writeArtistVariants = jest.fn<WriteFn>().mockResolvedValue({ variants_written: 1 });
+
+    await runConsumer({
+      loadNameGroups,
+      fetchBulk,
+      fetchAlts,
+      writeArtistVariants,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { index: 0, count: 1, description: 'partition=none' },
+      dryRun: false,
+    });
+
+    // Both fan-out writes receive the canonical 'The Format' in slot [1].
+    expect(writeArtistVariants).toHaveBeenCalledTimes(2);
+    const firstCall = writeArtistVariants.mock.calls[0] as unknown as [number, string, unknown[], string[]];
+    const secondCall = writeArtistVariants.mock.calls[1] as unknown as [number, string, unknown[], string[]];
+    expect(firstCall[1]).toBe('The Format');
+    expect(secondCall[1]).toBe('The Format');
   });
 
   it('counts per-artist writer failures into the writer_errors counter (source_rows_written unaffected)', async () => {

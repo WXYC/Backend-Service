@@ -133,6 +133,18 @@ export const resolveEntryTimestamp = (
   return epochMsToDate(startTime) ?? epochMsToDate(timeCreated) ?? epochMsToDate(timeLastModified);
 };
 
+/**
+ * Resolve the breakpoint top-of-hour for a flowsheet entry (BS#1449).
+ *
+ * tubafrenzy's RADIO_HOUR (epoch ms) is the authoritative top-of-hour a
+ * breakpoint marks (e.g. 12:00 PM) — distinct from add_time, the ~1-min-early
+ * logging instant that floors one hour early when a client formats "h a".
+ * Only breakpoint rows carry it; every other type stores null. epochMsToDate
+ * maps 0/absent → null, so a breakpoint missing RADIO_HOUR also yields null.
+ */
+export const resolveRadioHour = (entryType: BackendEntryType, radioHourMs: number | null): Date | null =>
+  entryType === 'breakpoint' ? epochMsToDate(radioHourMs) : null;
+
 // truncate is re-exported from @wxyc/database above
 
 export type TransformedShow = {

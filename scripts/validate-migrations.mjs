@@ -15,7 +15,12 @@
  * 2. Every journal entry has a corresponding .sql file
  * 3. No orphaned .sql files exist without a journal entry
  * 4. Every meta/*.json file parses (catches conflict markers)
- * 5. No duplicate idxs in journal (with HISTORICAL_DUPLICATE_IDXS allowlist)
+ * 5. Idxs are strictly monotonically increasing in journal order
+ *    (subsumes duplicate detection; gaps via DROPPED_IDXS are allowed).
+ *    HISTORICAL_DUPLICATE_IDXS retains an allowlist hatch — empty as of
+ *    WXYC/Backend-Service#1131, which fixed the lone historical duplicate
+ *    (idx 47) by renumbering `0047_*` to idx 48 and shifting all
+ *    subsequent entries +1.
  * 6. The latest snapshot's prevId chain is reachable back to the genesis
  *    snapshot (allowing breaks at known-dropped historical idxs)
  * 7. Every non-allowlisted journal entry has a corresponding snapshot file
@@ -97,7 +102,15 @@ const DROPPED_IDXS = new Set([1, 5, 8]);
 // Historical duplicate idxs that predate this validator. Tracked as an
 // allowlist so future PRs can't introduce new ones. Each entry is a
 // duplicate idx; both journal entries at that idx are accepted.
-const HISTORICAL_DUPLICATE_IDXS = new Set([47]);
+//
+// Empty as of #1131 — the lone historical duplicate (idx 47, shared by
+// `0046_cdc_notify_triggers` and `0047_replica-identity-for-pkless-tables`)
+// was renumbered there: `0047_*` moved from idx 47 → 48, and every
+// subsequent entry shifted +1. The set stays here as a placeholder so
+// the validator's tripwire test (`tests/unit/scripts/validate-migrations.test.ts`)
+// keeps its grip on the contract — new duplicates may not be introduced
+// without a deliberate edit through review.
+const HISTORICAL_DUPLICATE_IDXS = new Set();
 
 // Historical orphan SQL files: present in the migrations directory and
 // applied to production but never journaled. The 0046 trigger file was
@@ -109,16 +122,21 @@ const HISTORICAL_DUPLICATE_IDXS = new Set([47]);
 const KNOWN_ORPHAN_TAGS = new Set(['0046_cdc_notify_triggers']);
 
 // Historical idxs whose journal entry has no matching snapshot file. Two
-// origin clusters:
-//   - 36, 41, 47-54: predate this validator; #505 noted but never repaired
-//   - 57-67: accumulated through 2026-04 by the hand-edit-SQL-and-journal
-//            convention that bypassed `drizzle-kit generate`. PR #590
-//            shipped a single 0068_snapshot.json reflecting current schema
-//            and this allowlist tolerates the gap.
+// origin clusters (post-#1131 renumber: every idx >= 48 is +1 compared to
+// the pre-#1131 mapping; tag-name comments below reflect the tag the idx
+// now points at, not the value the idx used to hold):
+//   - 36 (`0036_*`), 41 (`0041_*`), 47 (`0046_cdc_notify_triggers`),
+//     48-55 (`0047_*` through `0054_*`): predate this validator; #505
+//     noted but never repaired.
+//   - 58-68 (`0057_*` through `0067_*`): accumulated through 2026-04 by
+//     the hand-edit-SQL-and-journal convention that bypassed
+//     `drizzle-kit generate`. PR #590 shipped a single 0069_snapshot.json
+//     (renamed from 0068_snapshot.json by #1131) reflecting current
+//     schema; this allowlist tolerates the gap.
 // New PRs that add a migration MUST emit its snapshot — Check 7 enforces
 // this against any new idx outside the allowlist.
 const HISTORICAL_MISSING_SNAPSHOT_IDXS = new Set([
-  36, 41, 47, 48, 49, 50, 51, 52, 53, 54, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67,
+  36, 41, 47, 48, 49, 50, 51, 52, 53, 54, 55, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
 ]);
 
 // Tags that predate the precondition-guard rule (issue #705). Already
@@ -240,8 +258,21 @@ for (const file of metaFiles) {
   }
 }
 
-// Check 5: No new duplicate idxs (allowlist historical ones)
+// Check 5: idxs are strictly monotonically increasing (subsumes the older
+// uniqueness check — a duplicate is just one shape of non-monotonic).
+// Gaps are allowed (DROPPED_IDXS, deliberate skips). The constraint is
+// that each entry's idx is strictly greater than the previous entry's;
+// going flat or backwards both break the invariant. Issue #1131 fixed
+// the lone historical duplicate (idx 47) by renumbering the second
+// `0047_*` entry to 48 and shifting all subsequent entries +1.
+//
+// HISTORICAL_DUPLICATE_IDXS is the escape hatch — keep it empty unless a
+// historical duplicate has to be re-allowlisted, in which case the test
+// in tests/unit/scripts/validate-migrations.test.ts forces the entry
+// through review.
 {
+  // Duplicate detection (preserves the diagnostic shape and the
+  // HISTORICAL_DUPLICATE_IDXS allowlist semantics).
   const idxCounts = new Map();
   for (const entry of journal.entries) {
     idxCounts.set(entry.idx, (idxCounts.get(entry.idx) || 0) + 1);
@@ -255,6 +286,34 @@ for (const file of metaFiles) {
       const dups = journal.entries.filter((e) => e.idx === idx).map((e) => e.tag);
       console.warn(`WARN:  Historical duplicate idx ${idx} (allowlisted): ${dups.join(', ')}`);
       warnings++;
+    }
+  }
+
+  // Strict monotonic increase. Catches both the duplicate-idx shape
+  // (`prev == curr`, the #1131 condition) and any future hand-edit that
+  // moves an entry's idx below its predecessor's. The check runs in
+  // journal-array order, which is already `when`-sorted by Check 1, so
+  // any non-monotonic idx here means the idx was assigned wrong relative
+  // to its temporal position.
+  for (let i = 1; i < journal.entries.length; i++) {
+    const prev = journal.entries[i - 1];
+    const curr = journal.entries[i];
+    if (curr.idx <= prev.idx) {
+      // Suppress when the pair is already covered by the duplicate
+      // diagnostic above — issuing both fires twice for the same row.
+      const isAllowlistedDup = curr.idx === prev.idx && HISTORICAL_DUPLICATE_IDXS.has(curr.idx);
+      if (isAllowlistedDup) continue;
+      // Suppress the duplicate-already-erred case so each conflicting
+      // row produces exactly one diagnostic.
+      if (curr.idx === prev.idx) continue;
+      console.error(
+        `ERROR: Non-monotonic idx in journal: entry ${curr.tag} (idx=${curr.idx}) ` +
+          `is not strictly greater than predecessor ${prev.tag} (idx=${prev.idx}). ` +
+          `Drizzle silently keys snapshot filenames off idx; an out-of-order idx ` +
+          `corrupts \`drizzle-kit\`'s bookkeeping. Renumber the entry to one greater ` +
+          `than the previous one.`
+      );
+      errors++;
     }
   }
 }

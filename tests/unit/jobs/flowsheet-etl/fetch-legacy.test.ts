@@ -52,12 +52,16 @@ describe('fetch-legacy parsing', () => {
   });
 
   describe('parseEntryRows', () => {
-    // Columns: ID, SHOW_ID, TYPE, ARTIST, ALBUM, TRACK, LABEL, REQ, SEQ, START, TIME_CREATED, TLM, LIBRARY_RELEASE_ID [, SEGUE_FLAG]
+    // Columns: 0-12 base (ID, SHOW_ID, TYPE, ARTIST, ALBUM, TRACK, LABEL, REQ,
+    // SEQ, START, TIME_CREATED, TLM, LIBRARY_RELEASE_ID), 13: RADIO_HOUR
+    // [, 14: SEGUE_FLAG]. RADIO_HOUR (BS#1449) is a stable column; SEGUE_FLAG
+    // stays the optional trailing column behind the fetchLegacyEntries try/catch.
 
-    it('parses 13-column format (without SEGUE_FLAG)', () => {
+    it('parses 14-column format (without SEGUE_FLAG)', () => {
+      // RADIO_HOUR=0 on a track row → radioHour null (tracks carry no top-of-hour).
       const raw =
-        '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t0\t1\t1706799600000\t1706799650000\t1706799700000\t101';
-      const rows = parseEntryRows(raw, 13);
+        '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t0\t1\t1706799600000\t1706799650000\t1706799700000\t101\t0';
+      const rows = parseEntryRows(raw, 14);
 
       expect(rows).toHaveLength(1);
       expect(rows[0]).toEqual({
@@ -74,40 +78,59 @@ describe('fetch-legacy parsing', () => {
         timeCreated: 1706799650000,
         timeLastModified: 1706799700000,
         legacyReleaseId: 101,
+        radioHour: null,
         segueFlag: 0,
       });
     });
 
-    it('parses 14-column format (with SEGUE_FLAG)', () => {
-      const raw =
-        '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t1\t1\t1706799600000\t1706799650000\t1706799700000\t101\t1';
+    it('parses a populated RADIO_HOUR (breakpoint) as epoch ms at index 13', () => {
+      // entryTypeCode 8 = HOURLY_BREAK; RADIO_HOUR is the authoritative top-of-hour.
+      const raw = '100\t200\t8\t--- 12:00 PM ---\t\t\t\t0\t1\t1718726280000\t0\t0\t0\t1718726400000';
       const rows = parseEntryRows(raw, 14);
+
+      expect(rows[0].radioHour).toBe(1718726400000);
+    });
+
+    it('parses 15-column format (with SEGUE_FLAG) — segue read from the shifted index 14', () => {
+      // RADIO_HOUR=0 at index 13, SEGUE_FLAG=1 at index 14. Guards against a
+      // segue-index regression from inserting RADIO_HOUR ahead of SEGUE_FLAG.
+      const raw =
+        '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t1\t1\t1706799600000\t1706799650000\t1706799700000\t101\t0\t1';
+      const rows = parseEntryRows(raw, 15);
 
       expect(rows).toHaveLength(1);
       expect(rows[0].requestFlag).toBe(1);
       expect(rows[0].timeCreated).toBe(1706799650000);
       expect(rows[0].timeLastModified).toBe(1706799700000);
       expect(rows[0].legacyReleaseId).toBe(101);
+      expect(rows[0].radioHour).toBeNull();
       expect(rows[0].segueFlag).toBe(1);
     });
 
-    it('defaults segueFlag to 0 in 13-column format', () => {
-      const raw = '100\t200\t0\tArtist\tAlbum\tTrack\tLabel\t0\t1\t1000\t1500\t2000\t42';
-      const rows = parseEntryRows(raw, 13);
+    it('defaults segueFlag to 0 in 14-column format', () => {
+      const raw = '100\t200\t0\tArtist\tAlbum\tTrack\tLabel\t0\t1\t1000\t1500\t2000\t42\t0';
+      const rows = parseEntryRows(raw, 14);
 
       expect(rows[0].segueFlag).toBe(0);
     });
 
+    it('sets radioHour to null when RADIO_HOUR is 0', () => {
+      const raw = '100\t200\t8\t--- breakpoint ---\t\t\t\t0\t1\t1718726280000\t0\t0\t0\t0';
+      const rows = parseEntryRows(raw, 14);
+
+      expect(rows[0].radioHour).toBeNull();
+    });
+
     it('sets legacyReleaseId to null when value is 0', () => {
-      const raw = '100\t200\t7\tTALKSET\t\t\t\t0\t5\t1000\t1500\t2000\t0';
-      const rows = parseEntryRows(raw, 13);
+      const raw = '100\t200\t7\tTALKSET\t\t\t\t0\t5\t1000\t1500\t2000\t0\t0';
+      const rows = parseEntryRows(raw, 14);
 
       expect(rows[0].legacyReleaseId).toBeNull();
     });
 
     it('handles NULL/empty text fields', () => {
-      const raw = '100\t200\t7\tNULL\t\t\t\t0\t5\t1000\t1500\t2000\t0';
-      const rows = parseEntryRows(raw, 13);
+      const raw = '100\t200\t7\tNULL\t\t\t\t0\t5\t1000\t1500\t2000\t0\t0';
+      const rows = parseEntryRows(raw, 14);
 
       expect(rows[0].artistName).toBeNull();
       expect(rows[0].albumTitle).toBeNull();
@@ -119,7 +142,7 @@ describe('fetch-legacy parsing', () => {
       const raw = '100\t200\t0\tArtist';
       const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
 
-      const rows = parseEntryRows(raw, 13);
+      const rows = parseEntryRows(raw, 14);
 
       expect(rows).toHaveLength(0);
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('malformed'), expect.any(String));
@@ -127,16 +150,16 @@ describe('fetch-legacy parsing', () => {
     });
 
     it('returns empty array for empty input', () => {
-      expect(parseEntryRows('', 13)).toEqual([]);
-      expect(parseEntryRows('   ', 13)).toEqual([]);
+      expect(parseEntryRows('', 14)).toEqual([]);
+      expect(parseEntryRows('   ', 14)).toEqual([]);
     });
 
     it('parses multiple rows', () => {
       const raw = [
-        '1\t100\t0\tArtist1\tAlbum1\tTrack1\tLabel1\t0\t1\t1000\t1500\t2000\t101',
-        '2\t100\t0\tArtist2\tAlbum2\tTrack2\tLabel2\t1\t2\t3000\t3500\t4000\t102',
+        '1\t100\t0\tArtist1\tAlbum1\tTrack1\tLabel1\t0\t1\t1000\t1500\t2000\t101\t0',
+        '2\t100\t0\tArtist2\tAlbum2\tTrack2\tLabel2\t1\t2\t3000\t3500\t4000\t102\t0',
       ].join('\n');
-      const rows = parseEntryRows(raw, 13);
+      const rows = parseEntryRows(raw, 14);
 
       expect(rows).toHaveLength(2);
       expect(rows[0].id).toBe(1);
@@ -148,8 +171,9 @@ describe('fetch-legacy parsing', () => {
     });
 
     it('preserves timeCreated when START_TIME is 0', () => {
-      const raw = '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t0\t1\t0\t1706799650000\t1706799700000\t101';
-      const rows = parseEntryRows(raw, 13);
+      const raw =
+        '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t0\t1\t0\t1706799650000\t1706799700000\t101\t0';
+      const rows = parseEntryRows(raw, 14);
 
       expect(rows).toHaveLength(1);
       expect(rows[0].startTime).toBe(0);
@@ -158,7 +182,11 @@ describe('fetch-legacy parsing', () => {
   });
 
   describe('parseShowRows', () => {
-    // Columns: ID, SIGNON_TIME, SIGNOFF_TIME, SHOW_NAME, TLM, DJ_NAME, DJ_ID
+    // Columns: ID, SIGNON_TIME, SIGNOFF_TIME, SHOW_NAME, TLM, DJ_HANDLE, DJ_ID
+    // (column 5 is DJ_HANDLE, the on-air alias — NOT DJ_NAME, the user's full
+    // real name. Pulling DJ_NAME into shows.legacy_dj_name leaked PII onto the
+    // v2 marker dj_name wire via the COALESCE fallback. The query string in
+    // fetchLegacyShows is asserted separately below.)
 
     it('parses 7-column format with DJ fields', () => {
       const raw = '1\t1706799600000\t1706803200000\tThe Morning Show\t1706799700000\tDJ Bluejay\t42';
@@ -171,7 +199,7 @@ describe('fetch-legacy parsing', () => {
         endTime: 1706803200000,
         showName: 'The Morning Show',
         timeLastModified: 1706799700000,
-        djName: 'DJ Bluejay',
+        djHandle: 'DJ Bluejay',
         djId: 42,
       });
     });
@@ -192,11 +220,11 @@ describe('fetch-legacy parsing', () => {
       expect(rows[0].showName).toBeNull();
     });
 
-    it('sets djName to null for empty/NULL values', () => {
+    it('sets djHandle to null for empty/NULL values', () => {
       const raw = '1\t1706799600000\t0\tShow\t0\tNULL\t0';
       const rows = parseShowRows(raw);
 
-      expect(rows[0].djName).toBeNull();
+      expect(rows[0].djHandle).toBeNull();
     });
 
     it('sets djId to null for 0 or invalid values', () => {
@@ -210,12 +238,32 @@ describe('fetch-legacy parsing', () => {
       const raw = '1\t1706799600000\t1706803200000\tThe Nest\t1706799700000\tDJ Bluejay\t42';
       const rows = parseShowRows(raw);
 
-      expect(rows[0].djName).toBe('DJ Bluejay');
+      expect(rows[0].djHandle).toBe('DJ Bluejay');
       expect(rows[0].djId).toBe(42);
     });
 
     it('returns empty array for empty input', () => {
       expect(parseShowRows('')).toEqual([]);
+    });
+  });
+
+  describe('fetchLegacyShows query — DJ_HANDLE source (PII regression)', () => {
+    // BS#1371 surfaced shows.legacy_dj_name on the public v2 marker dj_name
+    // wire. The ETL must read DJ_HANDLE (on-air alias), not DJ_NAME (the
+    // user's full real name forwarded by the BS legacy mirror as
+    // `realName || name`). If the column ever flips back, this test fires.
+    it('SELECTs DJ_HANDLE — never DJ_NAME — for shows.legacy_dj_name', async () => {
+      const { MirrorSQL } = jest.requireMock('@wxyc/database');
+      const sendMock: jest.Mock = MirrorSQL.instance().send;
+      sendMock.mockReset().mockResolvedValue('');
+
+      const { fetchLegacyShows } = await import('../../../../jobs/flowsheet-etl/fetch-legacy');
+      await fetchLegacyShows(null);
+
+      expect(sendMock).toHaveBeenCalledTimes(1);
+      const query: string = sendMock.mock.calls[0][0];
+      expect(query).toMatch(/\brs\.DJ_HANDLE\b/);
+      expect(query).not.toMatch(/\brs\.DJ_NAME\b/);
     });
   });
 });

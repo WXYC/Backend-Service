@@ -60,12 +60,6 @@ const EXPECTED_ONLY_IN_COMPOSE = [
   'CATALOG_TRACK_SEARCH_CTA_ENABLED',
   'CATALOG_TRACK_SEARCH_DISCOGS_ENABLED',
 
-  // Why: artist-search-alias LATERAL JOIN flag (plan §PR 5). Compose flips it
-  // on so `tests/integration/library-search-alias.spec.js` exercises the
-  // LATERAL against a seeded variant. Workflow path doesn't run that spec;
-  // whether that's a coverage gap is tracked separately.
-  'CATALOG_SEARCH_ALIAS_ENABLED',
-
   // Why: AWS Cognito identifiers from the legacy auth flow. Compose sets
   // them via `.env` substitution; backend defaults work in the workflow's
   // host-process auth-bypass mode.

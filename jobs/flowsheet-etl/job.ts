@@ -29,7 +29,7 @@ import {
   truncate,
 } from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
-import { mapProdEntryType, resolveEntryTimestamp } from './transform.js';
+import { mapProdEntryType, resolveEntryTimestamp, resolveRadioHour } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
@@ -178,6 +178,7 @@ type BulkEntryRow = {
   segue: boolean;
   play_order: number;
   add_time: Date;
+  radio_hour: Date | null;
 };
 
 type DbClient = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -197,7 +198,11 @@ const importShows = async (dbClient: DbClient, lines: string[]) => {
         .insert(shows)
         .values({
           legacy_show_id: Number(tuple[0]),
-          legacy_dj_name: truncate(tuple[2] != null ? String(tuple[2]) : null, 128),
+          // tuple[4] = DJ_HANDLE (on-air alias). tuple[2] (DJ_NAME) is the
+          // full real name that BS sends through the legacy mirror as
+          // `realName || name`; reading it here would leak PII onto the v2
+          // wire via shows.legacy_dj_name → flowsheet.dj_name COALESCE.
+          legacy_dj_name: truncate(tuple[4] != null ? String(tuple[4]) : null, 128),
           legacy_dj_id: Number.isFinite(rawDjId) && rawDjId !== 0 ? rawDjId : null,
           start_time: startTime,
           end_time: epochMsToDate(Number(tuple[9]) || 0),
@@ -221,7 +226,13 @@ const buildShowIdMap = async (dbClient: DbClient) => {
   return map;
 };
 
-const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map<number, number>) => {
+/**
+ * Parse FLOWSHEET_ENTRY_PROD dump lines into flowsheet rows and bulk-insert
+ * them. Exported so unit tests can pin the dump-column→row mapping — most
+ * importantly `radio_hour` from RADIO_HOUR (tuple[9]) — which otherwise has no
+ * CI regression guard against the dump column map drifting (#1462).
+ */
+export const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map<number, number>) => {
   let entryCount = 0;
   const pendingEntries: BulkEntryRow[] = [];
 
@@ -255,6 +266,8 @@ const importEntries = async (dbClient: DbClient, lines: string[], showIdMap: Map
         segue: tuple.length > 21 ? Number(tuple[21]) === 1 : false,
         play_order: Number(tuple[13]) || 0,
         add_time: addTime,
+        // tuple[9] = RADIO_HOUR (epoch ms); only breakpoints carry a top-of-hour.
+        radio_hour: resolveRadioHour(entryType, Number(tuple[9]) || 0),
       });
 
       if (pendingEntries.length >= BATCH_SIZE) {
@@ -335,7 +348,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
       .insert(shows)
       .values({
         legacy_show_id: show.id,
-        legacy_dj_name: truncate(show.djName, 128),
+        legacy_dj_name: truncate(show.djHandle, 128),
         legacy_dj_id: show.djId,
         start_time: startTime,
         end_time: endTime,
@@ -429,6 +442,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
         segue: entry.segueFlag === 1,
         play_order: entry.playOrder,
         add_time: addTime,
+        radio_hour: resolveRadioHour(entryType, entry.radioHour),
       })
       .onConflictDoUpdate({
         target: flowsheet.legacy_entry_id,
@@ -444,6 +458,8 @@ export const runIncremental = async (): Promise<SyncResult> => {
           add_time: sql`excluded.add_time`,
           show_id: sql`excluded.show_id`,
           play_order: sql`excluded.play_order`,
+          // Self-heal breakpoint rows synced before the column existed (BS#1449).
+          radio_hour: sql`excluded.radio_hour`,
         },
         // tubafrenzy bumps TIME_LAST_MODIFIED on adjacent rows during normal
         // operation (flowsheet.mirror.ts close-prior-now-playing UPDATE), so
@@ -462,7 +478,8 @@ export const runIncremental = async (): Promise<SyncResult> => {
           ${flowsheet.entry_type} IS DISTINCT FROM excluded.entry_type OR
           ${flowsheet.add_time} IS DISTINCT FROM excluded.add_time OR
           ${flowsheet.show_id} IS DISTINCT FROM excluded.show_id OR
-          ${flowsheet.play_order} IS DISTINCT FROM excluded.play_order
+          ${flowsheet.play_order} IS DISTINCT FROM excluded.play_order OR
+          ${flowsheet.radio_hour} IS DISTINCT FROM excluded.radio_hour
         `,
       });
 

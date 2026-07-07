@@ -43,30 +43,150 @@ interface MirrorEntry {
 }
 
 /**
- * Capture a mirror call failure to Sentry. Grouping is by `operation` (in
- * the message) and sub-tagged by `status` so a sustained outage rolls up
- * into a single issue with an occurrence count rather than fanning out
- * per-row. `mirrorCreateShow` had this since its 5-retry path; the entry
- * and signoff paths previously logged to console only, which is how the
- * 2026-06-05 tubafrenzy auth-config drift (missing `MIRROR_API_KEY` on the
- * tubafrenzy side) ran silent through a full DJ's show.
+ * Mirror operation taxonomy. Each operation declares:
+ *
+ *   - `category`: `'http'` for outbound tubafrenzy calls (the 2026-06-05
+ *     runbook is keyed on `category:http`); `'db'` for local DB queries
+ *     in the helper layer.
+ *
+ *   - `useFingerprint`: whether the Sentry event opts into an explicit
+ *     `['mirror-failure', operation]` fingerprint. The pre-existing HTTP
+ *     ops DO NOT fingerprint — they group via Sentry's default
+ *     message-based grouping to preserve their existing issue lineage
+ *     (alert rules / muted-issue subscriptions / runbook links wired to
+ *     historical IDs would silently stop firing if we forked the
+ *     lineage). `rotation_lookup` is new in BS#1432, so it opts into an
+ *     explicit fingerprint from the start.
+ *
+ *   - `useException`: whether `Error`-valued failures route through
+ *     `Sentry.captureException` (true) or stay on `captureMessage`
+ *     (false). The pre-existing HTTP ops MUST stay on captureMessage
+ *     even for catch-arm Errors: Sentry's default exception-grouping
+ *     algorithm keys by exception type + top stack frame, NOT by the
+ *     `Mirror: <op> failed` message string. Routing HTTP-op Errors
+ *     through captureException would silently fork their issue lineage
+ *     (round-3 review caught this). `rotation_lookup` opts into the
+ *     captureException lane because it's a new op with no historical
+ *     lineage to preserve, and its explicit fingerprint overrides
+ *     Sentry's default exception grouping anyway.
+ *
+ * Adding a new operation REQUIRES a new entry here — TypeScript's
+ * `satisfies Record<MirrorOperation, MirrorOperationMeta>` enforces
+ * exhaustiveness. `as const` preserves literal types so consumers see
+ * narrow `'http' | 'db'` and literal-`true`/`false` types instead of
+ * widened `string` / `boolean`. `Object.freeze` (outer + per-entry,
+ * since freeze is shallow) makes the registry actually immutable at
+ * runtime: `as const` is TypeScript-only, so it catches only writes in
+ * typechecked code. The runtime freeze closes the TS-bypass paths —
+ * `(meta as any).x = y` casts, JS-from-TS imports, `Object.assign`
+ * targets, and anything else the compiler can't see. Both layers
+ * together prevent a downstream importer from silently corrupting
+ * grouping for the lifetime of the process.
  */
-function captureMirrorFailure(
-  operation: 'create_entry' | 'update_entry' | 'signoff_show',
-  details: { status?: number; responseBody?: string; error?: unknown }
+export type MirrorOperation = 'create_entry' | 'update_entry' | 'signoff_show' | 'rotation_lookup';
+
+interface MirrorOperationMeta {
+  category: 'http' | 'db';
+  useFingerprint: boolean;
+  useException: boolean;
+}
+
+export const MIRROR_OPERATION_META = Object.freeze({
+  create_entry: Object.freeze({ category: 'http', useFingerprint: false, useException: false }),
+  update_entry: Object.freeze({ category: 'http', useFingerprint: false, useException: false }),
+  signoff_show: Object.freeze({ category: 'http', useFingerprint: false, useException: false }),
+  rotation_lookup: Object.freeze({ category: 'db', useFingerprint: true, useException: true }),
+} as const) satisfies Readonly<Record<MirrorOperation, Readonly<MirrorOperationMeta>>>;
+
+/** Defensive cap for stack-trace strings sent to Sentry, mirroring the
+ *  responseBody cap pattern. Long async stacks from drizzle + postgres-js
+ *  wrappers can be many KB; Sentry's per-event payload limit is finite,
+ *  and under sustained outage we emit one event per entry add/update.
+ *  Only applied on the captureMessage path (where we manually surface the
+ *  stack via `extra.stack`). The captureException path relies on Sentry's
+ *  native exception lane, which has its own framing/truncation. */
+const STACK_TRACE_MAX_LENGTH = 4000;
+
+/**
+ * Capture a mirror call failure to Sentry. Routing is governed by the
+ * per-operation entry in `MIRROR_OPERATION_META`:
+ *
+ *   - HTTP operations (`create_entry`, `update_entry`, `signoff_show`)
+ *     always emit via `Sentry.captureMessage` regardless of whether the
+ *     failure is a status code (`!response.ok`) or a catch-arm Error
+ *     (network error, fetch reject). This preserves their historical
+ *     issue identity: Sentry's default message grouping keys on
+ *     `'Mirror: <op> failed'`, so all four failure-mode subsets (401,
+ *     5xx, ECONNREFUSED, timeout) roll into the same operation-keyed
+ *     issue. The on-call runbook (2026-06-05 tubafrenzy auth-config
+ *     drift) is wired to that issue lineage. Error stacks are surfaced
+ *     via `extra.stack` (sliced to `STACK_TRACE_MAX_LENGTH`) since
+ *     captureMessage doesn't auto-extract them.
+ *
+ *   - The DB operation (`rotation_lookup`) emits via
+ *     `Sentry.captureException` for Error-valued failures, with an
+ *     explicit fingerprint `['mirror-failure', 'rotation_lookup']` so
+ *     it's grouped under a dedicated issue from the start (new in
+ *     BS#1432). Sentry's native exception lane handles the stack —
+ *     matches the codebase pattern in enrichment-worker / auth /
+ *     provision-user. Non-Error failures (defensive — should be rare)
+ *     fall through to captureMessage with the same fingerprint.
+ *
+ * `status` is captured as a tag (filterable in search but not part of
+ * the group hash) so a sustained outage rolls up into a single issue
+ * with an occurrence count rather than fanning out per-row.
+ */
+export function captureMirrorFailure(
+  operation: MirrorOperation,
+  details: { status?: number; responseBody?: string; error?: unknown },
+  level: 'error' | 'warning' = 'error'
 ): void {
+  const meta = MIRROR_OPERATION_META[operation];
+  const fingerprint: string[] | undefined = meta.useFingerprint ? ['mirror-failure', operation] : undefined;
+  const tags: Record<string, string> = {
+    subsystem: 'legacy-mirror',
+    operation,
+    category: meta.category,
+    ...(details.status != null ? { status: String(details.status) } : {}),
+  };
+  const extra: Record<string, unknown> = {
+    ...(details.status != null ? { status: details.status } : {}),
+    ...(details.responseBody != null ? { responseBody: details.responseBody.slice(0, 500) } : {}),
+  };
+
+  // captureException path: only for ops that opt in (currently just
+  // rotation_lookup) AND only when the failure is a real Error. Sentry's
+  // native exception lane handles the stack; no manual `extra.stack`
+  // forwarding here (matches the convention in enrichment-worker / auth
+  // / provision-user / check-request-ban-handler — none of those sites
+  // duplicate err.stack into extra).
+  if (meta.useException && details.error instanceof Error) {
+    Sentry.captureException(details.error, {
+      level,
+      ...(fingerprint != null ? { fingerprint } : {}),
+      tags,
+      extra,
+    });
+    return;
+  }
+
+  // captureMessage path: HTTP ops always (preserves message-grouped
+  // issue lineage even for catch-arm Errors), plus the defensive
+  // non-Error rotation_lookup case. Surface the error value as a
+  // stringified summary; for Error instances, also forward a truncated
+  // stack via extra so triagers don't lose it (captureMessage doesn't
+  // auto-extract stacks the way captureException does).
+  if (details.error != null) {
+    extra.error = String(details.error);
+    if (details.error instanceof Error && details.error.stack != null) {
+      extra.stack = details.error.stack.slice(0, STACK_TRACE_MAX_LENGTH);
+    }
+  }
   Sentry.captureMessage(`Mirror: ${operation} failed`, {
-    level: 'error',
-    tags: {
-      subsystem: 'legacy-mirror',
-      operation,
-      ...(details.status != null ? { status: String(details.status) } : {}),
-    },
-    extra: {
-      ...(details.status != null ? { status: details.status } : {}),
-      ...(details.responseBody != null ? { responseBody: details.responseBody.slice(0, 500) } : {}),
-      ...(details.error != null ? { error: String(details.error) } : {}),
-    },
+    level,
+    ...(fingerprint != null ? { fingerprint } : {}),
+    tags,
+    extra,
   });
 }
 
@@ -141,7 +261,11 @@ export function clearEntryIdMap(): void {
  * When radioShowID is provided, it's included so tubafrenzy doesn't auto-resolve.
  * nowPlayingFlag is always 0 (dropped — nothing in tubafrenzy reads it).
  */
-export function mapEntryToTubafrenzy(entry: MirrorEntry, radioShowID?: number | null): Record<string, unknown> {
+export function mapEntryToTubafrenzy(
+  entry: MirrorEntry,
+  radioShowID?: number | null,
+  isRotationMatch = false
+): Record<string, unknown> {
   const startMs = entry.add_time ? new Date(entry.add_time).getTime() : Date.now();
   const radioHour = Math.floor(startMs / 3_600_000) * 3_600_000;
 
@@ -192,9 +316,22 @@ export function mapEntryToTubafrenzy(entry: MirrorEntry, radioShowID?: number | 
     };
   }
 
-  // Track entries
+  // Track entries.
+  //
+  // Gate `entry.rotation_id && entry.rotation_id > 0` is intentionally
+  // looser than the helper's `entry.rotation_id != null` (BS#1432 round-2
+  // tightened the helper for read-path parity). End-to-end the two
+  // surfaces still agree: for `rotation_id = 0` the helper short-circuits
+  // (returns false), `isRotationMatch` is false, this branch falls through
+  // to the album_id check — yielding the same classification the read
+  // path would produce (FK join misses, IS-NULL-gated subquery doesn't
+  // fire, no badge). Schema FK to `rotation.id` (a serial starting at 1)
+  // makes `rotation_id = 0` theoretical drift in practice, but keeping
+  // this gate aligned with the schema-positive invariant rather than the
+  // helper's "any non-NULL = FK lane owns it" semantic preserves the
+  // explicit "real rotation FK" intent at the mapper layer.
   let flowsheetEntryType = 0;
-  if (entry.rotation_id && entry.rotation_id > 0) {
+  if ((entry.rotation_id && entry.rotation_id > 0) || isRotationMatch) {
     flowsheetEntryType = 2;
   } else if (entry.album_id && entry.album_id > 0) {
     flowsheetEntryType = 6;
@@ -220,9 +357,9 @@ export function mapEntryToTubafrenzy(entry: MirrorEntry, radioShowID?: number | 
  * Maps a Backend-Service FSEntry to the tubafrenzy PATCH JSON body.
  * Only includes fields that can be updated on an existing entry.
  */
-export function mapUpdateToTubafrenzy(entry: MirrorEntry): Record<string, unknown> {
+export function mapUpdateToTubafrenzy(entry: MirrorEntry, isRotationMatch = false): Record<string, unknown> {
   let flowsheetEntryType = 0;
-  if (entry.rotation_id && entry.rotation_id > 0) {
+  if ((entry.rotation_id && entry.rotation_id > 0) || isRotationMatch) {
     flowsheetEntryType = 2;
   } else if (entry.album_id && entry.album_id > 0) {
     flowsheetEntryType = 6;

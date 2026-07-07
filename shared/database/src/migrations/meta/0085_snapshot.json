@@ -1,6 +1,6 @@
 {
-  "id": "1f6d7e99-cbd3-4c51-b265-fcbd3e002b3d",
-  "prevId": "786c0c0e-f94d-4b46-9991-3092434fbc7d",
+  "id": "786c0c0e-f94d-4b46-9991-3092434fbc7d",
+  "prevId": "dc17541d-2fef-4979-b1e7-af1dd0bf6f75",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2935,14 +2935,6 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": false
-        },
-        "discogs_release_id_source": {
-          "name": "discogs_release_id_source",
-          "type": "discogs_release_id_source_enum",
-          "typeSchema": "wxyc_schema",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'tubafrenzy_paste'"
         }
       },
       "indexes": {
@@ -3829,14 +3821,6 @@
     }
   },
   "enums": {
-    "wxyc_schema.discogs_release_id_source_enum": {
-      "name": "discogs_release_id_source_enum",
-      "schema": "wxyc_schema",
-      "values": [
-        "tubafrenzy_paste",
-        "lml_offline_backfill"
-      ]
-    },
     "wxyc_schema.flowsheet_entry_type": {
       "name": "flowsheet_entry_type",
       "schema": "wxyc_schema",

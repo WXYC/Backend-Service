@@ -65,8 +65,10 @@ export const user = pgTable(
   (table) => [
     uniqueIndex('auth_user_email_key').on(table.email),
     uniqueIndex('auth_user_username_key').on(table.username),
-    index('auth_user_dj_name_trgm_idx').using('gin', sql`${table.djName} gin_trgm_ops`),
-    index('auth_user_name_trgm_idx').using('gin', sql`${table.name} gin_trgm_ops`),
+    // auth_user trigram indexes (auth_user_dj_name_trgm_idx, auth_user_name_trgm_idx)
+    // were dropped in migrations 0054 + 0065 — search no longer joins through
+    // auth_user; reads come from flowsheet.dj_name + flowsheet_dj_name_trgm_idx.
+    // Declaration removed to keep schema.ts aligned with the dropped state (BS#1129).
   ]
 );
 
@@ -440,6 +442,21 @@ export const compilation_track_artist = wxyc_schema.table(
     index('cta_library_id_idx').on(table.library_id),
     index('cta_artist_name_idx').on(table.artist_name),
     uniqueIndex('cta_unique_idx').on(table.library_id, table.artist_name, table.track_title),
+    // BS#1135 / 0099_cta-unique-null-track-partial.sql: complement to
+    // `cta_unique_idx` that closes the NULL-track-title duplicate
+    // loophole on PG 14 (prod runtime — `NULLS NOT DISTINCT` is PG15+
+    // and unavailable). The base index above covers the non-NULL
+    // slice (Postgres includes non-NULL rows in unique comparisons
+    // normally); this partial unique covers `track_title IS NULL` on
+    // `(library_id, artist_name)`. Together they enforce the full
+    // intended "no duplicate compilation tracks per (library, artist,
+    // title)" semantics. Tests:
+    // `tests/unit/database/schema.cta-unique-null-track-partial.test.ts`
+    // (schema drift), `tests/integration/cta-unique-null-track-partial.spec.js`
+    // (runtime behavior).
+    uniqueIndex('cta_unique_null_track_idx')
+      .on(table.library_id, table.artist_name)
+      .where(sql`${table.track_title} IS NULL`),
   ]
 );
 
@@ -491,7 +508,7 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
   'failed_no_retry',
 ]);
 
-// Provenance for `rotation.discogs_release_id` (BS#1029). Three values:
+// Provenance for `rotation.discogs_release_id` (BS#1029). Five values:
 //
 //   tubafrenzy_paste        — mirrored from tubafrenzy ROTATION_RELEASE
 //                             .DISCOGS_RELEASE_ID by `jobs/rotation-etl`,
@@ -513,18 +530,49 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
 //                             Tagged distinctly from `lml_offline_backfill` so
 //                             a future LML-based re-run can scope its UPDATEs
 //                             without clobbering the bypass-LML provenance.
+//   library_identity        — written by `addToRotation`
+//                             (apps/backend/services/library.service.ts) when
+//                             the dj-site `POST /library/rotation` request
+//                             carried an `album_id` whose `library_identity`
+//                             row supplied a non-NULL `discogs_release_id`.
+//                             The same call synchronously resolves
+//                             `lml_identity_id` against LML; on resolve
+//                             failure `lml_identity_id` lands NULL but the
+//                             source is still `library_identity` — the
+//                             source-of-the-Discogs-id is library_identity
+//                             regardless of whether the lml mint succeeded
+//                             (BS#1380).
+//   md_verified             — written only by operator-run remediation
+//                             scripts after a human verified the release id
+//                             against Discogs (first use: the BS#1528 MD
+//                             pass over the #1517 audit's held rows, via
+//                             scripts/audit/bs_1528_md_remediation.py). No
+//                             runtime writer emits this value. The #1522
+//                             recurring auditor's default --sources scope
+//                             deliberately excludes it: these rows are
+//                             human-verified and score low on free-text
+//                             title similarity by construction (degenerate
+//                             references), so re-auditing them would only
+//                             re-flag known-good ids. rotation-etl's
+//                             flip-back CASE still supersedes it with
+//                             `tubafrenzy_paste` if tubafrenzy later
+//                             contributes a non-NULL id — a fresh MD paste
+//                             outranks an old MD verification.
 //
 // Column default is `tubafrenzy_paste` so existing pre-migration rows
 // (PG11+ `attmissingval` virtual default) and new rotation-etl inserts
 // are correctly attributed without rotation-etl having to set the column
-// explicitly. The backfill writes `lml_offline_backfill` and the
-// rotation-etl ON CONFLICT path flips it back to `tubafrenzy_paste`
+// explicitly. The backfill writes `lml_offline_backfill`, the
+// dj-site `addToRotation` path writes `library_identity`, and the
+// rotation-etl ON CONFLICT path flips back to `tubafrenzy_paste`
 // when tubafrenzy contributes a non-NULL id (COALESCE-paired with
 // `rotation.discogs_release_id`).
 export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_source_enum', [
   'tubafrenzy_paste',
   'lml_offline_backfill',
   'discogs_direct_backfill',
+  'library_identity',
+  'md_verified',
 ]);
 /**
  * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes
@@ -592,6 +640,30 @@ export const rotation = wxyc_schema.table(
     // exhaustion on every deploy. NULL on transient LML failures (caught arm
     // — caller decides whether to retry) so the row stays retryable.
     tracklist_lookup_attempted_at: timestamp('tracklist_lookup_attempted_at', { withTimezone: true }),
+    // BS#1380: stable LML release-identity handle. Points at
+    // `entity.release_identity.id` on the LML side — the right layer to
+    // own a release identity, since Discogs admins periodically reorganize
+    // the catalog (see BS#624 prior art) and Discogs IDs aren't
+    // intrinsically stable. PG-level FK is not enforceable across the
+    // network; LML owns referential integrity.
+    //
+    // Writers:
+    //   - `addToRotation` (apps/backend/services/library.service.ts)
+    //     synchronously resolves via `POST /api/v1/identity/resolve` before
+    //     INSERT when `library_identity.discogs_release_id` is non-NULL.
+    //     Falls back to NULL on resolve timeout / 5xx (the row's
+    //     `discogs_release_id` still lands so the backfill can re-resolve).
+    //   - `jobs/rotation-lml-identity-backfill` (daily cron, recurring
+    //     drift-repair) sweeps rows with `lml_identity_id IS NULL AND
+    //     discogs_release_id IS NOT NULL`. Catches both rotation-etl
+    //     writes (rotation-etl never calls LML) and addToRotation
+    //     resolve-failure fallbacks.
+    //
+    // Rotation-etl preserves the column across ticks via a guarded CASE
+    // (see jobs/rotation-etl/job.ts) that clears it only when the
+    // *effective* `discogs_release_id` changes — paste-correction lands
+    // at `(X', NULL)` and the next backfill tick re-resolves.
+    lml_identity_id: integer('lml_identity_id'),
   },
   (table) => {
     return {
@@ -600,6 +672,15 @@ export const rotation = wxyc_schema.table(
       // rotation row; one row per legacy_rotation_id by tubafrenzy's invariant.
       // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
       legacyRotationIdIdx: uniqueIndex('rotation_legacy_rotation_id_idx').on(table.legacy_rotation_id),
+      // BS#1429 / migration 0101: writers must supply a positive Discogs
+      // release id or NULL; the `0` sentinel (and any negative drift) is
+      // rejected. Operator-rescue background and the 6-row remediation
+      // live in the migration header.
+      // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+      discogsReleaseIdNotSentinel: check(
+        'rotation_discogs_release_id_not_sentinel',
+        sql`${table.discogs_release_id} IS NULL OR ${table.discogs_release_id} > 0`
+      ),
     };
   }
 );
@@ -684,6 +765,12 @@ export const flowsheet = wxyc_schema.table(
     message: varchar('message', { length: 250 }),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
+    // Exact top-of-hour a breakpoint marks (tubafrenzy RADIO_HOUR), distinct from
+    // add_time — the row's logging instant, ~1 min before the hour. Nullable: only
+    // breakpoint rows populate it, and NULL until backfilled. Serialized onto V2
+    // breakpoint entries so clients render the hour-marker label from the real hour
+    // instead of flooring add_time across the boundary (#1448 / #1449).
+    radio_hour: timestamp('radio_hour', { withTimezone: true }),
     // BS#902 (Epic F / F1). Per-row mutation timestamp. Bumped by the
     // BEFORE INSERT OR UPDATE trigger (`bump_flowsheet_updated_at`,
     // migration 0084), so every write — including the enrichment-worker
@@ -726,6 +813,15 @@ export const flowsheet = wxyc_schema.table(
     linkage_source: text('linkage_source'),
     linkage_confidence: real('linkage_confidence'),
     linked_at: timestamp('linked_at', { withTimezone: true }),
+    // BMI composer for this playcut, written by apps/enrichment-worker
+    // (enrich.ts finalizeRow) from DiscogsMatchResult.writer_credits, with
+    // artist-as-proxy fallback. NULL until enrichment runs (and on non-track
+    // rows, which never enter the enrichment lifecycle). composer_source is
+    // enum-like text — like linkage_source above, kept text (not a pg enum)
+    // so adding a future source (e.g. musicbrainz_work, LML#699) needs no
+    // enum migration. Values: 'discogs_track' | 'discogs_release' | 'artist_proxy'.
+    composer: text('composer'),
+    composer_source: text('composer_source'),
     // B-0.5 marker: timestamp set when the legacy_release_id → library.id
     // resolver ran for this row and could not link. Lets B-2.2's LML
     // backfill find the broken-FK residual alongside the rows that never
@@ -818,14 +914,27 @@ export const flowsheet = wxyc_schema.table(
     // /flowsheet `?shows_limit=N` listing endpoint sequentially scans the
     // 2.6M-row table on every dj-site poll. See migration 0068 + issue #511.
     index('flowsheet_show_id_idx').on(table.show_id),
-    // `nextPlayOrder()` runs `SELECT max(play_order) FROM flowsheet` on every
-    // POST /flowsheet/ to derive the next monotonic play_order. Without this
-    // index that's a 2.6M-row parallel Seq Scan (~6s on prod) that exceeds
-    // the 5s `DB_STATEMENT_TIMEOUT_MS`, so postgres-js cancels and the API
-    // returns 500. With it, MAX is an O(1) leaf-page lookup. Built
-    // CONCURRENTLY out-of-band on prod 2026-04-30 to unblock the flowsheet
-    // during a live show. See migration 0071.
-    index('flowsheet_play_order_idx').on(sql`${table.play_order} DESC`),
+    // Composite B-tree on (show_id, play_order DESC) covering the per-show
+    // `nextPlayOrder()` MAX lookup that POST /flowsheet/ runs on every track
+    // and talkset insert. The original migration 0073 shipped a single-column
+    // DESC index on `play_order` to back the then-global MAX query; #693 then
+    // scoped `nextPlayOrder` to `WHERE show_id = ?`, leaving the single-column
+    // index misaligned (the planner can either backward-scan the global DESC
+    // index and filter by show_id, or bitmap-scan `flowsheet_show_id_idx` and
+    // aggregate — neither is the O(1) leaf-page lookup the original migration
+    // promised). The composite makes the per-show MAX a true O(1) lookup:
+    // each show's rows form a contiguous run in the index, with DESC ordering
+    // putting the per-show max at the run's leading edge. Same shape also
+    // accelerates the legacy mirror's announcement-entry lookup
+    // (`WHERE show_id = ? ORDER BY play_order DESC LIMIT 1` in
+    // apps/backend/middleware/legacy/flowsheet.mirror.ts) and `getEntriesByShow`
+    // (`WHERE show_id IN (...) ORDER BY play_order DESC`). Built CONCURRENTLY
+    // out-of-band on prod first; the migration is a no-op against the prod DB
+    // via `IF NOT EXISTS`. The prior single-column index is dropped in the
+    // same migration (BS#1133); the only non-per-show MAX(play_order) caller
+    // is `jobs/flowsheet-etl/job.ts:resetSequences()`, a one-shot post-bulk-
+    // load sequence reset that is not performance-sensitive.
+    index('flowsheet_show_id_play_order_idx').on(table.show_id, sql`${table.play_order} DESC`),
     // BS#902 (Epic F / F1). DESC B-tree on `updated_at` supports any
     // per-row staleness query that filters on `updated_at` (e.g. partial
     // ETag derivation downstream). The conditional-GET middleware itself
@@ -1026,6 +1135,50 @@ export const flowsheet_watermark = wxyc_schema.table(
   ]
 );
 
+/**
+ * BS#1467 (Epic F pattern, applied to the catalog). Single-row sibling
+ * watermark table that any INSERT/UPDATE/DELETE/TRUNCATE on `library` advances
+ * via the `touch_library_watermark` AFTER STATEMENT trigger (migration 0104).
+ * It is the conditional-GET freshness source for the catalog bulk-export
+ * endpoint (#1466 child 2).
+ *
+ * Mirrors `flowsheet_watermark` structurally, with one deliberate divergence
+ * in the trigger (not visible here — see migration 0104): the library trigger
+ * advances with a plain `GREATEST(now(), last_modified_at)`, dropping 0084's
+ * `+ interval '1 second'` floor. The catalog's primary writer is the
+ * `jobs/library-etl/` daily sync, which runs its entire per-row loop inside a
+ * single transaction; Postgres `now()` is `transaction_timestamp()` (frozen at
+ * transaction start), so a `+1s` floor would push the watermark N seconds into
+ * the future under a bulk write — the drift-forward half of #1106. A
+ * once-daily ETL feeding a once-daily poller doesn't need 0084's same-second
+ * disambiguation, so the monotonic-but-not-forced form is correct here.
+ *
+ * A DB trigger (not an app-level watermark) is mandatory because the ETL
+ * writes straight to Postgres, bypassing the BS service layer entirely — an
+ * app-level `updateLastModified()` would silently miss every ETL write (the
+ * #1106 bypass failure mode).
+ *
+ * The `id boolean PRIMARY KEY DEFAULT true` + `CHECK (id = true)` shape is the
+ * standard singleton-row pattern: only one row can ever exist (the seed
+ * inserted at migration apply time), so reads never need a predicate beyond
+ * the implicit "the row".
+ */
+export const library_watermark = wxyc_schema.table(
+  'library_watermark',
+  {
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    id: boolean('id').primaryKey().notNull().default(true),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    last_modified_at: timestamp('last_modified_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (_table) => [
+    // Singleton-row guard ships in migration 0104. The raw `"id" = true` form
+    // (no schema/table qualification) matches 0104's snapshot byte-for-byte so
+    // drizzle:generate doesn't emit a spurious DROP/ADD pair (the BS#1029 trap).
+    check('library_watermark_singleton', sql.raw(`"id" = true`)),
+  ]
+);
+
 export const album_metadata = wxyc_schema.table('album_metadata', {
   // `.notNull()` is redundant with `.primaryKey()` at the SQL level (PK
   // implies NOT NULL), but Drizzle's `InferInsertModel` type derivation
@@ -1046,8 +1199,82 @@ export const album_metadata = wxyc_schema.table('album_metadata', {
   soundcloud_url: varchar('soundcloud_url', { length: 512 }),
   artist_bio: text('artist_bio'),
   artist_wikipedia_url: varchar('artist_wikipedia_url', { length: 512 }),
+  // LML-only enrichment fields (BS#1336). These ride on the top-1
+  // `DiscogsMatchResult` only when the originating lookup sets `extended:
+  // true`; the enrichment-worker now forces it (handler.ts). Cold
+  // `/proxy/metadata/album` fallthrough already wired these into the
+  // response; persisting them here lets the BS#1331 cache-first path emit
+  // the same artist+release subtree on a hit instead of shedding it.
+  // `discogs_artist_id` is the external Discogs artist id (not an FK to
+  // `artists`); the artist sub-panel on dj-site / iOS V1 gates on it.
+  // `bio_tokens` is the persisted name for LML's `profile_tokens` (iOS's
+  // `bioTokens`). `tracklist` / `bio_tokens` stay untyped jsonb here
+  // (matching the existing `raw_data` column) and are typed at the read
+  // boundary in `album-metadata-lookup.service.ts`.
+  discogs_artist_id: integer('discogs_artist_id'),
+  label: varchar('label', { length: 255 }),
+  full_release_date: varchar('full_release_date', { length: 32 }),
+  genres: text('genres').array(),
+  styles: text('styles').array(),
+  tracklist: jsonb('tracklist'),
+  artist_image_url: varchar('artist_image_url', { length: 512 }),
+  bio_tokens: jsonb('bio_tokens'),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
+
+/**
+ * Free-text (artist, album) → Discogs release+master resolution cache
+ * (BS#1491 / catalog-popularity Phase-2 Track 1).
+ *
+ * Lives SEPARATE from `flowsheet` because the mapping is many-to-one: the
+ * ~43% of music plays with `album_id IS NULL` hold tens of thousands of
+ * distinct normalized `(artist, album)` pairs across ~2.6M rows. A per-row
+ * `flowsheet` column couldn't dedup that collapse; this table holds one row
+ * per normalized pair, keyed on the composite PK `(norm_artist, norm_album)`.
+ *
+ * Population: the recurring cron `jobs/catalog-popularity-freetext-resolve/`
+ * enumerates DISTINCT normalized pairs from
+ * `flowsheet WHERE entry_type='track' AND album_id IS NULL`, resolves each
+ * batch via LML `bulkLookupMetadata`, and UPSERTs the verdict here. Track 2's
+ * popularity collapse reads this table to attribute the free-text plays.
+ *
+ * Keys:
+ *   - `norm_artist` = `normalizeArtistName(artist)` (shared/database/src/normalize-artist-name.ts)
+ *   - `norm_album`  = `normalizeAlbumTitle(album)`  (shared/database/src/normalize-album-title.ts)
+ *
+ * Columns:
+ *   - `discogs_release_id` — the LML match's release id (`> 0`); NULL on
+ *     no-match OR on the BS#1185 streaming-only sentinel (`release_id == 0`,
+ *     which is not a linkable release). NULL is the "no usable release" state.
+ *   - `discogs_master_id` — populated once LML Track 0 surfaces `master_id` in
+ *     the lookup result; NULL until then (Track 1 runs in PARALLEL with Track
+ *     0 and needs only the release leg). The cron fills it opportunistically.
+ *   - `match_confidence` — LML's per-result `DiscogsMatchResult.confidence`.
+ *   - `match_source` — provenance string (e.g. `lml_bulk_lookup`); mirrors the
+ *     `library_identity_source.notes` provenance convention.
+ *   - `attempt_at` — attempt-at marker (docs/migrations.md "Attempt-at
+ *     markers"): stamped on a RESPONDED outcome (match OR explicit no-match),
+ *     left NULL on transient LML failure so the row stays retryable. The cron
+ *     re-attempts `attempt_at IS NULL` rows and no-match rows older than a TTL.
+ *   - `resolved_at` — when a release id was last written (NULL while unresolved).
+ */
+export const flowsheet_freetext_resolution = wxyc_schema.table(
+  'flowsheet_freetext_resolution',
+  {
+    norm_artist: text('norm_artist').notNull(),
+    norm_album: text('norm_album').notNull(),
+    discogs_release_id: integer('discogs_release_id'),
+    discogs_master_id: integer('discogs_master_id'),
+    match_confidence: real('match_confidence'),
+    match_source: text('match_source'),
+    attempt_at: timestamp('attempt_at', { withTimezone: true }),
+    resolved_at: timestamp('resolved_at', { withTimezone: true }),
+  },
+  (table) => [primaryKey({ columns: [table.norm_artist, table.norm_album] })]
+);
+
+export type FlowsheetFreetextResolution = InferSelectModel<typeof flowsheet_freetext_resolution>;
+export type NewFlowsheetFreetextResolution = InferInsertModel<typeof flowsheet_freetext_resolution>;
 
 export type NewGenre = InferInsertModel<typeof genres>;
 export type Genre = InferSelectModel<typeof genres>;
@@ -1172,6 +1399,20 @@ export const shows = wxyc_schema.table(
     primary_dj_id: varchar('primary_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
     specialty_id: integer('specialty_id').references(() => specialty_shows.id),
     legacy_show_id: integer('legacy_show_id'),
+    /**
+     * On-air DJ alias for the show, sourced from tubafrenzy's
+     * `FLOWSHEET_RADIO_SHOW_PROD.DJ_HANDLE` column (NOT `DJ_NAME` — that's the
+     * full real name BS forwards through the legacy mirror as `realName || name`
+     * and surfacing it on the public v2 wire would be PII exposure; see BS#1393).
+     *
+     * The marker `flowsheet.dj_name` resolver (apps/backend/routes/internal.route.ts
+     * via `resolveShow`'s COALESCE chain) reads this column as the fallback when
+     * `auth_user.dj_name` is NULL. Anything you write here lands on the public
+     * marker dj_name wire on the next webhook delivery — never write
+     * `auth_user.name` or any other full-name source. The flowsheet ETL writers
+     * (`jobs/flowsheet-etl/fetch-legacy.ts` and `jobs/flowsheet-etl/backfill-legacy-ids.ts`)
+     * are the canonical writers; align any new writer with their `DJ_HANDLE` source.
+     */
     legacy_dj_name: varchar('legacy_dj_name', { length: 128 }),
     legacy_dj_id: integer('legacy_dj_id'),
     /**
@@ -1205,7 +1446,10 @@ export const shows = wxyc_schema.table(
     // dj-site-originated shows.
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     uniqueIndex('shows_legacy_show_id_idx').on(table.legacy_show_id),
-    index('shows_legacy_dj_name_trgm_idx').using('gin', sql`${table.legacy_dj_name} gin_trgm_ops`),
+    // shows_legacy_dj_name_trgm_idx was dropped in migrations 0054 + 0065 —
+    // search no longer joins through shows; dj-name reads come from
+    // flowsheet.dj_name + flowsheet_dj_name_trgm_idx. Declaration removed to
+    // keep schema.ts aligned with the dropped state (BS#1129).
   ]
 );
 
@@ -1320,6 +1564,46 @@ export const album_plays = wxyc_schema
     plays: integer('plays').notNull(),
   })
   .existing();
+
+/**
+ * Attribution-corrected, master-collapsed catalog popularity (BS#1486 Phase-2
+ * Track 2 / #1492). One row per logical album, keyed by `logical_album_key`:
+ *
+ *   - `master:<discogs_master_id>`  — the dominant case; collapses every
+ *     library pressing AND every resolved free-text play of one logical album.
+ *     Derived from `library.canonical_entity_id` (`discogs:master:<id>` for
+ *     ~90% of resolved rows) and `flowsheet_freetext_resolution.discogs_master_id`.
+ *   - `release:<discogs_release_id>` — master-less fallback (one-offs,
+ *     self-released) so a release is never lost when it has no master.
+ *   - `library:<library_id>`        — linked-but-unresolved fallback
+ *     (`library.canonical_entity_id IS NULL`) so a played library row's plays
+ *     are never lost even though it can't collapse to a Discogs identity.
+ *
+ * `plays = linked_plays + freetext_plays`. `linked_plays` counts `flowsheet`
+ * track rows carrying an `album_id` FK (resolved through `library`);
+ * `freetext_plays` counts the ~43% unlinked plays fuzzy-matched to a
+ * release/master via `flowsheet_freetext_resolution` (Track 1). Unlike the
+ * linked-only, per-pressing `album_plays` MV, this collapses pressings and
+ * folds in the free-text plays that MV cannot see.
+ *
+ * Populated as a plain TABLE (not a materialized view) by
+ * `apps/backend/services/album-popularity-refresh.service.ts`: the free-text
+ * leg requires TS-side normalization (`normalizeArtistName` +
+ * `normalizeAlbumTitle`) to key raw flowsheet text against the resolution
+ * table — work an MV's single SQL SELECT cannot express. Migration 0107
+ * creates it empty; the refresh service rebuilds it on a cadence.
+ * `representative_library_id` is a display join target (a canonical pressing)
+ * for Track 3's export; NULL for free-text-only keys with no library row.
+ */
+export type NewAlbumPopularity = InferInsertModel<typeof album_popularity>;
+export type AlbumPopularity = InferSelectModel<typeof album_popularity>;
+export const album_popularity = wxyc_schema.table('album_popularity', {
+  logical_album_key: text('logical_album_key').primaryKey(),
+  plays: integer('plays').notNull(),
+  linked_plays: integer('linked_plays').notNull().default(0),
+  freetext_plays: integer('freetext_plays').notNull().default(0),
+  representative_library_id: integer('representative_library_id'),
+});
 
 export const rotation_library_view = wxyc_schema.view('rotation_library_view').as((qb) => {
   return qb
@@ -1591,6 +1875,19 @@ export type NewVenue = InferInsertModel<typeof venues>;
  * `raw_data` carries the source's original payload (the parsed schema.org
  * `Event` object for `rhp_scrape`) so we can forensically diff when the
  * source's format changes.
+ *
+ * `scraped_at` refreshes on every UPSERT — every row's scraped_at converges
+ * to the last successful sweep, so MIN/MAX(scraped_at) both answer "when
+ * did the scraper last run?" and can't answer "how long has the scraper
+ * been running steadily?". `first_scraped_at` is the forward-only anchor
+ * for that latter question — added in migration 0093 (BS#1385), held
+ * constant across re-UPSERTs by the writer's omission from the ON CONFLICT
+ * `set` clause. Pre-existing rows backfilled at migration apply time carry
+ * the DEFAULT now() evaluated then, NOT their original scrape time; the
+ * column is meaningful only for rows inserted after migration 0093 applied
+ * in the current environment. Downstream consumers asking "≥30 days
+ * steady?" must filter against the migration's per-env apply timestamp
+ * rather than treat backfilled rows as real first-scrape moments.
  */
 export const concerts = wxyc_schema.table(
   'concerts',
@@ -1615,6 +1912,10 @@ export const concerts = wxyc_schema.table(
     status: concertStatusEnum('status').notNull().default('on_sale'),
     raw_data: jsonb('raw_data').notNull(),
     scraped_at: timestamp('scraped_at', { withTimezone: true }).notNull(),
+    // INSERT-only scraper-stability anchor — writer omits from ON CONFLICT
+    // set so re-UPSERTs preserve the insert moment. See BS#1385 (migration
+    // 0093) and the table JSDoc above for the full rationale.
+    first_scraped_at: timestamp('first_scraped_at', { withTimezone: true }).defaultNow().notNull(),
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [

@@ -81,61 +81,12 @@ jest.mock('@sentry/node', () => ({
   captureException: jest.fn(),
 }));
 
-import { EventEmitter } from 'events';
+const mockIsActiveRotationMatch = jest.fn().mockResolvedValue(false);
+jest.mock('../../../../apps/backend/middleware/legacy/rotation-match.mirror', () => ({
+  isActiveRotationMatch: mockIsActiveRotationMatch,
+}));
 
-// Helper: create mock Express response that simulates the middleware lifecycle
-function createMockRes(statusCode: number, body: Record<string, unknown>) {
-  const emitter = new EventEmitter();
-  const locals: Record<string, unknown> = {};
-  const res = {
-    statusCode,
-    locals,
-    getHeader: jest.fn().mockReturnValue('application/json'),
-    send: jest.fn(),
-    once: emitter.once.bind(emitter),
-    on: emitter.on.bind(emitter),
-    emit: emitter.emit.bind(emitter),
-    _body: body,
-  };
-
-  // After send is called, emit 'finish' to trigger mirror logic
-  res.send.mockImplementation((data: unknown) => {
-    locals.mirrorData = typeof data === 'string' ? JSON.parse(data) : data;
-    // Simulate Express: emit finish after send
-    setTimeout(() => emitter.emit('finish'), 0);
-    return res;
-  });
-
-  return res;
-}
-
-function createMockReq() {
-  return {
-    ip: '127.0.0.1',
-    user: { id: 'test-user' },
-  };
-}
-
-// Helper: call middleware and wait for the async finish handler
-async function runMiddleware(
-  middleware: (req: any, res: any, next: any) => Promise<void> | void,
-  entry: Record<string, unknown>,
-  statusCode = 201
-) {
-  const req = createMockReq();
-  const res = createMockRes(statusCode, entry);
-  const next = jest.fn();
-
-  // Middleware may or may not return a promise
-  void middleware(req, res, next);
-  expect(next).toHaveBeenCalled();
-
-  // Trigger send (which populates mirrorData and emits finish)
-  res.send(JSON.stringify(entry));
-
-  // Wait for async finish handler to complete
-  await new Promise((resolve) => setTimeout(resolve, 50));
-}
+import { runMiddleware } from './http-mirror-harness';
 
 // Import the middleware AFTER all mocks are set up
 import { flowsheetMirror } from '../../../../apps/backend/middleware/legacy/flowsheet.mirror';
@@ -145,6 +96,16 @@ describe('mirror loop prevention', () => {
     jest.clearAllMocks();
     mockGetCachedEntryId.mockReturnValue(undefined);
     mockSelectLimitResult = [];
+    // jest.clearAllMocks() only clears call history (mock.calls/results) —
+    // it does NOT clear the queued `mockResolvedValueOnce(true)` impls or
+    // the default `mockResolvedValue(false)` set at module-load. A queued
+    // Once that the test under it never consumed (e.g., because an
+    // earlier `expect` throw bypassed the helper call) would leak into
+    // the next test. Use `mockReset()` to clear both queue and impl, then
+    // re-stamp the module-load default so subsequent tests see "no match"
+    // unless they explicitly opt into a positive case via mockResolvedValueOnce.
+    mockIsActiveRotationMatch.mockReset();
+    mockIsActiveRotationMatch.mockResolvedValue(false);
   });
 
   const baseEntry = {
@@ -210,7 +171,7 @@ describe('mirror loop prevention', () => {
 
       void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
         expect(mockCacheShowId).toHaveBeenCalledWith(100, 171500);
-        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), 171500);
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), 171500, false);
         done();
       });
     });
@@ -222,7 +183,26 @@ describe('mirror loop prevention', () => {
 
       void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
         expect(mockCacheShowId).not.toHaveBeenCalled();
-        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), null);
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.anything(), null, false);
+        done();
+      });
+    });
+
+    // BS#1432 round-2 review: pin the positive-flow propagation so a future
+    // refactor that drops the `await isActiveRotationMatch(entry)` call (or
+    // accidentally hard-codes the third arg to false) doesn't silently
+    // regress the typed-in-rotation-play badge.
+    it('propagates isRotationMatch=true to mapEntryToTubafrenzy when helper resolves true', (done) => {
+      mockMirrorCreateEntry.mockResolvedValue(99);
+      mockIsActiveRotationMatch.mockResolvedValueOnce(true);
+
+      void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockIsActiveRotationMatch).toHaveBeenCalledWith(expect.objectContaining({ rotation_id: null }));
+        // The default `mockSelectLimitResult = []` (empty) makes the
+        // radioShowID lookup resolve to null in this test environment;
+        // matcher pins the third arg specifically while accepting the
+        // first two as the entry object and `null` radioShowID.
+        expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(expect.any(Object), null, true);
         done();
       });
     });
@@ -242,8 +222,25 @@ describe('mirror loop prevention', () => {
       mockGetCachedEntryId.mockReturnValue(99);
 
       void runMiddleware(flowsheetMirror.updateEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
-        expect(mockMapUpdateToTubafrenzy).toHaveBeenCalled();
+        // Pin both args: BS#1432 added isRotationMatch as the second arg
+        // and the default-false flow must be visible at the call site so
+        // a regression that drops the helper call is loud.
+        expect(mockMapUpdateToTubafrenzy).toHaveBeenCalledWith(expect.anything(), false);
         expect(mockMirrorUpdateEntry).toHaveBeenCalledWith(99, expect.any(Object));
+        done();
+      });
+    });
+
+    // BS#1432 round-2 review: symmetric positive-case for updateEntry. Same
+    // rationale as the addEntry test above — guard against a refactor that
+    // silently disables the typed-in-rotation-play classification on update.
+    it('propagates isRotationMatch=true to mapUpdateToTubafrenzy when helper resolves true', (done) => {
+      mockGetCachedEntryId.mockReturnValue(99);
+      mockIsActiveRotationMatch.mockResolvedValueOnce(true);
+
+      void runMiddleware(flowsheetMirror.updateEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
+        expect(mockIsActiveRotationMatch).toHaveBeenCalledWith(expect.objectContaining({ rotation_id: null }));
+        expect(mockMapUpdateToTubafrenzy).toHaveBeenCalledWith(expect.anything(), true);
         done();
       });
     });

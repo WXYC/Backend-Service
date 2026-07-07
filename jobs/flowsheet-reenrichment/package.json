@@ -1,0 +1,28 @@
+{
+  "name": "@wxyc/flowsheet-reenrichment",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "One-shot re-enrichment: drain enriched_no_match rows whose (artist, album) pairs were missed before LML#583 closed the library-miss gap. Runs once; keyed on BACKFILL_CUTOFF_TS (LML#583 merge timestamp). Per-row serial; Sem(1)+TB(20/min) to share LML budget with live traffic. BS#1433.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_flowsheet_reenrichment:ci -f ../../Dockerfile.flowsheet-reenrichment ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.59.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0",
+    "@wxyc/metadata": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

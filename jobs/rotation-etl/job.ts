@@ -134,6 +134,49 @@ const runIncremental = async (): Promise<SyncResult> => {
                  ELSE ${rotation.discogs_release_id_source}
             END
           `,
+          // BS#1380: drift prevention. lml_identity_id was minted against
+          // the persisted discogs_release_id (either by addToRotation at
+          // INSERT time or by jobs/rotation-lml-identity-backfill); if a
+          // tubafrenzy paste-correction changes the discogs_release_id,
+          // the persisted lml_identity_id no longer matches the new id and
+          // the row must be cleared so the backfill cron re-resolves it.
+          //
+          // The "effective" qualifier matters: the discogs_release_id SET
+          // above uses COALESCE(excluded, persisted), so when tubafrenzy
+          // contributes NULL (the common case for rows without a paste
+          // URL) the discogs_release_id doesn't change. A CASE that fired
+          // on raw `excluded IS DISTINCT FROM rotation` would also fire
+          // on every tick where excluded is NULL and persisted is
+          // non-NULL — three-valued SQL has `NULL IS DISTINCT FROM X` =
+          // TRUE — silently nulling a perfectly-good lml_identity_id on
+          // every kill_date / artist_name / etc. change.
+          //
+          // Guard symmetric to the existing setWhere term below
+          // (`excluded.discogs_release_id IS NOT NULL AND
+          // rotation.discogs_release_id IS DISTINCT FROM
+          // excluded.discogs_release_id`): only clear when tubafrenzy
+          // supplied a non-NULL different id.
+          //
+          // Equivalent formulation:
+          //   COALESCE(excluded.discogs_release_id, rotation.discogs_release_id)
+          //     IS DISTINCT FROM rotation.discogs_release_id
+          //
+          // setWhere is unchanged — the existing discogs_release_id term
+          // already fires the gate on the Y_X → NULL transition. Adding
+          // an `excluded.lml_identity_id IS DISTINCT FROM rotation
+          // .lml_identity_id` term would *break* the gate: since
+          // lml_identity_id isn't in the INSERT VALUES tuple,
+          // excluded.lml_identity_id is always NULL, so the term would be
+          // TRUE on every tick for any row with a populated identity —
+          // turning the gate into a no-op for the rows BS#1059's
+          // xmin/CDC discipline most cares about.
+          lml_identity_id: sql`
+            CASE WHEN excluded.discogs_release_id IS NOT NULL
+                  AND excluded.discogs_release_id IS DISTINCT FROM ${rotation.discogs_release_id}
+                 THEN NULL
+                 ELSE ${rotation.lml_identity_id}
+            END
+          `,
         },
         // BS#1059 mechanic; the 30-min cron was rewriting most rows every cycle.
         // BS#1029: the plain IS DISTINCT FROM term on discogs_release_id

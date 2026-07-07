@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/rotation-artist-backfill",
+  "cron-schedule": "30 4 * * *",
+  "version": "1.0.0",
+  "description": "WXYC daily cron: refresh LML's release + artist caches for every release currently in BS rotation, keyed by rotation.lml_identity_id (BS#1380). One-tier batched call to POST /api/v1/cache/refresh-for-identities (LML#525) — LML maps each identity to its per-source (source, external_id) pairs and walks to artists internally. Closes BS#1381; supersedes the Discogs-specific iteration from BS#1361 (PR #1376).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_rotation_artist_backfill:ci -f ../../Dockerfile.rotation-artist-backfill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.59.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

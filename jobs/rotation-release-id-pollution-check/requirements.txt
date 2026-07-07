@@ -1,0 +1,5 @@
+# Runtime deps for job.py. pollution_engine.py itself needs only the stdlib
+# (psycopg is imported lazily inside its main()); the pins here follow the
+# "bounded major" convention so a breaking major can't ride in on a rebuild.
+psycopg[binary]>=3.1,<4
+sentry-sdk>=2.8,<3

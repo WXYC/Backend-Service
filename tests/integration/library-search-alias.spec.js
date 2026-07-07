@@ -103,6 +103,50 @@ describe('GET /library/query — alias-aware LATERAL JOIN (PR 5)', () => {
     expect(hit.artist_name).toBe('OHSEES');
     expect(hit.matched_via_alias).toEqual([{ matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' }]);
   });
+
+  test('discogs_member alias hit surfaces with source=discogs_member (BS#1383)', async () => {
+    // BS#1383: the catalog-search sites WANT `discogs_member` rows surfaced
+    // (so iOS/dj-site can render a "related artist" UX hint), unlike the
+    // concerts-artist-resolver which filters them. This asserts the source
+    // string survives the LATERAL projection and the wire shape so a
+    // downstream caller can distinguish in-library matches from
+    // related-artist matches. Geordie-Greep-via-black-midi is the prod
+    // shape from the BS#1368 audit; we reuse the OHSEES fixture artist
+    // (the source label is what's under test, not the artist semantics).
+    await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = $1`, [TEST_ARTIST_ID]);
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.artist_search_alias
+         (artist_id, source, variant, related_artist_id, external_subject_id,
+          external_object_id, active, method, confidence, last_verified_at)
+       VALUES ($1, 'discogs_member', 'Geordie Greep', NULL, NULL,
+               'discogs:artist:1234567', NULL, 'member_group', 0.9, NOW())
+       ON CONFLICT (artist_id, source, variant) DO UPDATE
+         SET last_verified_at = NOW()`,
+      [TEST_ARTIST_ID]
+    );
+
+    const res = await auth.get('/library/query').query({ q: 'Geordie Greep', limit: 50 }).expect(200);
+
+    const hit = res.body.results.find((r) => r.id === TEST_LIBRARY_ID);
+    // Fail-fast rather than warn-skip (BS#1383 review): the wire-shape
+    // assertion below is the WHOLE point of this test. A warn-and-return
+    // when the hit is absent would let a `CATALOG_SEARCH_ALIAS_ENABLED`
+    // regression in `dev_env/docker-compose.yml` slip past CI silently.
+    // The throw names the flag so a dev running locally without the
+    // LATERAL on can fix it in one read.
+    if (hit === undefined) {
+      throw new Error(
+        '[BS#1383] /library/query alias hit for "Geordie Greep" was absent — the wire-shape ' +
+          'assertion cannot run. Likely causes: (1) the backend is missing ' +
+          'CATALOG_SEARCH_ALIAS_ENABLED=true (set it on the backend service in ' +
+          'dev_env/docker-compose.yml or in .env for local `npm run dev`); (2) the alias ' +
+          'LATERAL JOIN in library-search.service.ts / library.service.ts was changed to filter ' +
+          'discogs_member rows — the resolver does, but the catalog-search sites must not (this ' +
+          'test exists to pin that asymmetry).'
+      );
+    }
+    expect(hit.matched_via_alias).toEqual([{ matched_variant: 'Geordie Greep', source: 'discogs_member' }]);
+  });
 });
 
 async function cleanupSeededRows(sql, wxycSchema) {

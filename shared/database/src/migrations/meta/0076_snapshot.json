@@ -1,6 +1,6 @@
 {
-  "id": "5c48e8da-c661-49dc-badf-48bcb9ec1c69",
-  "prevId": "621d7e4d-23e4-4073-a60b-7e5c91b0fcaa",
+  "id": "621d7e4d-23e4-4073-a60b-7e5c91b0fcaa",
+  "prevId": "8c73f1c3-e2c4-4451-a932-0133397d7b98",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -794,12 +794,6 @@
         "track_title": {
           "name": "track_title",
           "type": "varchar(128)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "track_position": {
-          "name": "track_position",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

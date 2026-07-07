@@ -1,8 +1,13 @@
 import { Router } from 'express';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, rotation, library, truncate, user } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
-import { mapProdEntryType, isMessageEntryType, type BackendEntryType } from '../utils/flowsheet-transform.js';
+import {
+  mapProdEntryType,
+  isMessageEntryType,
+  resolveRadioHour,
+  type BackendEntryType,
+} from '../utils/flowsheet-transform.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
 
@@ -22,6 +27,10 @@ const MARKER_ENTRY_TYPES: ReadonlySet<BackendEntryType> = new Set<BackendEntryTy
   'dj_join',
   'dj_leave',
 ]);
+
+// Materialized once for `inArray(...)` in the sibling-marker heal below — avoids
+// re-spreading the Set into an array on every webhook delivery.
+const MARKER_ENTRY_TYPE_LIST: BackendEntryType[] = [...MARKER_ENTRY_TYPES];
 
 export const internal_route = Router();
 
@@ -207,7 +216,16 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // joining guest. Same known limitation as flowsheet-dj-name-backfill;
       // the live createJoinNotification path is the only one that gets
       // guest attribution right today.
-      const markerDjName = MARKER_ENTRY_TYPES.has(entryType) ? normalizeMarkerName(show?.dj_name) : null;
+      const resolvedShowName = normalizeMarkerName(show?.dj_name);
+      const markerDjName = MARKER_ENTRY_TYPES.has(entryType) ? resolvedShowName : null;
+
+      // tubafrenzy's authoritative top-of-hour for a breakpoint (BS#1449).
+      // `radioHour` (epoch ms) is present on breakpoint payloads only once
+      // tubafrenzy#593 ships; resolveRadioHour (shared with the ETL) tolerates
+      // its absence (null) and any malformed value (→ null via epochMsToDate),
+      // so deploy ordering is safe and a garbage payload can't write an Invalid
+      // Date. Computed once and shared by the INSERT and the ON-CONFLICT heal.
+      const breakpointRadioHour = resolveRadioHour(entryType, entry.radioHour ?? null);
 
       // INSERT ... ON CONFLICT DO NOTHING RETURNING { id }: either we win
       // the insert and PG hands back exactly one row, or a concurrent
@@ -243,6 +261,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           segue: false,
           play_order: entry.sequenceWithinShow ?? 0,
           add_time: entry.startTime ? new Date(entry.startTime) : new Date(),
+          radio_hour: breakpointRadioHour,
         })
         .onConflictDoNothing()
         .returning({ id: flowsheet.id });
@@ -276,7 +295,63 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
         if (markerDjName !== null) {
           refresh.dj_name = markerDjName;
         }
+        // Heal breakpoint rows inserted before radio_hour existed (BS#1449).
+        // Like dj_name, only set when present — never overwrite with NULL.
+        if (breakpointRadioHour) {
+          refresh.radio_hour = breakpointRadioHour;
+        }
         await db.update(flowsheet).set(refresh).where(eq(flowsheet.legacy_entry_id, entry.id));
+      }
+
+      // Sibling-marker heal (BS#1444 — residual of BS#1371).
+      //
+      // The conflict path above only heals the SAME `legacy_entry_id`, but a
+      // `show_start` is the FIRST entry of a show, so when it arrives
+      // `resolveShow` has only just created the stub `shows` row — no
+      // `legacy_dj_name` yet — and the marker lands with dj_name=NULL (see the
+      // `ResolvedShow.dj_name` docstring). Tubafrenzy never re-delivers that
+      // create event, the periodic ETL's resolveDjNames only re-resolves ids
+      // it bulk-fetched, and `flowsheet-dj-name-backfill` is one-shot — so
+      // nothing ever fills the show_start once `shows.legacy_dj_name` lands.
+      // Net effect: every new tubafrenzy show renders a nameless "signed on"
+      // on the v2 wire until sign-off.
+      //
+      // Fix: whenever a delivery for the show resolves a non-null name, backfill
+      // the show's still-NULL marker rows. A live show's show_start heals at the
+      // next entry for the show — track add, edit, or sign-off — after the ETL
+      // fills the name. Healing on ANY delivery (not just fresh inserts) matters
+      // for the short-show case: a show whose start AND end both land before the
+      // ETL fill would otherwise never heal, since the ETL's resolveDjNames
+      // skips webhook-inserted rows (they arrive as updates, not inserts) — a
+      // later edit is then the only delivery that can fill them. Scoped to
+      // `MARKER_ENTRY_TYPES` + `dj_name IS NULL`, so track rows (own population
+      // path) and already-resolved markers are never touched.
+      //
+      // Probe-before-write — a bare UPDATE that matches zero rows still fires the
+      // STATEMENT-level `flowsheet_watermark` trigger (migration 0084),
+      // ratcheting the conditional-GET watermark +1s and thrashing iOS/dj-site
+      // pollers (the very churn BS#902/Epic F's watermark exists to prevent). A
+      // SELECT fires no trigger, so we read first and issue the watermark-
+      // touching UPDATE only when a marker is actually unhealed — at most once
+      // per show, after which every later delivery pays only the read. Both
+      // queries are index-backed by `flowsheet_show_id_idx`. (Two deliveries
+      // for the same show can still race between probe and UPDATE and fire one
+      // bounded spurious bump before the marker is healed; correctness is
+      // unaffected — the UPDATE re-checks `dj_name IS NULL`.)
+      if (resolvedShowName !== null && showId !== null) {
+        const unhealedMarkerWhere = and(
+          eq(flowsheet.show_id, showId),
+          isNull(flowsheet.dj_name),
+          inArray(flowsheet.entry_type, MARKER_ENTRY_TYPE_LIST)
+        );
+        const [unhealedMarker] = await db
+          .select({ id: flowsheet.id })
+          .from(flowsheet)
+          .where(unhealedMarkerWhere)
+          .limit(1);
+        if (unhealedMarker) {
+          await db.update(flowsheet).set({ dj_name: resolvedShowName }).where(unhealedMarkerWhere);
+        }
       }
     }
 

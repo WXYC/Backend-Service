@@ -27,6 +27,8 @@ Full reference. CLAUDE.md links here. Variables marked _required_ have no defaul
 - `BACKFILL_CRON_SCHEDULE` (deploy-time variable, used only by `flowsheet-metadata-backfill`) — Optional override for the cron schedule installed on the EC2 host. Set as a GitHub Actions repository variable (Settings → Variables → Actions, not Secrets — the cadence is not sensitive). If unset or empty, the deploy reads the `cron-schedule` field from `jobs/flowsheet-metadata-backfill/package.json` (currently `0 6 * * *`, 06:00 UTC daily) — same behavior as before BS#914. The override scope is narrow on purpose: only this job consults the var, so a stale value can't fan out across the deploy matrix. Resolution lives in `scripts/resolve-cron-schedule.sh`; takes effect on the next run of `Manual Build & Deploy` or `Auto Build & Deploy` targeting `flowsheet-metadata-backfill`. Use case: dial the cadence up for the C6 retune (Epic C, [#895](https://github.com/WXYC/Backend-Service/issues/895)) without a code-change deploy.
 - `ALBUM_PLAYS_REFRESH_INTERVAL_MS` (default `3600000` / 1 hour) — Cadence at which `apps/backend/services/album-plays-refresh.service.ts` rebuilds the `album_plays` materialized view that feeds the catalog search ranker.
 - `ALBUM_PLAYS_REFRESH_TIMEOUT_MS` (default `300000` / 5 min) — Per-statement timeout for the refresh's dedicated postgres-js client (`max: 1`, `application_name = wxyc-album-plays-refresh`). The API container's connection-level `DB_STATEMENT_TIMEOUT_MS=5000` is too tight for `REFRESH MATERIALIZED VIEW CONCURRENTLY` on prod, but loosening it globally would defeat the orphan-query protection it exists for. The dedicated client sidesteps that by carrying its own `statement_timeout` while the shared pool keeps the tight default. Set to a positive integer; non-numeric or non-positive values fall back to the default.
+- `ALBUM_POPULARITY_REFRESH_INTERVAL_MS` (default `3600000` / 1 hour) — Cadence at which `apps/backend/services/album-popularity-refresh.service.ts` rebuilds the `album_popularity` table — the attribution-corrected, master-collapsed popularity signal (BS#1486 Phase-2 Track 2 / #1492) that folds free-text plays in alongside linked plays. Slow-moving signal; the refresh deliberately does NOT advance `library_watermark`, so the new value surfaces in the catalog export on the next incidental library write rather than invalidating the whole export cache per refresh.
+- `ALBUM_POPULARITY_REFRESH_TIMEOUT_MS` (default `300000` / 5 min) — Per-statement timeout for that refresh's dedicated postgres-js client (`max: 1`, `application_name = wxyc-album-popularity-refresh`). Same rationale as `ALBUM_PLAYS_REFRESH_TIMEOUT_MS`: the full DELETE + two-leg repopulate exceeds the API container's 5 s `DB_STATEMENT_TIMEOUT_MS` on prod, so the rebuild runs on a dedicated client carrying its own `statement_timeout`. Set to a positive integer; non-numeric or non-positive values fall back to the default.
 - `ALBUM_METADATA_BACKFILL_VERIFY_TIMEOUT_MS` (default `120000` / 120 s, used by `jobs/album-metadata-backfill`) — `SET LOCAL statement_timeout` applied inside the transaction that runs the post-INSERT dual-count verify. The partial index from [#660](https://github.com/WXYC/Backend-Service/pull/660) (`idx_flowsheet_metadata_drain`) covers the `metadata_attempt_at IS NULL` partition only; the verify walks the opposite `IS NOT NULL` partition (~2.6M rows, no covering index) and would otherwise trip the backend's 5 s default ([BS#1019](https://github.com/WXYC/Backend-Service/issues/1019) / [BS#1022](https://github.com/WXYC/Backend-Service/issues/1022)). Must be a positive integer (milliseconds); empty or unset falls back to the default; non-numeric or non-positive values raise at job startup rather than silently defaulting.
 
 ## better-auth (`apps/auth`)
@@ -35,8 +37,15 @@ Full reference. CLAUDE.md links here. Variables marked _required_ have no defaul
 - `BETTER_AUTH_JWKS_URL` — e.g. `http://localhost:8082/auth/jwks`
 - `BETTER_AUTH_ISSUER` — e.g. `http://localhost:8082`
 - `BETTER_AUTH_AUDIENCE` — e.g. `http://localhost:8082`
-- `BETTER_AUTH_TRUSTED_ORIGINS` — Comma-separated CORS origins
-- `FRONTEND_SOURCE` — Frontend origin for CORS and redirects
+- `BETTER_AUTH_TRUSTED_ORIGINS` — Comma-separated CORS origins. Consumed by better-auth's `trustedOrigins` (`auth.definition.ts`) and, since BS#1107, as the auth service's Express-level CORS fallback when `FRONTEND_SOURCE` is unset.
+- `FRONTEND_SOURCE` — Frontend origin for CORS and redirects. Accepts a single origin or a comma-separated list (`resolveCorsOrigin` in `shared/authentication/src/cors-origin.ts`). **No wildcard fallback** (BS#1107): when unset, both apps serve no CORS headers at all (cross-origin browser calls fail closed) and log a `[cors]` error at startup — the old `|| '*'` fallback combined with `credentials: true` let any web origin make credentialed requests. The backend consults only this var; the auth service falls back to `BETTER_AUTH_TRUSTED_ORIGINS` before failing closed.
+
+### OIDC trustedClients (better-auth `oidcProvider`)
+
+Each downstream WXYC app that authenticates against `api.wxyc.org/auth` via OIDC code + PKCE flow needs a `trustedClient` entry, populated by `shared/authentication/src/oidc-trusted-clients.ts`'s `buildTrustedClients()` from env vars. Each client is gated behind its full required-env-var set — including a non-empty parsed redirect-URL list — so partial configuration omits the entry entirely rather than silently producing a malformed redirect URL that better-auth's authorize endpoint rejects on every login.
+
+- `WIKIJS_OIDC_CLIENT_ID`, `WIKIJS_OIDC_CLIENT_SECRET`, `WIKIJS_URL` — Wiki.js (production only — Wiki.js doesn't run locally). All three required to register the entry; `redirectUrls` is derived as `${WIKIJS_URL}/login/oidc/callback`.
+- `FLOWSHEET_OIDC_CLIENT_ID`, `FLOWSHEET_OIDC_CLIENT_SECRET`, `FLOWSHEET_OIDC_REDIRECT_URLS` — Flowsheet verifier (see [`flowsheet-digitization` plans/oidc-auth.md](https://github.com/WXYC/flowsheet-digitization/blob/main/plans/oidc-auth.md)). `FLOWSHEET_OIDC_REDIRECT_URLS` is comma-separated; production is set to both `https://flowsheet.wxyc.org/auth/callback` and `http://localhost:8765/auth/callback` so the same secret works for both environments.
 
 ## Email (SES)
 
@@ -53,7 +62,7 @@ The Backend container does not call SES, so no additional AWS credentials are ne
 
 ## Testing
 
-- `AUTH_BYPASS` — Set `true` to skip JWT verification in tests
+- `AUTH_BYPASS` — Set `true` to skip JWT verification in tests. Honored only when `NODE_ENV` is `development` or `test` (positive-list gate, BS#1097). Note: `showMemberMiddleware`'s bypass is narrower — `development` only (BS#1533) — so show-membership checks run for real in the integration env; the auth bypass still populates `req.auth.id` from the Bearer (JWT decode or raw user-id fallback), which is what the membership check reads.
 - `AUTH_USERNAME`, `AUTH_PASSWORD` — Test account credentials (when `AUTH_BYPASS=false`)
 - `TEST_HOST` — Test server host
 
@@ -110,6 +119,17 @@ Stricter ceilings for backfill-class LML callers, since one in-flight LML call h
 One-shot ETL for BS#1029. Reuses `BACKFILL_LML_*` (above) and adds:
 
 - `DRY_RUN` (default unset / `false`) — when `'true'` or `'1'`, the orchestrator skips every UPDATE and increments `rows_resolved_dry` instead of `rows_resolved`. Each planned write is still logged. Useful for confirming the candidate set before a real run; harmless to forget — the `discogs_release_id IS NULL` SELECT predicate is idempotent across reruns.
+
+### Rotation artist backfill (`jobs/rotation-artist-backfill`)
+
+Daily cron job for BS#1381. One BS call here = one batch of up to 50 `lml_identity_id`s; LML fans out internally to per-source release + artist Discogs calls, so this job has a fundamentally different timeout shape than the per-row backfill jobs above. Reuses `BACKFILL_LML_MAX_CONCURRENT` and `BACKFILL_LML_RATE_PER_MIN` (applied to **batch calls**, not Discogs egress), and adds:
+
+- `BACKFILL_LML_BATCH_TIMEOUT_MS` (default `360000` / 6 min) — BS-side `AbortController` budget per `refreshForIdentities` call. Sized to clear LML's worst-case ~4 min cold-cache fan-out (50 release + ~150 artist Discogs calls at LML's 50 req/min cap) PLUS Railway's ~5 min request-timeout ceiling with a 1-min safety margin. Distinct from `BACKFILL_LML_PER_CALL_TIMEOUT_MS` (per-row LML `/lookup`, sized for LML#370's 25 s cascade-exhaustion cap) because the batch-fanout topology is different. If LML's Railway request timeout changes, recalibrate this var.
+- `DRY_RUN` (default unset / `false`) — when `'true'` or `'1'`, enumerate identity cardinality but skip refresh calls.
+
+### Rotation release-id pollution check (`jobs/rotation-release-id-pollution-check`)
+
+Weekly Python cron for BS#1522 — no new env names. Reuses the existing contracts with in-code defaults when a var is absent from `.env`: `BACKFILL_LML_RATE_PER_MIN` (20, applied to the engine's release GETs), `BACKFILL_LML_RESOLVE_TIMEOUT_MS` (15000, per LML call), `LIVE_ACTIVITY_LOOKBACK_SECONDS` / `LIVE_ACTIVITY_PAUSE_MS` (cooperative pause, same semantics as the TS jobs), `WXYC_SCHEMA_NAME`, and `DRY_RUN` (log would-fire alerts instead of sending). Required set: `DB_*`, `LIBRARY_METADATA_URL`, `LML_API_KEY`, plus `SENTRY_DSN` unless `DRY_RUN` — the job aborts at init rather than run without the ability to alert. Full runbook in `jobs/rotation-release-id-pollution-check/README.md`.
 
 ### Bulk backfill (`jobs/album-level-backfill`)
 

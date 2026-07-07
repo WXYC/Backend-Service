@@ -14,6 +14,12 @@ This is a **one-shot**, **manually triggered** job:
 
 Cron registration is intentionally absent (`"job-type": "one-shot"` in `package.json`). Re-running after LML's catalog improves is a deliberate operator decision, not a scheduled tick.
 
+### Sole sanctioned offline writer (BS#1521, Option A, 2026-07-05)
+
+**This gated LML job is the ONLY sanctioned offline writer of `rotation.discogs_release_id`.** The 2026-05-29 operator-run bypass-LML rescue — which hit `api.discogs.com/database/search` directly, bypassing every `search_type` trust gate — is **retired**. It wrote its resolved ids under the placeholder source `lml_offline_backfill` (the only non-default enum value at the time — migration 0085 created the enum as `tubafrenzy_paste` default plus `lml_offline_backfill`); `scripts/relabel-rotation-direct-backfill.sql` then promoted those rows to `discogs_release_id_source = 'discogs_direct_backfill'` once migration 0086 shipped that value, so the relabel — not the rescue directly — is the proximate writer of every `discogs_direct_backfill` row. The rescue produced the one demonstrated wrong-album write in the rotation trusted-store incident family ([BS#1515](https://github.com/WXYC/Backend-Service/issues/1515), Yenbett → Tzenni). Do not re-run it. This job's `search_type` trust gate ([PR #1519](https://github.com/WXYC/Backend-Service/pull/1519)) — which landed the sequencing prerequisite for the retirement — makes it the safe replacement for pool refreshes.
+
+Any **new** `discogs_direct_backfill` row appearing after 2026-07-05 is an anomaly: the [#1517](https://github.com/WXYC/Backend-Service/issues/1517) audit flags that lineage (it is the bypass-LML bucket, `discogs_direct_backfill`, in `scripts/audit/bs_rotation_release_id_pollution.py`'s source list), and the [#1522](https://github.com/WXYC/Backend-Service/issues/1522) recurring check flags it automatically. The rescue's companion relabel is neutered against re-runs (pure-SQL `NOT EXISTS` guard) so a re-run is a no-op **as long as any `discogs_direct_backfill` row persists** — which the #1517 "do not delete these rows" constraint keeps true; the durable guarantee is the retirement, not the guard alone.
+
 ## Invocation
 
 ```sh
@@ -60,25 +66,31 @@ JSON log line emitted on `step: finished`:
   "scanned": 310,
   "resolved": 247,
   "resolved_dry": 0,
-  "unresolved": 51,
+  "unresolved": 43,
   "lml_error": 11,
   "raced": 1,
+  "sentinel_rejected": 0,
+  "trust_rejected": 8,
   "repo": "Backend-Service",
   "tool": "rotation-release-id-backfill",
   "run_id": "<uuid>"
 }
 ```
 
-Invariant: `scanned == resolved + resolved_dry + unresolved + lml_error + raced`.
+Invariant: `scanned == resolved + resolved_dry + unresolved + lml_error + raced + sentinel_rejected + trust_rejected`.
 
-| Counter        | Meaning                                                                                              |
-| -------------- | ---------------------------------------------------------------------------------------------------- |
-| `scanned`      | Rows visited (matches the candidate query's row count)                                               |
-| `resolved`     | LML returned a release id AND the UPDATE landed cleanly                                              |
-| `resolved_dry` | LML returned a release id; DRY_RUN suppressed the UPDATE                                             |
-| `unresolved`   | LML returned no Discogs match (`response.results[0].artwork.release_id` was null)                    |
-| `lml_error`    | LML call threw (cold-cache timeout, network blip, etc.); row stays NULL for next run                 |
-| `raced`        | UPDATE matched zero rows because a tubafrenzy paste won the race between candidate-select and update |
+| Counter             | Meaning                                                                                                                                                                                                                 |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scanned`           | Rows visited (matches the candidate query's row count)                                                                                                                                                                  |
+| `resolved`          | LML returned a positive release id on a `direct` match AND the UPDATE landed cleanly                                                                                                                                    |
+| `resolved_dry`      | LML returned a positive release id on a `direct` match; DRY_RUN suppressed the UPDATE                                                                                                                                   |
+| `unresolved`        | LML returned no Discogs match (`response.results[0].artwork.release_id` was null)                                                                                                                                       |
+| `lml_error`         | LML call threw (cold-cache timeout, network blip, etc.); row stays NULL for next run                                                                                                                                    |
+| `raced`             | UPDATE matched zero rows because a tubafrenzy paste won the race between candidate-select and update                                                                                                                    |
+| `sentinel_rejected` | LML returned `<= 0` (cache pollution / upstream regression); pre-empted before write per BS#1429 CHECK fence                                                                                                            |
+| `trust_rejected`    | LML returned a candidate id on a non-`direct` (or absent) `search_type` — an artist-fallback answer pointing at a **different album**; never persisted (BS#1516, the Yenbett→Tzenni recurrence BS#1515). Row stays NULL |
+
+`trust_rejected` rows are candidates for LML-side match improvements (or the album has no Discogs release yet); `unresolved` rows need Discogs/catalog additions. Both re-enter the candidate set on the next run.
 
 ## Post-run verification
 

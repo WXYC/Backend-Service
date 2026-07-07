@@ -1,10 +1,12 @@
-import { Request, RequestHandler } from 'express';
+import { Request, RequestHandler, Response } from 'express';
 import { Mutex } from 'async-mutex';
 import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/database';
 
 // play_order is computed by the service layer, not provided by controllers
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
+import { projectFlowsheetEntry } from '../utils/flowsheet-projection.js';
+import { stashMirrorData } from '../middleware/legacy/mirror.middleware.js';
 import WxycError from '../utils/error.js';
 
 export type QueryParams = {
@@ -26,6 +28,10 @@ export interface IFSEntryMetadata {
   soundcloud_url: string | null;
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
+  // album_metadata-only fields (BS#1441); no inline flowsheet column, so they
+  // are not top-level IFSEntry fields — only here in the nested metadata view.
+  genres: string[] | null;
+  styles: string[] | null;
 }
 
 // search_doc is a STORED GENERATED tsvector used only by the search hot path
@@ -42,9 +48,24 @@ export interface IFSEntryMetadata {
 // `metadata_status` and `enriching_since` (BS#891) ARE surfaced to the
 // controller layer because the V2 wire format projects metadata_status onto
 // track rows for iOS branch logic (WXYC/wxyc-ios-64#270).
+//
+// `radio_hour` (migration 0103, BS#1448) IS surfaced (BS#1449): the read path
+// projects it and transformToV2 emits it on breakpoint entries as the
+// authoritative top-of-hour. It's a present-but-nullable property here.
+//
+// `composer` / `composer_source` (migration 0108, BS#1499) are write-only
+// internal columns: the enrichment-worker writes them for the post-tubafrenzy
+// BMI export-successor (#1500) to read directly off flowsheet rows. They are
+// deliberately NOT projected onto the V2 wire format, so they're excluded here
+// alongside the other internal markers.
+//
+// Sibling allow-list: the mutation/peek echoes project through
+// CLIENT_FACING_FLOWSHEET_COLUMNS in ../utils/flowsheet-projection.ts (BS#1513).
+// A new client-facing column must be added there too, or the POST/PATCH/DELETE
+// echoes and the DJ peek won't carry it.
 export interface IFSEntry extends Omit<
   FSEntry,
-  'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at' | 'updated_at'
+  'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at' | 'updated_at' | 'composer' | 'composer_source'
 > {
   label_id: number | null;
   rotation_bin: string | null;
@@ -150,6 +171,20 @@ export type FSEntryRequestBody = {
   entry_type?: NewFSEntry['entry_type'];
 };
 
+/**
+ * Shared egress for the flowsheet mutation echoes (BS#1513 / PR #1532): stash
+ * the UNPROJECTED row for the legacy mirror middleware — whose BS#908 loop
+ * guards read `legacy_entry_id`, a column the client projection strips — then
+ * send the client-facing projection. Keeping the pair in one call means a new
+ * mutation site can't pick up the projection without the stash. The stash is
+ * inert on routes with no mirror middleware attached (changeOrder today) and
+ * becomes load-bearing automatically if one is wired up.
+ */
+const sendProjectedEntry = (res: Response, statusCode: number, entry: FSEntry): void => {
+  stashMirrorData(res, entry);
+  res.status(statusCode).json(projectFlowsheetEntry(entry));
+};
+
 // either an id is provided (meaning it came from the user's bin or was fuzzy found)
 // or it's not provided in which case whe just throw the data provided into the table w/ album_id = NULL
 export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res) => {
@@ -176,7 +211,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       dj_name,
     };
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    res.status(201).json(completedEntry);
+    sendProjectedEntry(res, 201, completedEntry);
     return;
   }
 
@@ -224,7 +259,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    res.status(201).json(completedEntry);
+    sendProjectedEntry(res, 201, completedEntry);
   } else if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
     throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
   } else {
@@ -253,7 +288,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    res.status(201).json(completedEntry);
+    sendProjectedEntry(res, 201, completedEntry);
   }
 };
 
@@ -263,8 +298,15 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
     throw new WxycError('Bad Request, Missing entry identifier: entry_id', 400);
   }
 
-  const removedEntry: FSEntry = await flowsheet_service.removeTrack(entry_id);
-  res.status(200).json(removedEntry);
+  const removedEntry = await flowsheet_service.removeTrack(entry_id);
+  // `.returning()` matched no row (double delete / already-gone id). Pre-#1532
+  // this serialized as a misleading 200-with-empty-body; projecting undefined
+  // would be a bare TypeError -> 500 (the BS#1271 class). 404 is the honest
+  // answer, matching changeOrder's existing missing-row behavior.
+  if (!removedEntry) {
+    throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
+  }
+  sendProjectedEntry(res, 200, removedEntry);
 };
 
 export type UpdateRequestBody = {
@@ -321,8 +363,20 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
     throw new WxycError('Bad Request, Missing entry identifier: entry_id', 400);
   }
 
-  const updatedEntry: FSEntry = await flowsheet_service.updateEntry(entry_id, pickUpdateEntryFields(data ?? {}));
-  res.status(200).json(updatedEntry);
+  const picked = pickUpdateEntryFields(data ?? {});
+  // An empty (or fully-filtered) patch would reach drizzle's `.set({})`,
+  // which throws `No values to set` — a 500 for what is a malformed request.
+  if (Object.keys(picked).length === 0) {
+    throw new WxycError('Bad Request, No updatable fields provided in: data', 400);
+  }
+
+  const updatedEntry = await flowsheet_service.updateEntry(entry_id, picked);
+  // UPDATE matched no row (entry deleted out from under the edit). See the
+  // 404 rationale on deleteEntry above.
+  if (!updatedEntry) {
+    throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
+  }
+  sendProjectedEntry(res, 200, updatedEntry);
 };
 
 export type JoinRequestBody = {
@@ -456,7 +510,13 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   const release = await orderMutex.acquire();
   try {
     const updatedEntry = await flowsheet_service.changeOrder(entry_id, new_position);
-    res.status(200).json(updatedEntry);
+    // The service 404s when the entry is missing at transaction start, but its
+    // confirmation read runs post-commit — a concurrent delete landing in that
+    // window returns undefined. See the 404 rationale on deleteEntry above.
+    if (!updatedEntry) {
+      throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
+    }
+    sendProjectedEntry(res, 200, updatedEntry);
   } finally {
     release();
   }
@@ -465,10 +525,6 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
 export interface ShowMetadata extends Show {
   specialty_show_name: string;
   show_djs: { id: string | null; dj_name: string | null }[];
-}
-
-export interface ShowInfo extends ShowMetadata {
-  entries: FSEntry[];
 }
 
 export const getShowInfo: RequestHandler<object, unknown, object, { show_id: string }> = async (req, res) => {

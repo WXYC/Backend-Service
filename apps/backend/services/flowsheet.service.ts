@@ -20,7 +20,7 @@ import {
   specialty_shows,
   album_metadata,
 } from '@wxyc/database';
-import { IFSEntry, ShowInfo, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
+import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 /**
@@ -105,6 +105,10 @@ export const getLastModifiedAt = async (): Promise<Date> => {
 };
 
 // SQL query fields (flat structure from database)
+//
+// Adding a client-facing column here (or emitting it in transformToV2)? Also
+// add it to CLIENT_FACING_FLOWSHEET_COLUMNS in ../utils/flowsheet-projection.ts
+// (BS#1513), or the mutation/peek echoes won't carry it.
 const FSEntryFieldsRaw = {
   id: flowsheet.id,
   show_id: flowsheet.show_id,
@@ -125,8 +129,11 @@ const FSEntryFieldsRaw = {
   //       (library-unlinked rotation rows hold the snapshot directly);
   //   (c) (artist, album) matches the library+artists join on an active rotation row's
   //       album_id (library-linked rows whose denorm fields are NULL).
-  // kill_date is compared against the flowsheet entry's add_time so historical rotation
-  // status is preserved — mirrors how tubafrenzy classifies at mirror time (WXYC/dj-site#750).
+  // The rotation window is bounded on BOTH sides against the flowsheet entry's add_time so
+  // historical rotation status is preserved: add_date <= add_time (inclusive lower bound —
+  // a play that aired before the release entered rotation is not badged; BS#1526) and
+  // kill_date IS NULL OR kill_date > add_time (exclusive upper bound). Mirrors how tubafrenzy
+  // classifies at mirror time (WXYC/dj-site#750).
   // Subquery only fires per-row on a missed FK join; on rows with a populated rotation_id
   // COALESCE short-circuits and the subquery is not evaluated.
   //
@@ -135,7 +142,7 @@ const FSEntryFieldsRaw = {
   // (re-bins, re-adds, label-driven re-promotes). Picking the lowest `id` (oldest active
   // row) is a deliberate, stable choice for the badge UX — when an album has been re-binned
   // L → M, the badge reports its original cohort rather than flipping retroactively. This
-  // matches the historical-correctness story above (kill_date filtering against add_time).
+  // matches the historical-correctness story above (add_date/kill_date window filtered against add_time).
   // The primary FK join via flowsheet.rotation_id remains canonical when present.
   rotation_bin: sql<string | null>`
     COALESCE(
@@ -148,7 +155,8 @@ const FSEntryFieldsRaw = {
         FROM ${rotation} r2
         LEFT JOIN ${library} l2 ON l2.id = r2.album_id
         LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
-        WHERE (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
+        WHERE r2.add_date <= ${flowsheet.add_time}::date
+          AND (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
           AND (
             (${flowsheet.album_id} IS NOT NULL AND r2.album_id = ${flowsheet.album_id})
             OR (
@@ -195,9 +203,16 @@ const FSEntryFieldsRaw = {
   artist_wikipedia_url: sql<
     string | null
   >`coalesce(${album_metadata.artist_wikipedia_url}, ${flowsheet.artist_wikipedia_url})`,
+  // genres/styles live ONLY on album_metadata (no inline flowsheet column to
+  // COALESCE over), so these are plain column reads. BS#1441.
+  genres: album_metadata.genres,
+  styles: album_metadata.styles,
   on_streaming: library.on_streaming,
   metadata_status: flowsheet.metadata_status,
   enriching_since: flowsheet.enriching_since,
+  // tubafrenzy's authoritative top-of-hour for breakpoint rows (BS#1449); NULL
+  // on every other type. transformToV2 emits it only on the breakpoint case.
+  radio_hour: flowsheet.radio_hour,
 };
 
 // Raw result type from SQL query
@@ -235,9 +250,12 @@ type FSEntryRaw = {
   soundcloud_url: string | null;
   artist_bio: string | null;
   artist_wikipedia_url: string | null;
+  genres: string[] | null;
+  styles: string[] | null;
   on_streaming: boolean | null;
   metadata_status: FSEntry['metadata_status'];
   enriching_since: Date | null;
+  radio_hour: Date | null;
 };
 
 /** Transform flat SQL result to nested IFSEntry structure */
@@ -279,7 +297,10 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   on_streaming: raw.on_streaming ?? null,
   metadata_status: raw.metadata_status,
   enriching_since: raw.enriching_since,
-  // Nested metadata view (used by transformToV2)
+  radio_hour: raw.radio_hour ?? null,
+  // Nested metadata view (used by transformToV2). genres/styles are
+  // album_metadata-only fields (BS#1441) and so live here, NOT as top-level
+  // IFSEntry/FSEntry fields (that type mirrors the flowsheet table).
   metadata: {
     artwork_url: raw.artwork_url,
     discogs_url: raw.discogs_url,
@@ -291,6 +312,8 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
     soundcloud_url: raw.soundcloud_url,
     artist_bio: raw.artist_bio,
     artist_wikipedia_url: raw.artist_wikipedia_url,
+    genres: raw.genres,
+    styles: raw.styles,
   },
 });
 
@@ -421,7 +444,14 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
     .where(inArray(flowsheet.show_id, show_ids))
-    .orderBy(desc(flowsheet.play_order));
+    // play_order can collide within a show: the tubafrenzy webhook and the
+    // dj-site live-insert path assign it independently and the schema
+    // intentionally allows overlap (no per-show UNIQUE — see schema.ts). Tied
+    // rows must therefore break on a stable secondary key, or the live
+    // flowsheet reshuffles between polls (the "randomly rearranging" report).
+    // flowsheet.id is globally monotonic, so it orders the two writers'
+    // entries deterministically at every shared play_order.
+    .orderBy(desc(flowsheet.play_order), desc(flowsheet.id));
 
   return raw.map(transformToIFSEntry);
 };
@@ -465,7 +495,9 @@ export const addTrack = async (entry: Omit<NewFSEntry, 'play_order'>): Promise<F
   return response[0];
 };
 
-export const removeTrack = async (entry_id: number): Promise<FSEntry> => {
+// Returns undefined when no row matches entry_id (double delete / stale id);
+// the controller maps that to a 404 (PR #1532 review).
+export const removeTrack = async (entry_id: number): Promise<FSEntry | undefined> => {
   /*
     TODO: logic for updating album playcount
    */
@@ -522,7 +554,9 @@ function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null |
   return qb;
 }
 
-export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry> => {
+// Returns undefined when the UPDATE matches no row (entry deleted out from
+// under the edit); the controller maps that to a 404 (PR #1532 review).
+export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry | undefined> => {
   // Defense in depth (BS#1099): construct the update object from named
   // fields so even if a future controller starts passing the raw body,
   // mass-assignment of internal columns (metadata_status, legacy_entry_id,
@@ -851,7 +885,11 @@ export const getAlbumFromDB = async (album_id: number) => {
 
 // We use entry_id in order to avoid a race condition here.
 // Using the id ensures we are pointing to a specific entry.
-export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry> => {
+// Returns undefined when the post-commit confirmation read finds the row gone
+// (a concurrent delete landed after the reorder transaction committed); the
+// controller maps that to a 404 (PR #1532 review). A missing row at
+// transaction START still throws the 404 WxycError inside the transaction.
+export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry | undefined> => {
   await db.transaction(
     async (trx) => {
       const result = await trx
@@ -941,18 +979,6 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> =>
   };
 };
 
-export const getPlaylist = async (show_id: number): Promise<ShowInfo> => {
-  const [metadata, entries] = await Promise.all([
-    getShowMetadata(show_id),
-    db.select().from(flowsheet).where(eq(flowsheet.show_id, show_id)),
-  ]);
-
-  return {
-    ...metadata,
-    entries,
-  };
-};
-
 /**
  * Transform a V1 flowsheet entry to V2 discriminated union format.
  * Removes irrelevant fields based on entry_type for cleaner API responses.
@@ -997,6 +1023,11 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         soundcloud_url: entry.metadata?.soundcloud_url ?? null,
         artist_bio: entry.metadata?.artist_bio ?? null,
         artist_wikipedia_url: entry.metadata?.artist_wikipedia_url ?? null,
+        // Arrays coerce empty→null (unlike the sibling scalars' plain `?? null`):
+        // a `'{}'` album_metadata row carries no information, so it collapses to
+        // the same `null` the contract uses for "absent". See BS#1441 rationale.
+        genres: entry.metadata?.genres?.length ? entry.metadata.genres : null,
+        styles: entry.metadata?.styles?.length ? entry.metadata.styles : null,
         on_streaming: entry.on_streaming ?? null,
         // BS#891. iOS branches on this to decide whether to render inline
         // metadata or fall back to the proxy-fetch path
@@ -1033,6 +1064,9 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
       return {
         ...baseFields,
         message: entry.message,
+        // The authoritative top-of-hour (BS#1449). Date here; res.json emits ISO
+        // (or null). Clients format this instead of the early add_time.
+        radio_hour: entry.radio_hour,
       };
 
     default: {

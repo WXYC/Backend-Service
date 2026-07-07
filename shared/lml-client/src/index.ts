@@ -22,6 +22,7 @@ import type {
 
 export type {
   DiscogsMatchResult,
+  DiscogsWriterCredits,
   DiscogsReleaseMetadata,
   DiscogsTrackItem,
   DiscogsArtistCredit,
@@ -819,6 +820,199 @@ export async function searchLibrary(params: {
 
   const response = await lmlFetch(`/api/v1/library/search?${searchParams}`);
   return (await response.json()) as LibrarySearchResponse;
+}
+
+/**
+ * Wire shape for `POST /api/v1/identity/resolve` (LML#526, BS#1380).
+ *
+ * Mirrors `ReleaseIdentityResolveRequest` / `ReleaseIdentityResolveResponse`
+ * in `wxyc-shared/api.yaml`. Defined locally rather than imported from
+ * `@wxyc/shared/dtos` so this wrapper compiles against the currently-shipped
+ * shared bundle; the types move to `@wxyc/shared/dtos` once the OpenAPI
+ * codegen catches up. Same approach used by the original `EntityResolveResponse`
+ * during its own ramp-up.
+ *
+ * v1 accepts only `kind: 'release'`; `kind: 'artist'` is reserved for the
+ * symmetric extension.
+ */
+export type ReleaseIdentityResolveSource = 'discogs_release' | 'discogs_master' | 'bandcamp';
+
+export interface ReleaseIdentityResolveRequest {
+  kind: 'release';
+  source: ReleaseIdentityResolveSource;
+  /**
+   * Source-specific identifier. For `discogs_release` / `discogs_master` it
+   * is the positive integer ID as a string; zero / negative values are
+   * rejected with 422 (Discogs uses `0` for the unknown-release sentinel).
+   * For `bandcamp` it is the canonical album URL.
+   */
+  external_id: string;
+}
+
+export interface ReleaseIdentityResolveResponse {
+  /** Stable `entity.release_identity.id` for the resolved row. */
+  identity_id: number;
+  kind: 'release';
+  /** `true` when this call inserted a new identity row; `false` on re-resolve. */
+  minted: boolean;
+}
+
+/**
+ * BS#1380: default timeout for `resolveIdentity`. The dj-site `addToRotation`
+ * path awaits this synchronously inside the Express handler before INSERT,
+ * so the budget gates user-perceived latency. 2 s matches the user-visible
+ * read paths (BS#992 picker budget) and is the value the BS#1380 plan
+ * commits to in prose; the catch path falls back to NULL on timeout and the
+ * daily backfill cron catches up within ~24h.
+ */
+const RESOLVE_IDENTITY_TIMEOUT_MS = 2000;
+
+/**
+ * Resolve a release-shaped `(source, external_id)` pair to a stable
+ * `entity.release_identity.id` on the LML side (LML#526).
+ *
+ * Idempotent on `(source, external_id)`: the same triple always returns
+ * the same `identity_id`. First call mints (`minted: true`), subsequent
+ * calls return the existing row (`minted: false`).
+ *
+ * The default timeout (`LML_RESOLVE_TIMEOUT_MS`, fallback 2000 ms) is set
+ * at the wrapper layer rather than at each caller — every consumer (BS's
+ * `addToRotation`, the `rotation-lml-identity-backfill` cron) wants the
+ * same fast-fail semantics. Pass an explicit `timeoutMs` to override.
+ *
+ * Errors:
+ *   - Timeout: `LmlClientError('LML request timed out', 504)` (rethrown
+ *     from `lmlFetch`). Caller categorises the AbortError as `'timeout'`
+ *     in its Sentry counter.
+ *   - 5xx: `LmlClientError(..., 502)` (the upstream status is rolled
+ *     into the LML client's "treat as bad gateway" wrapper).
+ *   - 4xx (incl. 422 sentinel rejection): `LmlClientError(..., status)`.
+ *   - Network: `LmlClientError(..., 502)` after the fetch throws.
+ */
+export async function resolveIdentity(
+  request: ReleaseIdentityResolveRequest,
+  options?: { timeoutMs?: number }
+): Promise<ReleaseIdentityResolveResponse> {
+  const timeoutMs = options?.timeoutMs ?? envInt('LML_RESOLVE_TIMEOUT_MS', RESOLVE_IDENTITY_TIMEOUT_MS);
+  const response = await lmlFetch(
+    '/api/v1/identity/resolve',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    },
+    timeoutMs
+  );
+  return (await response.json()) as ReleaseIdentityResolveResponse;
+}
+
+/**
+ * Wire shape for `POST /api/v1/cache/refresh-for-identities` (LML#525, BS#1381).
+ *
+ * Mirrors `BulkCacheRefreshRequest` / `BulkCacheRefreshResponse` in
+ * `wxyc-shared/api.yaml`. Defined locally rather than imported from
+ * `@wxyc/shared/dtos` so this wrapper compiles against the currently-shipped
+ * shared bundle; the types move to `@wxyc/shared/dtos` once the OpenAPI
+ * codegen catches up. Same pattern used by `EntityResolveResponse` and
+ * `ReleaseIdentityResolveResponse` during their own ramp-ups.
+ *
+ * Per-id `status` rollup is release-leg-gated by LML:
+ *   - `warmed`           — at least one source's release_outcome was `success`.
+ *                          Cache hits, fresh fetches, AND tombstones (LML#510)
+ *                          all count — the cache state is current either way.
+ *   - `not_found`        — no row in `entity.release_identity` for this id.
+ *                          BS holds a stale `lml_identity_id` reference.
+ *   - `not_implemented`  — at least one source returned `not_implemented`,
+ *                          no source was `success` (e.g. discogs_master,
+ *                          MusicBrainz pre-LML#217).
+ *   - `error`            — all dispatched sources errored. The only retry
+ *                          signal.
+ */
+export type CacheRefreshSourceOutcome = 'success' | 'error' | 'not_implemented';
+export type CacheRefreshItemStatus = 'warmed' | 'not_found' | 'not_implemented' | 'error';
+
+export interface CacheRefreshArtistOutcome {
+  /** String-typed for future source-agnosticism — Discogs IDs serialize as decimal strings. */
+  external_id: string;
+  outcome: CacheRefreshSourceOutcome;
+  /** Exception class name when `outcome != success`. Full traceback lands in LML's Sentry. */
+  message?: string | null;
+}
+
+export interface CacheRefreshSourceResult {
+  release_outcome: CacheRefreshSourceOutcome;
+  /** Walk-to-artists fan-out result. Empty on tombstone-success and on non-Discogs legs. */
+  artists?: CacheRefreshArtistOutcome[];
+  message?: string | null;
+}
+
+export interface CacheRefreshResultItem {
+  identity_id: number;
+  status: CacheRefreshItemStatus;
+  /** Null when `status === 'not_found'`. Otherwise keyed by source vocabulary (`discogs_release`, …). */
+  sources?: Record<string, CacheRefreshSourceResult> | null;
+  message?: string | null;
+}
+
+export interface BulkCacheRefreshRequest {
+  identity_ids: number[];
+}
+
+export interface BulkCacheRefreshResponse {
+  /** Per-identity verdicts in input order. No top-level counters — callers derive. */
+  results: CacheRefreshResultItem[];
+}
+
+/**
+ * Per-request cap on `refreshForIdentities`. LML returns 400 on overflow —
+ * the cap is bounded by Discogs rate-limit × cold-cache fan-out ≤ Railway's
+ * request-timeout ceiling. Exported so consumers can chunk inputs against
+ * the same constant instead of redefining it. Hard contract, not a tunable.
+ */
+export const REFRESH_FOR_IDENTITIES_BATCH_CAP = 50;
+
+/**
+ * Refresh LML's cache for a batch of release `identity_id`s (LML#525).
+ *
+ * LML maps each id to its per-source `(source, external_id)` pairs, dispatches
+ * the per-source release-cache refresh, and walks each refreshed Discogs
+ * release's artist credits to refresh artist caches too. Multiplexes onto
+ * the existing fallthrough seam (LML#503's `fetched_at` discriminator) —
+ * already-warm cache rows don't re-hit Discogs.
+ *
+ * Per-request cap: **50 identity_ids** (`REFRESH_FOR_IDENTITIES_BATCH_CAP`).
+ * The wrapper defends against under- and over-cap inputs client-side so a
+ * misconfigured caller fails fast instead of burning a wire round-trip on
+ * an LML 400.
+ *
+ * Default timeout matches the shared `TIMEOUT_MS` (30 s). Consumers whose
+ * batches can run cold-cache (Discogs fan-out × per-call latency) should
+ * pass a longer `timeoutMs` so a successful LML writeback isn't misclassified
+ * as a transport error on first touch.
+ */
+export async function refreshForIdentities(
+  identityIds: number[],
+  options?: { timeoutMs?: number }
+): Promise<BulkCacheRefreshResponse> {
+  if (identityIds.length === 0) {
+    throw new LmlClientError('refreshForIdentities requires at least one identity_id', 400);
+  }
+  if (identityIds.length > REFRESH_FOR_IDENTITIES_BATCH_CAP) {
+    throw new LmlClientError(
+      `refreshForIdentities batch size ${identityIds.length} exceeds the ${REFRESH_FOR_IDENTITIES_BATCH_CAP}-id cap; chunk upstream`,
+      400
+    );
+  }
+  const response = await lmlFetch(
+    '/api/v1/cache/refresh-for-identities',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identity_ids: identityIds } satisfies BulkCacheRefreshRequest),
+    },
+    options?.timeoutMs
+  );
+  return (await response.json()) as BulkCacheRefreshResponse;
 }
 
 /**

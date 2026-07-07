@@ -62,6 +62,11 @@ jobs:
               - 'shared/**'
             tests:
               - 'tests/**'
+              # Operator scripts that an integration spec reads verbatim (for
+              # "zero drift"): editing one must re-run its integration test, or
+              # the drift guard is silently bypassed on a script-only PR.
+              # tests/integration/relabel-rotation-direct-backfill.spec.js reads:
+              - 'scripts/relabel-rotation-direct-backfill.sql'
             db-init:
               - 'dev_env/Dockerfile.init'
               - 'dev_env/init-db.mjs'
@@ -342,6 +347,12 @@ jobs:
         env:
           NODE_ENV: test
           USE_MOCK_SERVICES: 'false'
+          # CORS fails closed when FRONTEND_SOURCE is unset (BS#1107). The
+          # integration suite never asserts CORS headers, but set it
+          # explicitly so both services take the configured-origin path and
+          # startup logs stay clean. Matches the ci-profile compose default
+          # in dev_env/docker-compose.yml.
+          FRONTEND_SOURCE: http://localhost:3000
           ANON_DEVICE_JWT_SECRET: ci-test-secret-key-for-anonymous-devices
           LIBRARY_METADATA_URL: http://localhost:9090
           SLACK_WEBHOOK_URL: http://localhost:9090
@@ -372,6 +383,16 @@ jobs:
           # Without this, those hooks log a warning and no-op, which the
           # auth-auto-membership integration spec specifically exercises.
           DEFAULT_ORG_SLUG: test-org
+          # Catalog-search alias LATERAL: align GHA with the ci-profile
+          # docker-compose default (dev_env/docker-compose.yml:245). Without
+          # this, `getCatalogSearchAliasConfig().enabled` is false in CI and
+          # tests/integration/library-search-alias.spec.js's BS#1269 +
+          # BS#1383 cases either silently warn-skip (the OHSEES test) or
+          # fail-fast (the discogs_member test). The flag has been on by
+          # default in `npm run ci:testmock` since BS#1269 landed; this
+          # closes the GHA-vs-compose drift that surfaced when BS#1383
+          # promoted its case from warn-skip to fail-fast.
+          CATALOG_SEARCH_ALIAS_ENABLED: 'true'
         run: |
           node dev_env/mock-api-server/dist/server.js > /tmp/mock-api.log 2>&1 &
           node apps/auth/dist/app.js > /tmp/auth.log 2>&1 &

@@ -1,6 +1,6 @@
 {
-  "id": "aebb183a-e441-4c33-aa1b-c2cd437666ed",
-  "prevId": "46be4105-04b4-4b4b-8f7b-be805a2368d9",
+  "id": "46be4105-04b4-4b4b-8f7b-be805a2368d9",
+  "prevId": "5b870f5a-2326-4862-b3fe-8ff35b4dc23f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2353,6 +2353,28 @@
             }
           ],
           "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "rotation_active_album_bin_uniq": {
+          "name": "rotation_active_album_bin_uniq",
+          "columns": [
+            {
+              "expression": "album_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "rotation_bin",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "kill_date IS NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

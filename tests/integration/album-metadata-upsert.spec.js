@@ -20,6 +20,14 @@
  *   4. catch-arm conflict-do-nothing: a search-URL fallback INSERT against
  *      an album_id that already has a fully-enriched row leaves the existing
  *      payload intact (no clobber of artwork_url / discogs_url / etc.).
+ *   5. BS#1336 extended columns: the 8 LML-only columns the worker added to
+ *      its match payload (discogs_artist_id, label, full_release_date,
+ *      genres/styles as `text[]`, tracklist/bio_tokens as `jsonb`,
+ *      artist_image_url) round-trip through real PG — arrays come back as JS
+ *      arrays, jsonb comes back parsed (the read path spreads/projects them).
+ *
+ * (Coverage 1-4 above predate BS#1336 and describe the 10-column base
+ * payload; the worker's match payload is now 18 columns — see #5.)
  *
  * Pure SQL — does NOT import `apps/enrichment-worker/enrich.ts` or
  * `apps/backend/services/metadata/enrichment.service.ts`. The integration
@@ -65,6 +73,34 @@ async function upsertMatch(sql, albumId, payload) {
            artist_wikipedia_url = EXCLUDED.artist_wikipedia_url,
            updated_at           = NOW()
      WHERE ${sql(SCHEMA)}.album_metadata.updated_at < NOW()
+  `;
+}
+
+/**
+ * BS#1336: the worker's match branch now also writes 8 LML-only columns
+ * (discogs_artist_id, label, full_release_date, genres, styles, tracklist,
+ * artist_image_url, bio_tokens). This INSERT carries them so the `text[]`
+ * (genres/styles) and `jsonb` (tracklist/bio_tokens) types round-trip through
+ * real PG + postgres-js — the half the mocked unit tests can't exercise. Kept
+ * separate from `upsertMatch` so the 10-column contract tests stay focused;
+ * the same `finalizeRow` source governs both. postgres-js binds a JS array as
+ * text[] natively; jsonb columns are wrapped with `sql.json()`.
+ */
+async function upsertMatchExtended(sql, albumId, payload) {
+  await sql`
+    INSERT INTO ${sql(SCHEMA)}.album_metadata
+      (album_id, artwork_url, discogs_url, release_year, spotify_url, apple_music_url,
+       youtube_music_url, bandcamp_url, soundcloud_url, artist_bio, artist_wikipedia_url,
+       discogs_artist_id, label, full_release_date, genres, styles, tracklist,
+       artist_image_url, bio_tokens, updated_at)
+    VALUES
+      (${albumId}, ${payload.artwork_url}, ${payload.discogs_url}, ${payload.release_year},
+       ${payload.spotify_url}, ${payload.apple_music_url}, ${payload.youtube_music_url},
+       ${payload.bandcamp_url}, ${payload.soundcloud_url}, ${payload.artist_bio},
+       ${payload.artist_wikipedia_url}, ${payload.discogs_artist_id}, ${payload.label},
+       ${payload.full_release_date}, ${payload.genres}, ${payload.styles},
+       ${sql.json(payload.tracklist)}, ${payload.artist_image_url}, ${sql.json(payload.bio_tokens)},
+       NOW())
   `;
 }
 
@@ -142,6 +178,20 @@ const SEARCH_URLS = {
   soundcloud_url: 'https://soundcloud.com/search?q=D3%20test',
 };
 
+// BS#1336: 10 base columns + the 8 LML-only columns. Arrays/objects here
+// exercise the text[] and jsonb round-trip.
+const EXTENDED_PAYLOAD = {
+  ...FULL_PAYLOAD,
+  discogs_artist_id: 3840,
+  label: 'Sonamos',
+  full_release_date: '2022-09-30',
+  genres: ['Rock', 'Jazz'],
+  styles: ['Folk', 'Indie Rock'],
+  tracklist: [{ position: '1', title: 'la paradoja', duration: '4:12' }],
+  artist_image_url: 'https://i.discogs.com/artist/juana.jpg',
+  bio_tokens: [{ type: 'plainText', text: 'Argentine musician' }],
+};
+
 describe('album_metadata UPSERT contract (real PG)', () => {
   let sql;
   /** album_ids inserted; deleted in afterAll regardless of pass/fail. */
@@ -182,6 +232,36 @@ describe('album_metadata UPSERT contract (real PG)', () => {
     expect(rows[0].artist_bio).toBe(FULL_PAYLOAD.artist_bio);
     expect(rows[0].artist_wikipedia_url).toBe(FULL_PAYLOAD.artist_wikipedia_url);
     expect(rows[0].updated_at).not.toBeNull();
+  });
+
+  test('BS#1336: the 8 LML-only columns round-trip through PG (text[] + jsonb)', async () => {
+    const albumId = await insertLibraryAlbum(sql, 'lml-extended');
+    insertedAlbumIds.push(albumId);
+
+    await upsertMatchExtended(sql, albumId, EXTENDED_PAYLOAD);
+
+    const rows = await sql`
+      SELECT discogs_artist_id, label, full_release_date, genres, styles, tracklist,
+             artist_image_url, bio_tokens
+        FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
+    `;
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    // Scalars.
+    expect(row.discogs_artist_id).toBe(3840);
+    expect(row.label).toBe('Sonamos');
+    expect(row.full_release_date).toBe('2022-09-30');
+    expect(row.artist_image_url).toBe(EXTENDED_PAYLOAD.artist_image_url);
+    // text[] must come back as a JS array, NOT a '{Rock,Jazz}' literal string —
+    // the read path (lookupAlbumMetadataByKey) and buildLocalMetadataResponse
+    // spread it (`[...persisted.genres]`), which would corrupt a string.
+    expect(Array.isArray(row.genres)).toBe(true);
+    expect(row.genres).toEqual(['Rock', 'Jazz']);
+    expect(row.styles).toEqual(['Folk', 'Indie Rock']);
+    // jsonb must come back parsed (array of objects), matching the shape the
+    // read path hands to projectTracklistForWire / the bioTokens spread.
+    expect(row.tracklist).toEqual([{ position: '1', title: 'la paradoja', duration: '4:12' }]);
+    expect(row.bio_tokens).toEqual([{ type: 'plainText', text: 'Argentine musician' }]);
   });
 
   test('UPDATE-on-conflict path: subsequent UPSERT overwrites payload and advances updated_at', async () => {

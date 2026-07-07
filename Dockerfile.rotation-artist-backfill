@@ -1,0 +1,43 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /rotation-artist-backfill-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./shared/lml-client ./shared/lml-client
+COPY ./jobs/rotation-artist-backfill ./jobs/rotation-artist-backfill
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/rotation-artist-backfill
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /rotation-artist-backfill
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/rotation-artist-backfill/package* ./jobs/rotation-artist-backfill/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
+
+# Same .npmrc handling as Dockerfile.rotation-release-id-backfill: the
+# `@wxyc/shared` registry dep (GitHub Packages, `@wxyc:registry`) requires
+# NPM_TOKEN at install time. The .npmrc is removed afterwards.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./rotation-artist-backfill-builder/jobs/rotation-artist-backfill/dist ./jobs/rotation-artist-backfill/dist
+COPY --from=builder ./rotation-artist-backfill-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./rotation-artist-backfill-builder/shared/lml-client/dist ./shared/lml-client/dist
+
+# This job's only DB read is one SELECT against `rotation`. 60 s is plenty.
+ENV DB_STATEMENT_TIMEOUT_MS=60000
+
+# Identifies the connection in pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-rotation-artist-backfill
+
+CMD ["npm", "start", "--workspace=@wxyc/rotation-artist-backfill"]
