@@ -73,10 +73,8 @@ if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') {
   // This endpoint accepts an email, looks up the user, then finds their reset token
   app.get('/auth/test/verification-token', async (req, res) => {
     try {
-      const identifier =
-        typeof req.query.identifier === 'string' ? req.query.identifier : '';
-      const type =
-        typeof req.query.type === 'string' ? req.query.type : 'reset-password';
+      const identifier = typeof req.query.identifier === 'string' ? req.query.identifier : '';
+      const type = typeof req.query.type === 'string' ? req.query.type : 'reset-password';
       if (!identifier) {
         return res.status(400).json({ error: 'identifier query parameter is required (email address)' });
       }
