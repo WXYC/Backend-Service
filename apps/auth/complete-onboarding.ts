@@ -6,6 +6,8 @@
  */
 
 import { auth } from '@wxyc/authentication';
+import type { IncomingHttpHeaders } from 'node:http';
+import { fromNodeHeaders } from 'better-auth/node';
 
 export class CompleteOnboardingError extends Error {
   constructor(
@@ -135,4 +137,61 @@ export async function completeOnboardingFromRequest(body: Record<string, unknown
     realName: trimOptional(body.realName),
     djName: trimOptional(body.djName),
   });
+}
+
+type SignInApi = {
+  signInEmail: (input: {
+    body: { email: string; password: string };
+    headers: Headers;
+    asResponse: true;
+  }) => Promise<Response>;
+  signInUsername: (input: {
+    body: { username: string; password: string };
+    headers: Headers;
+    asResponse: true;
+  }) => Promise<Response>;
+};
+
+/**
+ * Sign the onboarded user in on the same HTTP response so session cookies
+ * reach the browser without a separate client sign-in round trip.
+ */
+export async function establishPostOnboardingSession(
+  input: { email: string; username?: string; password: string },
+  requestHeaders: IncomingHttpHeaders
+): Promise<string[]> {
+  const api = auth.api as unknown as SignInApi;
+  const headers = fromNodeHeaders(requestHeaders);
+
+  const attempts: Array<() => Promise<Response>> = [];
+  const trimmedUsername = input.username?.trim();
+  const trimmedEmail = input.email.trim();
+
+  if (trimmedUsername) {
+    attempts.push(() =>
+      api.signInUsername({
+        body: { username: trimmedUsername, password: input.password },
+        headers,
+        asResponse: true,
+      })
+    );
+  }
+  if (trimmedEmail) {
+    attempts.push(() =>
+      api.signInEmail({
+        body: { email: trimmedEmail, password: input.password },
+        headers,
+        asResponse: true,
+      })
+    );
+  }
+
+  for (const attempt of attempts) {
+    const response = await attempt();
+    if (response.ok) {
+      return typeof response.headers.getSetCookie === 'function' ? response.headers.getSetCookie() : [];
+    }
+  }
+
+  return [];
 }
