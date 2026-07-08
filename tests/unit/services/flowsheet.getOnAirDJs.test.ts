@@ -62,6 +62,18 @@ describe('getOnAirDJs', () => {
     ]);
   });
 
+  it('prefers active account DJs over legacy_dj_name when a show carries both', async () => {
+    // Precedence guard: the account branch (show_djs rows present) must win, so
+    // legacy_dj_name is ignored — never merged in or preferred.
+    queueLimit([
+      { id: 7, end_time: null, primary_dj_id: 'user-1', dj_name_override: null, legacy_dj_name: 'DJ MONSTER' },
+    ]);
+    queueWhere([{ dj_id: 'user-1', active: true }]);
+    queueWhere([{ id: 'user-1', djName: 'DJ HOUNDSTOOTH' }]);
+
+    expect(await getOnAirDJs()).toEqual([{ id: 'user-1', dj_name: 'DJ HOUNDSTOOTH' }]);
+  });
+
   it('preserves the existing Anonymous-filtering behavior on the account path (dj_name null, id retained)', async () => {
     queueLimit([{ id: 6, end_time: null, primary_dj_id: 'user-9', dj_name_override: null, legacy_dj_name: null }]);
     queueWhere([{ dj_id: 'user-9', active: true }]);
