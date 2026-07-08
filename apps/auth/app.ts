@@ -16,11 +16,7 @@ import { rateLimitKeyFromRequest } from './rate-limit-key';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
-import {
-  CompleteOnboardingError,
-  completeOnboardingFromRequest,
-  establishPostOnboardingSession,
-} from './complete-onboarding';
+import { CompleteOnboardingError, completeOnboardingFromRequest } from './complete-onboarding';
 import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
@@ -275,22 +271,8 @@ const lookupEmailHandler = async (req: Request, res: Response) => {
 const completeOnboardingHandler = async (req: Request, res: Response) => {
   try {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const newPassword = body.newPassword;
-    const result = await completeOnboardingFromRequest(body);
-
-    let sessionEstablished = false;
-    if (typeof newPassword === 'string' && newPassword.length > 0) {
-      const sessionCookies = await establishPostOnboardingSession(
-        { email: result.email, username: result.username, password: newPassword },
-        req.headers
-      );
-      for (const cookie of sessionCookies) {
-        res.append('Set-Cookie', cookie);
-      }
-      sessionEstablished = sessionCookies.length > 0;
-    }
-
-    return res.json({ ...result, sessionEstablished });
+    const result = await completeOnboardingFromRequest(body, fromNodeHeaders(req.headers));
+    return res.json(result);
   } catch (error) {
     if (error instanceof CompleteOnboardingError) {
       return res.status(error.statusCode).json({ error: error.message, code: error.code });

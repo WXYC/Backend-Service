@@ -1,13 +1,18 @@
 /**
- * Atomic onboarding completion for admin-provisioned DJs.
+ * Onboarding completion for admin-provisioned DJs.
  *
- * Requires a setup token from the invite email. Sets the user's chosen password,
- * optional profile fields, and flips hasCompletedOnboarding in one operation.
+ * Two entry modes:
+ * - Invite token (the reset-password token from the invite email): sets the
+ *   chosen password through better-auth's own `resetPassword` endpoint —
+ *   which consumes the token, hashes, and runs the configured hooks — then
+ *   records profile fields and flips `hasCompletedOnboarding`.
+ * - Authenticated session: an incomplete user who is already signed in (e.g.
+ *   set a password via the forgot-password flow before onboarding) only
+ *   records profile fields and flips the flag. No password change.
  */
 
 import { auth } from '@wxyc/authentication';
-import type { IncomingHttpHeaders } from 'node:http';
-import { fromNodeHeaders } from 'better-auth/node';
+import { APIError } from 'better-auth/api';
 
 export class CompleteOnboardingError extends Error {
   constructor(
@@ -18,13 +23,6 @@ export class CompleteOnboardingError extends Error {
     super(message);
     this.name = 'CompleteOnboardingError';
   }
-}
-
-export interface CompleteOnboardingInput {
-  token: string;
-  newPassword: string;
-  realName?: string;
-  djName?: string;
 }
 
 export interface CompleteOnboardingResult {
@@ -74,43 +72,61 @@ async function assertIncompleteUser(userId: string): Promise<IncompleteUserRecor
   return user;
 }
 
-export async function completeOnboarding(input: CompleteOnboardingInput): Promise<CompleteOnboardingResult> {
-  const { token, newPassword, realName, djName } = input;
+async function markOnboardingComplete(
+  userId: string,
+  fields: { realName?: string; djName?: string; emailVerified?: boolean }
+): Promise<void> {
   const context = await auth.$context;
-
-  const minLength = context.password?.config?.minPasswordLength ?? 8;
-  const maxLength = context.password?.config?.maxPasswordLength ?? 128;
-
-  if (typeof token !== 'string' || token.trim().length === 0) {
-    throw new CompleteOnboardingError(400, 'Setup token is required', 'INVALID_REQUEST');
-  }
-
-  if (typeof newPassword !== 'string' || newPassword.length < minLength) {
-    throw new CompleteOnboardingError(400, `Password must be at least ${minLength} characters`, 'PASSWORD_TOO_SHORT');
-  }
-  if (newPassword.length > maxLength) {
-    throw new CompleteOnboardingError(400, `Password must be at most ${maxLength} characters`, 'PASSWORD_TOO_LONG');
-  }
-
-  const userId = await resolveUserIdFromToken(token.trim());
-  const verificationIdentifier = `reset-password:${token.trim()}`;
-
-  const user = await assertIncompleteUser(userId);
-
-  const hashedPassword = await context.password.hash(newPassword);
-  await context.internalAdapter.updatePassword(userId, hashedPassword);
-  await context.internalAdapter.deleteVerificationByIdentifier(verificationIdentifier);
-
-  const profileUpdate: Record<string, unknown> = {
+  const update: Record<string, unknown> = {
     hasCompletedOnboarding: true,
     updatedAt: new Date(),
   };
-  const trimmedRealName = trimOptional(realName);
-  const trimmedDjName = trimOptional(djName);
-  if (trimmedRealName) profileUpdate.realName = trimmedRealName;
-  if (trimmedDjName) profileUpdate.djName = trimmedDjName;
+  if (fields.realName) update.realName = fields.realName;
+  if (fields.djName) update.djName = fields.djName;
+  if (fields.emailVerified) update.emailVerified = true;
+  await context.internalAdapter.updateUser(userId, update);
+}
 
-  await context.internalAdapter.updateUser(userId, profileUpdate);
+export interface CompleteOnboardingTokenInput {
+  token: string;
+  newPassword: string;
+  realName?: string;
+  djName?: string;
+}
+
+/**
+ * Invite-token completion. Asserts the token belongs to a not-yet-onboarded
+ * user before consuming it, so a completed user's ordinary password-reset
+ * token can never be burned (or their profile rewritten) through this
+ * endpoint. The password itself is set by better-auth's `resetPassword`,
+ * keeping hashing, token consumption, and `onPasswordReset` on the supported
+ * surface. Using the emailed token proves mailbox ownership, so the account
+ * is also marked email-verified — without this, `requireEmailVerification`
+ * would block the very first sign-in after onboarding.
+ */
+export async function completeOnboardingWithToken(
+  input: CompleteOnboardingTokenInput
+): Promise<CompleteOnboardingResult> {
+  const { newPassword, realName, djName } = input;
+  const token = input.token.trim();
+
+  const userId = await resolveUserIdFromToken(token);
+  const user = await assertIncompleteUser(userId);
+
+  try {
+    await auth.api.resetPassword({ body: { token, newPassword } });
+  } catch (error) {
+    if (error instanceof APIError) {
+      throw new CompleteOnboardingError(
+        error.statusCode ?? 400,
+        error.body?.message ?? 'Invalid or expired setup token',
+        typeof error.body?.code === 'string' ? error.body.code : 'INVALID_TOKEN'
+      );
+    }
+    throw error;
+  }
+
+  await markOnboardingComplete(userId, { realName, djName, emailVerified: true });
 
   return {
     status: true,
@@ -120,78 +136,61 @@ export async function completeOnboarding(input: CompleteOnboardingInput): Promis
   };
 }
 
-export async function completeOnboardingFromRequest(body: Record<string, unknown>): Promise<CompleteOnboardingResult> {
-  const token = typeof body.token === 'string' ? body.token.trim() : '';
-  const newPassword = body.newPassword;
-
-  if (!token) {
-    throw new CompleteOnboardingError(400, 'Setup token is required', 'INVALID_REQUEST');
+/**
+ * Session completion for a signed-in incomplete user (the `/login?incomplete=true`
+ * form). They authenticated with a password they already know, so only profile
+ * fields and the completion flag change.
+ */
+export async function completeOnboardingWithSession(
+  headers: Headers,
+  input: { realName?: string; djName?: string }
+): Promise<CompleteOnboardingResult> {
+  const session = await auth.api.getSession({ headers });
+  if (!session?.user) {
+    throw new CompleteOnboardingError(
+      401,
+      'Sign in or use your invite link to complete onboarding',
+      'UNAUTHORIZED'
+    );
   }
-  if (typeof newPassword !== 'string' || newPassword.length === 0) {
-    throw new CompleteOnboardingError(400, 'newPassword is required', 'INVALID_REQUEST');
-  }
 
-  return completeOnboarding({
-    token,
-    newPassword,
-    realName: trimOptional(body.realName),
-    djName: trimOptional(body.djName),
-  });
+  const user = await assertIncompleteUser(session.user.id);
+
+  await markOnboardingComplete(user.id, { realName: input.realName, djName: input.djName });
+
+  return {
+    status: true,
+    userId: user.id,
+    email: user.email,
+    username: user.username,
+  };
 }
 
-type SignInApi = {
-  signInEmail: (input: {
-    body: { email: string; password: string };
-    headers: Headers;
-    asResponse: true;
-  }) => Promise<Response>;
-  signInUsername: (input: {
-    body: { username: string; password: string };
-    headers: Headers;
-    asResponse: true;
-  }) => Promise<Response>;
-};
+export async function completeOnboardingFromRequest(
+  body: Record<string, unknown>,
+  headers: Headers
+): Promise<CompleteOnboardingResult> {
+  const token = typeof body.token === 'string' ? body.token.trim() : '';
+  const newPassword = body.newPassword;
+  const realName = trimOptional(body.realName);
+  const djName = trimOptional(body.djName);
 
-/**
- * Sign the onboarded user in on the same HTTP response so session cookies
- * reach the browser without a separate client sign-in round trip.
- */
-export async function establishPostOnboardingSession(
-  input: { email: string; username?: string; password: string },
-  requestHeaders: IncomingHttpHeaders
-): Promise<string[]> {
-  const api = auth.api as unknown as SignInApi;
-  const headers = fromNodeHeaders(requestHeaders);
-
-  const attempts: Array<() => Promise<Response>> = [];
-  const trimmedUsername = input.username?.trim();
-  const trimmedEmail = input.email.trim();
-
-  if (trimmedUsername) {
-    attempts.push(() =>
-      api.signInUsername({
-        body: { username: trimmedUsername, password: input.password },
-        headers,
-        asResponse: true,
-      })
-    );
-  }
-  if (trimmedEmail) {
-    attempts.push(() =>
-      api.signInEmail({
-        body: { email: trimmedEmail, password: input.password },
-        headers,
-        asResponse: true,
-      })
-    );
-  }
-
-  for (const attempt of attempts) {
-    const response = await attempt();
-    if (response.ok) {
-      return typeof response.headers.getSetCookie === 'function' ? response.headers.getSetCookie() : [];
+  if (token) {
+    if (typeof newPassword !== 'string' || newPassword.length === 0) {
+      throw new CompleteOnboardingError(400, 'newPassword is required', 'INVALID_REQUEST');
     }
+    return completeOnboardingWithToken({ token, newPassword, realName, djName });
   }
 
-  return [];
+  // Reject a password without a token instead of silently ignoring it — a
+  // client that thinks it set a password must not be told onboarding succeeded.
+  if (typeof newPassword === 'string' && newPassword.length > 0) {
+    throw new CompleteOnboardingError(
+      400,
+      'Setting a password requires the setup token from your invite email',
+      'INVALID_REQUEST'
+    );
+  }
+
+  return completeOnboardingWithSession(headers, { realName, djName });
 }

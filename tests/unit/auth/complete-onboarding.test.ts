@@ -1,39 +1,41 @@
 import { jest } from '@jest/globals';
 
 const mockFindVerificationValue = jest.fn();
-const mockDeleteVerificationByIdentifier = jest.fn();
-const mockUpdatePassword = jest.fn();
 const mockUpdateUser = jest.fn();
 const mockFindUserById = jest.fn();
-const mockPasswordHash = jest.fn();
+const mockResetPassword = jest.fn();
+const mockGetSession = jest.fn();
 
 const mockAuthContext = {
   internalAdapter: {
     findVerificationValue: mockFindVerificationValue,
-    deleteVerificationByIdentifier: mockDeleteVerificationByIdentifier,
-    updatePassword: mockUpdatePassword,
     updateUser: mockUpdateUser,
     findUserById: mockFindUserById,
-  },
-  password: {
-    hash: mockPasswordHash,
-    config: { minPasswordLength: 8, maxPasswordLength: 128 },
   },
 };
 
 jest.mock('@wxyc/authentication', () => ({
   auth: {
     $context: Promise.resolve(mockAuthContext),
+    api: {
+      resetPassword: mockResetPassword,
+      getSession: mockGetSession,
+    },
   },
 }));
 
-import { CompleteOnboardingError, completeOnboarding } from '../../../apps/auth/complete-onboarding';
+import {
+  CompleteOnboardingError,
+  completeOnboardingFromRequest,
+  completeOnboardingWithToken,
+  completeOnboardingWithSession,
+} from '../../../apps/auth/complete-onboarding';
 
 const future = new Date(Date.now() + 60_000);
+const emptyHeaders = new Headers();
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockPasswordHash.mockResolvedValue('hashed-password' as never);
   mockFindVerificationValue.mockResolvedValue({
     value: 'user-id-001',
     expiresAt: future,
@@ -44,14 +46,14 @@ beforeEach(() => {
     username: 'testdj',
     hasCompletedOnboarding: false,
   } as never);
-  mockUpdatePassword.mockResolvedValue(undefined as never);
+  mockResetPassword.mockResolvedValue({ status: true } as never);
   mockUpdateUser.mockResolvedValue(undefined as never);
-  mockDeleteVerificationByIdentifier.mockResolvedValue(undefined as never);
+  mockGetSession.mockResolvedValue(null as never);
 });
 
-describe('completeOnboarding()', () => {
-  it('sets password, profile, and completion flag via setup token', async () => {
-    const result = await completeOnboarding({
+describe('completeOnboardingWithToken()', () => {
+  it('sets the password via better-auth resetPassword and marks completion', async () => {
+    const result = await completeOnboardingWithToken({
       token: 'setup-token-abc',
       newPassword: 'NewPassword1',
       realName: 'Jane Doe',
@@ -65,9 +67,76 @@ describe('completeOnboarding()', () => {
       username: 'testdj',
     });
     expect(mockFindVerificationValue).toHaveBeenCalledWith('reset-password:setup-token-abc');
-    expect(mockPasswordHash).toHaveBeenCalledWith('NewPassword1');
-    expect(mockUpdatePassword).toHaveBeenCalledWith('user-id-001', 'hashed-password');
-    expect(mockDeleteVerificationByIdentifier).toHaveBeenCalledWith('reset-password:setup-token-abc');
+    expect(mockResetPassword).toHaveBeenCalledWith({
+      body: { token: 'setup-token-abc', newPassword: 'NewPassword1' },
+    });
+    expect(mockUpdateUser).toHaveBeenCalledWith(
+      'user-id-001',
+      expect.objectContaining({
+        hasCompletedOnboarding: true,
+        emailVerified: true,
+        realName: 'Jane Doe',
+        djName: 'DJ Jane',
+      })
+    );
+  });
+
+  it('rejects expired setup tokens before consuming them', async () => {
+    mockFindVerificationValue.mockResolvedValue({
+      value: 'user-id-001',
+      expiresAt: new Date(0),
+    } as never);
+
+    await expect(
+      completeOnboardingWithToken({ token: 'expired-token', newPassword: 'NewPassword1' })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'INVALID_TOKEN',
+    });
+    expect(mockResetPassword).not.toHaveBeenCalled();
+  });
+
+  it('rejects users who already completed onboarding without burning the token', async () => {
+    mockFindUserById.mockResolvedValue({
+      id: 'user-id-001',
+      hasCompletedOnboarding: true,
+    } as never);
+
+    await expect(
+      completeOnboardingWithToken({ token: 'setup-token-abc', newPassword: 'NewPassword1' })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'ONBOARDING_ALREADY_COMPLETE',
+    });
+    expect(mockResetPassword).not.toHaveBeenCalled();
+  });
+
+  it('does not mark completion when resetPassword fails', async () => {
+    mockResetPassword.mockRejectedValue(new Error('boom') as never);
+
+    await expect(
+      completeOnboardingWithToken({ token: 'setup-token-abc', newPassword: 'NewPassword1' })
+    ).rejects.toThrow('boom');
+    expect(mockUpdateUser).not.toHaveBeenCalled();
+  });
+});
+
+describe('completeOnboardingWithSession()', () => {
+  it('marks completion for a signed-in incomplete user without touching the password', async () => {
+    mockGetSession.mockResolvedValue({ user: { id: 'user-id-001' } } as never);
+
+    const result = await completeOnboardingWithSession(emptyHeaders, {
+      realName: 'Jane Doe',
+      djName: 'DJ Jane',
+    });
+
+    expect(result).toEqual({
+      status: true,
+      userId: 'user-id-001',
+      email: 'dj@example.com',
+      username: 'testdj',
+    });
+    expect(mockResetPassword).not.toHaveBeenCalled();
     expect(mockUpdateUser).toHaveBeenCalledWith(
       'user-id-001',
       expect.objectContaining({
@@ -76,41 +145,72 @@ describe('completeOnboarding()', () => {
         djName: 'DJ Jane',
       })
     );
+    const update = mockUpdateUser.mock.calls[0][1] as Record<string, unknown>;
+    expect(update.emailVerified).toBeUndefined();
   });
 
-  it('rejects missing setup tokens', async () => {
-    await expect(completeOnboarding({ token: '', newPassword: 'NewPassword1' })).rejects.toMatchObject({
-      statusCode: 400,
-      code: 'INVALID_REQUEST',
+  it('rejects when there is no session', async () => {
+    await expect(completeOnboardingWithSession(emptyHeaders, { realName: 'Jane Doe' })).rejects.toMatchObject({
+      statusCode: 401,
+      code: 'UNAUTHORIZED',
     });
   });
 
-  it('rejects expired setup tokens', async () => {
-    mockFindVerificationValue.mockResolvedValue({
-      value: 'user-id-001',
-      expiresAt: new Date(0),
-    } as never);
-
-    await expect(completeOnboarding({ token: 'expired-token', newPassword: 'NewPassword1' })).rejects.toMatchObject({
-      statusCode: 400,
-      code: 'INVALID_TOKEN',
-    });
-  });
-
-  it('rejects users who already completed onboarding', async () => {
+  it('rejects a signed-in user who already completed onboarding', async () => {
+    mockGetSession.mockResolvedValue({ user: { id: 'user-id-001' } } as never);
     mockFindUserById.mockResolvedValue({
       id: 'user-id-001',
       hasCompletedOnboarding: true,
     } as never);
 
-    await expect(completeOnboarding({ token: 'setup-token-abc', newPassword: 'NewPassword1' })).rejects.toMatchObject({
+    await expect(completeOnboardingWithSession(emptyHeaders, { realName: 'Jane Doe' })).rejects.toMatchObject({
       statusCode: 400,
       code: 'ONBOARDING_ALREADY_COMPLETE',
     });
   });
+});
 
-  it('rejects passwords shorter than the configured minimum', async () => {
-    await expect(completeOnboarding({ token: 'setup-token-abc', newPassword: 'short1' })).rejects.toBeInstanceOf(
+describe('completeOnboardingFromRequest()', () => {
+  it('routes token requests to the token flow', async () => {
+    const result = await completeOnboardingFromRequest(
+      { token: 'setup-token-abc', newPassword: 'NewPassword1', realName: 'Jane Doe' },
+      emptyHeaders
+    );
+
+    expect(result.userId).toBe('user-id-001');
+    expect(mockResetPassword).toHaveBeenCalled();
+  });
+
+  it('requires newPassword when a token is supplied', async () => {
+    await expect(completeOnboardingFromRequest({ token: 'setup-token-abc' }, emptyHeaders)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'INVALID_REQUEST',
+    });
+  });
+
+  it('rejects a password without a token instead of silently ignoring it', async () => {
+    mockGetSession.mockResolvedValue({ user: { id: 'user-id-001' } } as never);
+
+    await expect(
+      completeOnboardingFromRequest({ newPassword: 'NewPassword1', realName: 'Jane Doe' }, emptyHeaders)
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'INVALID_REQUEST',
+    });
+    expect(mockUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it('routes tokenless requests to the session flow', async () => {
+    mockGetSession.mockResolvedValue({ user: { id: 'user-id-001' } } as never);
+
+    const result = await completeOnboardingFromRequest({ realName: 'Jane Doe' }, emptyHeaders);
+
+    expect(result.userId).toBe('user-id-001');
+    expect(mockResetPassword).not.toHaveBeenCalled();
+  });
+
+  it('is CompleteOnboardingError for unauthorized tokenless requests', async () => {
+    await expect(completeOnboardingFromRequest({ realName: 'Jane Doe' }, emptyHeaders)).rejects.toBeInstanceOf(
       CompleteOnboardingError
     );
   });
