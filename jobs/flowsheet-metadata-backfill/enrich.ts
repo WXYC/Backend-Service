@@ -285,3 +285,43 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
     .returning({ id: flowsheet.id });
   return updated.length === 0 ? 'enriched_no_match_raced' : 'enriched_no_match';
 };
+
+/**
+ * Best-effort marker-only stamp for a *permanently*-failing row (BS#1562).
+ *
+ * When `applyEnrichment` throws with an SQLSTATE that re-running the same row
+ * would always reproduce (e.g. a mojibake title whose synthesized Bandcamp
+ * URL overflows `flowsheet.bandcamp_url varchar(512)` — SQLSTATE 22001), the
+ * row never got its `metadata_attempt_at` marker, so the id-cursor re-selects
+ * it every nightly run and the pending cohort never reaches literal 0 — which
+ * breaks BS#1011's "cohort COUNT == 0 → retire the cron" completion criterion.
+ *
+ * This dead-letters the row: it stamps `metadata_attempt_at = now()` alone
+ * (writing none of the URLs that overflowed) so the row leaves the
+ * `metadata_attempt_at IS NULL` cohort while staying distinguishable from a
+ * successful enrichment (its metadata columns stay NULL). The WHERE mirrors
+ * `applyEnrichment`'s marker-IS-NULL race guard so a concurrent runtime stamp
+ * still wins.
+ *
+ * MUST be best-effort: any throw from the stamp itself is swallowed so it can
+ * never re-wedge the drain the way the original poison-pill jam did (BS#1561).
+ * The orchestrator's id-cursor advances regardless, so at worst a stamp that
+ * fails to land leaves the row for a future sweep — never a stall.
+ */
+export const stampDeadLetter = async (rowId: number): Promise<void> => {
+  try {
+    await db
+      .update(flowsheet)
+      .set({ metadata_attempt_at: sql`now()` })
+      // Raw `id AND metadata_attempt_at IS NULL` predicate, mirroring the
+      // unlinked-path UPDATE above — the marker-IS-NULL race guard means a
+      // concurrent runtime stamp still wins, and there's nothing to write but
+      // the marker itself.
+      .where(sql`"id" = ${rowId} AND "metadata_attempt_at" IS NULL`);
+  } catch {
+    // Swallow: the marker is a drain-hygiene optimization, not a correctness
+    // requirement. Re-throwing here would defeat the whole purpose (isolating
+    // the poison row so the cursor advances). The enrich failure was already
+    // logged and captured by the caller.
+  }
+};

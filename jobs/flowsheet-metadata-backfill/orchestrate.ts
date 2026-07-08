@@ -58,6 +58,7 @@ import {
 } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import type { EnrichRow, EnrichOutcome } from './enrich.js';
+import { stampDeadLetter as defaultStampDeadLetter } from './enrich.js';
 import type { LookupResult } from './lml-fetch.js';
 import { captureError, log } from './logger.js';
 
@@ -174,6 +175,50 @@ export type LookupFn = (artist: string, album?: string, track?: string) => Promi
 export type EnrichFn = (row: EnrichRow, response: LookupResponse) => Promise<EnrichOutcome>;
 
 /**
+ * Marker-only dead-letter stamp injected into `processRow` (BS#1562). Wired
+ * by production to `enrich.ts:stampDeadLetter`; tests inject a mock. Always
+ * resolves — the helper swallows its own errors (best-effort).
+ */
+export type StampDeadLetterFn = (rowId: number) => Promise<void>;
+
+/**
+ * Extract a postgres-js SQLSTATE from a caught enrich error, robust to the
+ * drizzle wrapper shape. drizzle re-throws the driver error; postgres-js
+ * exposes the 5-char SQLSTATE as `.code`, typically surfaced on the wrapper's
+ * `.cause`. Prefer `cause.code`, fall back to a top-level `.code`. Returns
+ * undefined when no *string* code can be read — the caller treats that as
+ * transient (retryable), failing safe toward retry rather than silent
+ * give-up.
+ */
+const extractSqlState = (error: unknown): string | undefined => {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const cause = (error as { cause?: unknown }).cause;
+  const causeCode = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  const code = causeCode ?? (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+};
+
+/**
+ * Classify an enrich failure as *permanent* (re-running the same row will
+ * always reproduce it) vs transient. Permanent = SQLSTATE class `22` (data
+ * exception — includes `22001` string_data_right_truncation, the mojibake
+ * varchar-overflow poison rows from BS#1560) OR class `23`
+ * (integrity_constraint_violation).
+ *
+ * Everything else — deadlock (`40P01`), serialization failure (`40001`),
+ * connection errors, or an SQLSTATE we can't determine — is transient, so the
+ * row stays `metadata_attempt_at IS NULL` and the next sweep retries it. Fail
+ * safe toward retry, never toward silently dead-lettering a row a retry could
+ * have enriched.
+ */
+export const isPermanentEnrichError = (error: unknown): boolean => {
+  const sqlState = extractSqlState(error);
+  if (!sqlState) return false;
+  const cls = sqlState.slice(0, 2);
+  return cls === '22' || cls === '23';
+};
+
+/**
  * Read the current (artist, album) lookup-dedup cache state. Wired by
  * `job.ts` to `getLookupCache().stats()`; tests inject a stub. Returns
  * undefined when the orchestrator is driven without a cache (synthetic
@@ -233,10 +278,20 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * stamps `metadata_attempt_at`, the id-cursor re-selects that same row as the
  * smallest pending id on the next run and crashes again — a permanent stall
  * (BS#1011). Isolating the throw here lets the cursor advance past it.
+ *
+ * Dead-lettering (BS#1562): isolating the throw kept the cursor moving but
+ * still left the poison row `metadata_attempt_at IS NULL`, so it was
+ * re-attempted (and re-failed, and re-logged) every nightly run forever — the
+ * pending cohort never reached literal 0, breaking BS#1011's "cohort == 0"
+ * retire criterion. When the SQLSTATE marks the failure *permanent* (data
+ * exception / integrity violation — `isPermanentEnrichError`), we stamp the
+ * marker via `stampDeadLetter` so the row leaves the pending cohort. Genuinely
+ * transient failures (deadlock, serialization, connection drop, or an
+ * unreadable code) are left unstamped and retryable, exactly as before.
  */
 export const processRow = async (
   row: EnrichRow,
-  deps: { lookup: LookupFn; enrich: EnrichFn }
+  deps: { lookup: LookupFn; enrich: EnrichFn; stampDeadLetter?: StampDeadLetterFn }
 ): Promise<ProcessResult> => {
   const artist = row.artist_name;
   const album = row.album_title ?? undefined;
@@ -258,6 +313,11 @@ export const processRow = async (
     const outcome = await deps.enrich(row, result.response);
     return { outcome, cacheHit: result.cacheHit };
   } catch (error) {
+    // Classify the failure by SQLSTATE. A permanent error (data exception /
+    // integrity violation) will reproduce every run, so dead-letter the row —
+    // stamp the marker so it leaves the `metadata_attempt_at IS NULL` cohort.
+    // Transient errors stay unstamped and retryable.
+    const deadLettered = isPermanentEnrichError(error);
     // Defend against non-Error throws (`throw 'string'`, `throw { code: x }`) —
     // `(error as Error).message` would emit undefined and the JSON logger would
     // drop the key, matching `readCacheFields`'s guard below.
@@ -265,8 +325,29 @@ export const processRow = async (
     log('warn', 'enrich_error', `enrich failed for flowsheet.id=${row.id}`, {
       flowsheet_id: row.id,
       error_message: message,
+      // Distinguish "dead-lettered (permanent → stamped, left the cohort)"
+      // from "left retryable (transient → stays pending)" without a new
+      // totals bucket. A spike in dead_lettered=true points at data corruption.
+      dead_lettered: deadLettered,
     });
-    captureError(error, 'enrich_error', { flowsheet_id: row.id, artist, album, track });
+    captureError(error, 'enrich_error', { flowsheet_id: row.id, artist, album, track, dead_lettered: deadLettered });
+    if (deadLettered) {
+      // Best-effort — `stampDeadLetter` swallows its own errors, but wrap the
+      // call anyway so an injected/alternate stamp that DOES throw can never
+      // re-wedge the drain (BS#1561's failure mode). The cursor must advance
+      // even if the marker never lands; the row just falls to a future sweep.
+      const stamp = deps.stampDeadLetter ?? defaultStampDeadLetter;
+      try {
+        await stamp(row.id);
+      } catch (stampError) {
+        const stampMessage = stampError instanceof Error ? stampError.message : String(stampError);
+        log('warn', 'dead_letter_stamp_error', `dead-letter stamp failed for flowsheet.id=${row.id}`, {
+          flowsheet_id: row.id,
+          error_message: stampMessage,
+        });
+        captureError(stampError, 'dead_letter_stamp_error', { flowsheet_id: row.id });
+      }
+    }
     // Forward the lookup's real cacheHit (unlike the lml_error path, the
     // lookup succeeded here): a cached hit made no LML call, so the caller
     // should still skip the inter-row throttle.

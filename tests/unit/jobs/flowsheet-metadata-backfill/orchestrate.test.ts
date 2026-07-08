@@ -21,6 +21,7 @@ import { db, type CheckLiveActivityFn } from '@wxyc/database';
 import {
   BATCH_SIZE,
   THROTTLE_MS,
+  isPermanentEnrichError,
   processRow,
   resolveBatchSize,
   resolveLiveActivityLookback,
@@ -30,6 +31,7 @@ import {
   runBackfill,
   type EnrichFn,
   type LookupFn,
+  type StampDeadLetterFn,
 } from '../../../../jobs/flowsheet-metadata-backfill/orchestrate';
 import type { LookupResponse } from '@wxyc/lml-client';
 
@@ -186,6 +188,54 @@ describe('resolveLiveActivityPauseMs', () => {
   });
 });
 
+describe('isPermanentEnrichError (BS#1562 SQLSTATE classification)', () => {
+  // A "permanent" enrich failure is one re-running the same row will always
+  // reproduce: SQLSTATE class 22 (data exception — includes 22001 varchar
+  // overflow, the mojibake-title poison rows) or class 23 (integrity
+  // constraint violation). Everything else — deadlock, serialization,
+  // connection drop, or an SQLSTATE we can't read — is treated as transient
+  // (retryable). Fail safe toward retry, never toward silent give-up.
+  //
+  // The caught error is a drizzle wrapper; postgres-js puts the SQLSTATE on
+  // `error.cause.code`, falling back to `error.code`.
+  const withCode = (code: unknown): Error => Object.assign(new Error('db error'), { code });
+  const withCauseCode = (code: unknown): Error => Object.assign(new Error('drizzle wrapper'), { cause: { code } });
+
+  it('classifies class-22 (data exception) as permanent — cause.code path', () => {
+    expect(isPermanentEnrichError(withCauseCode('22001'))).toBe(true); // string_data_right_truncation
+    expect(isPermanentEnrichError(withCauseCode('22007'))).toBe(true); // invalid_datetime_format
+  });
+
+  it('classifies class-23 (integrity constraint violation) as permanent', () => {
+    expect(isPermanentEnrichError(withCauseCode('23505'))).toBe(true); // unique_violation
+    expect(isPermanentEnrichError(withCauseCode('23502'))).toBe(true); // not_null_violation
+  });
+
+  it('reads the SQLSTATE off error.code when there is no cause', () => {
+    expect(isPermanentEnrichError(withCode('22001'))).toBe(true);
+    expect(isPermanentEnrichError(withCode('40P01'))).toBe(false);
+  });
+
+  it('prefers cause.code over a top-level code (drizzle wrapper shape)', () => {
+    const wrapped = Object.assign(new Error('wrapper'), { code: '40P01', cause: { code: '22001' } });
+    expect(isPermanentEnrichError(wrapped)).toBe(true);
+  });
+
+  it('classifies transient failures (deadlock, serialization) as NOT permanent', () => {
+    expect(isPermanentEnrichError(withCauseCode('40P01'))).toBe(false); // deadlock_detected
+    expect(isPermanentEnrichError(withCauseCode('40001'))).toBe(false); // serialization_failure
+    expect(isPermanentEnrichError(withCauseCode('08006'))).toBe(false); // connection_failure
+  });
+
+  it('treats an undeterminable code as transient (fail safe toward retry)', () => {
+    expect(isPermanentEnrichError(new Error('no code at all'))).toBe(false);
+    expect(isPermanentEnrichError(withCauseCode(undefined))).toBe(false);
+    expect(isPermanentEnrichError(withCode(12345))).toBe(false); // non-string code
+    expect(isPermanentEnrichError('just a string')).toBe(false);
+    expect(isPermanentEnrichError(null)).toBe(false);
+  });
+});
+
 describe('processRow', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -198,6 +248,12 @@ describe('processRow', () => {
     track_title: 'VI Scose Poise',
     album_id: null,
   };
+
+  const permanentError = () =>
+    Object.assign(new Error('value too long for type character varying(512)'), {
+      cause: { code: '22001' },
+    });
+  const transientError = () => Object.assign(new Error('deadlock detected'), { cause: { code: '40P01' } });
 
   it('returns enriched_match + cacheHit=false on LML success-with-match (miss path)', async () => {
     const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
@@ -257,6 +313,96 @@ describe('processRow', () => {
 
     expect(result).toEqual({ outcome: 'enrich_error', cacheHit: false });
     expect(enrich).toHaveBeenCalledWith(row, matchedResponse);
+  });
+
+  it('dead-letters a permanent enrich failure (class-22 overflow): stamps the marker so the row leaves the pending cohort', async () => {
+    // BS#1562: the mojibake-title poison rows overflow bandcamp_url
+    // varchar(512) → SQLSTATE 22001 every run. Stamping metadata_attempt_at
+    // removes them from the `metadata_attempt_at IS NULL` cohort so BS#1011's
+    // "cohort == 0" retire criterion can actually fire.
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
+    const enrich = jest.fn<EnrichFn>().mockRejectedValue(permanentError());
+    const stampDeadLetter = jest.fn<StampDeadLetterFn>().mockResolvedValue();
+
+    const result = await processRow(row, { lookup, enrich, stampDeadLetter });
+
+    expect(result).toEqual({ outcome: 'enrich_error', cacheHit: false });
+    expect(stampDeadLetter).toHaveBeenCalledWith(row.id);
+  });
+
+  it('does NOT dead-letter a transient enrich failure (deadlock 40P01): row stays retryable', async () => {
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
+    const enrich = jest.fn<EnrichFn>().mockRejectedValue(transientError());
+    const stampDeadLetter = jest.fn<StampDeadLetterFn>().mockResolvedValue();
+
+    const result = await processRow(row, { lookup, enrich, stampDeadLetter });
+
+    expect(result).toEqual({ outcome: 'enrich_error', cacheHit: false });
+    // No stamp → metadata_attempt_at stays NULL → next sweep retries it.
+    expect(stampDeadLetter).not.toHaveBeenCalled();
+  });
+
+  it('does NOT dead-letter an undeterminable-code enrich failure (fail safe toward retry)', async () => {
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
+    const enrich = jest.fn<EnrichFn>().mockRejectedValue(new Error('no SQLSTATE here'));
+    const stampDeadLetter = jest.fn<StampDeadLetterFn>().mockResolvedValue();
+
+    const result = await processRow(row, { lookup, enrich, stampDeadLetter });
+
+    expect(result).toEqual({ outcome: 'enrich_error', cacheHit: false });
+    expect(stampDeadLetter).not.toHaveBeenCalled();
+  });
+
+  it('does not throw when the dead-letter stamp itself rejects (cursor must still advance)', async () => {
+    // The stamp helper is best-effort; even if the injected stamp rejects,
+    // processRow must resolve with enrich_error, never re-throw.
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
+    const enrich = jest.fn<EnrichFn>().mockRejectedValue(permanentError());
+    const stampDeadLetter = jest.fn<StampDeadLetterFn>().mockRejectedValue(new Error('stamp failed too'));
+
+    await expect(processRow(row, { lookup, enrich, stampDeadLetter })).resolves.toEqual({
+      outcome: 'enrich_error',
+      cacheHit: false,
+    });
+  });
+
+  it('records dead_lettered on the enrich_error log line (permanent → true, transient → false)', async () => {
+    const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+    const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+    initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-dead-letter' });
+    const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    try {
+      const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
+      const stampDeadLetter = jest.fn<StampDeadLetterFn>().mockResolvedValue();
+
+      const parseEnrichErrorLine = () => {
+        const line = writeSpy.mock.calls
+          .map((args) => String(args[0]))
+          .reverse()
+          .find((l) => l.includes('"step":"enrich_error"'));
+        if (!line) throw new Error('expected an enrich_error log line');
+        return JSON.parse(line.trim());
+      };
+
+      await processRow(row, {
+        lookup,
+        enrich: jest.fn<EnrichFn>().mockRejectedValue(permanentError()),
+        stampDeadLetter,
+      });
+      expect(parseEnrichErrorLine().dead_lettered).toBe(true);
+
+      writeSpy.mockClear();
+      await processRow(row, {
+        lookup,
+        enrich: jest.fn<EnrichFn>().mockRejectedValue(transientError()),
+        stampDeadLetter,
+      });
+      expect(parseEnrichErrorLine().dead_lettered).toBe(false);
+    } finally {
+      writeSpy.mockRestore();
+      await closeLogger();
+    }
   });
 
   it('forwards cacheHit through the enrich_error path (the lookup succeeded, so a cached hit still skips throttle)', async () => {
