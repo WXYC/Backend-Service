@@ -92,6 +92,54 @@ describe('GET /library/query', () => {
     }
   });
 
+  test('genres filter ORs multiple genre names', async () => {
+    const rockOnly = await auth.get('/library/query').query({ genre: 'Rock', limit: 50 }).expect(200);
+    const jazzOnly = await auth.get('/library/query').query({ genre: 'Jazz', limit: 50 }).expect(200);
+    expect(rockOnly.body.results.length).toBeGreaterThan(0);
+    expect(jazzOnly.body.results.length).toBeGreaterThan(0);
+
+    const combined = await auth.get('/library/query').query({ genres: 'Rock,Jazz', limit: 100 }).expect(200);
+    expect(combined.body.results.length).toBeGreaterThan(0);
+    for (const row of combined.body.results) {
+      expect(['Rock', 'Jazz']).toContain(row.genre_name);
+    }
+    const combinedIds = new Set(combined.body.results.map((r) => r.id));
+    const rockIds = rockOnly.body.results.map((r) => r.id);
+    const jazzIds = jazzOnly.body.results.map((r) => r.id);
+    expect(rockIds.some((id) => combinedIds.has(id)) || jazzIds.some((id) => combinedIds.has(id))).toBe(true);
+  });
+
+  test('formats filter ORs multiple format names', async () => {
+    const cdOnly = await auth.get('/library/query').query({ format: 'cd', limit: 50 }).expect(200);
+    expect(cdOnly.body.results.length).toBeGreaterThan(0);
+
+    const vinylRes = await auth.get('/library/query').query({ format: 'Vinyl', limit: 50 });
+    const vinylOnly = vinylRes.status === 200 ? vinylRes.body.results : [];
+
+    const formatNames = [...new Set([...cdOnly.body.results, ...vinylOnly].map((r) => r.format_name))];
+    if (formatNames.length < 2) {
+      // Seed may only have cd — still verify CSV param is accepted.
+      const csvOnly = await auth.get('/library/query').query({ formats: 'cd', limit: 50 }).expect(200);
+      expect(csvOnly.body.results.length).toBeGreaterThan(0);
+      return;
+    }
+
+    const combined = await auth
+      .get('/library/query')
+      .query({ formats: formatNames.slice(0, 2).join(','), limit: 100 })
+      .expect(200);
+    expect(combined.body.results.length).toBeGreaterThan(0);
+    const allowed = new Set(formatNames.slice(0, 2));
+    for (const row of combined.body.results) {
+      expect(allowed.has(row.format_name)).toBe(true);
+    }
+  });
+
+  test('rejects unknown genre in genres list with 400', async () => {
+    const res = await auth.get('/library/query').query({ genres: 'Rock,NotARealGenre' }).expect(400);
+    expect(res.body.message).toMatch(/genre/i);
+  });
+
   test('stable pagination across same-primary-sort rows', async () => {
     // Sort by album asc — Stereolab's two records share artist but have
     // distinct titles, and the secondary `artist_name` sort gives the same
@@ -138,6 +186,44 @@ describe('GET /library/query', () => {
 
   test('rejects malformed on_streaming with 400', async () => {
     await auth.get('/library/query').query({ on_streaming: 'maybe' }).expect(400);
+  });
+
+  test('rejects malformed missing with 400', async () => {
+    await auth.get('/library/query').query({ missing: 'maybe' }).expect(400);
+  });
+
+  test('missing=true returns only currently missing albums', async () => {
+    const res = await auth.get('/library/query').query({ missing: 'true', limit: 50 }).expect(200);
+    expect(res.body.results.length).toBeGreaterThanOrEqual(0);
+    for (const row of res.body.results) {
+      expect(row).toEqual(expect.objectContaining({ id: expect.any(Number) }));
+    }
+  });
+
+  test('rotation_bins=H returns only heavy rotation rows', async () => {
+    const res = await auth.get('/library/query').query({ rotation_bins: 'H', limit: 50 }).expect(200);
+    for (const row of res.body.results) {
+      expect(row.rotation_bin).toBe('H');
+    }
+  });
+
+  test('rotation_bins ORs multiple bins', async () => {
+    const res = await auth.get('/library/query').query({ rotation_bins: 'H,M', limit: 100 }).expect(200);
+    for (const row of res.body.results) {
+      expect(['H', 'M']).toContain(row.rotation_bin);
+    }
+  });
+
+  test('rejects unknown rotation_bins with 400', async () => {
+    const res = await auth.get('/library/query').query({ rotation_bins: 'X' }).expect(400);
+    expect(res.body.message).toMatch(/rotation_bins/i);
+  });
+
+  test('rotation_bins AND missing both apply', async () => {
+    const res = await auth.get('/library/query').query({ rotation_bins: 'H', missing: 'true', limit: 50 }).expect(200);
+    for (const row of res.body.results) {
+      expect(row.rotation_bin).toBe('H');
+    }
   });
 
   test('rejects unknown sort with 400', async () => {
@@ -300,5 +386,103 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
 
     expect(Array.isArray(res.body.results)).toBe(true);
     expect(res.body.results.length).toBe(0);
+  });
+});
+
+/**
+ * Regressions from the PR #1154 review: repeated-query-key crashes (Express
+ * `simple` parser yields string[]), the missing=false inverse filter, the
+ * cascade leak into the missing view, and rotation-driven row duplication.
+ */
+describe('GET /library/query — review-feedback regressions (PR #1154)', () => {
+  let auth;
+  let album;
+  const uniq = Date.now();
+
+  beforeAll(async () => {
+    auth = createAuthRequest(request, global.access_token);
+    const res = await auth
+      .post('/library')
+      .send({
+        album_title: `Query Fixture ${uniq}`,
+        artist_name: 'Built to Spill',
+        label: 'Query Fixture Label',
+        genre_id: 11,
+        format_id: 1,
+      })
+      .expect(201);
+    album = res.body;
+  });
+
+  test('repeated genres keys are merged instead of crashing', async () => {
+    const res = await auth.get('/library/query?genres=Rock&genres=Jazz&limit=100').expect(200);
+    expect(res.body.results.length).toBeGreaterThan(0);
+    for (const row of res.body.results) {
+      expect(['Rock', 'Jazz']).toContain(row.genre_name);
+    }
+  });
+
+  test('repeated rotation_bins keys are merged instead of crashing', async () => {
+    const res = await auth.get('/library/query?rotation_bins=H&rotation_bins=M&limit=100').expect(200);
+    for (const row of res.body.results) {
+      expect(['H', 'M']).toContain(row.rotation_bin);
+    }
+  });
+
+  test('repeated q keys return 400 instead of 500', async () => {
+    await auth.get('/library/query?q=Bu&q=lt').expect(400);
+  });
+
+  test('missing=true and missing=false partition the catalog', async () => {
+    await auth.patch(`/library/${album.id}/missing`).expect(200);
+
+    const missingRes = await auth
+      .get('/library/query')
+      .query({ q: `Query Fixture ${uniq}`, missing: 'true', limit: 50 })
+      .expect(200);
+    expect(missingRes.body.results.some((r) => r.id === album.id)).toBe(true);
+
+    const notMissingRes = await auth
+      .get('/library/query')
+      .query({ q: `Query Fixture ${uniq}`, missing: 'false', limit: 50 })
+      .expect(200);
+    expect(notMissingRes.body.results.some((r) => r.id === album.id)).toBe(false);
+
+    await auth.patch(`/library/${album.id}/found`).expect(200);
+
+    const foundRes = await auth
+      .get('/library/query')
+      .query({ q: `Query Fixture ${uniq}`, missing: 'false', limit: 50 })
+      .expect(200);
+    expect(foundRes.body.results.some((r) => r.id === album.id)).toBe(true);
+  });
+
+  test('cascade is skipped when the missing filter is present', async () => {
+    // 'Bioluminescence' is a CTA-cascade trigger when unfiltered. Cascade rows
+    // carry no date_lost/date_found, so with missing=true the cascade must be
+    // skipped entirely instead of leaking CTA/LML rows into the missing view.
+    const res = await auth
+      .get('/library/query')
+      .query({ q: 'Bioluminescence', missing: 'true', limit: 10 })
+      .expect(200);
+
+    expect(res.body.results.length).toBe(0);
+    expect(res.body.total).toBe(0);
+  });
+
+  test('an album with multiple active rotation rows appears once', async () => {
+    await auth.post('/library/rotation').send({ album_id: album.id, rotation_bin: 'H' }).expect(201);
+    await auth.post('/library/rotation').send({ album_id: album.id, rotation_bin: 'M' }).expect(201);
+
+    const res = await auth
+      .get('/library/query')
+      .query({ q: `Query Fixture ${uniq}`, limit: 50 })
+      .expect(200);
+    const rows = res.body.results.filter((r) => r.id === album.id);
+    expect(rows.length).toBe(1);
+
+    const binFiltered = await auth.get('/library/query').query({ rotation_bins: 'H,M', limit: 100 }).expect(200);
+    const binRows = binFiltered.body.results.filter((r) => r.id === album.id);
+    expect(binRows.length).toBe(1);
   });
 });

@@ -54,6 +54,12 @@ library_route.get(
 
 library_route.post('/artists', requirePermissions({ catalog: ['write'] }), libraryController.addArtist);
 
+library_route.get(
+  '/artists/search',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.searchArtistsInGenre
+);
+
 library_route.get('/artists/peek-code', requirePermissions({ catalog: ['write'] }), libraryController.peekArtistNumber);
 
 library_route.get('/formats', requirePermissions({ catalog: ['read'] }), libraryController.getFormats);
@@ -65,6 +71,8 @@ library_route.get('/genres', requirePermissions({ catalog: ['read'] }), libraryC
 library_route.post('/genres', requirePermissions({ catalog: ['write'] }), libraryController.addGenre);
 
 library_route.get('/info', requirePermissions({ catalog: ['read'] }), libraryController.getAlbum);
+
+library_route.patch('/:id', requirePermissions({ catalog: ['write'] }), libraryController.updateAlbum);
 
 library_route.patch('/:id/missing', requirePermissions({ catalog: ['write'] }), libraryController.markMissing);
 

@@ -216,6 +216,17 @@ INSERT INTO wxyc_schema.library(
     VALUES (8, 15, 1, 'Confield', 1,
             'discogs:release:4080', 0.9, NOW());
 
+-- Jazz row for GET /library/query genres-filter integration tests (OR Rock,Jazz).
+INSERT INTO wxyc_schema.artists(artist_name, alphabetical_name, code_letters)
+  VALUES ('Miles Davis', 'Davis, Miles', 'DA');
+
+INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
+  VALUES (9, 7, 1);
+
+INSERT INTO wxyc_schema.library(
+    artist_id, genre_id, format_id, album_title, code_number)
+    VALUES (9, 7, 1, 'Kind of Blue', 1);
+
 -- Mirror the A.2 backfill outcome for all seeded library rows so the new
 -- tsvector path (which reads library.artist_name directly) and the trigram
 -- fallback (which uses the GIN index on library.artist_name) have populated

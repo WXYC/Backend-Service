@@ -1,7 +1,8 @@
 import * as Sentry from '@sentry/node';
-import { sql, type SQL } from 'drizzle-orm';
+import { inArray, sql, type SQL } from 'drizzle-orm';
 import {
   db,
+  library,
   library_artist_view,
   genres,
   format as formatTable,
@@ -23,6 +24,10 @@ import WxycError from '../utils/error.js';
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
 export type CatalogOrder = 'asc' | 'desc';
 
+/** Bins exposed as catalog tag filters (excludes New). */
+export const VALID_ROTATION_BINS = ['S', 'L', 'M', 'H'] as const;
+export type CatalogRotationBin = (typeof VALID_ROTATION_BINS)[number];
+
 export type LibraryQueryParams = {
   q: string;
   page: number;
@@ -30,8 +35,14 @@ export type LibraryQueryParams = {
   sort: CatalogSort;
   order: CatalogOrder;
   on_streaming?: boolean;
-  genre?: string;
-  format?: string;
+  /** When true, only albums currently marked missing in the library. */
+  missing?: boolean;
+  /** OR filter — empty/undefined means no genre constraint. */
+  genres?: string[];
+  /** OR filter — empty/undefined means no format constraint. */
+  formats?: string[];
+  /** OR filter — active rotation_bin must be one of these values. */
+  rotation_bins?: CatalogRotationBin[];
 };
 
 export type AlbumSearchResultRow = {
@@ -132,7 +143,7 @@ export function passesCascadeGate(trimmedQ: string, conditions: SearchCondition<
 export async function searchLibrary(
   params: LibraryQueryParams
 ): Promise<{ results: AlbumSearchResultRow[]; total: number }> {
-  await validateEnumFilters(params.genre, params.format);
+  await validateEnumFilters(params.genres, params.formats);
 
   const conditions = parseSearchQuery(params.q, CATALOG_PARSER_CONFIG);
   // Alias is keyed on the raw `q` (matched as a single string in the
@@ -250,13 +261,19 @@ export async function searchLibrary(
 
     dataQuery = sql`
       ${cte}
-      ${unionBody}
+      SELECT * FROM (
+        SELECT DISTINCT ON (id) * FROM (${unionBody}) AS raw
+        ORDER BY id ASC, rotation_bin ASC
+      ) AS deduped
       ORDER BY ${orderBy}
       LIMIT ${params.limit} OFFSET ${offset}
     `;
     countQuery = sql`
       ${cte}
-      SELECT COUNT(*)::int AS total FROM (${unionBody}) alias_search
+      SELECT COUNT(*)::int AS total FROM (
+        SELECT DISTINCT ON (id) id FROM (${unionBody}) AS raw
+        ORDER BY id ASC, rotation_bin ASC
+      ) AS deduped
     `;
   } else {
     // Alias OFF (legacy path). Single SELECT against library_artist_view,
@@ -266,8 +283,8 @@ export async function searchLibrary(
     const fromClause = where
       ? sql`FROM ${library_artist_view} ${albumPlaysJoin} WHERE ${where}`
       : sql`FROM ${library_artist_view} ${albumPlaysJoin}`;
-    const orderBy = sql`${SORT_COLUMNS[params.sort]} ${orderDirection}, ${SECONDARY_SORT[params.sort]} ASC, ${library_artist_view.id} ASC`;
-    dataQuery = sql`
+    const orderBy = sql`${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
+    const innerSelect = sql`
       SELECT
         ${library_artist_view.id} AS id,
         ${library_artist_view.add_date} AS add_date,
@@ -285,10 +302,21 @@ export async function searchLibrary(
         ${library_artist_view.on_streaming} AS on_streaming,
         ${library_artist_view.album_artist} AS album_artist
       ${fromClause}
+    `;
+    dataQuery = sql`
+      SELECT * FROM (
+        SELECT DISTINCT ON (id) * FROM (${innerSelect}) AS raw
+        ORDER BY id ASC, rotation_bin ASC
+      ) AS deduped
       ORDER BY ${orderBy}
       LIMIT ${params.limit} OFFSET ${offset}
     `;
-    countQuery = sql`SELECT COUNT(*)::int AS total ${fromClause}`;
+    countQuery = sql`
+      SELECT COUNT(*)::int AS total FROM (
+        SELECT DISTINCT ON (id) id FROM (${innerSelect}) AS raw
+        ORDER BY id ASC, rotation_bin ASC
+      ) AS deduped
+    `;
   }
 
   const [dataRows, countRows] = await Promise.all([db.execute(dataQuery), db.execute(countQuery)]);
@@ -303,6 +331,8 @@ export async function searchLibrary(
   // LML's `Semaphore(5) + TokenBucket(50/min)` chokepoint; pagination beyond
   // page 0 stays empty so clients don't scroll a bounded fallback list.
   if (params.page !== 0) return { results, total };
+  // Cascade rows carry no date_lost/date_found — skip when missing filter is set.
+  if (params.missing !== undefined) return { results, total };
   const trimmed = params.q.trim();
   if (!passesCascadeGate(trimmed, conditions)) return { results, total };
 
@@ -329,8 +359,19 @@ async function runCascade(params: LibraryQueryParams, q: string): Promise<AlbumS
   // in-memory over the bounded fallback list before serializing.
   const filtered = cascade.filter((row) => {
     if (params.on_streaming !== undefined && row.on_streaming !== params.on_streaming) return false;
-    if (params.genre !== undefined && row.genre_name !== params.genre) return false;
-    if (params.format !== undefined && row.format_name !== params.format) return false;
+    if (params.genres !== undefined && params.genres.length > 0 && !params.genres.includes(row.genre_name)) {
+      return false;
+    }
+    if (params.formats !== undefined && params.formats.length > 0 && !params.formats.includes(row.format_name)) {
+      return false;
+    }
+    if (
+      params.rotation_bins !== undefined &&
+      params.rotation_bins.length > 0 &&
+      (row.rotation_bin === null || !params.rotation_bins.includes(row.rotation_bin as CatalogRotationBin))
+    ) {
+      return false;
+    }
     return true;
   });
   if (filtered.length === 0) return [];
@@ -504,11 +545,29 @@ function buildFilterClause(params: LibraryQueryParams): SQL | null {
   if (params.on_streaming !== undefined) {
     parts.push(sql`${library_artist_view.on_streaming} = ${params.on_streaming}`);
   }
-  if (params.genre !== undefined) {
-    parts.push(sql`${library_artist_view.genre_name} = ${params.genre}`);
+  if (params.missing === true) {
+    parts.push(sql`EXISTS (
+      SELECT 1 FROM ${library}
+      WHERE ${library.id} = ${library_artist_view.id}
+        AND ${library.date_lost} IS NOT NULL
+        AND (${library.date_found} IS NULL OR ${library.date_found} < ${library.date_lost})
+    )`);
+  } else if (params.missing === false) {
+    parts.push(sql`NOT EXISTS (
+      SELECT 1 FROM ${library}
+      WHERE ${library.id} = ${library_artist_view.id}
+        AND ${library.date_lost} IS NOT NULL
+        AND (${library.date_found} IS NULL OR ${library.date_found} < ${library.date_lost})
+    )`);
   }
-  if (params.format !== undefined) {
-    parts.push(sql`${library_artist_view.format_name} = ${params.format}`);
+  if (params.genres !== undefined && params.genres.length > 0) {
+    parts.push(inArray(library_artist_view.genre_name, params.genres));
+  }
+  if (params.formats !== undefined && params.formats.length > 0) {
+    parts.push(inArray(library_artist_view.format_name, params.formats));
+  }
+  if (params.rotation_bins !== undefined && params.rotation_bins.length > 0) {
+    parts.push(inArray(library_artist_view.rotation_bin, params.rotation_bins));
   }
   if (parts.length === 0) return null;
   let result = parts[0];
@@ -562,17 +621,59 @@ export class UnknownEnumError extends WxycError {
   }
 }
 
-async function validateEnumFilters(genre?: string, format?: string): Promise<void> {
-  if (genre !== undefined) {
+async function validateEnumFilters(genres?: string[], formats?: string[]): Promise<void> {
+  if (genres !== undefined && genres.length > 0) {
     const set = await getGenreSet();
-    if (!set.has(genre)) {
-      throw new UnknownEnumError(`Unknown genre: ${genre}`);
+    for (const genre of genres) {
+      if (!set.has(genre)) {
+        throw new UnknownEnumError(`Unknown genre: ${genre}`);
+      }
     }
   }
-  if (format !== undefined) {
+  if (formats !== undefined && formats.length > 0) {
     const set = await getFormatSet();
-    if (!set.has(format)) {
-      throw new UnknownEnumError(`Unknown format: ${format}`);
+    for (const format of formats) {
+      if (!set.has(format)) {
+        throw new UnknownEnumError(`Unknown format: ${format}`);
+      }
     }
   }
+}
+
+/** Parse comma-separated rotation bin codes; validates against active bins. */
+export function parseRotationBinsQueryList(
+  ...raw: (string | string[] | undefined)[]
+): CatalogRotationBin[] | undefined {
+  const parsed = parseEnumQueryList(...raw);
+  if (!parsed) return undefined;
+  const valid = new Set<string>(VALID_ROTATION_BINS);
+  for (const bin of parsed) {
+    if (!valid.has(bin)) {
+      throw new WxycError(`rotation_bins must be one of: ${VALID_ROTATION_BINS.join(', ')}`, 400);
+    }
+  }
+  return parsed as CatalogRotationBin[];
+}
+
+/**
+ * Parse comma-separated enum query values; trims and dedupes. Accepts
+ * `string[]` per value because Express's `simple` query parser yields arrays
+ * for repeated keys (`?genres=Rock&genres=Jazz`).
+ */
+export function parseEnumQueryList(...raw: (string | string[] | undefined)[]): string[] | undefined {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of raw) {
+    if (!value) continue;
+    for (const piece of Array.isArray(value) ? value : [value]) {
+      if (typeof piece !== 'string') continue;
+      for (const part of piece.split(',')) {
+        const trimmed = part.trim();
+        if (!trimmed || seen.has(trimmed)) continue;
+        seen.add(trimmed);
+        out.push(trimmed);
+      }
+    }
+  }
+  return out.length > 0 ? out : undefined;
 }

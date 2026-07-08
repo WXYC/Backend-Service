@@ -981,6 +981,181 @@ paths:
         '200':
           description: Successfully added album
 
+  /library/query:
+    get:
+      summary: Query-builder search over the catalog
+      parameters:
+        - name: q
+          in: query
+          description: 'Search query; supports artist:/album:/label: prefixes, quoted exact match, and NOT'
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [artist, album, plays, date]
+            default: album
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: asc
+        - name: on_streaming
+          in: query
+          schema:
+            type: boolean
+        - name: missing
+          in: query
+          description: 'true: only albums currently marked missing; false: only non-missing albums'
+          schema:
+            type: boolean
+        - name: genre
+          in: query
+          description: Single genre name (alias for genres)
+          schema:
+            type: string
+        - name: genres
+          in: query
+          description: Comma-separated genre names, ORed together
+          schema:
+            type: string
+        - name: format
+          in: query
+          description: Single format name (alias for formats)
+          schema:
+            type: string
+        - name: formats
+          in: query
+          description: Comma-separated format names, ORed together
+          schema:
+            type: string
+        - name: rotation_bins
+          in: query
+          description: Comma-separated rotation bin codes (S, L, M, H), ORed together
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated catalog search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AlbumView'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  totalPages:
+                    type: integer
+        '400':
+          description: Invalid query parameter
+
+  /library/{id}:
+    patch:
+      summary: Partially update an album (only provided fields are written)
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: At least one field must be provided
+              properties:
+                album_title:
+                  type: string
+                label:
+                  type: string
+                label_id:
+                  type: integer
+                  nullable: true
+                  description: Must reference an existing label; null clears the label
+                genre_id:
+                  type: integer
+                format_id:
+                  type: integer
+                artist_id:
+                  type: integer
+                alternate_artist_name:
+                  type: string
+                  nullable: true
+                disc_quantity:
+                  type: integer
+                  minimum: 1
+                  maximum: 99
+      responses:
+        '200':
+          description: Updated album
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Album'
+        '400':
+          description: Invalid field value or no updatable fields provided
+        '404':
+          description: Album or artist not found
+
+  /library/{id}/missing:
+    patch:
+      summary: Mark an album as missing
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Updated album
+        '404':
+          description: Album not found
+
+  /library/{id}/found:
+    patch:
+      summary: Mark an album as found
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Updated album
+        '404':
+          description: Album not found
+
   /library/catalog:
     get:
       summary: Bulk catalog export (gzipped NDJSON, conditional-GET)
@@ -1147,6 +1322,57 @@ paths:
       responses:
         '200':
           description: Successfully added artist
+
+  /library/artists/search:
+    get:
+      summary: Prefix-search artists within a genre (catalog add-entry autocomplete)
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - in: query
+          name: genre_id
+          required: true
+          schema:
+            type: integer
+        - in: query
+          name: q
+          required: true
+          description: Prefix to match against artist names (minimum 2 characters)
+          schema:
+            type: string
+            minLength: 2
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 10
+      responses:
+        '200':
+          description: Matching artists with their per-genre code numbers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artists:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        artist_name:
+                          type: string
+                        code_letters:
+                          type: string
+                        code_number:
+                          type: integer
+        '400':
+          description: Invalid genre_id or q
+        '404':
+          description: Genre not found
 
   /library/artists/peek-code:
     get:

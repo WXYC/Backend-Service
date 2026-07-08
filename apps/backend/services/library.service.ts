@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
@@ -1495,6 +1495,50 @@ export const getArtistNameById = async (artist_id: number): Promise<string | nul
   return response[0]?.artist_name ?? null;
 };
 
+export type ArtistInGenreSearchRow = {
+  id: number;
+  artist_name: string;
+  code_letters: string;
+  code_number: number;
+};
+
+/** Escape LIKE/ILIKE metacharacters so user input matches literally. */
+const escapeLikePattern = (value: string): string => value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+
+/**
+ * Prefix search for artists in a genre (catalog add-entry autocomplete).
+ * `code_number` is the artist's number within that genre (`artist_genre_code`).
+ */
+export const searchArtistsInGenre = async (
+  genre_id: number,
+  q: string,
+  limit: number
+): Promise<ArtistInGenreSearchRow[]> => {
+  const prefix = q.trim();
+  if (prefix.length < 2) {
+    return [];
+  }
+
+  const cappedLimit = Math.min(20, Math.max(1, limit));
+
+  // Escape %/_ so e.g. q='%a' can't short the prefix-search contract into a
+  // contains-anything scan (review issue 14).
+  const pattern = escapeLikePattern(prefix) + '%';
+
+  return db
+    .select({
+      id: artists.id,
+      artist_name: artists.artist_name,
+      code_letters: artists.code_letters,
+      code_number: genre_artist_crossreference.artist_genre_code,
+    })
+    .from(artists)
+    .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(and(eq(genre_artist_crossreference.genre_id, genre_id), sql`${artists.artist_name} ILIKE ${pattern}`))
+    .orderBy(asc(artists.artist_name))
+    .limit(cappedLimit);
+};
+
 export const artistIdFromName = async (artist_name: string, genre_id: number): Promise<number> => {
   const response = await db
     .select({ id: artists.id })
@@ -1590,18 +1634,129 @@ export const generateArtistNumber = async (code_letters: string, genre_id: numbe
   return artist_genre_code;
 };
 
+/**
+ * Partial-update payload for PATCH /library/:id. Every field is optional —
+ * `updateAlbumInDB` only SETs keys that are present, so omitted fields are
+ * never overwritten (PR #1154 review: a title-typo fix must not reset
+ * disc_quantity to 1 or wipe alternate_artist_name / label_id).
+ */
+export type UpdateAlbumRow = {
+  album_title?: string;
+  label?: string | null;
+  label_id?: number | null;
+  genre_id?: number;
+  format_id?: number;
+  artist_id?: number;
+  artist_name?: string;
+  alternate_artist_name?: string | null;
+  disc_quantity?: number;
+  code_number?: number;
+};
+
+export const updateAlbumInDB = async (
+  album_id: number,
+  updates: UpdateAlbumRow,
+  opts?: { resetEnrichment?: boolean }
+) => {
+  const set: Record<string, unknown> = { last_modified: sql`NOW()` };
+  for (const key of [
+    'album_title',
+    'label',
+    'label_id',
+    'genre_id',
+    'format_id',
+    'artist_id',
+    'artist_name',
+    'alternate_artist_name',
+    'disc_quantity',
+    'code_number',
+  ] as const) {
+    if (updates[key] !== undefined) set[key] = updates[key];
+  }
+  // Identity-affecting edits invalidate LML-derived columns: the old
+  // on_streaming / artwork / canonical-entity linkage belongs to the previous
+  // (artist, title) identity. The controller re-fires enrichment after the
+  // write; nulling first means a failed lookup leaves the row visibly
+  // unenriched instead of silently bound to the wrong identity.
+  if (opts?.resetEnrichment) {
+    set.on_streaming = null;
+    set.artwork_url = null;
+    set.canonical_entity_id = null;
+    set.canonical_entity_confidence = null;
+    set.canonical_entity_resolved_at = null;
+  }
+  const result = await db.update(library).set(set).where(eq(library.id, album_id)).returning({ id: library.id });
+  return result[0];
+};
+
+/** Raw library row used by PATCH /library/:id to diff incoming fields. */
+export const getLibraryRowById = async (album_id: number) => {
+  const rows = await db
+    .select({
+      id: library.id,
+      artist_id: library.artist_id,
+      genre_id: library.genre_id,
+      format_id: library.format_id,
+      album_title: library.album_title,
+      label: library.label,
+      label_id: library.label_id,
+      alternate_artist_name: library.alternate_artist_name,
+      disc_quantity: library.disc_quantity,
+      code_number: library.code_number,
+      artist_name: library.artist_name,
+    })
+    .from(library)
+    .where(eq(library.id, album_id))
+    .limit(1);
+  return rows[0];
+};
+
+/** True when `artist_id` already owns an album with this `code_number` (excluding `exclude_album_id`). */
+export const albumCodeNumberTaken = async (
+  artist_id: number,
+  code_number: number,
+  exclude_album_id: number
+): Promise<boolean> => {
+  const rows = await db
+    .select({ id: library.id })
+    .from(library)
+    .where(
+      and(eq(library.artist_id, artist_id), eq(library.code_number, code_number), ne(library.id, exclude_album_id))
+    )
+    .limit(1);
+  return rows.length > 0;
+};
+
+export const artistExistsInGenre = async (artist_id: number, genre_id: number): Promise<boolean> => {
+  const rows = await db
+    .select({ artist_id: genre_artist_crossreference.artist_id })
+    .from(genre_artist_crossreference)
+    .where(
+      and(eq(genre_artist_crossreference.artist_id, artist_id), eq(genre_artist_crossreference.genre_id, genre_id))
+    )
+    .limit(1);
+  return rows.length > 0;
+};
+
 export const getAlbumFromDB = async (album_id: number) => {
   const album = await db
     .select({
       id: library.id,
+      artist_id: library.artist_id,
+      genre_id: library.genre_id,
+      format_id: library.format_id,
       code_letters: artists.code_letters,
       code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       artist_name: artists.artist_name,
       alphabetical_name: artists.alphabetical_name,
       album_title: library.album_title,
+      label: library.label,
       record_label: library.label,
       label_id: library.label_id,
+      alternate_artist_name: library.alternate_artist_name,
+      disc_quantity: library.disc_quantity,
+      album_artist: library.album_artist,
       plays: library.plays,
       add_date: library.add_date,
       last_modified: library.last_modified,
@@ -1656,6 +1811,11 @@ export const markAlbumFound = async (album_id: number) => {
 export const getGenresFromDB = async () => {
   const genreCollection = await db.select().from(genres);
   return genreCollection;
+};
+
+export const genreExists = async (genre_id: number): Promise<boolean> => {
+  const rows = await db.select({ id: genres.id }).from(genres).where(eq(genres.id, genre_id)).limit(1);
+  return rows.length > 0;
 };
 
 export const insertGenre = async (genre: NewGenre) => {

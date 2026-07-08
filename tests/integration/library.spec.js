@@ -1102,6 +1102,38 @@ describe('Library artist_name cascade trigger (A.3 / 0060)', () => {
   });
 });
 
+describe('Library Artists Search', () => {
+  let auth;
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+  });
+
+  test('searches artists in a genre by prefix', async () => {
+    const res = await auth.get('/library/artists/search').query({ genre_id: 11, q: 'Bu', limit: 10 }).expect(200);
+
+    expect(res.body.artists).toBeDefined();
+    expect(Array.isArray(res.body.artists)).toBe(true);
+    expect(res.body.artists.length).toBeGreaterThan(0);
+    const built = res.body.artists.find((a) => a.artist_name.toLowerCase().includes('built'));
+    expect(built).toBeDefined();
+    expectFields(built, 'id', 'artist_name', 'code_letters', 'code_number');
+    expect(built.code_letters).toBe('BU');
+  });
+
+  test('returns 400 when q is too short', async () => {
+    const res = await auth.get('/library/artists/search').query({ genre_id: 11, q: 'B' }).expect(400);
+
+    expectErrorContains(res, 'q');
+  });
+
+  test('returns 400 when genre_id is invalid', async () => {
+    const res = await auth.get('/library/artists/search').query({ genre_id: 0, q: 'Bu' }).expect(400);
+
+    expectErrorContains(res, 'genre_id');
+  });
+});
+
 describe('Library Artists Peek Code', () => {
   let auth;
 
