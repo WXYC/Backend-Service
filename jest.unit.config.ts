@@ -31,6 +31,7 @@ const config: Config = {
     '^better-auth/plugins/access$': '<rootDir>/tests/mocks/better-auth-access.mock.ts',
     '^better-auth/plugins/organization/access$': '<rootDir>/tests/mocks/better-auth-org-access.mock.ts',
     '^better-auth/node$': '<rootDir>/tests/mocks/better-auth-node.mock.ts',
+    '^better-auth/api$': '<rootDir>/tests/mocks/better-auth-api.mock.ts',
     // Remove .js extensions from relative imports (ESM compatibility)
     '^(\\.{1,2}/.*)\\.(js)$': '$1',
   },

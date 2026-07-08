@@ -147,11 +147,7 @@ export async function completeOnboardingWithSession(
 ): Promise<CompleteOnboardingResult> {
   const session = await auth.api.getSession({ headers });
   if (!session?.user) {
-    throw new CompleteOnboardingError(
-      401,
-      'Sign in or use your invite link to complete onboarding',
-      'UNAUTHORIZED'
-    );
+    throw new CompleteOnboardingError(401, 'Sign in or use your invite link to complete onboarding', 'UNAUTHORIZED');
   }
 
   const user = await assertIncompleteUser(session.user.id);

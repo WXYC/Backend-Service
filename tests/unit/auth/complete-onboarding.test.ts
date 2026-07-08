@@ -30,6 +30,7 @@ import {
   completeOnboardingWithToken,
   completeOnboardingWithSession,
 } from '../../../apps/auth/complete-onboarding';
+import { APIError } from 'better-auth/api';
 
 const future = new Date(Date.now() + 60_000);
 const emptyHeaders = new Headers();
@@ -117,6 +118,20 @@ describe('completeOnboardingWithToken()', () => {
     await expect(
       completeOnboardingWithToken({ token: 'setup-token-abc', newPassword: 'NewPassword1' })
     ).rejects.toThrow('boom');
+    expect(mockUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it('maps a better-auth APIError from resetPassword onto CompleteOnboardingError', async () => {
+    mockResetPassword.mockRejectedValue(
+      new APIError(400, { message: 'Invalid or expired token', code: 'INVALID_TOKEN' }) as never
+    );
+
+    await expect(
+      completeOnboardingWithToken({ token: 'setup-token-abc', newPassword: 'NewPassword1' })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'INVALID_TOKEN',
+    });
     expect(mockUpdateUser).not.toHaveBeenCalled();
   });
 });
