@@ -864,6 +864,17 @@ export const getOnAirDJName = async (): Promise<string | null> => {
   return await resolveDjNameForShow(latest_show);
 };
 
+/**
+ * Whether the given user account is on air right now. Backs GET /flowsheet/on-air.
+ *
+ * This is a per-*user* liveness check: it asks whether `dj_id` is an active
+ * member of the open show's `show_djs` join. It therefore cannot answer for
+ * legacy/tubafrenzy-mirrored shows, whose on-air DJ has no `auth_user` row and
+ * no `show_djs` membership (their identity is `shows.legacy_dj_name`) — there is
+ * simply no `dj_id` to pass. The endpoint that surfaces legacy on-air identity
+ * is GET /flowsheet/djs-on-air via `getOnAirDJs`; this one is intentionally left
+ * account-scoped (BS#1547).
+ */
 export const getOnAirStatusForDJ = async (dj_id: string): Promise<boolean> => {
   const latest_show = await getLatestShow();
   if (!latest_show || latest_show.end_time !== null) {
@@ -881,6 +892,45 @@ export const getDJsInCurrentShow = async (): Promise<User[]> => {
   }
 
   return getDJsInShow(current_show.id, true);
+};
+
+/**
+ * The on-air DJ list backing GET /flowsheet/djs-on-air.
+ *
+ * When the open show has active `show_djs` rows (DJs with Backend-Service
+ * accounts, including co-hosts), returns each with their `auth_user.id` string
+ * and Anonymous-filtered `dj_name` — the pre-existing behavior, preserved
+ * byte-for-byte (a filtered-away name yields `dj_name: null`, as it always has).
+ *
+ * When the open show has NO account rows, it is a legacy/tubafrenzy-mirrored
+ * show whose DJ identity lives in `shows.legacy_dj_name`. Those shows previously
+ * reported an empty list (the "Off Air while a human DJ is live" bug); here they
+ * surface a single entry resolved via `resolveDjNameForShow` — the same
+ * precedence chain (`dj_name_override` → primary DJ's `user.djName` →
+ * `legacy_dj_name`) that `getOnAirDJName` uses for the banner — with a `null`
+ * `id` because there is no user account. Returns `[]` when off air (no open
+ * show) or when the open legacy show has no resolvable name.
+ *
+ * `id` is nullable because a legacy DJ has no `auth_user.id`; see wxyc-shared
+ * `OnAirDJ` (BS#1547).
+ */
+export const getOnAirDJs = async (): Promise<Array<{ id: string | null; dj_name: string | null }>> => {
+  const current_show = await getLatestShow();
+  if (!current_show || current_show.end_time !== null) {
+    return [];
+  }
+
+  const accountDJs = await getDJsInShow(current_show.id, true);
+  if (accountDJs.length > 0) {
+    return accountDJs.map((dj) => ({
+      id: dj.id as string,
+      dj_name: resolveDjDisplayName((dj.djName as string | null | undefined) ?? null),
+    }));
+  }
+
+  // Legacy/tubafrenzy-mirrored show: no account rows; identity is legacy_dj_name.
+  const legacyName = await resolveDjNameForShow(current_show);
+  return legacyName ? [{ id: null, dj_name: legacyName }] : [];
 };
 
 export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promise<User[]> => {
