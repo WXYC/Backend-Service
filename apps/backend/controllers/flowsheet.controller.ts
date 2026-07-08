@@ -1,5 +1,6 @@
 import { Request, RequestHandler, Response } from 'express';
 import { Mutex } from 'async-mutex';
+import * as Sentry from '@sentry/node';
 import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/database';
 
 // play_order is computed by the service layer, not provided by controllers
@@ -121,23 +122,36 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   const [entries, total, onAirDjName] = await Promise.all([
     flowsheet_service.getEntriesByPage(offset, limit),
     flowsheet_service.getEntryCount(),
-    flowsheet_service.getOnAirDJName(),
+    // Best-effort: the on-air banner is auxiliary, so a failure resolving it must
+    // not fail the whole flowsheet read. On error we report to Sentry and return
+    // `undefined`, which omits `on_air` below — clients decode an absent field as
+    // "unknown" and hide the banner, rather than the endpoint 500ing the playlist.
+    flowsheet_service.getOnAirDJName().catch((error: unknown) => {
+      Sentry.captureException(error);
+      return undefined;
+    }),
   ]);
 
   const totalPages = Math.ceil(total / limit);
 
   // `on_air` lets clients render the on-air banner without scanning the fetched
   // entry window for a show_start marker (which can fall outside a 30-entry
-  // page). An OnAirInfo object means a named DJ is live; `null` means confirmed
-  // automation. Only the default paginated branch carries it — the iOS app
-  // polls this branch. See wxyc-shared api.yaml FlowsheetV2PaginatedResponse.
+  // page). Three states, matching wxyc-shared api.yaml FlowsheetV2PaginatedResponse:
+  // an OnAirInfo object = a named DJ is live; `null` = confirmed automation; the
+  // field ABSENT = the banner query failed (unknown). Only the default paginated
+  // branch carries it — the iOS app polls this branch.
+  //
+  // Freshness note: this route is wrapped in conditionalGet(getLastModifiedAt),
+  // which 304s on the flowsheet watermark. A rare `on_air` change that writes no
+  // flowsheet row (e.g. a mid-show dj_name_override edit) can be masked behind a
+  // stale 304 until the next flowsheet mutation.
   res.status(200).json({
     entries: entries.map(flowsheet_service.transformToV2),
     total,
     page,
     limit,
     totalPages,
-    on_air: onAirDjName ? { dj_name: onAirDjName } : null,
+    ...(onAirDjName !== undefined && { on_air: onAirDjName ? { dj_name: onAirDjName } : null }),
   });
 };
 

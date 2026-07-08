@@ -846,6 +846,13 @@ export const getLatestShow = async (): Promise<Show | undefined> => {
  * while a human DJ is live" bug. `legacy_dj_name` is the authoritative identity
  * for those shows, and `resolveDjNameForShow` already reads it.
  *
+ * Known limitation (inherited from the `getLatestShow`-based on-air endpoints):
+ * legacy/tubafrenzy shows are created open (`end_time: null`) and closed later by
+ * the ETL. Between a legacy show actually ending and the ETL stamping `end_time`,
+ * this reports that DJ as live — i.e. `on_air` can name a just-departed DJ during
+ * real automation. That is the lesser evil versus the false-"Auto DJ" bug this
+ * fixes, and it is the practical limit of the "`null` means automation" guarantee.
+ *
  * @returns the on-air DJ's display name, or `null` when no show is open or the
  *   open show has no resolvable name.
  */
