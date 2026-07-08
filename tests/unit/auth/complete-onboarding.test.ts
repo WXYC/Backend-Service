@@ -81,9 +81,7 @@ describe('completeOnboarding()', () => {
       expiresAt: new Date(0),
     } as never);
 
-    await expect(
-      completeOnboarding({ token: 'expired-token', newPassword: 'NewPassword1' })
-    ).rejects.toMatchObject({
+    await expect(completeOnboarding({ token: 'expired-token', newPassword: 'NewPassword1' })).rejects.toMatchObject({
       statusCode: 400,
       code: 'INVALID_TOKEN',
     });
@@ -95,9 +93,7 @@ describe('completeOnboarding()', () => {
       hasCompletedOnboarding: true,
     } as never);
 
-    await expect(
-      completeOnboarding({ token: 'setup-token-abc', newPassword: 'NewPassword1' })
-    ).rejects.toMatchObject({
+    await expect(completeOnboarding({ token: 'setup-token-abc', newPassword: 'NewPassword1' })).rejects.toMatchObject({
       statusCode: 400,
       code: 'ONBOARDING_ALREADY_COMPLETE',
     });
@@ -117,8 +113,8 @@ describe('completeOnboarding()', () => {
   });
 
   it('rejects passwords shorter than the configured minimum', async () => {
-    await expect(
-      completeOnboarding({ token: 'setup-token-abc', newPassword: 'short1' })
-    ).rejects.toBeInstanceOf(CompleteOnboardingError);
+    await expect(completeOnboarding({ token: 'setup-token-abc', newPassword: 'short1' })).rejects.toBeInstanceOf(
+      CompleteOnboardingError
+    );
   });
 });

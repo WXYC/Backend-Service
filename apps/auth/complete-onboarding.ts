@@ -55,9 +55,7 @@ async function resolveUserIdFromToken(token: string): Promise<string> {
   return verification.value;
 }
 
-async function assertIncompleteUser(
-  userId: string
-): Promise<{ id: string; hasCompletedOnboarding?: boolean }> {
+async function assertIncompleteUser(userId: string): Promise<{ id: string; hasCompletedOnboarding?: boolean }> {
   const context = await auth.$context;
   const userRecord = await context.internalAdapter.findUserById(userId);
   if (!userRecord) {

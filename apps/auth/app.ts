@@ -16,11 +16,7 @@ import { rateLimitKeyFromRequest } from './rate-limit-key';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
-import {
-  CompleteOnboardingError,
-  completeOnboardingFromRequest,
-  headersFromExpress,
-} from './complete-onboarding';
+import { CompleteOnboardingError, completeOnboardingFromRequest, headersFromExpress } from './complete-onboarding';
 import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
