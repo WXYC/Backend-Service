@@ -15,9 +15,12 @@
  *   - Within a single run, batches paginate by `id` (last-id cursor).
  *     Across runs, the WHERE filter is what restarts — the cursor doesn't
  *     need to persist.
- *   - One LML failure is logged, counted as `lml_error`, and the loop
- *     continues. The row stays `metadata_attempt_at IS NULL`, so the
- *     next sweep (recurring drift-repair, #639 Phase 2) retries it.
+ *   - A per-row failure — an LML throw (`lml_error`) or a DB-write throw
+ *     (`enrich_error`, e.g. a mojibake title overflowing a varchar column,
+ *     BS#1011) — is logged, counted, and the loop continues. The row stays
+ *     `metadata_attempt_at IS NULL`, so the next sweep (recurring
+ *     drift-repair, #639 Phase 2) retries it; the id-cursor still advances
+ *     within the run, so one bad row can never wedge the drain.
  *   - Cooperative pause: WXYC has no quiet hours — there is always a DJ in
  *     the booth. Before each batch, the orchestrator probes `flowsheet` for
  *     any track row added in the last `LIVE_ACTIVITY_LOOKBACK_SECONDS`
@@ -191,9 +194,14 @@ export type Totals = {
   enriched_no_match: number;
   enriched_no_match_raced: number;
   lml_error: number;
+  // Enrich (DB-write) failure on a single row. Kept distinct from `lml_error`
+  // (upstream LML throw) so a run's log line separates "LML couldn't answer"
+  // from "we couldn't persist" — a spike in this bucket points at data, not
+  // the upstream (BS#1011: mojibake titles overflowing varchar(512) columns).
+  enrich_error: number;
 };
 
-export type ProcessOutcome = EnrichOutcome | 'lml_error';
+export type ProcessOutcome = EnrichOutcome | 'lml_error' | 'enrich_error';
 
 /**
  * Outcome plus cache provenance, so the per-row loop can skip the LML
@@ -213,9 +221,18 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 /**
  * Drive a single row through lookup → enrich. The result is the outcome
- * status (or 'lml_error' when LML threw). Errors are logged and consumed;
- * they do not bubble up so a single bad row cannot abort the run. The row
+ * status: 'lml_error' when the LML lookup threw, 'enrich_error' when the
+ * per-row DB write threw. BOTH failures are logged, captured, and consumed
+ * — neither bubbles up, so a single bad row cannot abort the run. The row
  * stays `metadata_attempt_at IS NULL` so the next sweep retries it.
+ *
+ * The enrich catch is load-bearing, not defensive boilerplate: without it a
+ * single row whose synthesized search URL overflows a varchar(512) column
+ * (mojibake titles from the legacy latin1→UTF-8 ETL) throws mid-batch, the
+ * throw propagates to `main` → exit 1, and because the failed UPDATE never
+ * stamps `metadata_attempt_at`, the id-cursor re-selects that same row as the
+ * smallest pending id on the next run and crashes again — a permanent stall
+ * (BS#1011). Isolating the throw here lets the cursor advance past it.
  */
 export const processRow = async (
   row: EnrichRow,
@@ -237,8 +254,20 @@ export const processRow = async (
     return { outcome: 'lml_error', cacheHit: false };
   }
 
-  const outcome = await deps.enrich(row, result.response);
-  return { outcome, cacheHit: result.cacheHit };
+  try {
+    const outcome = await deps.enrich(row, result.response);
+    return { outcome, cacheHit: result.cacheHit };
+  } catch (error) {
+    log('warn', 'enrich_error', `enrich failed for flowsheet.id=${row.id}`, {
+      flowsheet_id: row.id,
+      error_message: (error as Error).message,
+    });
+    captureError(error, 'enrich_error', { flowsheet_id: row.id, artist, album, track });
+    // Forward the lookup's real cacheHit (unlike the lml_error path, the
+    // lookup succeeded here): a cached hit made no LML call, so the caller
+    // should still skip the inter-row throttle.
+    return { outcome: 'enrich_error', cacheHit: result.cacheHit };
+  }
 };
 
 /**
@@ -278,7 +307,8 @@ const formatTotals = (totals: Totals): string =>
   `scanned=${totals.scanned} enriched_match=${totals.enriched_match} ` +
   `enriched_match_raced=${totals.enriched_match_raced} ` +
   `enriched_no_match=${totals.enriched_no_match} ` +
-  `enriched_no_match_raced=${totals.enriched_no_match_raced} lml_error=${totals.lml_error}`;
+  `enriched_no_match_raced=${totals.enriched_no_match_raced} lml_error=${totals.lml_error} ` +
+  `enrich_error=${totals.enrich_error}`;
 
 export const runBackfill = async (opts: {
   lookup: LookupFn;
@@ -313,6 +343,7 @@ export const runBackfill = async (opts: {
     enriched_no_match: 0,
     enriched_no_match_raced: 0,
     lml_error: 0,
+    enrich_error: 0,
   };
   let lastId = 0;
   let batchIndex = 0;
