@@ -27,11 +27,32 @@ type BaseTags = { repo: string; tool: string; run_id: string };
 
 let baseTags: BaseTags | null = null;
 
-// `@sentry/node` v10 silently produces zero spans when tracesSampleRate is unset.
+/**
+ * Resolve the Sentry traces sample rate for this cron.
+ *
+ * Unlike the sibling ETL crons (flowsheet-etl, album-level-backfill, …) whose
+ * loggers default an unset `SENTRY_TRACES_SAMPLE_RATE` to 0, this job defaults
+ * to 1.0 — matching the runtime apps (`apps/backend`, `apps/auth`) and the
+ * rotation-artist-backfill divergence pinned in PR #1459. The
+ * `flowsheet-metadata-backfill.run.totals` span this job emits (op
+ * `flowsheet-metadata-backfill.totals`) carries the `enrich_error` bucket —
+ * the data-corruption tell (#1561) — so it IS this job's alerting substrate.
+ * The #1560 wedge exited 1 nightly for ~2.5 weeks with nobody alerted;
+ * defaulting tracing to 0 leaves any span-based alert dead-on-arrival, the span
+ * never reaches the index, and the alert sits at "no data" forever.
+ *
+ * The downshift lever is preserved: an explicit, valid
+ * `SENTRY_TRACES_SAMPLE_RATE=0` still silences the job's spans. What changed is
+ * the resolved *default*: both an unset value AND a malformed / out-of-range
+ * one now yield 1.0 (the sibling yields 0 for both). Failing toward 1.0 rather
+ * than 0 is deliberate — a typo while retuning must not silently disable this
+ * job's observability, the very failure this fix addresses. Spans remain gated
+ * on `SENTRY_DSN`, so dev/CI runs (no DSN) emit nothing regardless of rate.
+ */
 export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
-  if (raw === undefined) return 0;
+  if (raw === undefined) return 1;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 0;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 1;
   return parsed;
 };
 
