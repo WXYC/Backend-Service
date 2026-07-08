@@ -160,9 +160,46 @@ if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') {
     }
   });
 
+  // Reset the seeded test_incomplete user for session-onboarding E2E
+  app.post('/auth/test/reset-incomplete-user', async (req, res) => {
+    try {
+      const userId =
+        typeof (req.body as { userId?: string })?.userId === 'string'
+          ? (req.body as { userId: string }).userId
+          : 'test-incomplete-id-0000000000001';
+      const tempPassword = 'temppass123';
+
+      const { auth } = await import('@wxyc/authentication');
+      const context = await auth.$context;
+      const passwordHash = await context.password.hash(tempPassword);
+
+      const { db, user, account, session } = await import('@wxyc/database');
+      const { eq } = await import('drizzle-orm');
+
+      await db
+        .update(user)
+        .set({
+          hasCompletedOnboarding: false,
+          realName: '',
+          djName: '',
+          updatedAt: new Date(),
+        })
+        .where(eq(user.id, userId));
+
+      await db.update(account).set({ password: passwordHash }).where(eq(account.userId, userId));
+
+      await db.delete(session).where(eq(session.userId, userId));
+
+      return res.json({ success: true, userId });
+    } catch (error) {
+      console.error('[TEST ENDPOINTS] Failed to reset incomplete user:', error);
+      return res.status(500).json({ error: 'Failed to reset incomplete user' });
+    }
+  });
+
   // Report session
   console.log(
-    '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session, /auth/test/confirm-user)'
+    '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session, /auth/test/confirm-user, /auth/test/reset-incomplete-user)'
   );
 }
 
