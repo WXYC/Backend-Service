@@ -95,7 +95,6 @@ import { provisionUser, ProvisionError } from '../../../apps/auth/provision-user
 const validInput = {
   email: 'newdj@test.wxyc.org',
   username: 'new_dj',
-  password: 'temppass123',
   name: 'New DJ',
   organizationSlug: 'test-org',
   role: 'dj',
@@ -179,9 +178,9 @@ describe('provisionUser()', () => {
     });
 
     it('should hash the password and link a credential account', async () => {
-      await provisionUser(validInput);
+      await provisionUser({ ...validInput, password: 'bootstrap-from-env' });
 
-      expect(mockPasswordHash).toHaveBeenCalledWith(validInput.password);
+      expect(mockPasswordHash).toHaveBeenCalledWith('bootstrap-from-env');
       expect(mockLinkAccount).toHaveBeenCalledWith(
         expect.objectContaining({
           accountId: fakeUser.id,
@@ -385,12 +384,16 @@ describe('provisionUser()', () => {
 
   describe('password input', () => {
     it('should hash a server-generated password when password is omitted', async () => {
-      const { password: _ignored, ...withoutPassword } = validInput;
-
-      await provisionUser(withoutPassword);
+      await provisionUser(validInput);
 
       expect(mockPasswordHash).toHaveBeenCalledWith(expect.any(String));
-      expect(mockPasswordHash.mock.calls[0][0]).not.toBe(validInput.password);
+      expect(mockPasswordHash.mock.calls[0][0]).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    });
+
+    it('should hash an explicit password when supplied internally', async () => {
+      await provisionUser({ ...validInput, password: 'bootstrap-from-env' });
+
+      expect(mockPasswordHash).toHaveBeenCalledWith('bootstrap-from-env');
     });
   });
 

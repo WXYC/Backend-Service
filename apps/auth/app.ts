@@ -16,7 +16,7 @@ import { rateLimitKeyFromRequest } from './rate-limit-key';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
-import { CompleteOnboardingError, completeOnboardingFromRequest, headersFromExpress } from './complete-onboarding';
+import { CompleteOnboardingError, completeOnboardingFromRequest } from './complete-onboarding';
 import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
@@ -220,14 +220,15 @@ app.post('/auth/admin/provision-user', async (req, res) => {
     if (missing.length > 0) {
       return res.status(400).json({ error: `Missing required fields: ${missing.join(', ')}` });
     }
-    if (password !== undefined && typeof password !== 'string') {
-      return res.status(400).json({ error: 'password must be a string when provided' });
+    if (password !== undefined) {
+      return res
+        .status(400)
+        .json({ error: 'password must not be supplied; users set their password via the invite onboarding flow' });
     }
 
     const result = await provisionUser({
       email: email as string,
       username: username as string,
-      password: password as string | undefined,
       name: name as string,
       organizationSlug: organizationSlug as string,
       role: role as string,
@@ -271,10 +272,7 @@ const lookupEmailHandler = async (req: Request, res: Response) => {
 
 const completeOnboardingHandler = async (req: Request, res: Response) => {
   try {
-    const result = await completeOnboardingFromRequest(
-      (req.body ?? {}) as Record<string, unknown>,
-      headersFromExpress(req)
-    );
+    const result = await completeOnboardingFromRequest((req.body ?? {}) as Record<string, unknown>);
     return res.json(result);
   } catch (error) {
     if (error instanceof CompleteOnboardingError) {

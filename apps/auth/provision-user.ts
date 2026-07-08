@@ -24,7 +24,7 @@ export class ProvisionError extends Error {
 export interface ProvisionUserInput {
   email: string;
   username: string;
-  /** When omitted, a random server-side credential is generated (never returned). */
+  /** Internal-only: createDefaultUser supplies an explicit bootstrap password. */
   password?: string;
   name: string;
   organizationSlug: string;

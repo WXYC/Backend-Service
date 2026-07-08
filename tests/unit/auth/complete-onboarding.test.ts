@@ -6,7 +6,6 @@ const mockUpdatePassword = jest.fn();
 const mockUpdateUser = jest.fn();
 const mockFindUserById = jest.fn();
 const mockPasswordHash = jest.fn();
-const mockGetSession = jest.fn();
 
 const mockAuthContext = {
   internalAdapter: {
@@ -25,9 +24,6 @@ const mockAuthContext = {
 jest.mock('@wxyc/authentication', () => ({
   auth: {
     $context: Promise.resolve(mockAuthContext),
-    api: {
-      getSession: (...args: unknown[]) => mockGetSession(...args),
-    },
   },
 }));
 
@@ -75,6 +71,13 @@ describe('completeOnboarding()', () => {
     );
   });
 
+  it('rejects missing setup tokens', async () => {
+    await expect(completeOnboarding({ token: '', newPassword: 'NewPassword1' })).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'INVALID_REQUEST',
+    });
+  });
+
   it('rejects expired setup tokens', async () => {
     mockFindVerificationValue.mockResolvedValue({
       value: 'user-id-001',
@@ -97,19 +100,6 @@ describe('completeOnboarding()', () => {
       statusCode: 400,
       code: 'ONBOARDING_ALREADY_COMPLETE',
     });
-  });
-
-  it('supports session fallback when no token is provided', async () => {
-    mockGetSession.mockResolvedValue({ user: { id: 'user-id-001' } } as never);
-
-    const result = await completeOnboarding({
-      newPassword: 'NewPassword1',
-      headers: new Headers({ cookie: 'session=test' }),
-    });
-
-    expect(result.userId).toBe('user-id-001');
-    expect(mockGetSession).toHaveBeenCalled();
-    expect(mockDeleteVerificationByIdentifier).not.toHaveBeenCalled();
   });
 
   it('rejects passwords shorter than the configured minimum', async () => {
