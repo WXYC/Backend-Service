@@ -5,6 +5,7 @@
  */
 
 import * as Sentry from '@sentry/node';
+import { randomBytes } from 'node:crypto';
 import { auth, formatUsernameError, validateUsername, WXYCRoles } from '@wxyc/authentication';
 import { db, user } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
@@ -23,12 +24,18 @@ export class ProvisionError extends Error {
 export interface ProvisionUserInput {
   email: string;
   username: string;
-  password: string;
+  /** When omitted, a random server-side credential is generated (never returned). */
+  password?: string;
   name: string;
   organizationSlug: string;
   role: string;
   realName?: string;
   djName?: string;
+}
+
+/** Unguessable bootstrap credential — DJs set their real password via invite token onboarding. */
+export function generateProvisionBootstrapPassword(): string {
+  return randomBytes(32).toString('base64url');
 }
 
 export interface ProvisionUserResult {
@@ -55,7 +62,8 @@ const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : S
  * sync, since bypassing better-auth's endpoint handler skips plugin hooks.
  */
 export async function provisionUser(input: ProvisionUserInput): Promise<ProvisionUserResult> {
-  const { email, username, password, name, organizationSlug, role, realName, djName } = input;
+  const { email, username, name, organizationSlug, role, realName, djName } = input;
+  const password = input.password ?? generateProvisionBootstrapPassword();
 
   // 1. Validate role
   if (!(role in WXYCRoles)) {
@@ -178,7 +186,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     let emailError: string | undefined;
     try {
       await auth.api.requestPasswordReset({
-        body: { email, redirectTo: `${frontendUrl}/login` },
+        body: { email, redirectTo: `${frontendUrl}/onboarding` },
         headers: new Headers({ origin: frontendUrl }),
       });
     } catch (error) {

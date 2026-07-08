@@ -16,6 +16,11 @@ import { rateLimitKeyFromRequest } from './rate-limit-key';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
+import {
+  CompleteOnboardingError,
+  completeOnboardingFromRequest,
+  headersFromExpress,
+} from './complete-onboarding';
 import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
@@ -213,17 +218,20 @@ app.post('/auth/admin/provision-user', async (req, res) => {
       string,
       unknown
     >;
-    const missing = ['email', 'username', 'password', 'name', 'organizationSlug', 'role'].filter(
+    const missing = ['email', 'username', 'name', 'organizationSlug', 'role'].filter(
       (f) => !req.body?.[f] || typeof req.body[f] !== 'string'
     );
     if (missing.length > 0) {
       return res.status(400).json({ error: `Missing required fields: ${missing.join(', ')}` });
     }
+    if (password !== undefined && typeof password !== 'string') {
+      return res.status(400).json({ error: 'password must be a string when provided' });
+    }
 
     const result = await provisionUser({
       email: email as string,
       username: username as string,
-      password: password as string,
+      password: password as string | undefined,
       name: name as string,
       organizationSlug: organizationSlug as string,
       role: role as string,
@@ -265,6 +273,23 @@ const lookupEmailHandler = async (req: Request, res: Response) => {
   }
 };
 
+const completeOnboardingHandler = async (req: Request, res: Response) => {
+  try {
+    const result = await completeOnboardingFromRequest(
+      (req.body ?? {}) as Record<string, unknown>,
+      headersFromExpress(req)
+    );
+    return res.json(result);
+  } catch (error) {
+    if (error instanceof CompleteOnboardingError) {
+      return res.status(error.statusCode).json({ error: error.message, code: error.code });
+    }
+    console.error('[COMPLETE ONBOARDING] Unexpected error:', error);
+    Sentry.captureException(error, { tags: { subsystem: 'complete-onboarding' } });
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 // Disable rate limiting in test environments to avoid flaky integration tests.
 // This matches the pattern used by the backend's rateLimiting middleware.
 // Positive-list gate (BS#1097): the AUTH_BYPASS / USE_MOCK_SERVICES escape
@@ -293,6 +318,7 @@ if (!isTestEnv) {
     '/auth/email-otp/send-verification-otp',
     '/auth/forget-password',
     '/auth/wxyc/lookup-email',
+    '/auth/wxyc/complete-onboarding',
   ];
 
   for (const path of rateLimitedPaths) {
@@ -316,6 +342,7 @@ if (!isTestEnv) {
 }
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
+app.post('/auth/wxyc/complete-onboarding', completeOnboardingHandler);
 
 // BS#1261 — request-line ban enforcement. Registered before the better-auth
 // handler so this specific path doesn't fall through to better-auth's

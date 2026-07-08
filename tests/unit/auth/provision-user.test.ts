@@ -383,12 +383,23 @@ describe('provisionUser()', () => {
     });
   });
 
+  describe('password input', () => {
+    it('should hash a server-generated password when password is omitted', async () => {
+      const { password: _ignored, ...withoutPassword } = validInput;
+
+      await provisionUser(withoutPassword);
+
+      expect(mockPasswordHash).toHaveBeenCalledWith(expect.any(String));
+      expect(mockPasswordHash.mock.calls[0][0]).not.toBe(validInput.password);
+    });
+  });
+
   describe('welcome email', () => {
     it('should trigger password reset flow after successful provisioning', async () => {
       await provisionUser(validInput);
 
       expect(mockRequestPasswordReset).toHaveBeenCalledWith({
-        body: { email: validInput.email, redirectTo: expect.stringContaining('/login') },
+        body: { email: validInput.email, redirectTo: expect.stringContaining('/onboarding') },
         headers: expect.any(Headers),
       });
     });
