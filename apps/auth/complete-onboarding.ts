@@ -28,6 +28,8 @@ export interface CompleteOnboardingInput {
 export interface CompleteOnboardingResult {
   status: true;
   userId: string;
+  email: string;
+  username?: string;
 }
 
 const trimOptional = (value: unknown): string | undefined => {
@@ -48,19 +50,26 @@ async function resolveUserIdFromToken(token: string): Promise<string> {
   return verification.value;
 }
 
-async function assertIncompleteUser(userId: string): Promise<{ id: string }> {
+type IncompleteUserRecord = {
+  id: string;
+  email: string;
+  username?: string;
+  hasCompletedOnboarding?: boolean;
+};
+
+async function assertIncompleteUser(userId: string): Promise<IncompleteUserRecord> {
   const context = await auth.$context;
   const userRecord = await context.internalAdapter.findUserById(userId);
   if (!userRecord) {
     throw new CompleteOnboardingError(404, 'User not found', 'USER_NOT_FOUND');
   }
 
-  const hasCompletedOnboarding = (userRecord as { hasCompletedOnboarding?: boolean }).hasCompletedOnboarding;
-  if (hasCompletedOnboarding === true) {
+  const user = userRecord as IncompleteUserRecord;
+  if (user.hasCompletedOnboarding === true) {
     throw new CompleteOnboardingError(400, 'Onboarding already completed', 'ONBOARDING_ALREADY_COMPLETE');
   }
 
-  return { id: userRecord.id };
+  return user;
 }
 
 export async function completeOnboarding(input: CompleteOnboardingInput): Promise<CompleteOnboardingResult> {
@@ -84,7 +93,7 @@ export async function completeOnboarding(input: CompleteOnboardingInput): Promis
   const userId = await resolveUserIdFromToken(token.trim());
   const verificationIdentifier = `reset-password:${token.trim()}`;
 
-  await assertIncompleteUser(userId);
+  const user = await assertIncompleteUser(userId);
 
   const hashedPassword = await context.password.hash(newPassword);
   await context.internalAdapter.updatePassword(userId, hashedPassword);
@@ -101,7 +110,12 @@ export async function completeOnboarding(input: CompleteOnboardingInput): Promis
 
   await context.internalAdapter.updateUser(userId, profileUpdate);
 
-  return { status: true, userId };
+  return {
+    status: true,
+    userId: user.id,
+    email: user.email,
+    username: user.username,
+  };
 }
 
 export async function completeOnboardingFromRequest(body: Record<string, unknown>): Promise<CompleteOnboardingResult> {

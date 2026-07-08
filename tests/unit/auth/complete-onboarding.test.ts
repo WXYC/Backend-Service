@@ -40,6 +40,8 @@ beforeEach(() => {
   } as never);
   mockFindUserById.mockResolvedValue({
     id: 'user-id-001',
+    email: 'dj@example.com',
+    username: 'testdj',
     hasCompletedOnboarding: false,
   } as never);
   mockUpdatePassword.mockResolvedValue(undefined as never);
@@ -56,7 +58,12 @@ describe('completeOnboarding()', () => {
       djName: 'DJ Jane',
     });
 
-    expect(result).toEqual({ status: true, userId: 'user-id-001' });
+    expect(result).toEqual({
+      status: true,
+      userId: 'user-id-001',
+      email: 'dj@example.com',
+      username: 'testdj',
+    });
     expect(mockFindVerificationValue).toHaveBeenCalledWith('reset-password:setup-token-abc');
     expect(mockPasswordHash).toHaveBeenCalledWith('NewPassword1');
     expect(mockUpdatePassword).toHaveBeenCalledWith('user-id-001', 'hashed-password');
