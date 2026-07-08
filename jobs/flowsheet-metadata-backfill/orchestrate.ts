@@ -46,6 +46,7 @@
  * `lml-fetch.ts:lookupMetadata` and `enrich.ts:applyEnrichment`.
  */
 
+import * as Sentry from '@sentry/node';
 import { sql, type SQL } from 'drizzle-orm';
 import {
   db,
@@ -314,6 +315,47 @@ const formatTotals = (totals: Totals): string =>
   `enriched_no_match_raced=${totals.enriched_no_match_raced} lml_error=${totals.lml_error} ` +
   `enrich_error=${totals.enrich_error}`;
 
+/**
+ * Project the run totals onto a Sentry span with numeric attributes set at
+ * creation time (per the BS#1081 convention — late `setAttribute` calls index
+ * numbers as strings and break sum/avg/p95 aggregation).
+ *
+ * The span carries an explicit `op` of `flowsheet-metadata-backfill.totals` so
+ * a Sentry alert filtering `span.op:flowsheet-metadata-backfill.*` actually
+ * matches it — without an `op` the span lands under a generic default op and
+ * the wildcard matches nothing (the BS#1428 finding, fixed in PR #1459 for the
+ * sibling rotation-artist-backfill). Every totals bucket is exposed as an
+ * attribute, including `enrich_error` — the per-row DB-write-failure count
+ * (#1561) that is the corruption tell the #1560 wedge needed. Before this the
+ * buckets surfaced only in the structured `finished` log; now they are
+ * queryable and alertable in Sentry. The name keeps the sibling
+ * `${JOB_NAME}.run.totals` shape for name-pattern dashboard grouping.
+ *
+ * Gated on tracing being enabled (`SENTRY_TRACES_SAMPLE_RATE`, which this cron
+ * defaults to 1.0 — see `logger.ts:resolveTracesSampleRate`) and on
+ * `SENTRY_DSN`, so dev/CI runs emit nothing.
+ */
+const projectTotalsSpan = (totals: Totals): void => {
+  Sentry.startSpan(
+    {
+      name: `${JOB_NAME}.run.totals`,
+      op: `${JOB_NAME}.totals`,
+      attributes: {
+        'backfill.scanned': totals.scanned,
+        'backfill.enriched_match': totals.enriched_match,
+        'backfill.enriched_match_raced': totals.enriched_match_raced,
+        'backfill.enriched_no_match': totals.enriched_no_match,
+        'backfill.enriched_no_match_raced': totals.enriched_no_match_raced,
+        'backfill.lml_error': totals.lml_error,
+        'backfill.enrich_error': totals.enrich_error,
+      },
+    },
+    () => {
+      /* observability-only span; attributes set at creation */
+    }
+  );
+};
+
 export const runBackfill = async (opts: {
   lookup: LookupFn;
   enrich: EnrichFn;
@@ -391,6 +433,19 @@ export const runBackfill = async (opts: {
 
   const finalCacheFields = readCacheFields(opts.cacheStats);
   log('info', 'finished', `${JOB_NAME} done. ${formatTotals(totals)}`, { ...totals, ...finalCacheFields });
+
+  // Emit the run-level totals span carrying every bucket (incl. enrich_error)
+  // as a numeric attribute, so the drain's health is queryable/alertable in
+  // Sentry — not just in the log line above (BS#1563). Wrapped so a Sentry SDK
+  // fault can never turn a successful drain into a non-zero exit.
+  try {
+    projectTotalsSpan(totals);
+  } catch (error) {
+    log('warn', 'totals_span_failed', 'projectTotalsSpan threw; totals already logged', {
+      error_message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   return { totals };
 };
 
