@@ -829,6 +829,41 @@ export const getLatestShow = async (): Promise<Show | undefined> => {
   return (await getNShows(1))[0];
 };
 
+/**
+ * Resolve the display name of the DJ currently on air, or `null` when the
+ * station is on automation.
+ *
+ * Backs the `on_air` field on the default paginated GET /flowsheet response.
+ * A show is "on air" when the latest show (`MAX(shows.id)`) has no `end_time`;
+ * its display name comes from `resolveDjNameForShow`, the same precedence chain
+ * (`dj_name_override` → primary DJ's `user.djName` → `legacy_dj_name`) used to
+ * denormalize DJ names onto flowsheet rows.
+ *
+ * Deliberately does NOT consult the `show_djs` join table the way
+ * `getDJsInCurrentShow`/`getOnAirStatusForDJ` do: tubafrenzy-mirrored shows have
+ * no `show_djs` rows (the DJ has no Backend-Service account), so a join-table
+ * read reports automation for essentially every legacy live show — the "AUTO DJ
+ * while a human DJ is live" bug. `legacy_dj_name` is the authoritative identity
+ * for those shows, and `resolveDjNameForShow` already reads it.
+ *
+ * Known limitation (inherited from the `getLatestShow`-based on-air endpoints):
+ * legacy/tubafrenzy shows are created open (`end_time: null`) and closed later by
+ * the ETL. Between a legacy show actually ending and the ETL stamping `end_time`,
+ * this reports that DJ as live — i.e. `on_air` can name a just-departed DJ during
+ * real automation. That is the lesser evil versus the false-"Auto DJ" bug this
+ * fixes, and it is the practical limit of the "`null` means automation" guarantee.
+ *
+ * @returns the on-air DJ's display name, or `null` when no show is open or the
+ *   open show has no resolvable name.
+ */
+export const getOnAirDJName = async (): Promise<string | null> => {
+  const latest_show = await getLatestShow();
+  if (!latest_show || latest_show.end_time !== null) {
+    return null;
+  }
+  return await resolveDjNameForShow(latest_show);
+};
+
 export const getOnAirStatusForDJ = async (dj_id: string): Promise<boolean> => {
   const latest_show = await getLatestShow();
   if (!latest_show || latest_show.end_time !== null) {

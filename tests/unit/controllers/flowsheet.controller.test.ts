@@ -9,10 +9,12 @@ jest.mock('@sentry/node', () => ({ captureException: mockCaptureException }));
 const mockGetEntriesByPage = jest.fn<() => Promise<unknown[]>>();
 const mockGetEntryCount = jest.fn<() => Promise<number>>();
 const mockGetEntriesByShow = jest.fn<() => Promise<unknown[]>>();
+const mockGetNShows = jest.fn<() => Promise<unknown[]>>();
 const mockGetShowMetadata = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...(entry as Record<string, unknown>), v2: true }));
 const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
+const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>();
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
 const mockUpdateEntry = jest.fn<() => Promise<Record<string, unknown>>>();
@@ -27,10 +29,12 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByPage: mockGetEntriesByPage,
   getEntryCount: mockGetEntryCount,
   getEntriesByShow: mockGetEntriesByShow,
+  getNShows: mockGetNShows,
   getShowMetadata: mockGetShowMetadata,
   transformToV2: mockTransformToV2,
   addTrack: mockAddTrack,
   getLatestShow: mockGetLatestShow,
+  getOnAirDJName: mockGetOnAirDJName,
   getAlbumFromDB: mockGetAlbumFromDB,
   resolveDjNameForShow: mockResolveDjNameForShow,
   updateEntry: mockUpdateEntry,
@@ -96,6 +100,7 @@ describe('flowsheet.controller', () => {
       const entries = [createMockEntry(1), createMockEntry(2)];
       mockGetEntriesByPage.mockResolvedValue(entries);
       mockGetEntryCount.mockResolvedValue(2);
+      mockGetOnAirDJName.mockResolvedValue(null);
 
       const req = createMockReq();
       const res = createMockRes();
@@ -111,7 +116,79 @@ describe('flowsheet.controller', () => {
         page: 0,
         limit: 30,
         totalPages: 1,
+        on_air: null,
       });
+    });
+
+    // on_air (BS on-air-banner fix): the default paginated branch carries the
+    // current on-air DJ so clients render the banner without scanning the
+    // fetched entry window for a show_start marker. An OnAirInfo object means a
+    // named DJ is live; JSON null means confirmed automation ("Auto DJ").
+    it('includes on_air with the DJ name when a DJ is live', async () => {
+      mockGetEntriesByPage.mockResolvedValue([createMockEntry(1)]);
+      mockGetEntryCount.mockResolvedValue(1);
+      mockGetOnAirDJName.mockResolvedValue('DJ MONSTER');
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getEntries(req as Request, res as Response, mockNext);
+
+      expect(mockGetOnAirDJName).toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ on_air: { dj_name: 'DJ MONSTER' } }));
+    });
+
+    it('sets on_air to null when the station is on automation', async () => {
+      mockGetEntriesByPage.mockResolvedValue([createMockEntry(1)]);
+      mockGetEntryCount.mockResolvedValue(1);
+      mockGetOnAirDJName.mockResolvedValue(null);
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getEntries(req as Request, res as Response, mockNext);
+
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ on_air: null }));
+    });
+
+    // The banner is auxiliary: if getOnAirDJName rejects, the field is omitted
+    // (clients decode absent → unknown → hide banner) and the playlist read still
+    // succeeds — a banner-query failure must not 500 the whole endpoint.
+    it('omits on_air and still returns the playlist when getOnAirDJName throws', async () => {
+      const entries = [createMockEntry(1), createMockEntry(2)];
+      mockGetEntriesByPage.mockResolvedValue(entries);
+      mockGetEntryCount.mockResolvedValue(2);
+      mockGetOnAirDJName.mockRejectedValue(new Error('shows lookup failed'));
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getEntries(req as Request, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const body = (res.json as jest.Mock).mock.calls[0][0] as Record<string, unknown>;
+      expect(body).not.toHaveProperty('on_air');
+      expect(body).toMatchObject({ total: 2, page: 0, limit: 30, totalPages: 1 });
+      expect(mockNext).not.toHaveBeenCalled();
+      // the failure is reported, not silently swallowed
+      expect(mockCaptureException).toHaveBeenCalled();
+    });
+
+    // on_air rides only on the default paginated branch (the branch the iOS app
+    // polls). The shows_limit branch returns a bare array, so it must neither
+    // compute nor emit on_air — locking in that "default branch only" decision.
+    it('does not compute on_air on the shows_limit branch', async () => {
+      mockGetNShows.mockResolvedValue([{ id: 1 }]);
+      mockGetEntriesByShow.mockResolvedValue([createMockEntry(1)]);
+
+      const req = createMockReq({ shows_limit: '1' });
+      const res = createMockRes();
+
+      await getEntries(req as Request, res as Response, mockNext);
+
+      expect(mockGetOnAirDJName).not.toHaveBeenCalled();
+      const body = (res.json as jest.Mock).mock.calls[0][0];
+      expect(Array.isArray(body)).toBe(true);
     });
 
     it('calculates offset from page and limit', async () => {
