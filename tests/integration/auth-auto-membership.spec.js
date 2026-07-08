@@ -148,7 +148,6 @@ describe('user.create.after auto-membership hook', () => {
       body: JSON.stringify({
         email,
         username,
-        password: 'testpassword123',
         name: 'Provision Upsert Test',
         organizationSlug: ORG_SLUG,
         role: 'dj',

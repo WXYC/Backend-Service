@@ -156,7 +156,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
       }
       createdMember = { ...existingMember, role };
     } else {
-      createdMember = (await adapter.create({
+      createdMember = await adapter.create({
         model: 'member',
         data: {
           userId: newUser.id,
@@ -164,7 +164,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
           role,
           createdAt: new Date(),
         },
-      })) as typeof createdMember;
+      });
     }
 
     // 9. Sync admin role for stationManager (replicates afterAddMember hook)
@@ -201,7 +201,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
 
     return {
       user: newUser,
-      member: createdMember as unknown as ProvisionUserResult['member'],
+      member: createdMember,
       emailSent,
       emailError,
     };

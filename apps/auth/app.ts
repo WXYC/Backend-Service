@@ -73,8 +73,10 @@ if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') {
   // This endpoint accepts an email, looks up the user, then finds their reset token
   app.get('/auth/test/verification-token', async (req, res) => {
     try {
-      const identifier = String(req.query.identifier ?? '');
-      const type = String(req.query.type ?? 'reset-password');
+      const identifier =
+        typeof req.query.identifier === 'string' ? req.query.identifier : '';
+      const type =
+        typeof req.query.type === 'string' ? req.query.type : 'reset-password';
       if (!identifier) {
         return res.status(400).json({ error: 'identifier query parameter is required (email address)' });
       }
@@ -210,17 +212,15 @@ app.post('/auth/admin/provision-user', async (req, res) => {
     }
 
     // Validate required fields
-    const { email, username, password, name, organizationSlug, role, realName, djName } = req.body as Record<
-      string,
-      unknown
-    >;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const { email, username, name, organizationSlug, role, realName, djName } = body;
     const missing = ['email', 'username', 'name', 'organizationSlug', 'role'].filter(
-      (f) => !req.body?.[f] || typeof req.body[f] !== 'string'
+      (field) => !body[field] || typeof body[field] !== 'string'
     );
     if (missing.length > 0) {
       return res.status(400).json({ error: `Missing required fields: ${missing.join(', ')}` });
     }
-    if (password !== undefined) {
+    if ('password' in body) {
       return res
         .status(400)
         .json({ error: 'password must not be supplied; users set their password via the invite onboarding flow' });

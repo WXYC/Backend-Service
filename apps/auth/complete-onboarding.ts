@@ -48,7 +48,7 @@ async function resolveUserIdFromToken(token: string): Promise<string> {
   return verification.value;
 }
 
-async function assertIncompleteUser(userId: string): Promise<{ id: string; hasCompletedOnboarding?: boolean }> {
+async function assertIncompleteUser(userId: string): Promise<{ id: string }> {
   const context = await auth.$context;
   const userRecord = await context.internalAdapter.findUserById(userId);
   if (!userRecord) {
@@ -60,7 +60,7 @@ async function assertIncompleteUser(userId: string): Promise<{ id: string; hasCo
     throw new CompleteOnboardingError(400, 'Onboarding already completed', 'ONBOARDING_ALREADY_COMPLETE');
   }
 
-  return userRecord as { id: string; hasCompletedOnboarding?: boolean };
+  return { id: userRecord.id };
 }
 
 export async function completeOnboarding(input: CompleteOnboardingInput): Promise<CompleteOnboardingResult> {
