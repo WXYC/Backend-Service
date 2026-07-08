@@ -66,6 +66,22 @@ describe('getOnAirDJName', () => {
     expect(await getOnAirDJName()).toBeNull();
   });
 
+  it('honours dj_name_override precedence for an open show', async () => {
+    // The override short-circuits resolveDjNameForShow ahead of the user lookup,
+    // so only getLatestShow's terminal .limit() is consumed.
+    queueLimit([
+      {
+        id: 5,
+        end_time: null,
+        primary_dj_id: 'user-1',
+        dj_name_override: 'DJ HOUNDSTOOTH',
+        legacy_dj_name: 'DJ MONSTER',
+      },
+    ]);
+
+    expect(await getOnAirDJName()).toBe('DJ HOUNDSTOOTH');
+  });
+
   it('returns null when there is no latest show at all', async () => {
     // No queued value → getLatestShow() resolves undefined.
     expect(await getOnAirDJName()).toBeNull();
