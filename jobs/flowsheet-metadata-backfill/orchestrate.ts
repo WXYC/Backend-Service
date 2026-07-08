@@ -258,9 +258,13 @@ export const processRow = async (
     const outcome = await deps.enrich(row, result.response);
     return { outcome, cacheHit: result.cacheHit };
   } catch (error) {
+    // Defend against non-Error throws (`throw 'string'`, `throw { code: x }`) —
+    // `(error as Error).message` would emit undefined and the JSON logger would
+    // drop the key, matching `readCacheFields`'s guard below.
+    const message = error instanceof Error ? error.message : String(error);
     log('warn', 'enrich_error', `enrich failed for flowsheet.id=${row.id}`, {
       flowsheet_id: row.id,
-      error_message: (error as Error).message,
+      error_message: message,
     });
     captureError(error, 'enrich_error', { flowsheet_id: row.id, artist, album, track });
     // Forward the lookup's real cacheHit (unlike the lml_error path, the

@@ -272,6 +272,35 @@ describe('processRow', () => {
     expect(result).toEqual({ outcome: 'enrich_error', cacheHit: true });
   });
 
+  it('logs a non-Error enrich throw with a stringified message (not undefined)', async () => {
+    // A non-Error rejection (`throw 'string'`, `throw { code }`) must still
+    // surface a message on the enrich_error log line — `(error as Error).message`
+    // would emit undefined and the JSON logger would drop the key, leaving
+    // operators with no signal (mirrors readCacheFields's guard).
+    const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+    const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+    initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-enrich-nonerror' });
+    const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    try {
+      const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
+      const enrich = jest.fn<EnrichFn>().mockRejectedValue('value too long for type character varying(512)');
+
+      const result = await processRow(row, { lookup, enrich });
+
+      expect(result).toEqual({ outcome: 'enrich_error', cacheHit: false });
+      const enrichErrorLine = writeSpy.mock.calls
+        .map((args) => String(args[0]))
+        .find((l) => l.includes('"step":"enrich_error"'));
+      if (!enrichErrorLine) throw new Error('expected an enrich_error log line');
+      const parsed = JSON.parse(enrichErrorLine.trim());
+      expect(parsed.error_message).toBe('value too long for type character varying(512)');
+    } finally {
+      writeSpy.mockRestore();
+      await closeLogger();
+    }
+  });
+
   it('forwards undefined for null album_title / track_title (matches lml-fetch.ts contract)', async () => {
     const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult(false));
     const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_no_match');
