@@ -3,4 +3,5 @@ export * from './auth.roles';
 export * from './auth.middleware';
 export * from './auth.username';
 export * from './cors-origin';
+export * from './device-authorization';
 export { sendAccountSetupEmail } from './email';

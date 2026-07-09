@@ -1,12 +1,24 @@
 import * as Sentry from '@sentry/node';
-import { account, db, invitation, jwks, member, organization, session, user, verification } from '@wxyc/database';
+import {
+  account,
+  db,
+  deviceCode,
+  invitation,
+  jwks,
+  member,
+  organization,
+  session,
+  user,
+  verification,
+} from '@wxyc/database';
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { createAuthMiddleware } from 'better-auth/api';
+import { createAuthMiddleware, getSessionFromCtx } from 'better-auth/api';
 import {
   admin,
   anonymous,
   bearer,
+  deviceAuthorization,
   emailOTP,
   jwt,
   oidcProvider,
@@ -16,6 +28,11 @@ import {
 import { generateId } from '@better-auth/core/utils/id';
 import { and, eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
+import {
+  applyDeviceApproveRoleGate,
+  applyDeviceTokenSessionTtl,
+  capSessionUpdateAgainstDeviceFlow,
+} from './device-authorization';
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 import { buildTrustedClients } from './oidc-trusted-clients';
 import { buildLoginPage } from './oidc-login-page';
@@ -52,6 +69,7 @@ export const auth = betterAuth({
       organization: organization,
       member: member,
       invitation: invitation,
+      deviceCode: deviceCode,
     },
   }),
 
@@ -320,6 +338,31 @@ export const auth = betterAuth({
         },
       },
     }),
+    // ADR 0008 — QR sign-in for the shared control-room computer (RFC 8628).
+    // Browser at dj.wxyc.org calls /device/code, polls /device/token, and the
+    // DJ approves from the iOS app via /device/approve. The role gate
+    // (hooks.before) rejects `member` users with `access_denied`; the
+    // session-TTL clamp (hooks.after) overrides the 7-day cookie default to
+    // 12h for device-auth sessions only. The verificationUri keeps a
+    // universal-link fallback open for later but the iOS app reads the
+    // user_code out of the QR payload directly — it does not navigate the
+    // URL.
+    deviceAuthorization({
+      expiresIn: '5min',
+      interval: '5s',
+      userCodeLength: 8,
+      deviceCodeLength: 32,
+      verificationUri: 'https://dj.wxyc.org/device-auth',
+      // Upstream quirk on better-auth ≤ 1.6.20: `schema` was declared
+      // `z.custom(() => true)` with no `.optional()` in
+      // deviceAuthorizationOptionsSchema, so the runtime zod parse threw
+      // when absent while TypeScript's looser `unknown` type hid it. Fixed
+      // upstream in 1.6.21 (better-auth#9939); this `{}` becomes droppable
+      // once we bump the dependency (dependabot #1510). Passing `{}` stays
+      // safe on 1.6.22 — `mergeSchema()` folds in the plugin defaults from
+      // node_modules/better-auth/dist/plugins/device-authorization/schema.mjs.
+      schema: {},
+    }),
     emailOTP({
       async sendVerificationOTP({ email, otp, type }) {
         void sendOTPEmail({ to: email, otp, type }).catch((error) => {
@@ -340,21 +383,80 @@ export const auth = betterAuth({
   ],
 
   hooks: {
+    // ADR 0008: gate /device/approve so non-DJ users can't approve a QR
+    // sign-in. The plugin's own session check 401s anonymous callers; this
+    // hook adds the role check on top.
+    //
+    // ctx.context.session is not pre-populated for /device/approve — the
+    // plugin's handler resolves it on its own via getSessionFromCtx (see
+    // node_modules/better-auth/dist/plugins/device-authorization/routes.mjs
+    // deviceApprove). We do the same here so the role lookup runs against
+    // the same session the handler will see. Costs one extra DB round-trip
+    // per approve request, fine for the ADR 0008 path.
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== '/device/approve') return;
+      const session = await getSessionFromCtx(ctx);
+      if (!session?.user?.id) return; // let the plugin's own UNAUTHORIZED fire
+      await applyDeviceApproveRoleGate(
+        session.user.id,
+        async (uid) => {
+          const rows = await db.select({ role: member.role }).from(member).where(eq(member.userId, uid)).limit(1);
+          return rows[0];
+        },
+        async (uid) => {
+          // S1 (#1494 review): reset any *pending* device-code row the
+          // rejected user claimed via GET /auth/device?user_code=… so the
+          // plugin's `deviceCodeRecord.userId === session.user.id` check
+          // stops treating them as the approver. Scoped by (userId + pending)
+          // so we don't disturb an in-flight approval elsewhere.
+          await db
+            .update(deviceCode)
+            .set({ userId: null })
+            .where(and(eq(deviceCode.userId, uid), eq(deviceCode.status, 'pending')));
+        }
+      );
+    }),
     after: createAuthMiddleware(async (ctx) => {
-      if (ctx.path !== '/admin/create-user') {
+      if (ctx.path === '/admin/create-user') {
+        const email = ctx.body?.email;
+        if (!email || typeof email !== 'string') {
+          return;
+        }
+
+        // Auto-verify email for admin-created users (trusted operation)
+        try {
+          await db.update(user).set({ emailVerified: true }).where(eq(user.email, email));
+        } catch (error) {
+          console.error('Error auto-verifying admin-created user:', error);
+        }
         return;
       }
 
-      const email = ctx.body?.email;
-      if (!email || typeof email !== 'string') {
-        return;
-      }
-
-      // Auto-verify email for admin-created users (trusted operation)
-      try {
-        await db.update(user).set({ emailVerified: true }).where(eq(user.email, email));
-      } catch (error) {
-        console.error('Error auto-verifying admin-created user:', error);
+      // ADR 0008: clamp /device/token sessions to DEVICE_SESSION_TTL_MS.
+      // The plugin creates the session with the global default; we override
+      // its expiry and rewrite expires_in so the browser and DB agree.
+      // ctx.context.returned is the raw body object `ctx.json` produced when
+      // the dispatcher is invoked with asResponse=false (see
+      // node_modules/better-auth/dist/api/dispatch.mjs:225) — mutating
+      // expires_in on it propagates to the HTTP response.
+      if (ctx.path === '/device/token') {
+        const newSession = ctx.context.newSession;
+        const token = newSession?.session?.token;
+        const body = ctx.context.returned as { expires_in?: number } | undefined;
+        // Only on the success path: failed polls (authorization_pending,
+        // slow_down, expired_token, access_denied) don't populate newSession.
+        if (!token || !body) return;
+        try {
+          await applyDeviceTokenSessionTtl(token, body, new Date(), async (t, expiresAt, deviceFlowExpiresAt) => {
+            await db.update(session).set({ expiresAt, deviceFlowExpiresAt }).where(eq(session.token, t));
+          });
+        } catch (error) {
+          // Don't fail the response just because the TTL extension hit a
+          // transient DB error — the session is still valid, just at the
+          // default expiry. Surface to Sentry so we notice the drift.
+          console.error('[device-auth] Failed to clamp session TTL:', error);
+          Sentry.captureException(error, { tags: { subsystem: 'device-authorization' } });
+        }
       }
     }),
   },
@@ -413,6 +515,47 @@ export const auth = betterAuth({
             // hit a race or transient error — the operator can backfill
             // with scripts/backfill-missing-org-members.ts.
             console.error('[user.create.after] Failed to auto-add member row:', error);
+          }
+        },
+      },
+    },
+    session: {
+      update: {
+        // ADR 0008 — enforce the device-flow 12h cap against better-auth's
+        // rolling refresh. `getSession` past `updateAge` (default 1d) calls
+        // `internalAdapter.updateSession(token, {expiresAt: now + expiresIn})`
+        // and, because our global session.expiresIn defaults to 7d and the
+        // refresh math triggers on the very first read of a 12h session,
+        // that would silently walk the row back out to 7 days.
+        //
+        // We look up the row's `device_flow_expires_at` via the token in
+        // the endpoint context (set by `getSession` before its updateSession
+        // call) and, if the incoming write wants a later `expiresAt`,
+        // downgrade it to the cap. Non-device sessions have `cap === null`
+        // and the helper is a no-op — the password-auth refresh path is
+        // unaffected. If we can't identify the session (no context.session)
+        // we skip the cap; the cap is best-effort, and the sweeper-style
+        // fallback would be a follow-up (BS#1494 review).
+        before: async (data, ctx) => {
+          const payload = data as { expiresAt?: Date | string | null } & Record<string, unknown>;
+          if (!payload.expiresAt) return;
+          const contextWithSession = (ctx ?? {}) as {
+            context?: { session?: { session?: { token?: string | null } | null } | null };
+          };
+          const token = contextWithSession.context?.session?.session?.token;
+          if (!token) return;
+          try {
+            const rows = await db
+              .select({ cap: session.deviceFlowExpiresAt })
+              .from(session)
+              .where(eq(session.token, token))
+              .limit(1);
+            const cap = rows[0]?.cap ?? null;
+            return capSessionUpdateAgainstDeviceFlow(payload, cap);
+          } catch (error) {
+            console.error('[device-auth] Session-update cap lookup failed:', error);
+            Sentry.captureException(error, { tags: { subsystem: 'device-authorization' } });
+            return;
           }
         },
       },

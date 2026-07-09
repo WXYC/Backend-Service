@@ -105,5 +105,6 @@
   "0106_freetext-resolution": "c9fff323e5eb101fcd755fa682b3bbb9ea84b36c1e470cd1bad05004e66ae0fd",
   "0107_album-popularity": "1f89b36642cedd0aeddf5062e4dedaf774db7326a661a3366115119373148cd1",
   "0108_flowsheet-composer": "6ac7db945d6624bb764b7882627cbfc9d01f9fde5d04897f84ba592da0da40cd",
-  "0109_md-verified-release-id-source": "375bf7877d19df633615ce8be9e052b0a5a89c7e9fda13748f3f498e3a11eb12"
+  "0109_md-verified-release-id-source": "375bf7877d19df633615ce8be9e052b0a5a89c7e9fda13748f3f498e3a11eb12",
+  "0110_qr-device-auth": "0284b4f41fb20265ce3901f5e2bdf9226ade145df0cae44b60b7da822901dae2"
 }

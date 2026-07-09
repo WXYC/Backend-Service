@@ -90,8 +90,43 @@ export const session = pgTable(
     userAgent: text('user_agent'),
     impersonatedBy: varchar('impersonated_by', { length: 255 }),
     activeOrganizationId: varchar('active_organization_id', { length: 255 }),
+    // ADR 0008 — hard cap for QR sign-in sessions. Populated by the
+    // /device/token after-hook; enforced by databaseHooks.session.update.before
+    // so better-auth's rolling refresh (getSession → updateSession with
+    // expiresAt = now + 7d) cannot walk the row past the 12h ceiling.
+    // Nullable so all pre-existing (non-device-flow) sessions are unaffected.
+    deviceFlowExpiresAt: timestamp('device_flow_expires_at', { withTimezone: true }),
   },
   (table) => [uniqueIndex('auth_session_token_key').on(table.token)]
+);
+
+// ADR 0008 — RFC 8628 device-authorization substrate. Owned by the better-auth
+// `device-authorization` plugin. Rows are minted by /auth/device/code
+// (userId NULL), claimed by GET /auth/device?user_code=… (sets userId),
+// and flipped to `approved`/`denied` by /auth/device/approve|deny. Column
+// names, types, and required-ness match the plugin's schema contract at
+// node_modules/better-auth/dist/plugins/device-authorization/schema.mjs
+// field-for-field so the drizzle adapter's field map has no aliases to
+// maintain.
+export const deviceCode = pgTable(
+  'auth_device_code',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    deviceCode: varchar('device_code', { length: 255 }).notNull(),
+    userCode: varchar('user_code', { length: 255 }).notNull(),
+    userId: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    status: varchar('status', { length: 32 }).notNull(),
+    lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
+    pollingInterval: integer('polling_interval'),
+    clientId: varchar('client_id', { length: 255 }),
+    scope: text('scope'),
+  },
+  (table) => [
+    uniqueIndex('auth_device_code_device_code_key').on(table.deviceCode),
+    uniqueIndex('auth_device_code_user_code_key').on(table.userCode),
+    index('auth_device_code_expires_at_idx').on(table.expiresAt),
+  ]
 );
 
 export const account = pgTable(

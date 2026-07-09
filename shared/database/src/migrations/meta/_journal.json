@@ -750,6 +750,13 @@
       "when": 1781468384353,
       "tag": "0109_md-verified-release-id-source",
       "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1781468384354,
+      "tag": "0110_qr-device-auth",
+      "breakpoints": true
     }
   ]
 }
