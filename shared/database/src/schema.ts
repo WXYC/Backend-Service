@@ -225,34 +225,35 @@ export const invitation = pgTable(
 // object` at consent-write time and the /authorize return trip 500s —
 // breaking OIDC login for every downstream trusted client (Wiki.js,
 // flowsheet-digitization verifier).
-export const oauthApplication = pgTable(
-  'auth_oauth_application',
-  {
-    id: varchar('id', { length: 255 }).primaryKey(),
-    name: varchar('name', { length: 255 }).notNull(),
-    icon: text('icon'),
-    metadata: text('metadata'),
-    clientId: varchar('client_id', { length: 255 }).notNull(),
-    clientSecret: text('client_secret'),
-    redirectUrls: text('redirect_urls').notNull(),
-    type: varchar('type', { length: 32 }).notNull(),
-    disabled: boolean('disabled').default(false),
-    userId: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    uniqueIndex('auth_oauth_application_client_id_key').on(table.clientId),
-    index('auth_oauth_application_user_id_idx').on(table.userId),
-  ]
-);
+// Design note on the column-level `.unique(...)` calls: drizzle-kit emits
+// `uniqueIndex(...)` table-level constraints after all FKs, but the
+// `oauthAccessToken.client_id` and `oauthConsent.client_id` FKs *reference*
+// `oauthApplication.client_id` and Postgres 42830s (`no unique constraint
+// matching given keys for referenced table`) if the referenced unique
+// constraint doesn't exist at ADD CONSTRAINT time. Column-level `.unique()`
+// emits `UNIQUE` inline inside `CREATE TABLE`, so the constraint is present
+// before the FKs in the same migration are applied.
+export const oauthApplication = pgTable('auth_oauth_application', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  name: varchar('name', { length: 255 }).notNull(),
+  icon: text('icon'),
+  metadata: text('metadata'),
+  clientId: varchar('client_id', { length: 255 }).notNull().unique('auth_oauth_application_client_id_key'),
+  clientSecret: text('client_secret'),
+  redirectUrls: text('redirect_urls').notNull(),
+  type: varchar('type', { length: 32 }).notNull(),
+  disabled: boolean('disabled').default(false),
+  userId: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const oauthAccessToken = pgTable(
   'auth_oauth_access_token',
   {
     id: varchar('id', { length: 255 }).primaryKey(),
-    accessToken: text('access_token').notNull(),
-    refreshToken: text('refresh_token').notNull(),
+    accessToken: text('access_token').notNull().unique('auth_oauth_access_token_access_token_key'),
+    refreshToken: text('refresh_token').notNull().unique('auth_oauth_access_token_refresh_token_key'),
     accessTokenExpiresAt: timestamp('access_token_expires_at', { withTimezone: true }).notNull(),
     refreshTokenExpiresAt: timestamp('refresh_token_expires_at', { withTimezone: true }).notNull(),
     clientId: varchar('client_id', { length: 255 })
@@ -264,8 +265,6 @@ export const oauthAccessToken = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex('auth_oauth_access_token_access_token_key').on(table.accessToken),
-    uniqueIndex('auth_oauth_access_token_refresh_token_key').on(table.refreshToken),
     index('auth_oauth_access_token_client_id_idx').on(table.clientId),
     index('auth_oauth_access_token_user_id_idx').on(table.userId),
   ]

@@ -1,8 +1,12 @@
 -- @no-precondition-needed: three brand-new tables. FKs land at CREATE-time
---   against empty relations, so there are no invariants to violate. The two
---   UNIQUE indexes on `client_id` / `access_token` / `refresh_token` are also
---   safe on empty tables.
--- 0111: substrate for the better-auth `oidcProvider` plugin (WXYC/Backend-Service#TBD).
+--   against empty relations, so there are no invariants to violate. The
+--   UNIQUE constraints on `client_id` / `access_token` / `refresh_token` are
+--   emitted inline inside CREATE TABLE, so they exist before the two FKs
+--   (auth_oauth_access_token.client_id, auth_oauth_consent.client_id) that
+--   reference `auth_oauth_application.client_id` are added — otherwise
+--   Postgres 42830s ("no unique constraint matching given keys for referenced
+--   table"). See the design note in shared/database/src/schema.ts.
+-- 0111: substrate for the better-auth `oidcProvider` plugin (WXYC/Backend-Service#1571).
 --   Rows are minted at /auth/oauth2/register (application) and at consent-write
 --   time inside the /auth/oauth2/authorize return trip (access token + consent).
 --   Without these tables the Drizzle adapter throws
@@ -24,7 +28,9 @@ CREATE TABLE "auth_oauth_access_token" (
 	"user_id" varchar(255),
 	"scopes" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "auth_oauth_access_token_access_token_key" UNIQUE("access_token"),
+	CONSTRAINT "auth_oauth_access_token_refresh_token_key" UNIQUE("refresh_token")
 );
 --> statement-breakpoint
 CREATE TABLE "auth_oauth_application" (
@@ -39,7 +45,8 @@ CREATE TABLE "auth_oauth_application" (
 	"disabled" boolean DEFAULT false,
 	"user_id" varchar(255),
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "auth_oauth_application_client_id_key" UNIQUE("client_id")
 );
 --> statement-breakpoint
 CREATE TABLE "auth_oauth_consent" (
@@ -57,11 +64,7 @@ ALTER TABLE "auth_oauth_access_token" ADD CONSTRAINT "auth_oauth_access_token_us
 ALTER TABLE "auth_oauth_application" ADD CONSTRAINT "auth_oauth_application_user_id_auth_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."auth_user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "auth_oauth_consent" ADD CONSTRAINT "auth_oauth_consent_client_id_auth_oauth_application_client_id_fk" FOREIGN KEY ("client_id") REFERENCES "public"."auth_oauth_application"("client_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "auth_oauth_consent" ADD CONSTRAINT "auth_oauth_consent_user_id_auth_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."auth_user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE UNIQUE INDEX "auth_oauth_access_token_access_token_key" ON "auth_oauth_access_token" USING btree ("access_token");--> statement-breakpoint
-CREATE UNIQUE INDEX "auth_oauth_access_token_refresh_token_key" ON "auth_oauth_access_token" USING btree ("refresh_token");--> statement-breakpoint
 CREATE INDEX "auth_oauth_access_token_client_id_idx" ON "auth_oauth_access_token" USING btree ("client_id");--> statement-breakpoint
 CREATE INDEX "auth_oauth_access_token_user_id_idx" ON "auth_oauth_access_token" USING btree ("user_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "auth_oauth_application_client_id_key" ON "auth_oauth_application" USING btree ("client_id");--> statement-breakpoint
-CREATE INDEX "auth_oauth_application_user_id_idx" ON "auth_oauth_application" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "auth_oauth_consent_client_id_idx" ON "auth_oauth_consent" USING btree ("client_id");--> statement-breakpoint
 CREATE INDEX "auth_oauth_consent_user_id_idx" ON "auth_oauth_consent" USING btree ("user_id");
