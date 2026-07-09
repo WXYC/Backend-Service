@@ -208,6 +208,19 @@ describe('QR device-authorization (ADR 0008)', () => {
     expect(tokenBody.token_type).toBe('Bearer');
     expect(tokenBody.expires_in).toBe(12 * 60 * 60);
 
+    // WXYC/dj-site#841: the shared control-room browser signs in off the
+    // session *cookie*, not the bearer `access_token` body. The plugin's token
+    // route only setNewSession()s (no setSessionCookie — it's an OAuth token
+    // endpoint), so our /device/token after-hook must emit the session cookie,
+    // clamped to the same 12h ceiling as the DB row (ADR 0008). Without it the
+    // poll 200s but the browser never establishes a session and hangs on /login.
+    const tokenSetCookies = tokenRes.headers.getSetCookie();
+    const sessionCookie = tokenSetCookies.find((c) => c.startsWith('better-auth.session_token='));
+    expect(sessionCookie).toBeDefined();
+    // Non-empty signed value, and 12h (43200s) max-age so cookie and DB agree.
+    expect(sessionCookie).toMatch(/^better-auth\.session_token=.+/);
+    expect(sessionCookie).toMatch(/Max-Age=43200\b/i);
+
     // Persisted session's expiresAt AND device_flow_expires_at should both
     // match — the row is written in a single UPDATE by the after-hook.
     const rows = await sql.unsafe(`SELECT expires_at, device_flow_expires_at FROM auth_session WHERE token = $1`, [
