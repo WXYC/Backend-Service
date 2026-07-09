@@ -215,6 +215,83 @@ export const invitation = pgTable(
   (table) => [index('auth_invitation_email_idx').on(table.email)]
 );
 
+// Substrate for the better-auth `oidcProvider` plugin. Rows are minted by
+// the /auth/oauth2/register and /auth/oauth2/authorize routes. Column names,
+// types, and required-ness match the plugin's schema contract at
+// node_modules/better-auth/dist/plugins/oidc-provider/schema.mjs
+// field-for-field so the drizzle adapter's field map has no aliases to
+// maintain. Without these three tables the adapter throws
+// `BetterAuthError: The model "oauthConsent" was not found in the schema
+// object` at consent-write time and the /authorize return trip 500s —
+// breaking OIDC login for every downstream trusted client (Wiki.js,
+// flowsheet-digitization verifier).
+export const oauthApplication = pgTable(
+  'auth_oauth_application',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    name: varchar('name', { length: 255 }).notNull(),
+    icon: text('icon'),
+    metadata: text('metadata'),
+    clientId: varchar('client_id', { length: 255 }).notNull(),
+    clientSecret: text('client_secret'),
+    redirectUrls: text('redirect_urls').notNull(),
+    type: varchar('type', { length: 32 }).notNull(),
+    disabled: boolean('disabled').default(false),
+    userId: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('auth_oauth_application_client_id_key').on(table.clientId),
+    index('auth_oauth_application_user_id_idx').on(table.userId),
+  ]
+);
+
+export const oauthAccessToken = pgTable(
+  'auth_oauth_access_token',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    accessToken: text('access_token').notNull(),
+    refreshToken: text('refresh_token').notNull(),
+    accessTokenExpiresAt: timestamp('access_token_expires_at', { withTimezone: true }).notNull(),
+    refreshTokenExpiresAt: timestamp('refresh_token_expires_at', { withTimezone: true }).notNull(),
+    clientId: varchar('client_id', { length: 255 })
+      .notNull()
+      .references(() => oauthApplication.clientId, { onDelete: 'cascade' }),
+    userId: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }),
+    scopes: text('scopes').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('auth_oauth_access_token_access_token_key').on(table.accessToken),
+    uniqueIndex('auth_oauth_access_token_refresh_token_key').on(table.refreshToken),
+    index('auth_oauth_access_token_client_id_idx').on(table.clientId),
+    index('auth_oauth_access_token_user_id_idx').on(table.userId),
+  ]
+);
+
+export const oauthConsent = pgTable(
+  'auth_oauth_consent',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    clientId: varchar('client_id', { length: 255 })
+      .notNull()
+      .references(() => oauthApplication.clientId, { onDelete: 'cascade' }),
+    userId: varchar('user_id', { length: 255 })
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    scopes: text('scopes').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    consentGiven: boolean('consent_given').notNull(),
+  },
+  (table) => [
+    index('auth_oauth_consent_client_id_idx').on(table.clientId),
+    index('auth_oauth_consent_user_id_idx').on(table.userId),
+  ]
+);
+
 export type NewDJStats = InferInsertModel<typeof dj_stats>;
 export type DJStats = InferSelectModel<typeof dj_stats>;
 export const dj_stats = wxyc_schema.table('dj_stats', {
