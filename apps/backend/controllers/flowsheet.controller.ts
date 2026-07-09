@@ -498,11 +498,10 @@ export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = asy
 };
 
 export const getDJList: RequestHandler = async (req, res) => {
-  const currentDJs = await flowsheet_service.getDJsInCurrentShow();
-  const cleanDJList = currentDJs.map((dj) => {
-    return { id: dj.id, dj_name: flowsheet_service.resolveDjDisplayName(dj.djName ?? null) };
-  });
-  res.status(200).json(cleanDJList);
+  // getOnAirDJs preserves the account-DJ shape ({ id, dj_name }) and additionally
+  // surfaces legacy/tubafrenzy-mirrored shows (null id, legacy_dj_name) that the
+  // show_djs-only derivation used to miss — BS#1547.
+  res.status(200).json(await flowsheet_service.getOnAirDJs());
 };
 
 export const getOnAir: RequestHandler = async (req, res) => {

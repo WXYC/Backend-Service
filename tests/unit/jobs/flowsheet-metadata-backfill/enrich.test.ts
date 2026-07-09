@@ -18,7 +18,12 @@
 import { jest } from '@jest/globals';
 
 import { album_metadata, db, flowsheet } from '@wxyc/database';
-import { applyEnrichment, extractArtwork, type EnrichRow } from '../../../../jobs/flowsheet-metadata-backfill/enrich';
+import {
+  applyEnrichment,
+  extractArtwork,
+  stampDeadLetter,
+  type EnrichRow,
+} from '../../../../jobs/flowsheet-metadata-backfill/enrich';
 import type { LookupResponse } from '@wxyc/lml-client';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
@@ -513,6 +518,54 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     const outcome = await applyEnrichment(linkedRow, noMatchResponse);
     expect(outcome).toBe('enriched_no_match_raced');
     expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
+  });
+});
+
+/**
+ * BS#1562 — dead-letter the poison rows so the pending cohort can drain to 0.
+ *
+ * A deterministic enrich failure (e.g. a mojibake title whose synthesized
+ * Bandcamp URL overflows `flowsheet.bandcamp_url varchar(512)`, SQLSTATE
+ * 22001) never stamps `metadata_attempt_at` on its own — `applyEnrichment`
+ * throws before the marker write lands. `stampDeadLetter` is the marker-only
+ * UPDATE the orchestrator calls on a *permanent* enrich failure so the row
+ * leaves the `metadata_attempt_at IS NULL` cohort without persisting the URLs
+ * that failed. It is best-effort: it must never re-throw, so a stamp failure
+ * can't re-wedge the drain the way the original poison-pill jam did.
+ */
+describe('stampDeadLetter', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb._chain.returning.mockResolvedValue([{ id: baseRow.id }]);
+  });
+
+  it('issues a marker-only UPDATE (metadata_attempt_at = now()) with no metadata columns', async () => {
+    await stampDeadLetter(baseRow.id);
+
+    expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    // Only the marker is written — none of the URL/metadata columns that
+    // might have overflowed on the failed enrich are persisted.
+    expect(Object.keys(setArgs)).toEqual(['metadata_attempt_at']);
+    expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/now\(\)/i);
+  });
+
+  it('guards the UPDATE by id AND metadata_attempt_at IS NULL (mirrors applyEnrichment)', async () => {
+    await stampDeadLetter(baseRow.id);
+    expect(mockDb._chain.where).toHaveBeenCalledTimes(1);
+    const rendered = renderSql(mockDb._chain.where.mock.calls[0]?.[0]);
+    expect(rendered).toMatch(/id/);
+    expect(rendered.toLowerCase()).toMatch(/metadata_attempt_at/);
+  });
+
+  it('never re-throws when the stamp UPDATE itself fails (best-effort)', async () => {
+    // If the marker write fails too, the cursor must still advance — swallow
+    // the error rather than letting it re-wedge the drain (the exact failure
+    // mode BS#1561 fixed for enrich).
+    mockDb._chain.where.mockImplementationOnce(() => {
+      throw new Error('connection terminated');
+    });
+    await expect(stampDeadLetter(baseRow.id)).resolves.toBeUndefined();
   });
 });
 

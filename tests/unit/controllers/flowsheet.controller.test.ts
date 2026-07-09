@@ -15,6 +15,7 @@ const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...(entry as Record<str
 const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>();
+const mockGetOnAirDJs = jest.fn<() => Promise<Array<{ id: string | null; dj_name: string | null }>>>();
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
 const mockUpdateEntry = jest.fn<() => Promise<Record<string, unknown>>>();
@@ -35,6 +36,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   addTrack: mockAddTrack,
   getLatestShow: mockGetLatestShow,
   getOnAirDJName: mockGetOnAirDJName,
+  getOnAirDJs: mockGetOnAirDJs,
   getAlbumFromDB: mockGetAlbumFromDB,
   resolveDjNameForShow: mockResolveDjNameForShow,
   updateEntry: mockUpdateEntry,
@@ -54,6 +56,7 @@ import {
   getEntries,
   getLatest,
   getShowInfo,
+  getDJList,
   addEntry,
   updateEntry,
   deleteEntry,
@@ -351,6 +354,34 @@ describe('flowsheet.controller', () => {
       const res = createMockRes();
 
       await expect(getLatest(req as Request, res as Response, mockNext)).rejects.toThrow(error);
+    });
+  });
+
+  describe('getDJList (GET /flowsheet/djs-on-air)', () => {
+    it('responds 200 with the on-air DJ list from getOnAirDJs (a legacy DJ carries a null id)', async () => {
+      const djs = [{ id: null, dj_name: 'DJ MONSTER' }];
+      mockGetOnAirDJs.mockResolvedValue(djs);
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getDJList(req as Request, res as Response, mockNext);
+
+      expect(mockGetOnAirDJs).toHaveBeenCalledTimes(1);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(djs);
+    });
+
+    it('responds 200 with an empty array when off air', async () => {
+      mockGetOnAirDJs.mockResolvedValue([]);
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getDJList(req as Request, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith([]);
     });
   });
 

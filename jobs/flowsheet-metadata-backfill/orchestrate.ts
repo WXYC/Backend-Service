@@ -15,9 +15,12 @@
  *   - Within a single run, batches paginate by `id` (last-id cursor).
  *     Across runs, the WHERE filter is what restarts — the cursor doesn't
  *     need to persist.
- *   - One LML failure is logged, counted as `lml_error`, and the loop
- *     continues. The row stays `metadata_attempt_at IS NULL`, so the
- *     next sweep (recurring drift-repair, #639 Phase 2) retries it.
+ *   - A per-row failure — an LML throw (`lml_error`) or a DB-write throw
+ *     (`enrich_error`, e.g. a mojibake title overflowing a varchar column,
+ *     BS#1011) — is logged, counted, and the loop continues. The row stays
+ *     `metadata_attempt_at IS NULL`, so the next sweep (recurring
+ *     drift-repair, #639 Phase 2) retries it; the id-cursor still advances
+ *     within the run, so one bad row can never wedge the drain.
  *   - Cooperative pause: WXYC has no quiet hours — there is always a DJ in
  *     the booth. Before each batch, the orchestrator probes `flowsheet` for
  *     any track row added in the last `LIVE_ACTIVITY_LOOKBACK_SECONDS`
@@ -43,6 +46,7 @@
  * `lml-fetch.ts:lookupMetadata` and `enrich.ts:applyEnrichment`.
  */
 
+import * as Sentry from '@sentry/node';
 import { sql, type SQL } from 'drizzle-orm';
 import {
   db,
@@ -55,6 +59,7 @@ import {
 } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import type { EnrichRow, EnrichOutcome } from './enrich.js';
+import { stampDeadLetter as defaultStampDeadLetter } from './enrich.js';
 import type { LookupResult } from './lml-fetch.js';
 import { captureError, log } from './logger.js';
 
@@ -171,6 +176,50 @@ export type LookupFn = (artist: string, album?: string, track?: string) => Promi
 export type EnrichFn = (row: EnrichRow, response: LookupResponse) => Promise<EnrichOutcome>;
 
 /**
+ * Marker-only dead-letter stamp injected into `processRow` (BS#1562). Wired
+ * by production to `enrich.ts:stampDeadLetter`; tests inject a mock. Always
+ * resolves — the helper swallows its own errors (best-effort).
+ */
+export type StampDeadLetterFn = (rowId: number) => Promise<void>;
+
+/**
+ * Extract a postgres-js SQLSTATE from a caught enrich error, robust to the
+ * drizzle wrapper shape. drizzle re-throws the driver error; postgres-js
+ * exposes the 5-char SQLSTATE as `.code`, typically surfaced on the wrapper's
+ * `.cause`. Prefer `cause.code`, fall back to a top-level `.code`. Returns
+ * undefined when no *string* code can be read — the caller treats that as
+ * transient (retryable), failing safe toward retry rather than silent
+ * give-up.
+ */
+const extractSqlState = (error: unknown): string | undefined => {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const cause = (error as { cause?: unknown }).cause;
+  const causeCode = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  const code = causeCode ?? (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+};
+
+/**
+ * Classify an enrich failure as *permanent* (re-running the same row will
+ * always reproduce it) vs transient. Permanent = SQLSTATE class `22` (data
+ * exception — includes `22001` string_data_right_truncation, the mojibake
+ * varchar-overflow poison rows from BS#1560) OR class `23`
+ * (integrity_constraint_violation).
+ *
+ * Everything else — deadlock (`40P01`), serialization failure (`40001`),
+ * connection errors, or an SQLSTATE we can't determine — is transient, so the
+ * row stays `metadata_attempt_at IS NULL` and the next sweep retries it. Fail
+ * safe toward retry, never toward silently dead-lettering a row a retry could
+ * have enriched.
+ */
+export const isPermanentEnrichError = (error: unknown): boolean => {
+  const sqlState = extractSqlState(error);
+  if (!sqlState) return false;
+  const cls = sqlState.slice(0, 2);
+  return cls === '22' || cls === '23';
+};
+
+/**
  * Read the current (artist, album) lookup-dedup cache state. Wired by
  * `job.ts` to `getLookupCache().stats()`; tests inject a stub. Returns
  * undefined when the orchestrator is driven without a cache (synthetic
@@ -191,9 +240,14 @@ export type Totals = {
   enriched_no_match: number;
   enriched_no_match_raced: number;
   lml_error: number;
+  // Enrich (DB-write) failure on a single row. Kept distinct from `lml_error`
+  // (upstream LML throw) so a run's log line separates "LML couldn't answer"
+  // from "we couldn't persist" — a spike in this bucket points at data, not
+  // the upstream (BS#1011: mojibake titles overflowing varchar(512) columns).
+  enrich_error: number;
 };
 
-export type ProcessOutcome = EnrichOutcome | 'lml_error';
+export type ProcessOutcome = EnrichOutcome | 'lml_error' | 'enrich_error';
 
 /**
  * Outcome plus cache provenance, so the per-row loop can skip the LML
@@ -213,13 +267,32 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 /**
  * Drive a single row through lookup → enrich. The result is the outcome
- * status (or 'lml_error' when LML threw). Errors are logged and consumed;
- * they do not bubble up so a single bad row cannot abort the run. The row
+ * status: 'lml_error' when the LML lookup threw, 'enrich_error' when the
+ * per-row DB write threw. BOTH failures are logged, captured, and consumed
+ * — neither bubbles up, so a single bad row cannot abort the run. The row
  * stays `metadata_attempt_at IS NULL` so the next sweep retries it.
+ *
+ * The enrich catch is load-bearing, not defensive boilerplate: without it a
+ * single row whose synthesized search URL overflows a varchar(512) column
+ * (mojibake titles from the legacy latin1→UTF-8 ETL) throws mid-batch, the
+ * throw propagates to `main` → exit 1, and because the failed UPDATE never
+ * stamps `metadata_attempt_at`, the id-cursor re-selects that same row as the
+ * smallest pending id on the next run and crashes again — a permanent stall
+ * (BS#1011). Isolating the throw here lets the cursor advance past it.
+ *
+ * Dead-lettering (BS#1562): isolating the throw kept the cursor moving but
+ * still left the poison row `metadata_attempt_at IS NULL`, so it was
+ * re-attempted (and re-failed, and re-logged) every nightly run forever — the
+ * pending cohort never reached literal 0, breaking BS#1011's "cohort == 0"
+ * retire criterion. When the SQLSTATE marks the failure *permanent* (data
+ * exception / integrity violation — `isPermanentEnrichError`), we stamp the
+ * marker via `stampDeadLetter` so the row leaves the pending cohort. Genuinely
+ * transient failures (deadlock, serialization, connection drop, or an
+ * unreadable code) are left unstamped and retryable, exactly as before.
  */
 export const processRow = async (
   row: EnrichRow,
-  deps: { lookup: LookupFn; enrich: EnrichFn }
+  deps: { lookup: LookupFn; enrich: EnrichFn; stampDeadLetter?: StampDeadLetterFn }
 ): Promise<ProcessResult> => {
   const artist = row.artist_name;
   const album = row.album_title ?? undefined;
@@ -237,8 +310,50 @@ export const processRow = async (
     return { outcome: 'lml_error', cacheHit: false };
   }
 
-  const outcome = await deps.enrich(row, result.response);
-  return { outcome, cacheHit: result.cacheHit };
+  try {
+    const outcome = await deps.enrich(row, result.response);
+    return { outcome, cacheHit: result.cacheHit };
+  } catch (error) {
+    // Classify the failure by SQLSTATE. A permanent error (data exception /
+    // integrity violation) will reproduce every run, so dead-letter the row —
+    // stamp the marker so it leaves the `metadata_attempt_at IS NULL` cohort.
+    // Transient errors stay unstamped and retryable.
+    const deadLettered = isPermanentEnrichError(error);
+    // Defend against non-Error throws (`throw 'string'`, `throw { code: x }`) —
+    // `(error as Error).message` would emit undefined and the JSON logger would
+    // drop the key, matching `readCacheFields`'s guard below.
+    const message = error instanceof Error ? error.message : String(error);
+    log('warn', 'enrich_error', `enrich failed for flowsheet.id=${row.id}`, {
+      flowsheet_id: row.id,
+      error_message: message,
+      // Distinguish "dead-lettered (permanent → stamped, left the cohort)"
+      // from "left retryable (transient → stays pending)" without a new
+      // totals bucket. A spike in dead_lettered=true points at data corruption.
+      dead_lettered: deadLettered,
+    });
+    captureError(error, 'enrich_error', { flowsheet_id: row.id, artist, album, track, dead_lettered: deadLettered });
+    if (deadLettered) {
+      // Best-effort — `stampDeadLetter` swallows its own errors, but wrap the
+      // call anyway so an injected/alternate stamp that DOES throw can never
+      // re-wedge the drain (BS#1561's failure mode). The cursor must advance
+      // even if the marker never lands; the row just falls to a future sweep.
+      const stamp = deps.stampDeadLetter ?? defaultStampDeadLetter;
+      try {
+        await stamp(row.id);
+      } catch (stampError) {
+        const stampMessage = stampError instanceof Error ? stampError.message : String(stampError);
+        log('warn', 'dead_letter_stamp_error', `dead-letter stamp failed for flowsheet.id=${row.id}`, {
+          flowsheet_id: row.id,
+          error_message: stampMessage,
+        });
+        captureError(stampError, 'dead_letter_stamp_error', { flowsheet_id: row.id });
+      }
+    }
+    // Forward the lookup's real cacheHit (unlike the lml_error path, the
+    // lookup succeeded here): a cached hit made no LML call, so the caller
+    // should still skip the inter-row throttle.
+    return { outcome: 'enrich_error', cacheHit: result.cacheHit };
+  }
 };
 
 /**
@@ -278,7 +393,49 @@ const formatTotals = (totals: Totals): string =>
   `scanned=${totals.scanned} enriched_match=${totals.enriched_match} ` +
   `enriched_match_raced=${totals.enriched_match_raced} ` +
   `enriched_no_match=${totals.enriched_no_match} ` +
-  `enriched_no_match_raced=${totals.enriched_no_match_raced} lml_error=${totals.lml_error}`;
+  `enriched_no_match_raced=${totals.enriched_no_match_raced} lml_error=${totals.lml_error} ` +
+  `enrich_error=${totals.enrich_error}`;
+
+/**
+ * Project the run totals onto a Sentry span with numeric attributes set at
+ * creation time (per the BS#1081 convention — late `setAttribute` calls index
+ * numbers as strings and break sum/avg/p95 aggregation).
+ *
+ * The span carries an explicit `op` of `flowsheet-metadata-backfill.totals` so
+ * a Sentry alert filtering `span.op:flowsheet-metadata-backfill.*` actually
+ * matches it — without an `op` the span lands under a generic default op and
+ * the wildcard matches nothing (the BS#1428 finding, fixed in PR #1459 for the
+ * sibling rotation-artist-backfill). Every totals bucket is exposed as an
+ * attribute, including `enrich_error` — the per-row DB-write-failure count
+ * (#1561) that is the corruption tell the #1560 wedge needed. Before this the
+ * buckets surfaced only in the structured `finished` log; now they are
+ * queryable and alertable in Sentry. The name keeps the sibling
+ * `${JOB_NAME}.run.totals` shape for name-pattern dashboard grouping.
+ *
+ * Gated on tracing being enabled (`SENTRY_TRACES_SAMPLE_RATE`, which this cron
+ * defaults to 1.0 — see `logger.ts:resolveTracesSampleRate`) and on
+ * `SENTRY_DSN`, so dev/CI runs emit nothing.
+ */
+const projectTotalsSpan = (totals: Totals): void => {
+  Sentry.startSpan(
+    {
+      name: `${JOB_NAME}.run.totals`,
+      op: `${JOB_NAME}.totals`,
+      attributes: {
+        'backfill.scanned': totals.scanned,
+        'backfill.enriched_match': totals.enriched_match,
+        'backfill.enriched_match_raced': totals.enriched_match_raced,
+        'backfill.enriched_no_match': totals.enriched_no_match,
+        'backfill.enriched_no_match_raced': totals.enriched_no_match_raced,
+        'backfill.lml_error': totals.lml_error,
+        'backfill.enrich_error': totals.enrich_error,
+      },
+    },
+    () => {
+      /* observability-only span; attributes set at creation */
+    }
+  );
+};
 
 export const runBackfill = async (opts: {
   lookup: LookupFn;
@@ -313,6 +470,7 @@ export const runBackfill = async (opts: {
     enriched_no_match: 0,
     enriched_no_match_raced: 0,
     lml_error: 0,
+    enrich_error: 0,
   };
   let lastId = 0;
   let batchIndex = 0;
@@ -356,6 +514,19 @@ export const runBackfill = async (opts: {
 
   const finalCacheFields = readCacheFields(opts.cacheStats);
   log('info', 'finished', `${JOB_NAME} done. ${formatTotals(totals)}`, { ...totals, ...finalCacheFields });
+
+  // Emit the run-level totals span carrying every bucket (incl. enrich_error)
+  // as a numeric attribute, so the drain's health is queryable/alertable in
+  // Sentry — not just in the log line above (BS#1563). Wrapped so a Sentry SDK
+  // fault can never turn a successful drain into a non-zero exit.
+  try {
+    projectTotalsSpan(totals);
+  } catch (error) {
+    log('warn', 'totals_span_failed', 'projectTotalsSpan threw; totals already logged', {
+      error_message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   return { totals };
 };
 
