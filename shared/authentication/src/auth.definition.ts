@@ -28,7 +28,11 @@ import {
 import { generateId } from '@better-auth/core/utils/id';
 import { and, eq, sql } from 'drizzle-orm';
 import { WXYCRoles } from './auth.roles';
-import { applyDeviceApproveRoleGate, applyDeviceTokenSessionTtl } from './device-authorization';
+import {
+  applyDeviceApproveRoleGate,
+  applyDeviceTokenSessionTtl,
+  capSessionUpdateAgainstDeviceFlow,
+} from './device-authorization';
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 import { buildTrustedClients } from './oidc-trusted-clients';
 import { buildLoginPage } from './oidc-login-page';
@@ -349,12 +353,14 @@ export const auth = betterAuth({
       userCodeLength: 8,
       deviceCodeLength: 32,
       verificationUri: 'https://dj.wxyc.org/device-auth',
-      // Upstream quirk: `schema` is declared `z.custom(() => true)` with no
-      // `.optional()` in deviceAuthorizationOptionsSchema, so the runtime
-      // zod parse throws if absent — TypeScript's looser `unknown` type
-      // hides it. Pass an empty object; `mergeSchema()` folds in the plugin
-      // defaults from node_modules/better-auth/dist/plugins/device-
-      // authorization/schema.mjs. Tracked at WXYC/Backend-Service#1494.
+      // Upstream quirk on better-auth ≤ 1.6.20: `schema` was declared
+      // `z.custom(() => true)` with no `.optional()` in
+      // deviceAuthorizationOptionsSchema, so the runtime zod parse threw
+      // when absent while TypeScript's looser `unknown` type hid it. Fixed
+      // upstream in 1.6.21 (better-auth#9939); this `{}` becomes droppable
+      // once we bump the dependency (dependabot #1510). Passing `{}` stays
+      // safe on 1.6.22 — `mergeSchema()` folds in the plugin defaults from
+      // node_modules/better-auth/dist/plugins/device-authorization/schema.mjs.
       schema: {},
     }),
     emailOTP({
@@ -391,10 +397,24 @@ export const auth = betterAuth({
       if (ctx.path !== '/device/approve') return;
       const session = await getSessionFromCtx(ctx);
       if (!session?.user?.id) return; // let the plugin's own UNAUTHORIZED fire
-      await applyDeviceApproveRoleGate(session.user.id, async (uid) => {
-        const rows = await db.select({ role: member.role }).from(member).where(eq(member.userId, uid)).limit(1);
-        return rows[0];
-      });
+      await applyDeviceApproveRoleGate(
+        session.user.id,
+        async (uid) => {
+          const rows = await db.select({ role: member.role }).from(member).where(eq(member.userId, uid)).limit(1);
+          return rows[0];
+        },
+        async (uid) => {
+          // S1 (#1494 review): reset any *pending* device-code row the
+          // rejected user claimed via GET /auth/device?user_code=… so the
+          // plugin's `deviceCodeRecord.userId === session.user.id` check
+          // stops treating them as the approver. Scoped by (userId + pending)
+          // so we don't disturb an in-flight approval elsewhere.
+          await db
+            .update(deviceCode)
+            .set({ userId: null })
+            .where(and(eq(deviceCode.userId, uid), eq(deviceCode.status, 'pending')));
+        }
+      );
     }),
     after: createAuthMiddleware(async (ctx) => {
       if (ctx.path === '/admin/create-user') {
@@ -427,8 +447,8 @@ export const auth = betterAuth({
         // slow_down, expired_token, access_denied) don't populate newSession.
         if (!token || !body) return;
         try {
-          await applyDeviceTokenSessionTtl(token, body, new Date(), async (t, expiresAt) => {
-            await db.update(session).set({ expiresAt }).where(eq(session.token, t));
+          await applyDeviceTokenSessionTtl(token, body, new Date(), async (t, expiresAt, deviceFlowExpiresAt) => {
+            await db.update(session).set({ expiresAt, deviceFlowExpiresAt }).where(eq(session.token, t));
           });
         } catch (error) {
           // Don't fail the response just because the TTL extension hit a
@@ -495,6 +515,47 @@ export const auth = betterAuth({
             // hit a race or transient error — the operator can backfill
             // with scripts/backfill-missing-org-members.ts.
             console.error('[user.create.after] Failed to auto-add member row:', error);
+          }
+        },
+      },
+    },
+    session: {
+      update: {
+        // ADR 0008 — enforce the device-flow 12h cap against better-auth's
+        // rolling refresh. `getSession` past `updateAge` (default 1d) calls
+        // `internalAdapter.updateSession(token, {expiresAt: now + expiresIn})`
+        // and, because our global session.expiresIn defaults to 7d and the
+        // refresh math triggers on the very first read of a 12h session,
+        // that would silently walk the row back out to 7 days.
+        //
+        // We look up the row's `device_flow_expires_at` via the token in
+        // the endpoint context (set by `getSession` before its updateSession
+        // call) and, if the incoming write wants a later `expiresAt`,
+        // downgrade it to the cap. Non-device sessions have `cap === null`
+        // and the helper is a no-op — the password-auth refresh path is
+        // unaffected. If we can't identify the session (no context.session)
+        // we skip the cap; the cap is best-effort, and the sweeper-style
+        // fallback would be a follow-up (BS#1494 review).
+        before: async (data, ctx) => {
+          const payload = data as { expiresAt?: Date | string | null } & Record<string, unknown>;
+          if (!payload.expiresAt) return;
+          const contextWithSession = (ctx ?? {}) as {
+            context?: { session?: { session?: { token?: string | null } | null } | null };
+          };
+          const token = contextWithSession.context?.session?.session?.token;
+          if (!token) return;
+          try {
+            const rows = await db
+              .select({ cap: session.deviceFlowExpiresAt })
+              .from(session)
+              .where(eq(session.token, token))
+              .limit(1);
+            const cap = rows[0]?.cap ?? null;
+            return capSessionUpdateAgainstDeviceFlow(payload, cap);
+          } catch (error) {
+            console.error('[device-auth] Session-update cap lookup failed:', error);
+            Sentry.captureException(error, { tags: { subsystem: 'device-authorization' } });
+            return;
           }
         },
       },

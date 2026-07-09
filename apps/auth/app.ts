@@ -300,6 +300,15 @@ if (!isTestEnv) {
     // pollingInterval server-side via lastPolledAt and returns a structured
     // `slow_down` JSON body when polling is too fast; an HTTP 429 in front
     // would shadow it and break every polling client.
+    //
+    // Also NOT including `GET /auth/device` (the claim step). Cannot use
+    // the plain string form: express `app.use(path, mw)` is a *prefix*
+    // match, so `/auth/device` would swallow `/auth/device/token` and
+    // shadow `slow_down` in a 429. In practice the 8-char user_code space
+    // is ~1.1e12 over a 5-min TTL — brute-forcing a live pending code is
+    // impractical — so we accept this as defense-in-depth. If future data
+    // shows real oracle abuse, wire in a method+exact-path limiter
+    // (`app.use((req, next) => req.method === 'GET' && req.path === '/auth/device' ? limit : next)`).
     '/auth/device/code',
     '/auth/device/approve',
     '/auth/device/deny',
