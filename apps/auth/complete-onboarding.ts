@@ -188,11 +188,7 @@ export async function completeOnboardingWithSession(
   }
 
   if ((session.user as { isAnonymous?: boolean }).isAnonymous) {
-    throw new CompleteOnboardingError(
-      403,
-      'Anonymous sessions cannot complete onboarding',
-      'FORBIDDEN'
-    );
+    throw new CompleteOnboardingError(403, 'Anonymous sessions cannot complete onboarding', 'FORBIDDEN');
   }
 
   const user = await assertIncompleteUser(session.user.id);
