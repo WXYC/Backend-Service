@@ -107,5 +107,5 @@
   "0108_flowsheet-composer": "6ac7db945d6624bb764b7882627cbfc9d01f9fde5d04897f84ba592da0da40cd",
   "0109_md-verified-release-id-source": "375bf7877d19df633615ce8be9e052b0a5a89c7e9fda13748f3f498e3a11eb12",
   "0110_qr-device-auth": "0284b4f41fb20265ce3901f5e2bdf9226ade145df0cae44b60b7da822901dae2",
-  "0111_oidc-provider-substrate": "672b06ac1877e62e6d74cb8964ac330b79b1286ea9a989b6172fdf90a6e12d63"
+  "0111_oidc-provider-substrate": "6141b7478946ff39e787d1619878e3dd28f72b0ce4e06aa8b0d74b3d94cb1d98"
 }

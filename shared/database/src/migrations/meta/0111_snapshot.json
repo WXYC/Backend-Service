@@ -1,5 +1,5 @@
 {
-  "id": "160787d6-2c1c-4670-be7d-568b9bededab",
+  "id": "b4c725ff-89da-44ec-9c04-7c8b40b494e1",
   "prevId": "33262448-19a4-45bb-b449-4cb6bf051812",
   "version": "7",
   "dialect": "postgresql",
@@ -3578,36 +3578,6 @@
         }
       },
       "indexes": {
-        "auth_oauth_access_token_access_token_key": {
-          "name": "auth_oauth_access_token_access_token_key",
-          "columns": [
-            {
-              "expression": "access_token",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "auth_oauth_access_token_refresh_token_key": {
-          "name": "auth_oauth_access_token_refresh_token_key",
-          "columns": [
-            {
-              "expression": "refresh_token",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "auth_oauth_access_token_client_id_idx": {
           "name": "auth_oauth_access_token_client_id_idx",
           "columns": [
@@ -3668,7 +3638,22 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "auth_oauth_access_token_access_token_key": {
+          "name": "auth_oauth_access_token_access_token_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "access_token"
+          ]
+        },
+        "auth_oauth_access_token_refresh_token_key": {
+          "name": "auth_oauth_access_token_refresh_token_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "refresh_token"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -3753,38 +3738,7 @@
           "default": "now()"
         }
       },
-      "indexes": {
-        "auth_oauth_application_client_id_key": {
-          "name": "auth_oauth_application_client_id_key",
-          "columns": [
-            {
-              "expression": "client_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "auth_oauth_application_user_id_idx": {
-          "name": "auth_oauth_application_user_id_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "auth_oauth_application_user_id_auth_user_id_fk": {
           "name": "auth_oauth_application_user_id_auth_user_id_fk",
@@ -3801,7 +3755,15 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "auth_oauth_application_client_id_key": {
+          "name": "auth_oauth_application_client_id_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "client_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
