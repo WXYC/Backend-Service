@@ -2,10 +2,19 @@
 // can't transform without the ESM preset. `APIError` is the only symbol the
 // production code we test under `tests/unit/**` imports from here.
 export class APIError extends Error {
-  body: { error?: string; error_description?: string };
-  constructor(_status: string, body: { error?: string; error_description?: string }) {
-    super(body?.error ?? _status);
+  statusCode: number;
+  body?: { message?: string; code?: string; error?: string; error_description?: string; [key: string]: unknown };
+
+  constructor(
+    status: number | string = 500,
+    body?: { message?: string; code?: string; error?: string; error_description?: string; [key: string]: unknown },
+    _headers?: unknown,
+    statusCode?: number
+  ) {
+    super(body?.message ?? body?.error ?? 'API Error');
+    this.name = 'APIError';
     this.body = body;
+    this.statusCode = statusCode ?? (typeof status === 'number' ? status : 500);
   }
 }
 

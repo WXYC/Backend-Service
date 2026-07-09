@@ -87,11 +87,12 @@ Express wrapper around better-auth with these plugins: admin, username, anonymou
 - Email+password auth only (no social auth)
 - Email verification required
 - Sign-up disabled (admin creates accounts)
-- `POST /auth/admin/provision-user` — Atomic user provisioning: creates user, credential account, and org membership in one call. Requires admin session. Accepts `organizationSlug` (resolved server-side) so the client never needs to map slugs to UUIDs. See `apps/auth/provision-user.ts`.
+- `POST /auth/admin/provision-user` — Atomic user provisioning: creates user, credential account, and org membership in one call. Requires admin session. Accepts `organizationSlug` (resolved server-side) so the client never needs to map slugs to UUIDs. Password is not accepted — new DJs set their password via the invite onboarding flow. See `apps/auth/provision-user.ts`.
 - `GET /auth/admin/resolve-organization?slug=<slug>` — Resolves an organization slug to its UUID. Requires admin session. Returns `{ id, slug, name }`. Used by dj-site admin pages to avoid the fragile `getFullOrganization` SDK call which requires `orgSessionMiddleware`. See `apps/auth/resolve-organization.ts`.
+- `POST /auth/wxyc/complete-onboarding` — Public onboarding completion for admin-provisioned DJs. Invite mode accepts the setup token from the invite email plus `newPassword` and optional profile fields; session mode accepts profile fields only for a signed-in incomplete user. See `apps/auth/complete-onboarding.ts` and `wxyc-shared/api.yaml`.
 - QR sign-in (ADR 0008, RFC 8628): `POST /auth/device/code`, `GET /auth/device?user_code=…`, `POST /auth/device/approve`, `POST /auth/device/deny`, `POST /auth/device/token`. Browser at dj.wxyc.org polls `/device/token`; the DJ scans the QR with the iOS app and approves via `/device/approve` (gated to roles ≥ `dj`); resulting browser session is clamped to 12h. The 12h cap is enforced by `auth_session.device_flow_expires_at` + a `databaseHooks.session.update.before` clamp, so better-auth's rolling `getSession` refresh (7d default) cannot walk a device-flow session past the ceiling. A rejected member's claim on the `auth_device_code` row is reset to NULL so a legitimate DJ can still approve the same user_code before it TTLs. See `shared/authentication/src/device-authorization.ts` for the three extracted helpers and `docs/adr/0008-qr-device-authorization-shared-computer-signin.md` for the design.
 - Default user creation from env vars when `CREATE_DEFAULT_USER=TRUE` (uses `provisionUser()` internally)
-- Test-only endpoints (non-production): `/auth/test/verification-token`, `/auth/test/expire-session`
+- Test-only endpoints (non-production): `/auth/test/verification-token`, `/auth/test/expire-session`, `/auth/test/confirm-user`, `/auth/test/reset-incomplete-user`
 
 ### Database (`shared/database`)
 

@@ -16,11 +16,13 @@ import { rateLimitKeyFromRequest } from './rate-limit-key';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
+import { CompleteOnboardingError, completeOnboardingFromRequest } from './complete-onboarding';
 import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
 import { resolveOrganization } from './resolve-organization';
 import { shouldCaptureAuthExpressError } from './sentry-error-filter';
+import { E2E_INCOMPLETE_USER_ID, E2E_INCOMPLETE_USER_PASSWORD } from './e2e-test-constants';
 
 const port = process.env.AUTH_PORT || '8082';
 
@@ -72,8 +74,8 @@ if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') {
   // This endpoint accepts an email, looks up the user, then finds their reset token
   app.get('/auth/test/verification-token', async (req, res) => {
     try {
-      const identifier = String(req.query.identifier ?? '');
-      const type = String(req.query.type ?? 'reset-password');
+      const identifier = typeof req.query.identifier === 'string' ? req.query.identifier : '';
+      const type = typeof req.query.type === 'string' ? req.query.type : 'reset-password';
       if (!identifier) {
         return res.status(400).json({ error: 'identifier query parameter is required (email address)' });
       }
@@ -159,9 +161,44 @@ if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') {
     }
   });
 
+  // Reset the seeded test_incomplete user for session-onboarding E2E
+  app.post('/auth/test/reset-incomplete-user', async (req, res) => {
+    try {
+      const userId =
+        typeof (req.body as { userId?: string })?.userId === 'string'
+          ? (req.body as { userId: string }).userId
+          : E2E_INCOMPLETE_USER_ID;
+
+      const context = await auth.$context;
+      const passwordHash = await context.password.hash(E2E_INCOMPLETE_USER_PASSWORD);
+
+      const { db, user, account, session } = await import('@wxyc/database');
+      const { eq } = await import('drizzle-orm');
+
+      await db
+        .update(user)
+        .set({
+          hasCompletedOnboarding: false,
+          realName: '',
+          djName: '',
+          updatedAt: new Date(),
+        })
+        .where(eq(user.id, userId));
+
+      await db.update(account).set({ password: passwordHash }).where(eq(account.userId, userId));
+
+      await db.delete(session).where(eq(session.userId, userId));
+
+      return res.json({ success: true, userId });
+    } catch (error) {
+      console.error('[TEST ENDPOINTS] Failed to reset incomplete user:', error);
+      return res.status(500).json({ error: 'Failed to reset incomplete user' });
+    }
+  });
+
   // Report session
   console.log(
-    '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session, /auth/test/confirm-user)'
+    '[TEST ENDPOINTS] Test helper endpoints enabled (/auth/test/verification-token, /auth/test/expire-session, /auth/test/confirm-user, /auth/test/reset-incomplete-user)'
   );
 }
 
@@ -209,21 +246,23 @@ app.post('/auth/admin/provision-user', async (req, res) => {
     }
 
     // Validate required fields
-    const { email, username, password, name, organizationSlug, role, realName, djName } = req.body as Record<
-      string,
-      unknown
-    >;
-    const missing = ['email', 'username', 'password', 'name', 'organizationSlug', 'role'].filter(
-      (f) => !req.body?.[f] || typeof req.body[f] !== 'string'
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const { email, username, name, organizationSlug, role, realName, djName } = body;
+    const missing = ['email', 'username', 'name', 'organizationSlug', 'role'].filter(
+      (field) => !body[field] || typeof body[field] !== 'string'
     );
     if (missing.length > 0) {
       return res.status(400).json({ error: `Missing required fields: ${missing.join(', ')}` });
+    }
+    if ('password' in body) {
+      return res
+        .status(400)
+        .json({ error: 'password must not be supplied; users set their password via the invite onboarding flow' });
     }
 
     const result = await provisionUser({
       email: email as string,
       username: username as string,
-      password: password as string,
       name: name as string,
       organizationSlug: organizationSlug as string,
       role: role as string,
@@ -265,6 +304,21 @@ const lookupEmailHandler = async (req: Request, res: Response) => {
   }
 };
 
+const completeOnboardingHandler = async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const result = await completeOnboardingFromRequest(body, fromNodeHeaders(req.headers));
+    return res.json(result);
+  } catch (error) {
+    if (error instanceof CompleteOnboardingError) {
+      return res.status(error.statusCode).json({ error: error.message, code: error.code });
+    }
+    console.error('[COMPLETE ONBOARDING] Unexpected error:', error);
+    Sentry.captureException(error, { tags: { subsystem: 'complete-onboarding' } });
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 // Disable rate limiting in test environments to avoid flaky integration tests.
 // This matches the pattern used by the backend's rateLimiting middleware.
 // Positive-list gate (BS#1097): the AUTH_BYPASS / USE_MOCK_SERVICES escape
@@ -293,6 +347,7 @@ if (!isTestEnv) {
     '/auth/email-otp/send-verification-otp',
     '/auth/forget-password',
     '/auth/wxyc/lookup-email',
+    '/auth/wxyc/complete-onboarding',
     // ADR 0008 — QR device-authorization. Including /code (anonymous,
     // brute-force on the 8-char user_code namespace), /approve (authenticated
     // state-changing), and /deny (authenticated; bounds noise from a stuck
@@ -335,6 +390,7 @@ if (!isTestEnv) {
 }
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
+app.post('/auth/wxyc/complete-onboarding', completeOnboardingHandler);
 
 // BS#1261 — request-line ban enforcement. Registered before the better-auth
 // handler so this specific path doesn't fall through to better-auth's
