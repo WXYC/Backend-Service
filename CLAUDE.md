@@ -87,10 +87,11 @@ Express wrapper around better-auth with these plugins: admin, username, anonymou
 - Email+password auth only (no social auth)
 - Email verification required
 - Sign-up disabled (admin creates accounts)
-- `POST /auth/admin/provision-user` — Atomic user provisioning: creates user, credential account, and org membership in one call. Requires admin session. Accepts `organizationSlug` (resolved server-side) so the client never needs to map slugs to UUIDs. See `apps/auth/provision-user.ts`.
+- `POST /auth/admin/provision-user` — Atomic user provisioning: creates user, credential account, and org membership in one call. Requires admin session. Accepts `organizationSlug` (resolved server-side) so the client never needs to map slugs to UUIDs. Password is not accepted — new DJs set their password via the invite onboarding flow. See `apps/auth/provision-user.ts`.
 - `GET /auth/admin/resolve-organization?slug=<slug>` — Resolves an organization slug to its UUID. Requires admin session. Returns `{ id, slug, name }`. Used by dj-site admin pages to avoid the fragile `getFullOrganization` SDK call which requires `orgSessionMiddleware`. See `apps/auth/resolve-organization.ts`.
+- `POST /auth/wxyc/complete-onboarding` — Public onboarding completion for admin-provisioned DJs. Invite mode accepts the setup token from the invite email plus `newPassword` and optional profile fields; session mode accepts profile fields only for a signed-in incomplete user. See `apps/auth/complete-onboarding.ts` and `wxyc-shared/api.yaml`.
 - Default user creation from env vars when `CREATE_DEFAULT_USER=TRUE` (uses `provisionUser()` internally)
-- Test-only endpoints (non-production): `/auth/test/verification-token`, `/auth/test/expire-session`
+- Test-only endpoints (non-production): `/auth/test/verification-token`, `/auth/test/expire-session`, `/auth/test/confirm-user`, `/auth/test/reset-incomplete-user`
 
 ### Database (`shared/database`)
 

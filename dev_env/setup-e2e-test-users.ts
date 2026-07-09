@@ -14,8 +14,10 @@
 import { config } from 'dotenv';
 config();
 
+import { E2E_INCOMPLETE_USER_PASSWORD } from '../apps/auth/e2e-test-constants';
+
 const TEST_PASSWORD = 'testpassword123';
-const TEMP_PASSWORD = 'temppass123'; // For incomplete users (onboarding flow)
+const TEMP_PASSWORD = E2E_INCOMPLETE_USER_PASSWORD;
 
 interface TestUser {
   id: string;

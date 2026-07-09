@@ -58,7 +58,7 @@ async function main() {
   for (const u of incompleteUsers) {
     try {
       await auth.api.requestPasswordReset({
-        body: { email: u.email, redirectTo: `${frontendUrl}/login` },
+        body: { email: u.email, redirectTo: `${frontendUrl}/onboarding` },
         headers: new Headers({ origin: frontendUrl }),
       });
       sent++;

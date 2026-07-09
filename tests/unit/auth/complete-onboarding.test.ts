@@ -134,6 +134,26 @@ describe('completeOnboardingWithToken()', () => {
     });
     expect(mockUpdateUser).not.toHaveBeenCalled();
   });
+
+  it('retries profile update after resetPassword and returns PROFILE_UPDATE_FAILED when update keeps failing', async () => {
+    jest.useFakeTimers();
+    mockUpdateUser.mockRejectedValue(new Error('db blip') as never);
+
+    const pending = completeOnboardingWithToken({
+      token: 'setup-token-abc',
+      newPassword: 'NewPassword1',
+      realName: 'Jane Doe',
+    });
+
+    await jest.runAllTimersAsync();
+
+    await expect(pending).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PROFILE_UPDATE_FAILED',
+    });
+    expect(mockUpdateUser).toHaveBeenCalledTimes(3);
+    jest.useRealTimers();
+  });
 });
 
 describe('completeOnboardingWithSession()', () => {
@@ -162,6 +182,16 @@ describe('completeOnboardingWithSession()', () => {
     );
     const update = mockUpdateUser.mock.calls[0][1] as Record<string, unknown>;
     expect(update.emailVerified).toBeUndefined();
+  });
+
+  it('rejects anonymous sessions', async () => {
+    mockGetSession.mockResolvedValue({ user: { id: 'anon-id', isAnonymous: true } } as never);
+
+    await expect(completeOnboardingWithSession(emptyHeaders, { realName: 'Jane Doe' })).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'FORBIDDEN',
+    });
+    expect(mockUpdateUser).not.toHaveBeenCalled();
   });
 
   it('rejects when there is no session', async () => {

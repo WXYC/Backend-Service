@@ -22,6 +22,7 @@ import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
 import { resolveOrganization } from './resolve-organization';
 import { shouldCaptureAuthExpressError } from './sentry-error-filter';
+import { E2E_INCOMPLETE_USER_ID, E2E_INCOMPLETE_USER_PASSWORD } from './e2e-test-constants';
 
 const port = process.env.AUTH_PORT || '8082';
 
@@ -166,12 +167,10 @@ if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') {
       const userId =
         typeof (req.body as { userId?: string })?.userId === 'string'
           ? (req.body as { userId: string }).userId
-          : 'test-incomplete-id-0000000000001';
-      const tempPassword = 'temppass123';
+          : E2E_INCOMPLETE_USER_ID;
 
-      const { auth } = await import('@wxyc/authentication');
       const context = await auth.$context;
-      const passwordHash = await context.password.hash(tempPassword);
+      const passwordHash = await context.password.hash(E2E_INCOMPLETE_USER_PASSWORD);
 
       const { db, user, account, session } = await import('@wxyc/database');
       const { eq } = await import('drizzle-orm');

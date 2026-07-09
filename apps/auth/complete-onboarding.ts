@@ -9,9 +9,15 @@
  * - Authenticated session: an incomplete user who is already signed in (e.g.
  *   set a password via the forgot-password flow before onboarding) only
  *   records profile fields and flips the flag. No password change.
+ *
+ * The invite-token path is intentionally two-phase: `resetPassword` consumes
+ * the token before profile fields are written. A transient failure on the
+ * profile update is retried; if it still fails the client receives a
+ * distinguishable error steering them to sign in and finish via session mode.
  */
 
 import { auth } from '@wxyc/authentication';
+import type { User } from '@wxyc/database';
 import { APIError } from 'better-auth/api';
 
 export class CompleteOnboardingError extends Error {
@@ -32,12 +38,34 @@ export interface CompleteOnboardingResult {
   username?: string;
 }
 
+type IncompleteUserRecord = Pick<User, 'id' | 'email' | 'username' | 'hasCompletedOnboarding'>;
+
+const MARK_ONBOARDING_COMPLETE_ATTEMPTS = 3;
+const MARK_ONBOARDING_COMPLETE_DELAY_MS = 100;
+
 const trimOptional = (value: unknown): string | undefined => {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 };
 
+function toCompleteOnboardingResult(user: IncompleteUserRecord): CompleteOnboardingResult {
+  return {
+    status: true,
+    userId: user.id,
+    email: user.email,
+    username: user.username ?? undefined,
+  };
+}
+
+/**
+ * Resolve the user id bound to a setup/reset token.
+ *
+ * better-auth 1.6.20 stores password-reset tokens as verification rows with
+ * identifier `reset-password:${token}` and value = userId. This is an
+ * internal storage contract — a better-auth bump that changes the prefix or
+ * encoding would invalidate invite tokens until this lookup is updated.
+ */
 async function resolveUserIdFromToken(token: string): Promise<string> {
   const context = await auth.$context;
   const identifier = `reset-password:${token}`;
@@ -49,13 +77,6 @@ async function resolveUserIdFromToken(token: string): Promise<string> {
 
   return verification.value;
 }
-
-type IncompleteUserRecord = {
-  id: string;
-  email: string;
-  username?: string;
-  hasCompletedOnboarding?: boolean;
-};
 
 async function assertIncompleteUser(userId: string): Promise<IncompleteUserRecord> {
   const context = await auth.$context;
@@ -84,7 +105,22 @@ async function markOnboardingComplete(
   if (fields.realName) update.realName = fields.realName;
   if (fields.djName) update.djName = fields.djName;
   if (fields.emailVerified) update.emailVerified = true;
-  await context.internalAdapter.updateUser(userId, update);
+
+  for (let attempt = 1; attempt <= MARK_ONBOARDING_COMPLETE_ATTEMPTS; attempt++) {
+    try {
+      await context.internalAdapter.updateUser(userId, update);
+      return;
+    } catch {
+      if (attempt === MARK_ONBOARDING_COMPLETE_ATTEMPTS) {
+        throw new CompleteOnboardingError(
+          503,
+          'Your password was set but we could not finish setup. Sign in at /login?incomplete=true to complete your profile.',
+          'PROFILE_UPDATE_FAILED'
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, MARK_ONBOARDING_COMPLETE_DELAY_MS));
+    }
+  }
 }
 
 export interface CompleteOnboardingTokenInput {
@@ -128,12 +164,7 @@ export async function completeOnboardingWithToken(
 
   await markOnboardingComplete(userId, { realName, djName, emailVerified: true });
 
-  return {
-    status: true,
-    userId: user.id,
-    email: user.email,
-    username: user.username,
-  };
+  return toCompleteOnboardingResult(user);
 }
 
 /**
@@ -150,16 +181,19 @@ export async function completeOnboardingWithSession(
     throw new CompleteOnboardingError(401, 'Sign in or use your invite link to complete onboarding', 'UNAUTHORIZED');
   }
 
+  if ((session.user as { isAnonymous?: boolean }).isAnonymous) {
+    throw new CompleteOnboardingError(
+      403,
+      'Anonymous sessions cannot complete onboarding',
+      'FORBIDDEN'
+    );
+  }
+
   const user = await assertIncompleteUser(session.user.id);
 
   await markOnboardingComplete(user.id, { realName: input.realName, djName: input.djName });
 
-  return {
-    status: true,
-    userId: user.id,
-    email: user.email,
-    username: user.username,
-  };
+  return toCompleteOnboardingResult(user);
 }
 
 export async function completeOnboardingFromRequest(
