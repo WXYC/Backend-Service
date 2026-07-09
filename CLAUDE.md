@@ -98,7 +98,7 @@ Express wrapper around better-auth with these plugins: admin, username, anonymou
 
 Drizzle ORM with PostgreSQL (`postgres-js` driver).
 
-**Auth tables** (managed by better-auth): `auth_user`, `auth_session`, `auth_account`, `auth_verification`, `auth_jwks`, `auth_organization`, `auth_member`, `auth_invitation`.
+**Auth tables** (managed by better-auth): `auth_user`, `auth_session`, `auth_account`, `auth_verification`, `auth_jwks`, `auth_organization`, `auth_member`, `auth_invitation`, `auth_device_code` (ADR 0008 QR sign-in), `auth_oauth_application` / `auth_oauth_access_token` / `auth_oauth_consent` (better-auth `oidcProvider` plugin substrate).
 
 **Domain tables** (custom schema): `dj_stats`, `schedule`, `shift_covers`, `artists`, and flowsheet-related tables.
 
