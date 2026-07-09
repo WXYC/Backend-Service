@@ -145,12 +145,13 @@ describe('completeOnboardingWithToken()', () => {
       realName: 'Jane Doe',
     });
 
-    await jest.runAllTimersAsync();
-
-    await expect(pending).rejects.toMatchObject({
+    const assertion = expect(pending).rejects.toMatchObject({
       statusCode: 503,
       code: 'PROFILE_UPDATE_FAILED',
     });
+
+    await jest.runAllTimersAsync();
+    await assertion;
     expect(mockUpdateUser).toHaveBeenCalledTimes(3);
     jest.useRealTimers();
   });

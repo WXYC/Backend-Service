@@ -85,7 +85,13 @@ async function assertIncompleteUser(userId: string): Promise<IncompleteUserRecor
     throw new CompleteOnboardingError(404, 'User not found', 'USER_NOT_FOUND');
   }
 
-  const user = userRecord as IncompleteUserRecord;
+  const record = userRecord as User;
+  const user: IncompleteUserRecord = {
+    id: record.id,
+    email: record.email,
+    username: record.username,
+    hasCompletedOnboarding: record.hasCompletedOnboarding,
+  };
   if (user.hasCompletedOnboarding === true) {
     throw new CompleteOnboardingError(400, 'Onboarding already completed', 'ONBOARDING_ALREADY_COMPLETE');
   }
