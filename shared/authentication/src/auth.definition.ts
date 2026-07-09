@@ -14,6 +14,7 @@ import {
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { createAuthMiddleware, getSessionFromCtx } from 'better-auth/api';
+import { setSessionCookie } from 'better-auth/cookies';
 import {
   admin,
   anonymous,
@@ -32,6 +33,7 @@ import {
   applyDeviceApproveRoleGate,
   applyDeviceTokenSessionTtl,
   capSessionUpdateAgainstDeviceFlow,
+  DEVICE_SESSION_TTL_MS,
 } from './device-authorization';
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 import { buildTrustedClients } from './oidc-trusted-clients';
@@ -445,7 +447,22 @@ export const auth = betterAuth({
         const body = ctx.context.returned as { expires_in?: number } | undefined;
         // Only on the success path: failed polls (authorization_pending,
         // slow_down, expired_token, access_denied) don't populate newSession.
-        if (!token || !body) return;
+        if (!newSession || !token || !body) return;
+
+        // The device-authorization plugin's /device/token route creates the
+        // session (setNewSession) but never setSessionCookie — it is an OAuth
+        // token endpoint that hands the session back as a bearer `access_token`
+        // in the body. WXYC's shared-computer QR flow is browser-based (the
+        // "device" is the control-room browser), and that browser drives SSR
+        // requireAuth off the session *cookie*, not the bearer. Without this the
+        // poll 200s but the browser never actually signs in (WXYC/dj-site#841).
+        // Emit the cookie here, clamped to the same 12h ceiling as the DB row
+        // (ADR 0008) via an explicit maxAge override. Runs before the TTL-clamp
+        // DB write so a transient DB error can't leave the browser cookieless.
+        await setSessionCookie(ctx, newSession, false, {
+          maxAge: DEVICE_SESSION_TTL_MS / 1000,
+        });
+
         try {
           await applyDeviceTokenSessionTtl(token, body, new Date(), async (t, expiresAt, deviceFlowExpiresAt) => {
             await db.update(session).set({ expiresAt, deviceFlowExpiresAt }).where(eq(session.token, t));
