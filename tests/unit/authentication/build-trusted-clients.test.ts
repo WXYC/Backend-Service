@@ -135,8 +135,90 @@ describe('buildTrustedClients', () => {
     });
   });
 
-  describe('both clients', () => {
-    it('returns Wiki.js first, Flowsheet second, when both are fully configured', () => {
+  describe('wxyc-canary client', () => {
+    it('produces a public-client entry when WXYC_CANARY_OIDC_CLIENT_ID is set', () => {
+      // The canary is a public client (PKCE-only): no client_secret in its env,
+      // and its 5-min probe stops at the /authorize 302 without exchanging
+      // the code — so `type: 'public'` gates the code-exchange path (better-
+      // auth's `node_modules/.../oidc-provider/index.mjs:541`) to require
+      // `code_verifier` instead of `client_secret`. The redirect URL is a
+      // placeholder — canary.wxyc.org/authorize-echo doesn't have to resolve
+      // because the canary reads the 302 `Location` with `redirect: 'manual'`
+      // and inspects it in-process. Contract pinned by wxyc-canary#60 (the
+      // blocked-by ticket that consumes this trustedClient).
+      const clients = buildTrustedClients({
+        WXYC_CANARY_OIDC_CLIENT_ID: 'wxyc-canary',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0]).toEqual({
+        clientId: 'wxyc-canary',
+        clientSecret: undefined,
+        redirectUrls: ['https://canary.wxyc.org/authorize-echo'],
+        name: 'WXYC Canary',
+        type: 'public',
+        disabled: false,
+        icon: undefined,
+        metadata: null,
+        skipConsent: true,
+      });
+    });
+
+    it('omits the wxyc-canary entry when WXYC_CANARY_OIDC_CLIENT_ID is unset', () => {
+      // Matches the file-level docstring: a partially configured client
+      // (here: absent id) is omitted rather than silently pushed. Local dev
+      // .env-less boots won't assert a canary client that isn't wired
+      // upstream on prod. Symmetric with the wiki.js / flowsheet unset gates.
+      expect(buildTrustedClients({})).toEqual([]);
+    });
+
+    it('omits the wxyc-canary entry when WXYC_CANARY_OIDC_CLIENT_ID is empty string', () => {
+      // Defense-in-depth: an operator who accidentally sets the var to ''
+      // in the EC2 `.env` shouldn't produce a client with clientId ''. The
+      // truthy check on the env var covers this.
+      expect(buildTrustedClients({ WXYC_CANARY_OIDC_CLIENT_ID: '' })).toEqual([]);
+    });
+
+    it('does not require or read WXYC_CANARY_OIDC_CLIENT_SECRET (public client)', () => {
+      // The canary env deliberately carries NO secret — its whole scope-of-
+      // damage argument is "a leaked canary env carries no OIDC secret." A
+      // future refactor that quietly starts gating on a *_SECRET env var
+      // would rebuild the exact exposure the ticket exists to avoid. Pin the
+      // absence explicitly by asserting the client is still produced when
+      // only the id is present, and clientSecret comes back undefined.
+      const clients = buildTrustedClients({
+        WXYC_CANARY_OIDC_CLIENT_ID: 'wxyc-canary',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0].clientSecret).toBeUndefined();
+      expect(clients[0].type).toBe('public');
+    });
+  });
+
+  describe('all clients together', () => {
+    it('returns Wiki.js first, Flowsheet second, WXYC Canary third, when all are fully configured', () => {
+      const clients = buildTrustedClients({
+        WIKIJS_OIDC_CLIENT_ID: 'wiki-id',
+        WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',
+        WIKIJS_URL: 'https://wiki.wxyc.org',
+        FLOWSHEET_OIDC_CLIENT_ID: 'flowsheet',
+        FLOWSHEET_OIDC_CLIENT_SECRET: 'shh',
+        FLOWSHEET_OIDC_REDIRECT_URLS: 'https://flowsheet.wxyc.org/auth/callback',
+        WXYC_CANARY_OIDC_CLIENT_ID: 'wxyc-canary',
+      });
+
+      expect(clients).toHaveLength(3);
+      expect(clients[0].name).toBe('Wiki.js');
+      expect(clients[1].name).toBe('Flowsheet Verifier');
+      expect(clients[2].name).toBe('WXYC Canary');
+    });
+
+    it('still returns Wiki.js first, Flowsheet second when only those two are configured', () => {
+      // Pins the pre-canary ordering — a refactor that appends the canary
+      // block in the wrong place (before wiki.js / flowsheet) shouldn't
+      // silently perturb the existing two-client order the previous test
+      // used to lock in on its own.
       const clients = buildTrustedClients({
         WIKIJS_OIDC_CLIENT_ID: 'wiki-id',
         WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',

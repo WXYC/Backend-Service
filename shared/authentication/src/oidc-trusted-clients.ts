@@ -63,5 +63,29 @@ export function buildTrustedClients(env: NodeJS.ProcessEnv): Client[] {
     }
   }
 
+  // wxyc-canary — the synthetic-DJ probe that runs every 5 min and walks the
+  // full OIDC code + PKCE dance to catch the regression class that produced
+  // #1571 (`oauthConsent` schema drift → login 500). Deliberately a PUBLIC
+  // client: no `client_secret` in the canary env, and the probe stops at the
+  // /authorize 302 without exchanging the code — so `type: 'public'` gates the
+  // token endpoint's `client_secret` check (better-auth's
+  // `node_modules/.../oidc-provider/index.mjs:541`) to require `code_verifier`
+  // instead. The redirect URL is a placeholder; the canary reads the 302
+  // `Location` with `redirect: 'manual'` and inspects it in-process — no
+  // listener stands up at `canary.wxyc.org/authorize-echo`. See wxyc-canary#60.
+  if (env.WXYC_CANARY_OIDC_CLIENT_ID) {
+    clients.push({
+      clientId: env.WXYC_CANARY_OIDC_CLIENT_ID,
+      clientSecret: undefined,
+      redirectUrls: ['https://canary.wxyc.org/authorize-echo'],
+      name: 'WXYC Canary',
+      type: 'public',
+      disabled: false,
+      icon: undefined,
+      metadata: null,
+      skipConsent: true,
+    });
+  }
+
   return clients;
 }
