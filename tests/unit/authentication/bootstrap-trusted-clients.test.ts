@@ -11,27 +11,30 @@ import { bootstrapTrustedClients } from '../../../shared/authentication/src/boot
 // deploy or DB rebuild. See migration 0111 and the plugin schema at
 // node_modules/better-auth/dist/plugins/oidc-provider/schema.mjs.
 
+// Hoisted to module scope — parameter defaults are resolved in the enclosing
+// scope, not the function body, so declaring these inside `makeFakeAdapter`
+// makes `seed: AdapterRow[] = []` a TS2304 ("Cannot find name 'AdapterRow'").
+interface AdapterRow {
+  id: string;
+  clientId: string;
+  clientSecret: string | null;
+  name: string;
+  type: string;
+  disabled: boolean;
+  redirectUrls: string;
+  metadata: string | null;
+  icon: string | null;
+  userId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface WhereClause {
+  field: string;
+  value: string;
+}
+
 function makeFakeAdapter(seed: AdapterRow[] = []) {
-  interface AdapterRow {
-    id: string;
-    clientId: string;
-    clientSecret: string | null;
-    name: string;
-    type: string;
-    disabled: boolean;
-    redirectUrls: string;
-    metadata: string | null;
-    icon: string | null;
-    userId: string | null;
-    createdAt: Date;
-    updatedAt: Date;
-  }
-
-  interface WhereClause {
-    field: string;
-    value: string;
-  }
-
   const rows = new Map<string, AdapterRow>(seed.map((r) => [r.clientId, { ...r }]));
   const calls = { findOne: 0, create: 0, update: 0 };
   let randomIdCounter = 0;
@@ -294,12 +297,90 @@ describe('bootstrapTrustedClients', () => {
     expect(flowsheetRow.id).toBe('trusted-flowsheet');
   });
 
-  it('propagates non-race adapter errors so a failed bootstrap surfaces in Sentry', async () => {
-    // The caller in apps/auth/app.ts catches errors from this function and
-    // reports to Sentry at level: 'error' (warn-and-continue posture,
-    // matching sibling createDefaultUser / syncAdminRoles). This test locks
-    // in that this function re-throws non-race errors so the caller can
-    // catch them — a silent try/catch here would defeat that.
+  it('detects Drizzle-wrapped unique_violation via error.cause.code, not just error.code', async () => {
+    // Drizzle wraps postgres-js errors as DrizzleQueryError with the real
+    // error on `.cause` (see drizzle-orm/errors.ts, precedented by
+    // `apps/backend/routes/internal-bans.route.ts:162-163` and
+    // `jobs/flowsheet-metadata-backfill/orchestrate.ts:194-200`). In
+    // production, `error.code` is undefined on the wrapper and the code
+    // lives at `error.cause.code`. Locks the isUniqueViolation predicate
+    // against a regression that only checks `error.code`.
+    const { adapter, rows } = makeFakeAdapter();
+    // Simulate the full race: create throws DrizzleQueryError shape, and
+    // by then the racing replica has written the row (findOne re-lookup
+    // finds it, we update).
+    const originalCreate = adapter.create.bind(adapter);
+    adapter.create = (args: Parameters<typeof originalCreate>[0]) => {
+      rows.set(args.data.clientId, {
+        id: args.data.id,
+        clientId: args.data.clientId,
+        clientSecret: 'racing-replica-secret',
+        name: 'Written by racing replica',
+        type: 'web',
+        disabled: false,
+        redirectUrls: 'https://racing/cb',
+        metadata: null,
+        icon: null,
+        userId: null,
+        createdAt: new Date('2026-06-01'),
+        updatedAt: new Date('2026-06-01'),
+      });
+      const drizzleWrappedError = new Error('Failed query: insert into "auth_oauth_application" ...');
+      (drizzleWrappedError as { cause?: unknown }).cause = { code: '23505', severity: 'ERROR' };
+      throw drizzleWrappedError;
+    };
+
+    // If the predicate missed .cause.code, this would throw AggregateError
+    // (create threw, race-recovery didn't recognize the shape, error bubbled
+    // up). Reaching the resolved-with-updated result proves the wrapper
+    // shape was detected.
+    const result = await bootstrapTrustedClients(asAdapter(adapter), [flowsheetClient({ name: 'Our config' })]);
+    expect(result).toEqual({ created: 0, updated: 1 });
+    const finalRow = rows.get('flowsheet');
+    assertDefined(finalRow, 'flowsheet row');
+    expect(finalRow.name).toBe('Our config');
+  });
+
+  it('aggregates per-client failures so one bad client does not skip the others', async () => {
+    // Wiki.js processes cleanly; flowsheet fails; the aggregate must reflect
+    // both — created:1 for wiki (implicitly, via the throw not preventing
+    // its earlier success), and one collected error for flowsheet.
+    const wikijs: Client = {
+      clientId: 'wiki-id',
+      clientSecret: 'wiki-secret',
+      redirectUrls: ['https://wiki.wxyc.org/login/oidc/callback'],
+      name: 'Wiki.js',
+      type: 'web',
+      disabled: false,
+      icon: undefined,
+      metadata: null,
+      skipConsent: true,
+    };
+
+    const { adapter, rows } = makeFakeAdapter();
+    // Make ONLY the flowsheet create fail (non-unique-violation error).
+    const originalCreate = adapter.create.bind(adapter);
+    adapter.create = (args: Parameters<typeof originalCreate>[0]) => {
+      if (args.data.clientId === 'flowsheet') throw new Error('flowsheet-specific transient error');
+      return originalCreate(args);
+    };
+
+    await expect(bootstrapTrustedClients(asAdapter(adapter), [wikijs, flowsheetClient()])).rejects.toThrow(
+      /1 of 2 trustedClients failed/
+    );
+
+    // Wiki.js row was written; flowsheet was not — but the loop didn't abort
+    // before trying flowsheet.
+    expect(rows.has('wiki-id')).toBe(true);
+    expect(rows.has('flowsheet')).toBe(false);
+  });
+
+  it('collects transient adapter errors into an AggregateError so the caller can Sentry-alert', async () => {
+    // Caller in apps/auth/app.ts catches and reports to Sentry at level:
+    // 'warning' (matching sibling createDefaultUser / syncAdminRoles). This
+    // test locks in that this function surfaces failures as an
+    // AggregateError so the caller can catch them — a silent try/catch here
+    // would defeat that.
     const brokenAdapter = {
       findOne(): Promise<never> {
         return Promise.reject(new Error('DB unreachable'));
@@ -316,6 +397,6 @@ describe('bootstrapTrustedClients', () => {
       bootstrapTrustedClients(brokenAdapter as unknown as Parameters<typeof bootstrapTrustedClients>[0], [
         flowsheetClient(),
       ])
-    ).rejects.toThrow('DB unreachable');
+    ).rejects.toThrow(/1 of 1 trustedClients failed/);
   });
 });

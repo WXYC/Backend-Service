@@ -578,14 +578,14 @@ void (async () => {
   // that only affects OIDC token exchange for two clients. If bootstrap fails,
   // OIDC login 500s at first attempt (loud), everything else keeps working.
   try {
-    const context = await auth.$context;
     const trustedClients = buildTrustedClients(process.env);
-    const { created, updated } = await bootstrapTrustedClients(context.adapter, trustedClients);
     if (trustedClients.length === 0) {
       console.log(
         '[OIDC BOOTSTRAP] no trustedClients configured — skipping (check *_OIDC_CLIENT_ID env vars if unexpected)'
       );
     } else {
+      const context = await auth.$context;
+      const { created, updated } = await bootstrapTrustedClients(context.adapter, trustedClients);
       console.log(
         `[OIDC BOOTSTRAP] trustedClients synced (${created} created, ${updated} updated of ${trustedClients.length})`
       );
@@ -595,7 +595,7 @@ void (async () => {
       '[OIDC BOOTSTRAP] Failed to sync trustedClients — OIDC token exchange will 500 until this is resolved.',
       error
     );
-    Sentry.captureException(error, { level: 'error', tags: { subsystem: 'oidc-bootstrap' } });
+    Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'oidc-bootstrap' } });
   }
 
   const server = app.listen(parseInt(port), () => {
