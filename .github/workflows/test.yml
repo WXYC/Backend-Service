@@ -43,6 +43,7 @@ jobs:
       shared: ${{ steps.changes.outputs.shared }}
       tests: ${{ steps.changes.outputs.tests }}
       src: ${{ steps.changes.outputs.src }}
+      auth-tables-check: ${{ steps.changes.outputs.auth-tables-check }}
       run-integration: ${{ steps.should-run.outputs.run-integration }}
       db-init: ${{ steps.changes.outputs.db-init }}
     steps:
@@ -89,6 +90,16 @@ jobs:
               - 'package.json'
               - 'package-lock.json'
               - 'tsconfig.base.json'
+            # BS#1573: the auth-tables doc check must also run when only
+            # CLAUDE.md or its own enforcement script changes. Otherwise a PR
+            # that hand-edits the sentinel list to a wrong shape (or breaks
+            # the script itself) silently skips the check the PR was written
+            # to add. `src` above is scoped to build-affecting paths and
+            # would exclude a docs-only edit.
+            auth-tables-check:
+              - 'CLAUDE.md'
+              - 'scripts/check-auth-tables-doc.mjs'
+              - 'shared/database/src/schema.ts'
 
       - name: Determine if integration tests should run
         id: should-run
@@ -180,11 +191,28 @@ jobs:
       - name: Bulk UPDATE + ANALYZE pairing (BS#934)
         run: node scripts/check-bulk-update-analyze.mjs --strict
 
-      - name: Auth-tables doc drift (BS#1573)
-        run: node scripts/check-auth-tables-doc.mjs
-
       - name: Build
         run: npm run build
+
+  # Auth-tables doc drift (BS#1573). Split out from `lint-and-typecheck` so
+  # it triggers on `CLAUDE.md`- or `scripts/check-auth-tables-doc.mjs`-only
+  # PRs — which the `src` filter above excludes. Zero-dep, ~1s script; no
+  # `npm ci` needed.
+  auth-tables-doc-drift:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.auth-tables-check == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Auth-tables doc drift (BS#1573)
+        run: node scripts/check-auth-tables-doc.mjs
 
   # Unit tests - runs affected tests only
   unit-tests:
