@@ -18,6 +18,7 @@
 --   names, types, and required-ness match it field-for-field so the drizzle
 --   adapter's field map has no aliases to maintain.
 
+
 CREATE TABLE "auth_oauth_access_token" (
 	"id" varchar(255) PRIMARY KEY NOT NULL,
 	"access_token" text NOT NULL,
@@ -66,5 +67,6 @@ ALTER TABLE "auth_oauth_consent" ADD CONSTRAINT "auth_oauth_consent_client_id_au
 ALTER TABLE "auth_oauth_consent" ADD CONSTRAINT "auth_oauth_consent_user_id_auth_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."auth_user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "auth_oauth_access_token_client_id_idx" ON "auth_oauth_access_token" USING btree ("client_id");--> statement-breakpoint
 CREATE INDEX "auth_oauth_access_token_user_id_idx" ON "auth_oauth_access_token" USING btree ("user_id");--> statement-breakpoint
+CREATE INDEX "auth_oauth_application_user_id_idx" ON "auth_oauth_application" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "auth_oauth_consent_client_id_idx" ON "auth_oauth_consent" USING btree ("client_id");--> statement-breakpoint
 CREATE INDEX "auth_oauth_consent_user_id_idx" ON "auth_oauth_consent" USING btree ("user_id");

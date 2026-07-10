@@ -233,20 +233,24 @@ export const invitation = pgTable(
 // constraint doesn't exist at ADD CONSTRAINT time. Column-level `.unique()`
 // emits `UNIQUE` inline inside `CREATE TABLE`, so the constraint is present
 // before the FKs in the same migration are applied.
-export const oauthApplication = pgTable('auth_oauth_application', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  name: varchar('name', { length: 255 }).notNull(),
-  icon: text('icon'),
-  metadata: text('metadata'),
-  clientId: varchar('client_id', { length: 255 }).notNull().unique('auth_oauth_application_client_id_key'),
-  clientSecret: text('client_secret'),
-  redirectUrls: text('redirect_urls').notNull(),
-  type: varchar('type', { length: 32 }).notNull(),
-  disabled: boolean('disabled').default(false),
-  userId: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const oauthApplication = pgTable(
+  'auth_oauth_application',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    name: varchar('name', { length: 255 }).notNull(),
+    icon: text('icon'),
+    metadata: text('metadata'),
+    clientId: varchar('client_id', { length: 255 }).notNull().unique('auth_oauth_application_client_id_key'),
+    clientSecret: text('client_secret'),
+    redirectUrls: text('redirect_urls').notNull(),
+    type: varchar('type', { length: 32 }).notNull(),
+    disabled: boolean('disabled').default(false),
+    userId: varchar('user_id', { length: 255 }).references(() => user.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('auth_oauth_application_user_id_idx').on(table.userId)]
+);
 
 export const oauthAccessToken = pgTable(
   'auth_oauth_access_token',
