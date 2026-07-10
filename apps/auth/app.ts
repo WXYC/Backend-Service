@@ -577,25 +577,34 @@ void (async () => {
   // DB blip shouldn't take sign-in / session / provision-user down for a bug
   // that only affects OIDC token exchange for two clients. If bootstrap fails,
   // OIDC login 500s at first attempt (loud), everything else keeps working.
-  try {
-    const trustedClients = buildTrustedClients(process.env);
-    if (trustedClients.length === 0) {
-      console.log(
-        '[OIDC BOOTSTRAP] no trustedClients configured — skipping (check *_OIDC_CLIENT_ID env vars if unexpected)'
-      );
-    } else {
-      const context = await auth.$context;
-      const { created, updated } = await bootstrapTrustedClients(context.adapter, trustedClients);
-      console.log(
-        `[OIDC BOOTSTRAP] trustedClients synced (${created} created, ${updated} updated of ${trustedClients.length})`
-      );
-    }
-  } catch (error) {
-    console.error(
-      '[OIDC BOOTSTRAP] Failed to sync trustedClients — OIDC token exchange will 500 until this is resolved.',
-      error
+  const trustedClients = buildTrustedClients(process.env);
+  if (trustedClients.length === 0) {
+    console.log(
+      '[OIDC BOOTSTRAP] no trustedClients configured — skipping (check *_OIDC_CLIENT_ID env vars if unexpected)'
     );
-    Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'oidc-bootstrap' } });
+  } else {
+    try {
+      // Split the try so an `auth.$context` failure (plugin init, DB pool
+      // warm-up race) doesn't mis-tag as an oidc-bootstrap failure — a
+      // $context failure would break login/session/provision-user too, so
+      // on-call needs the right root-cause tag.
+      const context = await auth.$context;
+      try {
+        const { created, updated } = await bootstrapTrustedClients(context.adapter, trustedClients);
+        console.log(
+          `[OIDC BOOTSTRAP] trustedClients synced (${created} created, ${updated} updated of ${trustedClients.length})`
+        );
+      } catch (error) {
+        console.error(
+          '[OIDC BOOTSTRAP] Failed to sync trustedClients — OIDC token exchange will 500 until this is resolved.',
+          error
+        );
+        Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'oidc-bootstrap' } });
+      }
+    } catch (error) {
+      console.error('[AUTH CONTEXT] Failed to resolve auth.$context before bootstrap:', error);
+      Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'auth-context' } });
+    }
   }
 
   const server = app.listen(parseInt(port), () => {

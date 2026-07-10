@@ -365,9 +365,20 @@ describe('bootstrapTrustedClients', () => {
       return originalCreate(args);
     };
 
-    await expect(bootstrapTrustedClients(asAdapter(adapter), [wikijs, flowsheetClient()])).rejects.toThrow(
-      /1 of 2 trustedClients failed/
-    );
+    // Single-error case unwraps to the leaf error (Sentry-grouping fidelity),
+    // so we get the wrapped Error, not an AggregateError. Wrapper carries
+    // the clientId; leaf carries the original message via `.cause`.
+    let thrown: unknown;
+    try {
+      await bootstrapTrustedClients(asAdapter(adapter), [wikijs, flowsheetClient()]);
+    } catch (err) {
+      thrown = err;
+    }
+    assertDefined(thrown, 'expected bootstrap to throw');
+    expect(thrown).toBeInstanceOf(Error);
+    const wrapped = thrown as Error & { cause?: unknown };
+    expect(wrapped.message).toMatch(/clientId=flowsheet/);
+    expect((wrapped.cause as Error | undefined)?.message).toBe('flowsheet-specific transient error');
 
     // Wiki.js row was written; flowsheet was not — but the loop didn't abort
     // before trying flowsheet.
@@ -393,10 +404,60 @@ describe('bootstrapTrustedClients', () => {
       },
     };
 
-    await expect(
-      bootstrapTrustedClients(brokenAdapter as unknown as Parameters<typeof bootstrapTrustedClients>[0], [
+    // Single-error unwrap: throw the leaf-wrapper directly (with clientId
+    // context) so Sentry groups by root cause. AggregateError only surfaces
+    // when there are multiple leaf failures.
+    let thrown: unknown;
+    try {
+      await bootstrapTrustedClients(brokenAdapter as unknown as Parameters<typeof bootstrapTrustedClients>[0], [
         flowsheetClient(),
-      ])
-    ).rejects.toThrow(/1 of 1 trustedClients failed/);
+      ]);
+    } catch (err) {
+      thrown = err;
+    }
+    assertDefined(thrown, 'expected bootstrap to throw');
+    expect(thrown).toBeInstanceOf(Error);
+    const wrapped = thrown as Error & { cause?: unknown };
+    expect(wrapped.message).toMatch(/clientId=flowsheet/);
+    expect((wrapped.cause as Error | undefined)?.message).toBe('DB unreachable');
+  });
+
+  it('aggregates multiple failures into an AggregateError with a count summary', async () => {
+    // Two clients both fail: verify we get an AggregateError (not a single
+    // wrapped Error) with a message that identifies the failure count and
+    // partial-success accounting.
+    const wikijs: Client = {
+      clientId: 'wiki-id',
+      clientSecret: 'wiki-secret',
+      redirectUrls: ['https://wiki.wxyc.org/login/oidc/callback'],
+      name: 'Wiki.js',
+      type: 'web',
+      disabled: false,
+      icon: undefined,
+      metadata: null,
+      skipConsent: true,
+    };
+
+    const { adapter } = makeFakeAdapter();
+    adapter.create = () => {
+      throw new Error('create-side transient failure');
+    };
+    // Ensure findOne returns null so we always land on the create path.
+
+    let thrown: unknown;
+    try {
+      await bootstrapTrustedClients(asAdapter(adapter), [wikijs, flowsheetClient()]);
+    } catch (err) {
+      thrown = err;
+    }
+    assertDefined(thrown, 'expected bootstrap to throw');
+    expect(thrown).toBeInstanceOf(AggregateError);
+    const agg = thrown as AggregateError;
+    expect(agg.message).toMatch(/2 of 2 trustedClients failed/);
+    expect(agg.errors).toHaveLength(2);
+    // Each leaf preserves clientId identification.
+    const messages = (agg.errors as Error[]).map((e) => e.message);
+    expect(messages.some((m) => m.includes('clientId=wiki-id'))).toBe(true);
+    expect(messages.some((m) => m.includes('clientId=flowsheet'))).toBe(true);
   });
 });
