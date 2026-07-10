@@ -1,9 +1,15 @@
 /**
  * Observability for triangle-shows-etl: Sentry init + JSON logs.
  *
- * Mirrors `jobs/flowsheet-metadata-backfill/logger.ts` verbatim — the
- * contract from issue #538 is identical, the duplication is to keep this
- * one-shot job's build graph independent of the long-running services.
+ * Copied from `jobs/venue-events-scraper/logger.ts` (the issue-#538
+ * contract; per-job duplication keeps this job's build graph independent
+ * of the long-running services) PLUS one deliberate addition this copy
+ * carries that the siblings don't: `captureWarning`, the message-level
+ * Sentry signal the source-staleness alert depends on. When propagating
+ * logger fixes across the job fleet, do NOT "restore verbatim" by
+ * deleting it — and note `jobs/flowsheet-metadata-backfill/logger.ts`
+ * has separately diverged (tracesSampler work, BS#1457/#1566), so it is
+ * not a sync source for cron jobs that default tracing off.
  */
 
 import * as Sentry from '@sentry/node';

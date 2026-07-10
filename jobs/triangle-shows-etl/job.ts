@@ -34,6 +34,9 @@ const main = async (): Promise<void> => {
 
     const venueCache = makeVenueCache();
 
+    // Run guards (empty snapshot, zero upserts, majority failure) live in
+    // runEtl so orchestrate.test.ts can exercise them — a thrown guard
+    // lands in the catch below and exits non-zero.
     const totals = await runEtl({
       fetchHealth: () => fetchHealth(baseUrl),
       fetchVenues: () => fetchVenues(baseUrl),
@@ -42,17 +45,10 @@ const main = async (): Promise<void> => {
       upsertConcert,
     });
 
-    // Mirror the RHP scraper's zero-work guard: events came back but
-    // nothing landed — exit non-zero so cron-success monitoring can't
-    // stay green through a wholesale write-path failure.
-    const eventsIngestable = totals.events_seen - totals.events_excluded;
-    if (eventsIngestable > 0 && totals.upserts_total === 0) {
-      throw new Error(
-        `${eventsIngestable} ingestable events pulled but 0 upserted ` +
-          `(map_errors=${totals.map_errors}, venue_resolve_errors=${totals.venue_resolve_errors}, ` +
-          `upsert_errors=${totals.upsert_errors}); aborting with non-zero exit`
-      );
-    }
+    log('info', 'venue_cache_stats', 'venue cache size at end of run', {
+      venues_cached: venueCache.size(),
+      upserts_total: totals.upserts_total,
+    });
   } catch (error) {
     log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
     captureError(error, 'failed');

@@ -1,9 +1,11 @@
 /**
  * Wire types for the triangle-shows `/api/v1` surface, mirrored from
  * `backend/app/schemas.py` in WXYC/triangle-shows (EventResponse /
- * VenueResponse / HealthResponse). Hand-maintained — triangle-shows is a
- * plain FastAPI service outside the wxyc-shared codegen loop; the ETL's
- * `raw_data` column preserves the full payload so a drifted field is
+ * VenueResponse / HealthResponse). Hand-maintained, and deliberately a
+ * CONSUMED-FIELDS SUBSET — fields the ETL never reads (venue_color,
+ * updated_at, ...) are omitted to shrink the drift surface; the runtime
+ * object still carries whatever JSON arrived, and the ETL's `raw_data`
+ * column preserves that full payload so a drifted or omitted field is
  * recoverable without a re-pull.
  *
  * Pydantic serializes Optional fields as explicit nulls, `date` as
@@ -38,14 +40,12 @@ export type TsEvent = {
   /** Stable per-event identity, tier-prefixed (ext:/url:/hash:), ≤1100 chars.
    *  UNIQUE ONLY PER-VENUE — always qualify with venue_slug when keying. */
   source_key: string;
-  updated_at: string | null;
   /** Soft tombstone: when the venue stopped advertising the event. */
   removed_at: string | null;
   // Denormalized venue fields joined into the event response.
   venue_name: string | null;
   venue_slug: string | null;
   venue_city: string | null;
-  venue_color: string | null;
 };
 
 export type TsVenue = {
@@ -53,10 +53,6 @@ export type TsVenue = {
   name: string;
   slug: string;
   city: string;
-  capacity: number | null;
-  size_category: string;
-  website: string | null;
-  color: string;
 };
 
 export type TsHealth = {

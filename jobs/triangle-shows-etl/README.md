@@ -25,11 +25,13 @@ Plus the standard `@wxyc/database` connection vars. See [`docs/env-vars.md`](../
 
 ## Keying (load-bearing)
 
-`source_id = '<venue_slug>:' + source_key` — **never bare `source_key`**. triangle-shows' uniqueness is per-venue (`(venue_id, source_key)` is its unique index); `source_key` alone collides across venues (VenuePilot external ids are small integers, and the ingested set contains three same-platform pairs: rubies+stancyks VenuePilot, neptunes-parlour+boom-club Squarespace, shadowbox-studio+slims MEC). Max composed length ~1165 chars — why migration 0112 widened `concerts.source_id` to `text`.
+`source_id = '<venue_slug>:' + source_key` — **never bare `source_key`**. triangle-shows' uniqueness is per-venue (`(venue_id, source_key)` is its unique index); `source_key` alone collides across venues. The ingested set contains several same-platform groupings — a Ticketmaster quad (koka-booth, red-hat, dpac, the-ritz), an rhp_events pair (lincoln-theatre, the-pinhook), and the three pairs whose `ext:`/`url:` tier keys are the collision-prone kind (rubies+stancyks VenuePilot, neptunes-parlour+boom-club Squarespace, shadowbox-studio+slims MEC) — and the venue qualifier protects all of them uniformly. Max composed length ~1201 chars (source slug ≤100 + ':' + key ≤1100; ingested slugs are additionally asserted ≤64) — why migration 0112 widened `concerts.source_id` to `text`.
 
 ## Venue partition (BS#1570 Decision 1)
 
-The 5 double-covered triangle-shows slugs are excluded — events skipped, no ETL-provisioned venue rows: `cats-cradle`, `cats-cradle-back-room`, `local-506`, `motorco`, `haw-river-ballroom`. Startup assertions fail the run loudly when (a) any excluded slug disappears from the source venue list (partition drift — re-verify the double-coverage set), or (b) an ingested slug would overflow `venues.slug varchar(64)`.
+The 5 double-covered triangle-shows slugs are excluded — events skipped, no ETL-provisioned venue rows: `cats-cradle`, `cats-cradle-back-room`, `local-506`, `motorco`, `haw-river-ballroom`. Startup assertions fail the run loudly when (a) any excluded slug disappears from the source venue list (partition drift — re-verify the double-coverage set), or (b) an ingested slug would overflow `venues.slug varchar(64)` (the writer's `ensureVenue` enforces the same bound at the chokepoint, covering on-demand provisioning too; venue _names_ clamp to varchar(128) rather than fail — a long display name must not drop a venue's whole calendar).
+
+The startup assertion only catches a known overlap _disappearing_. The forward direction — a NEW venue appearing (source growth, or `/venues` list drift with on-demand provisioning) — is surfaced as a single end-of-run Sentry warning listing every venue row the run actually INSERTed (`venues_created`): each entry is the cue to re-check the RHP double-coverage partition before duplicates accumulate. The first-ever run names all 16; after that the list should be empty.
 
 Supersession-checkpoint footnote (not this job's concern): BS's venue seed spells Motorco `motorco-music-hall`; triangle-shows uses `motorco`. Flipping a venue from RHP to triangle-shows later must map the slug or it will provision a duplicate venue row.
 
@@ -43,7 +45,11 @@ Field mapping details (status enum mapping incl. `free` → `on_sale` + `price_m
 
 ## Observability
 
-Org-standard JSON logs + Sentry (issue #538 contract). A loud Sentry **warning** fires when the source's `/api/v1/health.last_scrape` is > 24h stale — its scheduler scrapes 06:00/18:00 ET, so ~7h-old data at the 05:05 UTC pull is normal. A run with ingestable events but zero upserts exits non-zero so cron-success monitoring can't stay green through a write-path failure.
+Org-standard JSON logs + Sentry (issue #538 contract). A loud Sentry **warning** fires when the source's `/api/v1/health.last_scrape` is > 24h stale, absent, or unparseable — its scheduler scrapes 06:00/18:00 ET, so ~7h-old data at the 05:05 UTC pull is normal. Every fetch retries once after 15s (a cold-starting source host degrades to "resolution deferred one night", not "no mirror tonight") and non-2xx failures carry a slice of the response body so a FastAPI 422's `detail` is self-describing in the log.
+
+**Run guards (exit non-zero):** an empty snapshot (0 events — a live Triangle calendar is never empty, so a 200-with-empty-array is a source regression, not a success); ingestable events with zero upserts; or failures outnumbering successes (majority-failure — a wholesale drift must not stay green because a handful of rows squeaked through). Per-event errors are counted and logged individually, but Sentry captures are deduped per distinct (step, message) per run so a 1,500-event drift is one Sentry event, not a quota flood; a venue whose provisioning failed is negative-cached for the rest of the run.
+
+**Resolver caveat (Phase 2 must reconcile):** when the source has no `artist`, `headlining_artist_raw` falls back to the event _name_ — which feeds event-title strings into the `concerts-artist-resolver`'s exact-match arm. A title that happens to normalize to a library artist (tribute nights, DJ nights named after artists) can be FK-stamped to the wrong artist and thereby enter the curated partial index. The resolver also re-scans tombstoned/unresolvable rows nightly (its claim query has no `removed_at` filter). Both are deliberately left to the Phase 2 curation-predicate ticket (BS#1570 correction 3) — this job makes no resolver changes per BS#1589.
 
 ## No sync-notify / SSE
 
