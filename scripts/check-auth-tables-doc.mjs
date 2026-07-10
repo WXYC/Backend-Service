@@ -28,12 +28,16 @@
  * to unrelated schema growth.
  *
  * Detection strategy:
- *   - Schema: walk every `.ts` file under `shared/database/src/` (excluding
- *     `migrations/`) and regex `pgTable\(\s*'(auth_[…]+)'` for every
- *     declaration. Walking a directory instead of a single hard-coded path
- *     survives a future split of `schema.ts` into `schema/auth.ts`,
- *     `schema/domain.ts`, etc. (BS#1581) — the check keeps working with no
- *     config file to remember to update.
+ *   - Schema: walk every `.ts` file under `shared/database/src/` (skipping
+ *     only `migrations/`, which is SQL-only) and regex
+ *     `pgTable\(\s*'(auth_[…]+)'` for every declaration. Walking a
+ *     directory instead of a single hard-coded path survives a future
+ *     split of `schema.ts` into `schema/auth.ts`, `schema/domain.ts`,
+ *     etc. (BS#1581) — the check keeps working with no config file to
+ *     remember to update. A conservative skip list here would silently
+ *     drop a future auth_* declaration in a subdir, reintroducing the
+ *     exact silent-bypass class this check closes; only skip dirs with
+ *     a technical reason (SQL only, etc.).
  *   - Doc: locate the fenced block between `<!-- auth-tables-list:begin -->`
  *     and `<!-- auth-tables-list:end -->`; extract every backtick-quoted
  *     `auth_*` token from the body.
@@ -74,7 +78,13 @@ const SCRIPT_REPO_ROOT = resolve(__dirname, '..');
 // `schema/auth.ts`, `schema/domain.ts`, etc. keeps working without a config
 // file to remember to update.
 const SCHEMA_ROOT_REL = 'shared/database/src';
-const SCHEMA_SKIP_DIRS = new Set(['migrations', 'legacy', 'types']);
+// Skip only `migrations/` — SQL files, no pgTable(...) calls, would be
+// filtered out by the extension check anyway but skipping saves a large
+// directory walk. Everything else under the schema root is a candidate;
+// speculative skip entries (e.g. `legacy/`, `types/`) would silently drop
+// a future auth_* declaration in one of those subdirs, reintroducing the
+// exact silent-bypass class this check was written to close (F14).
+const SCHEMA_SKIP_DIRS = new Set(['migrations']);
 const DOC_REL = 'CLAUDE.md';
 const SENTINEL_BEGIN = '<!-- auth-tables-list:begin -->';
 const SENTINEL_END = '<!-- auth-tables-list:end -->';
@@ -103,11 +113,62 @@ const DOC_TOKEN_RE = /`(auth_[A-Za-z0-9_]+)`/g;
 
 // Strip JS/TS line and block comments before regex extraction. A
 // commented-out `// pgTable('auth_legacy', ...)` is not a declared table.
-// Not a full JS parser — no template-literal or string tracking — but the
-// schema file has no `//` or `/*` sequences inside strings today, and the
-// worst case (over-strip) still fails safely on the diff step.
+//
+// Tracks single-quote, double-quote, and backtick string state so a `//`
+// or `/*` sequence inside a string literal isn't treated as a comment.
+// Without that tracking, a schema line like
+// `const url = 'https://example.com'; export const authX = pgTable('auth_x', ...);`
+// would have everything from the `//` onward stripped, silently dropping
+// the real `pgTable` call — reintroducing the exact silent-bypass class
+// this whole PR was written to close (F13). Handles simple backslash
+// escapes inside strings; not a full JS parser (template-literal
+// `${...}` interpolation is scanned as opaque string content) but
+// sufficient for the schema tree's declaration style.
 function stripJsComments(source) {
-  return source.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  let out = '';
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const c = source[i];
+    const next = source[i + 1];
+    // String literal — scan to matching quote, respecting backslash escapes.
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      out += c;
+      i += 1;
+      while (i < n) {
+        const sc = source[i];
+        if (sc === '\\' && i + 1 < n) {
+          out += sc + source[i + 1];
+          i += 2;
+          continue;
+        }
+        out += sc;
+        i += 1;
+        if (sc === quote) break;
+        // Bail out of an unterminated string at EOL for single/double quotes
+        // (backticks legitimately span lines). Prevents an unclosed quote
+        // from swallowing the rest of the file.
+        if (sc === '\n' && quote !== '`') break;
+      }
+      continue;
+    }
+    // Line comment — drop to end of line (but keep the newline).
+    if (c === '/' && next === '/') {
+      while (i < n && source[i] !== '\n') i += 1;
+      continue;
+    }
+    // Block comment — drop through the closing `*/`.
+    if (c === '/' && next === '*') {
+      i += 2;
+      while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i += 1;
+      i += 2; // skip past `*/` (safe past EOF; loop condition guards)
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
 }
 
 // Strip HTML comments from a markdown body. A backticked `auth_*` inside

@@ -340,6 +340,62 @@ describe('check-auth-tables-doc.mjs', () => {
       expect(stderr).toBe('');
     });
 
+    // F13: the naive line-comment stripper treats any `//` as a comment,
+    // including `//` inside string literals. A real `pgTable(...)` sharing
+    // a line with a URL literal would be silently dropped from the schema
+    // set — the exact class of silent-bypass this whole PR was written to
+    // close. Regression guard: schema file with a URL literal on the same
+    // line as an auth_ pgTable declaration must still be discovered.
+    it('extracts pgTable calls on the same line as a `//`-containing string literal', () => {
+      const tmpRoot = trackTmpRepo({
+        claudeMd: docWith(['auth_user', 'auth_provider']),
+        schemaTs: [
+          `import { pgTable, text } from 'drizzle-orm/pg-core';`,
+          '',
+          `export const authUser = pgTable('auth_user', { id: text('id') });`,
+          // URL literal immediately before an auth_ pgTable on the same line.
+          // The naive comment stripper would delete from `//example.com...`
+          // to end-of-line, taking the pgTable call with it.
+          `const providerUrl = 'https://example.com'; export const authProvider = pgTable('auth_provider', { id: text('id') });`,
+          '',
+        ].join('\n'),
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(EXIT_OK);
+      expect(stderr).toBe('');
+    });
+
+    // F14: SCHEMA_SKIP_DIRS must not include speculative directory names.
+    // Skipping a subdirectory that later gains an auth_* pgTable would
+    // silently drop it from the schema set — the exact silent-bypass class
+    // this PR closes. `migrations/` is the only justified skip (SQL only,
+    // no pgTable calls). Sibling subdirs must be walked. Regression guard:
+    // an auth_ pgTable in a `legacy/` or `types/` subdirectory is
+    // discovered by the tree walk.
+    it('discovers auth_* pgTables declared under any non-migrations subdirectory', () => {
+      const tmpRoot = trackTmpRepo({
+        claudeMd: docWith(['auth_user', 'auth_legacy_thing', 'auth_type_thing']),
+        schemaTs: schemaWith(['auth_user']),
+        extraSchemaFiles: {
+          'legacy/tables.ts': [
+            `import { pgTable, text } from 'drizzle-orm/pg-core';`,
+            '',
+            `export const legacyThing = pgTable('auth_legacy_thing', { id: text('id') });`,
+            '',
+          ].join('\n'),
+          'types/tables.ts': [
+            `import { pgTable, text } from 'drizzle-orm/pg-core';`,
+            '',
+            `export const typeThing = pgTable('auth_type_thing', { id: text('id') });`,
+            '',
+          ].join('\n'),
+        },
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(EXIT_OK);
+      expect(stderr).toBe('');
+    });
+
     // F6: duplicate begin/end sentinels are a silent redefinition risk.
     // The prior `indexOf` picks the first occurrence and slices to the
     // first END — everything past that vanishes. Fail loudly instead.
