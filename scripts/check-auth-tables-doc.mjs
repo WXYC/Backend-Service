@@ -100,6 +100,14 @@ function fileExists(abs) {
 function pickRepoRoot() {
   const layoutMatches = (root) => fileExists(join(root, SCHEMA_REL)) && fileExists(join(root, DOC_REL));
   if (layoutMatches(REPO_ROOT_CWD)) return REPO_ROOT_CWD;
+  // R3-5: when the test harness pins us to a temp root, don't silently fall
+  // back to the real script-parent repo. A test that deletes one of the
+  // required files to exercise the "cannot find <file>" path would otherwise
+  // see a green run against the real repo — the exact silent-bypass class
+  // this whole PR was written to close. Real callers (pre-push, CI) invoke
+  // from the repo root; the fallback exists only for developers running the
+  // script from a random cwd.
+  if (process.env.AUTH_TABLES_DOC_FORCE_CWD === '1') return REPO_ROOT_CWD;
   if (layoutMatches(SCRIPT_REPO_ROOT)) return SCRIPT_REPO_ROOT;
   // Return cwd anyway so the missing-file error is reported against the
   // caller's expected root, not a surprising fallback path.
@@ -234,7 +242,7 @@ function main(repoRoot) {
           `         ...\n` +
           `         ${SENTINEL_END}`
       );
-    } else {
+    } else if (block.reason === 'missing') {
       console.error(
         `check-auth-tables-doc: missing sentinel comments in ${DOC_REL}.\n` +
           `       expected the auth-tables line to be fenced between\n` +
@@ -243,6 +251,13 @@ function main(repoRoot) {
           `         ${SENTINEL_END}\n` +
           `       see BS#1573 for why the sentinels are load-bearing.`
       );
+    } else {
+      // Defensive: a new `reason` value was added to extractDocBlock but this
+      // switch wasn't updated. Throw with the raw reason so the caller sees
+      // exactly what the parser reported, rather than a silently mislabelled
+      // "missing sentinel" message that sends operators looking for the wrong
+      // thing (R3-3).
+      throw new Error(`check-auth-tables-doc: unrecognized block failure reason: ${JSON.stringify(block.reason)}`);
     }
     return 1;
   }
