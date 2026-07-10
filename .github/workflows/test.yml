@@ -43,7 +43,6 @@ jobs:
       shared: ${{ steps.changes.outputs.shared }}
       tests: ${{ steps.changes.outputs.tests }}
       src: ${{ steps.changes.outputs.src }}
-      auth-tables-check: ${{ steps.changes.outputs.auth-tables-check }}
       run-integration: ${{ steps.should-run.outputs.run-integration }}
       db-init: ${{ steps.changes.outputs.db-init }}
     steps:
@@ -90,16 +89,6 @@ jobs:
               - 'package.json'
               - 'package-lock.json'
               - 'tsconfig.base.json'
-            # BS#1573: the auth-tables doc check must also run when only
-            # CLAUDE.md or its own enforcement script changes. Otherwise a PR
-            # that hand-edits the sentinel list to a wrong shape (or breaks
-            # the script itself) silently skips the check the PR was written
-            # to add. `src` above is scoped to build-affecting paths and
-            # would exclude a docs-only edit.
-            auth-tables-check:
-              - 'CLAUDE.md'
-              - 'scripts/check-auth-tables-doc.mjs'
-              - 'shared/database/src/schema.ts'
 
       - name: Determine if integration tests should run
         id: should-run
@@ -194,13 +183,15 @@ jobs:
       - name: Build
         run: npm run build
 
-  # Auth-tables doc drift (BS#1573). Split out from `lint-and-typecheck` so
-  # it triggers on `CLAUDE.md`- or `scripts/check-auth-tables-doc.mjs`-only
-  # PRs — which the `src` filter above excludes. Zero-dep, ~1s script; no
-  # `npm ci` needed.
+  # Auth-tables doc drift (BS#1573). Runs unconditionally on every PR
+  # rather than behind a paths filter: the script is zero-dep, ~1s, and
+  # gating `Integration-Tests` on it (via `needs:` below) needs this job
+  # to reach a terminal state on every PR. A paths-filter `if:` would
+  # leave it skipped on unrelated PRs — GHA treats a skipped `needs:` as
+  # satisfied, but the cognitive load of tracking that vs. a required
+  # check that could silently pass isn't worth the second saved. No
+  # `npm ci`; the script has no dependencies.
   auth-tables-doc-drift:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.auth-tables-check == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -277,9 +268,15 @@ jobs:
   # The services block starts PostgreSQL even when skipped -- this is unavoidable with GHA
   # service containers but harmless (starts in seconds, job exits immediately).
   Integration-Tests:
-    needs: [detect-changes, lint-and-typecheck]
-    # Run when lint-and-typecheck succeeds or was skipped (no src changes).
-    # This ensures the required check reports status on docs-only PRs.
+    needs: [detect-changes, lint-and-typecheck, auth-tables-doc-drift]
+    # Run when all deps succeeded or were skipped. `Integration-Tests` is a
+    # required status check on `main`; `auth-tables-doc-drift` is not. Wiring
+    # it in as a hard `needs:` dep means a failing doc-drift check turns
+    # `Integration-Tests` into a "skipped due to dependency failure" report,
+    # which the branch protection rule surfaces as red. Without this, a
+    # docs-only PR that breaks the sentinel list would have `auth-tables-doc-drift`
+    # red, all required checks green, and merge allowed — the exact
+    # silent-bypass class this whole PR was written to close (BS#1573).
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     services:
