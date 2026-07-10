@@ -269,15 +269,22 @@ jobs:
   # service containers but harmless (starts in seconds, job exits immediately).
   Integration-Tests:
     needs: [detect-changes, lint-and-typecheck, auth-tables-doc-drift]
-    # Run when all deps succeeded or were skipped. `Integration-Tests` is a
-    # required status check on `main`; `auth-tables-doc-drift` is not. Wiring
-    # it in as a hard `needs:` dep means a failing doc-drift check turns
-    # `Integration-Tests` into a "skipped due to dependency failure" report,
-    # which the branch protection rule surfaces as red. Without this, a
-    # docs-only PR that breaks the sentinel list would have `auth-tables-doc-drift`
-    # red, all required checks green, and merge allowed — the exact
-    # silent-bypass class this whole PR was written to close (BS#1573).
-    if: ${{ !failure() && !cancelled() }}
+    # Pattern: "always-run + explicit failing pre-step" to convert upstream
+    # dep failures into a real job failure. `Integration-Tests` is a required
+    # status check on `main`; `auth-tables-doc-drift` is not. On this repo,
+    # branch protection treats a required check that reports `conclusion=skipped`
+    # as passing (empirically confirmed: `Migration Dry-Run (prod-shaped data)`
+    # reports skipped and does not block merge). So the intuitive fix — a
+    # `needs:` dep + `if: !failure() && !cancelled()` — silently bypasses:
+    # doc-drift fails -> Integration-Tests reports `skipped` -> merge allowed.
+    #
+    # Instead: run the job unconditionally (`always() && !cancelled()`), and
+    # have its first step explicitly fail when a critical `needs:` dep failed.
+    # A failing step fails the job, so `conclusion=failure` propagates to
+    # branch protection as red. See BS#1573 for the incident that motivated
+    # gating this check; the branch-protection admin-side follow-up is to add
+    # `auth-tables-doc-drift` directly to `required_status_checks.contexts`.
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -310,6 +317,17 @@ jobs:
       BETTER_AUTH_AUDIENCE: http://localhost:8083
       BETTER_AUTH_SECRET: ci-test-secret-key-for-jwt-signing
     steps:
+      # See the comment on `if:` above for why this step exists. Do not
+      # remove without understanding the branch-protection-vs-skipped-check
+      # interaction it papers over.
+      - name: Enforce upstream gate
+        if: ${{ needs.auth-tables-doc-drift.result == 'failure' || needs.lint-and-typecheck.result == 'failure' }}
+        run: |
+          echo "::error::Required upstream job failed; failing Integration-Tests to surface the block to branch protection."
+          echo "  auth-tables-doc-drift: ${{ needs.auth-tables-doc-drift.result }}"
+          echo "  lint-and-typecheck:    ${{ needs.lint-and-typecheck.result }}"
+          exit 1
+
       - name: Skip notification
         if: env.RUN_TESTS != 'true'
         run: echo "No relevant changes detected, skipping integration tests"
