@@ -85,6 +85,14 @@ jobs:
               - 'jobs/**'
               - 'shared/**'
               - 'tests/**'
+              # `scripts/**` covers the ESM static-check + operator scripts
+              # (`scripts/check-*.mjs`, `scripts/lib/*.mjs`, etc.). Prior to
+              # BS#1590 R4-5 an edit here didn't trigger `lint-and-typecheck`
+              # or `unit-tests`, which meant a broken ES-module import in a
+              # script had no CI signal — the script's own pre-push hook
+              # would still run in dev, but a script-only PR could green-CI
+              # its way to `main` with the module unloadable.
+              - 'scripts/**'
               - 'dev_env/mock-api-server/**'
               - 'package.json'
               - 'package-lock.json'
@@ -185,12 +193,12 @@ jobs:
 
   # Auth-tables doc drift (BS#1573). Runs unconditionally on every PR
   # rather than behind a paths filter: the script is zero-dep, ~1s, and
-  # gating `Integration-Tests` on it (via `needs:` below) needs this job
-  # to reach a terminal state on every PR. A paths-filter `if:` would
-  # leave it skipped on unrelated PRs — GHA treats a skipped `needs:` as
-  # satisfied, but the cognitive load of tracking that vs. a required
-  # check that could silently pass isn't worth the second saved. No
-  # `npm ci`; the script has no dependencies.
+  # this job is a required status check on `main` (BS#1587), which means
+  # every PR needs it to reach a terminal state. A paths-filter `if:`
+  # would leave it skipped on unrelated PRs, and branch protection treats
+  # a required check reporting `conclusion=skipped` as passing — a silent
+  # bypass this whole check was written to close. No `npm ci`; the script
+  # has no dependencies.
   auth-tables-doc-drift:
     runs-on: ubuntu-latest
     steps:
@@ -268,23 +276,18 @@ jobs:
   # The services block starts PostgreSQL even when skipped -- this is unavoidable with GHA
   # service containers but harmless (starts in seconds, job exits immediately).
   Integration-Tests:
-    needs: [detect-changes, lint-and-typecheck, auth-tables-doc-drift]
-    # Pattern: "always-run + explicit failing pre-step" to convert upstream
-    # dep failures into a real job failure. `Integration-Tests` is a required
-    # status check on `main`; `auth-tables-doc-drift` is not. On this repo,
-    # branch protection treats a required check that reports `conclusion=skipped`
-    # as passing (empirically confirmed: `Migration Dry-Run (prod-shaped data)`
-    # reports skipped and does not block merge). So the intuitive fix — a
-    # `needs:` dep + `if: !failure() && !cancelled()` — silently bypasses:
-    # doc-drift fails -> Integration-Tests reports `skipped` -> merge allowed.
+    needs: [detect-changes, lint-and-typecheck]
+    # Run when lint-and-typecheck succeeds or was skipped (no src changes).
+    # This ensures the required check reports status on docs-only PRs.
     #
-    # Instead: run the job unconditionally (`always() && !cancelled()`), and
-    # have its first step explicitly fail when a critical `needs:` dep failed.
-    # A failing step fails the job, so `conclusion=failure` propagates to
-    # branch protection as red. See BS#1573 for the incident that motivated
-    # gating this check; the branch-protection admin-side follow-up is to add
-    # `auth-tables-doc-drift` directly to `required_status_checks.contexts`.
-    if: ${{ always() && !cancelled() }}
+    # `auth-tables-doc-drift` is enforced directly via
+    # `required_status_checks.contexts` on `main` (BS#1587), so it no longer
+    # needs to gate `Integration-Tests` via `needs:` + a synthetic failing
+    # step. That prior scaffold (BS#1577 R4) worked around the branch-protection
+    # quirk where a required check reporting `conclusion=skipped` was treated
+    # as passing; with doc-drift a direct required context, its own failure
+    # blocks merge regardless of Integration-Tests' result.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -317,33 +320,6 @@ jobs:
       BETTER_AUTH_AUDIENCE: http://localhost:8083
       BETTER_AUTH_SECRET: ci-test-secret-key-for-jwt-signing
     steps:
-      # See the comment on `if:` above for why this step exists. Do not
-      # remove without understanding the branch-protection-vs-skipped-check
-      # interaction it papers over.
-      #
-      # WARNING: if you add anything to `Integration-Tests`' `needs:` list,
-      # extend this `if:` disjunction to cover it too. A required-check gate
-      # that doesn't enumerate every upstream it depends on will silently
-      # skip when that upstream fails/cancels/skips-unexpectedly, and the
-      # whole point of this scaffold is to make those failures loud.
-      #
-      # `auth-tables-doc-drift` runs unconditionally (see the R2 refactor)
-      # so a `skipped` result there means something went wrong — treat it
-      # as bad. `lint-and-typecheck` and `detect-changes` legitimately don't
-      # run in some states (paths filter false / n/a for detect-changes),
-      # so only fail on their explicit failure or cancellation.
-      - name: Enforce upstream gate
-        if: >-
-          ${{ needs.auth-tables-doc-drift.result != 'success'
-              || contains(fromJson('["failure", "cancelled"]'), needs.lint-and-typecheck.result)
-              || contains(fromJson('["failure", "cancelled"]'), needs.detect-changes.result) }}
-        run: |
-          echo "::error::Required upstream job failed; failing Integration-Tests to surface the block to branch protection."
-          echo "  detect-changes:        ${{ needs.detect-changes.result }}"
-          echo "  auth-tables-doc-drift: ${{ needs.auth-tables-doc-drift.result }}"
-          echo "  lint-and-typecheck:    ${{ needs.lint-and-typecheck.result }}"
-          exit 1
-
       - name: Skip notification
         if: env.RUN_TESTS != 'true'
         run: echo "No relevant changes detected, skipping integration tests"

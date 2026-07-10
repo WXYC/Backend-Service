@@ -49,6 +49,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { resolve, relative, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+import { isInvokedDirectly } from './lib/main-module.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Cwd-relative root (so tests can run the script against a synthetic tree).
@@ -270,16 +271,7 @@ function main(repoRoot) {
   return strict ? 1 : 0;
 }
 
-import { realpathSync } from 'node:fs';
-const invokedDirectly = (() => {
-  try {
-    return realpathSync(resolve(process.argv[1] ?? '')) === realpathSync(fileURLToPath(import.meta.url));
-  } catch {
-    return false;
-  }
-})();
-
-if (invokedDirectly) {
+if (isInvokedDirectly(import.meta.url)) {
   // Prefer the cwd as repo root (so tests can run against a temp tree); fall
   // back to the script's parent dir if cwd doesn't have the expected layout.
   const probeRoot = (root) =>
