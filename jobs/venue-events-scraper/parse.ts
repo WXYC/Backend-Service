@@ -325,7 +325,10 @@ const extractAddress = (location: SchemaEvent['location']): string | null => {
 
 /** The longest `headlining_artist_raw` we'll send to a varchar(256). */
 const MAX_HEADLINING_ARTIST_LEN = 256;
-/** Matches the schema's `concerts.source_id varchar(256)` ceiling. */
+/** RHP-side sanity cap on the pathname-derived source_id. Deliberate writer
+ *  policy, NOT a schema ceiling: migration 0112 widened `concerts.source_id`
+ *  to `text` (triangle-shows venue-qualified keys reach ~1201 chars), but an
+ *  RHP event-page path longer than this is a scraper bug, not a real key. */
 const MAX_SOURCE_ID_LEN = 256;
 /** Matches the schema's `venues.name varchar(128)` ceiling. */
 const MAX_VENUE_NAME_LEN = 128;

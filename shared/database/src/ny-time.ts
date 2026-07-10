@@ -5,16 +5,26 @@
  * must agree on the same conversion:
  *
  *   - `jobs/venue-events-scraper` derives `starts_on` FROM an instant
- *     (`nyCalendarDate`), mirroring the migration's one-time backfill
+ *     (`nyCalendarDate`), mirroring migration 0112's backfill and the
+ *     `concerts_derive_starts_on` trigger expression
  *     (`(starts_at AT TIME ZONE 'America/New_York')::date`).
  *   - `jobs/triangle-shows-etl` composes `starts_at`/`doors_at` from the
  *     source's date + local-time fields (`nyWallClockToUtc`).
  *
  * Built on Intl.DateTimeFormat (Node ships full IANA tz data) — no
  * dependency, DST handled by the platform.
+ *
+ * See also: `jobs/flowsheet-etl/transform.ts` (`easternOffsetAt` +
+ * `parseMySQLDatetime`) carries an older sibling of the same two-pass NY
+ * offset converge for tubafrenzy MySQL datetimes. A DST- or Intl-parsing
+ * fix here almost certainly applies there too; consolidation onto this
+ * module is a known follow-up — until then, patch both.
  */
 
-const NY_TIME_ZONE = 'America/New_York';
+/** The station's home time zone. Exported so consumers reference this
+ *  constant instead of re-hardcoding the literal (it already appears in
+ *  flowsheet.service.ts and flowsheet-etl). */
+export const NY_TIME_ZONE = 'America/New_York';
 
 // en-CA formats dates as ISO YYYY-MM-DD directly.
 const nyDateFormat = new Intl.DateTimeFormat('en-CA', {
@@ -29,8 +39,25 @@ const nyOffsetFormat = new Intl.DateTimeFormat('en-US', {
   timeZoneName: 'longOffset',
 });
 
-/** The `YYYY-MM-DD` America/New_York calendar date of an instant. */
-export const nyCalendarDate = (instant: Date): string => nyDateFormat.format(instant);
+const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The `YYYY-MM-DD` America/New_York calendar date of an instant.
+ *
+ * The output shape is validated: on a Node built without full ICU, Intl
+ * silently falls back to locale data that formats en-CA as `MM/DD/YYYY`,
+ * which would otherwise flow into the NOT NULL `date` column unnoticed —
+ * fail fast here instead.
+ */
+export const nyCalendarDate = (instant: Date): string => {
+  const formatted = nyDateFormat.format(instant);
+  if (!ISO_DATE_SHAPE.test(formatted)) {
+    throw new Error(
+      `nyCalendarDate: Intl 'en-CA' produced '${formatted}', not YYYY-MM-DD — is this Node built with full-icu?`
+    );
+  }
+  return formatted;
+};
 
 /** New York's UTC offset in milliseconds at the given instant (negative: -5h EST / -4h EDT). */
 const nyOffsetMsAt = (instant: Date): number => {
@@ -44,24 +71,48 @@ const nyOffsetMsAt = (instant: Date): number => {
   return sign * (Number(match[2]) * 60 + Number(match[3] ?? '0')) * 60_000;
 };
 
+// HH:MM or HH:MM:SS, hour optionally unpadded (some feeds emit '9:30').
+const TIME_SHAPE = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+
 /**
- * Interpret `isoDate` (`YYYY-MM-DD`) + `isoTime` (`HH:MM[:SS]`) as an
- * America/New_York wall-clock reading and return the UTC instant.
+ * Interpret `isoDate` (`YYYY-MM-DD`) + `time` (`HH:MM[:SS]`, hour may be
+ * unpadded) as an America/New_York wall-clock reading and return the UTC
+ * instant.
  *
  * Callers own the null branch — a date-only event's `starts_at` stays NULL
  * (never a fabricated time), so both arguments here are non-null.
  *
- * DST via the standard two-pass converge: guess the offset as if the wall
- * clock were UTC, then re-read the offset at the corrected instant. Times
- * inside the spring-forward gap resolve to the post-transition instant;
- * fall-back ambiguous times resolve to one consistent occurrence. Both
- * stay on the intended NY calendar date, which is what `starts_on` needs.
+ * DST policy (matches Temporal/java.time 'compatible'): a wall time inside
+ * the spring-forward gap resolves FORWARD to the post-transition instant
+ * (02:30 EST doesn't exist → 03:30 EDT); a fall-back ambiguous time
+ * resolves to its first (earlier, EDT) occurrence. Implementation: probe
+ * the NY offset treating the wall clock as UTC, re-probe at the corrected
+ * instant; when the two probes disagree AND applying the second still
+ * doesn't produce a self-consistent reading (the gap), keep the first
+ * probe's result — which is the forward resolution.
  */
-export const nyWallClockToUtc = (isoDate: string, isoTime: string): Date => {
-  const candidate = new Date(`${isoDate}T${isoTime.length === 5 ? `${isoTime}:00` : isoTime}Z`);
-  if (Number.isNaN(candidate.getTime())) {
-    throw new Error(`nyWallClockToUtc: unparseable date/time '${isoDate}' / '${isoTime}'`);
+export const nyWallClockToUtc = (isoDate: string, time: string): Date => {
+  const timeMatch = time.match(TIME_SHAPE);
+  if (!ISO_DATE_SHAPE.test(isoDate) || !timeMatch) {
+    throw new Error(`nyWallClockToUtc: unparseable date/time '${isoDate}' / '${time}' (want YYYY-MM-DD + HH:MM[:SS])`);
   }
-  const firstPass = new Date(candidate.getTime() - nyOffsetMsAt(candidate));
-  return new Date(candidate.getTime() - nyOffsetMsAt(firstPass));
+  const normalizedTime = `${timeMatch[1].padStart(2, '0')}:${timeMatch[2]}:${timeMatch[3] ?? '00'}`;
+  const candidate = new Date(`${isoDate}T${normalizedTime}Z`);
+  if (Number.isNaN(candidate.getTime())) {
+    throw new Error(`nyWallClockToUtc: invalid date/time '${isoDate}' / '${time}'`);
+  }
+
+  const offsetAtCandidate = nyOffsetMsAt(candidate);
+  const firstPass = new Date(candidate.getTime() - offsetAtCandidate);
+  const offsetAtFirstPass = nyOffsetMsAt(firstPass);
+  if (offsetAtFirstPass === offsetAtCandidate) {
+    return firstPass; // Probes agree — the common case.
+  }
+  const secondPass = new Date(candidate.getTime() - offsetAtFirstPass);
+  // If the offset at secondPass matches the offset we applied, secondPass
+  // reads back as the requested wall clock (a real instant — the DST
+  // boundary just sat between our probes). If it does NOT match, the wall
+  // clock is unrepresentable (spring-forward gap): firstPass is the
+  // forward resolution (requested time + gap width on the far side).
+  return nyOffsetMsAt(secondPass) === offsetAtFirstPass ? secondPass : firstPass;
 };
