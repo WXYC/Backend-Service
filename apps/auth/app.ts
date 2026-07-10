@@ -6,7 +6,7 @@ import * as Sentry from '@sentry/node';
 import { config } from 'dotenv';
 config();
 
-import { auth, resolveCorsOrigin } from '@wxyc/authentication';
+import { auth, bootstrapTrustedClients, buildTrustedClients, resolveCorsOrigin } from '@wxyc/authentication';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
 import express from 'express';
@@ -570,6 +570,30 @@ const syncAdminRoles = async () => {
 void (async () => {
   await createDefaultUser();
   await syncAdminRoles();
+
+  // Bootstrap oauthApplication rows for every trustedClient. The
+  // oidcProvider plugin's `getClient()` short-circuits on trustedClients
+  // (returned from memory, never persisted), but its token / consent write
+  // paths still FK-reference auth_oauth_application.client_id — every
+  // trustedClient token exchange 500s until a row exists. Fatal on failure:
+  // silently starting a server whose token endpoint is permanently broken
+  // (until an operator hand-runs SQL) is worse than a loud restart loop.
+  try {
+    const context = await auth.$context;
+    await bootstrapTrustedClients(
+      { adapter: context.adapter as unknown as Parameters<typeof bootstrapTrustedClients>[0]['adapter'] },
+      buildTrustedClients(process.env)
+    );
+    console.log('[OIDC BOOTSTRAP] trustedClients synced to auth_oauth_application');
+  } catch (error) {
+    console.error(
+      '[OIDC BOOTSTRAP] Failed to sync trustedClients — token exchange would 500. Aborting startup.',
+      error
+    );
+    Sentry.captureException(error, { level: 'fatal', tags: { subsystem: 'oidc-bootstrap' } });
+    await Sentry.flush(2_000).catch(() => undefined);
+    process.exit(1);
+  }
 
   const server = app.listen(parseInt(port), () => {
     console.log(`listening on port: ${port}! (auth service)`);
