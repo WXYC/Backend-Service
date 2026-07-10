@@ -15,4 +15,10 @@ if [ "$has_real_push" = false ]; then
 fi
 
 npm run typecheck && npm run lint
+# `check:docs` is the warn-only pair (doc-budget + doc-rules): they surface
+# gentle nudges about markdown hygiene but shouldn't block a push.
 npm run check:docs || true
+# `check:auth-tables-doc` (BS#1573) is hard-fail — it enforces the
+# CLAUDE.md sentinel list against the Drizzle schema, and a mismatch is
+# always a bug. Kept separate so `|| true` above doesn't mask it.
+npm run check:auth-tables-doc
