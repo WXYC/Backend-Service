@@ -1,7 +1,7 @@
 /**
  * Unit tests for the triangle-shows ETL writer. `db` is mocked via
  * `tests/mocks/database.mock.ts` (Jest module mapper); we inspect the
- * chain's `values` / `onConflictDoUpdate` invocations to pin the two
+ * chain's `values` / `onConflictDoUpdate` invocations to pin the
  * writer-discipline invariants this job carries:
  *
  *  1. `status` and `removed_at` refresh in BOTH directions on every
@@ -11,11 +11,19 @@
  *     is strictly better-informed than a BS admin).
  *  2. `first_scraped_at` stays INSERT-only (omitted from values AND the
  *     ON CONFLICT set), matching the RHP writer's BS#1385 anchor.
+ *  3. Venue upserts pass a `setWhere` no-op-skip predicate so
+ *     `last_modified` stays an honest audit signal, and width guards
+ *     live at the ensureVenue chokepoint.
  */
 import { db } from '@wxyc/database';
-import { ensureVenue, makeVenueCache, upsertConcert } from '../../../../jobs/triangle-shows-etl/writer';
+import {
+  clampCodePoints,
+  ensureVenue,
+  makeVenueCache,
+  upsertConcert,
+} from '../../../../jobs/triangle-shows-etl/writer';
 import { mapEvent } from '../../../../jobs/triangle-shows-etl/map';
-import type { TsEvent } from '../../../../jobs/triangle-shows-etl/types';
+import { makeTsEvent } from './fixtures';
 
 type MockDb = typeof db & {
   _chain: {
@@ -28,35 +36,6 @@ type MockDb = typeof db & {
 
 const mockDb = db as MockDb;
 
-const fakeEvent = (overrides: Partial<TsEvent> = {}): TsEvent => ({
-  id: 7,
-  venue_id: 2,
-  name: 'Juana Molina',
-  artist: 'Juana Molina',
-  support_artists: null,
-  date: '2026-09-01',
-  doors_time: '19:00:00',
-  show_time: '20:00:00',
-  ticket_url: null,
-  price_min: 20,
-  price_max: null,
-  image_url: null,
-  genre: null,
-  subgenre: null,
-  status: 'on_sale',
-  age_restriction: null,
-  description: null,
-  source: 'venuepilot',
-  source_key: 'ext:777',
-  updated_at: null,
-  removed_at: null,
-  venue_name: 'The Pinhook',
-  venue_slug: 'the-pinhook',
-  venue_city: 'Durham',
-  venue_color: '#aa00aa',
-  ...overrides,
-});
-
 const scrapedAt = new Date('2026-07-10T05:05:00Z');
 
 const concertValuesRows = (): Record<string, unknown>[] =>
@@ -68,6 +47,28 @@ const concertSetClauses = (): Record<string, unknown>[] =>
   mockDb._chain.onConflictDoUpdate.mock.calls
     .map((c: unknown[]) => (c[0] as { set?: Record<string, unknown> } | undefined)?.set)
     .filter((set): set is Record<string, unknown> => !!set && 'venue_id' in set);
+
+const venueValuesRows = (): Record<string, unknown>[] =>
+  mockDb._chain.values.mock.calls
+    .flatMap((c: unknown[]) => (Array.isArray(c[0]) ? c[0] : [c[0]]))
+    .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object' && 'slug' in r);
+
+const fakeEvent = (overrides: Parameters<typeof makeTsEvent>[0] = {}) =>
+  makeTsEvent({
+    id: 7,
+    name: 'Juana Molina',
+    artist: 'Juana Molina',
+    date: '2026-09-01',
+    doors_time: '19:00:00',
+    show_time: '20:00:00',
+    price_min: 20,
+    price_max: null,
+    genre: null,
+    ticket_url: null,
+    image_url: null,
+    source_key: 'ext:777',
+    ...overrides,
+  });
 
 describe('upsertConcert', () => {
   beforeEach(() => {
@@ -166,15 +167,32 @@ describe('ensureVenue', () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 3, created: true }]);
     await ensureVenue('the-pinhook', 'The Pinhook', 'Durham');
 
-    const venueRows = mockDb._chain.values.mock.calls
-      .flatMap((c: unknown[]) => (Array.isArray(c[0]) ? c[0] : [c[0]]))
-      .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object' && 'slug' in r);
-    expect(venueRows[0]).toMatchObject({ slug: 'the-pinhook', name: 'The Pinhook', city: 'Durham', state: 'NC' });
+    expect(venueValuesRows()[0]).toMatchObject({
+      slug: 'the-pinhook',
+      name: 'The Pinhook',
+      city: 'Durham',
+      state: 'NC',
+    });
 
     const venueSets = mockDb._chain.onConflictDoUpdate.mock.calls
       .map((c: unknown[]) => (c[0] as { set?: Record<string, unknown> } | undefined)?.set)
       .filter((set): set is Record<string, unknown> => !!set && 'city' in set && !('venue_id' in set));
     expect(venueSets[0]).toMatchObject({ name: 'The Pinhook', city: 'Durham' });
+  });
+
+  it('passes a setWhere no-op-skip predicate (the honest-last_modified invariant)', async () => {
+    // The mock chains through any config, so pin the CONFIG SHAPE: without
+    // this, a refactor that drops setWhere keeps every suite green while
+    // every nightly run bumps venues.last_modified on all 16 rows and the
+    // fallback-SELECT branch becomes dead code pinning an unreachable state.
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 3, created: true }]);
+    await ensureVenue('the-pinhook', 'The Pinhook', 'Durham');
+
+    const venueConfig = mockDb._chain.onConflictDoUpdate.mock.calls
+      .map((c: unknown[]) => c[0] as { set?: Record<string, unknown>; setWhere?: unknown } | undefined)
+      .find((cfg) => !!cfg?.set && 'city' in cfg.set);
+    expect(venueConfig).toBeDefined();
+    expect(venueConfig?.setWhere).toBeDefined();
   });
 
   it('falls back to SELECT when the setWhere predicate suppressed a no-op UPDATE', async () => {
@@ -189,6 +207,29 @@ describe('ensureVenue', () => {
     mockDb._chain.limit.mockResolvedValueOnce([]);
     await expect(ensureVenue('the-pinhook', 'The Pinhook', 'Durham')).rejects.toThrow(/the-pinhook/);
   });
+
+  describe('width guards at the chokepoint (covers on-demand provisioning too)', () => {
+    it('throws on a slug over varchar(64) — a key is never truncated', async () => {
+      await expect(ensureVenue('x'.repeat(65), 'Name', 'Durham')).rejects.toThrow(/64/);
+      expect(mockDb._chain.values).not.toHaveBeenCalled();
+    });
+
+    it('clamps a name over varchar(128) instead of failing the venue (source allows String(200))', async () => {
+      // PG errors rather than truncates, and one long-named venue must not
+      // drop its whole calendar from the mirror nightly.
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 3, created: true }]);
+      await ensureVenue('the-pinhook', 'P'.repeat(200), 'Durham');
+
+      expect((venueValuesRows()[0].name as string).length).toBe(128);
+    });
+  });
+});
+
+describe('clampCodePoints', () => {
+  it('counts code points, not UTF-16 units', () => {
+    expect(clampCodePoints(`${'x'.repeat(3)}🎸y`, 4)).toBe('xxx🎸');
+    expect(clampCodePoints('short', 10)).toBe('short');
+  });
 });
 
 describe('makeVenueCache', () => {
@@ -197,15 +238,17 @@ describe('makeVenueCache', () => {
     mockDb._chain.limit.mockResolvedValue([]);
   });
 
-  it('resolves each slug once per run', async () => {
+  it('resolves each slug once per run and reports created=false on cache hits', async () => {
     mockDb._chain.returning.mockResolvedValue([{ id: 8, created: true }]);
     const cache = makeVenueCache();
 
     const first = await cache.get('kings', 'Kings', 'Raleigh');
     const second = await cache.get('kings', 'Kings', 'Raleigh');
 
-    expect(first).toBe(8);
-    expect(second).toBe(8);
+    expect(first).toEqual({ venue_id: 8, created: true });
+    // The cache hit must NOT re-report created — the orchestrator counts
+    // created outcomes as the partition-drift signal.
+    expect(second).toEqual({ venue_id: 8, created: false });
     expect(cache.size()).toBe(1);
     // One upsert only — second get() served from cache.
     expect(mockDb._chain.returning).toHaveBeenCalledTimes(1);

@@ -10,47 +10,9 @@ import {
   ingestedVenues,
   isExcluded,
 } from '../../../../jobs/triangle-shows-etl/venues';
-import type { TsVenue } from '../../../../jobs/triangle-shows-etl/types';
+import { ALL_SOURCE_SLUGS, makeTsVenue } from './fixtures';
 
-const venue = (slug: string, overrides: Partial<TsVenue> = {}): TsVenue => ({
-  id: 1,
-  name: slug,
-  slug,
-  city: 'Durham',
-  capacity: null,
-  size_category: 'small',
-  website: null,
-  color: '#000000',
-  ...overrides,
-});
-
-// The 21-venue triangle-shows seed as of 2026-07-10 (backend/app/seed.py) —
-// the 5 excluded slugs plus 16 ingested.
-const ALL_SOURCE_SLUGS = [
-  'koka-booth',
-  'red-hat',
-  'dpac',
-  'the-ritz',
-  'lincoln-theatre',
-  'cats-cradle',
-  'motorco',
-  'local-506',
-  'the-pinhook',
-  'kings',
-  'cats-cradle-back-room',
-  'the-cave',
-  'haw-river-ballroom',
-  'neptunes-parlour',
-  'shadowbox-studio',
-  'rubies',
-  'stancyks',
-  'boom-club',
-  'chapel-of-bones',
-  'pour-house',
-  'slims',
-];
-
-const sourceVenues = ALL_SOURCE_SLUGS.map((s) => venue(s));
+const sourceVenues = ALL_SOURCE_SLUGS.map((s) => makeTsVenue(s));
 
 describe('EXCLUDED_VENUE_SLUGS', () => {
   it('is exactly the 5 RHP-covered triangle-shows slugs (partition by venue, BS#1570 Decision 1)', () => {
@@ -81,7 +43,7 @@ describe('assertVenuePartition', () => {
   });
 
   it('throws when an ingested venue slug would overflow venues.slug varchar(64)', () => {
-    const withLongSlug = [...sourceVenues, venue('x'.repeat(65))];
+    const withLongSlug = [...sourceVenues, makeTsVenue('x'.repeat(65))];
     expect(() => assertVenuePartition(withLongSlug)).toThrow(/64/);
   });
 

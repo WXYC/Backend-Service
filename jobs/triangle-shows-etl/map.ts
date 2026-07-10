@@ -5,24 +5,33 @@
  *
  * Keying: `source_id = '<venue_slug>:' + source_key`. NEVER bare
  * `source_key` — triangle-shows uniqueness is per-venue
- * `(venue_id, source_key)`, and the ingested venue set contains
- * same-platform pairs whose `ext:`/`url:` tier keys can collide across
- * venues (rubies+stancyks VenuePilot, neptunes-parlour+boom-club
- * Squarespace, shadowbox-studio+slims MEC).
+ * `(venue_id, source_key)`. The ingested set contains several
+ * same-platform groupings (a Ticketmaster quad, an rhp_events pair, and
+ * three pairs whose `ext:`/`url:` tier keys are the collision-prone
+ * kind: rubies+stancyks VenuePilot, neptunes-parlour+boom-club
+ * Squarespace, shadowbox-studio+slims MEC) — the qualifier protects all
+ * of them uniformly.
  */
 
 import { nyCalendarDate, nyWallClockToUtc, type NewConcert } from '@wxyc/database';
+import { clampCodePoints } from './writer.js';
 import type { TsEvent } from './types.js';
 
 const HEADLINER_MAX = 256;
 
+// Same shape ny-time enforces; validated here for BOTH branches so a
+// source date-format drift on date-only events fails as a map_error (the
+// documented contract-drift counter), not as an opaque upsert_error at
+// the Drizzle date-column bind.
+const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
+
 /** Everything the writer needs: the concert payload minus the run-scoped
  *  columns (`venue_id` resolves via the per-run slug cache; `scraped_at`
- *  is stamped per run), plus the venue fields for on-demand provisioning. */
+ *  is stamped per run). `venue_slug` is the one venue field that earns a
+ *  place here — mapEvent validates it non-null; the orchestrator reads
+ *  any other venue detail off the source event it already holds. */
 export type MappedEvent = {
   venue_slug: string;
-  venue_name: string | null;
-  venue_city: string | null;
   concert: Omit<NewConcert, 'venue_id' | 'scraped_at'>;
 };
 
@@ -62,12 +71,17 @@ export const mapEvent = (event: TsEvent): MappedEvent => {
   if (!event.venue_slug) {
     throw new Error(`mapEvent: event id ${event.id} has no venue_slug; cannot compose the venue-qualified source_id`);
   }
+  if (!ISO_DATE_SHAPE.test(event.date)) {
+    throw new Error(`mapEvent: event id ${event.id} has non-ISO date '${event.date}' (want YYYY-MM-DD)`);
+  }
   const { status, priceMin } = mapStatus(event);
+  // `||` on the trimmed artist, not `??`: heterogeneous scrapers can emit
+  // '' where they mean "unknown", and an empty headliner defeats both the
+  // resolver and any display — `name` is NOT NULL, so the fallback is total.
+  const headliner = event.artist?.trim() || event.name;
 
   return {
     venue_slug: event.venue_slug,
-    venue_name: event.venue_name,
-    venue_city: event.venue_city,
     concert: {
       source: 'triangle_shows',
       source_id: `${event.venue_slug}:${event.source_key}`,
@@ -75,9 +89,10 @@ export const mapEvent = (event: TsEvent): MappedEvent => {
       // Date-only events keep starts_at NULL — never a fabricated time.
       starts_at: event.show_time ? nyWallClockToUtc(event.date, event.show_time) : null,
       doors_at: event.doors_time ? nyWallClockToUtc(event.date, event.doors_time) : null,
-      // artist ?? name is total: name is NOT NULL at the source. Truncated
-      // to the column width (source String(500) vs varchar(256)).
-      headlining_artist_raw: (event.artist ?? event.name).slice(0, HEADLINER_MAX),
+      // Truncated to the column width (source String(500) vs varchar(256));
+      // code-point-safe so an astral char at the boundary can't strand a
+      // lone surrogate as U+FFFD in the DB.
+      headlining_artist_raw: clampCodePoints(headliner, HEADLINER_MAX),
       title: event.name,
       supporting_artists_raw: splitSupportArtists(event.support_artists),
       ticket_url: event.ticket_url,

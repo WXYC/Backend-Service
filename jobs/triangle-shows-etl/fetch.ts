@@ -10,11 +10,20 @@
  * tombstone stamped on the event's own show date, and source rows
  * hard-delete 7 days past their date). No `updated_since`: idempotent by
  * construction, and the whole corpus is a few thousand rows.
+ *
+ * Each GET retries once after a delay: the source host can cold-start at
+ * the 05:05 UTC pull (it last scraped 18:00 ET), and a single transient
+ * failure must degrade to "resolution deferred one night" — the README's
+ * documented soft edge — not "no mirror tonight". Failures include a
+ * slice of the response body so FastAPI's self-describing 422 `detail`
+ * reaches the log instead of an opaque status line.
  */
 
 import type { TsEvent, TsHealth, TsVenue } from './types.js';
 
 const REQUEST_TIMEOUT_MS = 30_000;
+const RETRY_DELAY_MS = 15_000;
+const ERROR_BODY_SLICE = 300;
 
 export const resolveBaseUrl = (raw: string | undefined = process.env.TRIANGLE_SHOWS_URL): string => {
   if (!raw) {
@@ -23,22 +32,43 @@ export const resolveBaseUrl = (raw: string | undefined = process.env.TRIANGLE_SH
   return raw.replace(/\/+$/, '');
 };
 
-const getJson = async <T>(url: string): Promise<T> => {
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const getJsonOnce = async <T>(url: string): Promise<T> => {
   const response = await fetch(url, {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     headers: { accept: 'application/json' },
   });
   if (!response.ok) {
-    throw new Error(`GET ${url} -> ${response.status} ${response.statusText}`);
+    const body = await response.text().catch(() => '');
+    throw new Error(
+      `GET ${url} -> ${response.status} ${response.statusText}` +
+        (body ? ` — body: ${body.slice(0, ERROR_BODY_SLICE)}` : '')
+    );
   }
   return (await response.json()) as T;
 };
 
-export const buildEventsUrl = (baseUrl: string, start: string): string =>
-  `${baseUrl}/api/v1/events?dedup=false&include_removed=true&start=${start}`;
+const getJson = async <T>(url: string): Promise<T> => {
+  try {
+    return await getJsonOnce<T>(url);
+  } catch (firstError) {
+    await sleep(RETRY_DELAY_MS);
+    try {
+      return await getJsonOnce<T>(url);
+    } catch (secondError) {
+      // Surface the terminal error but keep the first attempt's story —
+      // "timeout then 200" vs "422 twice" triage very differently.
+      throw new Error(
+        `${(secondError as Error).message} (retry after ${RETRY_DELAY_MS}ms; first attempt: ${(firstError as Error).message})`,
+        { cause: secondError }
+      );
+    }
+  }
+};
 
 export const fetchEvents = async (baseUrl: string, start: string): Promise<TsEvent[]> =>
-  getJson<TsEvent[]>(buildEventsUrl(baseUrl, start));
+  getJson<TsEvent[]>(`${baseUrl}/api/v1/events?dedup=false&include_removed=true&start=${start}`);
 
 export const fetchVenues = async (baseUrl: string): Promise<TsVenue[]> =>
   getJson<TsVenue[]>(`${baseUrl}/api/v1/venues`);

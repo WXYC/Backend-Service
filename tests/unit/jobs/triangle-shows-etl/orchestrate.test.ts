@@ -1,88 +1,34 @@
 /**
  * Unit tests for the triangle-shows-etl orchestrator. All dependencies
  * (health / venues / events fetches, venue resolution, upsert) are
- * injected fakes — no network, no DB.
+ * injected fakes — no network, no DB. The run guards live here (not in
+ * job.ts) precisely so these tests can exercise them.
  */
 import { runEtl, type RunOptions } from '../../../../jobs/triangle-shows-etl/orchestrate';
 import { EXCLUDED_VENUE_SLUGS } from '../../../../jobs/triangle-shows-etl/venues';
-import type { TsEvent, TsHealth, TsVenue } from '../../../../jobs/triangle-shows-etl/types';
+import type { TsEvent } from '../../../../jobs/triangle-shows-etl/types';
+import { ALL_SOURCE_SLUGS, makeTsEvent, makeTsHealth, makeTsVenue } from './fixtures';
 
-// The real 21-slug seed (see venues.test.ts): 5 excluded + 16 ingested.
-const ALL_SOURCE_SLUGS = [
-  'koka-booth',
-  'red-hat',
-  'dpac',
-  'the-ritz',
-  'lincoln-theatre',
-  'cats-cradle',
-  'motorco',
-  'local-506',
-  'the-pinhook',
-  'kings',
-  'cats-cradle-back-room',
-  'the-cave',
-  'haw-river-ballroom',
-  'neptunes-parlour',
-  'shadowbox-studio',
-  'rubies',
-  'stancyks',
-  'boom-club',
-  'chapel-of-bones',
-  'pour-house',
-  'slims',
-];
+const sourceVenues = ALL_SOURCE_SLUGS.map((slug, i) => makeTsVenue(slug, { id: i + 1 }));
 
-const venue = (slug: string, id: number): TsVenue => ({
-  id,
-  name: slug,
-  slug,
-  city: 'Durham',
-  capacity: null,
-  size_category: 'small',
-  website: null,
-  color: '#000000',
-});
+const event = (id: number, venueSlug: string, overrides: Partial<TsEvent> = {}): TsEvent =>
+  makeTsEvent({
+    id,
+    name: `Event ${id}`,
+    artist: 'Jessica Pratt',
+    show_time: '20:00:00',
+    price_min: null,
+    price_max: null,
+    ticket_url: null,
+    image_url: null,
+    genre: null,
+    source_key: `ext:${id}`,
+    venue_name: venueSlug,
+    venue_slug: venueSlug,
+    ...overrides,
+  });
 
-const sourceVenues = ALL_SOURCE_SLUGS.map((slug, i) => venue(slug, i + 1));
-
-const event = (id: number, venueSlug: string, overrides: Partial<TsEvent> = {}): TsEvent => ({
-  id,
-  venue_id: 1,
-  name: `Event ${id}`,
-  artist: 'Jessica Pratt',
-  support_artists: null,
-  date: '2026-08-14',
-  doors_time: null,
-  show_time: '20:00:00',
-  ticket_url: null,
-  price_min: null,
-  price_max: null,
-  image_url: null,
-  genre: null,
-  subgenre: null,
-  status: 'on_sale',
-  age_restriction: null,
-  description: null,
-  source: 'venuepilot',
-  source_key: `ext:${id}`,
-  updated_at: null,
-  removed_at: null,
-  venue_name: venueSlug,
-  venue_slug: venueSlug,
-  venue_city: 'Durham',
-  venue_color: '#000000',
-  ...overrides,
-});
-
-const freshHealth: TsHealth = {
-  status: 'healthy',
-  event_count: 100,
-  venue_count: 21,
-  // ~7h before the injected `now` — normal for the 05:05 UTC pull.
-  last_scrape: '2026-07-09T22:00:00+00:00',
-  version: 'abc123',
-};
-
+// ~7h after the fixture's last_scrape — normal for the 05:05 UTC pull.
 const NOW = new Date('2026-07-10T05:05:00Z');
 
 const makeOpts = (
@@ -93,15 +39,21 @@ const makeOpts = (
 } => {
   const upserts: Array<{ source_id: string; venueId: number }> = [];
   const provisioned: string[] = [];
+  const venueIdBySlug = new Map<string, number>();
   let nextVenueId = 100;
   const opts: RunOptions & { upserts: typeof upserts; provisioned: typeof provisioned } = {
-    fetchHealth: () => Promise.resolve(freshHealth),
+    fetchHealth: () => Promise.resolve(makeTsHealth()),
     fetchVenues: () => Promise.resolve(sourceVenues),
     fetchEvents: () => Promise.resolve<TsEvent[]>([]),
+    // Memoized like the real makeVenueCache: created=true only on the
+    // first resolution of a slug.
     resolveVenueId: (slug) => {
+      const hit = venueIdBySlug.get(slug);
+      if (hit !== undefined) return Promise.resolve({ venue_id: hit, created: false });
       provisioned.push(slug);
       nextVenueId += 1;
-      return Promise.resolve(nextVenueId);
+      venueIdBySlug.set(slug, nextVenueId);
+      return Promise.resolve({ venue_id: nextVenueId, created: true });
     },
     upsertConcert: (mapped, venueId) => {
       upserts.push({ source_id: mapped.concert.source_id, venueId });
@@ -115,13 +67,18 @@ const makeOpts = (
   return opts;
 };
 
+// Most tests need at least one successfully upserted event so the run
+// guards (empty snapshot / zero upserts / majority failure) don't fire.
+const someEvents = [event(1, 'the-pinhook'), event(2, 'kings')];
+
 describe('runEtl — venue provisioning and partition', () => {
   it('provisions exactly the 16 ingested venues; excluded slugs never get a row', async () => {
-    const opts = makeOpts();
+    const opts = makeOpts({ fetchEvents: () => Promise.resolve(someEvents) });
     const totals = await runEtl(opts);
 
     expect(totals.venues_seen).toBe(21);
     expect(totals.venues_ingested).toBe(16);
+    expect(totals.venues_created).toBe(16); // first run — every row is new
     expect(opts.provisioned).toHaveLength(16);
     for (const excluded of EXCLUDED_VENUE_SLUGS) {
       expect(opts.provisioned).not.toContain(excluded);
@@ -180,13 +137,16 @@ describe('runEtl — event flow', () => {
     expect(totals.upserts_total).toBe(2);
   });
 
-  it('provisions an unknown event venue on demand instead of dropping its events', async () => {
+  it('provisions an unknown event venue on demand and counts it', async () => {
     const opts = makeOpts({
-      fetchEvents: () => Promise.resolve([event(1, 'brand-new-room', { venue_name: 'Brand New Room' })]),
+      fetchEvents: () =>
+        Promise.resolve([event(1, 'brand-new-room', { venue_name: 'Brand New Room' }), event(2, 'kings')]),
     });
     const totals = await runEtl(opts);
 
-    expect(totals.upserts_total).toBe(1);
+    expect(totals.upserts_total).toBe(2);
+    expect(totals.venues_provisioned_on_demand).toBe(1);
+    expect(totals.venues_created).toBe(17); // 16 listed + 1 on demand
     expect(opts.provisioned).toContain('brand-new-room');
   });
 
@@ -205,12 +165,86 @@ describe('runEtl — event flow', () => {
     expect(totals.upsert_errors).toBe(1);
     expect(totals.upserts_total).toBe(1);
   });
+
+  it('negative-caches a venue whose provisioning failed: events skip without re-running the doomed resolve', async () => {
+    const resolveCalls: string[] = [];
+    const opts = makeOpts({
+      fetchEvents: () =>
+        Promise.resolve([
+          event(1, 'the-cave'),
+          event(2, 'the-cave'),
+          event(3, 'the-cave'),
+          // Enough healthy events that the majority-failure guard stays
+          // quiet — this test is about the negative cache, not the guard.
+          event(4, 'kings'),
+          event(5, 'slims'),
+          event(6, 'the-pinhook'),
+          event(7, 'rubies'),
+        ]),
+      resolveVenueId: (slug) => {
+        resolveCalls.push(slug);
+        if (slug === 'the-cave') return Promise.reject(new Error('value too long for type character varying(128)'));
+        return Promise.resolve({ venue_id: 42, created: false });
+      },
+    });
+    const totals = await runEtl(opts);
+
+    // One failing attempt in the step-2 loop, then the negative cache
+    // absorbs all three of the venue's events — no per-event re-INSERT.
+    expect(resolveCalls.filter((s) => s === 'the-cave')).toHaveLength(1);
+    expect(totals.venue_resolve_errors).toBe(1);
+    expect(totals.events_skipped_failed_venue).toBe(3);
+    expect(totals.upserts_total).toBe(4);
+  });
+});
+
+describe('runEtl — run guards', () => {
+  it('fails the run on an empty snapshot (a live Triangle calendar is never empty)', async () => {
+    const opts = makeOpts({ fetchEvents: () => Promise.resolve<TsEvent[]>([]) });
+    await expect(runEtl(opts)).rejects.toThrow(/empty snapshot/);
+  });
+
+  it('fails the run when ingestable events exist but zero upserted', async () => {
+    const opts = makeOpts({
+      fetchEvents: () => Promise.resolve([event(1, 'the-pinhook'), event(2, 'kings')]),
+      upsertConcert: () => Promise.reject(new Error('boom')),
+    });
+    await expect(runEtl(opts)).rejects.toThrow(/0 upserted/);
+  });
+
+  it('fails the run when failures outnumber successes (wholesale drift must not stay green)', async () => {
+    const opts = makeOpts({
+      fetchEvents: () =>
+        Promise.resolve([
+          event(1, 'the-pinhook', { status: 'postponed' }),
+          event(2, 'kings', { status: 'postponed' }),
+          event(3, 'the-cave', { status: 'postponed' }),
+          event(4, 'slims'),
+        ]),
+    });
+    await expect(runEtl(opts)).rejects.toThrow(/majority/);
+  });
+
+  it('passes when successes outnumber failures', async () => {
+    const opts = makeOpts({
+      fetchEvents: () =>
+        Promise.resolve([
+          event(1, 'the-pinhook', { status: 'postponed' }), // 1 failure
+          event(2, 'kings'),
+          event(3, 'slims'),
+        ]),
+    });
+    const totals = await runEtl(opts);
+    expect(totals.map_errors).toBe(1);
+    expect(totals.upserts_total).toBe(2);
+  });
 });
 
 describe('runEtl — source staleness', () => {
   it('flags a last_scrape older than 24h', async () => {
     const opts = makeOpts({
-      fetchHealth: () => Promise.resolve({ ...freshHealth, last_scrape: '2026-07-08T22:00:00+00:00' }),
+      fetchHealth: () => Promise.resolve(makeTsHealth({ last_scrape: '2026-07-08T22:00:00+00:00' })),
+      fetchEvents: () => Promise.resolve(someEvents),
     });
     const totals = await runEtl(opts);
     expect(totals.source_stale).toBe(true);
@@ -218,25 +252,38 @@ describe('runEtl — source staleness', () => {
 
   it('flags an absent last_scrape', async () => {
     const opts = makeOpts({
-      fetchHealth: () => Promise.resolve({ ...freshHealth, last_scrape: null }),
+      fetchHealth: () => Promise.resolve(makeTsHealth({ last_scrape: null })),
+      fetchEvents: () => Promise.resolve(someEvents),
+    });
+    const totals = await runEtl(opts);
+    expect(totals.source_stale).toBe(true);
+  });
+
+  it('flags an UNPARSEABLE last_scrape as stale (NaN must not classify as fresh)', async () => {
+    // A serialization drift (epoch int, locale string) makes getTime()
+    // NaN; every comparison with NaN is false, so without an explicit
+    // finiteness check the freshness alert would permanently stop firing.
+    const opts = makeOpts({
+      fetchHealth: () => Promise.resolve(makeTsHealth({ last_scrape: 'yesterday at noon' })),
+      fetchEvents: () => Promise.resolve(someEvents),
     });
     const totals = await runEtl(opts);
     expect(totals.source_stale).toBe(true);
   });
 
   it('does not flag ~7h-old data (normal at the 05:05 UTC pull; source scrapes 06:00/18:00 ET)', async () => {
-    const totals = await runEtl(makeOpts());
+    const totals = await runEtl(makeOpts({ fetchEvents: () => Promise.resolve(someEvents) }));
     expect(totals.source_stale).toBe(false);
   });
 
   it('treats a health-probe failure as stale but continues the run', async () => {
     const opts = makeOpts({
       fetchHealth: () => Promise.reject(new Error('connect ECONNREFUSED')),
-      fetchEvents: () => Promise.resolve([event(1, 'the-pinhook')]),
+      fetchEvents: () => Promise.resolve(someEvents),
     });
     const totals = await runEtl(opts);
     expect(totals.source_stale).toBe(true);
-    expect(totals.upserts_total).toBe(1);
+    expect(totals.upserts_total).toBe(2);
   });
 });
 
@@ -246,7 +293,7 @@ describe('runEtl — back-dated start', () => {
     const opts = makeOpts({
       fetchEvents: (start) => {
         seenStart = start;
-        return Promise.resolve<TsEvent[]>([]);
+        return Promise.resolve(someEvents);
       },
     });
     await runEtl(opts);

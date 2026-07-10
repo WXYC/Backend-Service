@@ -45,12 +45,35 @@ export type WriteConcertOutcome = {
   inserted: boolean;
 };
 
+/** `venues.slug` is varchar(64) — a key, so overflow throws rather than
+ *  truncates (a clipped slug would silently alias two venues). */
+const VENUE_SLUG_MAX = 64;
+/** `venues.name` is varchar(128); the source allows String(200). A display
+ *  name clamps safely — PG errors rather than truncates, and one long-named
+ *  venue must not drop its whole calendar from the mirror. */
+const VENUE_NAME_MAX = 128;
+
+/** Code-point-safe truncation (`String.prototype.slice` counts UTF-16 code
+ *  units and can strand half a surrogate pair as U+FFFD in the DB). */
+export const clampCodePoints = (value: string, max: number): string => [...value].slice(0, max).join('');
+
 /**
  * Resolve a venue slug to a numeric id, creating or refreshing the row
  * from source data. `state` is hardcoded 'NC' — every triangle-shows
  * venue is in the Triangle. `created` derives from PG's `xmax = 0`.
+ *
+ * Width guards live HERE, at the single write chokepoint, so the
+ * on-demand provisioning path is covered too — `assertVenuePartition`'s
+ * startup check only sees the /venues list, not event-denormalized names.
  */
-export const ensureVenue = async (slug: string, name: string, city: string): Promise<WriteVenueOutcome> => {
+export const ensureVenue = async (slug: string, rawName: string, city: string): Promise<WriteVenueOutcome> => {
+  if (slug.length > VENUE_SLUG_MAX) {
+    throw new Error(
+      `ensureVenue: slug '${slug.slice(0, 80)}…' exceeds venues.slug varchar(${VENUE_SLUG_MAX}) — ` +
+        `a source-side slug change past the column width; do not truncate a key`
+    );
+  }
+  const name = clampCodePoints(rawName, VENUE_NAME_MAX);
   const values: VenuesValue = {
     slug,
     name,
@@ -91,9 +114,13 @@ export const ensureVenue = async (slug: string, name: string, city: string): Pro
   return { venue_id: existing[0].id, created: false };
 };
 
-/** Per-run (slug -> id) cache: one DB round-trip per venue per run. */
+/** Per-run (slug -> id) cache: one DB round-trip per venue per run. This
+ *  is the ONLY memoization layer — the orchestrator calls through it
+ *  unconditionally. `created` is threaded through (false on cache hits)
+ *  so the orchestrator can surface brand-new venue rows as the
+ *  re-check-the-RHP-partition signal. */
 export type VenueCache = {
-  get: (slug: string, name: string, city: string) => Promise<number>;
+  get: (slug: string, name: string, city: string) => Promise<WriteVenueOutcome>;
   size: () => number;
 };
 
@@ -102,10 +129,10 @@ export const makeVenueCache = (): VenueCache => {
   return {
     async get(slug, name, city) {
       const hit = cache.get(slug);
-      if (hit !== undefined) return hit;
-      const { venue_id } = await ensureVenue(slug, name, city);
-      cache.set(slug, venue_id);
-      return venue_id;
+      if (hit !== undefined) return { venue_id: hit, created: false };
+      const outcome = await ensureVenue(slug, name, city);
+      cache.set(slug, outcome.venue_id);
+      return outcome;
     },
     size() {
       return cache.size;
@@ -128,7 +155,7 @@ export const upsertConcert = async (
   const values: ConcertsValue = {
     ...mapped.concert,
     venue_id: venueId,
-    scraped_at: new Date(scrapedAt.toISOString()), // Pre-normalize (BS#802 trap).
+    scraped_at: scrapedAt, // Already a Date; the typed builder serializes it safely.
   };
 
   const result = await db

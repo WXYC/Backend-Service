@@ -2,11 +2,10 @@
   "extends": ["../../tsconfig.base.json"],
   "references": [{ "path": "../../shared/database" }],
   "include": ["."],
+  "//": "compilerOptions.paths is EMPTY ON PURPOSE: it shadows tsconfig.base.json's paths (which map @wxyc/database to shared/database/src). Without the override, tsc cross-compiles the shared package's sources under this project instead of resolving the built dist, and `tsc -p` fails on TS6305/global types.",
   "compilerOptions": {
     "module": "esnext",
     "moduleResolution": "bundler",
-    "paths": {
-      "@/*": ["./*"]
-    }
+    "paths": {}
   }
 }
