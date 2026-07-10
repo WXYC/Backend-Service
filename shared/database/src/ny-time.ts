@@ -50,6 +50,11 @@ const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
  * fail fast here instead.
  */
 export const nyCalendarDate = (instant: Date): string => {
+  if (Number.isNaN(instant.getTime())) {
+    // Fail with an attributed message instead of Intl's bare
+    // 'RangeError: Invalid time value' pointing into formatter internals.
+    throw new Error('nyCalendarDate: received an Invalid Date');
+  }
   const formatted = nyDateFormat.format(instant);
   if (!ISO_DATE_SHAPE.test(formatted)) {
     throw new Error(
@@ -95,6 +100,13 @@ export const nyWallClockToUtc = (isoDate: string, time: string): Date => {
   const timeMatch = time.match(TIME_SHAPE);
   if (!ISO_DATE_SHAPE.test(isoDate) || !timeMatch) {
     throw new Error(`nyWallClockToUtc: unparseable date/time '${isoDate}' / '${time}' (want YYYY-MM-DD + HH:MM[:SS])`);
+  }
+  if (Number(timeMatch[1]) > 23) {
+    // Reject explicitly: ECMA-262 quietly accepts T24:00 as next-day
+    // midnight, which would window the event one calendar day late with
+    // no error anywhere. A source meaning end-of-day midnight must say
+    // which day it means ('00:00' on the next date).
+    throw new Error(`nyWallClockToUtc: hour out of range in '${time}' (want 00-23; T24:00 is ambiguous about the day)`);
   }
   const normalizedTime = `${timeMatch[1].padStart(2, '0')}:${timeMatch[2]}:${timeMatch[3] ?? '00'}`;
   const candidate = new Date(`${isoDate}T${normalizedTime}Z`);
