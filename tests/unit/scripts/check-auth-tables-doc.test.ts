@@ -32,10 +32,17 @@ interface ExecResult {
   status: number;
 }
 
-function runOnRoot(rootDir: string): ExecResult {
+function runOnRoot(rootDir: string, opts: { forceCwd?: boolean } = {}): ExecResult {
+  // AUTH_TABLES_DOC_FORCE_CWD pins pickRepoRoot() to cwd instead of falling
+  // back to the script-parent repo — needed by the missing-file tests below,
+  // which delete a required file from the temp root and would otherwise
+  // silently pass against the real repo. All other tests build a valid
+  // layout in cwd, so the fallback branch is a no-op for them.
+  const env = { ...process.env };
+  if (opts.forceCwd) env.AUTH_TABLES_DOC_FORCE_CWD = '1';
   const r = spawnSync('node', [scriptPath], {
     cwd: rootDir,
-    env: { ...process.env },
+    env,
   });
   return {
     stdout: r.stdout?.toString() ?? '',
@@ -364,7 +371,38 @@ describe('check-auth-tables-doc.mjs', () => {
       });
       const { status, stderr } = runOnRoot(tmpRoot);
       expect(status).toBe(1);
-      expect(stderr).toMatch(/invert|out of order|end.*before.*begin/i);
+      // R3-4: assert the distinctive "inverted sentinel comments" wording
+      // rather than a permissive alternation. The permissive form would
+      // accept the generic "missing sentinel comments" fallback too — the
+      // exact miscue R2-4 was supposed to prevent.
+      expect(stderr).toMatch(/inverted sentinel comments/);
+    });
+
+    // R3-6: cover the "cannot find <required file>" exit-1 branches. This
+    // is the surface a caller sees when the script is invoked from a
+    // directory that looks-close-but-isn't the repo (e.g. a partial checkout,
+    // or a stale scratch tree that lost CLAUDE.md). Without this test the
+    // fallback branches in pickRepoRoot + main are untested.
+    it('exits 1 with a clear message when CLAUDE.md is missing from the repo root', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: docWith(['auth_user']),
+        schemaTs: schemaWith(['auth_user']),
+      });
+      fs.rmSync(path.join(tmpRoot, 'CLAUDE.md'));
+      const { status, stderr } = runOnRoot(tmpRoot, { forceCwd: true });
+      expect(status).toBe(1);
+      expect(stderr).toMatch(/cannot find CLAUDE\.md/);
+    });
+
+    it('exits 1 with a clear message when shared/database/src/schema.ts is missing', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: docWith(['auth_user']),
+        schemaTs: schemaWith(['auth_user']),
+      });
+      fs.rmSync(path.join(tmpRoot, 'shared/database/src/schema.ts'));
+      const { status, stderr } = runOnRoot(tmpRoot, { forceCwd: true });
+      expect(status).toBe(1);
+      expect(stderr).toMatch(/cannot find shared\/database\/src\/schema\.ts/);
     });
   });
 });
