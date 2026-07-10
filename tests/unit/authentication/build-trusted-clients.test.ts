@@ -154,7 +154,7 @@ describe('buildTrustedClients', () => {
       expect(clients[0]).toEqual({
         clientId: 'wxyc-canary',
         clientSecret: undefined,
-        redirectUrls: ['https://canary.wxyc.org/authorize-echo'],
+        redirectUrls: ['https://canary.wxyc.invalid/authorize-echo'],
         name: 'WXYC Canary',
         type: 'public',
         disabled: false,
@@ -241,7 +241,7 @@ describe('buildTrustedClients', () => {
       expect(clients[2]).toEqual({
         clientId: 'wxyc-canary',
         clientSecret: undefined,
-        redirectUrls: ['https://canary.wxyc.org/authorize-echo'],
+        redirectUrls: ['https://canary.wxyc.invalid/authorize-echo'],
         name: 'WXYC Canary',
         type: 'public',
         disabled: false,
@@ -295,6 +295,191 @@ describe('buildTrustedClients', () => {
   describe('neither client', () => {
     it('returns an empty array when no client env vars are set', () => {
       expect(buildTrustedClients({})).toEqual([]);
+    });
+  });
+
+  describe('env-var whitespace trimming', () => {
+    // #1586 — env vars written via GH-secret-to-EC2 workflows can pick up a
+    // trailing newline or space from a paste error in a password manager. The
+    // truthy check passes, the clientId is registered with the padding, and
+    // better-auth's strict `===` client lookup returns invalid_client on the
+    // next login. Silent failure mode — the operator sees a green workflow
+    // and a broken login. Trim before the truthy check and before the
+    // assignment so both the gate and the resulting row use the canonical
+    // value.
+
+    it('trims a trailing newline off WXYC_CANARY_OIDC_CLIENT_ID', () => {
+      const clients = buildTrustedClients({
+        WXYC_CANARY_OIDC_CLIENT_ID: 'wxyc-canary\n',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0].clientId).toBe('wxyc-canary');
+    });
+
+    it('trims leading and trailing spaces off WXYC_CANARY_OIDC_CLIENT_ID', () => {
+      const clients = buildTrustedClients({
+        WXYC_CANARY_OIDC_CLIENT_ID: '  wxyc-canary  ',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0].clientId).toBe('wxyc-canary');
+    });
+
+    it('treats whitespace-only WXYC_CANARY_OIDC_CLIENT_ID as unset', () => {
+      // '   ' trims to '' — same as unset. Falsy trimmed value gates the
+      // whole block off, so no client is registered.
+      const clients = buildTrustedClients({
+        WXYC_CANARY_OIDC_CLIENT_ID: '   ',
+      });
+
+      expect(clients).toEqual([]);
+    });
+
+    it('trims whitespace off all three wiki.js env vars', () => {
+      const clients = buildTrustedClients({
+        WIKIJS_OIDC_CLIENT_ID: '  wiki-id\n',
+        WIKIJS_OIDC_CLIENT_SECRET: '  wiki-secret  ',
+        WIKIJS_URL: '  https://wiki.wxyc.org  ',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0].clientId).toBe('wiki-id');
+      expect(clients[0].clientSecret).toBe('wiki-secret');
+      // Redirect URL is built from the trimmed WIKIJS_URL — no stray spaces
+      // that would send the callback to a malformed origin.
+      expect(clients[0].redirectUrls).toEqual(['https://wiki.wxyc.org/login/oidc/callback']);
+    });
+
+    it('treats whitespace-only WIKIJS_URL as unset (omits the wiki.js entry)', () => {
+      const clients = buildTrustedClients({
+        WIKIJS_OIDC_CLIENT_ID: 'wiki-id',
+        WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',
+        WIKIJS_URL: '   ',
+      });
+
+      expect(clients).toEqual([]);
+    });
+
+    it('trims whitespace off flowsheet env vars', () => {
+      const clients = buildTrustedClients({
+        FLOWSHEET_OIDC_CLIENT_ID: '  flowsheet\n',
+        FLOWSHEET_OIDC_CLIENT_SECRET: '  shh  ',
+        FLOWSHEET_OIDC_REDIRECT_URLS: 'https://flowsheet.wxyc.org/auth/callback',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0].clientId).toBe('flowsheet');
+      expect(clients[0].clientSecret).toBe('shh');
+    });
+  });
+
+  describe('canary redirect placeholder uses .invalid TLD', () => {
+    // #1584 — RFC 2606 §2 reserves the `.invalid` TLD for guaranteed
+    // non-resolution. The original placeholder `canary.wxyc.org` is a
+    // WXYC-controlled hostname; if anyone ever stood up an S3 static page or
+    // CDN listener there, the `skipConsent: true` bypass would let an
+    // attacker-crafted `/oauth2/authorize` URL silently mint a code and
+    // redirect it to their controlled listener. Pin the `.invalid` TLD
+    // explicitly so a future refactor can't accidentally revert to a
+    // resolvable hostname.
+    it('registers the canary redirect URL against the .invalid TLD', () => {
+      const clients = buildTrustedClients({
+        WXYC_CANARY_OIDC_CLIENT_ID: 'wxyc-canary',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0].redirectUrls).toEqual(['https://canary.wxyc.invalid/authorize-echo']);
+    });
+  });
+
+  describe('duplicate clientId guard', () => {
+    // #1579 — buildTrustedClients builds up to three entries from three
+    // env-gated blocks. If two blocks emit the same clientId (operator
+    // accidentally sets WXYC_CANARY_OIDC_CLIENT_ID=wiki-id, for example), the
+    // sequential upsert loop in bootstrap-trusted-clients writes each entry
+    // under the same DB primary key in order — so the second entry's
+    // {type, clientSecret, redirectUrls} clobbers the first. In the wiki-vs-
+    // canary collision case, wiki.js becomes type:'public' with a null
+    // clientSecret, breaking the wiki.js login flow silently. Fail loudly at
+    // boot so the operator sees the misconfiguration before login traffic hits.
+
+    it('throws when two configured clients share a clientId', () => {
+      // Same clientId reused across the canary and wiki.js env-var blocks.
+      expect(() =>
+        buildTrustedClients({
+          WIKIJS_OIDC_CLIENT_ID: 'shared-id',
+          WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',
+          WIKIJS_URL: 'https://wiki.wxyc.org',
+          WXYC_CANARY_OIDC_CLIENT_ID: 'shared-id',
+        })
+      ).toThrow(/shared-id/);
+    });
+
+    it('names both offending env-var groups in the error message', () => {
+      // The operator needs to know which env vars collided to fix the paste
+      // error. A bare "duplicate clientId" message forces them to grep every
+      // WXYC_*_OIDC_CLIENT_ID env var to find the collision.
+      let thrown: unknown;
+      try {
+        buildTrustedClients({
+          WIKIJS_OIDC_CLIENT_ID: 'shared-id',
+          WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',
+          WIKIJS_URL: 'https://wiki.wxyc.org',
+          WXYC_CANARY_OIDC_CLIENT_ID: 'shared-id',
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      const err = thrown as Error;
+      expect(err.message).toMatch(/Wiki\.js/);
+      expect(err.message).toMatch(/WXYC Canary/);
+    });
+
+    it('throws on a flowsheet/canary collision (symmetry check)', () => {
+      // The guard treats every client identically, not just wiki-vs-canary.
+      // A future fourth client picks up the same protection for free.
+      expect(() =>
+        buildTrustedClients({
+          FLOWSHEET_OIDC_CLIENT_ID: 'shared-id',
+          FLOWSHEET_OIDC_CLIENT_SECRET: 'shh',
+          FLOWSHEET_OIDC_REDIRECT_URLS: 'https://flowsheet.wxyc.org/auth/callback',
+          WXYC_CANARY_OIDC_CLIENT_ID: 'shared-id',
+        })
+      ).toThrow(/shared-id/);
+    });
+
+    it('does not throw when three distinct clientIds are configured (happy-path regression)', () => {
+      // No behavior change for the correctly-configured case — this is the
+      // one already exercised by "all clients together" but pinned separately
+      // so a regression that always-throws on non-empty input is caught.
+      expect(() =>
+        buildTrustedClients({
+          WIKIJS_OIDC_CLIENT_ID: 'wiki-id',
+          WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',
+          WIKIJS_URL: 'https://wiki.wxyc.org',
+          FLOWSHEET_OIDC_CLIENT_ID: 'flowsheet',
+          FLOWSHEET_OIDC_CLIENT_SECRET: 'shh',
+          FLOWSHEET_OIDC_REDIRECT_URLS: 'https://flowsheet.wxyc.org/auth/callback',
+          WXYC_CANARY_OIDC_CLIENT_ID: 'wxyc-canary',
+        })
+      ).not.toThrow();
+    });
+
+    it('detects collisions only after trimming (whitespace-padded matches trim to the same value)', () => {
+      // Belt-and-suspenders: the trim guard from #1586 must apply before the
+      // dedup guard, so a paste-error trailing-space collision surfaces as a
+      // dedup violation instead of silently registering two "distinct" ids
+      // that differ only in trailing whitespace.
+      expect(() =>
+        buildTrustedClients({
+          WIKIJS_OIDC_CLIENT_ID: 'shared-id',
+          WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',
+          WIKIJS_URL: 'https://wiki.wxyc.org',
+          WXYC_CANARY_OIDC_CLIENT_ID: 'shared-id\n',
+        })
+      ).toThrow(/shared-id/);
     });
   });
 });
