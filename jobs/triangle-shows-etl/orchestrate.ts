@@ -81,6 +81,13 @@ export type Totals = {
   upserts_updated: number;
   /** Upserted events carrying a source tombstone this run. */
   tombstones_seen: number;
+  /** Events whose composed starts_at is EARLIER than doors_at — the
+   *  free-text source scrapers can pair a past-midnight show_time with
+   *  the advertised calendar date ('doors 11PM, show 12:30AM'). Logged
+   *  and passed through unmodified: no heuristic can safely re-shift
+   *  either side (the inverse skew — correct starts_at, misparsed
+   *  doors — also occurs); the real fix belongs in the source scrapers. */
+  time_order_anomalies: number;
   /** True when the health probe reported last_scrape > 24h old, absent, or unparseable. */
   source_stale: boolean;
 };
@@ -100,6 +107,7 @@ const emptyTotals = (): Totals => ({
   upserts_inserted: 0,
   upserts_updated: 0,
   tombstones_seen: 0,
+  time_order_anomalies: 0,
   source_stale: false,
 });
 
@@ -238,6 +246,19 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
     if (failedSlugs.has(mapped.venue_slug)) {
       totals.events_skipped_failed_venue += 1;
       continue;
+    }
+
+    const { starts_at, doors_at } = mapped.concert;
+    if (starts_at && doors_at && starts_at < doors_at) {
+      totals.time_order_anomalies += 1;
+      log('warn', 'time_order_anomaly', `event id ${event.id} composes starts_at before doors_at`, {
+        event_id: event.id,
+        venue_slug: mapped.venue_slug,
+        date: event.date,
+        doors_time: event.doors_time,
+        show_time: event.show_time,
+        source: event.source,
+      });
     }
 
     if (!listedSlugs.has(mapped.venue_slug) && !warnedUnlistedSlugs.has(mapped.venue_slug)) {

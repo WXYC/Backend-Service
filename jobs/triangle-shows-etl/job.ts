@@ -12,7 +12,7 @@
  * no source filter).
  *
  * Run procedure: cron-registered via deploy-base's `cron-schedule` from
- * package.json (`5 5 * * *` UTC = 01:05 ET, between the RHP scraper at
+ * package.json (`5 5 * * *` UTC = 01:05 EDT / 00:05 EST, between the RHP scraper at
  * 05:00 and the resolver at 05:15). Container runs to completion.
  *
  * Required env: `TRIANGLE_SHOWS_URL` (see docs/env-vars.md).

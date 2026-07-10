@@ -356,6 +356,19 @@ export { normalizeAlbumTitle } from '../../shared/database/src/normalize-album-t
 export { freetextPairKey, normalizeFreetextArtist } from '../../shared/database/src/freetext-norm.js';
 export { NY_TIME_ZONE, nyCalendarDate, nyWallClockToUtc } from '../../shared/database/src/ny-time.js';
 
+// Self-contained STUB of shared/database/src/concerts-sql.ts. The real
+// module imports schema.ts, which calls drizzle's `eq` at module scope (a
+// view definition) — re-exporting it here would break every suite that
+// per-file-mocks 'drizzle-orm' with a partial factory (e.g. the
+// album-plays/popularity-refresh suites). The stub mirrors the real
+// fragment under the tests/__mocks__/drizzle-orm.ts sql-tag shape; the
+// REAL module's text and column bindings are pinned by
+// tests/unit/database/concerts-sql.test.ts.
+export const headliningArtistIdConflictClear = (): { sql: readonly string[]; values: unknown[] } => ({
+  sql: ['CASE WHEN ', ' IS DISTINCT FROM excluded."headlining_artist_raw" THEN NULL ELSE ', ' END'],
+  values: ['<concerts.headlining_artist_raw>', '<concerts.headlining_artist_id>'],
+});
+
 // Mock types
 export type AnonymousDevice = {
   id: number;

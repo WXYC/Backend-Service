@@ -135,6 +135,30 @@ describe('upsertConcert', () => {
     for (const set of sets) expect(set).not.toHaveProperty('first_scraped_at');
   });
 
+  it('conditionally clears headlining_artist_id in the ON CONFLICT set when the raw headliner changed — the resolver is write-once (claims WHERE headlining_artist_id IS NULL), so a headliner swap on a rename-stable ext:/url: source_key would otherwise serve the old artist forever', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: false }]);
+    await upsertConcert(mapEvent(fakeEvent()), 5, scrapedAt);
+
+    const set = concertSetClauses()[0];
+    expect(set).toHaveProperty('headlining_artist_id');
+    // A drizzle SQL fragment: pin the CASE/IS DISTINCT FROM/excluded
+    // mechanism so a refactor to an unconditional NULL (which would strip
+    // every resolved id nightly) fails here.
+    // Robust to both SQL-object shapes: real drizzle exposes queryChunks
+    // (string chunks interleaved with column refs); the unit-mock env's
+    // tag exposes the template strings via `.sql` (String() joins them).
+    const frag = set.headlining_artist_id as {
+      sql?: string | readonly string[];
+      queryChunks?: Array<{ value?: unknown }>;
+    };
+    const fragmentText =
+      frag?.sql != null
+        ? [frag.sql].flat().join(' ')
+        : (frag?.queryChunks ?? []).flatMap((c) => (Array.isArray(c.value) ? (c.value as string[]) : [])).join(' ');
+    expect(fragmentText).toMatch(/IS DISTINCT FROM/i);
+    expect(fragmentText).toMatch(/excluded/i);
+  });
+
   it('threads venue_id and the venue-qualified source_id into the row', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
     await upsertConcert(mapEvent(fakeEvent()), 31337, scrapedAt);

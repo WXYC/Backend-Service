@@ -4,7 +4,7 @@ Nightly pull ETL (BS#1589, Phase 1 of the [BS#1570](https://github.com/WXYC/Back
 
 ## Schedule
 
-`cron-schedule: "5 5 * * *"` UTC (01:05 ET) — between the RHP scraper at 05:00 and the resolver at 05:15. Known soft edge (BS#1570 correction 5): a cold-starting triangle-shows host can occasionally push this pull past the 05:15 resolver, deferring artist resolution of new rows by one night. Self-healing; not a bug.
+`cron-schedule: "5 5 * * *"` UTC (01:05 EDT / 00:05 EST) — between the RHP scraper at 05:00 and the resolver at 05:15. Known soft edge (BS#1570 correction 5): a cold-starting triangle-shows host can occasionally push this pull past the 05:15 resolver, deferring artist resolution of new rows by one night. Self-healing; not a bug.
 
 ## Environment
 
@@ -41,7 +41,7 @@ For `source='triangle_shows'` rows, `status` is **source-authoritative — refre
 
 Same both-directions rule for `removed_at`: it mirrors the source's tombstone — set when stamped, **cleared when a delisted event reappears**. Absence-from-snapshot is never treated as a removal signal; rows that age out at the source (hard-delete at +7 days) may keep a NULL `removed_at` forever, which is fine because `starts_on` windowing retires them from any feed.
 
-Field mapping details (status enum mapping incl. `free` → `on_sale` + `price_min=0`, `artist ?? name` truncation, date-only events keeping `starts_at` NULL) live in `map.ts` and its unit tests (`tests/unit/jobs/triangle-shows-etl/`).
+Field mapping details (status enum mapping incl. `free` → `on_sale` + `price_min=0`; headliner = `artist` when non-blank else `name`, both-blank throws as a map_error; `title` only when distinct from the headliner per the schema contract; un-storable prices past the numeric(8,2) cap or negative drop to NULL; unparseable `removed_at` throws as a map_error; date-only events keep `starts_at` NULL) live in `map.ts` and its unit tests (`tests/unit/jobs/triangle-shows-etl/`). `headlining_artist_id` is conditionally cleared on conflict when the raw headliner changed (shared fragment in `shared/database/src/concerts-sql.ts`, also adopted by the RHP writer) so the write-once resolver re-claims the row the same night. A `time_order_anomalies` counter flags events whose composed `starts_at` precedes `doors_at` (past-midnight `show_time` on the advertised date) — logged, never re-shifted.
 
 ## Observability
 

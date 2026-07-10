@@ -77,7 +77,14 @@ const nyOffsetMsAt = (instant: Date): number => {
 };
 
 // HH:MM or HH:MM:SS, hour optionally unpadded (some feeds emit '9:30').
-const TIME_SHAPE = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+// Fractional seconds are accepted and TRUNCATED (never rounded up into
+// the next second): Pydantic serializes Python `time` via isoformat(),
+// which emits microseconds whenever they're nonzero — triangle-shows'
+// Squarespace scraper concretely produces them (datetime.fromtimestamp
+// of a millisecond timestamp). Rejecting the shape would permanently
+// map_error those venues' events; sub-second precision carries no
+// signal for a concert start time.
+const TIME_SHAPE = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?$/;
 
 /**
  * Interpret `isoDate` (`YYYY-MM-DD`) + `time` (`HH:MM[:SS]`, hour may be

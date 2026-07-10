@@ -53,6 +53,14 @@ describe('nyWallClockToUtc', () => {
     ['2026-03-08', '01:30:00', '2026-03-08T06:30:00.000Z'],
     // Just after the gap: 03:30 EDT.
     ['2026-03-08', '03:30:00', '2026-03-08T07:30:00.000Z'],
+    // Fractional seconds accepted and truncated: Pydantic serializes a
+    // Python time via isoformat(), which emits microseconds whenever they
+    // are nonzero — concretely produced by triangle-shows' Squarespace
+    // scraper (datetime.fromtimestamp(ms / 1000) keeps sub-second
+    // precision). Rejecting the shape would permanently map_error those
+    // venues' events.
+    ['2026-07-04', '20:00:00.123000', '2026-07-05T00:00:00.000Z'],
+    ['2026-07-04', '19:30:15.5', '2026-07-04T23:30:15.000Z'],
   ])('nyWallClockToUtc(%s, %s) -> %s', (date, time, expectedIso) => {
     expect(nyWallClockToUtc(date, time).toISOString()).toBe(expectedIso);
   });
