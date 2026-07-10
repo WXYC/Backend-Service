@@ -205,7 +205,7 @@ CLAUDE.md is the always-loaded reference card; topic depth lives in `docs/*.md`.
 
 - `npm run check:doc-budget` — **warn-only.** Warns if CLAUDE.md exceeds its char budget. When it fires, extract to `docs/` rather than growing CLAUDE.md.
 - `npm run check:doc-rules` — **warn-only.** Surfaces `<!-- @rule -->` markers in `docs/*.md` that are stale (unenforced + old, enforced + verbose, or past `review-after`). Convention documented in [`docs/migrations.md`](docs/migrations.md#rule-annotation-convention).
-- `npm run check:auth-tables-doc` — **hard-fail.** Enforces the sentinel-fenced `auth_*` table list in CLAUDE.md against `shared/database/src/schema.ts`. A mismatch is always a bug (see BS#1573 for the drift incidents that motivated it); do not paper over failures with `|| true` in the hook. If your diff legitimately changes the set of auth tables, edit the sentinel-fenced line in CLAUDE.md to match the schema.
+- `npm run check:auth-tables-doc` — **hard-fail.** Enforces the sentinel-fenced `auth_*` table list in CLAUDE.md against every `.ts` file under `shared/database/src/` (BS#1581 tree walk; skips only `migrations/`). A mismatch is always a bug (see BS#1573 for the drift incidents that motivated it); do not paper over failures with `|| true` in the hook. If your diff legitimately changes the set of auth tables, edit the sentinel-fenced line in CLAUDE.md to match the schema.
 
 ### Branching
 
