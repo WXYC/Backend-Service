@@ -74,10 +74,76 @@ const buildMutableFields = (client: Client, now: Date): MutableFields => ({
   updatedAt: now,
 });
 
-// Postgres SQLSTATE for `unique_violation`. Thrown by `postgres` (the driver
-// under Drizzle) as `error.code === '23505'`.
-const isUniqueViolation = (error: unknown): boolean =>
-  typeof error === 'object' && error !== null && 'code' in error && (error as { code: unknown }).code === '23505';
+// Postgres SQLSTATE for `unique_violation`. `postgres` (the driver under
+// Drizzle) reports it as `.code`, but Drizzle wraps driver errors in a
+// `DrizzleQueryError` and puts the real error on `.cause`. Check both
+// locations — same pattern as `extractSqlState` in
+// `jobs/flowsheet-metadata-backfill/orchestrate.ts:194-200` and
+// `apps/backend/routes/internal-bans.route.ts:162-163`, so tests that throw a
+// bare error and prod runs that throw the wrapped form both classify.
+const isUniqueViolation = (error: unknown): boolean => {
+  if (typeof error !== 'object' || error === null) return false;
+  const cause = (error as { cause?: unknown }).cause;
+  const causeCode = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  const code = causeCode ?? (error as { code?: unknown }).code;
+  return code === '23505';
+};
+
+async function upsertOne(adapter: DBAdapter<Record<string, unknown>>, client: Client): Promise<'created' | 'updated'> {
+  const existing = await adapter.findOne<OauthApplicationRow>({
+    model: 'oauthApplication',
+    where: [{ field: 'clientId', value: client.clientId }],
+  });
+
+  const now = new Date();
+  const mutable = buildMutableFields(client, now);
+
+  if (!existing) {
+    try {
+      // `forceAllowId: true` is REQUIRED — without it, the adapter factory
+      // strips `data.id` and generates a random one, silently breaking the
+      // deterministic id contract. See adapter/factory.mjs:417-421.
+      await adapter.create({
+        model: 'oauthApplication',
+        data: {
+          id: idForTrustedClient(client.clientId),
+          clientId: client.clientId,
+          userId: null,
+          createdAt: now,
+          ...mutable,
+        },
+        forceAllowId: true,
+      });
+      return 'created';
+    } catch (error) {
+      // Multi-replica boot race: replica A's findOne missed, replica B
+      // wrote the row before A's create fired. Fall through to update
+      // rather than crashing this replica.
+      if (!isUniqueViolation(error)) throw error;
+    }
+  }
+
+  const row =
+    existing ??
+    (await adapter.findOne<OauthApplicationRow>({
+      model: 'oauthApplication',
+      where: [{ field: 'clientId', value: client.clientId }],
+    }));
+
+  if (!row) {
+    // Vanishingly unlikely: another replica deleted the row between our
+    // race-catch and this re-lookup. Surface as an error — the invariant this
+    // module maintains has been externally violated.
+    throw new Error(`bootstrap: row for clientId=${client.clientId} vanished mid-upsert`);
+  }
+
+  await adapter.update({
+    model: 'oauthApplication',
+    where: [{ field: 'id', value: row.id }],
+    update: mutable,
+  });
+  return 'updated';
+}
 
 export async function bootstrapTrustedClients(
   adapter: DBAdapter<Record<string, unknown>>,
@@ -85,65 +151,30 @@ export async function bootstrapTrustedClients(
 ): Promise<{ created: number; updated: number }> {
   let created = 0;
   let updated = 0;
+  const errors: Error[] = [];
 
   for (const client of trustedClients) {
-    const existing = await adapter.findOne<OauthApplicationRow>({
-      model: 'oauthApplication',
-      where: [{ field: 'clientId', value: client.clientId }],
-    });
-
-    const now = new Date();
-    const mutable = buildMutableFields(client, now);
-
-    if (!existing) {
-      try {
-        // `forceAllowId: true` is REQUIRED — without it, the adapter factory
-        // strips `data.id` and generates a random one, silently breaking the
-        // deterministic id contract. See adapter/factory.mjs:417-421.
-        await adapter.create({
-          model: 'oauthApplication',
-          data: {
-            id: idForTrustedClient(client.clientId),
-            clientId: client.clientId,
-            userId: null,
-            createdAt: now,
-            ...mutable,
-          },
-          forceAllowId: true,
-        });
-        created++;
-        continue;
-      } catch (error) {
-        // Multi-replica boot race: replica A's findOne missed, replica B
-        // wrote the row before A's create fired. Fall through to update
-        // rather than crashing this replica.
-        if (!isUniqueViolation(error)) throw error;
-      }
+    // Per-client isolation: a failure on one trustedClient (transient race
+    // whose recovery path also failed, schema drift on one row) shouldn't
+    // prevent the others from being upserted. Aggregate errors and re-throw
+    // at the end so the caller's Sentry alert still fires but every client
+    // gets an attempt.
+    try {
+      const outcome = await upsertOne(adapter, client);
+      if (outcome === 'created') created++;
+      else updated++;
+    } catch (error) {
+      errors.push(
+        error instanceof Error ? error : new Error(`bootstrap: unknown error for clientId=${client.clientId}`)
+      );
     }
+  }
 
-    // Look the row up by clientId (unique) rather than trusting `existing.id`
-    // — if we got here via the race path, `existing` is null but the row now
-    // exists under whatever id the racing replica assigned.
-    const row =
-      existing ??
-      (await adapter.findOne<OauthApplicationRow>({
-        model: 'oauthApplication',
-        where: [{ field: 'clientId', value: client.clientId }],
-      }));
-
-    if (!row) {
-      // Vanishingly unlikely: another replica deleted the row between our
-      // race-catch and this re-lookup. Surface it — the invariant this
-      // module maintains has been externally violated.
-      throw new Error(`bootstrap: row for clientId=${client.clientId} vanished mid-upsert`);
-    }
-
-    await adapter.update({
-      model: 'oauthApplication',
-      where: [{ field: 'id', value: row.id }],
-      update: mutable,
-    });
-    updated++;
+  if (errors.length > 0) {
+    throw new AggregateError(
+      errors,
+      `bootstrap: ${errors.length} of ${trustedClients.length} trustedClients failed to upsert`
+    );
   }
 
   return { created, updated };
