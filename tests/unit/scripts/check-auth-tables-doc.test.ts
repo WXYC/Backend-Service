@@ -183,5 +183,168 @@ describe('check-auth-tables-doc.mjs', () => {
       expect(status).toBe(1);
       expect(stderr).toMatch(/sentinel/i);
     });
+
+    // F2: extend the schema-side regex to accept uppercase and backtick args.
+    // The prior char class `[a-z0-9_]` missed camelCased table names, and the
+    // literal `['"]` quote set missed backtick template-literal args — both
+    // are realistic patterns that would silently drop tables from the schema
+    // set and hide drift. Mirrors `scripts/schema-shape-report.mjs`.
+    it('extracts uppercase table names from pgTable literals', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: docWith(['auth_user', 'auth_UserV2']),
+        schemaTs: [
+          `import { pgTable, text } from 'drizzle-orm/pg-core';`,
+          '',
+          `export const authUser = pgTable('auth_user', { id: text('id') });`,
+          `export const authUserV2 = pgTable('auth_UserV2', { id: text('id') });`,
+          '',
+        ].join('\n'),
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(0);
+      expect(stderr).toBe('');
+    });
+
+    it('extracts table names from backtick-quoted pgTable literals', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: docWith(['auth_user', 'auth_new']),
+        schemaTs: [
+          `import { pgTable, text } from 'drizzle-orm/pg-core';`,
+          '',
+          `export const authUser = pgTable(\`auth_user\`, { id: text('id') });`,
+          `export const authNew = pgTable(\`auth_new\`, { id: text('id') });`,
+          '',
+        ].join('\n'),
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(0);
+      expect(stderr).toBe('');
+    });
+
+    // F3: hard-fail when the schema regex matches zero tables. If the doc is
+    // also empty, both sets agree at 0-vs-0 and the check silently "passes"
+    // (the BS#1571 shape). This repo will always have at least `auth_user`.
+    it('fails when zero auth_* pgTables are found in the schema', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: [
+          '# CLAUDE.md',
+          '',
+          '<!-- auth-tables-list:begin -->',
+          '**Auth tables**: (none).',
+          '<!-- auth-tables-list:end -->',
+          '',
+        ].join('\n'),
+        schemaTs: [
+          `import { pgTable, text } from 'drizzle-orm/pg-core';`,
+          '',
+          `export const someDomainTable = pgTable('wxyc_flowsheet', { id: text('id') });`,
+          '',
+        ].join('\n'),
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(1);
+      expect(stderr).toMatch(/zero|no.*auth_/i);
+    });
+
+    // F4: strip HTML comments inside the sentinel block before token
+    // extraction. A backticked `auth_*` token inside `<!-- ... -->` is a
+    // human note or TODO, not a claim about a real table.
+    it('ignores auth_* tokens inside HTML comments in the doc body', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: [
+          '# CLAUDE.md',
+          '',
+          '<!-- auth-tables-list:begin -->',
+          '**Auth tables**: `auth_user`.',
+          '<!-- TODO: also list `auth_ghost` once BS#9999 lands -->',
+          '<!-- auth-tables-list:end -->',
+          '',
+        ].join('\n'),
+        schemaTs: schemaWith(['auth_user']),
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(0);
+      expect(stderr).toBe('');
+    });
+
+    // F5b: same treatment for the schema side — a commented-out
+    // `// pgTable('auth_legacy', ...)` call should not be counted as a
+    // declared table.
+    it('ignores pgTable calls inside line comments in the schema', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: docWith(['auth_user']),
+        schemaTs: [
+          `import { pgTable, text } from 'drizzle-orm/pg-core';`,
+          '',
+          `export const authUser = pgTable('auth_user', { id: text('id') });`,
+          `// export const authLegacy = pgTable('auth_legacy', { id: text('id') });`,
+          '',
+        ].join('\n'),
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(0);
+      expect(stderr).toBe('');
+    });
+
+    it('ignores pgTable calls inside block comments in the schema', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: docWith(['auth_user']),
+        schemaTs: [
+          `import { pgTable, text } from 'drizzle-orm/pg-core';`,
+          '',
+          `export const authUser = pgTable('auth_user', { id: text('id') });`,
+          `/*`,
+          `  export const authLegacy = pgTable('auth_legacy', { id: text('id') });`,
+          `*/`,
+          '',
+        ].join('\n'),
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(0);
+      expect(stderr).toBe('');
+    });
+
+    // F6: duplicate begin/end sentinels are a silent redefinition risk.
+    // The prior `indexOf` picks the first occurrence and slices to the
+    // first END — everything past that vanishes. Fail loudly instead.
+    it('fails when the begin sentinel appears more than once', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: [
+          '# CLAUDE.md',
+          '',
+          '<!-- auth-tables-list:begin -->',
+          '**Auth tables**: `auth_user`.',
+          '<!-- auth-tables-list:end -->',
+          '',
+          '<!-- auth-tables-list:begin -->',
+          '(accidental second block)',
+          '<!-- auth-tables-list:end -->',
+          '',
+        ].join('\n'),
+        schemaTs: schemaWith(['auth_user']),
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(1);
+      expect(stderr).toMatch(/duplicate|more than one|multiple.*sentinel/i);
+    });
+
+    it('fails when the end sentinel appears more than once', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: [
+          '# CLAUDE.md',
+          '',
+          '<!-- auth-tables-list:begin -->',
+          '**Auth tables**: `auth_user`.',
+          '<!-- auth-tables-list:end -->',
+          '',
+          '<!-- auth-tables-list:end -->',
+          '',
+        ].join('\n'),
+        schemaTs: schemaWith(['auth_user']),
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(1);
+      expect(stderr).toMatch(/duplicate|more than one|multiple.*sentinel/i);
+    });
   });
 });
