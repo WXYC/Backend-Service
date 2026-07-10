@@ -4,7 +4,9 @@
  * Run shape:
  *   1. Health probe — loud Sentry warning when the source's `last_scrape`
  *      is > 24h stale, ABSENT, or unparseable (its scheduler scrapes
- *      06:00/18:00 ET, so ~7h-old data at the 05:05 UTC pull is normal).
+ *      several times daily — indie venues 06:00/12:00/18:00 ET, the
+ *      Ticketmaster job twice daily — so the latest pre-pull scrape is
+ *      18:00 ET and ~7h-old data at the 05:05 UTC pull is normal).
  *      Non-fatal: a stale mirror is better than no mirror, and the
  *      staleness has its own alert.
  *   2. Venue list — partition assertions (`venues.ts`), then provision
@@ -14,10 +16,10 @@
  *      injected memoized cache — the ONLY memoization layer), UPSERT.
  *   5. Run guards — the run FAILS (throws, non-zero exit) when the source
  *      returns an empty snapshot, when ingestable events exist but zero
- *      upserted, or when failures outnumber successes. Cron-success
- *      monitoring must not stay green through a wholesale regression,
- *      and a 200-with-empty-array is a source regression, not a success
- *      (a live Triangle calendar is never empty).
+ *      upserted, or when failures reach successes (>= half failing).
+ *      Cron-success monitoring must not stay green through a wholesale
+ *      regression, and a 200-with-empty-array is a source regression,
+ *      not a success (a live Triangle calendar is never empty).
  *
  * Dependencies are injected so unit tests drive the orchestrator without
  * network or DB; production wires them in `job.ts`. Per-event errors are
@@ -115,11 +117,15 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
   const now = opts.now ?? (() => new Date());
   const scrapedAt = now();
 
-  // Sentry dedup: capture each distinct (step, message) once per run; the
-  // counters + per-event log lines carry the volume.
+  // Sentry dedup: capture each distinct (step, message-class) once per
+  // run; the counters + per-event log lines carry the volume. Digits are
+  // normalized out of the key because the thrown messages embed per-event
+  // ids and values ("event id 1523", a raw date string) — without this,
+  // 1,500 same-class failures would produce 1,500 distinct keys and the
+  // dedup would be a no-op exactly when it matters.
   const capturedKeys = new Set<string>();
   const captureOnce = (error: unknown, step: string, extra: Record<string, unknown> = {}): void => {
-    const key = `${step}:${(error as Error).message}`;
+    const key = `${step}:${(error as Error).message.replace(/\d+/g, '#')}`;
     if (capturedKeys.has(key)) return;
     capturedKeys.add(key);
     captureError(error, step, extra);
@@ -168,6 +174,12 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
   const listedSlugs = new Set<string>();
   const createdSlugs: string[] = [];
   const warnedUnlistedSlugs = new Set<string>();
+  // Fallback classifier for excluded venues: if a source glitch nulls an
+  // event's denormalized venue_slug, its venue_id can still prove the
+  // event belongs to an RHP-covered venue — those must count as excluded,
+  // not as map errors inflating the majority-failure guard over events
+  // this job would have skipped anyway.
+  const excludedVenueIds = new Set(sourceVenues.filter((v) => isExcluded(v.slug)).map((v) => v.id));
 
   for (const venue of ingestedVenues(sourceVenues)) {
     listedSlugs.add(venue.slug);
@@ -199,10 +211,11 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
   });
 
   // 4. Per-event map -> resolve -> upsert. Venue resolution goes through
-  // the injected memoized cache unconditionally — no second cache layer
-  // here; the step-2 loop warmed it for every listed venue.
+  // the injected memoized cache (the only POSITIVE cache; failedSlugs
+  // above is the negative side); the step-2 loop warmed it for every
+  // listed venue.
   for (const event of events) {
-    if (event.venue_slug && isExcluded(event.venue_slug)) {
+    if ((event.venue_slug && isExcluded(event.venue_slug)) || excludedVenueIds.has(event.venue_id)) {
       totals.events_excluded += 1;
       continue;
     }
@@ -245,10 +258,12 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
 
     let venueId: number;
     try {
+      // Trimmed-|| like the artist fallback: heterogeneous scrapers can
+      // emit '' where they mean "unknown", and '' satisfies NOT NULL.
       const { venue_id, created } = await opts.resolveVenueId(
         mapped.venue_slug,
-        event.venue_name ?? mapped.venue_slug,
-        event.venue_city ?? 'Unknown'
+        event.venue_name?.trim() || mapped.venue_slug,
+        event.venue_city?.trim() || 'Unknown'
       );
       venueId = venue_id;
       if (created) {
@@ -317,9 +332,12 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
         `aborting with non-zero exit`
     );
   }
-  if (failed > totals.upserts_total) {
+  // >= not >: an exactly-50% failure rate is still a wholesale regression
+  // for a mirror (e.g. one platform's scrapers breaking — the Ticketmaster
+  // quad is roughly half the corpus by volume) and must not stay green.
+  if (failed > 0 && failed >= totals.upserts_total) {
     throw new Error(
-      `majority of ingestable events failed (${failed} failed vs ${totals.upserts_total} upserted of ${ingestable}); ` +
+      `failures reached successes (${failed} failed vs ${totals.upserts_total} upserted of ${ingestable} ingestable); ` +
         `treating as a wholesale regression — see map_errors/venue_resolve_errors/upsert_errors in the finished log`
     );
   }

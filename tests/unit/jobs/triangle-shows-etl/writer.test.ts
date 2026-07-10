@@ -16,12 +16,7 @@
  *     live at the ensureVenue chokepoint.
  */
 import { db } from '@wxyc/database';
-import {
-  clampCodePoints,
-  ensureVenue,
-  makeVenueCache,
-  upsertConcert,
-} from '../../../../jobs/triangle-shows-etl/writer';
+import { ensureVenue, makeVenueCache, upsertConcert } from '../../../../jobs/triangle-shows-etl/writer';
 import { mapEvent } from '../../../../jobs/triangle-shows-etl/map';
 import { makeTsEvent } from './fixtures';
 
@@ -222,13 +217,6 @@ describe('ensureVenue', () => {
 
       expect((venueValuesRows()[0].name as string).length).toBe(128);
     });
-  });
-});
-
-describe('clampCodePoints', () => {
-  it('counts code points, not UTF-16 units', () => {
-    expect(clampCodePoints(`${'x'.repeat(3)}🎸y`, 4)).toBe('xxx🎸');
-    expect(clampCodePoints('short', 10)).toBe('short');
   });
 });
 

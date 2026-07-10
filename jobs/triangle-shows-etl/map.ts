@@ -14,8 +14,13 @@
  */
 
 import { nyCalendarDate, nyWallClockToUtc, type NewConcert } from '@wxyc/database';
-import { clampCodePoints } from './writer.js';
 import type { TsEvent } from './types.js';
+
+/** Code-point-safe truncation (`String.prototype.slice` counts UTF-16 code
+ *  units and can strand half a surrogate pair as U+FFFD in the DB). Lives
+ *  here — the pure, DB-free module — so writer.ts's import of it points
+ *  the same direction as its type import (writer -> map, no cycle). */
+export const clampCodePoints = (value: string, max: number): string => [...value].slice(0, max).join('');
 
 const HEADLINER_MAX = 256;
 

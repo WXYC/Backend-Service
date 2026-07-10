@@ -7,7 +7,7 @@
  *  1. `status` refreshes on EVERY upsert, both directions. The RHP
  *     writer's status is insert-only/admin-managed because JSON-LD
  *     `Offer.availability` is unreliable; triangle-shows maintains an
- *     explicit per-event status enum refreshed by its 13 platform
+ *     explicit per-event status enum refreshed by its per-venue platform
  *     scrapers, so for these rows the source is strictly better-informed
  *     than a BS admin.
  *  2. `removed_at` mirrors the source's tombstone both directions — set
@@ -30,7 +30,7 @@
 import { db, venues, concerts } from '@wxyc/database';
 import { eq, sql } from 'drizzle-orm';
 
-import type { MappedEvent } from './map.js';
+import { clampCodePoints, type MappedEvent } from './map.js';
 
 type VenuesValue = typeof venues.$inferInsert;
 type ConcertsValue = typeof concerts.$inferInsert;
@@ -52,10 +52,6 @@ const VENUE_SLUG_MAX = 64;
  *  name clamps safely — PG errors rather than truncates, and one long-named
  *  venue must not drop its whole calendar from the mirror. */
 const VENUE_NAME_MAX = 128;
-
-/** Code-point-safe truncation (`String.prototype.slice` counts UTF-16 code
- *  units and can strand half a surrogate pair as U+FFFD in the DB). */
-export const clampCodePoints = (value: string, max: number): string => [...value].slice(0, max).join('');
 
 /**
  * Resolve a venue slug to a numeric id, creating or refreshing the row
@@ -114,11 +110,12 @@ export const ensureVenue = async (slug: string, rawName: string, city: string): 
   return { venue_id: existing[0].id, created: false };
 };
 
-/** Per-run (slug -> id) cache: one DB round-trip per venue per run. This
- *  is the ONLY memoization layer — the orchestrator calls through it
- *  unconditionally. `created` is threaded through (false on cache hits)
- *  so the orchestrator can surface brand-new venue rows as the
- *  re-check-the-RHP-partition signal. */
+/** Per-run (slug -> id) cache: one DB round-trip per venue per run. The
+ *  only POSITIVE memoization layer — the orchestrator adds a negative
+ *  side (its `failedSlugs` set skips venues whose provisioning already
+ *  failed this run) but keeps no second id map. `created` is threaded
+ *  through (false on cache hits) so the orchestrator can surface
+ *  brand-new venue rows as the re-check-the-RHP-partition signal. */
 export type VenueCache = {
   get: (slug: string, name: string, city: string) => Promise<WriteVenueOutcome>;
   size: () => number;

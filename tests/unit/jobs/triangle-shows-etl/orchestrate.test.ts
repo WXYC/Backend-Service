@@ -118,11 +118,28 @@ describe('runEtl — event flow', () => {
         Promise.resolve([
           event(1, 'the-pinhook', { status: 'postponed' }), // unknown status -> map error
           event(2, 'kings'),
+          event(3, 'slims'),
         ]),
     });
     const totals = await runEtl(opts);
 
     expect(totals.map_errors).toBe(1);
+    expect(totals.upserts_total).toBe(2);
+  });
+
+  it('classifies a null-venue_slug event at an EXCLUDED venue as excluded via venue_id, not as a map error', async () => {
+    // A source glitch that nulls the denormalized venue_slug must not turn
+    // RHP-partition events (which this job would skip anyway) into
+    // map_errors that inflate the failure guard and misdirect triage.
+    const catsCradleId = sourceVenues[ALL_SOURCE_SLUGS.indexOf('cats-cradle')].id;
+    const opts = makeOpts({
+      fetchEvents: () =>
+        Promise.resolve([event(1, 'cats-cradle', { venue_slug: null, venue_id: catsCradleId }), event(2, 'kings')]),
+    });
+    const totals = await runEtl(opts);
+
+    expect(totals.events_excluded).toBe(1);
+    expect(totals.map_errors).toBe(0);
     expect(totals.upserts_total).toBe(1);
   });
 
@@ -153,7 +170,7 @@ describe('runEtl — event flow', () => {
   it('counts upsert errors per event without aborting the loop', async () => {
     let calls = 0;
     const opts = makeOpts({
-      fetchEvents: () => Promise.resolve([event(1, 'the-pinhook'), event(2, 'kings')]),
+      fetchEvents: () => Promise.resolve([event(1, 'the-pinhook'), event(2, 'kings'), event(3, 'slims')]),
       upsertConcert: () => {
         calls += 1;
         if (calls === 1) return Promise.reject(new Error('boom'));
@@ -163,7 +180,7 @@ describe('runEtl — event flow', () => {
     const totals = await runEtl(opts);
 
     expect(totals.upsert_errors).toBe(1);
-    expect(totals.upserts_total).toBe(1);
+    expect(totals.upserts_total).toBe(2);
   });
 
   it('negative-caches a venue whose provisioning failed: events skip without re-running the doomed resolve', async () => {
@@ -222,7 +239,20 @@ describe('runEtl — run guards', () => {
           event(4, 'slims'),
         ]),
     });
-    await expect(runEtl(opts)).rejects.toThrow(/majority/);
+    await expect(runEtl(opts)).rejects.toThrow(/failures reached successes/);
+  });
+
+  it('fails the run at exactly 50% failures (one broken platform can be half the corpus)', async () => {
+    const opts = makeOpts({
+      fetchEvents: () =>
+        Promise.resolve([
+          event(1, 'the-pinhook', { status: 'postponed' }),
+          event(2, 'kings', { status: 'postponed' }),
+          event(3, 'the-cave'),
+          event(4, 'slims'),
+        ]),
+    });
+    await expect(runEtl(opts)).rejects.toThrow(/failures reached successes/);
   });
 
   it('passes when successes outnumber failures', async () => {
