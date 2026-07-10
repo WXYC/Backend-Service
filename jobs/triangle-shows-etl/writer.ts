@@ -27,7 +27,7 @@
  * triangle-shows' seed.
  */
 
-import { db, venues, concerts } from '@wxyc/database';
+import { db, venues, concerts, headliningArtistIdConflictClear } from '@wxyc/database';
 import { eq, sql } from 'drizzle-orm';
 
 import { clampCodePoints, type MappedEvent } from './map.js';
@@ -169,6 +169,11 @@ export const upsertConcert = async (
         starts_at: values.starts_at,
         doors_at: values.doors_at,
         headlining_artist_raw: values.headlining_artist_raw,
+        // Clears the resolved FK only when the raw headliner actually
+        // changed, so the write-once resolver re-claims the row the same
+        // night — see the shared fragment's docstring in
+        // shared/database/src/concerts-sql.ts.
+        headlining_artist_id: headliningArtistIdConflictClear(),
         title: values.title,
         supporting_artists_raw: values.supporting_artists_raw,
         ticket_url: values.ticket_url,

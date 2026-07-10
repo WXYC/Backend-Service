@@ -14,7 +14,7 @@
  * threading state through the writer.
  */
 
-import { db, venues, concerts, nyCalendarDate } from '@wxyc/database';
+import { db, venues, concerts, nyCalendarDate, headliningArtistIdConflictClear } from '@wxyc/database';
 import { eq, sql } from 'drizzle-orm';
 
 import type { ParsedConcert } from './rhp-types.js';
@@ -243,6 +243,11 @@ export const upsertConcert = async (
         starts_at: values.starts_at,
         starts_on: values.starts_on,
         headlining_artist_raw: values.headlining_artist_raw,
+        // RHP source_ids are pathname-derived and survive a billed-artist
+        // swap, and the resolver is write-once — clear the resolved FK
+        // when the raw headliner changed so it re-resolves the same
+        // night. Shared fragment: shared/database/src/concerts-sql.ts.
+        headlining_artist_id: headliningArtistIdConflictClear(),
         supporting_artists_raw: values.supporting_artists_raw,
         ticket_url: values.ticket_url,
         image_url: values.image_url,

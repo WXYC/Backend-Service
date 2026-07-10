@@ -85,10 +85,49 @@ describe('mapEvent — dates and times', () => {
 });
 
 describe('mapEvent — headliner and title', () => {
-  it('prefers artist over name for headlining_artist_raw and carries name as title', () => {
+  it('prefers artist over name for headlining_artist_raw and carries name as title when distinct', () => {
     const mapped = mapEvent(makeTsEvent({ artist: 'Juana Molina', name: 'Juana Molina — DOGA tour' }));
     expect(mapped.concert.headlining_artist_raw).toBe('Juana Molina');
     expect(mapped.concert.title).toBe('Juana Molina — DOGA tour');
+  });
+
+  // schema.ts documents title as 'Event name as the source displays it,
+  // when distinct from the artist' (and rhp_scrape rows leave it NULL).
+  // Writing name unconditionally would render 'Juana Molina — Juana
+  // Molina' in any feed using the documented headliner—title shape.
+  it('leaves title NULL when the headliner IS the name (artist absent — nothing distinct to display)', () => {
+    const mapped = mapEvent(makeTsEvent({ artist: null, name: 'Jessica Pratt' }));
+    expect(mapped.concert.headlining_artist_raw).toBe('Jessica Pratt');
+    expect(mapped.concert.title).toBeNull();
+  });
+
+  it('leaves title NULL when name and artist are the same string (not distinct billing)', () => {
+    const mapped = mapEvent(makeTsEvent({ artist: 'Cat Power', name: 'Cat Power' }));
+    expect(mapped.concert.title).toBeNull();
+  });
+
+  it('trims the name fallback so a padded source name cannot store a padded headliner', () => {
+    const mapped = mapEvent(makeTsEvent({ artist: null, name: '  Cat Power  ' }));
+    expect(mapped.concert.headlining_artist_raw).toBe('Cat Power');
+  });
+
+  it('throws a map error when artist AND name are both blank — a headliner-less row satisfies NOT NULL but is unresolvable garbage', () => {
+    expect(() => mapEvent(makeTsEvent({ artist: null, name: '   ' }))).toThrow(/blank/i);
+    expect(() => mapEvent(makeTsEvent({ artist: ' ', name: '' }))).toThrow(/blank/i);
+  });
+
+  it('leaves title NULL when name is blank but artist is valid — a whitespace title is not "distinct billing"', () => {
+    const mapped = mapEvent(makeTsEvent({ artist: 'Cat Power', name: '   ' }));
+    expect(mapped.concert.headlining_artist_raw).toBe('Cat Power');
+    expect(mapped.concert.title).toBeNull();
+  });
+
+  it('keeps the full name in title exactly when truncation amputated the headliner (artist absent, name past 256 code points)', () => {
+    const long = `${'x'.repeat(300)}`;
+    const mapped = mapEvent(makeTsEvent({ artist: null, name: long }));
+    expect([...mapped.concert.headlining_artist_raw]).toHaveLength(256);
+    // Without this, the amputated prefix would be the only queryable copy.
+    expect(mapped.concert.title).toBe(long);
   });
 
   it('falls back to name when artist is null (name is NOT NULL at the source, so the mapping is total)', () => {
@@ -177,6 +216,27 @@ describe('mapEvent — status and prices', () => {
     expect(mapped.concert.price_min).toBe('15.50');
     expect(mapped.concert.price_max).toBe('20.00');
   });
+
+  // numeric(8,2) caps at 999999.99 and PG errors rather than truncates.
+  // Source floats are unbounded, and the scrapers' price regexes can
+  // misparse prose digit runs (a phone number in a Squarespace
+  // description) — an un-storable price must drop to NULL, not fail the
+  // whole event's upsert every night.
+  it('drops un-storable prices (past the numeric(8,2) cap) instead of failing the event', () => {
+    const mapped = mapEvent(makeTsEvent({ price_min: 9195551234, price_max: 20242025 }));
+    expect(mapped.concert.price_min).toBeNull();
+    expect(mapped.concert.price_max).toBeNull();
+  });
+
+  it('judges the cap on the ROUNDED value — toFixed carries 999999.996 to 1000000.00', () => {
+    expect(mapEvent(makeTsEvent({ price_min: 999999.99 })).concert.price_min).toBe('999999.99');
+    expect(mapEvent(makeTsEvent({ price_min: 999999.996 })).concert.price_min).toBeNull();
+    expect(mapEvent(makeTsEvent({ price_min: Number.POSITIVE_INFINITY })).concert.price_min).toBeNull();
+  });
+
+  it('drops negative prices — the same misparse family can capture a leading hyphen from prose ranges', () => {
+    expect(mapEvent(makeTsEvent({ price_min: -5 })).concert.price_min).toBeNull();
+  });
 });
 
 describe('mapEvent — tombstones and raw payload', () => {
@@ -188,6 +248,33 @@ describe('mapEvent — tombstones and raw payload', () => {
   it('carries removed_at as NULL for live rows (writer clears on reappearance)', () => {
     const mapped = mapEvent(makeTsEvent({ removed_at: null }));
     expect(mapped.concert.removed_at).toBeNull();
+  });
+
+  it('throws a map error on an unparseable removed_at — an Invalid Date would otherwise explode at the Drizzle bind as a context-free RangeError counted as an upsert_error', () => {
+    expect(() => mapEvent(makeTsEvent({ removed_at: 'not-a-timestamp' }))).toThrow(/removed_at/);
+  });
+
+  it('strips U+0000 from the raw payload — PG rejects NUL in every text-typed bind, which would permanently fail the event', () => {
+    const mapped = mapEvent(makeTsEvent({ description: 'trio\u0000set' }));
+    expect((mapped.concert.raw_data as { description: string }).description).toBe('trioset');
+  });
+
+  it('strips U+0000 from mapped columns too, not just raw_data — a NUL in artist would fail the varchar bind the same way', () => {
+    const mapped = mapEvent(makeTsEvent({ artist: 'Nil\u0000üfer Yanya' }));
+    expect(mapped.concert.headlining_artist_raw).toBe('Nilüfer Yanya');
+  });
+
+  it('passes a clean payload through as the same object (no needless deep copy)', () => {
+    const event = makeTsEvent({ description: 'trio set' });
+    expect(mapEvent(event).concert.raw_data).toBe(event);
+  });
+
+  it('does not corrupt literal backslash-u0000 TEXT (no actual NUL) — escaped-JSON string surgery would strip the escape and break or mangle the payload', () => {
+    // The 6 typed characters backslash-u-0-0-0-0, not a control character.
+    const event = makeTsEvent({ description: 'call \\u0000 me' });
+    const mapped = mapEvent(event);
+    expect(mapped.concert.raw_data).toBe(event);
+    expect((mapped.concert.raw_data as { description: string }).description).toBe('call \\u0000 me');
   });
 
   it('stores the full EventResponse as raw_data (genre/subgenre/description live only there per Decision 2)', () => {

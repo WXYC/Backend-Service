@@ -158,6 +158,31 @@ describe('upsertConcert', () => {
       }
     });
   });
+
+  it('conditionally clears headlining_artist_id in the ON CONFLICT set when the raw headliner changed — RHP source_ids are pathname-derived and stable when a page swaps its billed artist, and the write-once resolver never revisits a non-NULL FK', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: false }]);
+    await upsertConcert(fakeParsed('fk-clear'), 1, new Date('2026-06-05T12:00:00Z'));
+
+    const set = concertSetClauses()[0];
+    expect(set).toHaveProperty('headlining_artist_id');
+    // The value is a drizzle SQL fragment (shared helper from
+    // @wxyc/database) — pin the CASE/IS DISTINCT FROM/excluded mechanism
+    // so a refactor to an unconditional NULL (stripping every resolved id
+    // nightly) fails here.
+    // Robust to both SQL-object shapes: real drizzle exposes queryChunks
+    // (string chunks interleaved with column refs); the unit-mock env's
+    // tag exposes the template strings via `.sql` (String() joins them).
+    const frag = set.headlining_artist_id as {
+      sql?: string | readonly string[];
+      queryChunks?: Array<{ value?: unknown }>;
+    };
+    const fragmentText =
+      frag?.sql != null
+        ? [frag.sql].flat().join(' ')
+        : (frag?.queryChunks ?? []).flatMap((c) => (Array.isArray(c.value) ? (c.value as string[]) : [])).join(' ');
+    expect(fragmentText).toMatch(/IS DISTINCT FROM/i);
+    expect(fragmentText).toMatch(/excluded/i);
+  });
 });
 
 // Migration 0112 (BS#1589) — `starts_on date NOT NULL` is the venue-local

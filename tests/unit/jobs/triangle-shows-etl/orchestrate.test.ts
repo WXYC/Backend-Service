@@ -143,6 +143,25 @@ describe('runEtl — event flow', () => {
     expect(totals.upserts_total).toBe(1);
   });
 
+  it('counts a starts_at earlier than doors_at as a time-order anomaly and still upserts the row unmodified', async () => {
+    // Free-text source scrapers can pair a past-midnight show_time with
+    // the advertised date ('Sat Oct 31, doors 11PM, show 12:30AM' stores
+    // date=…-10-31 + show_time=00:30) — starts_at composes ~22.5h before
+    // doors_at. No heuristic can safely re-shift either side (the inverse
+    // skew also occurs), so this is observability only.
+    const opts = makeOpts({
+      fetchEvents: () =>
+        Promise.resolve([
+          event(1, 'the-pinhook', { doors_time: '23:00:00', show_time: '00:30:00', date: '2026-10-31' }),
+          event(2, 'kings'),
+        ]),
+    });
+    const totals = await runEtl(opts);
+
+    expect(totals.time_order_anomalies).toBe(1);
+    expect(totals.upserts_total).toBe(2);
+  });
+
   it('counts tombstoned upserts', async () => {
     const opts = makeOpts({
       fetchEvents: () =>
