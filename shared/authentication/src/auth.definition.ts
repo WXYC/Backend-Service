@@ -218,6 +218,20 @@ export const auth = betterAuth({
       loginPage: buildLoginPage(process.env),
       allowDynamicClientRegistration: false,
       requirePKCE: true,
+      // #1580 — route id_token signing through the JWT plugin's asymmetric
+      // key (RS256 / EdDSA) rather than the default per-client HMAC (HS256).
+      // Better-auth's HS256 path signs with `client.clientSecret` as the
+      // HMAC key (`node_modules/better-auth/dist/plugins/oidc-provider/index.mjs:649`);
+      // for a public client (`type: 'public'`, no `clientSecret`), the call
+      // reduces to `sign(new TextEncoder().encode(undefined))` → zero-length
+      // key → jose throws `JWSInvalid` → 500 out of the token endpoint. The
+      // JWT plugin's asymmetric signer works uniformly for `web` and
+      // `public` clients and needs no per-client secret. This flag requires
+      // the `jwt()` plugin to be registered ahead of `oidcProvider` — the
+      // pin is asserted by `tests/unit/authentication/oidc-provider-public-client-jwt.test.ts`.
+      // Do not flip this to `false` without also removing the wxyc-canary
+      // public trustedClient (see #1578, wxyc-canary#60).
+      useJWTPlugin: true,
       trustedClients: buildTrustedClients(process.env),
       getAdditionalUserInfoClaim: async (userRecord) => {
         try {

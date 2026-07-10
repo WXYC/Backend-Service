@@ -107,6 +107,25 @@ function flowsheetClient(overrides: Partial<Client> = {}): Client {
   return { ...base, ...overrides };
 }
 
+// Public-client shape (wxyc-canary). Mirrors the actual `Client` type — no
+// `as any`. `clientSecret: undefined` and `type: 'public'` are the two
+// load-bearing coercions in `bootstrap-trusted-clients.ts` (`?? null` on
+// line 67, `?? 'web'` on line 69). See #1585.
+function canaryClient(overrides: Partial<Client> = {}): Client {
+  const base: Client = {
+    clientId: 'wxyc-canary',
+    clientSecret: undefined,
+    redirectUrls: ['https://canary.wxyc.invalid/authorize-echo'],
+    name: 'WXYC Canary',
+    type: 'public',
+    disabled: false,
+    icon: undefined,
+    metadata: null,
+    skipConsent: true,
+  };
+  return { ...base, ...overrides };
+}
+
 describe('bootstrapTrustedClients', () => {
   it('is a no-op when the trustedClients array is empty', async () => {
     const { adapter, calls, rows } = makeFakeAdapter();
@@ -420,6 +439,90 @@ describe('bootstrapTrustedClients', () => {
     const wrapped = thrown as Error & { cause?: unknown };
     expect(wrapped.message).toMatch(/clientId=flowsheet/);
     expect((wrapped.cause as Error | undefined)?.message).toBe('DB unreachable');
+  });
+
+  it('pins the public-client shape on insert: clientSecret null, type "public"', async () => {
+    // #1585 — the bootstrap has two load-bearing coercions for the public-
+    // client shape introduced in #1578:
+    //   line 67: clientSecret: client.clientSecret ?? null
+    //   line 69: type: client.type ?? 'web'
+    // Every existing test uses `clientSecret: 'shh'` and `type: 'web'`, so
+    // the public-client path (`clientSecret: undefined` → null, `type:
+    // 'public'` → 'public') is unpinned. Someone "cleaning up" line 67 to
+    // `?? ''` would give public clients an empty-string HMAC key that
+    // trips #1580 silently; someone dropping the `?? 'web'` on line 69
+    // and passing `type: undefined` at the call site would flip public
+    // clients to `type: undefined` in the DB. Pin the shape here so both
+    // regressions are visible.
+    const { adapter, rows } = makeFakeAdapter();
+
+    const result = await bootstrapTrustedClients(asAdapter(adapter), [canaryClient()]);
+
+    expect(result).toEqual({ created: 1, updated: 0 });
+    const inserted = rows.get('wxyc-canary');
+    assertDefined(inserted, 'wxyc-canary row');
+    // clientSecret must coerce to `null`, NOT to `''` — an empty string
+    // is a valid HMAC key to jose and would sail past the #1580 failure
+    // mode without any test flagging it.
+    expect(inserted.clientSecret).toBeNull();
+    // type must land as literal 'public' — dropping the field or the
+    // `?? 'web'` default would flip this to undefined or 'web'.
+    expect(inserted.type).toBe('public');
+    // Deterministic id preserved for the operator SELECT ... WHERE id
+    // LIKE 'trusted-%' query the module documents.
+    expect(inserted.id).toBe('trusted-wxyc-canary');
+    // Full remaining shape to make sure no other field got clobbered while
+    // the two load-bearing ones were being pinned.
+    expect(inserted).toMatchObject({
+      clientId: 'wxyc-canary',
+      name: 'WXYC Canary',
+      disabled: false,
+      redirectUrls: 'https://canary.wxyc.invalid/authorize-echo',
+      metadata: null,
+      icon: null,
+    });
+  });
+
+  it('pins the public-client shape on update: stale wiki-shape row becomes public shape', async () => {
+    // Symmetric with the wiki/flowsheet drift-tolerant-upsert test. If a
+    // canary row was ever written with a stale non-public shape (e.g., a
+    // partial-config boot that ran before #1580 shipped and mistakenly
+    // registered the canary as `type: 'web'`), the next boot re-upserts
+    // the canonical `type: 'public' + clientSecret: null` shape.
+    const { adapter, calls, rows } = makeFakeAdapter([
+      {
+        id: 'trusted-wxyc-canary',
+        clientId: 'wxyc-canary',
+        clientSecret: 'stale-shh-from-a-past-misconfiguration',
+        name: 'WXYC Canary (old)',
+        type: 'web',
+        disabled: false,
+        redirectUrls: 'https://canary.wxyc.org/authorize-echo',
+        metadata: null,
+        icon: null,
+        userId: null,
+        createdAt: new Date('2026-06-01'),
+        updatedAt: new Date('2026-06-01'),
+      },
+    ]);
+
+    await bootstrapTrustedClients(asAdapter(adapter), [canaryClient()]);
+
+    expect(calls.create).toBe(0);
+    expect(calls.update).toBe(1);
+    const row = rows.get('wxyc-canary');
+    assertDefined(row, 'wxyc-canary row');
+    // Same two load-bearing pins as the create test — asserting them on the
+    // update path too catches a regression that dropped the coercions from
+    // only one of the two branches (they share `buildMutableFields`, but
+    // the pinning is per-branch to make either drift immediately visible).
+    expect(row.clientSecret).toBeNull();
+    expect(row.type).toBe('public');
+    // Redirect URL was also refreshed — proves `buildMutableFields` ran
+    // on the update path with the canary shape, not just the two pinned
+    // fields we're asserting.
+    expect(row.redirectUrls).toBe('https://canary.wxyc.invalid/authorize-echo');
+    expect(row.name).toBe('WXYC Canary');
   });
 
   it('aggregates multiple failures into an AggregateError with a count summary', async () => {
