@@ -13,7 +13,8 @@
  *      every ingested venue so all 16 exist even before their first event.
  *   3. Full-snapshot events pull (back-dated start; tombstones included).
  *   4. Per event: skip excluded slugs, map, resolve venue (through the
- *      injected memoized cache — the ONLY memoization layer), UPSERT.
+ *      injected memoized cache — the only positive cache; failedSlugs
+ *      below is the negative side), UPSERT.
  *   5. Run guards — the run FAILS (throws, non-zero exit) when the source
  *      returns an empty snapshot, when ingestable events exist but zero
  *      upserted, or when failures reach successes (>= half failing).
@@ -43,7 +44,7 @@ import { captureError, captureWarning, log } from './logger.js';
 
 const JOB_NAME = 'triangle-shows-etl';
 
-/** Source freshness ceiling before we warn (scrapes run twice daily). */
+/** Source freshness ceiling before we warn (latest pre-pull scrape is 18:00 ET). */
 const SOURCE_STALE_MS = 24 * 60 * 60 * 1000;
 
 export type ResolveVenueIdFn = (
