@@ -13,117 +13,138 @@
  *   constraint "auth_oauth_access_token_client_id_auth_oauth_application_client"
  *
  * This bootstrap upserts one row per trustedClient at server startup so the
- * FK is satisfied without asking operators to hand-run SQL. Contents don't
- * gate auth (the plugin doesn't read them for trustedClients), but we still
- * write meaningful values so the row is legible when someone inspects
- * `SELECT * FROM auth_oauth_application`.
+ * FK is satisfied without asking operators to hand-run SQL. Contents mirror
+ * both the in-memory trustedClient AND what the plugin's /register handler
+ * writes (`node_modules/better-auth/dist/plugins/oidc-provider/index.mjs:868-892`)
+ * so a bootstrap row is indistinguishable from a self-registered one.
  *
- * Lives here rather than inline in `apps/auth/app.ts` so it can be tested
- * without instantiating `betterAuth({...})` and pulling in the database
- * adapter, plugin chain, and Sentry init — same rationale as
- * `oidc-trusted-clients.ts` and `oidc-login-page.ts`.
+ * Deliberate design choices:
+ *   - Passes `forceAllowId: true` on create so the deterministic
+ *     `trusted-<clientId>` PK actually lands in the DB. Without it, the
+ *     adapter factory logs a warning and generates a random id
+ *     (`@better-auth/core/dist/db/adapter/factory.mjs:417-421`), which
+ *     would silently break the `SELECT ... WHERE id LIKE 'trusted-%'`
+ *     operator query this module advertises.
+ *   - Catches Postgres `unique_violation` on create and falls through to
+ *     update, so multi-replica boots (staging Docker Compose, any future
+ *     scale-out) don't crash the losing replica when both `findOne` miss
+ *     the row and both call `create`.
+ *   - Includes `metadata` and `icon` — the plugin schema declares both,
+ *     the /register handler persists both, so bootstrap rows do too.
  */
 
+import { oauthApplication } from '@wxyc/database';
+import type { DBAdapter } from 'better-auth';
 import type { Client } from 'better-auth/plugins';
 
-// Row shape used against the Better Auth Drizzle adapter. Field names are
-// camelCase because the adapter translates to the snake_case columns declared
-// in `shared/database/src/schema.ts`. Kept structurally-typed rather than
-// importing a concrete adapter type so this module doesn't drag in the whole
-// better-auth type surface (mirrors how `bootstrap-trusted-clients.test.ts`
-// hand-rolls a fake adapter).
-interface OauthApplicationRow {
-  id: string;
-  clientId: string;
-  clientSecret: string | null;
-  name: string;
-  type: string;
-  disabled: boolean;
-  redirectUrls: string;
-  userId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}
+// Drizzle-inferred row type — single source of truth. If schema.ts adds a
+// column, this row type follows without a manual mirror to maintain.
+type OauthApplicationRow = typeof oauthApplication.$inferSelect;
 
-interface AdapterWhereClause {
-  field: string;
-  value: unknown;
-}
+// Fields the bootstrap owns from Client config (i.e., that can drift and must
+// be refreshed on every boot). Extract so create and update stay in sync — a
+// new mutable field added to one branch and forgotten in the other would leave
+// updated rows shaped differently from freshly-inserted rows.
+type MutableFields = Pick<
+  OauthApplicationRow,
+  'clientSecret' | 'name' | 'type' | 'disabled' | 'redirectUrls' | 'metadata' | 'icon' | 'updatedAt'
+>;
 
-interface BootstrapAdapter {
-  findOne(args: { model: string; where: AdapterWhereClause[] }): Promise<OauthApplicationRow | null>;
-  create(args: { model: string; data: OauthApplicationRow }): Promise<OauthApplicationRow>;
-  update(args: {
-    model: string;
-    where: AdapterWhereClause[];
-    update: Partial<OauthApplicationRow>;
-  }): Promise<OauthApplicationRow>;
-}
-
-interface BootstrapContext {
-  adapter: BootstrapAdapter;
-}
-
-// Deterministic id derivation. The plugin generates a random id when a client
-// self-registers via `/auth/oauth2/register`, but trustedClients never take
-// that path — using `trusted-<clientId>` keeps the row stable across container
-// restarts and legible to operators (`SELECT ... WHERE id LIKE 'trusted-%'`).
 const idForTrustedClient = (clientId: string): string => `trusted-${clientId}`;
 
 // The plugin's registration handler stores `redirectUrls` as a comma-joined
-// string (see node_modules/better-auth/dist/plugins/oidc-provider/index.mjs:886)
-// and splits back to array in `getClient()` (line 48). Mirror that encoding so
-// `SELECT redirect_urls FROM auth_oauth_application` reads the same regardless
-// of whether the row was minted by /register or by this bootstrap.
+// string (index.mjs:886) and splits back to array in getClient() (line 48).
 const encodeRedirectUrls = (urls: readonly string[]): string => urls.join(',');
 
+// `Client.metadata` is `Record<string, any> | null` on the in-memory config;
+// the plugin's /register handler serializes it as JSON (`index.mjs:883`).
+// Mirror that so a config with `metadata: { foo: 'bar' }` reads back the same
+// through both paths.
+const encodeMetadata = (metadata: Client['metadata']): string | null =>
+  metadata == null ? null : JSON.stringify(metadata);
+
+const buildMutableFields = (client: Client, now: Date): MutableFields => ({
+  clientSecret: client.clientSecret ?? null,
+  name: client.name ?? client.clientId,
+  type: client.type ?? 'web',
+  disabled: client.disabled ?? false,
+  redirectUrls: encodeRedirectUrls(client.redirectUrls ?? []),
+  metadata: encodeMetadata(client.metadata),
+  icon: client.icon ?? null,
+  updatedAt: now,
+});
+
+// Postgres SQLSTATE for `unique_violation`. Thrown by `postgres` (the driver
+// under Drizzle) as `error.code === '23505'`.
+const isUniqueViolation = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && (error as { code: unknown }).code === '23505';
+
 export async function bootstrapTrustedClients(
-  context: BootstrapContext,
+  adapter: DBAdapter<Record<string, unknown>>,
   trustedClients: readonly Client[]
-): Promise<void> {
+): Promise<{ created: number; updated: number }> {
+  let created = 0;
+  let updated = 0;
+
   for (const client of trustedClients) {
-    const existing = await context.adapter.findOne({
+    const existing = await adapter.findOne<OauthApplicationRow>({
       model: 'oauthApplication',
       where: [{ field: 'clientId', value: client.clientId }],
     });
 
     const now = new Date();
+    const mutable = buildMutableFields(client, now);
 
     if (!existing) {
-      await context.adapter.create({
-        model: 'oauthApplication',
-        data: {
-          id: idForTrustedClient(client.clientId),
-          clientId: client.clientId,
-          clientSecret: client.clientSecret ?? null,
-          name: client.name ?? client.clientId,
-          type: client.type ?? 'web',
-          disabled: client.disabled ?? false,
-          redirectUrls: encodeRedirectUrls(client.redirectUrls ?? []),
-          userId: null,
-          createdAt: now,
-          updatedAt: now,
-        },
-      });
-      continue;
+      try {
+        // `forceAllowId: true` is REQUIRED — without it, the adapter factory
+        // strips `data.id` and generates a random one, silently breaking the
+        // deterministic id contract. See adapter/factory.mjs:417-421.
+        await adapter.create({
+          model: 'oauthApplication',
+          data: {
+            id: idForTrustedClient(client.clientId),
+            clientId: client.clientId,
+            userId: null,
+            createdAt: now,
+            ...mutable,
+          },
+          forceAllowId: true,
+        });
+        created++;
+        continue;
+      } catch (error) {
+        // Multi-replica boot race: replica A's findOne missed, replica B
+        // wrote the row before A's create fired. Fall through to update
+        // rather than crashing this replica.
+        if (!isUniqueViolation(error)) throw error;
+      }
     }
 
-    // Always refresh mutable fields from config. Skipping the update when
-    // values match saves one DB round-trip but adds a branching drift check
-    // whose bugs (case sensitivity, array ordering, whitespace) would silently
-    // leave stale rows in prod; a single UPDATE per boot is cheap enough that
-    // "always refresh" wins on legibility.
-    await context.adapter.update({
+    // Look the row up by clientId (unique) rather than trusting `existing.id`
+    // — if we got here via the race path, `existing` is null but the row now
+    // exists under whatever id the racing replica assigned.
+    const row =
+      existing ??
+      (await adapter.findOne<OauthApplicationRow>({
+        model: 'oauthApplication',
+        where: [{ field: 'clientId', value: client.clientId }],
+      }));
+
+    if (!row) {
+      // Vanishingly unlikely: another replica deleted the row between our
+      // race-catch and this re-lookup. Surface it — the invariant this
+      // module maintains has been externally violated.
+      throw new Error(`bootstrap: row for clientId=${client.clientId} vanished mid-upsert`);
+    }
+
+    await adapter.update({
       model: 'oauthApplication',
-      where: [{ field: 'id', value: existing.id }],
-      update: {
-        clientSecret: client.clientSecret ?? null,
-        name: client.name ?? client.clientId,
-        type: client.type ?? 'web',
-        disabled: client.disabled ?? false,
-        redirectUrls: encodeRedirectUrls(client.redirectUrls ?? []),
-        updatedAt: now,
-      },
+      where: [{ field: 'id', value: row.id }],
+      update: mutable,
     });
+    updated++;
   }
+
+  return { created, updated };
 }

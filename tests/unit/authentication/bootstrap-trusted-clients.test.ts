@@ -1,3 +1,4 @@
+import { assertDefined } from '@wxyc/shared/test-utils';
 import type { Client } from 'better-auth/plugins';
 import { bootstrapTrustedClients } from '../../../shared/authentication/src/bootstrap-trusted-clients';
 
@@ -10,45 +11,62 @@ import { bootstrapTrustedClients } from '../../../shared/authentication/src/boot
 // deploy or DB rebuild. See migration 0111 and the plugin schema at
 // node_modules/better-auth/dist/plugins/oidc-provider/schema.mjs.
 
-interface AdapterRow {
-  id: string;
-  name: string;
-  clientId: string;
-  clientSecret: string | null;
-  redirectUrls: string;
-  type: string;
-  disabled: boolean;
-  userId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
 function makeFakeAdapter(seed: AdapterRow[] = []) {
-  const rows = new Map<string, AdapterRow>(seed.map((r) => [r.clientId, { ...r }]));
-  const calls = { findOne: 0, create: 0, update: 0 };
+  interface AdapterRow {
+    id: string;
+    clientId: string;
+    clientSecret: string | null;
+    name: string;
+    type: string;
+    disabled: boolean;
+    redirectUrls: string;
+    metadata: string | null;
+    icon: string | null;
+    userId: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  }
 
-  // Bootstrap only ever queries by `clientId` or `id`; both are strings. Typing
-  // `where.value` narrowly here saves a `String(unknown)` cast that lints as
-  // "will use Object's default stringification format".
   interface WhereClause {
     field: string;
     value: string;
   }
 
+  const rows = new Map<string, AdapterRow>(seed.map((r) => [r.clientId, { ...r }]));
+  const calls = { findOne: 0, create: 0, update: 0 };
+  let randomIdCounter = 0;
+
   const adapter = {
     findOne({ model, where }: { model: string; where: WhereClause[] }) {
       calls.findOne++;
       if (model !== 'oauthApplication') throw new Error(`unexpected model ${model}`);
-      const clause = where.find((w) => w.field === 'clientId');
-      if (!clause) throw new Error('bootstrap should only look up by clientId');
-      return Promise.resolve(rows.get(clause.value) ?? null);
+      // Fake only ever gets queried by clientId (findOne pre-create) or by id
+      // (findOne post-race for the update-path re-lookup).
+      const clientIdClause = where.find((w) => w.field === 'clientId');
+      const idClause = where.find((w) => w.field === 'id');
+      if (clientIdClause) return Promise.resolve(rows.get(clientIdClause.value) ?? null);
+      if (idClause) return Promise.resolve([...rows.values()].find((r) => r.id === idClause.value) ?? null);
+      throw new Error('bootstrap should only look up by clientId or id');
     },
-    create({ model, data }: { model: string; data: AdapterRow }) {
+    // Emulate the real adapter factory's id-stripping behavior so tests catch
+    // any regression on the `forceAllowId: true` argument. See
+    // `@better-auth/core/dist/db/adapter/factory.mjs:417-421`.
+    create({ model, data, forceAllowId }: { model: string; data: AdapterRow; forceAllowId?: boolean }) {
       calls.create++;
       if (model !== 'oauthApplication') throw new Error(`unexpected model ${model}`);
-      if (rows.has(data.clientId)) throw new Error(`duplicate clientId ${data.clientId}`);
-      rows.set(data.clientId, { ...data });
-      return Promise.resolve(data);
+      const finalData = { ...data };
+      if ('id' in finalData && !forceAllowId) {
+        finalData.id = `random-${randomIdCounter++}`;
+      }
+      if (rows.has(finalData.clientId)) {
+        // Emulate Postgres unique_violation shape (SQLSTATE 23505) so the
+        // race-recovery path can pattern-match on it.
+        const err = new Error('duplicate key value violates unique constraint');
+        (err as { code?: string }).code = '23505';
+        throw err;
+      }
+      rows.set(finalData.clientId, finalData);
+      return Promise.resolve(finalData);
     },
     update({ model, where, update: values }: { model: string; where: WhereClause[]; update: Partial<AdapterRow> }) {
       calls.update++;
@@ -64,13 +82,12 @@ function makeFakeAdapter(seed: AdapterRow[] = []) {
   return { adapter, rows, calls };
 }
 
-// Small helper to satisfy `@typescript-eslint/no-non-null-assertion` while still
-// getting a narrowed value — Map.get returns V|undefined and we want to fail
-// the test loudly if the row we expected to see just isn't there.
-function must<T>(value: T | null | undefined, message: string): T {
-  if (value == null) throw new Error(message);
-  return value;
-}
+// TS is happy with the real DBAdapter shape being wider than our fake — cast
+// through `unknown` at the boundary. The fake's structure is what the tests
+// actually exercise; the DBAdapter type erasure is just to satisfy the
+// impl's declared parameter type.
+type FakeAdapter = ReturnType<typeof makeFakeAdapter>['adapter'];
+const asAdapter = (fake: FakeAdapter) => fake as unknown as Parameters<typeof bootstrapTrustedClients>[0];
 
 function flowsheetClient(overrides: Partial<Client> = {}): Client {
   const base: Client = {
@@ -91,63 +108,80 @@ describe('bootstrapTrustedClients', () => {
   it('is a no-op when the trustedClients array is empty', async () => {
     const { adapter, calls, rows } = makeFakeAdapter();
 
-    await bootstrapTrustedClients({ adapter }, []);
+    const result = await bootstrapTrustedClients(asAdapter(adapter), []);
 
     expect(calls).toEqual({ findOne: 0, create: 0, update: 0 });
     expect(rows.size).toBe(0);
+    expect(result).toEqual({ created: 0, updated: 0 });
   });
 
   it('inserts a new row when no oauthApplication exists for the clientId', async () => {
     const { adapter, calls, rows } = makeFakeAdapter();
 
-    await bootstrapTrustedClients({ adapter }, [flowsheetClient()]);
+    const result = await bootstrapTrustedClients(asAdapter(adapter), [flowsheetClient()]);
 
     expect(calls.findOne).toBe(1);
     expect(calls.create).toBe(1);
     expect(calls.update).toBe(0);
+    expect(result).toEqual({ created: 1, updated: 0 });
 
-    const inserted = must(rows.get('flowsheet'), 'flowsheet row');
-    // Storage shape (comma-joined redirectUrls) matches the plugin's registration handler
-    // at node_modules/better-auth/dist/plugins/oidc-provider/index.mjs:886.
+    const inserted = rows.get('flowsheet');
+    assertDefined(inserted, 'flowsheet row');
     expect(inserted).toMatchObject({
       clientId: 'flowsheet',
       name: 'Flowsheet Verifier',
       type: 'web',
       disabled: false,
       redirectUrls: 'http://localhost:8765/auth/callback',
+      metadata: null,
+      icon: null,
     });
-    // Timestamps are populated so a downstream migration that adds NOT NULL
-    // to `created_at`/`updated_at` doesn't retroactively break bootstrap.
     expect(inserted.createdAt).toBeInstanceOf(Date);
     expect(inserted.updatedAt).toBeInstanceOf(Date);
+  });
+
+  it('persists the deterministic id by passing forceAllowId: true to create', async () => {
+    // The adapter factory strips `data.id` unless `forceAllowId: true` is
+    // passed (@better-auth/core/dist/db/adapter/factory.mjs:417-421). The
+    // fake adapter emulates this — a regression that dropped forceAllowId
+    // would fail this assertion by writing 'random-0' instead of
+    // 'trusted-flowsheet'.
+    const { adapter, rows } = makeFakeAdapter();
+
+    await bootstrapTrustedClients(asAdapter(adapter), [flowsheetClient()]);
+
+    const inserted = rows.get('flowsheet');
+    assertDefined(inserted, 'flowsheet row');
+    expect(inserted.id).toBe('trusted-flowsheet');
   });
 
   it('joins multiple redirect URLs with a comma when inserting', async () => {
     const { adapter, rows } = makeFakeAdapter();
 
-    await bootstrapTrustedClients({ adapter }, [flowsheetClient({ redirectUrls: ['https://a/cb', 'https://b/cb'] })]);
+    await bootstrapTrustedClients(asAdapter(adapter), [
+      flowsheetClient({ redirectUrls: ['https://a/cb', 'https://b/cb'] }),
+    ]);
 
-    expect(must(rows.get('flowsheet'), 'flowsheet row').redirectUrls).toBe('https://a/cb,https://b/cb');
+    const row = rows.get('flowsheet');
+    assertDefined(row, 'flowsheet row');
+    expect(row.redirectUrls).toBe('https://a/cb,https://b/cb');
   });
 
-  it('uses a deterministic id derived from clientId so re-runs on other envs match by findOne', async () => {
-    // The id column is a varchar PK; the plugin generates a random id when a
-    // client self-registers via /auth/oauth2/register, but that path never
-    // runs for trustedClients. A deterministic derivation keeps the row
-    // stable across container restarts, so an operator inspecting the DB can
-    // recognize which row belongs to which trustedClient config entry.
+  it('serializes structured metadata as JSON to match the plugin /register storage format', async () => {
+    // The plugin's /register handler at oidc-provider/index.mjs:883 does
+    // `metadata: metadata ? JSON.stringify(metadata) : null`. Bootstrap must
+    // mirror this so /register-minted and bootstrap-minted rows are
+    // indistinguishable to any DB reader.
     const { adapter, rows } = makeFakeAdapter();
 
-    await bootstrapTrustedClients({ adapter }, [flowsheetClient()]);
+    await bootstrapTrustedClients(asAdapter(adapter), [flowsheetClient({ metadata: { audience: 'flowsheet' } })]);
 
-    expect(must(rows.get('flowsheet'), 'flowsheet row').id).toBe('trusted-flowsheet');
+    const row = rows.get('flowsheet');
+    assertDefined(row, 'flowsheet row');
+    expect(row.metadata).toBe('{"audience":"flowsheet"}');
   });
 
-  it('updates the existing row when name / type / redirectUrls drift from config', async () => {
-    // A trustedClient whose redirect URL was changed in .env must be updated
-    // in the DB even when the row already exists — otherwise the previous
-    // deploy's URL keeps satisfying the FK but is invisible to reviewers who
-    // only look at env config.
+  it('updates existing row on every boot when config drifts (drift-tolerant upsert)', async () => {
     const { adapter, calls, rows } = makeFakeAdapter([
       {
         id: 'trusted-flowsheet',
@@ -157,13 +191,15 @@ describe('bootstrapTrustedClients', () => {
         type: 'web',
         disabled: false,
         redirectUrls: 'https://old-host/cb',
+        metadata: null,
+        icon: null,
         userId: null,
         createdAt: new Date('2026-06-01'),
         updatedAt: new Date('2026-06-01'),
       },
     ]);
 
-    await bootstrapTrustedClients({ adapter }, [
+    await bootstrapTrustedClients(asAdapter(adapter), [
       flowsheetClient({ name: 'New Name', redirectUrls: ['https://new-host/cb'] }),
     ]);
 
@@ -171,14 +207,64 @@ describe('bootstrapTrustedClients', () => {
     expect(calls.create).toBe(0);
     expect(calls.update).toBe(1);
 
-    const row = must(rows.get('flowsheet'), 'flowsheet row');
+    const row = rows.get('flowsheet');
+    assertDefined(row, 'flowsheet row');
     expect(row.name).toBe('New Name');
     expect(row.redirectUrls).toBe('https://new-host/cb');
-    // Preserved: id, createdAt.
     expect(row.id).toBe('trusted-flowsheet');
     expect(row.createdAt.toISOString()).toBe(new Date('2026-06-01').toISOString());
-    // Refreshed: updatedAt.
     expect(row.updatedAt.getTime()).toBeGreaterThan(row.createdAt.getTime());
+  });
+
+  it('recovers from a rolling-deploy race by catching unique_violation and falling through to update', async () => {
+    // Two replicas boot in parallel. Replica A's findOne misses. Between A's
+    // findOne and A's create, Replica B has already written the row.
+    // A's create hits SQLSTATE 23505 — we catch it, re-lookup by clientId,
+    // and fall through to update. Verifies the fatal-crash on unique
+    // violation that earlier revisions had is fixed.
+    const { adapter, calls, rows } = makeFakeAdapter();
+
+    // Simulate the race: pre-seed the row into the map AFTER the first
+    // findOne would have run. We achieve this by wrapping findOne to seed
+    // the row on first call.
+    let firstFindOne = true;
+    const originalFindOne = adapter.findOne.bind(adapter);
+    adapter.findOne = (args: Parameters<typeof originalFindOne>[0]) => {
+      if (firstFindOne) {
+        firstFindOne = false;
+        const result = originalFindOne(args);
+        // Between "our" findOne returning null and "our" create firing, the
+        // other replica's create lands.
+        rows.set('flowsheet', {
+          id: 'trusted-flowsheet',
+          clientId: 'flowsheet',
+          clientSecret: 'racing-replica-secret',
+          name: 'Written by racing replica',
+          type: 'web',
+          disabled: false,
+          redirectUrls: 'https://racing/cb',
+          metadata: null,
+          icon: null,
+          userId: null,
+          createdAt: new Date('2026-06-01'),
+          updatedAt: new Date('2026-06-01'),
+        });
+        return result;
+      }
+      return originalFindOne(args);
+    };
+
+    const result = await bootstrapTrustedClients(asAdapter(adapter), [flowsheetClient({ name: 'Our config' })]);
+
+    // 1 findOne (returned null) + 1 create (unique_violation) + 1 findOne
+    // (re-lookup) + 1 update.
+    expect(calls.findOne).toBe(2);
+    expect(calls.create).toBe(1);
+    expect(calls.update).toBe(1);
+    expect(result).toEqual({ created: 0, updated: 1 });
+    const finalRow = rows.get('flowsheet');
+    assertDefined(finalRow, 'flowsheet row');
+    expect(finalRow.name).toBe('Our config');
   });
 
   it('processes both wiki.js and flowsheet when both are configured', async () => {
@@ -196,32 +282,40 @@ describe('bootstrapTrustedClients', () => {
 
     const { adapter, calls, rows } = makeFakeAdapter();
 
-    await bootstrapTrustedClients({ adapter }, [wikijs, flowsheetClient()]);
+    const result = await bootstrapTrustedClients(asAdapter(adapter), [wikijs, flowsheetClient()]);
 
     expect(calls.create).toBe(2);
-    expect(must(rows.get('wiki-id'), 'wiki-id row').id).toBe('trusted-wiki-id');
-    expect(must(rows.get('flowsheet'), 'flowsheet row').id).toBe('trusted-flowsheet');
+    expect(result).toEqual({ created: 2, updated: 0 });
+    const wikiRow = rows.get('wiki-id');
+    const flowsheetRow = rows.get('flowsheet');
+    assertDefined(wikiRow, 'wiki-id row');
+    assertDefined(flowsheetRow, 'flowsheet row');
+    expect(wikiRow.id).toBe('trusted-wiki-id');
+    expect(flowsheetRow.id).toBe('trusted-flowsheet');
   });
 
-  it('propagates adapter errors so a failed bootstrap fails startup (not silently 500s later)', async () => {
-    // The whole point of moving this from a manual SQL insert into a boot
-    // hook is to catch the failure before we start accepting traffic. A
-    // silent try/catch here would defeat that; the caller in
-    // apps/auth/app.ts is the layer that decides fatal-vs-warn.
+  it('propagates non-race adapter errors so a failed bootstrap surfaces in Sentry', async () => {
+    // The caller in apps/auth/app.ts catches errors from this function and
+    // reports to Sentry at level: 'error' (warn-and-continue posture,
+    // matching sibling createDefaultUser / syncAdminRoles). This test locks
+    // in that this function re-throws non-race errors so the caller can
+    // catch them — a silent try/catch here would defeat that.
     const brokenAdapter = {
       findOne(): Promise<never> {
         return Promise.reject(new Error('DB unreachable'));
       },
-      create(): Promise<Record<string, never>> {
-        return Promise.resolve({});
+      create(): Promise<never> {
+        return Promise.reject(new Error('should not be reached'));
       },
-      update(): Promise<Record<string, never>> {
-        return Promise.resolve({});
+      update(): Promise<never> {
+        return Promise.reject(new Error('should not be reached'));
       },
     };
 
-    await expect(bootstrapTrustedClients({ adapter: brokenAdapter }, [flowsheetClient()])).rejects.toThrow(
-      'DB unreachable'
-    );
+    await expect(
+      bootstrapTrustedClients(brokenAdapter as unknown as Parameters<typeof bootstrapTrustedClients>[0], [
+        flowsheetClient(),
+      ])
+    ).rejects.toThrow('DB unreachable');
   });
 });

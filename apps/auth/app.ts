@@ -571,28 +571,31 @@ void (async () => {
   await createDefaultUser();
   await syncAdminRoles();
 
-  // Bootstrap oauthApplication rows for every trustedClient. The
-  // oidcProvider plugin's `getClient()` short-circuits on trustedClients
-  // (returned from memory, never persisted), but its token / consent write
-  // paths still FK-reference auth_oauth_application.client_id — every
-  // trustedClient token exchange 500s until a row exists. Fatal on failure:
-  // silently starting a server whose token endpoint is permanently broken
-  // (until an operator hand-runs SQL) is worse than a loud restart loop.
+  // Bootstrap oauthApplication rows for every trustedClient. See
+  // `bootstrap-trusted-clients.ts` for why this exists. warn-and-continue to
+  // match sibling `createDefaultUser` / `syncAdminRoles` posture — a transient
+  // DB blip shouldn't take sign-in / session / provision-user down for a bug
+  // that only affects OIDC token exchange for two clients. If bootstrap fails,
+  // OIDC login 500s at first attempt (loud), everything else keeps working.
   try {
     const context = await auth.$context;
-    await bootstrapTrustedClients(
-      { adapter: context.adapter as unknown as Parameters<typeof bootstrapTrustedClients>[0]['adapter'] },
-      buildTrustedClients(process.env)
-    );
-    console.log('[OIDC BOOTSTRAP] trustedClients synced to auth_oauth_application');
+    const trustedClients = buildTrustedClients(process.env);
+    const { created, updated } = await bootstrapTrustedClients(context.adapter, trustedClients);
+    if (trustedClients.length === 0) {
+      console.log(
+        '[OIDC BOOTSTRAP] no trustedClients configured — skipping (check *_OIDC_CLIENT_ID env vars if unexpected)'
+      );
+    } else {
+      console.log(
+        `[OIDC BOOTSTRAP] trustedClients synced (${created} created, ${updated} updated of ${trustedClients.length})`
+      );
+    }
   } catch (error) {
     console.error(
-      '[OIDC BOOTSTRAP] Failed to sync trustedClients — token exchange would 500. Aborting startup.',
+      '[OIDC BOOTSTRAP] Failed to sync trustedClients — OIDC token exchange will 500 until this is resolved.',
       error
     );
-    Sentry.captureException(error, { level: 'fatal', tags: { subsystem: 'oidc-bootstrap' } });
-    await Sentry.flush(2_000).catch(() => undefined);
-    process.exit(1);
+    Sentry.captureException(error, { level: 'error', tags: { subsystem: 'oidc-bootstrap' } });
   }
 
   const server = app.listen(parseInt(port), () => {
