@@ -98,7 +98,13 @@ Express wrapper around better-auth with these plugins: admin, username, anonymou
 
 Drizzle ORM with PostgreSQL (`postgres-js` driver).
 
+<!-- auth-tables-list:begin -->
+
 **Auth tables** (managed by better-auth): `auth_user`, `auth_session`, `auth_account`, `auth_verification`, `auth_jwks`, `auth_organization`, `auth_member`, `auth_invitation`, `auth_device_code` (ADR 0008 QR sign-in), `auth_oauth_application` / `auth_oauth_access_token` / `auth_oauth_consent` (better-auth `oidcProvider` plugin substrate).
+
+<!-- auth-tables-list:end -->
+
+The list above is enforced against `shared/database/src/schema.ts` by `scripts/check-auth-tables-doc.mjs` (BS#1573). Adding a new `auth_*` `pgTable(...)` requires updating the sentinel-fenced line; the CI job will fail otherwise.
 
 **Domain tables** (custom schema): `dj_stats`, `schedule`, `shift_covers`, `artists`, and flowsheet-related tables.
 
