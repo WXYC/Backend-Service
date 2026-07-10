@@ -386,7 +386,7 @@ describe('bootstrapTrustedClients', () => {
     expect(rows.has('flowsheet')).toBe(false);
   });
 
-  it('collects transient adapter errors into an AggregateError so the caller can Sentry-alert', async () => {
+  it('propagates a single adapter failure as the wrapped leaf error (Sentry-grouping fidelity)', async () => {
     // Caller in apps/auth/app.ts catches and reports to Sentry at level:
     // 'warning' (matching sibling createDefaultUser / syncAdminRoles). This
     // test locks in that this function surfaces failures as an
