@@ -3,8 +3,20 @@
  * mapping (BS#1589 field table). No DB, no network — `mapEvent` and its
  * helpers are pure, so the whole contract pins here.
  */
-import { mapEvent, splitSupportArtists, backdatedStart } from '../../../../jobs/triangle-shows-etl/map';
+import {
+  clampCodePoints,
+  mapEvent,
+  splitSupportArtists,
+  backdatedStart,
+} from '../../../../jobs/triangle-shows-etl/map';
 import { makeTsEvent } from './fixtures';
+
+describe('clampCodePoints', () => {
+  it('counts code points, not UTF-16 units', () => {
+    expect(clampCodePoints(`${'x'.repeat(3)}🎸y`, 4)).toBe('xxx🎸');
+    expect(clampCodePoints('short', 10)).toBe('short');
+  });
+});
 
 describe('mapEvent — keying', () => {
   // The venue qualifier is load-bearing (BS#1589 "Keying"): triangle-shows
