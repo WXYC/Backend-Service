@@ -198,6 +198,13 @@ describe('buildTrustedClients', () => {
 
   describe('all clients together', () => {
     it('returns Wiki.js first, Flowsheet second, WXYC Canary third, when all are fully configured', () => {
+      // Full-shape assertion (not just `.name`): a refactor that silently
+      // flips wiki.js's `type: 'web' → 'public'` or drops `skipConsent` from
+      // flowsheet would sail past a name-only check. The individual describe
+      // blocks pin the shape when each client is configured in isolation;
+      // pin it again in the "all three together" configuration so an
+      // ordering-dependent bug (e.g. mutation of a shared literal) can't
+      // hide either.
       const clients = buildTrustedClients({
         WIKIJS_OIDC_CLIENT_ID: 'wiki-id',
         WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',
@@ -209,16 +216,47 @@ describe('buildTrustedClients', () => {
       });
 
       expect(clients).toHaveLength(3);
-      expect(clients[0].name).toBe('Wiki.js');
-      expect(clients[1].name).toBe('Flowsheet Verifier');
-      expect(clients[2].name).toBe('WXYC Canary');
+      expect(clients[0]).toEqual({
+        clientId: 'wiki-id',
+        clientSecret: 'wiki-secret',
+        redirectUrls: ['https://wiki.wxyc.org/login/oidc/callback'],
+        name: 'Wiki.js',
+        type: 'web',
+        disabled: false,
+        icon: undefined,
+        metadata: null,
+        skipConsent: true,
+      });
+      expect(clients[1]).toEqual({
+        clientId: 'flowsheet',
+        clientSecret: 'shh',
+        redirectUrls: ['https://flowsheet.wxyc.org/auth/callback'],
+        name: 'Flowsheet Verifier',
+        type: 'web',
+        disabled: false,
+        icon: undefined,
+        metadata: null,
+        skipConsent: true,
+      });
+      expect(clients[2]).toEqual({
+        clientId: 'wxyc-canary',
+        clientSecret: undefined,
+        redirectUrls: ['https://canary.wxyc.org/authorize-echo'],
+        name: 'WXYC Canary',
+        type: 'public',
+        disabled: false,
+        icon: undefined,
+        metadata: null,
+        skipConsent: true,
+      });
     });
 
     it('still returns Wiki.js first, Flowsheet second when only those two are configured', () => {
       // Pins the pre-canary ordering — a refactor that appends the canary
       // block in the wrong place (before wiki.js / flowsheet) shouldn't
       // silently perturb the existing two-client order the previous test
-      // used to lock in on its own.
+      // used to lock in on its own. Full-shape here too so a partial-config
+      // refactor can't drop `skipConsent` or flip `type` unnoticed.
       const clients = buildTrustedClients({
         WIKIJS_OIDC_CLIENT_ID: 'wiki-id',
         WIKIJS_OIDC_CLIENT_SECRET: 'wiki-secret',
@@ -229,8 +267,28 @@ describe('buildTrustedClients', () => {
       });
 
       expect(clients).toHaveLength(2);
-      expect(clients[0].name).toBe('Wiki.js');
-      expect(clients[1].name).toBe('Flowsheet Verifier');
+      expect(clients[0]).toEqual({
+        clientId: 'wiki-id',
+        clientSecret: 'wiki-secret',
+        redirectUrls: ['https://wiki.wxyc.org/login/oidc/callback'],
+        name: 'Wiki.js',
+        type: 'web',
+        disabled: false,
+        icon: undefined,
+        metadata: null,
+        skipConsent: true,
+      });
+      expect(clients[1]).toEqual({
+        clientId: 'flowsheet',
+        clientSecret: 'shh',
+        redirectUrls: ['https://flowsheet.wxyc.org/auth/callback'],
+        name: 'Flowsheet Verifier',
+        type: 'web',
+        disabled: false,
+        icon: undefined,
+        metadata: null,
+        skipConsent: true,
+      });
     });
   });
 
