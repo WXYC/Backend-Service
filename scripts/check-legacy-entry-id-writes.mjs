@@ -45,10 +45,11 @@
  *   2 — an allowlisted file no longer contains the pattern (stale allowlist).
  */
 
-import { readFileSync, readdirSync, statSync, realpathSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, relative, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+import { isInvokedDirectly } from './lib/main-module.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -175,19 +176,6 @@ function main() {
   console.log(`PASS: ${matched.length} source file(s) reference legacy_entry_id; all in the allowlist.`);
 }
 
-// Node ESM "is main module" idiom. realpathSync canonicalizes both sides so
-// macOS's /tmp -> /private/tmp symlink doesn't make a self-invocation look
-// like an import (which would skip main() and silently exit 0).
-const invokedDirectly = (() => {
-  try {
-    const argvPath = realpathSync(resolve(process.argv[1] ?? ''));
-    const selfPath = realpathSync(fileURLToPath(import.meta.url));
-    return argvPath === selfPath;
-  } catch {
-    return false;
-  }
-})();
-
-if (invokedDirectly) {
+if (isInvokedDirectly(import.meta.url)) {
   main();
 }

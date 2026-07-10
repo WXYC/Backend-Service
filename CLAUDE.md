@@ -105,7 +105,7 @@ Drizzle ORM with PostgreSQL (`postgres-js` driver).
 
 <!-- auth-tables-list:end -->
 
-The list above is enforced against `shared/database/src/schema.ts` by `scripts/check-auth-tables-doc.mjs` (BS#1573). Adding a new `auth_*` `pgTable(...)` requires updating the sentinel-fenced line; the CI job will fail otherwise.
+The list above is enforced against every `.ts` file under `shared/database/src/` by `scripts/check-auth-tables-doc.mjs` (BS#1573). Adding a new `auth_*` `pgTable(...)` — in `schema.ts` today or a sibling file if the schema is ever split (BS#1581) — requires updating the sentinel-fenced line; the CI job will fail otherwise.
 
 **Domain tables** (custom schema): `dj_stats`, `schedule`, `shift_covers`, `artists`, and flowsheet-related tables.
 

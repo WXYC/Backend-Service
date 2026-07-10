@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * Static check: the "Auth tables" one-liner in `CLAUDE.md` matches the set of
- * `auth_*` tables declared as `pgTable('auth_...', ...)` in
- * `shared/database/src/schema.ts` (BS#1573).
+ * `auth_*` tables declared as `pgTable('auth_...', ...)` under
+ * `shared/database/src/**` (BS#1573).
  *
  * Why this exists: in the ~30 days before it was written, the doc list rotted
  * twice in silence.
@@ -28,7 +28,12 @@
  * to unrelated schema growth.
  *
  * Detection strategy:
- *   - Schema: regex `pgTable\(\s*'(auth_[a-z0-9_]+)'` for every declaration.
+ *   - Schema: walk every `.ts` file under `shared/database/src/` (excluding
+ *     `migrations/`) and regex `pgTable\(\s*'(auth_[…]+)'` for every
+ *     declaration. Walking a directory instead of a single hard-coded path
+ *     survives a future split of `schema.ts` into `schema/auth.ts`,
+ *     `schema/domain.ts`, etc. (BS#1581) — the check keeps working with no
+ *     config file to remember to update.
  *   - Doc: locate the fenced block between `<!-- auth-tables-list:begin -->`
  *     and `<!-- auth-tables-list:end -->`; extract every backtick-quoted
  *     `auth_*` token from the body.
@@ -40,14 +45,21 @@
  *
  * Exit codes:
  *   0 — sets match
- *   1 — sets differ, sentinels missing/duplicated/inverted, schema has zero
- *       auth_* tables, or one of the required files is missing
+ *   2 — sentinel/config error (missing/duplicate/inverted sentinels in
+ *       CLAUDE.md, or one of the required paths is missing)
+ *   3 — schema and doc disagree (drift)
+ *   4 — schema regex found zero auth_* tables (probably a moved/renamed file
+ *       or a broken import; the repo always has at least `auth_user`)
+ *
+ * The exit-code split (BS#1583) lets a CI operator distinguish "the check is
+ * broken" (2 or 4 — inspect the script/schema layout) from "someone forgot
+ * to update the doc" (3 — edit CLAUDE.md). Historically both mapped to 1.
  */
 
-import { readFileSync, statSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dirname } from 'node:path';
+import { isInvokedDirectly } from './lib/main-module.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Prefer cwd as repo root (so tests can point at a temp tree); fall back to
@@ -55,10 +67,24 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT_CWD = process.cwd();
 const SCRIPT_REPO_ROOT = resolve(__dirname, '..');
 
-const SCHEMA_REL = 'shared/database/src/schema.ts';
+// Directory to scan for schema declarations. Everything under this dir with
+// a `.ts` extension is candidate source; `migrations/` is skipped explicitly
+// (SQL only, no pgTable calls). Was a single hard-coded file until BS#1581 —
+// switched to a directory walk so a future split of `schema.ts` into
+// `schema/auth.ts`, `schema/domain.ts`, etc. keeps working without a config
+// file to remember to update.
+const SCHEMA_ROOT_REL = 'shared/database/src';
+const SCHEMA_SKIP_DIRS = new Set(['migrations', 'legacy', 'types']);
 const DOC_REL = 'CLAUDE.md';
 const SENTINEL_BEGIN = '<!-- auth-tables-list:begin -->';
 const SENTINEL_END = '<!-- auth-tables-list:end -->';
+
+// Exit-code taxonomy (BS#1583). Named constants so switch-arms and tests
+// don't hand-write literals.
+export const EXIT_OK = 0;
+export const EXIT_CONFIG = 2;
+export const EXIT_DRIFT = 3;
+export const EXIT_ZERO_TABLES = 4;
 
 // pgTable('auth_<name>', ...) — the string literal is the DB table name and
 // is what the CLAUDE.md list enumerates. The JS export symbol (which may
@@ -67,7 +93,8 @@ const SENTINEL_END = '<!-- auth-tables-list:end -->';
 // Character class matches [A-Za-z0-9_] to catch camelCased tables (e.g.
 // `auth_UserV2`), and quote class includes backticks to catch template-literal
 // args (`pgTable(\`auth_new\`, ...)`. Mirrors the shape in
-// `scripts/schema-shape-report.mjs`.
+// `scripts/schema-shape-report.mjs` (search for `pgTable` there — line
+// numbers drift; the name is stable).
 const PG_TABLE_RE = /pgTable\(\s*['"`](auth_[A-Za-z0-9_]+)['"`]/g;
 
 // Backtick-quoted `auth_<name>` token inside the sentinel-fenced doc block.
@@ -89,6 +116,14 @@ function stripHtmlComments(body) {
   return body.replace(/<!--[\s\S]*?-->/g, '');
 }
 
+// Strip triple-backtick fenced code blocks from a markdown body. Prevents a
+// documentation example that happens to embed the sentinel comment (or a
+// bogus `auth_*` token) from being counted as either a real sentinel or a
+// real doc claim. Handles both ``` and ```lang forms (R4-6).
+function stripFencedCodeBlocks(source) {
+  return source.replace(/```[\s\S]*?```/g, '');
+}
+
 function fileExists(abs) {
   try {
     return statSync(abs).isFile();
@@ -97,8 +132,19 @@ function fileExists(abs) {
   }
 }
 
+function dirExists(abs) {
+  try {
+    return statSync(abs).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function pickRepoRoot() {
-  const layoutMatches = (root) => fileExists(join(root, SCHEMA_REL)) && fileExists(join(root, DOC_REL));
+  // A repo root is one that has both the schema dir and CLAUDE.md at the
+  // expected paths. Nothing else is required — the walk below discovers
+  // whatever .ts files live inside.
+  const layoutMatches = (root) => dirExists(join(root, SCHEMA_ROOT_REL)) && fileExists(join(root, DOC_REL));
   if (layoutMatches(REPO_ROOT_CWD)) return REPO_ROOT_CWD;
   // R3-5: when the test harness pins us to a temp root, don't silently fall
   // back to the real script-parent repo. A test that deletes one of the
@@ -114,7 +160,33 @@ function pickRepoRoot() {
   return REPO_ROOT_CWD;
 }
 
-function extractSchemaTables(source) {
+/**
+ * Recursively collect every `.ts` file under `root`, skipping directory
+ * names in SCHEMA_SKIP_DIRS. Returns absolute paths.
+ */
+function collectSchemaFiles(root) {
+  const out = [];
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (SCHEMA_SKIP_DIRS.has(entry.name)) continue;
+        walk(join(dir, entry.name));
+      } else if (entry.isFile() && entry.name.endsWith('.ts')) {
+        out.push(join(dir, entry.name));
+      }
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
+export function extractSchemaTables(source) {
   // Strip comments first so commented-out `pgTable(...)` calls (or
   // pseudo-declarations inside `/* ... */` block comments) don't inflate
   // the schema set. Line numbers below are computed from the stripped
@@ -138,6 +210,32 @@ function extractSchemaTables(source) {
 }
 
 /**
+ * Walk `schemaRoot` for `.ts` files and merge every `pgTable('auth_…')`
+ * declaration into a single set. The value stored in `lineByTable` is
+ * `{ relPath, lineNo }` so the drift-report can point at the exact file
+ * that declares each table (relevant once schema.ts gets split — BS#1581).
+ */
+function extractSchemaTablesFromTree(schemaRoot, repoRoot) {
+  const files = collectSchemaFiles(schemaRoot);
+  const tables = new Set();
+  const lineByTable = new Map();
+  for (const abs of files) {
+    const source = readFileSync(abs, 'utf8');
+    const { tables: fileTables, lineByTable: fileLines } = extractSchemaTables(source);
+    for (const t of fileTables) tables.add(t);
+    for (const [t, lineNo] of fileLines) {
+      if (!lineByTable.has(t)) {
+        // Relative to the repo root so error messages stay copy-pasteable
+        // regardless of where the check was invoked from.
+        const relPath = abs.startsWith(repoRoot + '/') ? abs.slice(repoRoot.length + 1) : abs;
+        lineByTable.set(t, { relPath, lineNo });
+      }
+    }
+  }
+  return { tables, lineByTable };
+}
+
+/**
  * Count non-overlapping occurrences of `needle` in `haystack`. Used to
  * assert exactly one begin/end sentinel — a duplicated sentinel silently
  * redefines the fenced block otherwise (F6).
@@ -152,27 +250,31 @@ function countOccurrences(haystack, needle) {
   return count;
 }
 
-function extractDocBlock(source) {
-  const beginCount = countOccurrences(source, SENTINEL_BEGIN);
-  const endCount = countOccurrences(source, SENTINEL_END);
+export function extractDocBlock(source) {
+  // Strip fenced code blocks first so a documentation example that embeds
+  // the sentinel (```md ... <!-- auth-tables-list:begin --> ... ```) doesn't
+  // inflate the sentinel count and trip the duplicate branch (R4-6).
+  const stripped = stripFencedCodeBlocks(source);
+  const beginCount = countOccurrences(stripped, SENTINEL_BEGIN);
+  const endCount = countOccurrences(stripped, SENTINEL_END);
   if (beginCount === 0 || endCount === 0) {
     return { ok: false, reason: 'missing' };
   }
   if (beginCount > 1 || endCount > 1) {
     return { ok: false, reason: 'duplicate', beginCount, endCount };
   }
-  const begin = source.indexOf(SENTINEL_BEGIN);
-  const end = source.indexOf(SENTINEL_END);
+  const begin = stripped.indexOf(SENTINEL_BEGIN);
+  const end = stripped.indexOf(SENTINEL_END);
   if (end < begin) {
     return { ok: false, reason: 'inverted' };
   }
   const bodyStart = begin + SENTINEL_BEGIN.length;
-  const body = source.slice(bodyStart, end);
-  const lineNo = source.slice(0, begin).split('\n').length;
+  const body = stripped.slice(bodyStart, end);
+  const lineNo = stripped.slice(0, begin).split('\n').length;
   return { ok: true, body, lineNo };
 }
 
-function extractDocTables(body) {
+export function extractDocTables(body) {
   // Strip HTML comments so a TODO like
   // `<!-- also list \`auth_ghost\` once BS#9999 lands -->` doesn't get
   // parsed as a real doc claim (F4).
@@ -186,39 +288,38 @@ function extractDocTables(body) {
   return tables;
 }
 
-function main(repoRoot) {
-  const schemaPath = join(repoRoot, SCHEMA_REL);
+export function main(repoRoot) {
+  const schemaRoot = join(repoRoot, SCHEMA_ROOT_REL);
   const docPath = join(repoRoot, DOC_REL);
 
-  if (!fileExists(schemaPath)) {
-    console.error(`check-auth-tables-doc: cannot find ${SCHEMA_REL} (looked in ${repoRoot})`);
-    return 1;
+  if (!dirExists(schemaRoot)) {
+    console.error(`check-auth-tables-doc: cannot find ${SCHEMA_ROOT_REL} (looked in ${repoRoot})`);
+    return EXIT_CONFIG;
   }
   if (!fileExists(docPath)) {
     console.error(`check-auth-tables-doc: cannot find ${DOC_REL} (looked in ${repoRoot})`);
-    return 1;
+    return EXIT_CONFIG;
   }
 
-  const schemaSource = readFileSync(schemaPath, 'utf8');
   const docSource = readFileSync(docPath, 'utf8');
 
-  const { tables: schemaTables, lineByTable: schemaLineByTable } = extractSchemaTables(schemaSource);
+  const { tables: schemaTables, lineByTable: schemaLineByTable } = extractSchemaTablesFromTree(schemaRoot, repoRoot);
 
   // F3: hard-fail if the schema regex found zero tables. This repo will
   // always have at least `auth_user`. A zero-match usually means the regex
-  // is broken (renamed import, quote-style change) or the schema file
-  // moved. Without this guard, an empty schema set silently matches an
-  // empty doc set — the exact BS#1571 failure shape.
+  // is broken (renamed import, quote-style change) or the whole schema
+  // tree moved. Without this guard, an empty schema set silently matches
+  // an empty doc set — the exact BS#1571 failure shape.
   if (schemaTables.size === 0) {
     console.error(
-      `check-auth-tables-doc: found zero auth_* pgTable(...) declarations in ${SCHEMA_REL}.\n` +
+      `check-auth-tables-doc: found zero auth_* pgTable(...) declarations under ${SCHEMA_ROOT_REL}.\n` +
         `       this repo always has at least auth_user; a zero match probably means:\n` +
-        `         - the schema file was moved or split (SCHEMA_REL is hard-coded)\n` +
+        `         - the schema tree was moved or renamed (SCHEMA_ROOT_REL is hard-coded)\n` +
         `         - pgTable was renamed at the import site (e.g. \`import { pgTable as pt }\`)\n` +
-        `         - the file was drained without landing new tables somewhere else\n` +
+        `         - every schema file was drained without landing new tables somewhere else\n` +
         `       failing loudly rather than silently agreeing with an empty doc set.`
     );
-    return 1;
+    return EXIT_ZERO_TABLES;
   }
 
   const block = extractDocBlock(docSource);
@@ -253,13 +354,18 @@ function main(repoRoot) {
       );
     } else {
       // Defensive: a new `reason` value was added to extractDocBlock but this
-      // switch wasn't updated. Throw with the raw reason so the caller sees
-      // exactly what the parser reported, rather than a silently mislabelled
-      // "missing sentinel" message that sends operators looking for the wrong
-      // thing (R3-3).
-      throw new Error(`check-auth-tables-doc: unrecognized block failure reason: ${JSON.stringify(block.reason)}`);
+      // switch wasn't updated. Print a clean error + exit rather than a raw
+      // Node stack trace so the failure UX matches every other branch above
+      // (R4-8). The stack still names the file for anyone who wants it via
+      // `node --stack-trace-limit`.
+      console.error(
+        `check-auth-tables-doc: unrecognized block failure reason: ${JSON.stringify(block.reason)}.\n` +
+          `       this is a bug — extractDocBlock returned a reason the CLI switch\n` +
+          `       doesn't handle. add a branch above or remove the unhandled reason\n` +
+          `       from extractDocBlock.`
+      );
     }
-    return 1;
+    return EXIT_CONFIG;
   }
 
   const docTables = extractDocTables(block.body);
@@ -269,20 +375,20 @@ function main(repoRoot) {
 
   if (missingInDoc.length === 0 && extraInDoc.length === 0) {
     console.log(
-      `PASS: ${schemaTables.size} auth_* table(s) in ${SCHEMA_REL} match the CLAUDE.md sentinel-fenced list.`
+      `PASS: ${schemaTables.size} auth_* table(s) under ${SCHEMA_ROOT_REL} match the CLAUDE.md sentinel-fenced list.`
     );
-    return 0;
+    return EXIT_OK;
   }
 
   console.error('');
-  console.error(`FAIL: the auth-tables list in ${DOC_REL} has drifted from ${SCHEMA_REL}.`);
+  console.error(`FAIL: the auth-tables list in ${DOC_REL} has drifted from ${SCHEMA_ROOT_REL}.`);
   console.error(`      (fix by editing the sentinel-fenced line in ${DOC_REL}:${block.lineNo})`);
   console.error('');
   if (missingInDoc.length > 0) {
     console.error(`  missing from ${DOC_REL} (declared in schema but not documented):`);
     for (const t of missingInDoc) {
-      const ln = schemaLineByTable.get(t);
-      console.error(`    - ${t}   (${SCHEMA_REL}:${ln})`);
+      const loc = schemaLineByTable.get(t);
+      console.error(`    - ${t}   (${loc.relPath}:${loc.lineNo})`);
     }
     console.error('');
   }
@@ -294,20 +400,9 @@ function main(repoRoot) {
     console.error('');
   }
   console.error(`  BS#1573 for the rationale; BS#1571 / BS#1572 for the incidents that motivated the check.`);
-  return 1;
+  return EXIT_DRIFT;
 }
 
-import { realpathSync } from 'node:fs';
-const invokedDirectly = (() => {
-  try {
-    return realpathSync(resolve(process.argv[1] ?? '')) === realpathSync(fileURLToPath(import.meta.url));
-  } catch {
-    return false;
-  }
-})();
-
-if (invokedDirectly) {
+if (isInvokedDirectly(import.meta.url)) {
   process.exit(main(pickRepoRoot()));
 }
-
-export { extractSchemaTables, extractDocBlock, extractDocTables, main };
