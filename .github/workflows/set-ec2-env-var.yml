@@ -41,6 +41,10 @@ jobs:
           # supports has to be listed here.
           LML_API_KEY: ${{ secrets.LML_API_KEY }}
           LIBRARY_METADATA_URL: ${{ secrets.LIBRARY_METADATA_URL }}
+          # wxyc-canary OIDC probe client id (WXYC/wxyc-canary#60). Public
+          # client — there is no companion `WXYC_CANARY_OIDC_CLIENT_SECRET`
+          # by design; do not add one.
+          WXYC_CANARY_OIDC_CLIENT_ID: ${{ secrets.WXYC_CANARY_OIDC_CLIENT_ID }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -48,6 +52,7 @@ jobs:
           case "$SECRET_NAME" in
             LML_API_KEY) VALUE="$LML_API_KEY" ;;
             LIBRARY_METADATA_URL) VALUE="$LIBRARY_METADATA_URL" ;;
+            WXYC_CANARY_OIDC_CLIENT_ID) VALUE="$WXYC_CANARY_OIDC_CLIENT_ID" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1
