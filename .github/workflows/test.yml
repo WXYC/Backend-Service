@@ -320,10 +320,26 @@ jobs:
       # See the comment on `if:` above for why this step exists. Do not
       # remove without understanding the branch-protection-vs-skipped-check
       # interaction it papers over.
+      #
+      # WARNING: if you add anything to `Integration-Tests`' `needs:` list,
+      # extend this `if:` disjunction to cover it too. A required-check gate
+      # that doesn't enumerate every upstream it depends on will silently
+      # skip when that upstream fails/cancels/skips-unexpectedly, and the
+      # whole point of this scaffold is to make those failures loud.
+      #
+      # `auth-tables-doc-drift` runs unconditionally (see the R2 refactor)
+      # so a `skipped` result there means something went wrong — treat it
+      # as bad. `lint-and-typecheck` and `detect-changes` legitimately don't
+      # run in some states (paths filter false / n/a for detect-changes),
+      # so only fail on their explicit failure or cancellation.
       - name: Enforce upstream gate
-        if: ${{ needs.auth-tables-doc-drift.result == 'failure' || needs.lint-and-typecheck.result == 'failure' }}
+        if: >-
+          ${{ needs.auth-tables-doc-drift.result != 'success'
+              || contains(fromJson('["failure", "cancelled"]'), needs.lint-and-typecheck.result)
+              || contains(fromJson('["failure", "cancelled"]'), needs.detect-changes.result) }}
         run: |
           echo "::error::Required upstream job failed; failing Integration-Tests to surface the block to branch protection."
+          echo "  detect-changes:        ${{ needs.detect-changes.result }}"
           echo "  auth-tables-doc-drift: ${{ needs.auth-tables-doc-drift.result }}"
           echo "  lint-and-typecheck:    ${{ needs.lint-and-typecheck.result }}"
           exit 1
