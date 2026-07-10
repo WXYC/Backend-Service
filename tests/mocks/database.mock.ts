@@ -135,13 +135,20 @@ export const concerts = {
   source: 'source',
   source_id: 'source_id',
   venue_id: 'venue_id',
+  starts_on: 'starts_on',
   starts_at: 'starts_at',
+  doors_at: 'doors_at',
   headlining_artist_raw: 'headlining_artist_raw',
+  title: 'title',
   headlining_artist_id: 'headlining_artist_id',
   supporting_artists_raw: 'supporting_artists_raw',
   ticket_url: 'ticket_url',
   image_url: 'image_url',
+  price_min: 'price_min',
+  price_max: 'price_max',
+  age_restriction: 'age_restriction',
   status: 'status',
+  removed_at: 'removed_at',
   raw_data: 'raw_data',
   scraped_at: 'scraped_at',
   first_scraped_at: 'first_scraped_at',
@@ -347,6 +354,7 @@ export type { IntParserOptions } from '../../shared/database/src/env-parsers.js'
 export { normalizeArtistName } from '../../shared/database/src/normalize-artist-name.js';
 export { normalizeAlbumTitle } from '../../shared/database/src/normalize-album-title.js';
 export { freetextPairKey, normalizeFreetextArtist } from '../../shared/database/src/freetext-norm.js';
+export { nyCalendarDate, nyWallClockToUtc } from '../../shared/database/src/ny-time.js';
 
 // Mock types
 export type AnonymousDevice = {

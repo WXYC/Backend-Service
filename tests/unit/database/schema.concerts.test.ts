@@ -64,10 +64,10 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
       expect(schemaSource).toMatch(/export const concerts\s*=\s*wxyc_schema\.table/);
     });
 
-    it('has the source-tagged identity columns', () => {
+    it('has the source-tagged identity columns (source_id is text post-0112 — triangle-shows venue-qualified keys reach ~1165 chars)', () => {
       const def = extractTableDef('concerts');
       expect(def).toMatch(/source:\s*concertSourceEnum\(['"]source['"]/);
-      expect(def).toMatch(/source_id:\s*varchar\(['"]source_id['"]/);
+      expect(def).toMatch(/source_id:\s*text\(['"]source_id['"]/);
     });
 
     it('FKs venue_id to venues.id with ON DELETE restrict (concerts live only when their venue does)', () => {
@@ -131,10 +131,93 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
     });
   });
 
+  // Migration 0112 (BS#1589): triangle-shows substrate. starts_on is the
+  // NOT NULL venue-local windowing column; starts_at goes nullable
+  // (date-only events, no fabricated times); promoted columns are all
+  // nullable so existing rhp_scrape rows are untouched.
+  describe('concerts table — 0112 triangle-shows substrate (BS#1589)', () => {
+    const def = () => extractTableDef('concerts');
+
+    it('declares starts_on as a NOT NULL date (the windowing column)', () => {
+      expect(def()).toMatch(/starts_on:\s*date\(['"]starts_on['"]\)\.notNull\(\)/);
+    });
+
+    it('declares starts_at as a NULLABLE timestamptz (date-only events carry no time)', () => {
+      const column = def().match(/starts_at:\s*timestamp\([^)]*\)[^,]*/);
+      expect(column?.[0]).toBeDefined();
+      expect(column?.[0]).toMatch(/withTimezone:\s*true/);
+      expect(column?.[0]).not.toMatch(/\.notNull\(\)/);
+    });
+
+    it('has the promoted columns, all nullable', () => {
+      const d = def();
+      expect(d).toMatch(/title:\s*text\(['"]title['"]\)/);
+      expect(d).toMatch(/doors_at:\s*timestamp\(['"]doors_at['"]/);
+      expect(d).toMatch(/price_min:\s*numeric\(['"]price_min['"],\s*\{\s*precision:\s*8,\s*scale:\s*2\s*\}\)/);
+      expect(d).toMatch(/price_max:\s*numeric\(['"]price_max['"],\s*\{\s*precision:\s*8,\s*scale:\s*2\s*\}\)/);
+      expect(d).toMatch(/age_restriction:\s*varchar\(['"]age_restriction['"],\s*\{\s*length:\s*50\s*\}\)/);
+      expect(d).toMatch(/removed_at:\s*timestamp\(['"]removed_at['"]/);
+      for (const promoted of ['title:', 'doors_at:', 'price_min:', 'price_max:', 'age_restriction:', 'removed_at:']) {
+        const column = d.match(new RegExp(`${promoted}[^,\\n]*(?:\\{[^}]*\\})?[^,\\n]*`));
+        expect(column?.[0]).toBeDefined();
+        expect(column?.[0]).not.toMatch(/\.notNull\(\)/);
+      }
+    });
+
+    it('declares the starts_on-first curated-feed partial index (resolver-stamped, not tombstoned)', () => {
+      expect(def()).toMatch(
+        /index\(['"]concerts_curated_starts_on_idx['"]\)[\s\S]*?\.on\(table\.starts_on\)[\s\S]*?\.where\(sql`[\s\S]*?headlining_artist_id[\s\S]*?IS NOT NULL[\s\S]*?removed_at[\s\S]*?IS NULL/
+      );
+    });
+  });
+
+  describe('migration 0112 (triangle-shows substrate, BS#1589)', () => {
+    const entry112 = journal.entries.find((e) => e.tag.startsWith('0112_'));
+    const sqlPath112 = entry112 ? path.join(migrationsDir, `${entry112.tag}.sql`) : null;
+    const sql112 = sqlPath112 && fs.existsSync(sqlPath112) ? fs.readFileSync(sqlPath112, 'utf-8') : '';
+
+    it('exists in the journal', () => {
+      expect(entry112).toBeDefined();
+      expect(entry112?.tag).toMatch(/^0112_triangle-shows-concerts$/);
+    });
+
+    it('adds the triangle_shows enum value and widens source_id to text', () => {
+      expect(sql112).toMatch(/ALTER TYPE "wxyc_schema"\."concert_source_enum" ADD VALUE 'triangle_shows'/);
+      expect(sql112).toMatch(/ALTER COLUMN "source_id" SET DATA TYPE text/);
+    });
+
+    it('backfills starts_on before SET NOT NULL and pairs the UPDATE with an ANALYZE', () => {
+      // Order matters: add nullable -> backfill -> SET NOT NULL. A plain
+      // `ADD COLUMN starts_on date NOT NULL` cannot apply to a non-empty
+      // table, which is exactly the deploy-wedge this pin guards against.
+      const addIdx = sql112.indexOf('ADD COLUMN "starts_on" date');
+      const backfillIdx = sql112.indexOf('SET "starts_on" =');
+      const notNullIdx = sql112.indexOf('ALTER COLUMN "starts_on" SET NOT NULL');
+      expect(addIdx).toBeGreaterThan(-1);
+      expect(backfillIdx).toBeGreaterThan(addIdx);
+      expect(notNullIdx).toBeGreaterThan(backfillIdx);
+      // Scan DDL lines only — the migration's comment header quotes the
+      // forbidden single-statement form when explaining the hand-split.
+      const ddlOnly = sql112
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('--'))
+        .join('\n');
+      expect(ddlOnly).not.toMatch(/ADD COLUMN "starts_on" date NOT NULL/);
+      expect(sql112).toMatch(/AT TIME ZONE 'America\/New_York'/);
+      expect(sql112).toMatch(/ANALYZE "wxyc_schema"\."concerts"/);
+    });
+
+    it('drops NOT NULL on starts_at (never drops rows — first_scraped_at anchors #1373)', () => {
+      expect(sql112).toMatch(/ALTER COLUMN "starts_at" DROP NOT NULL/);
+      expect(sql112).not.toMatch(/DELETE FROM/i);
+    });
+  });
+
   describe('enums', () => {
-    it('declares concert_source_enum with rhp_scrape as initial value', () => {
+    it('declares concert_source_enum with rhp_scrape and triangle_shows (0112)', () => {
       expect(schemaSource).toMatch(/concertSourceEnum\s*=\s*wxyc_schema\.enum\(['"]concert_source_enum['"]/);
       expect(schemaSource).toMatch(/['"]rhp_scrape['"]/);
+      expect(schemaSource).toMatch(/['"]triangle_shows['"]/);
     });
 
     it('declares concert_status_enum with the four lifecycle states', () => {
