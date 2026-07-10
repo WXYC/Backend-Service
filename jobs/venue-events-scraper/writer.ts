@@ -14,7 +14,7 @@
  * threading state through the writer.
  */
 
-import { db, venues, concerts } from '@wxyc/database';
+import { db, venues, concerts, nyCalendarDate } from '@wxyc/database';
 import { eq, sql } from 'drizzle-orm';
 
 import type { ParsedConcert } from './rhp-types.js';
@@ -188,7 +188,10 @@ export const makeVenueCache = (): VenueCache => {
  * (sold_out / cancelled / rescheduled). The RHP JSON-LD's `Offer.availability`
  * isn't reliable enough to drive automated status transitions — adding
  * that pipeline is queued behind real cancellation data from the source
- * (tracked separately from this PR).
+ * (tracked separately from this PR). Contrast: `jobs/triangle-shows-etl`
+ * refreshes status on every upsert — its source maintains an explicit
+ * status enum; see that job's README before assuming this insert-only
+ * policy is a table-wide invariant.
  *
  * `scraped_at` is set per-call so the orchestrator can distinguish
  * "stamped this run" from "missed this run". A row that disappears from
@@ -204,11 +207,15 @@ export const upsertConcert = async (
 ): Promise<WriteConcertOutcome> => {
   const scrapedAtIso = scrapedAt.toISOString(); // Pre-stringify (BS#802 trap).
 
+  const startsAt = new Date(parsed.starts_at);
   const values: ConcertsValue = {
     source: 'rhp_scrape',
     source_id: parsed.source_id,
     venue_id: venueId,
-    starts_at: new Date(parsed.starts_at), // Drizzle typed builder serializes Date safely.
+    starts_at: startsAt, // Drizzle typed builder serializes Date safely.
+    // Venue-local calendar date (migration 0112 NOT NULL). In `set` below
+    // too — a reschedule can move the calendar date.
+    starts_on: nyCalendarDate(startsAt),
     headlining_artist_raw: parsed.headlining_artist,
     supporting_artists_raw: parsed.supporting_artists,
     ticket_url: parsed.ticket_url,
@@ -234,6 +241,7 @@ export const upsertConcert = async (
       set: {
         venue_id: values.venue_id,
         starts_at: values.starts_at,
+        starts_on: values.starts_on,
         headlining_artist_raw: values.headlining_artist_raw,
         supporting_artists_raw: values.supporting_artists_raw,
         ticket_url: values.ticket_url,

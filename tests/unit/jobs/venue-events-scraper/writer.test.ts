@@ -157,6 +157,54 @@ describe('upsertConcert', () => {
   });
 });
 
+// Migration 0112 (BS#1589) — `starts_on date NOT NULL` is the venue-local
+// calendar-date windowing column. The RHP writer must compute it from
+// `starts_at` in America/New_York in BOTH the insert values and the ON
+// CONFLICT set (a reschedule can move the calendar date). Missing either
+// side fails the NOT NULL constraint on the first post-deploy scrape —
+// and `npm run typecheck` doesn't cover jobs/**, so this test is the net.
+describe('starts_on venue-local calendar date (migration 0112, BS#1589)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const insertRowsAndSetClauses = () => {
+    const values = mockDb._chain.values.mock.calls
+      .flatMap((c: unknown[]) => (Array.isArray(c[0]) ? c[0] : [c[0]]))
+      .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object' && 'source_id' in r);
+    const sets = mockDb._chain.onConflictDoUpdate.mock.calls
+      .map((c: unknown[]) => (c[0] as { set?: Record<string, unknown> } | undefined)?.set)
+      .filter((set): set is Record<string, unknown> => !!set && 'venue_id' in set);
+    return { values, sets };
+  };
+
+  it('writes starts_on in both the INSERT values and the ON CONFLICT set', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
+
+    // fakeParsed's starts_at is 2026-11-06T20:00:00-0500 == 2026-11-07T01:00Z;
+    // the NY calendar date is Nov 6.
+    await upsertConcert(fakeParsed('starts-on'), 1, new Date('2026-06-05T12:00:00Z'));
+
+    const { values, sets } = insertRowsAndSetClauses();
+    expect(values.length).toBeGreaterThan(0);
+    expect(sets.length).toBeGreaterThan(0);
+    for (const row of values) expect(row).toHaveProperty('starts_on', '2026-11-06');
+    for (const set of sets) expect(set).toHaveProperty('starts_on', '2026-11-06');
+  });
+
+  it('assigns a late show stored as an early-UTC instant to the PREVIOUS Eastern calendar day', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 2, inserted: true }]);
+
+    // 01:30 UTC on Jun 14 is 21:30 EDT on Jun 13 — the show belongs to Jun 13.
+    const parsed = { ...fakeParsed('late-show'), starts_at: '2026-06-14T01:30:00Z' };
+    await upsertConcert(parsed, 1, new Date('2026-06-05T12:00:00Z'));
+
+    const { values } = insertRowsAndSetClauses();
+    expect(values.length).toBeGreaterThan(0);
+    expect(values[0]).toHaveProperty('starts_on', '2026-06-13');
+  });
+});
+
 describe('ensureVenue (seeded path)', () => {
   beforeEach(() => {
     jest.clearAllMocks();

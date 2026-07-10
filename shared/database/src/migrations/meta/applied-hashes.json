@@ -107,5 +107,6 @@
   "0108_flowsheet-composer": "6ac7db945d6624bb764b7882627cbfc9d01f9fde5d04897f84ba592da0da40cd",
   "0109_md-verified-release-id-source": "375bf7877d19df633615ce8be9e052b0a5a89c7e9fda13748f3f498e3a11eb12",
   "0110_qr-device-auth": "0284b4f41fb20265ce3901f5e2bdf9226ade145df0cae44b60b7da822901dae2",
-  "0111_oidc-provider-substrate": "f12255a3ff9ab9e2b8266741d90c6654b8fa451bdca418ebdd060dd5e54f28b7"
+  "0111_oidc-provider-substrate": "f12255a3ff9ab9e2b8266741d90c6654b8fa451bdca418ebdd060dd5e54f28b7",
+  "0112_triangle-shows-concerts": "f15843c8d248ff0b5c35ba9a623bd072310cfae6734a5e1b8692e1b4f0cedce8"
 }

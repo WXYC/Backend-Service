@@ -14,6 +14,7 @@ import {
   index,
   pgEnum,
   date,
+  numeric,
   uniqueIndex,
   customType,
   real,
@@ -1932,6 +1933,7 @@ export type NewArtistSearchAlias = InferInsertModel<typeof artist_search_alias>;
  */
 export const concertSourceEnum = wxyc_schema.enum('concert_source_enum', [
   'rhp_scrape', // Rockhouse Partners venue sites (catscradle.com, local506.com, ...)
+  'triangle_shows', // triangle-shows pull ETL (jobs/triangle-shows-etl, BS#1589)
 ]);
 
 /**
@@ -2003,18 +2005,47 @@ export type NewVenue = InferInsertModel<typeof venues>;
  * in the current environment. Downstream consumers asking "≥30 days
  * steady?" must filter against the migration's per-env apply timestamp
  * rather than treat backfilled rows as real first-scrape moments.
+ *
+ * Date semantics (migration 0112, BS#1589): `starts_on` is the venue-local
+ * (America/New_York) calendar date and the NOT NULL windowing column —
+ * "upcoming" queries filter on it. `starts_at` is the exact instant and is
+ * nullable: many `triangle_shows` events are date-only and we never
+ * fabricate times. For `rhp_scrape` rows the writer derives `starts_on`
+ * from `starts_at`; the two `starts_at` indexes simply don't cover
+ * null-`starts_at` rows, and the curated feed reads the `starts_on`-first
+ * partial index instead.
+ *
+ * `removed_at` (triangle_shows only): mirrors the source's soft tombstone —
+ * set when the source stamps it, cleared when a delisted event reappears.
+ * It is an observation ("the venue stopped advertising this"), never
+ * inferred from absence-from-snapshot: source rows hard-delete 7 days past
+ * their date, so some rows age out with `removed_at` never observed, which
+ * is fine because `starts_on` windowing retires them from any feed.
+ *
+ * `triangle_shows` keying: `source_id = '<venue_slug>:' + source_key`.
+ * triangle-shows' `source_key` is unique only per-venue (its unique index
+ * is `(venue_id, source_key)`; VenuePilot ids are small integers that
+ * collide across venues), so the venue qualifier is load-bearing. Max
+ * length ~1165 chars (slug ≤100 + ':' + key ≤1100) — why `source_id` is
+ * `text`, not varchar(256).
  */
 export const concerts = wxyc_schema.table(
   'concerts',
   {
     id: serial('id').primaryKey(),
     source: concertSourceEnum('source').notNull(),
-    source_id: varchar('source_id', { length: 256 }).notNull(),
+    source_id: text('source_id').notNull(),
     venue_id: integer('venue_id')
       .notNull()
       .references(() => venues.id, { onDelete: 'restrict' }),
-    starts_at: timestamp('starts_at', { withTimezone: true }).notNull(),
+    // Venue-local calendar date; the windowing column. See table JSDoc.
+    starts_on: date('starts_on').notNull(),
+    // Exact instant; NULL for date-only events (no fabricated times).
+    starts_at: timestamp('starts_at', { withTimezone: true }),
+    doors_at: timestamp('doors_at', { withTimezone: true }),
     headlining_artist_raw: varchar('headlining_artist_raw', { length: 256 }).notNull(),
+    // Event name as the source displays it, when distinct from the artist.
+    title: text('title'),
     headlining_artist_id: integer('headlining_artist_id').references(() => artists.id, {
       onDelete: 'set null',
     }),
@@ -2024,7 +2055,13 @@ export const concerts = wxyc_schema.table(
       .default(sql`'{}'::text[]`),
     ticket_url: text('ticket_url'),
     image_url: text('image_url'),
+    // Dollars. free events carry price_min = 0 (status maps to on_sale).
+    price_min: numeric('price_min', { precision: 8, scale: 2 }),
+    price_max: numeric('price_max', { precision: 8, scale: 2 }),
+    age_restriction: varchar('age_restriction', { length: 50 }),
     status: concertStatusEnum('status').notNull().default('on_sale'),
+    // Source-observed soft tombstone; cleared on reappearance. See JSDoc.
+    removed_at: timestamp('removed_at', { withTimezone: true }),
     raw_data: jsonb('raw_data').notNull(),
     scraped_at: timestamp('scraped_at', { withTimezone: true }).notNull(),
     // INSERT-only scraper-stability anchor — writer omits from ON CONFLICT
@@ -2037,6 +2074,12 @@ export const concerts = wxyc_schema.table(
     uniqueIndex('concerts_source_source_id_idx').on(table.source, table.source_id),
     index('concerts_venue_starts_at_idx').on(table.venue_id, table.starts_at),
     index('concerts_headlining_artist_starts_at_idx').on(table.headlining_artist_id, table.starts_at),
+    // Curated-feed path (Phase 2's GET /concerts?curated=true): resolver-
+    // stamped, not tombstoned, windowed by calendar date. starts_on-first
+    // because starts_at is nullable post-0112 (BS#1570 correction 4).
+    index('concerts_curated_starts_on_idx')
+      .on(table.starts_on)
+      .where(sql`${table.headlining_artist_id} IS NOT NULL AND ${table.removed_at} IS NULL`),
   ]
 );
 
