@@ -63,10 +63,31 @@ const SENTINEL_END = '<!-- auth-tables-list:end -->';
 // pgTable('auth_<name>', ...) — the string literal is the DB table name and
 // is what the CLAUDE.md list enumerates. The JS export symbol (which may
 // differ, e.g. `oauthConsent` -> 'auth_oauth_consent') is not what we compare.
-const PG_TABLE_RE = /pgTable\(\s*['"](auth_[a-z0-9_]+)['"]/g;
+//
+// Character class matches [A-Za-z0-9_] to catch camelCased tables (e.g.
+// `auth_UserV2`), and quote class includes backticks to catch template-literal
+// args (`pgTable(\`auth_new\`, ...)`. Mirrors the shape in
+// `scripts/schema-shape-report.mjs`.
+const PG_TABLE_RE = /pgTable\(\s*['"`](auth_[A-Za-z0-9_]+)['"`]/g;
 
 // Backtick-quoted `auth_<name>` token inside the sentinel-fenced doc block.
-const DOC_TOKEN_RE = /`(auth_[a-z0-9_]+)`/g;
+// Same char-class extension as PG_TABLE_RE to stay symmetric.
+const DOC_TOKEN_RE = /`(auth_[A-Za-z0-9_]+)`/g;
+
+// Strip JS/TS line and block comments before regex extraction. A
+// commented-out `// pgTable('auth_legacy', ...)` is not a declared table.
+// Not a full JS parser — no template-literal or string tracking — but the
+// schema file has no `//` or `/*` sequences inside strings today, and the
+// worst case (over-strip) still fails safely on the diff step.
+function stripJsComments(source) {
+  return source.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+// Strip HTML comments from a markdown body. A backticked `auth_*` inside
+// `<!-- ... -->` is a TODO or prose note, not a claim about a real table.
+function stripHtmlComments(body) {
+  return body.replace(/<!--[\s\S]*?-->/g, '');
+}
 
 function fileExists(abs) {
   try {
@@ -86,26 +107,56 @@ function pickRepoRoot() {
 }
 
 function extractSchemaTables(source) {
+  // Strip comments first so commented-out `pgTable(...)` calls (or
+  // pseudo-declarations inside `/* ... */` block comments) don't inflate
+  // the schema set. Line numbers below are computed from the stripped
+  // source; a commented decl that's re-added later moves to its post-strip
+  // line, but the error just points at the wrong line — the diff is still
+  // correct.
+  const stripped = stripJsComments(source);
   const tables = new Set();
   const lineByTable = new Map();
   PG_TABLE_RE.lastIndex = 0;
   let m;
-  while ((m = PG_TABLE_RE.exec(source)) !== null) {
+  while ((m = PG_TABLE_RE.exec(stripped)) !== null) {
     const name = m[1];
     tables.add(name);
     if (!lineByTable.has(name)) {
-      const lineNo = source.slice(0, m.index).split('\n').length;
+      const lineNo = stripped.slice(0, m.index).split('\n').length;
       lineByTable.set(name, lineNo);
     }
   }
   return { tables, lineByTable };
 }
 
+/**
+ * Count non-overlapping occurrences of `needle` in `haystack`. Used to
+ * assert exactly one begin/end sentinel — a duplicated sentinel silently
+ * redefines the fenced block otherwise (F6).
+ */
+function countOccurrences(haystack, needle) {
+  let count = 0;
+  let idx = 0;
+  while ((idx = haystack.indexOf(needle, idx)) !== -1) {
+    count += 1;
+    idx += needle.length;
+  }
+  return count;
+}
+
 function extractDocBlock(source) {
+  const beginCount = countOccurrences(source, SENTINEL_BEGIN);
+  const endCount = countOccurrences(source, SENTINEL_END);
+  if (beginCount === 0 || endCount === 0) {
+    return { ok: false, reason: 'missing' };
+  }
+  if (beginCount > 1 || endCount > 1) {
+    return { ok: false, reason: 'duplicate', beginCount, endCount };
+  }
   const begin = source.indexOf(SENTINEL_BEGIN);
   const end = source.indexOf(SENTINEL_END);
-  if (begin < 0 || end < 0 || end < begin) {
-    return { ok: false };
+  if (end < begin) {
+    return { ok: false, reason: 'missing' };
   }
   const bodyStart = begin + SENTINEL_BEGIN.length;
   const body = source.slice(bodyStart, end);
@@ -114,10 +165,14 @@ function extractDocBlock(source) {
 }
 
 function extractDocTables(body) {
+  // Strip HTML comments so a TODO like
+  // `<!-- also list \`auth_ghost\` once BS#9999 lands -->` doesn't get
+  // parsed as a real doc claim (F4).
+  const stripped = stripHtmlComments(body);
   const tables = new Set();
   DOC_TOKEN_RE.lastIndex = 0;
   let m;
-  while ((m = DOC_TOKEN_RE.exec(body)) !== null) {
+  while ((m = DOC_TOKEN_RE.exec(stripped)) !== null) {
     tables.add(m[1]);
   }
   return tables;
@@ -141,16 +196,43 @@ function main(repoRoot) {
 
   const { tables: schemaTables, lineByTable: schemaLineByTable } = extractSchemaTables(schemaSource);
 
+  // F3: hard-fail if the schema regex found zero tables. This repo will
+  // always have at least `auth_user`. A zero-match usually means the regex
+  // is broken (renamed import, quote-style change) or the schema file
+  // moved. Without this guard, an empty schema set silently matches an
+  // empty doc set — the exact BS#1571 failure shape.
+  if (schemaTables.size === 0) {
+    console.error(
+      `check-auth-tables-doc: found zero auth_* pgTable(...) declarations in ${SCHEMA_REL}.\n` +
+        `       this repo always has at least auth_user; a zero match probably means:\n` +
+        `         - the schema file was moved or split (SCHEMA_REL is hard-coded)\n` +
+        `         - pgTable was renamed at the import site (e.g. \`import { pgTable as pt }\`)\n` +
+        `         - the file was drained without landing new tables somewhere else\n` +
+        `       failing loudly rather than silently agreeing with an empty doc set.`
+    );
+    return 1;
+  }
+
   const block = extractDocBlock(docSource);
   if (!block.ok) {
-    console.error(
-      `check-auth-tables-doc: missing sentinel comments in ${DOC_REL}.\n` +
-        `       expected the auth-tables line to be fenced between\n` +
-        `         ${SENTINEL_BEGIN}\n` +
-        `         ...\n` +
-        `         ${SENTINEL_END}\n` +
-        `       see BS#1573 for why the sentinels are load-bearing.`
-    );
+    if (block.reason === 'duplicate') {
+      console.error(
+        `check-auth-tables-doc: duplicate sentinel comments in ${DOC_REL} ` +
+          `(begin ×${block.beginCount}, end ×${block.endCount}).\n` +
+          `       exactly one of each is required. a duplicate begin sentinel silently\n` +
+          `       redefines the fenced block — the parser slices from the first begin\n` +
+          `       to the first end and drops the rest. remove the extra sentinels.`
+      );
+    } else {
+      console.error(
+        `check-auth-tables-doc: missing sentinel comments in ${DOC_REL}.\n` +
+          `       expected the auth-tables line to be fenced between\n` +
+          `         ${SENTINEL_BEGIN}\n` +
+          `         ...\n` +
+          `         ${SENTINEL_END}\n` +
+          `       see BS#1573 for why the sentinels are load-bearing.`
+      );
+    }
     return 1;
   }
 
