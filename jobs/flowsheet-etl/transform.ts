@@ -79,6 +79,12 @@ export const mapProdEntryType = (typeCode: number): BackendEntryType => {
 /**
  * Resolve the UTC offset for America/New_York at a given instant.
  * Returns a string like "-05:00" (EST) or "-04:00" (EDT).
+ *
+ * See also: `@wxyc/database`'s `shared/database/src/ny-time.ts`
+ * (`nyWallClockToUtc`) is the newer shared sibling of this same two-pass
+ * NY offset converge, with an explicit DST-gap policy. A DST- or
+ * Intl-parsing fix here almost certainly applies there too; consolidating
+ * this module onto ny-time is a known follow-up — until then, patch both.
  */
 const easternOffsetAt = (probeUtc: Date): string => {
   const parts = new Intl.DateTimeFormat('en-US', {

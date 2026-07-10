@@ -2010,10 +2010,14 @@ export type NewVenue = InferInsertModel<typeof venues>;
  * (America/New_York) calendar date and the NOT NULL windowing column —
  * "upcoming" queries filter on it. `starts_at` is the exact instant and is
  * nullable: many `triangle_shows` events are date-only and we never
- * fabricate times. For `rhp_scrape` rows the writer derives `starts_on`
- * from `starts_at`; the two `starts_at` indexes simply don't cover
- * null-`starts_at` rows, and the curated feed reads the `starts_on`-first
- * partial index instead.
+ * fabricate times. Whenever `starts_at` is set, the DB derives `starts_on`
+ * from it via the `concerts_derive_starts_on` BEFORE trigger (0112), so an
+ * UPDATE moving the instant across midnight can't leave a stale calendar
+ * date; date-only rows pass through with the writer-supplied `starts_on`.
+ * Query note for Phase 2: range predicates on `starts_at` never match
+ * null-`starts_at` rows (SQL NULL semantics — the btree indexes themselves
+ * do store NULLs), so date-window queries must filter on `starts_on`; the
+ * curated feed reads the `starts_on`-first partial index.
  *
  * `removed_at` (triangle_shows only): mirrors the source's soft tombstone —
  * set when the source stamps it, cleared when a delisted event reappears.
@@ -2026,8 +2030,10 @@ export type NewVenue = InferInsertModel<typeof venues>;
  * triangle-shows' `source_key` is unique only per-venue (its unique index
  * is `(venue_id, source_key)`; VenuePilot ids are small integers that
  * collide across venues), so the venue qualifier is load-bearing. Max
- * length ~1165 chars (slug ≤100 + ':' + key ≤1100) — why `source_id` is
- * `text`, not varchar(256).
+ * length ~1201 chars (source slug String(100) + ':' + key String(1100);
+ * in practice the ETL's startup assertion caps ingested slugs at 64 to fit
+ * `venues.slug`, giving ~1165) — why `source_id` is `text`, not
+ * varchar(256).
  */
 export const concerts = wxyc_schema.table(
   'concerts',

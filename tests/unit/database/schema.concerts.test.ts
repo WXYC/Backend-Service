@@ -96,14 +96,14 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
       );
     });
 
-    it('declares the (venue_id, starts_at) index for "what is playing at X this week?" queries', () => {
+    it('declares the (venue_id, starts_at) index for "what is playing at X this week?" queries (timed rows only post-0112 — date-only rows window on starts_on)', () => {
       const def = extractTableDef('concerts');
       expect(def).toMatch(
         /index\(['"]concerts_venue_starts_at_idx['"]\)[\s\S]*?\.on\(table\.venue_id,\s*table\.starts_at\)/
       );
     });
 
-    it('declares the (headlining_artist_id, starts_at) index for "next tour date for artist Y?" queries', () => {
+    it('declares the (headlining_artist_id, starts_at) index for "next tour date for artist Y?" queries (timed rows only post-0112 — date-only rows window on starts_on)', () => {
       const def = extractTableDef('concerts');
       expect(def).toMatch(
         /index\(['"]concerts_headlining_artist_starts_at_idx['"]\)[\s\S]*?\.on\(table\.headlining_artist_id,\s*table\.starts_at\)/
@@ -157,11 +157,33 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
       expect(d).toMatch(/price_max:\s*numeric\(['"]price_max['"],\s*\{\s*precision:\s*8,\s*scale:\s*2\s*\}\)/);
       expect(d).toMatch(/age_restriction:\s*varchar\(['"]age_restriction['"],\s*\{\s*length:\s*50\s*\}\)/);
       expect(d).toMatch(/removed_at:\s*timestamp\(['"]removed_at['"]/);
-      for (const promoted of ['title:', 'doors_at:', 'price_min:', 'price_max:', 'age_restriction:', 'removed_at:']) {
-        const column = d.match(new RegExp(`${promoted}[^,\\n]*(?:\\{[^}]*\\})?[^,\\n]*`));
+      // Paren-bounded extraction (the idiom the first_scraped_at pin above
+      // uses): `X: builder([...])<chain-until-comma-or-newline>`. A naive
+      // `[^,\n]*` from the column name stops at the comma INSIDE the
+      // builder call and never sees a chained .notNull() — which is the
+      // exact thing this test exists to catch.
+      for (const promoted of ['title', 'doors_at', 'price_min', 'price_max', 'age_restriction', 'removed_at']) {
+        const column = d.match(new RegExp(`${promoted}:\\s*\\w+\\([^)]*\\)[^,\\n]*`));
         expect(column?.[0]).toBeDefined();
         expect(column?.[0]).not.toMatch(/\.notNull\(\)/);
       }
+    });
+
+    it('declares the concerts_derive_starts_on trigger in 0112 (DB owns the starts_on <-> starts_at invariant)', () => {
+      const sql112 = fs.readFileSync(
+        path.join(
+          migrationsDir,
+          `${journal.entries.find((e) => e.tag.startsWith('0112_'))?.tag ?? '0112-missing'}.sql`
+        ),
+        'utf-8'
+      );
+      expect(sql112).toMatch(/CREATE OR REPLACE FUNCTION wxyc_schema\.concerts_derive_starts_on\(\)/);
+      expect(sql112).toMatch(
+        /CREATE TRIGGER concerts_derive_starts_on\s*\nBEFORE INSERT OR UPDATE ON wxyc_schema\.concerts/
+      );
+      // The NULL guard is what preserves date-only rows' writer-supplied
+      // starts_on; without it the trigger would null-out their windowing.
+      expect(sql112).toMatch(/IF NEW\.starts_at IS NOT NULL THEN/);
     });
 
     it('declares the starts_on-first curated-feed partial index (resolver-stamped, not tombstoned)', () => {
@@ -187,24 +209,26 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
     });
 
     it('backfills starts_on before SET NOT NULL and pairs the UPDATE with an ANALYZE', () => {
-      // Order matters: add nullable -> backfill -> SET NOT NULL. A plain
-      // `ADD COLUMN starts_on date NOT NULL` cannot apply to a non-empty
-      // table, which is exactly the deploy-wedge this pin guards against.
-      const addIdx = sql112.indexOf('ADD COLUMN "starts_on" date');
-      const backfillIdx = sql112.indexOf('SET "starts_on" =');
-      const notNullIdx = sql112.indexOf('ALTER COLUMN "starts_on" SET NOT NULL');
-      expect(addIdx).toBeGreaterThan(-1);
-      expect(backfillIdx).toBeGreaterThan(addIdx);
-      expect(notNullIdx).toBeGreaterThan(backfillIdx);
-      // Scan DDL lines only — the migration's comment header quotes the
-      // forbidden single-statement form when explaining the hand-split.
+      // Scan DDL lines only for EVERY position probe — the migration's
+      // comment header quotes 'ADD COLUMN "starts_on" date NOT NULL' when
+      // explaining the hand-split, so an indexOf against the raw file
+      // would anchor on the comment and make the ordering pin vacuous.
       const ddlOnly = sql112
         .split('\n')
         .filter((line) => !line.trimStart().startsWith('--'))
         .join('\n');
+      // Order matters: add nullable -> backfill -> SET NOT NULL. A plain
+      // `ADD COLUMN starts_on date NOT NULL` cannot apply to a non-empty
+      // table, which is exactly the deploy-wedge this pin guards against.
+      const addIdx = ddlOnly.indexOf('ADD COLUMN "starts_on" date');
+      const backfillIdx = ddlOnly.indexOf('SET "starts_on" =');
+      const notNullIdx = ddlOnly.indexOf('ALTER COLUMN "starts_on" SET NOT NULL');
+      expect(addIdx).toBeGreaterThan(-1);
+      expect(backfillIdx).toBeGreaterThan(addIdx);
+      expect(notNullIdx).toBeGreaterThan(backfillIdx);
       expect(ddlOnly).not.toMatch(/ADD COLUMN "starts_on" date NOT NULL/);
-      expect(sql112).toMatch(/AT TIME ZONE 'America\/New_York'/);
-      expect(sql112).toMatch(/ANALYZE "wxyc_schema"\."concerts"/);
+      expect(ddlOnly).toMatch(/AT TIME ZONE 'America\/New_York'/);
+      expect(ddlOnly).toMatch(/ANALYZE "wxyc_schema"\."concerts"/);
     });
 
     it('drops NOT NULL on starts_at (never drops rows — first_scraped_at anchors #1373)', () => {
