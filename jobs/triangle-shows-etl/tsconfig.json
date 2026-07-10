@@ -1,0 +1,17 @@
+{
+  "extends": ["../../tsconfig.base.json"],
+  "references": [{ "path": "../../shared/database" }],
+  "include": ["."],
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    // Load-bearing even though nothing imports via '@/': child `paths`
+    // REPLACES the base's, which would otherwise map @wxyc/database to
+    // shared/database/src and force this project to typecheck against
+    // package sources (TS6305 under the project reference) instead of the
+    // built dist. Same shape as the sibling job tsconfigs.
+    "paths": {
+      "@/*": ["./*"]
+    }
+  }
+}
