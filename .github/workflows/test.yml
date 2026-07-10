@@ -180,6 +180,9 @@ jobs:
       - name: Bulk UPDATE + ANALYZE pairing (BS#934)
         run: node scripts/check-bulk-update-analyze.mjs --strict
 
+      - name: Auth-tables doc drift (BS#1573)
+        run: node scripts/check-auth-tables-doc.mjs
+
       - name: Build
         run: npm run build
 
