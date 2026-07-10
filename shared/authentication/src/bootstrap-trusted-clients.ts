@@ -164,16 +164,24 @@ export async function bootstrapTrustedClients(
       if (outcome === 'created') created++;
       else updated++;
     } catch (error) {
-      errors.push(
-        error instanceof Error ? error : new Error(`bootstrap: unknown error for clientId=${client.clientId}`)
-      );
+      // Wrap with clientId + preserve the original via `cause`. Adapter
+      // errors like "DB unreachable" don't carry a clientId of their own;
+      // ops triaging the aggregate needs to know which client each leaf
+      // belongs to without reconstructing loop order.
+      errors.push(new Error(`bootstrap: failed for clientId=${client.clientId}`, { cause: error }));
     }
   }
 
-  if (errors.length > 0) {
+  if (errors.length === 1) {
+    // Single-error unwrap: throw the leaf directly so Sentry groups this
+    // failure with other occurrences of the same root cause. Mirrors the
+    // pattern at `jobs/rotation-artist-backfill/orchestrate.ts:131-132`.
+    throw errors[0];
+  }
+  if (errors.length > 1) {
     throw new AggregateError(
       errors,
-      `bootstrap: ${errors.length} of ${trustedClients.length} trustedClients failed to upsert`
+      `bootstrap: ${errors.length} of ${trustedClients.length} trustedClients failed to upsert (${created} created, ${updated} updated before the failures)`
     );
   }
 
