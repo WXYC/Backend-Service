@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/triangle-shows-etl",
+  "cron-schedule": "5 5 * * *",
+  "version": "1.0.0",
+  "description": "WXYC nightly pull ETL (BS#1589): mirror triangle-shows concert-calendar events into the venues/concerts tables for the 16 Triangle venues the venue-events-scraper doesn't cover, keyed on (source='triangle_shows', source_id='<venue_slug>:'+source_key). Full-snapshot pull with tombstones; source-authoritative status.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_triangle_shows_etl:ci -f ../../Dockerfile.triangle-shows-etl ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.59.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

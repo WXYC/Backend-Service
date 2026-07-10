@@ -184,6 +184,10 @@ The artist identity ETL (`jobs/artist-identity-etl/`) populates the six reconcil
 
 - `DATABASE_URL_DISCOGS` — PostgreSQL URL for LML's discogs-cache database, where `entity.identity` lives. Required for the artist-identity ETL.
 
+The triangle-shows ETL (`jobs/triangle-shows-etl/`) mirrors the [triangle-shows](https://github.com/WXYC/triangle-shows) concert calendar into `venues`/`concerts` for the 16 venues the venue-events-scraper doesn't cover (BS#1589). No SSH tunnel and no sync-notify — it pulls the source's public `/api/v1` surface over HTTPS and nothing consumes concerts live yet.
+
+- `TRIANGLE_SHOWS_URL` — Base URL of the triangle-shows API, no trailing slash (a trailing slash is stripped defensively). Required; the job fails fast at startup when unset.
+
 ### One-shot backfill jobs
 
 One-shot backfill jobs under `jobs/*-backfill/` run via `Manual Build & Deploy` and `docker run`. They share a small set of operator knobs:
