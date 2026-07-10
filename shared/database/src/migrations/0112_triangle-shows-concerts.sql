@@ -13,8 +13,9 @@
 --   * `source_id` varchar(256) -> text. Binary-coercible type change: no table rewrite,
 --     no change to existing rhp_scrape values, and concerts_source_source_id_idx (plain
 --     btree unique) needs no REINDEX. Needed because triangle-shows keying is
---     '<venue_slug>:' + source_key with a theoretical max ~1165 chars, and PG varchar
---     errors rather than truncates.
+--     '<venue_slug>:' + source_key: theoretical max ~1201 chars (slug String(100) + ':'
+--     + key String(1100)), ~1165 in practice under the ETL's slug<=64 assertion — and
+--     PG varchar errors rather than truncates.
 --   * `starts_at` drops NOT NULL — many triangle-shows events are date-only and we never
 --     fabricate times. `starts_on date NOT NULL` (venue-local America/New_York calendar
 --     date) becomes the windowing column. Backfill-then-SET-NOT-NULL below; derivation
@@ -63,6 +64,9 @@ CREATE INDEX "concerts_curated_starts_on_idx" ON "wxyc_schema"."concerts" USING 
 -- inserts cleanly: BEFORE ROW triggers run before the NOT NULL check. Date-only
 -- rows (starts_at IS NULL) pass through untouched — their starts_on is the
 -- source's authoritative calendar date and must be supplied by the writer.
+-- Remediation corollary: on a TIMED row, starts_on is trigger-owned — a manual
+-- `UPDATE ... SET starts_on = X` reports UPDATE 1 but is silently re-derived; to
+-- move a timed row's calendar date, move starts_at (or NULL it first).
 CREATE OR REPLACE FUNCTION wxyc_schema.concerts_derive_starts_on() RETURNS trigger AS $$
 BEGIN
   IF NEW.starts_at IS NOT NULL THEN

@@ -76,12 +76,22 @@ describe('nyWallClockToUtc', () => {
   });
 
   test.each([
-    ['2026-07-04', '25:00:00'], // out-of-range hour parses to an invalid Date
+    ['2026-07-04', '25:00:00'], // out-of-range hour
+    // ECMA-262 quietly accepts T24:00 as next-day midnight, which would
+    // window the event a day late with no error — rejected explicitly.
+    ['2026-07-04', '24:00'],
+    ['2026-07-04', '24:00:00'],
     ['2026-07-04', '19'], // not HH:MM[:SS]
     ['2026-07-04', '19:30:00-05:00'], // offset suffix not part of the contract
     ['07/04/2026', '19:30:00'], // date must be ISO
     ['2026-07-04', ''],
   ])('rejects malformed input %s / %s with a clear error', (date, time) => {
     expect(() => nyWallClockToUtc(date, time)).toThrow(/nyWallClockToUtc/);
+  });
+});
+
+describe('nyCalendarDate — invalid input', () => {
+  test("throws an attributed error on an Invalid Date (not Intl's bare RangeError)", () => {
+    expect(() => nyCalendarDate(new Date('not a date'))).toThrow(/nyCalendarDate/);
   });
 });
