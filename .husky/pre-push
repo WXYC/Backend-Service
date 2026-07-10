@@ -14,7 +14,15 @@ if [ "$has_real_push" = false ]; then
   exit 0
 fi
 
-npm run typecheck && npm run lint
+# NOTE: keep each check on its own line. Husky runs this script under
+# `sh -e`, and POSIX errexit does NOT abort on failures inside an AND-OR
+# list (e.g. `npm run typecheck && npm run lint`) — the shell exempts
+# commands whose exit status is "used by a command that uses its result",
+# which includes both sides of `&&`. So chaining these with `&&` silently
+# lets a typecheck failure fall through to the next line. One command per
+# line, no `&&`, so `set -e` actually fires.
+npm run typecheck
+npm run lint
 # `check:docs` is the warn-only pair (doc-budget + doc-rules): they surface
 # gentle nudges about markdown hygiene but shouldn't block a push.
 npm run check:docs || true
