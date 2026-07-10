@@ -39,9 +39,9 @@
  * lose. Fail with a readable diff; a human updates the doc.
  *
  * Exit codes:
- *   0 — sets match, or sets match with a warning about non-standard tokens
- *   1 — sets differ, sentinels missing, or one of the required files is
- *       missing
+ *   0 — sets match
+ *   1 — sets differ, sentinels missing/duplicated/inverted, schema has zero
+ *       auth_* tables, or one of the required files is missing
  */
 
 import { readFileSync, statSync } from 'node:fs';
@@ -156,7 +156,7 @@ function extractDocBlock(source) {
   const begin = source.indexOf(SENTINEL_BEGIN);
   const end = source.indexOf(SENTINEL_END);
   if (end < begin) {
-    return { ok: false, reason: 'missing' };
+    return { ok: false, reason: 'inverted' };
   }
   const bodyStart = begin + SENTINEL_BEGIN.length;
   const body = source.slice(bodyStart, end);
@@ -222,6 +222,17 @@ function main(repoRoot) {
           `       exactly one of each is required. a duplicate begin sentinel silently\n` +
           `       redefines the fenced block — the parser slices from the first begin\n` +
           `       to the first end and drops the rest. remove the extra sentinels.`
+      );
+    } else if (block.reason === 'inverted') {
+      console.error(
+        `check-auth-tables-doc: inverted sentinel comments in ${DOC_REL} ` +
+          `(end appears before begin).\n` +
+          `       the end sentinel must follow the begin sentinel. this usually means\n` +
+          `       one of the two was pasted in the wrong order during an edit. reorder\n` +
+          `       so the block reads:\n` +
+          `         ${SENTINEL_BEGIN}\n` +
+          `         ...\n` +
+          `         ${SENTINEL_END}`
       );
     } else {
       console.error(

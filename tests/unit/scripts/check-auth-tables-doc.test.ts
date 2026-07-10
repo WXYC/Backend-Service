@@ -346,5 +346,25 @@ describe('check-auth-tables-doc.mjs', () => {
       expect(status).toBe(1);
       expect(stderr).toMatch(/duplicate|more than one|multiple.*sentinel/i);
     });
+
+    // R2-4: end-before-begin is a distinct edit mistake from missing
+    // sentinels — surface a message that names the actual problem
+    // ("inverted") so a reader isn't chasing a phantom "missing" error.
+    it('fails with an inverted-order message when end appears before begin', () => {
+      tmpRoot = setupTempRepo({
+        claudeMd: [
+          '# CLAUDE.md',
+          '',
+          '<!-- auth-tables-list:end -->',
+          '**Auth tables**: `auth_user`.',
+          '<!-- auth-tables-list:begin -->',
+          '',
+        ].join('\n'),
+        schemaTs: schemaWith(['auth_user']),
+      });
+      const { status, stderr } = runOnRoot(tmpRoot);
+      expect(status).toBe(1);
+      expect(stderr).toMatch(/invert|out of order|end.*before.*begin/i);
+    });
   });
 });
