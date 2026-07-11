@@ -1,0 +1,24 @@
+-- 0113 default-feed index for GET /concerts (BS#1603, touring-events Phase 2).
+--
+-- The curated feed reads `concerts_curated_starts_on_idx` (0112), but that
+-- index is partial on `headlining_artist_id IS NOT NULL`, so it can't serve
+-- the DEFAULT (uncurated) feed's `removed_at IS NULL AND starts_on >= from
+-- ORDER BY starts_on, id` path — which would otherwise seq-scan. This adds a
+-- non-partial-on-headliner btree on `(starts_on, id)` scoped to the live
+-- (non-tombstoned) rows every read path already filters, covering both the
+-- range predicate and the ORDER BY tiebreak.
+--
+-- IF NOT EXISTS + CONCURRENTLY note: `concerts` is small today, but follow the
+-- established index runbook. To pre-build out-of-band against a large prod
+-- table (no AccessExclusiveLock, no INSERT pause), an operator runs, before
+-- the migration lands:
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "concerts_active_starts_on_id_idx"
+--     ON "wxyc_schema"."concerts" USING btree ("starts_on","id")
+--     WHERE "wxyc_schema"."concerts"."removed_at" IS NULL;
+--
+-- The in-migration form below is NOT CONCURRENTLY because Drizzle wraps each
+-- migration in a transaction (CONCURRENTLY cannot run inside a transaction
+-- block); the IF NOT EXISTS makes it a no-op when the CONCURRENTLY build ran
+-- first, while a fresh dev DB picks the index up on first migrate.
+CREATE INDEX IF NOT EXISTS "concerts_active_starts_on_id_idx" ON "wxyc_schema"."concerts" USING btree ("starts_on","id") WHERE "wxyc_schema"."concerts"."removed_at" IS NULL;

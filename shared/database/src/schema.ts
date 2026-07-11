@@ -2086,6 +2086,15 @@ export const concerts = wxyc_schema.table(
     index('concerts_curated_starts_on_idx')
       .on(table.starts_on)
       .where(sql`${table.headlining_artist_id} IS NOT NULL AND ${table.removed_at} IS NULL`),
+    // Default (uncurated) feed path (Phase 2's GET /concerts): non-tombstoned
+    // rows windowed by calendar date, ordered by (starts_on, id). The curated
+    // partial index above can't serve this path (its predicate requires a
+    // resolved headliner), so the default feed would seq-scan without this.
+    // Partial on `removed_at IS NULL` to match every read path's tombstone
+    // filter and keep the index tight. (starts_on, id) mirrors the ORDER BY.
+    index('concerts_active_starts_on_id_idx')
+      .on(table.starts_on, table.id)
+      .where(sql`${table.removed_at} IS NULL`),
   ]
 );
 
