@@ -313,12 +313,51 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     return last;
   };
 
-  /** concerts-scan delta attributable to exactly one feed read of this page. */
+  /** Raw cumulative concerts-scan counter (single read, snapshot cleared first). */
+  const rawScans = async () => {
+    await sql.unsafe('SELECT pg_stat_clear_snapshot()');
+    const [row] = await sql.unsafe(
+      `SELECT COALESCE(seq_scan, 0) + COALESCE(idx_scan, 0) AS scans
+         FROM pg_stat_user_tables
+        WHERE schemaname = $1 AND relname = 'concerts'`,
+      [SCHEMA]
+    );
+    return Number(row ? row.scans : 0);
+  };
+
+  /**
+   * concerts-scan delta attributable to EXACTLY ONE feed read of this page.
+   *
+   * `pg_stat_user_tables` is flushed asynchronously by the stats collector, and
+   * the backend serves the feed on its own connection pool, so the scan a feed
+   * read performs is not always visible on the first poll. The naive
+   * `after(settled) - before(settled)` around a single read can settle BEFORE
+   * the read's scan flushes and report a spurious 0. Retrying the whole
+   * before/read/after cycle is worse: each extra feed read adds scans that flush
+   * into a later bracket, inflating the delta above the anti-N+1 ceiling.
+   *
+   * So we issue the feed read exactly ONCE, then poll the counter until it has
+   * both advanced past `before` AND gone stable (two equal consecutive reads) —
+   * capturing this single read's scans without absorbing any other. If it never
+   * advances within the budget the delta stays 0 and the `>= 1` liveness
+   * assertion fails honestly (rather than looping and issuing more reads).
+   */
   const scanDeltaForOneFeedRead = async () => {
     const before = await settledScans();
     await fetchSeededTracks();
-    const after = await settledScans();
-    return after - before;
+
+    let last = -1;
+    let stableAdvanced = before;
+    for (let i = 0; i < 40; i++) {
+      const scans = await rawScans(); // eslint-disable-line no-await-in-loop
+      if (scans > before && scans === last) {
+        stableAdvanced = scans;
+        break;
+      }
+      last = scans;
+      await new Promise((r) => setTimeout(r, 100)); // eslint-disable-line no-await-in-loop
+    }
+    return stableAdvanced - before;
   };
 
   // The batched lookup scans `concerts` a small, bounded number of times per
@@ -346,9 +385,70 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
 
     const largeDelta = await scanDeltaForOneFeedRead();
 
-    // Never one-scan-per-row: a per-row impl would push this to >= 9.
-    expect(largeDelta).toBeGreaterThanOrEqual(0);
+    // Liveness lower bound: the feed read must scan `concerts` at LEAST once,
+    // else the enrichment is a no-op and the whole batching contract is vacuous
+    // (a delta of 0 would silently pass a regression that stopped querying
+    // concerts entirely). `scanDeltaForOneFeedRead` retries until it observes a
+    // positive delta (absorbing the async stats-flush race), so `>= 1` is
+    // reliable here, not flaky — see its doc comment for why the naive
+    // before/after can spuriously read 0.
+    expect(largeDelta).toBeGreaterThanOrEqual(1);
+    // Upper bounds (anti-N+1): never one-scan-per-row — a per-row impl would
+    // push this to >= 9.
     expect(largeDelta).toBeLessThanOrEqual(BATCHED_SCAN_CEILING);
     expect(largeDelta).toBeLessThan(1 + MANY_MATCHES);
+  });
+
+  /**
+   * Conditional-GET freshness across `concerts` writes (BS#1607, migration
+   * 0114). Because the V2 feed embeds `upcoming_show` from `concerts`, a
+   * concerts write must advance the flowsheet watermark — otherwise a polling
+   * client's `If-Modified-Since` would 304 against a page whose curated CTA has
+   * changed (the stale-add case). The 0114 AFTER STATEMENT trigger on
+   * `concerts` reuses `touch_flowsheet_watermark()` (from 0084), which bumps the
+   * watermark to `GREATEST(now(), prev + 1s)` — strictly greater than the
+   * pre-write value, so the subsequent conditional GET recomputes a fresh 200.
+   */
+  it('a concerts write advances the flowsheet watermark: conditional GET re-200s (migration 0114)', async () => {
+    // Use this spec's seeded track range so the range read is non-empty (a
+    // range that matches no rows 404s before the conditional-GET header lands).
+    const startId = Math.min(...insertedTrackIds);
+    const endId = Math.max(...insertedTrackIds);
+    const getFeed = (ifModifiedSince) => {
+      const req = request.get('/flowsheet').query({ start_id: startId, end_id: endId });
+      return ifModifiedSince ? req.set('If-Modified-Since', ifModifiedSince) : req;
+    };
+
+    // Baseline: read the current effective Last-Modified for the feed.
+    const baseline = await getFeed();
+    expect(baseline.status).toBe(200);
+    const lastModified = baseline.headers['last-modified'];
+    expect(lastModified).toBeDefined();
+
+    // Same watermark, no intervening write -> 304 (proves the baseline is a
+    // real conditional-GET watermark, not an always-200 route).
+    const unchanged = await getFeed(lastModified);
+    expect(unchanged.status).toBe(304);
+
+    // A concerts write fires the 0114 trigger and advances the watermark. Use
+    // an UPDATE on an existing seeded row so the write is self-contained (no new
+    // source_id to clean up); the AFTER STATEMENT trigger fires on UPDATE too.
+    // Guard against same-second flooring in the conditional-GET comparison: the
+    // trigger's `+1s` floor guarantees a whole-second advance, but poll a few
+    // times so an unflushed read doesn't race the assertion.
+    await sql.unsafe(`UPDATE "${SCHEMA}".concerts SET scraped_at = now() WHERE source_id = $1`, [
+      `${SOURCE_ID_PREFIX}soon`,
+    ]);
+
+    let statusAfterWrite = 304;
+    for (let i = 0; i < 20; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await getFeed(lastModified);
+      statusAfterWrite = res.status;
+      if (statusAfterWrite === 200) break;
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(statusAfterWrite).toBe(200);
   });
 });
