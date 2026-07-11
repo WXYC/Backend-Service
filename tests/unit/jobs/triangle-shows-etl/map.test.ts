@@ -5,6 +5,7 @@
  */
 import {
   clampCodePoints,
+  extractHeadliner,
   mapEvent,
   splitSupportArtists,
   backdatedStart,
@@ -162,6 +163,157 @@ describe('mapEvent — headliner and title', () => {
     expect([...raw]).toHaveLength(256);
     expect(raw.endsWith('🎸')).toBe(true);
     expect(raw).not.toContain('�');
+  });
+});
+
+// BS#1604: the source's `artist` is the full marquee/billing string in
+// practice (byte-identical to `name` 550/550), which starves the exact-
+// match concerts-artist-resolver. extractHeadliner derives a clean
+// headliner; the contract is CONSERVATIVE — under-strip over over-strip,
+// because a dirty billing merely stays unresolved while an over-stripped
+// one can resolve to the WRONG artist.
+describe('extractHeadliner — strip patterns', () => {
+  it.each([
+    // Leading tag-shaped parentheticals/brackets, incl. repeated.
+    ['(Record Shop) Gracie Abrams Listening Party', 'Gracie Abrams Listening Party'],
+    ['(LOW TIX) (18+) Deerhoof', 'Deerhoof'],
+    ['(SOLD OUT) Jessica Pratt', 'Jessica Pratt'],
+    ['[MOVED TO THE RITZ] Stereolab', 'Stereolab'],
+    // Framing prefixes, with and without the colon for An Evening With.
+    ['An Evening With: Mountain Grass Unit', 'Mountain Grass Unit'],
+    ['An Evening With Juana Molina', 'Juana Molina'],
+    ["Cat's Cradle Presents: Hiss Golden Messenger", 'Hiss Golden Messenger'],
+    // Support-act tails.
+    ["Acid Mother's Temple w/ Magick Potion", "Acid Mother's Temple"],
+    ['76th Street w/ Tornsey', '76th Street'],
+    ['76th Street w/Tornsey', '76th Street'], // no space after the token occurs in the wild
+    ['Wednesday W/ Truth Club', 'Wednesday'], // case-insensitive
+    ['Horse Jumper of Love // Squirrel Flower // Sluice', 'Horse Jumper of Love'],
+    ['Mdou Moctar feat. Mikey Coltun', 'Mdou Moctar'],
+    ['Mdou Moctar ft. Mikey Coltun', 'Mdou Moctar'],
+    ['Mdou Moctar featuring Mikey Coltun', 'Mdou Moctar'],
+    // Stacked structures strip to a fixpoint, and a tail strip cleans up
+    // punctuation it leaves dangling.
+    ['(LOW TIX) An Evening With: Deerhoof w/ Sword II', 'Deerhoof'],
+    ['Deerhoof - w/ Sword II', 'Deerhoof'],
+  ])('extractHeadliner(%j) -> %j', (input, expected) => {
+    expect(extractHeadliner(input)).toBe(expected);
+  });
+});
+
+describe('extractHeadliner — conservative negatives (must NOT strip)', () => {
+  it.each([
+    // `&` / `and` / `with` / `+` are never support delimiters.
+    'Andy Frasco & The U.N',
+    'Duke Ellington & John Coltrane',
+    'Iron and Wine',
+    'Elvis Costello with Steve Nieve',
+    'Sylvan Esso + Flock of Dimes',
+    // A single mixed-case leading parenthetical word is plausibly part of
+    // the name — only tag-shaped parentheticals (multi-word, digits,
+    // all-caps) strip.
+    '(Sandy) Alex G',
+    // Trailing parentheticals are part of the name; only LEADING tags strip.
+    '!!! (Chk Chk Chk)',
+    'Owen (solo)',
+    // Slash-bearing names: delimiters require leading whitespace.
+    'AC/DC',
+    'DIIV/Horsegirl', // no whitespace around the slash — not a ` // ` tail
+    // Word-shaped delimiters require both-sides whitespace / the dot.
+    'Featherweight',
+    'The Weather Station',
+  ])('extractHeadliner(%j) is the identity', (input) => {
+    expect(extractHeadliner(input)).toBe(input);
+  });
+});
+
+describe('extractHeadliner — fallback and idempotence', () => {
+  it.each([
+    // Cleanup that empties the string falls back to the full billing —
+    // better stored verbatim (it just stays unresolved, like today) than
+    // dropped or blanked.
+    ['(SOLD OUT)', '(SOLD OUT)'],
+    ['(18+)', '(18+)'],
+    ['An Evening With:', 'An Evening With:'],
+  ])('falls back to the full billing when cleanup empties it: %j', (input, expected) => {
+    expect(extractHeadliner(input)).toBe(expected);
+  });
+
+  it('trims whitespace even on the fallback path', () => {
+    expect(extractHeadliner('   ')).toBe('');
+    expect(extractHeadliner('  Jessica Pratt  ')).toBe('Jessica Pratt');
+  });
+
+  it.each([
+    "Acid Mother's Temple w/ Magick Potion",
+    '(LOW TIX) (18+) An Evening With: Deerhoof w/ Sword II',
+    '(Record Shop) Gracie Abrams Listening Party',
+    '(SOLD OUT)',
+    'An Evening With:',
+    'Andy Frasco & The U.N',
+    '(Sandy) Alex G',
+    'Horse Jumper of Love // Squirrel Flower',
+  ])('is idempotent: extract(extract(%j)) === extract(%j)', (input) => {
+    const once = extractHeadliner(input);
+    expect(extractHeadliner(once)).toBe(once);
+  });
+});
+
+describe('mapEvent — clean headliner wiring (BS#1604)', () => {
+  it('cleans the billing into headlining_artist_raw while title keeps the full display billing', () => {
+    // The 550/550 case: artist byte-identical to name, both the full billing.
+    const billing = "Acid Mother's Temple w/ Magick Potion";
+    const mapped = mapEvent(makeTsEvent({ artist: billing, name: billing }));
+    expect(mapped.concert.headlining_artist_raw).toBe("Acid Mother's Temple");
+    expect(mapped.concert.title).toBe(billing);
+  });
+
+  it('leaves title NULL when no cleanup fires and artist === name (no behavior change)', () => {
+    const mapped = mapEvent(makeTsEvent({ artist: 'Cat Power', name: 'Cat Power' }));
+    expect(mapped.concert.headlining_artist_raw).toBe('Cat Power');
+    expect(mapped.concert.title).toBeNull();
+  });
+
+  it('prefers a present, non-blank upstream headliner field and skips the heuristic', () => {
+    const billing = '(An Oddly Tagged) Billing w/ Support';
+    const mapped = mapEvent(makeTsEvent({ headliner: 'Acid Mothers Temple', artist: billing, name: billing }));
+    expect(mapped.concert.headlining_artist_raw).toBe('Acid Mothers Temple');
+    expect(mapped.concert.title).toBe(billing);
+  });
+
+  it('trims the upstream headliner before use', () => {
+    const mapped = mapEvent(makeTsEvent({ headliner: '  Deerhoof  ' }));
+    expect(mapped.concert.headlining_artist_raw).toBe('Deerhoof');
+  });
+
+  it.each([
+    ['null', null],
+    ['empty string', ''],
+    ['whitespace only', '   '],
+    ['absent (pre-upstream payloads omit the key)', undefined],
+  ])('falls back to the heuristic when the upstream headliner is %s', (_label, headliner) => {
+    const mapped = mapEvent(makeTsEvent({ headliner, artist: '76th Street w/ Tornsey' }));
+    expect(mapped.concert.headlining_artist_raw).toBe('76th Street');
+  });
+
+  it('clamps the upstream headliner to 256 code points like every other route', () => {
+    const mapped = mapEvent(makeTsEvent({ headliner: 'x'.repeat(500) }));
+    expect(mapped.concert.headlining_artist_raw).toHaveLength(256);
+  });
+
+  it('still throws a map error when headliner, artist AND name are all blank', () => {
+    expect(() => mapEvent(makeTsEvent({ headliner: ' ', artist: null, name: '   ' }))).toThrow(/blank/i);
+  });
+
+  it('writes the row on a blank billing when the upstream headliner carries the name', () => {
+    const mapped = mapEvent(makeTsEvent({ headliner: 'Deerhoof', artist: null, name: '  ' }));
+    expect(mapped.concert.headlining_artist_raw).toBe('Deerhoof');
+    expect(mapped.concert.title).toBeNull();
+  });
+
+  it('strips U+0000 before extraction so the heuristic sees the sanitized billing', () => {
+    const mapped = mapEvent(makeTsEvent({ artist: 'Nil\u0000üfer Yanya w/ Truth Club' }));
+    expect(mapped.concert.headlining_artist_raw).toBe('Nilüfer Yanya');
   });
 });
 
