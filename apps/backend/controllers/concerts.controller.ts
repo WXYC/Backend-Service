@@ -1,4 +1,5 @@
 import { RequestHandler } from 'express';
+import { nyCalendarDate } from '@wxyc/database';
 import * as concertsService from '../services/concerts.service.js';
 import WxycError from '../utils/error.js';
 
@@ -24,27 +25,57 @@ const MAX_LIMIT = 100;
 
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
-const isValidIsoDate = (value: string): boolean => ISO_DATE_PATTERN.test(value) && !Number.isNaN(Date.parse(value));
+/**
+ * Strict `YYYY-MM-DD` calendar-date validation. A shape check plus
+ * `Date.parse` is not enough: `Date.parse` rolls invalid days forward
+ * ('2026-02-30' parses as 2026-03-02, '2026-04-31' as 2026-05-01), so a
+ * bad-but-shaped date would pass validation, reach the Postgres `date`
+ * bind, be rejected there, and surface as an unhandled 500 instead of a
+ * 400. Round-tripping the parsed instant back through `toISOString()` and
+ * comparing the calendar portion rejects any rolled-over date: only a real
+ * calendar day formats back to the exact same string.
+ */
+const isValidIsoDate = (value: string): boolean => {
+  if (!ISO_DATE_PATTERN.test(value)) {
+    return false;
+  }
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+};
 
 /**
  * Today's calendar date where the venues are (America/New_York) — the
  * default `from`. `starts_on` is a venue-local date, so deriving "today"
  * from server-clock UTC would flip the window at 8 PM Eastern and
- * prematurely drop tonight's shows. `en-CA` formats as YYYY-MM-DD.
+ * prematurely drop tonight's shows. Delegates to the shared `nyCalendarDate`
+ * helper (`@wxyc/database`), which the concert writers already use and which
+ * carries a full-ICU guard the inline `Intl` copy lacked.
  */
-const todayEastern = (): string =>
-  new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+const todayEastern = (): string => nyCalendarDate(new Date());
+
+/**
+ * Parse a positive-integer query param behind an all-digits guard. A bare
+ * `parseInt` would accept '1abc' → 1 and '0x10' → 16; requiring the raw
+ * value to be all digits (and using an explicit radix) rejects both.
+ * Returns 400 on malformed input via `WxycError`.
+ */
+const parsePositiveInt = (raw: string, field: string): number => {
+  if (!/^\d+$/.test(raw)) {
+    throw new WxycError(`${field} must be a positive integer`, 400);
+  }
+  return Number.parseInt(raw, 10);
+};
 
 export const getConcerts: RequestHandler<object, unknown, object, ConcertsQueryParams> = async (req, res) => {
   const { query } = req;
 
-  const page = parseInt(query.page ?? '1');
-  const limit = parseInt(query.limit ?? String(DEFAULT_LIMIT));
+  const page = parsePositiveInt(query.page ?? '1', 'page');
+  const limit = parsePositiveInt(query.limit ?? String(DEFAULT_LIMIT), 'limit');
 
-  if (isNaN(page) || page < 1) {
+  if (page < 1) {
     throw new WxycError('page must be a positive integer', 400);
   }
-  if (isNaN(limit) || limit < 1) {
+  if (limit < 1) {
     throw new WxycError('limit must be a positive integer', 400);
   }
   if (limit > MAX_LIMIT) {

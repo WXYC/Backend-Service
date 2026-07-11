@@ -14,11 +14,59 @@
  */
 import { db } from '@wxyc/database';
 import {
+  ConcertDTO,
   ConcertJoinRow,
   getConcertsCount,
   getConcertsPage,
   toConcertDTO,
 } from '../../../apps/backend/services/concerts.service';
+
+/**
+ * Compile-time pin: `ConcertDTO` must match the SSOT `Concert` schema in
+ * `wxyc-shared/api.yaml` v1.15.0. The published `@wxyc/shared` at this
+ * worktree's pin (`^1.15.0`) does not yet export a `Concert` DTO, so we
+ * assert against a hand-mirrored shape derived from the api.yaml operation.
+ * When `@wxyc/shared` publishes `Concert`, replace `ApiYamlConcert` below
+ * with `import type { Concert } from '@wxyc/shared/dtos'` — the two-way
+ * `Equal` assertions then fail loudly if the local alias drifts from the
+ * SSOT (`date-time` fields are strings, `supporting_artists_raw` non-null,
+ * prices numbers, status the closed enum).
+ */
+type ApiYamlConcertVenue = {
+  id: number;
+  slug: string;
+  name: string;
+  city: string;
+  state: string;
+  address: string | null;
+};
+
+type ApiYamlConcert = {
+  id: number;
+  venue: ApiYamlConcertVenue;
+  starts_on: string;
+  starts_at: string | null;
+  doors_at: string | null;
+  headlining_artist_raw: string;
+  headlining_artist_id: number | null;
+  title: string | null;
+  supporting_artists_raw: string[];
+  ticket_url: string | null;
+  image_url: string | null;
+  price_min: number | null;
+  price_max: number | null;
+  age_restriction: string | null;
+  status: 'on_sale' | 'sold_out' | 'cancelled' | 'rescheduled';
+};
+
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+type Expect<T extends true> = T;
+
+// Fails to compile if ConcertDTO and the api.yaml-derived shape diverge in
+// either direction (extra key, missing key, or type mismatch).
+type _ConcertDtoMatchesSsot = Expect<Equal<ConcertDTO, ApiYamlConcert>>;
+// Reference the alias so `noUnusedLocals`/lint keep the assertion live.
+const _concertDtoTypeGuard: _ConcertDtoMatchesSsot = true;
 
 const mockDb = db as unknown as { _chain: Record<string, jest.Mock> };
 
@@ -64,6 +112,14 @@ const dateOnlyRow: ConcertJoinRow = {
   venue_address: null,
 };
 
+describe('ConcertDTO structural pin', () => {
+  it('matches the api.yaml-derived Concert shape (compile-time assertion)', () => {
+    // The real check is the `_ConcertDtoMatchesSsot` type above, which fails
+    // to compile on drift; this keeps a runtime reference to the guard.
+    expect(_concertDtoTypeGuard).toBe(true);
+  });
+});
+
 describe('toConcertDTO', () => {
   it('embeds the full venue object', () => {
     const dto = toConcertDTO(timedRow);
@@ -83,6 +139,13 @@ describe('toConcertDTO', () => {
     expect(dto.price_max).toBe(28.5);
   });
 
+  it('serializes Date instants to ISO-8601 strings (SSOT date-time shape)', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.starts_at).toBe('2026-08-15T00:00:00.000Z');
+    expect(dto.doors_at).toBe('2026-08-14T23:00:00.000Z');
+    expect(typeof dto.starts_at).toBe('string');
+  });
+
   it('passes nulls through for a date-only row (null starts_at)', () => {
     const dto = toConcertDTO(dateOnlyRow);
     expect(dto.starts_on).toBe('2026-09-01');
@@ -92,6 +155,14 @@ describe('toConcertDTO', () => {
     expect(dto.price_min).toBeNull();
     expect(dto.price_max).toBeNull();
     expect(dto.venue.address).toBeNull();
+  });
+
+  it('coalesces a NULL supporting_artists_raw to an empty array', () => {
+    // Spec says the column is non-null, but a defensive coalesce guards
+    // against a stray NULL breaking strict Swift/Kotlin decoders.
+    const nulled = { ...timedRow, supporting_artists_raw: null as unknown as string[] };
+    const dto = toConcertDTO(nulled);
+    expect(dto.supporting_artists_raw).toEqual([]);
   });
 
   it('emits exactly the Concert wire keys — no internal ingestion columns', () => {

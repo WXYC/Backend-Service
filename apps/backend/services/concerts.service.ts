@@ -35,8 +35,12 @@ export type ConcertDTO = {
   id: number;
   venue: VenueDTO;
   starts_on: string;
-  starts_at: Date | null;
-  doors_at: Date | null;
+  // ISO-8601 date-time string (or null), matching the SSOT `Concert` type in
+  // `wxyc-shared/api.yaml` (format: date-time). The Drizzle row surfaces these
+  // as `Date`; `toConcertDTO` serializes them so the local alias aligns with
+  // the generated `@wxyc/shared` shape (see the alias note above).
+  starts_at: string | null;
+  doors_at: string | null;
   headlining_artist_raw: string;
   headlining_artist_id: number | null;
   title: string | null;
@@ -127,12 +131,17 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
     address: row.venue_address,
   },
   starts_on: row.starts_on,
-  starts_at: row.starts_at,
-  doors_at: row.doors_at,
+  // Drizzle surfaces these `timestamptz` columns as `Date`; the SSOT wire
+  // type is an ISO-8601 date-time string. `res.json` already serializes
+  // Date→ISO, so the wire output is unchanged; this makes the DTO type honest.
+  starts_at: row.starts_at === null ? null : row.starts_at.toISOString(),
+  doors_at: row.doors_at === null ? null : row.doors_at.toISOString(),
   headlining_artist_raw: row.headlining_artist_raw,
   headlining_artist_id: row.headlining_artist_id,
   title: row.title,
-  supporting_artists_raw: row.supporting_artists_raw,
+  // Spec declares this a required non-null array; coalesce a NULL row value
+  // to [] so a stray null can't break strict Swift/Kotlin decoders.
+  supporting_artists_raw: row.supporting_artists_raw ?? [],
   ticket_url: row.ticket_url,
   image_url: row.image_url,
   price_min: toDollars(row.price_min),
