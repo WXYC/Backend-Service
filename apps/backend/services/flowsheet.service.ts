@@ -19,7 +19,9 @@ import {
   library_artist_view,
   specialty_shows,
   album_metadata,
+  nyCalendarDate,
 } from '@wxyc/database';
+import { getUpcomingShowsForArtists } from './concerts.service.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -174,6 +176,14 @@ const FSEntryFieldsRaw = {
       END
     )
   `,
+  // Resolved catalog artist for the played release, via the flowsheet ->
+  // library FK join already present on every read path below
+  // (`leftJoin(library, library.id = flowsheet.album_id)`). NULL for
+  // free-form entries (no album_id) and for library rows with no artist link.
+  // Not a client-facing wire field itself — it's the batch key the V2 feed
+  // uses to attach the per-playcut `upcoming_show` enrichment (BS#1607),
+  // matched against `concerts.headlining_artist_id` (same `artists.id` space).
+  artist_id: library.artist_id,
   request_flag: flowsheet.request_flag,
   segue: flowsheet.segue,
   message: flowsheet.message,
@@ -229,6 +239,7 @@ type FSEntryRaw = {
   label_id: number | null;
   rotation_id: number | null;
   rotation_bin: string | null;
+  artist_id: number | null;
   request_flag: boolean | null;
   segue: boolean | null;
   message: string | null;
@@ -274,6 +285,7 @@ const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
   label_id: raw.label_id,
   rotation_id: raw.rotation_id,
   rotation_bin: raw.rotation_bin,
+  artist_id: raw.artist_id ?? null,
   request_flag: raw.request_flag ?? false,
   segue: raw.segue ?? false,
   message: raw.message,
@@ -1068,6 +1080,55 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> =>
  * Transform a V1 flowsheet entry to V2 discriminated union format.
  * Removes irrelevant fields based on entry_type for cleaner API responses.
  */
+/**
+ * Attach the per-playcut `upcoming_show` enrichment to a feed page of entries
+ * (BS#1607, touring-events Phase 3).
+ *
+ * Batched — ONE indexed concerts query for the whole page, never one per row
+ * (the no-N+1 guarantee; project #32 perf posture). Collects the distinct
+ * resolved `artist_id`s across the track rows, does a single
+ * `getUpcomingShowsForArtists` lookup, and fans the soonest curated upcoming
+ * concert back onto each matching track. Rows with no resolved artist, or
+ * whose artist has no curated upcoming date, are returned unchanged
+ * (`upcoming_show` stays absent) — so the wire shape is byte-identical to
+ * pre-1607 for the no-match case (additive/optional field).
+ *
+ * "Today" is America/New_York (`nyCalendarDate`), matching `GET /concerts`'s
+ * default `from`: `starts_on` is a venue-local calendar date, so a UTC "today"
+ * would flip the window at 8 PM Eastern and prematurely drop tonight's shows.
+ *
+ * Returns the same array reference with the matched entries mutated in place;
+ * the caller maps the result through `transformToV2`, which reads
+ * `entry.upcoming_show`.
+ */
+export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry[]> => {
+  const artistIds = Array.from(
+    new Set(
+      entries
+        .filter((entry) => entry.entry_type === 'track' && entry.artist_id !== null)
+        .map((entry) => entry.artist_id as number)
+    )
+  );
+  if (artistIds.length === 0) {
+    return entries;
+  }
+
+  const byArtist = await getUpcomingShowsForArtists(artistIds, nyCalendarDate(new Date()));
+  if (byArtist.size === 0) {
+    return entries;
+  }
+
+  for (const entry of entries) {
+    if (entry.entry_type === 'track' && entry.artist_id !== null) {
+      const show = byArtist.get(entry.artist_id);
+      if (show !== undefined) {
+        entry.upcoming_show = show;
+      }
+    }
+  }
+  return entries;
+};
+
 export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
   const baseFields = {
     id: entry.id,
@@ -1119,6 +1180,13 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         // (WXYC/wxyc-ios-64#270). Always present on track rows once the
         // column ships; `pending` is the default for newly-inserted rows.
         metadata_status: entry.metadata_status,
+        // Per-playcut upcoming-show enrichment (BS#1607). The key is emitted
+        // ONLY when `attachUpcomingShows` matched a curated upcoming concert
+        // for this track's artist — a no-match track row is byte-identical to
+        // its pre-1607 shape (the parity requirement), and iOS decodes the
+        // absent field as "no touring CTA". The SSOT field is optional +
+        // nullable, so this present-or-absent projection is spec-conformant.
+        ...(entry.upcoming_show ? { upcoming_show: entry.upcoming_show } : {}),
       };
 
     case 'show_start':

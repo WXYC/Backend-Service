@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, isNotNull, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import { concerts, db, venues } from '@wxyc/database';
 
 /**
@@ -199,4 +199,66 @@ export const getConcertsCount = async (filters: ConcertsQueryFilters): Promise<n
     .where(buildWhere(filters));
 
   return Number(result[0]?.count ?? 0);
+};
+
+/**
+ * Batched artist → soonest-upcoming-curated-concert lookup, backing the V2
+ * flowsheet feed's per-playcut `upcoming_show` enrichment (BS#1607, touring-
+ * events Phase 3).
+ *
+ * ONE indexed query for a whole feed page — never one query per row. The
+ * caller (`flowsheet.service` `attachUpcomingShows`) collects the distinct
+ * resolved artist ids across the returned page and passes them here; the
+ * result is a `Map<artistId, ConcertDTO>` it fans back out onto the matching
+ * playcuts. This is the no-N+1 guarantee the ticket and the post-launch
+ * hardening posture (project #32) require.
+ *
+ * Predicate is exactly the curated feed's: `headlining_artist_id IN (…)`,
+ * `removed_at IS NULL`, `starts_on >= today` (America/New_York, supplied by
+ * the caller so the window matches `GET /concerts`'s `todayEastern`). The
+ * `headlining_artist_id IS NOT NULL AND removed_at IS NULL` conjuncts let the
+ * planner read `concerts_curated_starts_on_idx`.
+ *
+ * One concert per artist — the SOONEST. `DISTINCT ON (headlining_artist_id)`
+ * with `ORDER BY headlining_artist_id, starts_on ASC, id` collapses an
+ * artist's multiple upcoming dates to the earliest (id as a stable tiebreak
+ * when two dates coincide), mirroring the "soonest wins" rule documented on
+ * the `upcoming_show` DTO. `DISTINCT ON` requires the distinct expression to
+ * lead the ORDER BY; the venue-embedding join and the DTO mapping reuse
+ * `getConcertsPage`'s projection so the wire shape can't drift.
+ *
+ * Returns an empty map for an empty id list without touching the DB.
+ */
+export const getUpcomingShowsForArtists = async (
+  artistIds: number[],
+  today: string
+): Promise<Map<number, ConcertDTO>> => {
+  const byArtist = new Map<number, ConcertDTO>();
+  if (artistIds.length === 0) {
+    return byArtist;
+  }
+
+  const rows = await db
+    .selectDistinctOn([concerts.headlining_artist_id], concertJoinFields)
+    .from(concerts)
+    .innerJoin(venues, eq(venues.id, concerts.venue_id))
+    .where(
+      and(
+        isNotNull(concerts.headlining_artist_id),
+        isNull(concerts.removed_at),
+        gte(concerts.starts_on, today),
+        inArray(concerts.headlining_artist_id, artistIds)
+      )
+    )
+    .orderBy(asc(concerts.headlining_artist_id), asc(concerts.starts_on), asc(concerts.id));
+
+  for (const row of rows as ConcertJoinRow[]) {
+    // headlining_artist_id is non-null here (the WHERE guards it), but the
+    // ConcertJoinRow type keeps it nullable for the general projection; the
+    // guard keeps the Map key a plain number.
+    if (row.headlining_artist_id !== null) {
+      byArtist.set(row.headlining_artist_id, toConcertDTO(row));
+    }
+  }
+  return byArtist;
 };

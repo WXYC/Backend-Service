@@ -2,6 +2,7 @@ import { jest } from '@jest/globals';
 
 type MockQueryChain = {
   select: jest.Mock;
+  selectDistinctOn: jest.Mock;
   from: jest.Mock;
   where: jest.Mock;
   innerJoin: jest.Mock;
@@ -22,6 +23,7 @@ export function createMockQueryChain(resolvedValue: unknown = []): MockQueryChai
 
   const chainMethods = [
     'select',
+    'selectDistinctOn',
     'from',
     'where',
     'innerJoin',
@@ -52,6 +54,7 @@ export function createMockDb() {
   const mockChain = createMockQueryChain();
   const mockDb = {
     select: mockChain.select,
+    selectDistinctOn: mockChain.selectDistinctOn,
     insert: mockChain.insert,
     update: mockChain.update,
     delete: mockChain.delete,
