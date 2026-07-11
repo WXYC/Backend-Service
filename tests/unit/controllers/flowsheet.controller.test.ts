@@ -12,6 +12,11 @@ const mockGetEntriesByShow = jest.fn<() => Promise<unknown[]>>();
 const mockGetNShows = jest.fn<() => Promise<unknown[]>>();
 const mockGetShowMetadata = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...(entry as Record<string, unknown>), v2: true }));
+// BS#1607: the feed paths call attachUpcomingShows before projecting to V2.
+// It's a no-op passthrough here (the enrichment logic is unit-tested in
+// tests/unit/services/flowsheet.attachUpcomingShows.test.ts); returning the
+// same array keeps these controller tests focused on the HTTP wiring.
+const mockAttachUpcomingShows = jest.fn((entries: unknown[]) => Promise.resolve(entries));
 const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>();
@@ -33,6 +38,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getNShows: mockGetNShows,
   getShowMetadata: mockGetShowMetadata,
   transformToV2: mockTransformToV2,
+  attachUpcomingShows: mockAttachUpcomingShows,
   addTrack: mockAddTrack,
   getLatestShow: mockGetLatestShow,
   getOnAirDJName: mockGetOnAirDJName,

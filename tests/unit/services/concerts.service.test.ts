@@ -18,6 +18,7 @@ import {
   ConcertJoinRow,
   getConcertsCount,
   getConcertsPage,
+  getUpcomingShowsForArtists,
   toConcertDTO,
 } from '../../../apps/backend/services/concerts.service';
 
@@ -228,5 +229,54 @@ describe('getConcertsCount', () => {
   it('returns 0 when the aggregate row is missing', async () => {
     mockDb._chain.where.mockReturnValueOnce(Promise.resolve([]));
     await expect(getConcertsCount({ from: '2026-08-01', curated: true })).resolves.toBe(0);
+  });
+});
+
+describe('getUpcomingShowsForArtists (BS#1607)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('short-circuits an empty artist-id list without touching the DB', async () => {
+    const result = await getUpcomingShowsForArtists([], '2026-08-01');
+    expect(result.size).toBe(0);
+    expect(mockDb._chain.selectDistinctOn).not.toHaveBeenCalled();
+  });
+
+  it('maps each row to a ConcertDTO keyed by headlining_artist_id', async () => {
+    const other: ConcertJoinRow = { ...timedRow, id: 202, headlining_artist_id: 5555 };
+    // Terminal .orderBy() resolves the DISTINCT ON row set for this call.
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([timedRow, other]));
+
+    const result = await getUpcomingShowsForArtists([4211, 5555], '2026-08-01');
+
+    expect(result.size).toBe(2);
+    expect(result.get(4211)).toEqual(toConcertDTO(timedRow));
+    expect(result.get(5555)).toEqual(toConcertDTO(other));
+  });
+
+  it('distinct-selects on headlining_artist_id (soonest-per-artist collapse)', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    await getUpcomingShowsForArtists([4211], '2026-08-01');
+    // The DISTINCT ON expression list must lead with headlining_artist_id.
+    const distinctArgs = mockDb._chain.selectDistinctOn.mock.calls[0][0] as string[];
+    expect(distinctArgs).toEqual(['headlining_artist_id']);
+  });
+
+  it('never selects internal ingestion columns', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    await getUpcomingShowsForArtists([4211], '2026-08-01');
+    const projection = mockDb._chain.selectDistinctOn.mock.calls[0][1] as Record<string, string>;
+    const selectedColumns = Object.values(projection);
+    for (const internal of INTERNAL_COLUMNS) {
+      expect(selectedColumns).not.toContain(internal);
+    }
+  });
+
+  it('skips a defensive null headlining_artist_id row (never a Map key)', async () => {
+    const nulledKey: ConcertJoinRow = { ...timedRow, headlining_artist_id: null };
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([nulledKey]));
+    const result = await getUpcomingShowsForArtists([4211], '2026-08-01');
+    expect(result.size).toBe(0);
   });
 });

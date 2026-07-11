@@ -6,6 +6,7 @@ import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/datab
 // play_order is computed by the service layer, not provided by controllers
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
+import type { ConcertDTO } from '../services/concerts.service.js';
 import { projectFlowsheetEntry } from '../utils/flowsheet-projection.js';
 import { stashMirrorData } from '../middleware/legacy/mirror.middleware.js';
 import WxycError from '../utils/error.js';
@@ -72,6 +73,17 @@ export interface IFSEntry extends Omit<
   rotation_bin: string | null;
   on_streaming: boolean | null;
   metadata: IFSEntryMetadata;
+  // Resolved catalog artist for the played release (flowsheet.album_id ->
+  // library.artist_id). Not a wire field — the batch key `attachUpcomingShows`
+  // uses to look up the per-playcut `upcoming_show` (BS#1607). NULL for
+  // free-form entries and unresolved library rows.
+  artist_id: number | null;
+  // Per-playcut upcoming-show enrichment (BS#1607). Populated only on track
+  // rows whose `artist_id` matched a curated, non-tombstoned, upcoming
+  // concert; absent/undefined otherwise. `transformToV2` emits it as
+  // `upcoming_show` on the V2 track wire shape (SSOT `FlowsheetV2TrackEntry`,
+  // wxyc-shared api.yaml 1.16.0), reusing the `Concert` schema verbatim.
+  upcoming_show?: ConcertDTO | null;
 }
 
 const MAX_ITEMS = 200;
@@ -91,6 +103,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     const entries = await flowsheet_service.getEntriesByShow(...recentShows.map((show) => show.id));
 
     if (entries.length) {
+      await flowsheet_service.attachUpcomingShows(entries);
       res.status(200).json(entries.map(flowsheet_service.transformToV2));
     } else {
       res.status(404).json({
@@ -106,6 +119,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     }
     const entries = await flowsheet_service.getEntriesByRange(parseInt(query.start_id), parseInt(query.end_id));
     if (entries.length) {
+      await flowsheet_service.attachUpcomingShows(entries);
       res.status(200).json(entries.map(flowsheet_service.transformToV2));
     } else {
       res.status(404).json({ message: 'No Tracks found' });
@@ -131,6 +145,10 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
       return undefined;
     }),
   ]);
+
+  // Attach the per-playcut upcoming-show enrichment (BS#1607) before
+  // projecting to V2 — one batched concerts query for the whole page.
+  await flowsheet_service.attachUpcomingShows(entries);
 
   const totalPages = Math.ceil(total / limit);
 
@@ -158,6 +176,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
 export const getLatest: RequestHandler = async (req, res) => {
   const entries = await flowsheet_service.getEntriesByPage(0, 1);
   if (entries.length) {
+    await flowsheet_service.attachUpcomingShows(entries);
     res.status(200).json(flowsheet_service.transformToV2(entries[0]));
   } else {
     res.status(204).end();
@@ -556,6 +575,8 @@ export const getShowInfo: RequestHandler<object, unknown, object, { show_id: str
     flowsheet_service.getShowMetadata(showId),
     flowsheet_service.getEntriesByShow(showId),
   ]);
+
+  await flowsheet_service.attachUpcomingShows(entries);
 
   res.status(200).json({
     ...showMetadata,
