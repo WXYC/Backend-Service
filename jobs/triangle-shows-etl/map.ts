@@ -76,18 +76,41 @@ export const splitSupportArtists = (raw: string | null): string[] =>
 const LEADING_TAG = /^[([]([^)\]]*)[)\]]\s*/;
 
 /**
+ * Ticketing/venue noise phrases that mark a mixed-case leading parenthetical
+ * as strippable even when it isn't all-caps or digit-bearing (`(Sold Out)`,
+ * `(Moved to the Ritz)`, `(Record Shop)`). Word-boundary anchored, not a
+ * bare substring, so a band name that merely CONTAINS a noise word
+ * (`(Free Energy)`, `(Moved by Music)`) stays attached — the conservative
+ * contract prefers leaving an unknown parenthetical over guessing it's a
+ * tag. Deliberately small and phrase-specific.
+ */
+const NOISE_PATTERNS = [
+  /\bsold[\s-]?out\b/,
+  /\blow tix\b/,
+  /\brecord shop\b/,
+  /\bmoved to\b/,
+  /\bcancell?ed\b/,
+  /\bpostponed\b/,
+  /\brescheduled\b/,
+];
+
+/**
  * Venue tags look like `(Record Shop)`, `(LOW TIX)`, `(18+)`, `(SOLD
- * OUT)` — multi-word, digit-bearing, or shouty. A single mixed-case word
- * is plausibly part of the artist's name (`(Sandy) Alex G`), so it stays.
- * The `toLowerCase` half of the all-caps test keeps caseless scripts from
- * counting as "all caps".
+ * OUT)`, `[MOVED TO THE RITZ]` — all-caps, digit/age-gate-bearing, or a
+ * recognizable ticketing/venue noise phrase. A leading parenthetical that
+ * is merely multi-word is NOT enough: a real multi-word band name can lead
+ * a billing (`(Free Energy) Truth Club`), and the conservative contract
+ * prefers keeping it over guessing it's a tag. The `toLowerCase` half of
+ * the all-caps test keeps caseless scripts from counting as "all caps".
  */
 const isStrippableLeadingTag = (content: string): boolean => {
   const tag = content.trim();
   if (tag === '') return true; // pure noise, e.g. '()'
-  if (/[\s\d]/.test(tag)) return true; // multi-word or digit-bearing: (Record Shop), (18+)
+  if (/\d/.test(tag)) return true; // digit / age-gate: (18+)
   const letters = tag.replace(/[^\p{L}]+/gu, '');
-  return letters.length >= 2 && letters === letters.toUpperCase() && letters !== letters.toLowerCase();
+  if (letters.length >= 2 && letters === letters.toUpperCase() && letters !== letters.toLowerCase()) return true;
+  const lower = tag.toLowerCase();
+  return NOISE_PATTERNS.some((pattern) => pattern.test(lower));
 };
 
 /** `An Evening With: X` / `An Evening With X` — the framing is never the
@@ -107,9 +130,12 @@ const PRESENTS_PREFIX = /^[^:]*\bpresents\s*:\s*/i;
  * space after the token (`w/Magick Potion` occurs in the wild) while the
  * word-shaped forms require one so a name merely containing the letters
  * (`Featherweight`) is safe. Plain ` with `, `&`, `and`, `+` are NOT
- * delimiters — far too common inside legitimate names.
+ * delimiters — far too common inside legitimate names. The `w/(?!o(?:ut)?\b)`
+ * negative lookahead keeps `w/` from firing on the abbreviations `w/o` and
+ * `w/out` — those mean "without" and belong to the name (`Angel w/o Wings`),
+ * not a support delimiter.
  */
-const SUPPORT_TAIL = /\s+(?:w\/|\/\/)\s*\S.*$|\s+(?:feat\.|ft\.|featuring)\s+\S.*$/i;
+const SUPPORT_TAIL = /\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*\S.*$|\s+(?:feat\.|ft\.|featuring)\s+\S.*$/i;
 
 /** Punctuation a tail/prefix strip can leave dangling (`Foo -` after
  *  `Foo - w/ Bar`). Terminal `!`/`?`/`.` are kept — they end real names. */
@@ -125,6 +151,18 @@ const TRAILING_DANGLE = /[\s,;:\-–—]+$/;
 export const extractHeadliner = (billing: string): string => {
   const original = billing.trim();
   let cleaned = original;
+  let stripped = false;
+  // Strip the support-act tail FIRST. `PRESENTS_PREFIX` (below) is greedy
+  // to the last colon, so running it before the tail strip lets a promoter
+  // clause buried in a support tail eat the real headliner
+  // (`Deerhoof w/ Hopscotch Presents: Late Night Set` -> `Late Night Set`).
+  // Removing the tail up front leaves the leading fixpoint only the
+  // headliner + its framing to work on.
+  const afterTail = cleaned.replace(SUPPORT_TAIL, '');
+  if (afterTail !== cleaned) {
+    cleaned = afterTail;
+    stripped = true;
+  }
   // Leading structures repeat and stack — `(LOW TIX) (18+) An Evening
   // With: X` — so strip to a fixpoint. Terminates: every pass that
   // doesn't break strictly shortens the string.
@@ -136,8 +174,13 @@ export const extractHeadliner = (billing: string): string => {
     }
     cleaned = cleaned.replace(AN_EVENING_WITH, '').replace(PRESENTS_PREFIX, '').trimStart();
     if (cleaned === before) break;
+    stripped = true;
   }
-  cleaned = cleaned.replace(SUPPORT_TAIL, '').replace(TRAILING_DANGLE, '').trim();
+  // Only clean a dangling separator when a strip actually fired — otherwise
+  // a verbatim name that legitimately ends in punctuation (`Sleep Token —`)
+  // would be silently altered.
+  if (stripped) cleaned = cleaned.replace(TRAILING_DANGLE, '');
+  cleaned = cleaned.trim();
   return cleaned === '' ? original : cleaned;
 };
 
