@@ -21,6 +21,7 @@ import { internalBansRoute } from './routes/internal-bans.route.js';
 import { ses_events_route } from './routes/ses-events.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
+import { concerts_route } from './routes/concerts.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
 import {
@@ -94,6 +95,9 @@ app.use('/proxy', proxy_route);
 
 // Enriched playlist proxy (unauthenticated, matches tubafrenzy path)
 app.use('/playlists', playlist_route);
+
+// Touring Soon concerts feed (anonymous auth, pure DB read) — BS#1603
+app.use('/concerts', concerts_route);
 
 // Business logic routes
 app.use('/labels', labels_route);
