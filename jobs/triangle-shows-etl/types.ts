@@ -19,6 +19,13 @@ export type TsEvent = {
   /** Event display name; NOT NULL at the source (String(500)). */
   name: string;
   artist: string | null;
+  /**
+   * Clean performer name, extracted upstream (WXYC/triangle-shows#18).
+   * Nullable AND optional: best-effort at the source, and absent entirely
+   * until the upstream change deploys — the ETL prefers it when present
+   * and non-blank, falling back to the local heuristic (BS#1604).
+   */
+  headliner?: string | null;
   /** Single comma-joined string at the source, not a list. */
   support_artists: string | null;
   /** Venue-local calendar date, `YYYY-MM-DD`. */

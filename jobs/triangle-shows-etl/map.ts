@@ -48,6 +48,99 @@ export const splitSupportArtists = (raw: string | null): string[] =>
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
+/* ------------------------------------------------------------------ *
+ * Clean-headliner extraction (BS#1604)                                *
+ *                                                                     *
+ * triangle-shows' `artist` field is byte-identical to the event       *
+ * `name` in practice — the full marquee/billing string, not a clean   *
+ * performer — which starves the exact-match `concerts-artist-resolver`*
+ * (9/259 distinct billings resolved). Until the upstream `headliner`  *
+ * field (WXYC/triangle-shows#18) covers the corpus, derive a clean    *
+ * headliner here. TRIANGLE_SHOWS-SPECIFIC by design: RHP headliners   *
+ * are already clean, and the shared resolver stays untouched.         *
+ *                                                                     *
+ * Conservative by contract: prefer under-stripping — a billing left   *
+ * dirty just stays unresolved (today's behavior), while over-stripping*
+ * can mangle a legitimate name into a WRONG resolution. `&`/`and` are *
+ * never treated as support delimiters (Andy Frasco & The U.N), and a  *
+ * leading single mixed-case parenthetical word is kept ((Sandy) Alex  *
+ * G) — only tag-shaped parentheticals strip. Idempotent: every rule   *
+ * removes its own trigger, and the empty-result fallback returns a    *
+ * string none of the rules re-fire on.                                *
+ * ------------------------------------------------------------------ */
+
+/** Leading `(...)`/`[...]` group plus trailing whitespace; content captured
+ *  so `isStrippableLeadingTag` can rule on it. Anchored — only LEADING
+ *  parentheticals are candidates; trailing ones (`!!! (Chk Chk Chk)`) are
+ *  part of the name. */
+const LEADING_TAG = /^[([]([^)\]]*)[)\]]\s*/;
+
+/**
+ * Venue tags look like `(Record Shop)`, `(LOW TIX)`, `(18+)`, `(SOLD
+ * OUT)` — multi-word, digit-bearing, or shouty. A single mixed-case word
+ * is plausibly part of the artist's name (`(Sandy) Alex G`), so it stays.
+ * The `toLowerCase` half of the all-caps test keeps caseless scripts from
+ * counting as "all caps".
+ */
+const isStrippableLeadingTag = (content: string): boolean => {
+  const tag = content.trim();
+  if (tag === '') return true; // pure noise, e.g. '()'
+  if (/[\s\d]/.test(tag)) return true; // multi-word or digit-bearing: (Record Shop), (18+)
+  const letters = tag.replace(/[^\p{L}]+/gu, '');
+  return letters.length >= 2 && letters === letters.toUpperCase() && letters !== letters.toLowerCase();
+};
+
+/** `An Evening With: X` / `An Evening With X` — the framing is never the
+ *  performer. Requires a colon or whitespace after `with` so a band name
+ *  merely STARTING with the phrase (`An Evening Withering`) is untouched. */
+const AN_EVENING_WITH = /^an evening with[:\s]+/i;
+
+/** `<Promoter> Presents: X` — colon REQUIRED: `X Presents Y` without one
+ *  is too weak a signal (plausibly a name), and `[^:]*` keeps the strip
+ *  from eating past other colon structure in the billing. */
+const PRESENTS_PREFIX = /^[^:]*\bpresents\s*:\s*/i;
+
+/**
+ * Support-act tails: ` w/ X`, ` // X // Y`, ` feat. X`, ` ft. X`,
+ * ` featuring X`. Every delimiter requires LEADING whitespace so
+ * slash-bearing names (`AC/DC`) never split; `w/`+`//` allow a missing
+ * space after the token (`w/Magick Potion` occurs in the wild) while the
+ * word-shaped forms require one so a name merely containing the letters
+ * (`Featherweight`) is safe. Plain ` with `, `&`, `and`, `+` are NOT
+ * delimiters — far too common inside legitimate names.
+ */
+const SUPPORT_TAIL = /\s+(?:w\/|\/\/)\s*\S.*$|\s+(?:feat\.|ft\.|featuring)\s+\S.*$/i;
+
+/** Punctuation a tail/prefix strip can leave dangling (`Foo -` after
+ *  `Foo - w/ Bar`). Terminal `!`/`?`/`.` are kept — they end real names. */
+const TRAILING_DANGLE = /[\s,;:\-–—]+$/;
+
+/**
+ * Derive a clean headliner from a billing string. Exported for the unit
+ * suite. Returns the trimmed input unchanged when no rule fires, and
+ * falls back to the trimmed input when cleanup empties the string (a
+ * pure-tag billing like `(SOLD OUT)` is still better stored verbatim
+ * than dropped — it just stays unresolved, exactly like today).
+ */
+export const extractHeadliner = (billing: string): string => {
+  const original = billing.trim();
+  let cleaned = original;
+  // Leading structures repeat and stack — `(LOW TIX) (18+) An Evening
+  // With: X` — so strip to a fixpoint. Terminates: every pass that
+  // doesn't break strictly shortens the string.
+  for (;;) {
+    const before = cleaned;
+    const tag = LEADING_TAG.exec(cleaned);
+    if (tag && isStrippableLeadingTag(tag[1])) {
+      cleaned = cleaned.slice(tag[0].length).trimStart();
+    }
+    cleaned = cleaned.replace(AN_EVENING_WITH, '').replace(PRESENTS_PREFIX, '').trimStart();
+    if (cleaned === before) break;
+  }
+  cleaned = cleaned.replace(SUPPORT_TAIL, '').replace(TRAILING_DANGLE, '').trim();
+  return cleaned === '' ? original : cleaned;
+};
+
 /** numeric(8,2) tops out at 999999.99, and PG errors rather than
  *  truncates. Judged on the ROUNDED value — toFixed carries 999999.996
  *  to '1000000.00'. */
@@ -128,13 +221,22 @@ export const mapEvent = (event: TsEvent): MappedEvent => {
   // '' where they mean "unknown", and an empty headliner defeats both the
   // resolver and any display. `name` is NOT NULL at the source but can be
   // whitespace — trim BEFORE the truthiness check so it can't slip through
-  // as a blank headliner; when both are blank the event is unresolvable
-  // garbage, thrown as a countable map_error rather than written.
+  // as a blank headliner; when everything is blank the event is
+  // unresolvable garbage, thrown as a countable map_error rather than
+  // written.
   const artist = sanitized.artist?.trim() ?? '';
   const name = sanitized.name.trim();
-  const headliner = artist || name;
+  const billing = artist || name;
+  // BS#1604: prefer the upstream clean-performer field when present and
+  // non-blank (WXYC/triangle-shows#18 emits it best-effort — nullable,
+  // and absent entirely until it deploys); otherwise derive a clean
+  // headliner from the billing string. Both routes hit the same clamp.
+  const upstreamHeadliner = sanitized.headliner?.trim() ?? '';
+  const headliner = upstreamHeadliner || extractHeadliner(billing);
   if (headliner === '') {
-    throw new Error(`mapEvent: event id ${event.id} has a blank artist AND name — refusing a headliner-less row`);
+    throw new Error(
+      `mapEvent: event id ${event.id} has a blank headliner, artist AND name — refusing a headliner-less row`
+    );
   }
   const clampedHeadliner = clampCodePoints(headliner, HEADLINER_MAX);
 
@@ -163,8 +265,12 @@ export const mapEvent = (event: TsEvent): MappedEvent => {
       // Schema contract (schema.ts): 'Event name as the source displays
       // it, when distinct from the artist' — rhp_scrape rows leave it
       // NULL. When the headliner already IS the name (artist absent or
-      // identical), writing it again would render 'Juana Molina — Juana
-      // Molina' in any feed using the headliner—title shape. Compared
+      // identical, and no cleanup fired), writing it again would render
+      // 'Juana Molina — Juana Molina' in any feed using the
+      // headliner—title shape. When BS#1604 cleanup (or the upstream
+      // field) DID change the headliner, this same rule now preserves
+      // the full display billing here — the clean headliner is for the
+      // resolver, not a display replacement. Compared
       // against the CLAMPED headliner so a >256-code-point name keeps its
       // full text here exactly when truncation amputated the raw column;
       // the `name &&` guard keeps a blank name (with a valid artist) from
