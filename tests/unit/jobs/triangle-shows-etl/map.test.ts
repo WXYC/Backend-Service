@@ -196,6 +196,13 @@ describe('extractHeadliner — strip patterns', () => {
     // punctuation it leaves dangling.
     ['(LOW TIX) An Evening With: Deerhoof w/ Sword II', 'Deerhoof'],
     ['Deerhoof - w/ Sword II', 'Deerhoof'],
+    // `w/` without a space before the support act still strips.
+    ['Wednesday w/Truth Club', 'Wednesday'],
+    // Rule ordering: the support tail is stripped BEFORE the greedy
+    // `Presents:` prefix, so a promoter clause buried inside a support tail
+    // can't eat the real headliner (would otherwise yield 'Late Night Set').
+    ['Deerhoof w/ Hopscotch Presents: Late Night Set', 'Deerhoof'],
+    ['Superchunk w/ Merge Records Presents: All-Stars', 'Superchunk'],
   ])('extractHeadliner(%j) -> %j', (input, expected) => {
     expect(extractHeadliner(input)).toBe(expected);
   });
@@ -222,20 +229,48 @@ describe('extractHeadliner — conservative negatives (must NOT strip)', () => {
     // Word-shaped delimiters require both-sides whitespace / the dot.
     'Featherweight',
     'The Weather Station',
+    // `w/o` / `w/out` mean "without" and belong to the name — the `w/`
+    // delimiter has a negative lookahead so it does not fire on them.
+    'Angel w/o Wings',
+    'The Man w/out a Country',
+    // A recognizable multi-word band name leads the billing: NOT a tag, so
+    // the leading parenthetical stays (only ticketing/venue noise strips).
+    '(Free Energy) Truth Club',
+    // No strip fired, so a name that legitimately ends in a dash/dangle is
+    // left verbatim (TRAILING_DANGLE only runs after a real strip).
+    'Sleep Token —',
+    'Godspeed You! Black Emperor',
   ])('extractHeadliner(%j) is the identity', (input) => {
     expect(extractHeadliner(input)).toBe(input);
+  });
+
+  it('strips `w/` (a real support delimiter) but not `w/o`', () => {
+    expect(extractHeadliner('76th Street w/ Tornsey')).toBe('76th Street');
+    expect(extractHeadliner('76th Street w/Tornsey')).toBe('76th Street');
+    expect(extractHeadliner('Angel w/o Wings')).toBe('Angel w/o Wings');
+  });
+
+  it('keeps the leading band name in a `(Band) Headliner` billing (does not strip to the trailing word)', () => {
+    // Regression: a "contains a space" rule would over-strip this to 'Truth
+    // Club'. Conservative contract keeps the whole verbatim billing.
+    expect(extractHeadliner('(Free Energy) Truth Club')).toBe('(Free Energy) Truth Club');
+  });
+
+  it('leaves a trailing dangle when no other rule fired, but cleans one a strip left behind', () => {
+    expect(extractHeadliner('Sleep Token —')).toBe('Sleep Token —');
+    expect(extractHeadliner('Deerhoof - w/ Sword II')).toBe('Deerhoof');
   });
 });
 
 describe('extractHeadliner — fallback and idempotence', () => {
   it.each([
-    // Cleanup that empties the string falls back to the full billing —
+    // Cleanup that empties the string falls back to the trimmed billing —
     // better stored verbatim (it just stays unresolved, like today) than
     // dropped or blanked.
     ['(SOLD OUT)', '(SOLD OUT)'],
     ['(18+)', '(18+)'],
     ['An Evening With:', 'An Evening With:'],
-  ])('falls back to the full billing when cleanup empties it: %j', (input, expected) => {
+  ])('falls back to the trimmed billing when cleanup empties it: %j', (input, expected) => {
     expect(extractHeadliner(input)).toBe(expected);
   });
 
