@@ -541,6 +541,7 @@ components:
         - supporting_artists_raw
         - ticket_url
         - image_url
+        - event_url
         - price_min
         - price_max
         - age_restriction
@@ -579,6 +580,12 @@ components:
         image_url:
           type: string
           nullable: true
+        event_url:
+          type: string
+          nullable: true
+          description: >-
+            The venue's own event-detail page, distinct from ticket_url (often
+            a third-party seller). Null when no venue page is known.
         price_min:
           type: number
           nullable: true

@@ -224,6 +224,31 @@ describe('starts_on venue-local calendar date (migration 0112, BS#1589)', () => 
   });
 });
 
+// BS#1609 — `event_url` is the venue's own event-detail page, parsed all
+// along (`ParsedConcert.event_page_url`) but dropped at write time until the
+// column existed. It refreshes in BOTH the INSERT values and the ON CONFLICT
+// set (like ticket_url/image_url) so a moved page URL propagates on re-scrape,
+// and typecheck doesn't cover jobs/**, so this test is the net.
+describe('event_url venue-page passthrough (migration 0115, BS#1609)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('maps event_page_url -> event_url in both the INSERT values and the ON CONFLICT set', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
+
+    const parsed = fakeParsed('venue-page');
+    await upsertConcert(parsed, 1, new Date('2026-06-05T12:00:00Z'));
+
+    const values = concertInsertRows();
+    const sets = concertSetClauses();
+    expect(values.length).toBeGreaterThan(0);
+    expect(sets.length).toBeGreaterThan(0);
+    for (const row of values) expect(row).toHaveProperty('event_url', parsed.event_page_url);
+    for (const set of sets) expect(set).toHaveProperty('event_url', parsed.event_page_url);
+  });
+});
+
 describe('ensureVenue (seeded path)', () => {
   beforeEach(() => {
     jest.clearAllMocks();

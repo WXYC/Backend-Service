@@ -220,6 +220,10 @@ export const upsertConcert = async (
     supporting_artists_raw: parsed.supporting_artists,
     ticket_url: parsed.ticket_url,
     image_url: parsed.image_url,
+    // The venue's own event-detail page (BS#1609). Parsed all along but
+    // dropped at write time until this column existed; refreshes on every
+    // pass like ticket_url/image_url so a moved page URL propagates.
+    event_url: parsed.event_page_url,
     raw_data: parsed.raw,
     scraped_at: new Date(scrapedAtIso),
   };
@@ -251,6 +255,7 @@ export const upsertConcert = async (
         supporting_artists_raw: values.supporting_artists_raw,
         ticket_url: values.ticket_url,
         image_url: values.image_url,
+        event_url: values.event_url,
         raw_data: values.raw_data,
         scraped_at: values.scraped_at,
         last_modified: sql`now()`,

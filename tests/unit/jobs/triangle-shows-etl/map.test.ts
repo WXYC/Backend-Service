@@ -476,6 +476,19 @@ describe('mapEvent — tombstones and raw payload', () => {
     expect(mapped.concert.ticket_url).toBe('https://t');
     expect(mapped.concert.image_url).toBe('https://i');
   });
+
+  // BS#1609 — source_url is the venue's own event-detail page (the field the
+  // old iOS DTO decoded as the Box Office CTA target). It maps to
+  // concerts.event_url, distinct from ticket_url (the third-party seller).
+  it('maps source_url through to event_url (the venue event page)', () => {
+    const mapped = mapEvent(makeTsEvent({ source_url: 'https://venue.example/event/9/' }));
+    expect(mapped.concert.event_url).toBe('https://venue.example/event/9/');
+  });
+
+  it('carries a null source_url through as null event_url (client falls back to ticket_url)', () => {
+    const mapped = mapEvent(makeTsEvent({ source_url: null }));
+    expect(mapped.concert.event_url).toBeNull();
+  });
 });
 
 describe('backdatedStart', () => {

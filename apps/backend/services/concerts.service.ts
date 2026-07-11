@@ -15,7 +15,7 @@ import { concerts, db, venues } from '@wxyc/database';
 
 /**
  * Wire shapes mirroring `Venue` / `Concert` / `ConcertsResponse` in
- * `wxyc-shared/api.yaml` v1.15.0 (the cross-repo SSOT). Local aliases pending
+ * `wxyc-shared/api.yaml` v1.17.0 (the cross-repo SSOT). Local aliases pending
  * a published `@wxyc/shared` that carries them — once the dependency pin in
  * `apps/backend/package.json` reaches that version, these should be replaced
  * with `import type { Concert, Venue } from '@wxyc/shared/dtos'`. Same
@@ -47,6 +47,9 @@ export type ConcertDTO = {
   supporting_artists_raw: string[];
   ticket_url: string | null;
   image_url: string | null;
+  // The venue's own event-detail page (BS#1609). Distinct from ticket_url
+  // (often a third-party seller); the iOS CTA prefers this when non-null.
+  event_url: string | null;
   price_min: number | null;
   price_max: number | null;
   age_restriction: string | null;
@@ -77,6 +80,7 @@ export type ConcertJoinRow = {
   supporting_artists_raw: string[];
   ticket_url: string | null;
   image_url: string | null;
+  event_url: string | null;
   price_min: string | null;
   price_max: string | null;
   age_restriction: string | null;
@@ -104,6 +108,7 @@ const concertJoinFields = {
   supporting_artists_raw: concerts.supporting_artists_raw,
   ticket_url: concerts.ticket_url,
   image_url: concerts.image_url,
+  event_url: concerts.event_url,
   price_min: concerts.price_min,
   price_max: concerts.price_max,
   age_restriction: concerts.age_restriction,
@@ -144,6 +149,7 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
   supporting_artists_raw: row.supporting_artists_raw ?? [],
   ticket_url: row.ticket_url,
   image_url: row.image_url,
+  event_url: row.event_url,
   price_min: toDollars(row.price_min),
   price_max: toDollars(row.price_max),
   age_restriction: row.age_restriction,
