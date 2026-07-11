@@ -237,6 +237,30 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
     });
   });
 
+  // Migration 0115 (BS#1609): event_url is the venue's own event-detail
+  // page, additive + nullable so existing rows are untouched. Both scrapers
+  // refill it on their nightly UPSERT; rows with no known page stay NULL.
+  describe('concerts.event_url (migration 0115, BS#1609)', () => {
+    const def = () => extractTableDef('concerts');
+    const entry115 = journal.entries.find((e) => e.tag.startsWith('0115_'));
+    const sqlPath115 = entry115 ? path.join(migrationsDir, `${entry115.tag}.sql`) : null;
+    const sql115 = sqlPath115 && fs.existsSync(sqlPath115) ? fs.readFileSync(sqlPath115, 'utf-8') : '';
+
+    it('declares event_url as a nullable text column', () => {
+      const d = def();
+      expect(d).toMatch(/event_url:\s*text\(['"]event_url['"]\)/);
+      const column = d.match(/event_url:\s*\w+\([^)]*\)[^,\n]*/);
+      expect(column?.[0]).toBeDefined();
+      expect(column?.[0]).not.toMatch(/\.notNull\(\)/);
+    });
+
+    it('is added by migration 0115 (additive ADD COLUMN, no NOT NULL)', () => {
+      expect(entry115).toBeDefined();
+      expect(sql115).toMatch(/ALTER TABLE "wxyc_schema"\."concerts" ADD COLUMN "event_url" text/);
+      expect(sql115).not.toMatch(/event_url"\s+text\s+NOT NULL/);
+    });
+  });
+
   describe('enums', () => {
     it('declares concert_source_enum with rhp_scrape and triangle_shows (0112)', () => {
       expect(schemaSource).toMatch(/concertSourceEnum\s*=\s*wxyc_schema\.enum\(['"]concert_source_enum['"]/);

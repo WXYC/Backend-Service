@@ -178,6 +178,7 @@ export const upsertConcert = async (
         supporting_artists_raw: values.supporting_artists_raw,
         ticket_url: values.ticket_url,
         image_url: values.image_url,
+        event_url: values.event_url,
         price_min: values.price_min,
         price_max: values.price_max,
         age_restriction: values.age_restriction,

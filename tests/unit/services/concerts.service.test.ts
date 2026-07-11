@@ -24,7 +24,7 @@ import {
 
 /**
  * Compile-time pin: `ConcertDTO` must match the SSOT `Concert` schema in
- * `wxyc-shared/api.yaml` v1.15.0. The published `@wxyc/shared` at this
+ * `wxyc-shared/api.yaml` v1.17.0 (event_url added in 1.17.0 / BS#1609). The published `@wxyc/shared` at this
  * worktree's pin (`^1.15.0`) does not yet export a `Concert` DTO, so we
  * assert against a hand-mirrored shape derived from the api.yaml operation.
  * When `@wxyc/shared` publishes `Concert`, replace `ApiYamlConcert` below
@@ -54,6 +54,7 @@ type ApiYamlConcert = {
   supporting_artists_raw: string[];
   ticket_url: string | null;
   image_url: string | null;
+  event_url: string | null;
   price_min: number | null;
   price_max: number | null;
   age_restriction: string | null;
@@ -82,8 +83,9 @@ const timedRow: ConcertJoinRow = {
   headlining_artist_id: 4211,
   title: null,
   supporting_artists_raw: ['Hermanos Gutiérrez'],
-  ticket_url: 'https://catscradle.com/event/nilufer-yanya/',
+  ticket_url: 'https://www.etix.com/ticket/p/nilufer-yanya',
   image_url: 'https://catscradle.com/img/nilufer-yanya.jpg',
+  event_url: 'https://catscradle.com/event/nilufer-yanya/',
   price_min: '25.00',
   price_max: '28.50',
   age_restriction: 'All Ages',
@@ -107,6 +109,7 @@ const dateOnlyRow: ConcertJoinRow = {
   supporting_artists_raw: [],
   ticket_url: null,
   image_url: null,
+  event_url: null,
   price_min: null,
   price_max: null,
   age_restriction: null,
@@ -158,6 +161,19 @@ describe('toConcertDTO', () => {
     expect(dto.venue.address).toBeNull();
   });
 
+  // BS#1609 — event_url is the venue event page, distinct from ticket_url. It
+  // passes through verbatim (present or null); a null lets iOS fall back to
+  // ticket_url exactly as before the field existed.
+  it('passes event_url through, distinct from ticket_url', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.event_url).toBe('https://catscradle.com/event/nilufer-yanya/');
+    expect(dto.event_url).not.toBe(dto.ticket_url);
+  });
+
+  it('emits a null event_url for a row with no known venue page', () => {
+    expect(toConcertDTO(dateOnlyRow).event_url).toBeNull();
+  });
+
   it('coalesces a NULL supporting_artists_raw to an empty array', () => {
     // Spec says the column is non-null, but a defensive coalesce guards
     // against a stray NULL breaking strict Swift/Kotlin decoders.
@@ -181,6 +197,7 @@ describe('toConcertDTO', () => {
         'supporting_artists_raw',
         'ticket_url',
         'image_url',
+        'event_url',
         'price_min',
         'price_max',
         'age_restriction',

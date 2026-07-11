@@ -159,6 +159,20 @@ describe('upsertConcert', () => {
     expect(fragmentText).toMatch(/excluded/i);
   });
 
+  it('writes event_url in both the INSERT values and the ON CONFLICT set (source-authoritative venue page, BS#1609)', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: false }]);
+    const url = 'https://thepinhook.com/event/777/';
+    await upsertConcert(mapEvent(fakeEvent({ source_url: url })), 5, scrapedAt);
+
+    const rows = concertValuesRows();
+    const sets = concertSetClauses();
+    expect(rows.length).toBeGreaterThan(0);
+    expect(sets.length).toBeGreaterThan(0);
+    expect(rows[0]).toHaveProperty('event_url', url);
+    // In `set` too, so a moved venue-page URL propagates on re-scrape.
+    expect(sets[0]).toHaveProperty('event_url', url);
+  });
+
   it('threads venue_id and the venue-qualified source_id into the row', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
     await upsertConcert(mapEvent(fakeEvent()), 31337, scrapedAt);

@@ -36,6 +36,10 @@ export type TsEvent = {
   price_min: number | null;
   price_max: number | null;
   image_url: string | null;
+  /** The event detail page on the venue's own site (the field the old iOS
+   *  DTO decoded as the Box Office CTA target). Maps to `concerts.event_url`
+   *  (BS#1609). */
+  source_url: string | null;
   genre: string | null;
   subgenre: string | null;
   /** Source EventStatus enum: on_sale | sold_out | cancelled | free. */

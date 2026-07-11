@@ -55,6 +55,7 @@ export const makeTsEvent = (overrides: Partial<TsEvent> = {}): TsEvent => ({
   price_min: 18,
   price_max: 22,
   image_url: 'https://example.com/101.jpg',
+  source_url: 'https://thepinhook.com/event/101/',
   genre: 'folk',
   subgenre: null,
   status: 'on_sale',

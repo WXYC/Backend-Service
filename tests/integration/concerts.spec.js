@@ -72,6 +72,7 @@ describe('GET /concerts (BS#1603)', () => {
       supporting_artists: [],
       ticket_url: null,
       image_url: null,
+      event_url: null,
       price_min: null,
       price_max: null,
       age_restriction: null,
@@ -84,8 +85,8 @@ describe('GET /concerts (BS#1603)', () => {
          (source, source_id, venue_id, starts_on, starts_at, doors_at,
           headlining_artist_raw, headlining_artist_id, title, supporting_artists_raw,
           ticket_url, image_url, price_min, price_max, age_restriction, status,
-          removed_at, raw_data, scraped_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, '{}'::jsonb, now())`,
+          removed_at, event_url, raw_data, scraped_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, '{}'::jsonb, now())`,
       [
         row.source,
         SOURCE_ID_PREFIX + row.key,
@@ -104,6 +105,7 @@ describe('GET /concerts (BS#1603)', () => {
         row.age_restriction,
         row.status,
         row.removed_at,
+        row.event_url,
       ]
     );
   };
@@ -155,6 +157,7 @@ describe('GET /concerts (BS#1603)', () => {
       supporting_artists: ['Opener A', 'Opener B'],
       ticket_url: 'https://example.com/tickets/bs1603',
       image_url: 'https://example.com/img/bs1603.jpg',
+      event_url: 'https://example.com/venue/event/bs1603',
       price_min: '25.00',
       price_max: '28.50',
       age_restriction: 'All Ages',
@@ -228,6 +231,10 @@ describe('GET /concerts (BS#1603)', () => {
       expect(dateOnly).toBeDefined();
       expect(dateOnly.starts_at).toBeNull();
       expect(dateOnly.starts_on).toBe(IN_20);
+      // BS#1609: event_url is present in the projection and null when the row
+      // has no known venue page (iOS falls back to ticket_url) — asserting
+      // `null` (not absent) pins that the backend always emits the key.
+      expect(dateOnly.event_url).toBeNull();
 
       // Past and removed rows are absent.
       expect(keys).not.toContain('Long Gone Act');
@@ -247,6 +254,7 @@ describe('GET /concerts (BS#1603)', () => {
         supporting_artists_raw: ['Opener A', 'Opener B'],
         ticket_url: 'https://example.com/tickets/bs1603',
         image_url: 'https://example.com/img/bs1603.jpg',
+        event_url: 'https://example.com/venue/event/bs1603',
         price_min: 25,
         price_max: 28.5,
         age_restriction: 'All Ages',

@@ -2061,6 +2061,11 @@ export const concerts = wxyc_schema.table(
       .default(sql`'{}'::text[]`),
     ticket_url: text('ticket_url'),
     image_url: text('image_url'),
+    // The venue's own event-detail page (distinct from ticket_url, which is
+    // often a third-party seller). Nullable — many rows have no known venue
+    // page. Surfaced on the Concert read model so the iOS CTA can prefer the
+    // venue page over the ticket link (BS#1609).
+    event_url: text('event_url'),
     // Dollars. free events carry price_min = 0 (status maps to on_sale).
     price_min: numeric('price_min', { precision: 8, scale: 2 }),
     price_max: numeric('price_max', { precision: 8, scale: 2 }),
