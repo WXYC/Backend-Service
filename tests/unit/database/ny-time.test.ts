@@ -7,7 +7,7 @@
  * these, so DST correctness is pinned explicitly on both transition days.
  */
 import { describe, test, expect } from '@jest/globals';
-import { NY_TIME_ZONE, nyCalendarDate, nyWallClockToUtc } from '../../../shared/database/src/ny-time';
+import { NY_TIME_ZONE, nyCalendarDate, nyStartOfDay, nyWallClockToUtc } from '../../../shared/database/src/ny-time';
 
 describe('NY_TIME_ZONE', () => {
   test('is the canonical IANA name (consumers import this instead of re-hardcoding)', () => {
@@ -32,6 +32,45 @@ describe('nyCalendarDate', () => {
 
   test('output always matches the YYYY-MM-DD shape the date column expects (full-icu guard)', () => {
     expect(nyCalendarDate(new Date('2026-06-14T01:30:00Z'))).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});
+
+describe('nyStartOfDay', () => {
+  test.each([
+    // EST (UTC-5): midnight ET on 2026-01-15 is 05:00Z.
+    ['2026-01-15T18:00:00Z', '2026-01-15T05:00:00.000Z'],
+    // An instant just after EST midnight still floors to the same 05:00Z.
+    ['2026-01-15T05:00:01Z', '2026-01-15T05:00:00.000Z'],
+    // An instant just BEFORE EST midnight belongs to the previous ET day
+    // (04:59Z on the 15th is still Jan 14 in NY -> 2026-01-14T05:00Z).
+    ['2026-01-15T04:59:00Z', '2026-01-14T05:00:00.000Z'],
+    // EDT (UTC-4): midnight ET on 2026-07-04 is 04:00Z.
+    ['2026-07-04T18:00:00Z', '2026-07-04T04:00:00.000Z'],
+  ])('nyStartOfDay(%s) -> %s', (iso, expectedIso) => {
+    expect(nyStartOfDay(new Date(iso)).toISOString()).toBe(expectedIso);
+  });
+
+  test('the returned instant floors to its own ET calendar date (round-trips through nyCalendarDate)', () => {
+    const start = nyStartOfDay(new Date('2026-07-04T18:00:00Z'));
+    expect(nyCalendarDate(start)).toBe('2026-07-04');
+  });
+
+  test('ET-midnight rollover advances the start-of-day instant deterministically (injectable now)', () => {
+    // The conditional-GET watermark fold (BS#1607) relies on this jump: a
+    // request one second BEFORE ET midnight and one second AFTER must resolve
+    // to different start-of-day instants exactly one ET day apart, so a
+    // pre-midnight If-Modified-Since goes stale at the rollover. EST here.
+    const justBeforeMidnightET = new Date('2026-01-16T04:59:59Z'); // 23:59:59 ET on the 15th
+    const justAfterMidnightET = new Date('2026-01-16T05:00:01Z'); // 00:00:01 ET on the 16th
+    expect(nyStartOfDay(justBeforeMidnightET).toISOString()).toBe('2026-01-15T05:00:00.000Z');
+    expect(nyStartOfDay(justAfterMidnightET).toISOString()).toBe('2026-01-16T05:00:00.000Z');
+    expect(nyStartOfDay(justAfterMidnightET).getTime()).toBeGreaterThan(nyStartOfDay(justBeforeMidnightET).getTime());
+  });
+
+  test('defaults to the current instant when called with no argument', () => {
+    // Same-ET-day contract: the default-arg path must agree with an explicit
+    // `new Date()` reading (both floor to today's ET midnight).
+    expect(nyStartOfDay().toISOString()).toBe(nyStartOfDay(new Date()).toISOString());
   });
 });
 

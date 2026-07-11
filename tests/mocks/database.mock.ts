@@ -357,7 +357,7 @@ export type { IntParserOptions } from '../../shared/database/src/env-parsers.js'
 export { normalizeArtistName } from '../../shared/database/src/normalize-artist-name.js';
 export { normalizeAlbumTitle } from '../../shared/database/src/normalize-album-title.js';
 export { freetextPairKey, normalizeFreetextArtist } from '../../shared/database/src/freetext-norm.js';
-export { NY_TIME_ZONE, nyCalendarDate, nyWallClockToUtc } from '../../shared/database/src/ny-time.js';
+export { NY_TIME_ZONE, nyCalendarDate, nyStartOfDay, nyWallClockToUtc } from '../../shared/database/src/ny-time.js';
 
 // Self-contained STUB of shared/database/src/concerts-sql.ts. The real
 // module imports schema.ts, which calls drizzle's `eq` at module scope (a
