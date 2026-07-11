@@ -496,6 +496,126 @@ components:
           items:
             $ref: '#/components/schemas/FlowsheetEntryV2'
 
+    Venue:
+      type: object
+      description: A live-music venue whose calendar WXYC ingests. Embedded whole in Concert.
+      required:
+        - id
+        - slug
+        - name
+        - city
+        - state
+        - address
+      properties:
+        id:
+          type: integer
+        slug:
+          type: string
+        name:
+          type: string
+        city:
+          type: string
+        state:
+          type: string
+        address:
+          type: string
+          nullable: true
+
+    Concert:
+      type: object
+      description: >-
+        One upcoming (or recent) concert. `starts_on` is the venue-local
+        calendar date and is always present; `starts_at` is the exact instant
+        and is null for date-only events. Internal ingestion columns are not
+        exposed.
+      required:
+        - id
+        - venue
+        - starts_on
+        - starts_at
+        - doors_at
+        - headlining_artist_raw
+        - headlining_artist_id
+        - title
+        - supporting_artists_raw
+        - ticket_url
+        - image_url
+        - price_min
+        - price_max
+        - age_restriction
+        - status
+      properties:
+        id:
+          type: integer
+        venue:
+          $ref: '#/components/schemas/Venue'
+        starts_on:
+          type: string
+          format: date
+        starts_at:
+          type: string
+          format: date-time
+          nullable: true
+        doors_at:
+          type: string
+          format: date-time
+          nullable: true
+        headlining_artist_raw:
+          type: string
+        headlining_artist_id:
+          type: integer
+          nullable: true
+        title:
+          type: string
+          nullable: true
+        supporting_artists_raw:
+          type: array
+          items:
+            type: string
+        ticket_url:
+          type: string
+          nullable: true
+        image_url:
+          type: string
+          nullable: true
+        price_min:
+          type: number
+          nullable: true
+        price_max:
+          type: number
+          nullable: true
+        age_restriction:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [on_sale, sold_out, cancelled, rescheduled]
+
+    ConcertsResponse:
+      type: object
+      required:
+        - concerts
+        - pagination
+      properties:
+        concerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Concert'
+        pagination:
+          type: object
+          required:
+            - page
+            - limit
+          properties:
+            page:
+              type: integer
+            limit:
+              type: integer
+            total:
+              type: integer
+            hasMore:
+              type: boolean
+
 security:
   - BearerAuth: []
 
@@ -1497,3 +1617,57 @@ paths:
       responses:
         '200':
           description: Successfully added to schedule
+
+  /concerts:
+    get:
+      summary: List upcoming concerts (Touring Soon feed)
+      description: >-
+        Upcoming non-removed concerts windowed on the venue-local calendar
+        date `starts_on`, ordered by `starts_on` ascending, paginated.
+        `curated=true` narrows to concerts whose headliner resolved to a WXYC
+        catalog artist. Requires anonymous session auth.
+      parameters:
+        - name: curated
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Only concerts with a resolved catalog headliner
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Window start (inclusive) on starts_on; defaults to today (America/New_York)
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Window end (inclusive) on starts_on; defaults to unbounded
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number (1-indexed)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          description: Page size
+      responses:
+        '200':
+          description: Paginated list of upcoming concerts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConcertsResponse'
+        '400':
+          description: Invalid query parameters
+        '401':
+          description: Authentication required
