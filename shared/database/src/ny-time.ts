@@ -64,6 +64,28 @@ export const nyCalendarDate = (instant: Date): string => {
   return formatted;
 };
 
+/**
+ * The UTC instant of the most recent America/New_York midnight (00:00:00
+ * local) at or before `instant` — i.e. the start of the Eastern calendar day
+ * that `instant` falls in.
+ *
+ * `instant` is injectable (defaults to `new Date()`) so callers can pin "now"
+ * deterministically in tests — notably to exercise the ET-midnight rollover of
+ * the conditional-GET watermark without waiting for the wall clock.
+ *
+ * Used by the flowsheet conditional-GET watermark (BS#1607): the effective
+ * Last-Modified is `max(flowsheet_watermark, nyStartOfDay(now))`. The upcoming-
+ * show feed enrichment filters `concerts.starts_on >= nyCalendarDate(now)`, so
+ * at ET midnight a previously-cached page must be recomputed to drop a
+ * now-past show even though no flowsheet write moved the watermark. Folding
+ * this instant in makes a pre-midnight `If-Modified-Since` go stale exactly
+ * when the ET calendar date rolls over.
+ *
+ * Built on the same `nyCalendarDate` + `nyWallClockToUtc` pair the concert
+ * writers use, so it agrees with them on DST boundaries by construction.
+ */
+export const nyStartOfDay = (instant: Date = new Date()): Date => nyWallClockToUtc(nyCalendarDate(instant), '00:00');
+
 /** New York's UTC offset in milliseconds at the given instant (negative: -5h EST / -4h EDT). */
 const nyOffsetMsAt = (instant: Date): number => {
   const part = nyOffsetFormat.formatToParts(instant).find((p) => p.type === 'timeZoneName');

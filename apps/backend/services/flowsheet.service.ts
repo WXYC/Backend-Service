@@ -20,6 +20,7 @@ import {
   specialty_shows,
   album_metadata,
   nyCalendarDate,
+  nyStartOfDay,
 } from '@wxyc/database';
 import { getUpcomingShowsForArtists } from './concerts.service.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
@@ -100,10 +101,32 @@ const nextPlayOrder = async (showId: number): Promise<number> => {
  * Returns the epoch (`new Date(0)`) only as a defensive fallback — the
  * migration seeds the singleton row at apply time, so in production the
  * SELECT always returns exactly one row.
+ *
+ * ET-midnight fold (BS#1607): the effective watermark is
+ * `max(flowsheet_watermark, nyStartOfDay(now))`. The V2 feed's per-playcut
+ * `upcoming_show` enrichment (`attachUpcomingShows`) filters
+ * `concerts.starts_on >= nyCalendarDate(now)`, so the cached-GET response
+ * depends on the wall-clock ET date, not only on flowsheet writes. Without
+ * this fold, after ET midnight with no overnight flowsheet write a
+ * now-past show's CTA would keep rendering (a client's pre-midnight
+ * If-Modified-Since would 304 against a stale watermark). Maxing in the
+ * start-of-today ET instant jumps the watermark forward at midnight, so the
+ * first request past midnight gets a fresh 200 and the feed is recomputed —
+ * dropping the past show. `concerts`-table INSERT/UPDATE/DELETE advances the
+ * watermark directly (migration 0114's trigger), covering the stale-add case;
+ * this fold covers the stale-drop case, which no write signals.
+ *
+ * The fold applies to every route wired to `flowsheetConditionalGet`
+ * (`GET /flowsheet` and `GET /flowsheet/latest`); the accepted cost is one
+ * extra unconditional refetch per client per ET day. `now` is injectable
+ * (defaults to `new Date()`) so the midnight rollover is unit-testable
+ * deterministically.
  */
-export const getLastModifiedAt = async (): Promise<Date> => {
+export const getLastModifiedAt = async (now: Date = new Date()): Promise<Date> => {
   const result = await db.select({ at: flowsheet_watermark.last_modified_at }).from(flowsheet_watermark).limit(1);
-  return result[0]?.at ?? new Date(0);
+  const watermark = result[0]?.at ?? new Date(0);
+  const startOfEtDay = nyStartOfDay(now);
+  return watermark.getTime() >= startOfEtDay.getTime() ? watermark : startOfEtDay;
 };
 
 // SQL query fields (flat structure from database)
@@ -1114,9 +1137,6 @@ export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry
   }
 
   const byArtist = await getUpcomingShowsForArtists(artistIds, nyCalendarDate(new Date()));
-  if (byArtist.size === 0) {
-    return entries;
-  }
 
   for (const entry of entries) {
     if (entry.entry_type === 'track' && entry.artist_id !== null) {
