@@ -14,7 +14,20 @@
  */
 
 import { nyCalendarDate, nyWallClockToUtc, type NewConcert } from '@wxyc/database';
+import { extractHeadliner } from './headliner.js';
 import type { TsEvent } from './types.js';
+
+// Clean-headliner extraction (BS#1604) + the BS#1614 clean-name LML gate
+// live in headliner.ts — a deliberately DB-free module so the BS#1614
+// name-set export script can import them without tripping
+// `@wxyc/database`'s import-time env guard. Re-exported here so ETL-side
+// consumers keep one import surface.
+export {
+  extractHeadliner,
+  isCleanHeadliner,
+  HARD_BILLING_DELIMITERS,
+  BILLING_DELIMITER_PATTERNS,
+} from './headliner.js';
 
 /** Code-point-safe truncation (`String.prototype.slice` counts UTF-16 code
  *  units and can strand half a surrogate pair as U+FFFD in the DB). Lives
@@ -47,142 +60,6 @@ export const splitSupportArtists = (raw: string | null): string[] =>
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-
-/* ------------------------------------------------------------------ *
- * Clean-headliner extraction (BS#1604)                                *
- *                                                                     *
- * triangle-shows' `artist` field is byte-identical to the event       *
- * `name` in practice — the full marquee/billing string, not a clean   *
- * performer — which starves the exact-match `concerts-artist-resolver`*
- * (9/259 distinct billings resolved). Until the upstream `headliner`  *
- * field (WXYC/triangle-shows#18) covers the corpus, derive a clean    *
- * headliner here. TRIANGLE_SHOWS-SPECIFIC by design: RHP headliners   *
- * are already clean, and the shared resolver stays untouched.         *
- *                                                                     *
- * Conservative by contract: prefer under-stripping — a billing left   *
- * dirty just stays unresolved (today's behavior), while over-stripping*
- * can mangle a legitimate name into a WRONG resolution. `&`/`and` are *
- * never treated as support delimiters (Andy Frasco & The U.N), and a  *
- * leading single mixed-case parenthetical word is kept ((Sandy) Alex  *
- * G) — only tag-shaped parentheticals strip. Idempotent: every rule   *
- * removes its own trigger, and the empty-result fallback returns a    *
- * string none of the rules re-fire on.                                *
- * ------------------------------------------------------------------ */
-
-/** Leading `(...)`/`[...]` group plus trailing whitespace; content captured
- *  so `isStrippableLeadingTag` can rule on it. Anchored — only LEADING
- *  parentheticals are candidates; trailing ones (`!!! (Chk Chk Chk)`) are
- *  part of the name. */
-const LEADING_TAG = /^[([]([^)\]]*)[)\]]\s*/;
-
-/**
- * Ticketing/venue noise phrases that mark a mixed-case leading parenthetical
- * as strippable even when it isn't all-caps or digit-bearing (`(Sold Out)`,
- * `(Moved to the Ritz)`, `(Record Shop)`). Word-boundary anchored, not a
- * bare substring, so a band name that merely CONTAINS a noise word
- * (`(Free Energy)`, `(Moved by Music)`) stays attached — the conservative
- * contract prefers leaving an unknown parenthetical over guessing it's a
- * tag. Deliberately small and phrase-specific.
- */
-const NOISE_PATTERNS = [
-  /\bsold[\s-]?out\b/,
-  /\blow tix\b/,
-  /\brecord shop\b/,
-  /\bmoved to\b/,
-  /\bcancell?ed\b/,
-  /\bpostponed\b/,
-  /\brescheduled\b/,
-];
-
-/**
- * Venue tags look like `(Record Shop)`, `(LOW TIX)`, `(18+)`, `(SOLD
- * OUT)`, `[MOVED TO THE RITZ]` — all-caps, digit/age-gate-bearing, or a
- * recognizable ticketing/venue noise phrase. A leading parenthetical that
- * is merely multi-word is NOT enough: a real multi-word band name can lead
- * a billing (`(Free Energy) Truth Club`), and the conservative contract
- * prefers keeping it over guessing it's a tag. The `toLowerCase` half of
- * the all-caps test keeps caseless scripts from counting as "all caps".
- */
-const isStrippableLeadingTag = (content: string): boolean => {
-  const tag = content.trim();
-  if (tag === '') return true; // pure noise, e.g. '()'
-  if (/\d/.test(tag)) return true; // digit / age-gate: (18+)
-  const letters = tag.replace(/[^\p{L}]+/gu, '');
-  if (letters.length >= 2 && letters === letters.toUpperCase() && letters !== letters.toLowerCase()) return true;
-  const lower = tag.toLowerCase();
-  return NOISE_PATTERNS.some((pattern) => pattern.test(lower));
-};
-
-/** `An Evening With: X` / `An Evening With X` — the framing is never the
- *  performer. Requires a colon or whitespace after `with` so a band name
- *  merely STARTING with the phrase (`An Evening Withering`) is untouched. */
-const AN_EVENING_WITH = /^an evening with[:\s]+/i;
-
-/** `<Promoter> Presents: X` — colon REQUIRED: `X Presents Y` without one
- *  is too weak a signal (plausibly a name), and `[^:]*` keeps the strip
- *  from eating past other colon structure in the billing. */
-const PRESENTS_PREFIX = /^[^:]*\bpresents\s*:\s*/i;
-
-/**
- * Support-act tails: ` w/ X`, ` // X // Y`, ` feat. X`, ` ft. X`,
- * ` featuring X`. Every delimiter requires LEADING whitespace so
- * slash-bearing names (`AC/DC`) never split; `w/`+`//` allow a missing
- * space after the token (`w/Magick Potion` occurs in the wild) while the
- * word-shaped forms require one so a name merely containing the letters
- * (`Featherweight`) is safe. Plain ` with `, `&`, `and`, `+` are NOT
- * delimiters — far too common inside legitimate names. The `w/(?!o(?:ut)?\b)`
- * negative lookahead keeps `w/` from firing on the abbreviations `w/o` and
- * `w/out` — those mean "without" and belong to the name (`Angel w/o Wings`),
- * not a support delimiter.
- */
-const SUPPORT_TAIL = /\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*\S.*$|\s+(?:feat\.|ft\.|featuring)\s+\S.*$/i;
-
-/** Punctuation a tail/prefix strip can leave dangling (`Foo -` after
- *  `Foo - w/ Bar`). Terminal `!`/`?`/`.` are kept — they end real names. */
-const TRAILING_DANGLE = /[\s,;:\-–—]+$/;
-
-/**
- * Derive a clean headliner from a billing string. Exported for the unit
- * suite. Returns the trimmed input unchanged when no rule fires, and
- * falls back to the trimmed input when cleanup empties the string (a
- * pure-tag billing like `(SOLD OUT)` is still better stored verbatim
- * than dropped — it just stays unresolved, exactly like today).
- */
-export const extractHeadliner = (billing: string): string => {
-  const original = billing.trim();
-  let cleaned = original;
-  let stripped = false;
-  // Strip the support-act tail FIRST. `PRESENTS_PREFIX` (below) is greedy
-  // to the last colon, so running it before the tail strip lets a promoter
-  // clause buried in a support tail eat the real headliner
-  // (`Deerhoof w/ Hopscotch Presents: Late Night Set` -> `Late Night Set`).
-  // Removing the tail up front leaves the leading fixpoint only the
-  // headliner + its framing to work on.
-  const afterTail = cleaned.replace(SUPPORT_TAIL, '');
-  if (afterTail !== cleaned) {
-    cleaned = afterTail;
-    stripped = true;
-  }
-  // Leading structures repeat and stack — `(LOW TIX) (18+) An Evening
-  // With: X` — so strip to a fixpoint. Terminates: every pass that
-  // doesn't break strictly shortens the string.
-  for (;;) {
-    const before = cleaned;
-    const tag = LEADING_TAG.exec(cleaned);
-    if (tag && isStrippableLeadingTag(tag[1])) {
-      cleaned = cleaned.slice(tag[0].length).trimStart();
-    }
-    cleaned = cleaned.replace(AN_EVENING_WITH, '').replace(PRESENTS_PREFIX, '').trimStart();
-    if (cleaned === before) break;
-    stripped = true;
-  }
-  // Only clean a dangling separator when a strip actually fired — otherwise
-  // a verbatim name that legitimately ends in punctuation (`Sleep Token —`)
-  // would be silently altered.
-  if (stripped) cleaned = cleaned.replace(TRAILING_DANGLE, '');
-  cleaned = cleaned.trim();
-  return cleaned === '' ? original : cleaned;
-};
 
 /** numeric(8,2) tops out at 999999.99, and PG errors rather than
  *  truncates. Judged on the ROUNDED value — toFixed carries 999999.996
