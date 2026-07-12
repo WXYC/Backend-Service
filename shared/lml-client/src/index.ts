@@ -1016,6 +1016,197 @@ export async function refreshForIdentities(
 }
 
 /**
+ * Wire shape for `POST /api/v1/artists/resolve/bulk` (LML#759, BS#1614).
+ *
+ * Mirrors `ArtistResolveBulkRequest` / `ArtistResolveBulkResponse` /
+ * `ArtistResolveResult` and the three verdict enums in `wxyc-shared/api.yaml`
+ * (PR A, wxyc-shared#218). Defined locally rather than imported from
+ * `@wxyc/shared/dtos` so this wrapper compiles against the currently-shipped
+ * shared bundle; the types move to `@wxyc/shared/dtos` once the OpenAPI codegen
+ * catches up. Same pattern used by `EntityResolveResponse`,
+ * `ReleaseIdentityResolveRequest`, and `BulkCacheRefreshRequest` during their
+ * own ramp-ups.
+ *
+ * Resolution model is verify-before-mint: `method` has exactly two values
+ * because the discogs-cache is a pair-wise-filtered sample of Discogs — cache
+ * legs corroborate (and equality legs can veto a mint into `ambiguous`) but
+ * never decide. `escalation_unavailable` is the one RETRYABLE unresolved reason
+ * ("couldn't ask," not "asked and missed"); consumers must not apply a no-match
+ * TTL to it.
+ */
+
+/** What decided a resolved verdict: an `identity_store` short-circuit vs a live `api_search`. */
+export type ArtistResolveMethod = 'identity_store' | 'api_search';
+
+/**
+ * A discogs-cache candidate-generation leg that produced >= 1 candidate for the
+ * input's identity-match form. Corroboration + conflict detection only, never a
+ * verdict: the four equality legs can veto a mint into `ambiguous`; fuzzy
+ * `cache_trigram` neighbors never veto.
+ */
+export type ArtistResolveCacheLeg =
+  | 'cache_exact'
+  | 'cache_member'
+  | 'cache_alias'
+  | 'cache_name_variation'
+  | 'cache_trigram';
+
+/**
+ * Why a name did not resolve. `not_found` / `ambiguous` are terminal;
+ * `escalation_unavailable` (breaker open / outage / 429 / 5xx-after-retries) is
+ * RETRYABLE — the caller must not stamp a no-match TTL on it.
+ */
+export type ArtistResolveUnresolvedReason = 'not_found' | 'ambiguous' | 'escalation_unavailable';
+
+/**
+ * Verdict for one input name, index-aligned with the request's `names`. Exactly
+ * one of `discogs_artist_id` (resolved) or `unresolved_reason` is present;
+ * `cache_corroboration` is always present (may be empty). `candidate_count` is
+ * always serialized — `null` means "not measured" (the API tier did not run:
+ * identity_store short-circuit or escalation_unavailable), never zero-as-unknown.
+ */
+export interface ArtistResolveResult {
+  /** Verbatim echo of the input name at this index. */
+  name: string;
+  /** The resolved Discogs artist id. Present iff resolved. */
+  discogs_artist_id?: number;
+  /**
+   * Raw Discogs artist title, disambiguation suffix included (e.g. `Popsicle (2)`).
+   * Present iff resolved via `api_search` — `identity_store` rows store no title.
+   */
+  canonical_name?: string;
+  /** What decided the resolution. Present iff resolved. */
+  method?: ArtistResolveMethod;
+  /**
+   * Cache legs that produced candidates for this name's identity-match form, on
+   * both verdict kinds. Empty when no leg produced candidates and always empty
+   * on `identity_store` short-circuits.
+   */
+  cache_corroboration: ArtistResolveCacheLeg[];
+  /** Why the name did not resolve. Present iff unresolved. */
+  unresolved_reason?: ArtistResolveUnresolvedReason;
+  /**
+   * Exact-form candidates the API tier observed (1 on resolved, 0 on
+   * not_found; on ambiguous >= 2 for an overloaded family or exactly 1 for an
+   * equality-leg cache conflict). `null` when the API tier did not run.
+   */
+  candidate_count: number | null;
+}
+
+export interface ArtistResolveBulkRequest {
+  names: string[];
+  /** Run every tier identically but skip the `entity.identity` write-back. */
+  dry_run?: boolean;
+}
+
+export interface ArtistResolveBulkResponse {
+  /** One verdict per input name, in input order. */
+  results: ArtistResolveResult[];
+}
+
+/**
+ * LML's per-request hard cap on `resolveArtistNamesBulk` (LML#759). Keeps a
+ * fully-escalating batch within the shared 50/min Discogs budget (~25 live
+ * calls, ~30 s); callers page against this constant. LML returns 413 on
+ * overflow. Hard contract, not a tunable.
+ */
+export const ARTIST_RESOLVE_BATCH_CAP = 25;
+
+/**
+ * Per-name slice of the batch-size-scaled default timeout. LML processes the
+ * API leg serially at the shared 50/min Discogs budget (~1.2 s/name) plus
+ * retries/backoff, so the socket budget must grow with batch size or a
+ * successful full-escalation batch reads as a transport timeout.
+ */
+const ARTIST_RESOLVE_PER_NAME_TIMEOUT_MS = 5000;
+
+/**
+ * Fixed slack on top of the per-name budget — connection setup, the PG
+ * candidate pre-pass, and response serialization, independent of batch size.
+ */
+const ARTIST_RESOLVE_TIMEOUT_SLACK_MS = 30_000;
+
+/**
+ * Bulk-resolve bare artist names to Discogs artist identities via LML's
+ * `POST /api/v1/artists/resolve/bulk` (LML#759). Verify-before-mint: LML reads
+ * `entity.identity`, generates discogs-cache corroboration candidates, then
+ * runs a single-page live Discogs API artist search, minting only on exactly
+ * one exact-form candidate with no equality-leg cache conflict. Returns one
+ * verdict per input name in input order (`ArtistResolveResult`).
+ *
+ * Consumer: the concerts headliner backfill (BS#1614) — touring artists absent
+ * from the WXYC library that the pure-SQL strict/alias resolver can't reach.
+ *
+ * Wiring decisions (mirroring `bulkLookupMetadata`):
+ *
+ * - **One limiter token per batch, not per name.** LML paces its own serial
+ *   Discogs fan-out internally; the BS-side limiter mirrors that same shared
+ *   ceiling, so token-per-batch is the correct accounting.
+ * - **Timeout scales with batch size.** `names.length ×
+ *   ARTIST_RESOLVE_PER_NAME_TIMEOUT_MS (5000) + ARTIST_RESOLVE_TIMEOUT_SLACK_MS
+ *   (30_000)` — ~35 s for a 1-name page, ~155 s at the 25 cap. A fixed 30 s
+ *   default (this endpoint's `/lookup` siblings) would misclassify a successful
+ *   full-escalation batch as a transport timeout. Override via
+ *   `options.timeoutMs`. Offline-only caller; a long socket is cheap.
+ * - **Span op mirrors `bulkLookupMetadata`** (`http.client`); `lml.bulk.size` is
+ *   the batch attribute. No `cache_stats` projection — this endpoint doesn't
+ *   return the `/lookup` cache-counter block.
+ *
+ * Client-side validation rejects empty + oversize batches before the wire call
+ * — a 400/413 round-trip costs a TCP RTT for no information gain.
+ *
+ * @param names - Bare artist names (1..=25), sent verbatim.
+ * @param options.dryRun - Run every tier but skip the `entity.identity` write-back.
+ */
+export async function resolveArtistNamesBulk(
+  names: string[],
+  options?: { timeoutMs?: number; limiter?: LmlLimiter; caller?: string; dryRun?: boolean }
+): Promise<ArtistResolveBulkResponse> {
+  if (names.length === 0) {
+    throw new LmlClientError('resolveArtistNamesBulk requires at least 1 name.', 400);
+  }
+  if (names.length > ARTIST_RESOLVE_BATCH_CAP) {
+    throw new LmlClientError(
+      `resolveArtistNamesBulk exceeded the cap of ${ARTIST_RESOLVE_BATCH_CAP} names (received ${names.length}).`,
+      400
+    );
+  }
+
+  const timeoutMs =
+    options?.timeoutMs ?? names.length * ARTIST_RESOLVE_PER_NAME_TIMEOUT_MS + ARTIST_RESOLVE_TIMEOUT_SLACK_MS;
+
+  const body: ArtistResolveBulkRequest = { names };
+  if (options?.dryRun) body.dry_run = true;
+
+  const activeLimiter = options?.limiter ?? defaultLimiter;
+  return activeLimiter.run(async () => {
+    return await Sentry.startSpan({ name: 'lml.artists.resolve.bulk', op: 'http.client' }, async (span) => {
+      try {
+        span.setAttributes({
+          'lml.queue_depth': activeLimiter.state().queueDepth,
+          'lml.bulk.size': names.length,
+          'lml.caller': options?.caller ?? 'unknown',
+        });
+      } catch (err) {
+        console.warn('lml.client: failed to project queue_depth + bulk.size + caller onto resolve span', err);
+      }
+
+      const response = await lmlFetch(
+        '/api/v1/artists/resolve/bulk',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        timeoutMs
+      );
+
+      return (await response.json()) as ArtistResolveBulkResponse;
+    });
+  });
+}
+
+/**
  * Check whether the LML service is configured.
  */
 export function isLmlConfigured(): boolean {
