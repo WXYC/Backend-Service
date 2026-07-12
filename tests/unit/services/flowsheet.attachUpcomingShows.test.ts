@@ -183,6 +183,19 @@ describe('attachUpcomingShows (BS#1607 id arm + BS#1613 name arm)', () => {
     expect(entries[0].upcoming_show).toBeUndefined();
   });
 
+  it('matches a free-text play whose name carries stray/doubled whitespace (free-text SSOT key)', async () => {
+    // The concert side keys 'J Dilla' → 'j dilla'. A DJ free-texts ' J  Dilla '
+    // (leading/trailing + doubled spaces). Both sides run the SAME free-text
+    // normalizer (collapse internal whitespace + trim), so the play still
+    // resolves to 'j dilla' and matches — the bare `normalizeArtistName` would
+    // leave ' j  dilla ' and silently miss.
+    const concert = makeConcert({ headlining_artist_id: null, headlining_artist_raw: 'J Dilla' });
+    lookup.mockResolvedValueOnce(maps(new Map(), new Map([['j dilla', concert]])));
+    const entries = [createTrackEntry({ id: 1, artist_id: null, artist_name: ' J  Dilla ' })];
+    await attachUpcomingShows(entries);
+    expect(entries[0].upcoming_show).toBe(concert);
+  });
+
   // --- precedence + guards ---
 
   it('prefers the id arm over the name arm when a row matches both', async () => {

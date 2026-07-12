@@ -333,6 +333,27 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
     expect(byNormName.has('municipal waste')).toBe(false);
   });
 
+  it('collapses stray + doubled whitespace in the name key (free-text SSOT)', async () => {
+    // A DJ free-text play and a scraped raw routinely differ only in incidental
+    // whitespace ('J Dilla' vs 'J  Dilla' vs ' J Dilla '). The name arm keys
+    // free-text plays, so it must use the free-text normalizer (collapse internal
+    // whitespace + trim) — the same SSOT `flowsheet_freetext_resolution` uses —
+    // not the bare `normalizeArtistName`, which leaves the doubled/edge spaces in
+    // place and silently splits the key.
+    const messy: UpcomingRow = {
+      ...unresolvedCleanRow,
+      id: 402,
+      headlining_artist_raw: ' J  Dilla ',
+      starts_on: '2026-08-11',
+    };
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([messy]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    // Collapsed + trimmed → a play typed 'J Dilla' (single space) matches.
+    expect(byNormName.get('j dilla')).toEqual(toConcertDTO(messy));
+    // The un-collapsed variant is NOT a key (would be a silent no-match).
+    expect(byNormName.has(' j  dilla ')).toBe(false);
+  });
+
   it('collapses multiple dates for one name key to the SOONEST (first row wins)', async () => {
     // Rows arrive ordered starts_on ASC (the query's ORDER BY), so the first
     // occurrence of a key is the soonest.

@@ -19,7 +19,7 @@ import {
   library_artist_view,
   specialty_shows,
   album_metadata,
-  normalizeArtistName,
+  normalizeFreetextArtist,
   nyCalendarDate,
   nyStartOfDay,
 } from '@wxyc/database';
@@ -1115,11 +1115,13 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> =>
  *   1. id arm — `byArtistId.get(artist_id)`: the album-resolved catalog artist
  *      (`flowsheet.album_id → library.artist_id`) matched a resolved concert.
  *      Precise; the sole BS#1607 path, kept as-is (regression-guarded).
- *   2. name arm (BS#1613) — `byNormName.get(normalizeArtistName(artist_name))`:
+ *   2. name arm (BS#1613) — `byNormName.get(normalizeFreetextArtist(artist_name))`:
  *      catches FREE-TEXT plays (no `album_id`, so no `artist_id`) and CLEAN
  *      UNRESOLVED concerts (touring artists absent from our catalog). Uses the
- *      SAME normalizer as the concert side, so the two keys are provably
- *      produced by one function — drift would be a silent no-match.
+ *      free-text match SSOT (`normalizeArtistName` + collapse internal
+ *      whitespace + trim) — the SAME normalizer the concert side keys with, so
+ *      incidental spacing can't split the key and the two sides are provably
+ *      drift-free.
  *
  * The name arm keys only on a non-empty `artist_name` (`?.trim()`), so a blank
  * free-text name can't form a `''` key that collides. Rows that match neither
@@ -1155,7 +1157,7 @@ export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry
     const byId = entry.artist_id !== null ? byArtistId.get(entry.artist_id) : undefined;
     const byName =
       byId === undefined && entry.artist_name?.trim()
-        ? byNormName.get(normalizeArtistName(entry.artist_name))
+        ? byNormName.get(normalizeFreetextArtist(entry.artist_name))
         : undefined;
     const show = byId ?? byName;
     if (show !== undefined) {
