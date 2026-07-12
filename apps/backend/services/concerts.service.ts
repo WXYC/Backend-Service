@@ -1,5 +1,5 @@
-import { and, asc, eq, gte, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
-import { concerts, db, venues } from '@wxyc/database';
+import { and, asc, eq, gte, isNotNull, isNull, lte, sql } from 'drizzle-orm';
+import { artists, concerts, db, normalizeArtistName, venues } from '@wxyc/database';
 
 /**
  * Concerts read service — backs `GET /concerts` (BS#1603, touring-events
@@ -208,63 +208,93 @@ export const getConcertsCount = async (filters: ConcertsQueryFilters): Promise<n
 };
 
 /**
- * Batched artist → soonest-upcoming-curated-concert lookup, backing the V2
- * flowsheet feed's per-playcut `upcoming_show` enrichment (BS#1607, touring-
- * events Phase 3).
- *
- * ONE indexed query for a whole feed page — never one query per row. The
- * caller (`flowsheet.service` `attachUpcomingShows`) collects the distinct
- * resolved artist ids across the returned page and passes them here; the
- * result is a `Map<artistId, ConcertDTO>` it fans back out onto the matching
- * playcuts. This is the no-N+1 guarantee the ticket and the post-launch
- * hardening posture (project #32) require.
- *
- * Predicate is exactly the curated feed's: `headlining_artist_id IN (…)`,
- * `removed_at IS NULL`, `starts_on >= today` (America/New_York, supplied by
- * the caller so the window matches `GET /concerts`'s `todayEastern`). The
- * `headlining_artist_id IS NOT NULL AND removed_at IS NULL` conjuncts let the
- * planner read `concerts_curated_starts_on_idx`.
- *
- * One concert per artist — the SOONEST. `DISTINCT ON (headlining_artist_id)`
- * with `ORDER BY headlining_artist_id, starts_on ASC, id` collapses an
- * artist's multiple upcoming dates to the earliest (id as a stable tiebreak
- * when two dates coincide), mirroring the "soonest wins" rule documented on
- * the `upcoming_show` DTO. `DISTINCT ON` requires the distinct expression to
- * lead the ORDER BY; the venue-embedding join and the DTO mapping reuse
- * `getConcertsPage`'s projection so the wire shape can't drift.
- *
- * Returns an empty map for an empty id list without touching the DB.
+ * Adds the canonical catalog artist name to the concerts ⋈ venues projection
+ * for the `upcoming_show` name arm. Sourced via the LEFT JOIN to `artists`, so
+ * a resolved concert keys its name-map entry off the artist's CURRENT catalog
+ * name (which may differ from the possibly-stale scraped raw), while an
+ * unresolved concert leaves this null and falls back to the raw.
  */
-export const getUpcomingShowsForArtists = async (
-  artistIds: number[],
+const upcomingShowJoinFields = {
+  ...concertJoinFields,
+  artist_name: artists.artist_name,
+};
+
+/** `ConcertJoinRow` plus the LEFT-joined canonical artist name (null when unresolved). */
+type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
+
+/**
+ * Batched upcoming-concert lookup backing the V2 flowsheet feed's per-playcut
+ * `upcoming_show` enrichment (BS#1607, widened by BS#1613; touring-events
+ * Phase 3).
+ *
+ * ONE indexed query for a whole feed page — never one query per row. The caller
+ * (`flowsheet.service` `attachUpcomingShows`) invokes this once and fans the
+ * two returned maps back onto the page's tracks. This is the no-N+1 guarantee
+ * the ticket and the post-launch hardening posture (project #32) require.
+ *
+ * JOIN shape:
+ *   - INNER JOIN `venues` — strict, exactly as `getConcertsPage`; keeps the
+ *     DTO's `venue` non-null. A concert with a dangling `venue_id` is dropped
+ *     (it can't render a CTA anyway).
+ *   - LEFT JOIN `artists` on `headlining_artist_id` — only to source the
+ *     canonical name for the name arm's key. It MUST be a left join: an inner
+ *     join would drop every UNRESOLVED concert (`headlining_artist_id IS
+ *     NULL`), which is precisely the set BS#1613's name arm exists to recover.
+ *
+ * Predicate: `removed_at IS NULL AND starts_on >= today` (America/New_York,
+ * supplied by the caller so the window matches `GET /concerts`'s
+ * `todayEastern`). No `headlining_artist_id IS NOT NULL` conjunct — unlike
+ * BS#1607's id-only lookup, this must include unresolved concerts. Reads the
+ * `concerts_active_starts_on_id_idx` (non-tombstoned, `starts_on`-first).
+ *
+ * Returns two maps, each collapsed to the SOONEST concert per key by
+ * first-write-wins over rows ordered `starts_on ASC, id ASC` (id as a stable
+ * tiebreak when two dates coincide) — mirroring the "soonest wins" rule on the
+ * `upcoming_show` DTO without a `DISTINCT ON`:
+ *   - `byArtistId` — RESOLVED rows only (`headlining_artist_id` non-null),
+ *     keyed by that id. The precise arm; matches album-linked plays.
+ *   - `byNormName` — keyed by `normalizeArtistName(...)`: the canonical
+ *     `artists.artist_name` for a resolved row (so a free-text play typed with
+ *     the current name matches even when the concert resolved via an alias of
+ *     an older name), else the scraped `headlining_artist_raw`. A billing/
+ *     co-bill raw normalizes to its ENTIRE string — an inert key no
+ *     one-artist-per-entry flowsheet play equals — so it is stored but never
+ *     matched (see the BS#1613 ticket's "no clean-name filter" rationale).
+ *
+ * The venue-embedding join and DTO mapping reuse `getConcertsPage`'s projection
+ * so the wire shape can't drift.
+ */
+export const getUpcomingShowsMaps = async (
   today: string
-): Promise<Map<number, ConcertDTO>> => {
-  const byArtist = new Map<number, ConcertDTO>();
-  if (artistIds.length === 0) {
-    return byArtist;
-  }
+): Promise<{ byArtistId: Map<number, ConcertDTO>; byNormName: Map<string, ConcertDTO> }> => {
+  const byArtistId = new Map<number, ConcertDTO>();
+  const byNormName = new Map<string, ConcertDTO>();
 
   const rows = await db
-    .selectDistinctOn([concerts.headlining_artist_id], concertJoinFields)
+    .select(upcomingShowJoinFields)
     .from(concerts)
     .innerJoin(venues, eq(venues.id, concerts.venue_id))
-    .where(
-      and(
-        isNotNull(concerts.headlining_artist_id),
-        isNull(concerts.removed_at),
-        gte(concerts.starts_on, today),
-        inArray(concerts.headlining_artist_id, artistIds)
-      )
-    )
-    .orderBy(asc(concerts.headlining_artist_id), asc(concerts.starts_on), asc(concerts.id));
+    .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
+    .where(and(isNull(concerts.removed_at), gte(concerts.starts_on, today)))
+    .orderBy(asc(concerts.starts_on), asc(concerts.id));
 
-  for (const row of rows as ConcertJoinRow[]) {
-    // headlining_artist_id is non-null here (the WHERE guards it), but the
-    // ConcertJoinRow type keeps it nullable for the general projection; the
-    // guard keeps the Map key a plain number.
-    if (row.headlining_artist_id !== null) {
-      byArtist.set(row.headlining_artist_id, toConcertDTO(row));
+  for (const row of rows as UpcomingShowJoinRow[]) {
+    const dto = toConcertDTO(row);
+
+    // id arm — resolved rows only; first write wins → soonest.
+    if (row.headlining_artist_id !== null && !byArtistId.has(row.headlining_artist_id)) {
+      byArtistId.set(row.headlining_artist_id, dto);
+    }
+
+    // name arm — canonical name for resolved rows (falling back to the raw if
+    // the LEFT JOIN somehow found no artists row), raw for unresolved rows.
+    const nameSource =
+      row.headlining_artist_id !== null && row.artist_name !== null ? row.artist_name : row.headlining_artist_raw;
+    const nameKey = normalizeArtistName(nameSource);
+    if (nameKey !== '' && !byNormName.has(nameKey)) {
+      byNormName.set(nameKey, dto);
     }
   }
-  return byArtist;
+
+  return { byArtistId, byNormName };
 };

@@ -13,12 +13,20 @@
  *     `upcoming_show`, with the full `Concert` wire shape and no internal
  *     ingestion columns;
  *   - the SOONEST of an artist's several upcoming dates wins;
- *   - no match, an unresolved (free-form / null album_id) artist, and
- *     removed/past concerts all leave `upcoming_show` absent (parity: the row
- *     is byte-identical to its pre-1607 shape);
+ *   - no match, an unresolved (free-form / null album_id) artist with no
+ *     matching concert, and removed/past concerts all leave `upcoming_show`
+ *     absent (parity: the row is byte-identical to its pre-1607 shape);
  *   - the lookup is BATCHED — a page whose N track rows all match still hits
  *     the `concerts` table a bounded, N-independent number of times (proves no
  *     per-row query).
+ *
+ * BS#1613 widens the match to a name arm alongside the id arm, also pinned here:
+ *   - a FREE-TEXT play (null album_id, so no resolved artist_id) attaches a
+ *     clean UNRESOLVED concert (headlining_artist_id null) by normalized name;
+ *   - a billing-string concert raw (`Circle Jerks & Municipal Waste`) is an
+ *     inert key — it does not attach to a single-artist play (`Circle Jerks`);
+ *   - the name arm collapses two unresolved concerts whose raws normalize to
+ *     the same key to the SOONEST date.
  */
 
 const postgres = require('postgres');
@@ -60,6 +68,11 @@ function isoDate(offsetDays) {
 const PAST = isoDate(-14);
 const SOON = isoDate(7); // the soonest upcoming date for ARTIST_WITH_SHOW
 const LATER = isoDate(21); // a later date for the same artist — must lose
+
+// BS#1613 name-arm dates: two upcoming dates for one normalized name key, to
+// prove the name arm also collapses to the soonest.
+const NAME_SOON = isoDate(4);
+const NAME_LATER = isoDate(25);
 
 describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
   let sql;
@@ -196,14 +209,48 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
       headlining_artist_id: ARTIST_ONLY_PAST,
     });
 
+    // BS#1613 name-arm fixtures — all UNRESOLVED (headlining_artist_id null),
+    // so they can't be reached by the id arm; the name arm is the only path.
+    // A clean single name absent from our catalog (the recall #1613 adds).
+    await seedConcert({
+      key: 'freetext-clean',
+      venue_id: venueId,
+      starts_on: SOON,
+      headlining_artist_raw: 'Wishy',
+    });
+    // A billing string — normalizes to its entire self, an inert map key.
+    await seedConcert({
+      key: 'billing',
+      venue_id: venueId,
+      starts_on: SOON,
+      headlining_artist_raw: 'Circle Jerks & Municipal Waste',
+    });
+    // Two dates whose raws normalize to the same key ('tubs') — soonest wins.
+    await seedConcert({
+      key: 'name-soon',
+      venue_id: venueId,
+      starts_on: NAME_SOON,
+      headlining_artist_raw: 'The Tubs',
+    });
+    await seedConcert({
+      key: 'name-later',
+      venue_id: venueId,
+      starts_on: NAME_LATER,
+      headlining_artist_raw: 'THE TUBS',
+    });
+
     // Track rows: one matching artist, one with an artist that has no upcoming
     // date, one whose artist only has a past date, and one free-form (null
-    // album_id → unresolved artist).
+    // album_id → unresolved artist) with no matching concert.
     const t1 = await seedTrack({ albumId: ALBUM_WITH_SHOW, artistName: 'Built to Spill', playOrder: 1 });
     const t2 = await seedTrack({ albumId: ALBUM_NO_SHOW, artistName: 'Ravyn Lenae', playOrder: 2 });
     const t3 = await seedTrack({ albumId: ALBUM_ONLY_PAST, artistName: 'Jockstrap', playOrder: 3 });
     const t4 = await seedTrack({ albumId: null, artistName: 'Some Free-Form Act', playOrder: 4 });
-    insertedTrackIds = [t1, t2, t3, t4];
+    // BS#1613 free-text plays (null album_id → null artist_id): match by name.
+    const t5 = await seedTrack({ albumId: null, artistName: 'Wishy', playOrder: 5 });
+    const t6 = await seedTrack({ albumId: null, artistName: 'Circle Jerks', playOrder: 6 });
+    const t7 = await seedTrack({ albumId: null, artistName: 'The Tubs', playOrder: 7 });
+    insertedTrackIds = [t1, t2, t3, t4, t5, t6, t7];
   });
 
   afterAll(async () => {
@@ -262,11 +309,48 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     expect(pastOnly).not.toHaveProperty('upcoming_show');
   });
 
-  it('leaves upcoming_show absent for a free-form (unresolved-artist) track', async () => {
+  it('leaves upcoming_show absent for a free-form track with no matching concert', async () => {
     const tracks = await fetchSeededTracks();
-    const freeForm = tracks.find((t) => t.album_id === null);
+    // Several tracks now share a null album_id (the BS#1613 free-text plays), so
+    // key on the artist name that has no concert.
+    const freeForm = tracks.find((t) => t.album_id === null && t.artist_name === 'Some Free-Form Act');
     expect(freeForm).toBeDefined();
     expect(freeForm).not.toHaveProperty('upcoming_show');
+  });
+
+  // --- BS#1613 name arm ---
+
+  it('attaches a clean unresolved concert to a free-text play by normalized name', async () => {
+    const tracks = await fetchSeededTracks();
+    const freeText = tracks.find((t) => t.album_id === null && t.artist_name === 'Wishy');
+    expect(freeText).toBeDefined();
+    expect(freeText.upcoming_show).toBeDefined();
+    expect(freeText.upcoming_show).toMatchObject({
+      starts_on: SOON,
+      headlining_artist_raw: 'Wishy',
+      headlining_artist_id: null, // unresolved — matched purely by name
+      venue: { slug: VENUE_SLUG },
+    });
+  });
+
+  it('does not attach a billing-string concert to a single-artist free-text play (inert key)', async () => {
+    const tracks = await fetchSeededTracks();
+    // The concert raw is 'Circle Jerks & Municipal Waste'; the play is
+    // 'Circle Jerks'. The billing string normalizes to its entire self, so the
+    // single-act play never equals it.
+    const cj = tracks.find((t) => t.album_id === null && t.artist_name === 'Circle Jerks');
+    expect(cj).toBeDefined();
+    expect(cj).not.toHaveProperty('upcoming_show');
+  });
+
+  it('collapses two same-normalized-name unresolved concerts to the SOONEST', async () => {
+    const tracks = await fetchSeededTracks();
+    // 'The Tubs' and 'THE TUBS' both normalize to 'tubs'; only NAME_SOON rides.
+    const tubs = tracks.find((t) => t.album_id === null && t.artist_name === 'The Tubs');
+    expect(tubs).toBeDefined();
+    expect(tubs.upcoming_show).toBeDefined();
+    expect(tubs.upcoming_show.starts_on).toBe(NAME_SOON);
+    expect(tubs.upcoming_show.starts_on).not.toBe(NAME_LATER);
   });
 
   it('never surfaces the tombstoned or later date for the matching artist', async () => {

@@ -1,17 +1,18 @@
 /**
- * Unit tests for the per-playcut upcoming-show enrichment (BS#1607,
- * touring-events Phase 3).
+ * Unit tests for the per-playcut upcoming-show enrichment (BS#1607, widened to
+ * a hybrid id-arm ∪ name-arm match in BS#1613, touring-events Phase 3).
  *
  * `@wxyc/database` resolves to tests/mocks/database.mock.ts, so these pin the
- * pure batching + projection logic without PostgreSQL:
- *   - `attachUpcomingShows` collects the DISTINCT resolved artist ids across a
- *     feed page and does exactly ONE `getUpcomingShowsForArtists` call (the
- *     no-N+1 guarantee), then fans the soonest concert back onto each match;
+ * pure batching + fan-out logic without PostgreSQL:
+ *   - `attachUpcomingShows` does exactly ONE `getUpcomingShowsMaps` call for a
+ *     feed page (the no-N+1 guarantee), then fans the soonest concert onto each
+ *     track via the id arm (album-resolved `artist_id`) with a normalized-name
+ *     arm fallback (free-text plays + clean unresolved concerts, BS#1613);
  *   - `transformToV2` emits `upcoming_show` only when present, so a no-match
  *     track row is byte-identical to its pre-1607 shape (parity requirement).
  *
- * The end-to-end SQL windowing (curated predicate, soonest-wins DISTINCT ON,
- * removed/past exclusion, bounded query count for an N-row page) is covered by
+ * The end-to-end SQL windowing (removed/past exclusion, canonical-name key,
+ * soonest-wins collapse, bounded query count for an N-row page) is covered by
  * tests/integration/flowsheet-upcoming-show.spec.js.
  */
 import { attachUpcomingShows, transformToV2 } from '../../../apps/backend/services/flowsheet.service';
@@ -94,47 +95,54 @@ const makeConcert = (overrides: Partial<ConcertDTO> = {}): ConcertDTO => ({
   ...overrides,
 });
 
-describe('attachUpcomingShows (BS#1607)', () => {
+/** Build the {byArtistId, byNormName} return of getUpcomingShowsMaps. */
+const maps = (byArtistId: Map<number, ConcertDTO> = new Map(), byNormName: Map<string, ConcertDTO> = new Map()) => ({
+  byArtistId,
+  byNormName,
+});
+
+describe('attachUpcomingShows (BS#1607 id arm + BS#1613 name arm)', () => {
   let lookup: jest.SpyInstance;
 
   beforeEach(() => {
     jest.restoreAllMocks();
-    lookup = jest.spyOn(concertsService, 'getUpcomingShowsForArtists');
+    lookup = jest.spyOn(concertsService, 'getUpcomingShowsMaps');
   });
 
-  it('skips the DB entirely when the page has no resolved track artists', async () => {
+  it('skips the DB when no track row carries an artist id or a non-empty name', async () => {
     const entries = [
-      createTrackEntry({ id: 1, artist_id: null }),
-      createTrackEntry({ id: 2, entry_type: 'show_start', artist_id: 4211 }),
+      createTrackEntry({ id: 1, entry_type: 'show_start', artist_id: 4211 }), // marker
+      createTrackEntry({ id: 2, artist_id: null, artist_name: '   ' }), // blank free text
     ];
     await attachUpcomingShows(entries);
     expect(lookup).not.toHaveBeenCalled();
-    expect(entries[0].upcoming_show).toBeUndefined();
+    expect(entries[1].upcoming_show).toBeUndefined();
   });
 
-  it('does exactly ONE lookup for an N-row page, with DISTINCT artist ids', async () => {
-    lookup.mockResolvedValueOnce(new Map());
+  it('does exactly ONE getUpcomingShowsMaps call for an N-row page, with a today date', async () => {
+    lookup.mockResolvedValueOnce(maps());
     const entries = [
       createTrackEntry({ id: 1, artist_id: 4211 }),
       createTrackEntry({ id: 2, artist_id: 4211 }), // duplicate artist
-      createTrackEntry({ id: 3, artist_id: 7000 }),
-      createTrackEntry({ id: 4, artist_id: null }), // free-form, no artist
-      createTrackEntry({ id: 5, entry_type: 'talkset', artist_id: 9999 }), // non-track
+      createTrackEntry({ id: 3, artist_id: null, artist_name: 'Wishy' }), // free-text
+      createTrackEntry({ id: 4, entry_type: 'talkset', artist_id: 9999 }), // non-track
     ];
     await attachUpcomingShows(entries);
 
     expect(lookup).toHaveBeenCalledTimes(1);
-    const [artistIds] = lookup.mock.calls[0];
-    expect([...(artistIds as number[])].sort((a, b) => a - b)).toEqual([4211, 7000]);
+    const [today] = lookup.mock.calls[0];
+    expect(today).toMatch(/^\d{4}-\d{2}-\d{2}$/); // America/New_York calendar date
   });
 
-  it('attaches the matched concert to every track row of that artist', async () => {
+  // --- id arm (BS#1607 regression guard) ---
+
+  it('attaches via the id arm to every catalog track row of that artist', async () => {
     const concert = makeConcert({ headlining_artist_id: 4211 });
-    lookup.mockResolvedValueOnce(new Map([[4211, concert]]));
+    lookup.mockResolvedValueOnce(maps(new Map([[4211, concert]])));
     const entries = [
-      createTrackEntry({ id: 1, artist_id: 4211 }),
-      createTrackEntry({ id: 2, artist_id: 4211 }),
-      createTrackEntry({ id: 3, artist_id: 7000 }), // no match in the map
+      createTrackEntry({ id: 1, artist_id: 4211, artist_name: 'Juana Molina' }),
+      createTrackEntry({ id: 2, artist_id: 4211, artist_name: 'Juana Molina' }),
+      createTrackEntry({ id: 3, artist_id: 7000, artist_name: 'Someone Else' }), // no map entry
     ];
     await attachUpcomingShows(entries);
 
@@ -143,11 +151,70 @@ describe('attachUpcomingShows (BS#1607)', () => {
     expect(entries[2].upcoming_show).toBeUndefined();
   });
 
-  it('leaves every row untouched when no artist has an upcoming date', async () => {
-    lookup.mockResolvedValueOnce(new Map());
-    const entries = [createTrackEntry({ id: 1, artist_id: 4211 })];
+  // --- name arm (BS#1613) ---
+
+  it('attaches via the name arm to a free-text play of a resolved artist', async () => {
+    const concert = makeConcert({ headlining_artist_id: 4211 });
+    // Free-text play: no album_id → artist_id null; matched on canonical name.
+    lookup.mockResolvedValueOnce(maps(new Map(), new Map([['juana molina', concert]])));
+    const entries = [createTrackEntry({ id: 1, artist_id: null, artist_name: 'Juana Molina' })];
+    await attachUpcomingShows(entries);
+    expect(entries[0].upcoming_show).toBe(concert);
+  });
+
+  it('attaches a clean unresolved concert to a free-text play by name (null headlining_artist_id)', async () => {
+    const concert = makeConcert({ headlining_artist_id: null, headlining_artist_raw: 'Wishy' });
+    lookup.mockResolvedValueOnce(maps(new Map(), new Map([['wishy', concert]])));
+    const entries = [createTrackEntry({ id: 1, artist_id: null, artist_name: 'Wishy' })];
+    await attachUpcomingShows(entries);
+    expect(entries[0].upcoming_show).toBe(concert);
+    expect(entries[0].upcoming_show?.headlining_artist_id).toBeNull();
+  });
+
+  it('does not attach a billing-string concert to a single-artist play (inert key)', async () => {
+    const concert = makeConcert({
+      headlining_artist_id: null,
+      headlining_artist_raw: 'Circle Jerks & Municipal Waste',
+    });
+    // The map is keyed by the ENTIRE normalized billing string.
+    lookup.mockResolvedValueOnce(maps(new Map(), new Map([['circle jerks & municipal waste', concert]])));
+    const entries = [createTrackEntry({ id: 1, artist_id: null, artist_name: 'Circle Jerks' })];
     await attachUpcomingShows(entries);
     expect(entries[0].upcoming_show).toBeUndefined();
+  });
+
+  // --- precedence + guards ---
+
+  it('prefers the id arm over the name arm when a row matches both', async () => {
+    const byIdConcert = makeConcert({ id: 900, headlining_artist_id: 4211 });
+    const byNameConcert = makeConcert({ id: 901, headlining_artist_id: null, headlining_artist_raw: 'Juana Molina' });
+    lookup.mockResolvedValueOnce(maps(new Map([[4211, byIdConcert]]), new Map([['juana molina', byNameConcert]])));
+    const entries = [createTrackEntry({ id: 1, artist_id: 4211, artist_name: 'Juana Molina' })];
+    await attachUpcomingShows(entries);
+    expect(entries[0].upcoming_show).toBe(byIdConcert); // id arm wins
+  });
+
+  it('never matches a whitespace-only free-text name (no empty-string key collision)', async () => {
+    const stray = makeConcert();
+    // A hypothetical stray '' key must never be reached by a blank name.
+    lookup.mockResolvedValueOnce(maps(new Map(), new Map([['', stray]])));
+    const entries = [
+      createTrackEntry({ id: 1, artist_id: 4211, artist_name: 'Juana Molina' }), // matchable → DB runs
+      createTrackEntry({ id: 2, artist_id: null, artist_name: '   ' }), // blank free text
+    ];
+    await attachUpcomingShows(entries);
+    expect(entries[1].upcoming_show).toBeUndefined();
+  });
+
+  it('leaves every row untouched when both maps are empty', async () => {
+    lookup.mockResolvedValueOnce(maps());
+    const entries = [
+      createTrackEntry({ id: 1, artist_id: 4211 }),
+      createTrackEntry({ id: 2, artist_id: null, artist_name: 'Wishy' }),
+    ];
+    await attachUpcomingShows(entries);
+    expect(entries[0].upcoming_show).toBeUndefined();
+    expect(entries[1].upcoming_show).toBeUndefined();
   });
 });
 

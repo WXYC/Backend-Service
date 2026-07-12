@@ -18,7 +18,7 @@ import {
   ConcertJoinRow,
   getConcertsCount,
   getConcertsPage,
-  getUpcomingShowsForArtists,
+  getUpcomingShowsMaps,
   toConcertDTO,
 } from '../../../apps/backend/services/concerts.service';
 
@@ -249,51 +249,131 @@ describe('getConcertsCount', () => {
   });
 });
 
-describe('getUpcomingShowsForArtists (BS#1607)', () => {
+/**
+ * BS#1613 widens the `upcoming_show` match from the id-only join to a hybrid
+ * id-arm ∪ name-arm. `getUpcomingShowsMaps` loads every upcoming, non-tombstoned
+ * concert once (not filtered to a passed id list) and returns two maps:
+ *   - `byArtistId` — resolved rows only, keyed by `headlining_artist_id`;
+ *   - `byNormName` — resolved rows keyed by the CANONICAL artist name (from the
+ *     LEFT JOIN to `artists`), unresolved rows keyed by the raw. Billing-string
+ *     raws normalize to their entire string — inert keys, not false positives.
+ * Both maps are first-write-wins over rows ordered `starts_on ASC, id`, so each
+ * key holds the SOONEST upcoming concert.
+ *
+ * These fixtures carry the extra `artist_name` (the canonical name the LEFT
+ * JOIN sources) that `ConcertJoinRow` doesn't; the row shape is a superset.
+ */
+describe('getUpcomingShowsMaps (BS#1613)', () => {
+  type UpcomingRow = ConcertJoinRow & { artist_name: string | null };
+
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  it('short-circuits an empty artist-id list without touching the DB', async () => {
-    const result = await getUpcomingShowsForArtists([], '2026-08-01');
-    expect(result.size).toBe(0);
-    expect(mockDb._chain.selectDistinctOn).not.toHaveBeenCalled();
+  // Resolved: headlining_artist_id set; artist_name is the canonical catalog
+  // name, which can differ from the scraped raw (here, diacritic vs not).
+  const resolvedRow: UpcomingRow = {
+    ...timedRow,
+    id: 301,
+    headlining_artist_id: 4211,
+    headlining_artist_raw: 'Nilufer Yanya', // scraped, no diacritic
+    artist_name: 'Nilüfer Yanya', // canonical catalog name
+    starts_on: '2026-08-14',
+  };
+
+  // Unresolved, clean single name (the recall #1613 adds): keys off the raw.
+  const unresolvedCleanRow: UpcomingRow = {
+    ...timedRow,
+    id: 302,
+    headlining_artist_id: null,
+    headlining_artist_raw: 'Wishy',
+    artist_name: null,
+    starts_on: '2026-08-20',
+  };
+
+  // Unresolved billing string: keys off its ENTIRE normalized string — inert.
+  const billingRow: UpcomingRow = {
+    ...timedRow,
+    id: 303,
+    headlining_artist_id: null,
+    headlining_artist_raw: 'Circle Jerks & Municipal Waste',
+    artist_name: null,
+    starts_on: '2026-08-22',
+  };
+
+  it('builds byArtistId from resolved rows only, keyed by headlining_artist_id', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([resolvedRow, unresolvedCleanRow]));
+    const { byArtistId } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byArtistId.size).toBe(1); // the unresolved row is not in the id map
+    expect(byArtistId.get(4211)).toEqual(toConcertDTO(resolvedRow));
   });
 
-  it('maps each row to a ConcertDTO keyed by headlining_artist_id', async () => {
-    const other: ConcertJoinRow = { ...timedRow, id: 202, headlining_artist_id: 5555 };
-    // Terminal .orderBy() resolves the DISTINCT ON row set for this call.
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([timedRow, other]));
-
-    const result = await getUpcomingShowsForArtists([4211, 5555], '2026-08-01');
-
-    expect(result.size).toBe(2);
-    expect(result.get(4211)).toEqual(toConcertDTO(timedRow));
-    expect(result.get(5555)).toEqual(toConcertDTO(other));
+  it('keys a resolved row in byNormName off the CANONICAL name, not the raw', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([resolvedRow]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    // canonical 'Nilüfer Yanya' → 'nilüfer yanya'; the diacritic-free raw
+    // 'Nilufer Yanya' → 'nilufer yanya' is NOT the key.
+    expect(byNormName.get('nilüfer yanya')).toEqual(toConcertDTO(resolvedRow));
+    expect(byNormName.has('nilufer yanya')).toBe(false);
   });
 
-  it('distinct-selects on headlining_artist_id (soonest-per-artist collapse)', async () => {
+  it('keys an unresolved clean row in byNormName off the raw name', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([unresolvedCleanRow]));
+    const { byArtistId, byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byArtistId.size).toBe(0); // unresolved → absent from the id map
+    expect(byNormName.get('wishy')).toEqual(toConcertDTO(unresolvedCleanRow));
+  });
+
+  it('keys a billing-string raw off its ENTIRE normalized string (inert key)', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([billingRow]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.get('circle jerks & municipal waste')).toEqual(toConcertDTO(billingRow));
+    // The individual acts are NOT keys, so a single-artist play can't match.
+    expect(byNormName.has('circle jerks')).toBe(false);
+    expect(byNormName.has('municipal waste')).toBe(false);
+  });
+
+  it('collapses multiple dates for one name key to the SOONEST (first row wins)', async () => {
+    // Rows arrive ordered starts_on ASC (the query's ORDER BY), so the first
+    // occurrence of a key is the soonest.
+    const soon: UpcomingRow = { ...unresolvedCleanRow, id: 400, starts_on: '2026-08-10' };
+    const later: UpcomingRow = { ...unresolvedCleanRow, id: 401, starts_on: '2026-09-10' };
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([soon, later]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.get('wishy')).toEqual(toConcertDTO(soon));
+  });
+
+  it('collapses multiple dates for one artist id to the SOONEST (first row wins)', async () => {
+    const soon: UpcomingRow = { ...resolvedRow, id: 500, starts_on: '2026-08-10' };
+    const later: UpcomingRow = { ...resolvedRow, id: 501, starts_on: '2026-09-10' };
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([soon, later]));
+    const { byArtistId } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byArtistId.get(4211)).toEqual(toConcertDTO(soon));
+  });
+
+  it('LEFT JOINs artists so a resolved row can source its canonical name', async () => {
     mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
-    await getUpcomingShowsForArtists([4211], '2026-08-01');
-    // The DISTINCT ON expression list must lead with headlining_artist_id.
-    const distinctArgs = mockDb._chain.selectDistinctOn.mock.calls[0][0] as string[];
-    expect(distinctArgs).toEqual(['headlining_artist_id']);
+    await getUpcomingShowsMaps('2026-08-01');
+    // The join to artists must be a LEFT join — an INNER join would silently
+    // drop every unresolved concert (headlining_artist_id IS NULL), which is
+    // exactly the set the name arm exists to recover.
+    expect(mockDb._chain.leftJoin).toHaveBeenCalled();
   });
 
   it('never selects internal ingestion columns', async () => {
     mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
-    await getUpcomingShowsForArtists([4211], '2026-08-01');
-    const projection = mockDb._chain.selectDistinctOn.mock.calls[0][1] as Record<string, string>;
+    await getUpcomingShowsMaps('2026-08-01');
+    const projection = mockDb._chain.select.mock.calls[0][0] as Record<string, string>;
     const selectedColumns = Object.values(projection);
     for (const internal of INTERNAL_COLUMNS) {
       expect(selectedColumns).not.toContain(internal);
     }
   });
 
-  it('skips a defensive null headlining_artist_id row (never a Map key)', async () => {
-    const nulledKey: ConcertJoinRow = { ...timedRow, headlining_artist_id: null };
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([nulledKey]));
-    const result = await getUpcomingShowsForArtists([4211], '2026-08-01');
-    expect(result.size).toBe(0);
+  it('returns two empty maps for an empty upcoming set', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    const { byArtistId, byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byArtistId.size).toBe(0);
+    expect(byNormName.size).toBe(0);
   });
 });
