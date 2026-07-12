@@ -30,6 +30,9 @@ import {
   resolveEntity,
   refreshForIdentities,
   REFRESH_FOR_IDENTITIES_BATCH_CAP,
+  resolveArtistNamesBulk,
+  ARTIST_RESOLVE_BATCH_CAP,
+  type ArtistResolveResult,
   LmlClientError,
   checkStreamingAvailability,
   searchLibrary,
@@ -755,6 +758,222 @@ describe('lml.client', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+  });
+
+  describe('resolveArtistNamesBulk (BS#1614 / LML#759)', () => {
+    // A resolved-via-api_search verdict, mirroring the wxyc-shared#218
+    // ArtistResolveResult contract: discogs_artist_id + method + canonical_name,
+    // required cache_corroboration, candidate_count = 1.
+    const resolvedResult = (name: string, id: number): ArtistResolveResult => ({
+      name,
+      discogs_artist_id: id,
+      canonical_name: name,
+      method: 'api_search',
+      cache_corroboration: ['cache_exact'],
+      candidate_count: 1,
+    });
+
+    it('sends POST to /api/v1/artists/resolve/bulk wrapping names in a {names} envelope', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await resolveArtistNamesBulk(['Wishy', "L'Rain"]);
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://lml.test:8000/api/v1/artists/resolve/bulk');
+      expect(init.method).toBe('POST');
+      const body = JSON.parse(init.body as string) as { names: string[]; dry_run?: boolean };
+      expect(body.names).toEqual(['Wishy', "L'Rain"]);
+      // dry_run stays off the wire unless explicitly requested.
+      expect(body.dry_run).toBeUndefined();
+    });
+
+    it('forwards dry_run: true onto the body when options.dryRun is set', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await resolveArtistNamesBulk(['Wishy'], { dryRun: true });
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1]?.body as string) as { dry_run?: boolean };
+      expect(body.dry_run).toBe(true);
+    });
+
+    it('returns verdicts index-aligned with input, passing resolved + unresolved fields through', async () => {
+      const mockResponse = {
+        results: [
+          resolvedResult('Wishy', 7315154),
+          {
+            name: 'Some Co-Bill & Another',
+            cache_corroboration: [],
+            unresolved_reason: 'not_found',
+            candidate_count: 0,
+          },
+          {
+            name: 'Popsicle',
+            cache_corroboration: ['cache_exact', 'cache_trigram'],
+            unresolved_reason: 'ambiguous',
+            candidate_count: 2,
+          },
+          {
+            name: 'Never Asked',
+            cache_corroboration: [],
+            unresolved_reason: 'escalation_unavailable',
+            candidate_count: null,
+          },
+        ],
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      } as unknown as globalThis.Response);
+
+      const result = await resolveArtistNamesBulk(['Wishy', 'Some Co-Bill & Another', 'Popsicle', 'Never Asked']);
+
+      expect(result.results.map((r) => r.name)).toEqual(['Wishy', 'Some Co-Bill & Another', 'Popsicle', 'Never Asked']);
+      expect(result.results[0]).toMatchObject({ discogs_artist_id: 7315154, method: 'api_search', candidate_count: 1 });
+      expect(result.results[1]).toMatchObject({ unresolved_reason: 'not_found', candidate_count: 0 });
+      expect(result.results[2].unresolved_reason).toBe('ambiguous');
+      // escalation_unavailable carries candidate_count: null (not measured — never zero-as-unknown).
+      expect(result.results[3]).toMatchObject({ unresolved_reason: 'escalation_unavailable', candidate_count: null });
+    });
+
+    it('rejects empty names locally without hitting the wire', async () => {
+      await expect(resolveArtistNamesBulk([])).rejects.toThrow(/at least 1 name/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects oversize batches (> 25) locally without hitting the wire', async () => {
+      const names = Array.from({ length: ARTIST_RESOLVE_BATCH_CAP + 1 }, (_, i) => `Artist ${i}`);
+      await expect(resolveArtistNamesBulk(names)).rejects.toThrow(/cap of 25 names/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('exports ARTIST_RESOLVE_BATCH_CAP as the LML#759 hard contract value (25)', () => {
+      expect(ARTIST_RESOLVE_BATCH_CAP).toBe(25);
+    });
+
+    it('includes Authorization: Bearer <key> when LML_API_KEY is set', async () => {
+      process.env.LML_API_KEY = 'test-secret';
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await resolveArtistNamesBulk(['Wishy']);
+
+      const headers = (mockFetch.mock.calls.at(-1)?.[1]?.headers ?? {}) as Record<string, string>;
+      expect(headers).toMatchObject({ Authorization: 'Bearer test-secret', 'Content-Type': 'application/json' });
+    });
+
+    it('consumes exactly one limiter token per batch (not one per name)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      // Same shape as the bulkLookupMetadata token-per-batch pin: a 25-name
+      // batch consuming 25 tokens would drain a small bucket; one token per
+      // batch keeps two back-to-back pages fast.
+      const limiter = createLmlLimiter({ maxConcurrent: 4, ratePerMinute: 60 });
+      const names = Array.from({ length: 25 }, (_, i) => `Artist ${i}`);
+
+      const start = Date.now();
+      await resolveArtistNamesBulk(names, { limiter });
+      await resolveArtistNamesBulk(names, { limiter });
+      const elapsed = Date.now() - start;
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(elapsed).toBeLessThan(500);
+    });
+
+    it('wraps the call in a Sentry span (lml.artists.resolve.bulk / http.client) with bulk.size', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await resolveArtistNamesBulk(['Wishy', "L'Rain", '(Sandy) Alex G']);
+
+      expect(mockStartSpan).toHaveBeenCalledTimes(1);
+      expect(mockStartSpan.mock.calls[0][0]).toEqual({ name: 'lml.artists.resolve.bulk', op: 'http.client' });
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith(expect.objectContaining({ 'lml.bulk.size': 3 }));
+    });
+
+    it('projects lml.caller onto the span when caller is provided', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await resolveArtistNamesBulk(['Wishy'], { caller: 'concerts-artist-lml-resolver' });
+
+      const callerCalls = mockSpanSetAttributes.mock.calls.filter(
+        (args) => (args[0] as Record<string, unknown>)?.['lml.caller'] === 'concerts-artist-lml-resolver'
+      );
+      expect(callerCalls).toHaveLength(1);
+    });
+
+    it("projects lml.caller='unknown' when caller is not provided (flag-of-shame)", async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await resolveArtistNamesBulk(['Wishy']);
+
+      const callerCalls = mockSpanSetAttributes.mock.calls.filter(
+        (args) => (args[0] as Record<string, unknown>)?.['lml.caller'] === 'unknown'
+      );
+      expect(callerCalls).toHaveLength(1);
+    });
+
+    it('scales the default timeout with batch size (names.length × 5000 + 30000)', async () => {
+      // The API leg runs serially at the shared 50/min budget (~1.2s/name)
+      // plus retries. A fixed 30s default would misclassify a successful
+      // full-escalation batch as a transport timeout, so the budget must
+      // scale. 3 names → 3×5000 + 30000 = 45000 ms.
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await resolveArtistNamesBulk(['Wishy', "L'Rain", '(Sandy) Alex G']);
+
+      const scaledCalls = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 45000);
+      expect(scaledCalls).toHaveLength(1);
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('honors options.timeoutMs as a per-call override', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await resolveArtistNamesBulk(['Wishy', "L'Rain"], { timeoutMs: 5000 });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 5000)).toHaveLength(1);
+      // The scaled default (2×5000 + 30000 = 40000) must NOT be scheduled when overridden.
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 40000)).toHaveLength(0);
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('throws LmlClientError on non-2xx response (e.g. 413 over-cap at the wire)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 413,
+        statusText: 'Payload Too Large',
+      } as unknown as globalThis.Response);
+
+      await expect(resolveArtistNamesBulk(['Wishy'])).rejects.toThrow(LmlClientError);
     });
   });
 
