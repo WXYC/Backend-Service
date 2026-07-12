@@ -147,23 +147,35 @@ beforeAll(async () => {
   pg = postgres(`postgres://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}`, { max: 1, onnotice: () => {} });
   await cleanup(); // idempotent across re-runs on the shared e2e schema
 
-  // The negative-path billings must have NO matching catalog artist, or the
-  // resolver would stamp them and the "leaves unmatched unresolved" assertion
-  // would be silently wrong. This holds on the small e2e seed; fail loudly if
-  // the DB was pointed at the prod clone (where e.g. Sleater-Kinney exists as a
-  // real artist) rather than letting the assertion pass or fail for the wrong
-  // reason.
-  const collisions = await pg<{ artist_name: string }[]>`
-    SELECT artist_name FROM ${pg(SCHEMA)}.artists
+  // The negative-path billings must have NO resolver match, or the resolver
+  // would stamp them and the "leaves unmatched unresolved" assertion would be
+  // silently wrong. This mirrors BOTH arms of the resolver (query.ts): the
+  // strict `artists` join AND the alias arm over `artist_search_alias` for the
+  // synonym-class sources — a strict-only check would give false confidence,
+  // since a synonym variant normalizing to a negative billing resolves too.
+  // (The synonym source list mirrors SYNONYM_ALIAS_SOURCES in
+  // jobs/concerts-artist-resolver/query.ts; imported inline rather than from
+  // that module to avoid dragging in its top-level `@wxyc/database` connection.)
+  // Holds on the small e2e seed; fails loudly if the DB was pointed at the prod
+  // clone or a contaminated shared schema.
+  const collisions = await pg<{ label: string; via: string }[]>`
+    SELECT artist_name AS label, 'artists' AS via FROM ${pg(SCHEMA)}.artists
     WHERE ${pg(SCHEMA)}.normalize_artist_name(artist_name) IN (
       ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_A}),
       ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_B})
     )
+    UNION ALL
+    SELECT variant AS label, 'artist_search_alias' AS via FROM ${pg(SCHEMA)}.artist_search_alias
+    WHERE source IN ('discogs_name_variation', 'discogs_alias', 'wxyc_library_alt')
+      AND ${pg(SCHEMA)}.normalize_artist_name(variant) IN (
+        ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_A}),
+        ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_B})
+      )
   `;
   if (collisions.length > 0) {
     throw new Error(
-      `e2e artists table already contains a catalog match for a negative-path billing ` +
-        `(${collisions.map((r) => r.artist_name).join(', ')}); this suite requires the small seed, not the prod clone`
+      `e2e DB already contains a resolver match for a negative-path billing ` +
+        `(${collisions.map((r) => `${r.label} via ${r.via}`).join(', ')}); this suite requires the small seed`
     );
   }
 
