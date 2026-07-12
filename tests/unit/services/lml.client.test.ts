@@ -836,9 +836,24 @@ describe('lml.client', () => {
       const result = await resolveArtistNamesBulk(['Wishy', 'Some Co-Bill & Another', 'Popsicle', 'Never Asked']);
 
       expect(result.results.map((r) => r.name)).toEqual(['Wishy', 'Some Co-Bill & Another', 'Popsicle', 'Never Asked']);
-      expect(result.results[0]).toMatchObject({ discogs_artist_id: 7315154, method: 'api_search', candidate_count: 1 });
+      // Resolved verdict: every field survives the passthrough, incl. the two
+      // api_search-only fields (canonical_name, cache_corroboration) the wrapper
+      // must not drop if a future refactor ever introduces a projection step.
+      expect(result.results[0]).toMatchObject({
+        discogs_artist_id: 7315154,
+        canonical_name: 'Wishy',
+        method: 'api_search',
+        cache_corroboration: ['cache_exact'],
+        candidate_count: 1,
+      });
       expect(result.results[1]).toMatchObject({ unresolved_reason: 'not_found', candidate_count: 0 });
-      expect(result.results[2].unresolved_reason).toBe('ambiguous');
+      // Ambiguous verdict: corroboration legs (incl. a fuzzy cache_trigram
+      // neighbor) pass through alongside the reason and count.
+      expect(result.results[2]).toMatchObject({
+        unresolved_reason: 'ambiguous',
+        cache_corroboration: ['cache_exact', 'cache_trigram'],
+        candidate_count: 2,
+      });
       // escalation_unavailable carries candidate_count: null (not measured — never zero-as-unknown).
       expect(result.results[3]).toMatchObject({ unresolved_reason: 'escalation_unavailable', candidate_count: null });
     });
@@ -877,9 +892,13 @@ describe('lml.client', () => {
         json: () => Promise.resolve({ results: [] }),
       } as unknown as globalThis.Response);
 
-      // Same shape as the bulkLookupMetadata token-per-batch pin: a 25-name
-      // batch consuming 25 tokens would drain a small bucket; one token per
-      // batch keeps two back-to-back pages fast.
+      // The real pin here is the mockFetch call count (== 2, one HTTP request
+      // per batch): a regression that fanned out to one request+token PER NAME
+      // would fire 50 requests, not 2. The timing assertion is only a weak
+      // secondary — with a 60-token bucket even a hypothetical consume(25)-per-
+      // batch (25 + 25 = 50 ≤ 60) would not block, so `elapsed < 500` alone
+      // cannot distinguish per-batch from per-name token accounting. Same
+      // documented caveat as the bulkLookupMetadata token-per-batch test.
       const limiter = createLmlLimiter({ maxConcurrent: 4, ratePerMinute: 60 });
       const names = Array.from({ length: 25 }, (_, i) => `Artist ${i}`);
 
@@ -933,21 +952,27 @@ describe('lml.client', () => {
       expect(callerCalls).toHaveLength(1);
     });
 
-    it('scales the default timeout with batch size (names.length × 5000 + 30000)', async () => {
-      // The API leg runs serially at the shared 50/min budget (~1.2s/name)
-      // plus retries. A fixed 30s default would misclassify a successful
-      // full-escalation batch as a transport timeout, so the budget must
-      // scale. 3 names → 3×5000 + 30000 = 45000 ms.
+    // The API leg runs serially at the shared 50/min budget (~1.2s/name) plus
+    // retries. A fixed 30s default would misclassify a successful full-escalation
+    // batch as a transport timeout, so the budget scales: names.length × 5000 +
+    // 30000. The 1-name floor (35000) and the 25-name cap (155000) are the two
+    // boundaries the JSDoc advertises; the 3-name point (45000) pins the slope,
+    // so together they'd catch an operator-precedence slip like × (5000 + 30000).
+    it.each([
+      [1, 35000],
+      [3, 45000],
+      [ARTIST_RESOLVE_BATCH_CAP, 155000],
+    ])('scales the default timeout with batch size: %i names → %i ms', async (count, expectedMs) => {
       const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
       mockFetch.mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({ results: [] }),
       } as unknown as globalThis.Response);
 
-      await resolveArtistNamesBulk(['Wishy', "L'Rain", '(Sandy) Alex G']);
+      const names = Array.from({ length: count }, (_, i) => `Artist ${i}`);
+      await resolveArtistNamesBulk(names);
 
-      const scaledCalls = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 45000);
-      expect(scaledCalls).toHaveLength(1);
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === expectedMs)).toHaveLength(1);
       setTimeoutSpy.mockRestore();
     });
 
