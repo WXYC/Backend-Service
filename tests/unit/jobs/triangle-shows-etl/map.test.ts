@@ -365,6 +365,25 @@ describe('splitSupportArtists', () => {
     expect(splitSupportArtists(input)).toEqual(expected);
   });
 
+  it('passes an already-clean array through unchanged', () => {
+    expect(splitSupportArtists(['Stereolab', 'Cat Power'])).toEqual(['Stereolab', 'Cat Power']);
+  });
+
+  it('trims and drops empties in array input', () => {
+    expect(splitSupportArtists(['Nilüfer Yanya ', '', 'Hermanos Gutiérrez'])).toEqual([
+      'Nilüfer Yanya',
+      'Hermanos Gutiérrez',
+    ]);
+  });
+
+  it('drops non-string elements a malformed feed array could carry', () => {
+    // The feed is untrusted external JSON; a null slot must not crash the ETL.
+    expect(splitSupportArtists(['Juana Molina', null, 'Jessica Pratt'] as string[])).toEqual([
+      'Juana Molina',
+      'Jessica Pratt',
+    ]);
+  });
+
   it('is what mapEvent feeds supporting_artists_raw', () => {
     const mapped = mapEvent(makeTsEvent({ support_artists: 'Stereolab, Cat Power' }));
     expect(mapped.concert.supporting_artists_raw).toEqual(['Stereolab', 'Cat Power']);
