@@ -74,6 +74,16 @@ const LATER = isoDate(21); // a later date for the same artist — must lose
 const NAME_SOON = isoDate(4);
 const NAME_LATER = isoDate(25);
 
+// BS#1613 RESOLVED name-arm probe: artist 6 (Bjork) with a scraped raw ('Björk',
+// diacritic) that DIFFERS from the canonical catalog name ('Bjork'). A free-text
+// play typed 'Bjork' can only attach if the name arm keys off the LEFT-JOINed
+// canonical `artists.artist_name`, not the raw — so this fixture fails loudly if
+// that join ever regresses (which the mocked unit tests can't catch).
+const ARTIST_RESOLVED_NAME = 6;
+const RESOLVED_CANONICAL_NAME = 'Bjork';
+const RESOLVED_SCRAPED_RAW = 'Björk';
+const RESOLVED_NAME_DATE = isoDate(6);
+
 describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
   let sql;
   let venueId;
@@ -238,6 +248,16 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
       starts_on: NAME_LATER,
       headlining_artist_raw: 'THE TUBS',
     });
+    // A RESOLVED concert (headlining_artist_id set) whose scraped raw differs
+    // from the canonical catalog name — exercises the real LEFT JOIN sourcing
+    // the name-arm key off artists.artist_name.
+    await seedConcert({
+      key: 'resolved-name',
+      venue_id: venueId,
+      starts_on: RESOLVED_NAME_DATE,
+      headlining_artist_raw: RESOLVED_SCRAPED_RAW,
+      headlining_artist_id: ARTIST_RESOLVED_NAME,
+    });
 
     // Track rows: one matching artist, one with an artist that has no upcoming
     // date, one whose artist only has a past date, and one free-form (null
@@ -250,7 +270,10 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     const t5 = await seedTrack({ albumId: null, artistName: 'Wishy', playOrder: 5 });
     const t6 = await seedTrack({ albumId: null, artistName: 'Circle Jerks', playOrder: 6 });
     const t7 = await seedTrack({ albumId: null, artistName: 'The Tubs', playOrder: 7 });
-    insertedTrackIds = [t1, t2, t3, t4, t5, t6, t7];
+    // Free-text play typed with the CANONICAL name of a resolved concert whose
+    // scraped raw differs — must attach via the canonical name-arm key.
+    const t8 = await seedTrack({ albumId: null, artistName: RESOLVED_CANONICAL_NAME, playOrder: 8 });
+    insertedTrackIds = [t1, t2, t3, t4, t5, t6, t7, t8];
   });
 
   afterAll(async () => {
@@ -351,6 +374,23 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     expect(tubs.upcoming_show).toBeDefined();
     expect(tubs.upcoming_show.starts_on).toBe(NAME_SOON);
     expect(tubs.upcoming_show.starts_on).not.toBe(NAME_LATER);
+  });
+
+  it('attaches a RESOLVED concert to a free-text play via the LEFT-JOINed canonical name (not the raw)', async () => {
+    const tracks = await fetchSeededTracks();
+    // The play is typed with the canonical catalog name 'Bjork'; the resolved
+    // concert's scraped raw is 'Björk' (diacritic). Matching proves the name-arm
+    // key is sourced from artists.artist_name via the LEFT JOIN — if that join
+    // regressed, the key would fall back to the raw 'Björk' and this would miss.
+    const bjork = tracks.find((t) => t.album_id === null && t.artist_name === RESOLVED_CANONICAL_NAME);
+    expect(bjork).toBeDefined();
+    expect(bjork.upcoming_show).toBeDefined();
+    expect(bjork.upcoming_show).toMatchObject({
+      starts_on: RESOLVED_NAME_DATE,
+      headlining_artist_id: ARTIST_RESOLVED_NAME, // the resolved concert
+      headlining_artist_raw: RESOLVED_SCRAPED_RAW, // whose raw differs from canonical
+      venue: { slug: VENUE_SLUG },
+    });
   });
 
   it('never surfaces the tombstoned or later date for the matching artist', async () => {

@@ -1,5 +1,5 @@
 import { and, asc, eq, gte, isNotNull, isNull, lte, sql } from 'drizzle-orm';
-import { artists, concerts, db, normalizeArtistName, venues } from '@wxyc/database';
+import { artists, concerts, db, normalizeFreetextArtist, venues } from '@wxyc/database';
 
 /**
  * Concerts read service — backs `GET /concerts` (BS#1603, touring-events
@@ -241,10 +241,12 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  *     join would drop every UNRESOLVED concert (`headlining_artist_id IS
  *     NULL`), which is precisely the set BS#1613's name arm exists to recover.
  *
- * Predicate: `removed_at IS NULL AND starts_on >= today` (America/New_York,
- * supplied by the caller so the window matches `GET /concerts`'s
- * `todayEastern`). No `headlining_artist_id IS NOT NULL` conjunct — unlike
- * BS#1607's id-only lookup, this must include unresolved concerts. Reads the
+ * Predicate: `buildWhere({ from: today, curated: false })` — `removed_at IS NULL
+ * AND starts_on >= today` (America/New_York, supplied by the caller so the
+ * window matches `GET /concerts`'s `todayEastern`). Reusing the shared builder
+ * keeps this feed from drifting off the page/count queries; `curated: false`
+ * omits the `headlining_artist_id IS NOT NULL` conjunct — unlike BS#1607's
+ * id-only lookup, this must include unresolved concerts. Reads the
  * `concerts_active_starts_on_id_idx` (non-tombstoned, `starts_on`-first).
  *
  * Returns two maps, each collapsed to the SOONEST concert per key by
@@ -253,13 +255,21 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  * `upcoming_show` DTO without a `DISTINCT ON`:
  *   - `byArtistId` — RESOLVED rows only (`headlining_artist_id` non-null),
  *     keyed by that id. The precise arm; matches album-linked plays.
- *   - `byNormName` — keyed by `normalizeArtistName(...)`: the canonical
- *     `artists.artist_name` for a resolved row (so a free-text play typed with
- *     the current name matches even when the concert resolved via an alias of
- *     an older name), else the scraped `headlining_artist_raw`. A billing/
- *     co-bill raw normalizes to its ENTIRE string — an inert key no
- *     one-artist-per-entry flowsheet play equals — so it is stored but never
- *     matched (see the BS#1613 ticket's "no clean-name filter" rationale).
+ *   - `byNormName` — keyed by `normalizeFreetextArtist(...)` (the free-text
+ *     match SSOT: `normalizeArtistName` + collapse internal whitespace + trim,
+ *     so incidental spacing in a scraped raw or a DJ's free-text entry can't
+ *     split the key): the canonical `artists.artist_name` for a resolved row
+ *     (so a free-text play typed with the current name matches even when the
+ *     concert resolved via an alias of an older name), else the scraped
+ *     `headlining_artist_raw`. Both sides of the match run this one function, so
+ *     the two keys are provably drift-free. A billing/co-bill raw normalizes to
+ *     its ENTIRE string — an inert key no one-artist-per-entry flowsheet play
+ *     equals — so it is stored but never matched (see the BS#1613 ticket's "no
+ *     clean-name filter" rationale). RESIDUAL (accepted; #1614 is the real
+ *     lever): two DISTINCT artists sharing a normalized name (homonyms, e.g. two
+ *     bands named `Wire`) collapse to one key — the soonest wins and can attach
+ *     to a play of the other. Low-harm for a "Touring Soon" CTA, not engineered
+ *     around here.
  *
  * The venue-embedding join and DTO mapping reuse `getConcertsPage`'s projection
  * so the wire shape can't drift.
@@ -275,23 +285,31 @@ export const getUpcomingShowsMaps = async (
     .from(concerts)
     .innerJoin(venues, eq(venues.id, concerts.venue_id))
     .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
-    .where(and(isNull(concerts.removed_at), gte(concerts.starts_on, today)))
+    .where(buildWhere({ from: today, curated: false }))
     .orderBy(asc(concerts.starts_on), asc(concerts.id));
 
   for (const row of rows as UpcomingShowJoinRow[]) {
-    const dto = toConcertDTO(row);
+    const artistId = row.headlining_artist_id;
 
-    // id arm — resolved rows only; first write wins → soonest.
-    if (row.headlining_artist_id !== null && !byArtistId.has(row.headlining_artist_id)) {
-      byArtistId.set(row.headlining_artist_id, dto);
+    // name arm — canonical name for resolved rows (falling back to the raw only
+    // on the impossible dangling-FK miss, since `artists.artist_name` is NOT
+    // NULL), the scraped raw for unresolved rows.
+    const nameSource = artistId !== null && row.artist_name !== null ? row.artist_name : row.headlining_artist_raw;
+    const nameKey = normalizeFreetextArtist(nameSource);
+
+    // First write wins per key → the soonest date (rows arrive starts_on ASC).
+    // id arm is resolved rows only; name arm skips the inert empty key.
+    const needsId = artistId !== null && !byArtistId.has(artistId);
+    const needsName = nameKey !== '' && !byNormName.has(nameKey);
+    if (!needsId && !needsName) {
+      continue; // a later date for an already-seen artist AND name — build no DTO
     }
 
-    // name arm — canonical name for resolved rows (falling back to the raw if
-    // the LEFT JOIN somehow found no artists row), raw for unresolved rows.
-    const nameSource =
-      row.headlining_artist_id !== null && row.artist_name !== null ? row.artist_name : row.headlining_artist_raw;
-    const nameKey = normalizeArtistName(nameSource);
-    if (nameKey !== '' && !byNormName.has(nameKey)) {
+    const dto = toConcertDTO(row);
+    if (needsId && artistId !== null) {
+      byArtistId.set(artistId, dto);
+    }
+    if (needsName) {
       byNormName.set(nameKey, dto);
     }
   }
