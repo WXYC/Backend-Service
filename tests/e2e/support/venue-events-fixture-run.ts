@@ -13,6 +13,14 @@
  * pattern as `etl.test.ts` running the ETL jobs via `tsx`), so `@wxyc/database`
  * binds to whatever DB_* the parent passes in the env. Prints the run totals
  * as JSON on stdout and exits non-zero if the scraper's own run guards throw.
+ *
+ * This deliberately mirrors `job.ts`'s wiring but reaches the orchestrator
+ * directly: `job.ts` fetches over the network, so it can't be pointed at
+ * fixtures. Only the fetch seam is swapped — the parse, venue-upsert, and
+ * concert-upsert code paths are the real ones. `job.ts`'s own concerns (env
+ * parsing, the sites-all-failed / events-seen-but-zero-upserts run guards) are
+ * covered by `tests/unit/jobs/venue-events-scraper/*`; this driver's job is the
+ * data pipeline, not those guards.
  */
 
 import fs from 'node:fs';
@@ -51,6 +59,22 @@ const fetchHtml = (url: string): Promise<string> => {
 const catsCradle = RHP_SITES.find((s) => s.site_slug === 'cats-cradle');
 if (!catsCradle) throw new Error('venue-events-fixture-run: cats-cradle site config missing from RHP_SITES');
 
+// Guard the EVENT_FIXTURES ↔ index-fixture coupling: if someone edits
+// cats-cradle-events-index.html to add/rename a slug without updating the map,
+// fail loudly here instead of letting the unmapped URL become a swallowed
+// fetch_error deep in the orchestrator.
+const EXPECTED_EVENTS = Object.keys(EVENT_FIXTURES).length;
+const indexLinks = extractEventLinks(readFixture('cats-cradle-events-index.html'), catsCradle.base_url);
+const unmapped = indexLinks.filter((url) => !(url in EVENT_FIXTURES));
+if (unmapped.length > 0) {
+  throw new Error(`venue-events-fixture-run: index fixture links have no mapped fixture: ${unmapped.join(', ')}`);
+}
+if (indexLinks.length !== EXPECTED_EVENTS) {
+  throw new Error(
+    `venue-events-fixture-run: index fixture links (${indexLinks.length}) != mapped fixtures (${EXPECTED_EVENTS}); update EVENT_FIXTURES`
+  );
+}
+
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: 'venue-events-fixture-run' });
   const venueCache = makeVenueCache();
@@ -65,8 +89,12 @@ const main = async (): Promise<void> => {
       upsertConcert,
       mapConcurrent,
     });
-    if (totals.upserts_total === 0) {
-      throw new Error(`venue-events-fixture-run: 0 concerts upserted (totals=${JSON.stringify(totals)})`);
+    // Every mapped fixture must upsert — not merely "at least one" — so a
+    // JSON-LD drift that drops one event is caught here, not one layer up.
+    if (totals.upserts_total !== EXPECTED_EVENTS) {
+      throw new Error(
+        `venue-events-fixture-run: expected ${EXPECTED_EVENTS} upserts, got ${totals.upserts_total} (totals=${JSON.stringify(totals)})`
+      );
     }
     process.stdout.write(`${JSON.stringify(totals)}\n`);
   } finally {
