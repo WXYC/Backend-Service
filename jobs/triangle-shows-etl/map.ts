@@ -53,12 +53,14 @@ export type MappedEvent = {
   concert: Omit<NewConcert, 'venue_id' | 'scraped_at'>;
 };
 
-/** Split the source's single comma-joined string into the `text[]` shape
- *  `concerts.supporting_artists_raw` expects: trimmed, empties dropped. */
-export const splitSupportArtists = (raw: string | null): string[] =>
-  (raw ?? '')
-    .split(',')
-    .map((s) => s.trim())
+/** Normalize the source's support-artist field into the `text[]` shape
+ *  `concerts.supporting_artists_raw` expects: trimmed, empties dropped.
+ *  Accepts both the legacy single comma-joined string and the JSON array
+ *  the source flips to (WXYC/triangle-shows#39) — the feed is untrusted, so
+ *  a non-string array element is coerced away rather than crashing the ETL. */
+export const splitSupportArtists = (raw: string | string[] | null): string[] =>
+  (Array.isArray(raw) ? raw : (raw ?? '').split(','))
+    .map((s) => (typeof s === 'string' ? s.trim() : ''))
     .filter((s) => s.length > 0);
 
 /** numeric(8,2) tops out at 999999.99, and PG errors rather than

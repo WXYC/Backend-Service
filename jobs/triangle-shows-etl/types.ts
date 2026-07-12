@@ -26,8 +26,13 @@ export type TsEvent = {
    * and non-blank, falling back to the local heuristic (BS#1604).
    */
   headliner?: string | null;
-  /** Single comma-joined string at the source, not a list. */
-  support_artists: string | null;
+  /**
+   * Support-artist billing. Historically a single comma-joined string;
+   * WXYC/triangle-shows#39 flips it to a JSON array (lossless — a comma
+   * inside a name no longer corrupts). `splitSupportArtists` tolerates
+   * both shapes so the consumer can deploy ahead of the source flip.
+   */
+  support_artists: string | string[] | null;
   /** Venue-local calendar date, `YYYY-MM-DD`. */
   date: string;
   doors_time: string | null;
