@@ -19,10 +19,11 @@ import {
   library_artist_view,
   specialty_shows,
   album_metadata,
+  normalizeArtistName,
   nyCalendarDate,
   nyStartOfDay,
 } from '@wxyc/database';
-import { getUpcomingShowsForArtists } from './concerts.service.js';
+import { getUpcomingShowsMaps } from './concerts.service.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -1105,16 +1106,25 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> =>
  */
 /**
  * Attach the per-playcut `upcoming_show` enrichment to a feed page of entries
- * (BS#1607, touring-events Phase 3).
+ * (BS#1607, widened to a hybrid id-arm ∪ name-arm match in BS#1613; touring-
+ * events Phase 3).
  *
- * Batched — ONE indexed concerts query for the whole page, never one per row
- * (the no-N+1 guarantee; project #32 perf posture). Collects the distinct
- * resolved `artist_id`s across the track rows, does a single
- * `getUpcomingShowsForArtists` lookup, and fans the soonest curated upcoming
- * concert back onto each matching track. Rows with no resolved artist, or
- * whose artist has no curated upcoming date, are returned unchanged
- * (`upcoming_show` stays absent) — so the wire shape is byte-identical to
- * pre-1607 for the no-match case (additive/optional field).
+ * Batched — ONE indexed concerts query for the whole page via
+ * `getUpcomingShowsMaps`, never one per row (the no-N+1 guarantee; project #32
+ * perf posture). Each track row resolves through two arms, id first:
+ *   1. id arm — `byArtistId.get(artist_id)`: the album-resolved catalog artist
+ *      (`flowsheet.album_id → library.artist_id`) matched a resolved concert.
+ *      Precise; the sole BS#1607 path, kept as-is (regression-guarded).
+ *   2. name arm (BS#1613) — `byNormName.get(normalizeArtistName(artist_name))`:
+ *      catches FREE-TEXT plays (no `album_id`, so no `artist_id`) and CLEAN
+ *      UNRESOLVED concerts (touring artists absent from our catalog). Uses the
+ *      SAME normalizer as the concert side, so the two keys are provably
+ *      produced by one function — drift would be a silent no-match.
+ *
+ * The name arm keys only on a non-empty `artist_name` (`?.trim()`), so a blank
+ * free-text name can't form a `''` key that collides. Rows that match neither
+ * arm are returned unchanged (`upcoming_show` stays absent) — the wire shape is
+ * byte-identical to pre-1607 for the no-match case (additive/optional field).
  *
  * "Today" is America/New_York (`nyCalendarDate`), matching `GET /concerts`'s
  * default `from`: `starts_on` is a venue-local calendar date, so a UTC "today"
@@ -1125,25 +1135,31 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> =>
  * `entry.upcoming_show`.
  */
 export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry[]> => {
-  const artistIds = Array.from(
-    new Set(
-      entries
-        .filter((entry) => entry.entry_type === 'track' && entry.artist_id !== null)
-        .map((entry) => entry.artist_id as number)
-    )
+  // Skip the DB only when NO track row could match either arm: a track matches
+  // the id arm with a non-null artist_id, or the name arm with a non-empty
+  // artist_name. (Almost every track carries a name, so this mainly short-
+  // circuits all-marker pages.)
+  const hasMatchableTrack = entries.some(
+    (entry) => entry.entry_type === 'track' && (entry.artist_id !== null || !!entry.artist_name?.trim())
   );
-  if (artistIds.length === 0) {
+  if (!hasMatchableTrack) {
     return entries;
   }
 
-  const byArtist = await getUpcomingShowsForArtists(artistIds, nyCalendarDate(new Date()));
+  const { byArtistId, byNormName } = await getUpcomingShowsMaps(nyCalendarDate(new Date()));
 
   for (const entry of entries) {
-    if (entry.entry_type === 'track' && entry.artist_id !== null) {
-      const show = byArtist.get(entry.artist_id);
-      if (show !== undefined) {
-        entry.upcoming_show = show;
-      }
+    if (entry.entry_type !== 'track') {
+      continue;
+    }
+    const byId = entry.artist_id !== null ? byArtistId.get(entry.artist_id) : undefined;
+    const byName =
+      byId === undefined && entry.artist_name?.trim()
+        ? byNormName.get(normalizeArtistName(entry.artist_name))
+        : undefined;
+    const show = byId ?? byName;
+    if (show !== undefined) {
+      entry.upcoming_show = show;
     }
   }
   return entries;
