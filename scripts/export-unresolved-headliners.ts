@@ -31,8 +31,11 @@ import { formatSummary, summarizeHeadlinerDump } from './lib/headliner-export.js
 
 const source = process.argv[2];
 // fd 0 = stdin; readFileSync on it blocks until EOF, which is exactly the
-// pipe semantics we want for `psql ... | tsx <this script>`.
-const raw = readFileSync(source ?? 0, 'utf8');
+// pipe semantics we want for `psql ... | tsx <this script>`. `||` not `??`
+// so an empty-string arg (e.g. an unset shell var expanded into the
+// invocation) also falls back to stdin instead of readFileSync('') throwing
+// a raw ENOENT.
+const raw = readFileSync(source || 0, 'utf8');
 const summary = summarizeHeadlinerDump(raw.split(/\r?\n/));
 
 if (summary.distinctRaw === 0) {
