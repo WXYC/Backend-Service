@@ -131,6 +131,15 @@ Daily cron job for BS#1381. One BS call here = one batch of up to 50 `lml_identi
 
 Weekly Python cron for BS#1522 — no new env names. Reuses the existing contracts with in-code defaults when a var is absent from `.env`: `BACKFILL_LML_RATE_PER_MIN` (20, applied to the engine's release GETs), `BACKFILL_LML_RESOLVE_TIMEOUT_MS` (15000, per LML call), `LIVE_ACTIVITY_LOOKBACK_SECONDS` / `LIVE_ACTIVITY_PAUSE_MS` (cooperative pause, same semantics as the TS jobs), `WXYC_SCHEMA_NAME`, and `DRY_RUN` (log would-fire alerts instead of sending). Required set: `DB_*`, `LIBRARY_METADATA_URL`, `LML_API_KEY`, plus `SENTRY_DSN` unless `DRY_RUN` — the job aborts at init rather than run without the ability to alert. Full runbook in `jobs/rotation-release-id-pollution-check/README.md`.
 
+### Concerts artist LML resolve (`jobs/concerts-artist-lml-resolver`)
+
+Daily cron for BS#1614: resolves clean unresolved `concerts.headlining_artist_raw` names to Discogs artist ids via LML's verify-before-mint `POST /api/v1/artists/resolve/bulk` (LML#759). Pages are sent serially with a job-owned limiter (same BS#995 blast-radius story as `BACKFILL_LML_*`, but job-scoped names so the two knobs can be tuned independently); `resolveArtistNamesBulk` takes ONE limiter token per page and derives its own batch-size-scaled socket timeout, so there is no per-call timeout var here. Cooperative pause reuses `LIVE_ACTIVITY_LOOKBACK_SECONDS` (above; `0` disables) with the fixed 30 s re-probe sleep.
+
+- `CONCERTS_ARTIST_RESOLVE_PAGE_SIZE` (default `10`) — Names per LML page. Values above the endpoint's hard per-request cap of 25 (`ARTIST_RESOLVE_BATCH_CAP`) fail fast at options parse.
+- `CONCERTS_ARTIST_RESOLVE_NO_MATCH_TTL_DAYS` (default `30`) — Re-ask window for RESPONDED no-matches (`not_found` / `ambiguous`, stamped into `concerts.artist_resolve_attempted_at`). Marker-NULL rows (never-asked, `escalation_unavailable`, transport failures) are always eligible regardless of TTL — that split is the LML#759 retryability contract.
+- `CONCERTS_ARTIST_RESOLVE_MAX_CONCURRENT` (default `1`) — Limiter semaphore width. Pages are already sent serially; belt-and-suspenders.
+- `CONCERTS_ARTIST_RESOLVE_RATE_PER_MIN` (default `20`) — Limiter token-bucket rate, in PAGES per minute (one token per page). Bounds hot-looping through cheap `identity_store` pages; Discogs egress is paced LML-side.
+
 ### Bulk backfill (`jobs/album-level-backfill`)
 
 Knobs for the one-shot album-level historical backfill (BS#1041). Separate from `BACKFILL_LML_*` above because this job calls LML's bulk endpoint (`/api/v1/lookup/bulk`, LML#368), where the natural unit is the batch, not the row. Defaults are tuned to let this job run concurrently with the per-row drain cron without saturating LML's serial Discogs fan-out. All are positive integers; non-positive or unparseable values throw at job startup.
