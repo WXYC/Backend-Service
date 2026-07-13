@@ -187,8 +187,11 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
     });
 
     it('declares the starts_on-first curated-feed partial index (resolver-stamped, not tombstoned)', () => {
+      // Predicate widened by migration 0116 (BS#1614): either resolution lane
+      // (catalog FK OR Discogs artist id) counts as curated. Must stay an
+      // exact twin of buildWhere's curated branch in concerts.service.ts.
       expect(def()).toMatch(
-        /index\(['"]concerts_curated_starts_on_idx['"]\)[\s\S]*?\.on\(table\.starts_on\)[\s\S]*?\.where\(sql`[\s\S]*?headlining_artist_id[\s\S]*?IS NOT NULL[\s\S]*?removed_at[\s\S]*?IS NULL/
+        /index\(['"]concerts_curated_starts_on_idx['"]\)[\s\S]*?\.on\(table\.starts_on\)[\s\S]*?\.where\([\s\S]*?sql`[\s\S]*?\([\s\S]*?headlining_artist_id[\s\S]*?IS NOT NULL OR [\s\S]*?headlining_discogs_artist_id[\s\S]*?IS NOT NULL\)[\s\S]*?removed_at[\s\S]*?IS NULL/
       );
     });
   });
