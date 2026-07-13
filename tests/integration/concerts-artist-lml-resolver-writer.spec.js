@@ -375,22 +375,36 @@ describe('concerts-artist-lml-resolver writer contract (BS#1614)', () => {
     it('the widened curated predicate still matches the partial index', async () => {
       // Regression pin for the index/read-path lockstep rule: if buildWhere's
       // OR predicate drifts from the concerts_curated_starts_on_idx partial
-      // predicate, the planner can no longer use the index. The dataset is
-      // tiny so the planner would normally seq-scan; SET LOCAL enable_seqscan
-      // off forces it to prove the index is USABLE, which is exactly the
-      // predicate-match property this pins.
-      const rows = await sql.begin(async (tx) => {
-        await tx.unsafe(`SET LOCAL enable_seqscan = off`);
-        return tx.unsafe(
-          `EXPLAIN (FORMAT JSON)
-           SELECT "id" FROM "${SCHEMA}".concerts
-           WHERE ("headlining_artist_id" IS NOT NULL OR "headlining_discogs_artist_id" IS NOT NULL)
-             AND "removed_at" IS NULL
-             AND "starts_on" >= CURRENT_DATE
-           ORDER BY "starts_on", "id"`
-        );
-      });
-      expect(JSON.stringify(rows[0]['QUERY PLAN'])).toContain('concerts_curated_starts_on_idx');
+      // predicate, the planner can no longer use the index. Two confounders
+      // are neutralized inside a ROLLED-BACK transaction: enable_seqscan off
+      // (tiny dataset → seq scan otherwise wins on cost), and a transient
+      // DROP of concerts_active_starts_on_id_idx (its removed_at-only
+      // predicate also matches this query AND it serves the (starts_on, id)
+      // ORDER BY for free, so the planner prefers it whenever both are
+      // usable). With both gone, the plan names the curated index if and
+      // only if its predicate still implies the query's — the property this
+      // pins. The sentinel throw rolls everything back; nothing persists.
+      let planJson;
+      const sentinel = new Error('rollback-explain-probe');
+      try {
+        await sql.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL enable_seqscan = off`);
+          await tx.unsafe(`DROP INDEX "${SCHEMA}"."concerts_active_starts_on_id_idx"`);
+          const rows = await tx.unsafe(
+            `EXPLAIN (FORMAT JSON)
+             SELECT "id" FROM "${SCHEMA}".concerts
+             WHERE ("headlining_artist_id" IS NOT NULL OR "headlining_discogs_artist_id" IS NOT NULL)
+               AND "removed_at" IS NULL
+               AND "starts_on" >= CURRENT_DATE
+             ORDER BY "starts_on", "id"`
+          );
+          planJson = JSON.stringify(rows[0]['QUERY PLAN']);
+          throw sentinel;
+        });
+      } catch (err) {
+        if (err !== sentinel) throw err;
+      }
+      expect(planJson).toContain('concerts_curated_starts_on_idx');
     });
   });
 });
