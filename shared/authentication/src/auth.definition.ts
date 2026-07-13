@@ -98,7 +98,12 @@ export const auth = betterAuth({
   // Base URL for the auth service
   baseURL: process.env.BETTER_AUTH_URL || 'http://localhost:8082/auth',
 
-  // Trusted origins for CORS
+  // Trusted origins for CORS. Wildcard entries (e.g.
+  // `https://*.wxyc-dj.pages.dev` for the dj-site Cloudflare Pages preview
+  // deployments) pass straight through — better-auth matches each entry with
+  // `matchesOriginPattern`, which understands `*`/`?` globs. The Express CORS
+  // layer trusts the same wildcards via `resolveCorsOrigin`
+  // (`cors-origin.ts`), so both trust layers agree on preview origins.
   trustedOrigins: (process.env.BETTER_AUTH_TRUSTED_ORIGINS || process.env.FRONTEND_SOURCE || 'http://localhost:3000')
     .split(',')
     .map((origin) => origin.trim())
