@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/concerts-artist-lml-resolver",
+  "cron-schedule": "35 5 * * *",
+  "version": "1.0.0",
+  "description": "WXYC daily cron (BS#1614): resolve clean unresolved concerts.headlining_artist_raw names to Discogs artist ids via LML's verify-before-mint POST /api/v1/artists/resolve/bulk (LML#759), writing headlining_discogs_artist_id (+ provenance + attempt-at marker) and FK-loop-closing headlining_artist_id when the Discogs id maps to exactly one library artist. Runs after the 05:05 triangle-shows pull and the 05:15 strict/alias resolver so the SQL arms get first claim; cooperative pause defers when DJs are active.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_concerts_artist_lml_resolver:ci -f ../../Dockerfile.concerts-artist-lml-resolver ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.59.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
