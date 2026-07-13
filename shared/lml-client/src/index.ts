@@ -1107,8 +1107,10 @@ export interface ArtistResolveBulkResponse {
 /**
  * LML's per-request hard cap on `resolveArtistNamesBulk` (LML#759). Keeps a
  * fully-escalating batch within the shared 50/min Discogs budget (~25 live
- * calls, ~30 s); callers page against this constant. LML returns 413 on
- * overflow. Hard contract, not a tunable.
+ * calls ≈ 30 s of rate-limited Discogs time — distinct from, and shorter than,
+ * the ~155 s socket timeout below, which adds retry/backoff + transport slack
+ * on top of that floor); callers page against this constant. LML returns 413
+ * on overflow. Hard contract, not a tunable.
  */
 export const ARTIST_RESOLVE_BATCH_CAP = 25;
 
@@ -1224,7 +1226,19 @@ export async function resolveArtistNamesBulk(
         timeoutMs
       );
 
-      const parsed = (await response.json()) as ArtistResolveBulkResponse;
+      let parsed: ArtistResolveBulkResponse;
+      try {
+        parsed = (await response.json()) as ArtistResolveBulkResponse;
+      } catch (err) {
+        // A 200 with an unparseable body (truncated stream, or an HTML error
+        // page a proxy slipped in front of LML) would otherwise throw a bare
+        // SyntaxError that escapes the `LmlClientError` contract this function's
+        // JSDoc promises. Wrap it so consumers see one error type.
+        throw new LmlClientError(
+          `resolveArtistNamesBulk: LML returned an unparseable body: ${(err as Error).message}`,
+          502
+        );
+      }
 
       // The whole contract is positional: `results[i]` is the verdict for
       // `names[i]` (`ArtistResolveResult` carries no `index` field, unlike
@@ -1232,10 +1246,9 @@ export async function resolveArtistNamesBulk(
       // would let a consumer silently mis-attribute a `discogs_artist_id` to
       // the wrong name and write it. Fail loud at the chokepoint instead.
       if (!Array.isArray(parsed.results) || parsed.results.length !== names.length) {
+        const got = Array.isArray(parsed.results) ? `${parsed.results.length} result(s)` : 'a non-array results field';
         throw new LmlClientError(
-          `resolveArtistNamesBulk: LML returned ${
-            Array.isArray(parsed.results) ? parsed.results.length : 'a non-array'
-          } result(s) for ${names.length} name(s); expected an index-aligned 1:1 array`,
+          `resolveArtistNamesBulk: LML returned ${got} for ${names.length} name(s); expected an index-aligned 1:1 array`,
           502
         );
       }
