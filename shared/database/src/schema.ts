@@ -1986,8 +1986,16 @@ export type NewVenue = InferInsertModel<typeof venues>;
  *
  * `headlining_artist_id` is best-effort — LML's canonical-entity coverage
  * is ~24% (see [[project_lml_entity_identity_state]]) so most rows ship
- * with a NULL id and just the raw name. A future artist-resolver pass
- * backfills the id without changing the raw column.
+ * with a NULL id and just the raw name. The daily
+ * `jobs/concerts-artist-resolver/` pass backfills the id without changing
+ * the raw column. Touring artists absent from the WXYC library can never
+ * get that FK; `headlining_discogs_artist_id` (BS#1614) is their parallel
+ * resolution lane — a bare Discogs artist id minted by the offline LML
+ * verify-before-mint pass (`jobs/concerts-artist-lml-resolver/`), with
+ * `headlining_discogs_artist_id_source` as provenance and
+ * `artist_resolve_attempted_at` as the attempt-at marker (docs/migrations.md
+ * "Attempt-at markers"). Display always renders `headlining_artist_raw`;
+ * the Discogs id is a curation/linkage signal, never display text.
  *
  * `raw_data` carries the source's original payload (the parsed schema.org
  * `Event` object for `rhp_scrape`) so we can forensically diff when the
@@ -2055,6 +2063,23 @@ export const concerts = wxyc_schema.table(
     headlining_artist_id: integer('headlining_artist_id').references(() => artists.id, {
       onDelete: 'set null',
     }),
+    // Discogs artist id for the headliner, resolved from
+    // `headlining_artist_raw` by the offline LML verify-before-mint pass
+    // (BS#1614, `jobs/concerts-artist-lml-resolver/`). External id, no FK —
+    // `album_metadata.discogs_artist_id` precedent. NULL until resolved.
+    headlining_discogs_artist_id: integer('headlining_discogs_artist_id'),
+    // Provenance for `headlining_discogs_artist_id`, à la
+    // `rotation.discogs_release_id_source` — but TEXT with a documented
+    // vocabulary instead of a pgEnum, because the 0109 saga showed each
+    // enum-value addition costs its own migration. Values so far:
+    //   'lml_artist_resolve' — jobs/concerts-artist-lml-resolver via LML#759.
+    headlining_discogs_artist_id_source: text('headlining_discogs_artist_id_source'),
+    // Attempt-at marker (docs/migrations.md "Attempt-at markers"): stamped
+    // when LML RESPONDED for this row's name (resolved / ambiguous /
+    // not_found), left NULL on `escalation_unavailable` and transport errors
+    // so those rows stay immediately retryable. The resolver job re-attempts
+    // NULL rows and no-match rows past a TTL.
+    artist_resolve_attempted_at: timestamp('artist_resolve_attempted_at', { withTimezone: true }),
     supporting_artists_raw: text('supporting_artists_raw')
       .array()
       .notNull()
@@ -2086,11 +2111,19 @@ export const concerts = wxyc_schema.table(
     index('concerts_venue_starts_at_idx').on(table.venue_id, table.starts_at),
     index('concerts_headlining_artist_starts_at_idx').on(table.headlining_artist_id, table.starts_at),
     // Curated-feed path (Phase 2's GET /concerts?curated=true): resolver-
-    // stamped, not tombstoned, windowed by calendar date. starts_on-first
-    // because starts_at is nullable post-0112 (BS#1570 correction 4).
+    // stamped (catalog FK OR Discogs id — either resolution lane counts,
+    // BS#1614), not tombstoned, windowed by calendar date. starts_on-first
+    // because starts_at is nullable post-0112 (BS#1570 correction 4). The
+    // predicate must stay an exact textual twin of `buildWhere`'s curated
+    // branch in apps/backend/services/concerts.service.ts or the planner
+    // stops matching the partial index. BS#1618 adds a third
+    // `has_resolved_support` term when it lands — whichever PR merges second
+    // rebases onto the other's predicate.
     index('concerts_curated_starts_on_idx')
       .on(table.starts_on)
-      .where(sql`${table.headlining_artist_id} IS NOT NULL AND ${table.removed_at} IS NULL`),
+      .where(
+        sql`(${table.headlining_artist_id} IS NOT NULL OR ${table.headlining_discogs_artist_id} IS NOT NULL) AND ${table.removed_at} IS NULL`
+      ),
     // Default (uncurated) feed path (Phase 2's GET /concerts): non-tombstoned
     // rows windowed by calendar date, ordered by (starts_on, id). The curated
     // partial index above can't serve this path (its predicate requires a
