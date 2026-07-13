@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, isNotNull, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { artists, concerts, db, normalizeFreetextArtist, venues } from '@wxyc/database';
 
 /**
@@ -162,8 +162,13 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
  * Non-removed rows only, windowed inclusively on `starts_on`. With
  * `curated: true` the predicate becomes exactly the
  * `concerts_curated_starts_on_idx` partial-index predicate
- * (`headlining_artist_id IS NOT NULL AND removed_at IS NULL`), so the
- * curated feed reads the index.
+ * (`(headlining_artist_id IS NOT NULL OR headlining_discogs_artist_id IS
+ * NOT NULL) AND removed_at IS NULL`), so the curated feed reads the index.
+ * Either resolution lane counts as curated (BS#1614): the catalog FK from
+ * the strict/alias resolver, or the Discogs id minted by the offline LML
+ * pass for touring artists absent from the library. The OR must stay an
+ * exact twin of the index predicate in shared/database/src/schema.ts —
+ * widening one without the other silently de-indexes the curated feed.
  */
 const buildWhere = ({ from, to, curated }: ConcertsQueryFilters) => {
   const conditions = [isNull(concerts.removed_at), gte(concerts.starts_on, from)];
@@ -171,7 +176,7 @@ const buildWhere = ({ from, to, curated }: ConcertsQueryFilters) => {
     conditions.push(lte(concerts.starts_on, to));
   }
   if (curated) {
-    conditions.push(isNotNull(concerts.headlining_artist_id));
+    conditions.push(or(isNotNull(concerts.headlining_artist_id), isNotNull(concerts.headlining_discogs_artist_id))!);
   }
   return and(...conditions);
 };

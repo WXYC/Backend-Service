@@ -1632,15 +1632,17 @@ paths:
       description: >-
         Upcoming non-removed concerts windowed on the venue-local calendar
         date `starts_on`, ordered by `starts_on` ascending, paginated.
-        `curated=true` narrows to concerts whose headliner resolved to a WXYC
-        catalog artist. Requires anonymous session auth.
+        `curated=true` narrows to concerts whose headliner resolved — to a
+        WXYC catalog artist (`headlining_artist_id`) or to a Discogs artist
+        identity (`headlining_discogs_artist_id`, the BS#1614 offline LML
+        pass). Requires anonymous session auth.
       parameters:
         - name: curated
           in: query
           schema:
             type: boolean
             default: false
-          description: Only concerts with a resolved catalog headliner
+          description: Only concerts with a resolved headliner (catalog FK or Discogs artist id)
         - name: from
           in: query
           schema:
