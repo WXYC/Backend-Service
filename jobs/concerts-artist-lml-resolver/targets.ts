@@ -13,9 +13,17 @@
  *   AND headlining_discogs_artist_id IS NULL  -- this arm hasn't either
  *   AND headlining_artist_raw IS NOT NULL
  *   AND removed_at IS NULL
- *   AND starts_on >= CURRENT_DATE
+ *   AND starts_on >= (now() AT TIME ZONE 'America/New_York')::date
  *   AND (artist_resolve_attempted_at IS NULL   -- never-asked / retryable
  *        OR artist_resolve_attempted_at < now() - TTL)  -- no-match re-ask
+ *
+ * The upcoming-only bound is the venue-local (Eastern) calendar date, not
+ * server-clock `CURRENT_DATE`. `starts_on` is a venue-local date, so a UTC
+ * "today" would flip the window at 8 PM Eastern and briefly drop tonight's
+ * shows — the exact reason the read path derives its window from
+ * `todayEastern()` (apps/backend/controllers/concerts.controller.ts). Matching
+ * that here keeps the candidate window identical to the feed's, independent of
+ * the DB server's timezone or when the cron happens to fire.
  *
  * Write fan-out targets the candidate row ids, guarded by BOTH id columns
  * being still NULL, so the job only fills NULLs and a row the 05:15 SQL
@@ -83,7 +91,7 @@ export const loadHeadlinerCandidates = async (ttlDays: number): Promise<TargetCa
       AND "headlining_discogs_artist_id" IS NULL
       AND "headlining_artist_raw" IS NOT NULL
       AND "removed_at" IS NULL
-      AND "starts_on" >= CURRENT_DATE
+      AND "starts_on" >= (now() AT TIME ZONE 'America/New_York')::date
       AND ("artist_resolve_attempted_at" IS NULL
         OR "artist_resolve_attempted_at" < now() - (interval '1 day' * ${ttlDays}))
     ORDER BY "id" ASC

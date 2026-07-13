@@ -87,8 +87,10 @@ describe('loadHeadlinerCandidates', () => {
     expect(text).toContain('"headlining_discogs_artist_id" IS NULL');
     expect(text).toContain('"headlining_artist_raw" IS NOT NULL');
     expect(text).toContain('"removed_at" IS NULL');
-    // Upcoming-only: never burn Discogs budget resolving past shows.
-    expect(text).toContain('"starts_on" >= CURRENT_DATE');
+    // Upcoming-only: never burn Discogs budget resolving past shows. Windowed
+    // on the venue-local (Eastern) date the read path uses, not server-clock
+    // CURRENT_DATE — a UTC "today" would flip the window at 8 PM Eastern.
+    expect(text).toContain(`"starts_on" >= (now() AT TIME ZONE 'America/New_York')::date`);
     // Marker-NULL rows always eligible; stamped rows re-ask only past the TTL.
     expect(text).toContain('"artist_resolve_attempted_at" IS NULL');
     expect(text).toContain(`interval '1 day'`);
