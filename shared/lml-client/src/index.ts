@@ -1141,7 +1141,12 @@ const ARTIST_RESOLVE_TIMEOUT_SLACK_MS = 30_000;
  *
  * - **One limiter token per batch, not per name.** LML paces its own serial
  *   Discogs fan-out internally; the BS-side limiter mirrors that same shared
- *   ceiling, so token-per-batch is the correct accounting.
+ *   ceiling, so token-per-batch is the correct accounting. The default
+ *   `limiter` is the process-wide runtime pool (`LML_CLIENT_*`); a full
+ *   25-name batch can hold one of its 5 permits for the entire ~155 s socket,
+ *   so any runtime/interactive caller MUST pass a dedicated `options.limiter`
+ *   (the documented offline consumer does). Defaulting to the runtime pool is
+ *   the sibling convention, not an invitation to run big batches on it.
  * - **Timeout scales with batch size.** `names.length ×
  *   ARTIST_RESOLVE_PER_NAME_TIMEOUT_MS (5000) + ARTIST_RESOLVE_TIMEOUT_SLACK_MS
  *   (30_000)` — ~35 s for a 1-name page, ~155 s at the 25 cap. A fixed 30 s
@@ -1151,11 +1156,29 @@ const ARTIST_RESOLVE_TIMEOUT_SLACK_MS = 30_000;
  * - **Span op mirrors `bulkLookupMetadata`** (`http.client`); `lml.bulk.size` is
  *   the batch attribute. No `cache_stats` projection — this endpoint doesn't
  *   return the `/lookup` cache-counter block.
+ * - **No `X-Caller-Budget-Ms`.** That header is a `/lookup`-family construct
+ *   (it lets LML short-circuit its empty-results cascade); this endpoint does
+ *   not honor it, so — unlike the sibling — no `budgetMs` option is offered.
  *
  * Client-side validation rejects empty + oversize batches before the wire call
- * — a 400/413 round-trip costs a TCP RTT for no information gain.
+ * — a 400/413 round-trip costs a TCP RTT for no information gain. The response
+ * is then validated to be an index-aligned 1:1 array before return; a length or
+ * shape violation throws `LmlClientError(…, 502)` rather than handing a
+ * mis-aligned batch to a consumer that zips verdicts to names positionally.
+ *
+ * Errors (all `LmlClientError`):
+ *   - Empty / >25 names: thrown client-side (`400`) before the wire call.
+ *   - Timeout: `504` (AbortController fired; rethrown from `lmlFetch`).
+ *   - 5xx: `502`. Other non-2xx (incl. a wire `413` if LML's cap ever drops
+ *     below 25): the upstream status is passed through.
+ *   - Network failure, or a malformed / mis-aligned response body: `502`.
+ * Note `escalation_unavailable` is NOT an error — it arrives as a 200-body
+ * verdict and is RETRYABLE; consumers must not stamp a no-match TTL on it.
  *
  * @param names - Bare artist names (1..=25), sent verbatim.
+ * @param options.timeoutMs - Override the batch-size-scaled default socket timeout (ms).
+ * @param options.limiter - Override the default runtime limiter (see the token bullet above).
+ * @param options.caller - Caller-class label projected onto the span as `lml.caller`.
  * @param options.dryRun - Run every tier but skip the `entity.identity` write-back.
  */
 export async function resolveArtistNamesBulk(
@@ -1201,7 +1224,23 @@ export async function resolveArtistNamesBulk(
         timeoutMs
       );
 
-      return (await response.json()) as ArtistResolveBulkResponse;
+      const parsed = (await response.json()) as ArtistResolveBulkResponse;
+
+      // The whole contract is positional: `results[i]` is the verdict for
+      // `names[i]` (`ArtistResolveResult` carries no `index` field, unlike
+      // `BulkLookupResultItem`). A short, long, reordered, or missing array
+      // would let a consumer silently mis-attribute a `discogs_artist_id` to
+      // the wrong name and write it. Fail loud at the chokepoint instead.
+      if (!Array.isArray(parsed.results) || parsed.results.length !== names.length) {
+        throw new LmlClientError(
+          `resolveArtistNamesBulk: LML returned ${
+            Array.isArray(parsed.results) ? parsed.results.length : 'a non-array'
+          } result(s) for ${names.length} name(s); expected an index-aligned 1:1 array`,
+          502
+        );
+      }
+
+      return parsed;
     });
   });
 }

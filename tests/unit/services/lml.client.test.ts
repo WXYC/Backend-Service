@@ -774,11 +774,26 @@ describe('lml.client', () => {
       candidate_count: 1,
     });
 
-    it('sends POST to /api/v1/artists/resolve/bulk wrapping names in a {names} envelope', async () => {
-      mockFetch.mockResolvedValue({
+    // The wrapper validates results.length === names.length, so request-shape
+    // tests that don't care about the verdicts must still return an index-
+    // aligned 1:1 body rather than a bare `{ results: [] }`.
+    const okBatch = (names: string[]) =>
+      ({
         ok: true,
-        json: () => Promise.resolve({ results: [] }),
-      } as unknown as globalThis.Response);
+        json: () => Promise.resolve({ results: names.map((n, i) => resolvedResult(n, 1000 + i)) }),
+      }) as unknown as globalThis.Response;
+
+    beforeEach(() => {
+      // Reset the process-wide default limiter so the setTimeout-spy timeout
+      // tests below draw from a full TokenBucket. Without this, a depleted
+      // shared bucket sends TokenBucket.consume(1) down the slow path, adding a
+      // stray setTimeout call and a real ~1.2 s sleep — a latent flake the
+      // BS#906 block already guards against with the same reset-before-each.
+      _resetLmlClientLimitersForTest();
+    });
+
+    it('sends POST to /api/v1/artists/resolve/bulk wrapping names in a {names} envelope', async () => {
+      mockFetch.mockResolvedValue(okBatch(['Wishy', "L'Rain"]));
 
       await resolveArtistNamesBulk(['Wishy', "L'Rain"]);
 
@@ -793,10 +808,7 @@ describe('lml.client', () => {
     });
 
     it('forwards dry_run: true onto the body when options.dryRun is set', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ results: [] }),
-      } as unknown as globalThis.Response);
+      mockFetch.mockResolvedValue(okBatch(['Wishy']));
 
       await resolveArtistNamesBulk(['Wishy'], { dryRun: true });
 
@@ -839,13 +851,8 @@ describe('lml.client', () => {
       // Resolved verdict: every field survives the passthrough, incl. the two
       // api_search-only fields (canonical_name, cache_corroboration) the wrapper
       // must not drop if a future refactor ever introduces a projection step.
-      expect(result.results[0]).toMatchObject({
-        discogs_artist_id: 7315154,
-        canonical_name: 'Wishy',
-        method: 'api_search',
-        cache_corroboration: ['cache_exact'],
-        candidate_count: 1,
-      });
+      // toEqual (not toMatchObject) so a dropped OR an added junk field fails.
+      expect(result.results[0]).toEqual(resolvedResult('Wishy', 7315154));
       expect(result.results[1]).toMatchObject({ unresolved_reason: 'not_found', candidate_count: 0 });
       // Ambiguous verdict: corroboration legs (incl. a fuzzy cache_trigram
       // neighbor) pass through alongside the reason and count.
@@ -856,6 +863,34 @@ describe('lml.client', () => {
       });
       // escalation_unavailable carries candidate_count: null (not measured — never zero-as-unknown).
       expect(result.results[3]).toMatchObject({ unresolved_reason: 'escalation_unavailable', candidate_count: null });
+    });
+
+    it('throws (502) when LML returns fewer results than names — the contract is positional', async () => {
+      // 2 names in, 1 verdict back: index alignment is broken. The wrapper must
+      // reject rather than let a consumer zip results[1] to the wrong name.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [resolvedResult('Wishy', 7315154)] }),
+      } as unknown as globalThis.Response);
+
+      const err = await resolveArtistNamesBulk(['Wishy', "L'Rain"]).catch((e) => e);
+      expect(err).toBeInstanceOf(LmlClientError);
+      expect((err as LmlClientError).statusCode).toBe(502);
+      expect((err as Error).message).toMatch(/1 result\(s\) for 2 name\(s\)/);
+    });
+
+    it('throws (502) when LML returns a non-array results field', async () => {
+      // A malformed 200 body ({results: null}) would otherwise NPE deep in a
+      // consumer's `.results.map(...)`; localize it to an LmlClientError here.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: null }),
+      } as unknown as globalThis.Response);
+
+      const err = await resolveArtistNamesBulk(['Wishy']).catch((e) => e);
+      expect(err).toBeInstanceOf(LmlClientError);
+      expect((err as LmlClientError).statusCode).toBe(502);
+      expect((err as Error).message).toMatch(/non-array/);
     });
 
     it('rejects empty names locally without hitting the wire', async () => {
@@ -875,10 +910,7 @@ describe('lml.client', () => {
 
     it('includes Authorization: Bearer <key> when LML_API_KEY is set', async () => {
       process.env.LML_API_KEY = 'test-secret';
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ results: [] }),
-      } as unknown as globalThis.Response);
+      mockFetch.mockResolvedValue(okBatch(['Wishy']));
 
       await resolveArtistNamesBulk(['Wishy']);
 
@@ -887,35 +919,29 @@ describe('lml.client', () => {
     });
 
     it('consumes exactly one limiter token per batch (not one per name)', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ results: [] }),
-      } as unknown as globalThis.Response);
-
-      // The real pin here is the mockFetch call count (== 2, one HTTP request
-      // per batch): a regression that fanned out to one request+token PER NAME
-      // would fire 50 requests, not 2. The timing assertion is only a weak
-      // secondary — with a 60-token bucket even a hypothetical consume(25)-per-
-      // batch (25 + 25 = 50 ≤ 60) would not block, so `elapsed < 500` alone
-      // cannot distinguish per-batch from per-name token accounting. Same
-      // documented caveat as the bulkLookupMetadata token-per-batch test.
       const limiter = createLmlLimiter({ maxConcurrent: 4, ratePerMinute: 60 });
       const names = Array.from({ length: 25 }, (_, i) => `Artist ${i}`);
+      mockFetch.mockResolvedValue(okBatch(names));
 
       const start = Date.now();
       await resolveArtistNamesBulk(names, { limiter });
       await resolveArtistNamesBulk(names, { limiter });
       const elapsed = Date.now() - start;
 
+      // The fetch call count (== 2, one HTTP request per batch) catches the
+      // gross regression: one request+token PER NAME would fire 50 requests.
       expect(mockFetch).toHaveBeenCalledTimes(2);
       expect(elapsed).toBeLessThan(500);
+      // Token-accounting pin the fetch-count can't give: 2 batches of 25 names
+      // consume 2 tokens total (one per batch). A `consume(names.length)`
+      // regression would drain ~50 of the 60-token bucket, leaving ~10 — which
+      // the fetch-count and the (non-blocking, 50 ≤ 60) timing assertion both
+      // miss. ~58 remaining (minus negligible continuous refill) proves 1/batch.
+      expect(limiter.state().availableTokens).toBeGreaterThan(55);
     });
 
     it('wraps the call in a Sentry span (lml.artists.resolve.bulk / http.client) with bulk.size', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ results: [] }),
-      } as unknown as globalThis.Response);
+      mockFetch.mockResolvedValue(okBatch(['Wishy', "L'Rain", '(Sandy) Alex G']));
 
       await resolveArtistNamesBulk(['Wishy', "L'Rain", '(Sandy) Alex G']);
 
@@ -925,10 +951,7 @@ describe('lml.client', () => {
     });
 
     it('projects lml.caller onto the span when caller is provided', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ results: [] }),
-      } as unknown as globalThis.Response);
+      mockFetch.mockResolvedValue(okBatch(['Wishy']));
 
       await resolveArtistNamesBulk(['Wishy'], { caller: 'concerts-artist-lml-resolver' });
 
@@ -939,10 +962,7 @@ describe('lml.client', () => {
     });
 
     it("projects lml.caller='unknown' when caller is not provided (flag-of-shame)", async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ results: [] }),
-      } as unknown as globalThis.Response);
+      mockFetch.mockResolvedValue(okBatch(['Wishy']));
 
       await resolveArtistNamesBulk(['Wishy']);
 
@@ -964,12 +984,9 @@ describe('lml.client', () => {
       [ARTIST_RESOLVE_BATCH_CAP, 155000],
     ])('scales the default timeout with batch size: %i names → %i ms', async (count, expectedMs) => {
       const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ results: [] }),
-      } as unknown as globalThis.Response);
-
       const names = Array.from({ length: count }, (_, i) => `Artist ${i}`);
+      mockFetch.mockResolvedValue(okBatch(names));
+
       await resolveArtistNamesBulk(names);
 
       expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === expectedMs)).toHaveLength(1);
@@ -978,10 +995,7 @@ describe('lml.client', () => {
 
     it('honors options.timeoutMs as a per-call override', async () => {
       const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ results: [] }),
-      } as unknown as globalThis.Response);
+      mockFetch.mockResolvedValue(okBatch(['Wishy', "L'Rain"]));
 
       await resolveArtistNamesBulk(['Wishy', "L'Rain"], { timeoutMs: 5000 });
 
@@ -991,14 +1005,19 @@ describe('lml.client', () => {
       setTimeoutSpy.mockRestore();
     });
 
-    it('throws LmlClientError on non-2xx response (e.g. 413 over-cap at the wire)', async () => {
+    it('throws LmlClientError, passing the upstream status through (413 over-cap at the wire)', async () => {
+      // The client caps at 25 locally, so a wire 413 can only arise if LML's
+      // cap ever drops below 25 — pin that lmlFetch passes <500 statuses
+      // through (413, not a collapsed 502) so a caller could branch on it.
       mockFetch.mockResolvedValue({
         ok: false,
         status: 413,
         statusText: 'Payload Too Large',
       } as unknown as globalThis.Response);
 
-      await expect(resolveArtistNamesBulk(['Wishy'])).rejects.toThrow(LmlClientError);
+      const err = await resolveArtistNamesBulk(['Wishy']).catch((e) => e);
+      expect(err).toBeInstanceOf(LmlClientError);
+      expect((err as LmlClientError).statusCode).toBe(413);
     });
   });
 
