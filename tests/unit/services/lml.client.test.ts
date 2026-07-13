@@ -817,6 +817,18 @@ describe('lml.client', () => {
     });
 
     it('returns verdicts index-aligned with input, passing resolved + unresolved fields through', async () => {
+      // An identity_store short-circuit: resolved, but the API tier never ran —
+      // so no canonical_name (identity rows store no title), empty
+      // cache_corroboration, and candidate_count: null. Distinct verdict shape
+      // from the api_search resolvedResult; pinned so a future projection can't
+      // silently mangle the identity_store branch.
+      const identityStoreResult: ArtistResolveResult = {
+        name: 'Cindy Lee',
+        discogs_artist_id: 4720512,
+        method: 'identity_store',
+        cache_corroboration: [],
+        candidate_count: null,
+      };
       const mockResponse = {
         results: [
           resolvedResult('Wishy', 7315154),
@@ -838,6 +850,7 @@ describe('lml.client', () => {
             unresolved_reason: 'escalation_unavailable',
             candidate_count: null,
           },
+          identityStoreResult,
         ],
       };
       mockFetch.mockResolvedValue({
@@ -845,9 +858,10 @@ describe('lml.client', () => {
         json: () => Promise.resolve(mockResponse),
       } as unknown as globalThis.Response);
 
-      const result = await resolveArtistNamesBulk(['Wishy', 'Some Co-Bill & Another', 'Popsicle', 'Never Asked']);
+      const names = ['Wishy', 'Some Co-Bill & Another', 'Popsicle', 'Never Asked', 'Cindy Lee'];
+      const result = await resolveArtistNamesBulk(names);
 
-      expect(result.results.map((r) => r.name)).toEqual(['Wishy', 'Some Co-Bill & Another', 'Popsicle', 'Never Asked']);
+      expect(result.results.map((r) => r.name)).toEqual(names);
       // Resolved verdict: every field survives the passthrough, incl. the two
       // api_search-only fields (canonical_name, cache_corroboration) the wrapper
       // must not drop if a future refactor ever introduces a projection step.
@@ -863,6 +877,8 @@ describe('lml.client', () => {
       });
       // escalation_unavailable carries candidate_count: null (not measured — never zero-as-unknown).
       expect(result.results[3]).toMatchObject({ unresolved_reason: 'escalation_unavailable', candidate_count: null });
+      // identity_store short-circuit survives whole (no canonical_name/reason added).
+      expect(result.results[4]).toEqual(identityStoreResult);
     });
 
     it('throws (502) when LML returns fewer results than names — the contract is positional', async () => {
@@ -891,6 +907,20 @@ describe('lml.client', () => {
       expect(err).toBeInstanceOf(LmlClientError);
       expect((err as LmlClientError).statusCode).toBe(502);
       expect((err as Error).message).toMatch(/non-array/);
+    });
+
+    it('throws (502 LmlClientError) when a 200 body is unparseable — not a raw SyntaxError', async () => {
+      // The JSDoc promises "all LmlClientError"; a non-JSON 200 (truncated
+      // stream / proxy HTML page) must not escape as a bare SyntaxError.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.reject(new SyntaxError('Unexpected end of JSON input')),
+      } as unknown as globalThis.Response);
+
+      const err = await resolveArtistNamesBulk(['Wishy']).catch((e) => e);
+      expect(err).toBeInstanceOf(LmlClientError);
+      expect((err as LmlClientError).statusCode).toBe(502);
+      expect((err as Error).message).toMatch(/unparseable body/);
     });
 
     it('rejects empty names locally without hitting the wire', async () => {
