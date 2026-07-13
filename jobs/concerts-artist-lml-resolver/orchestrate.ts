@@ -79,6 +79,10 @@ export type Totals = {
   pages: number;
   /** Names resolved to a Discogs artist id. */
   resolved: number;
+  /** Of `resolved`, how many via LML's cheap `identity_store` tier (no Discogs API call). */
+  resolved_via_identity_store: number;
+  /** Of `resolved`, how many via a live Discogs `api_search` (spends LML's Discogs budget). */
+  resolved_via_api_search: number;
   /** Rows updated by resolved verdicts (fan-out can exceed `resolved`). */
   rows_resolved: number;
   /** Rows whose `headlining_artist_id` FK was also loop-closed. */
@@ -103,6 +107,8 @@ export const emptyTotals = (): Totals => ({
   names: 0,
   pages: 0,
   resolved: 0,
+  resolved_via_identity_store: 0,
+  resolved_via_api_search: 0,
   rows_resolved: 0,
   fk_loop_closed: 0,
   ambiguous: 0,
@@ -214,6 +220,15 @@ export const runResolve = async (deps: RunDeps, options: RunOptions): Promise<To
 
       if (typeof result.discogs_artist_id === 'number') {
         totals.resolved += 1;
+        // Break out the resolution tier so the run's cost story is legible from
+        // the finished log: `identity_store` is a free cache hit, `api_search`
+        // spent LML's Discogs budget. (An undefined method — not expected per
+        // the LML#759 contract on a resolved verdict — increments neither.)
+        if (result.method === 'identity_store') {
+          totals.resolved_via_identity_store += 1;
+        } else if (result.method === 'api_search') {
+          totals.resolved_via_api_search += 1;
+        }
         for (const [target, ids] of entry) {
           try {
             const { updated, fk_loop_closed } = await target.applyResolved(ids, {

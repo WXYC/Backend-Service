@@ -101,6 +101,27 @@ describe('runResolve — verdict matrix', () => {
     expect(totals).toMatchObject({ candidates: 1, names: 1, pages: 1, resolved: 1, rows_resolved: 1, errors: 0 });
   });
 
+  test('resolved counters split by LML method tier (identity_store vs api_search)', async () => {
+    const target = makeTarget('headliner', [
+      { id: 1, raw_name: 'Sweeping Promises' }, // cheap cache hit
+      { id: 2, raw_name: 'Wednesday' }, // live Discogs search
+    ]);
+    const resolveBatch = makeResolveBatch({
+      'Sweeping Promises': { ...resolvedResult('Sweeping Promises', 777), method: 'identity_store' },
+      Wednesday: resolvedResult('Wednesday', 88), // helper defaults method to 'api_search'
+    });
+
+    const totals = await runResolve({ targets: [target], gate: passAll, resolveBatch }, options());
+
+    // The split makes the run's cost story legible from the finished log —
+    // identity_store is free, api_search spent LML's Discogs budget.
+    expect(totals).toMatchObject({
+      resolved: 2,
+      resolved_via_identity_store: 1,
+      resolved_via_api_search: 1,
+    });
+  });
+
   test('fk_loop_closed and raced aggregate from the target return values', async () => {
     const target = makeTarget('headliner', [
       { id: 1, raw_name: 'Mannequin Pussy' },
