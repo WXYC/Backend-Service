@@ -74,7 +74,7 @@ async function loadCandidates(sql, ttlDays = TTL_DAYS) {
        AND "headlining_discogs_artist_id" IS NULL
        AND "headlining_artist_raw" IS NOT NULL
        AND "removed_at" IS NULL
-       AND "starts_on" >= CURRENT_DATE
+       AND "starts_on" >= (now() AT TIME ZONE 'America/New_York')::date
        AND ("artist_resolve_attempted_at" IS NULL
          OR "artist_resolve_attempted_at" < now() - (interval '1 day' * $1))
        AND "source_id" LIKE $2
