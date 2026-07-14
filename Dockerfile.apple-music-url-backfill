@@ -1,0 +1,56 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /apple-music-url-backfill-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./shared/lml-client ./shared/lml-client
+COPY ./jobs/apple-music-url-backfill ./jobs/apple-music-url-backfill
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/apple-music-url-backfill
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /apple-music-url-backfill
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/apple-music-url-backfill/package* ./jobs/apple-music-url-backfill/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
+
+# `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
+# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
+# .npmrc the prod stage's npm install 401s on @wxyc/shared.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./apple-music-url-backfill-builder/jobs/apple-music-url-backfill/dist ./jobs/apple-music-url-backfill/dist
+COPY --from=builder ./apple-music-url-backfill-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./apple-music-url-backfill-builder/shared/lml-client/dist ./shared/lml-client/dist
+
+# The candidate SELECTs walk `flowsheet` (2.6M rows) with no covering
+# index; the API's tight 5s default statement timeout is too aggressive
+# for the batch scans as the cursor advances.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+
+# Async commit: the WHERE guard (`apple_music_url IS NULL`) makes any
+# work lost to an RDS crash naturally re-runnable, so the RPO trade-off
+# is safe.
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# Identifies the connection in pg_stat_activity during triage.
+ENV DB_APPLICATION_NAME=wxyc-apple-music-url-backfill
+
+# ENTRYPOINT + empty CMD so docker-level args (`--execute`, `--dry-run`)
+# pass through to the job rather than replacing the launcher — the
+# Dockerfile.legacy-dj-name-remediation pattern. With `CMD ["npm",
+# "start"]`, `docker run <image> --execute` would REPLACE the CMD and npm
+# would never run.
+ENTRYPOINT ["node", "/apple-music-url-backfill/jobs/apple-music-url-backfill/dist/job.js"]
+CMD []

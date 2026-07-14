@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/apple-music-url-backfill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "One-shot remediation: re-query LML for album_metadata + flowsheet rows whose apple_music_url was persisted as null despite a positive match signal (discogs_url present or library.on_streaming), then fill ONLY the still-null rows. Dry-run by default; pass --execute to write. Gated on LML#782. BS#1631.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_apple_music_url_backfill:ci -f ../../Dockerfile.apple-music-url-backfill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.59.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
