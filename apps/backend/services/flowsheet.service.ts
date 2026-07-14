@@ -226,7 +226,13 @@ const FSEntryFieldsRaw = {
   // entries (album_id IS NULL) miss the join and fall through to the
   // inline flowsheet values.
   artwork_url: sql<string | null>`coalesce(${album_metadata.artwork_url}, ${flowsheet.artwork_url})`,
-  discogs_url: sql<string | null>`coalesce(${album_metadata.discogs_url}, ${flowsheet.discogs_url})`,
+  // discogs_url additionally NULLIFs the '' synthetic-match sentinel LML
+  // persists for streaming-only/artist-only matches (LML#401/#487) so it
+  // never reaches the wire (BS#1628). NULLIF wraps the COALESCE — an ''
+  // verdict in album_metadata stays authoritative over a stale inline URL
+  // rather than falling through to it. The persisted '' is deliberate
+  // (BS#1185 keys off it); only the projection normalizes.
+  discogs_url: sql<string | null>`nullif(coalesce(${album_metadata.discogs_url}, ${flowsheet.discogs_url}), '')`,
   release_year: sql<number | null>`coalesce(${album_metadata.release_year}, ${flowsheet.release_year})`,
   spotify_url: sql<string | null>`coalesce(${album_metadata.spotify_url}, ${flowsheet.spotify_url})`,
   apple_music_url: sql<string | null>`coalesce(${album_metadata.apple_music_url}, ${flowsheet.apple_music_url})`,
