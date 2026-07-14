@@ -26,9 +26,10 @@
  *
  * Pure SQL — does NOT import `claim.ts`. The integration runner is babel-jest
  * with no TS support (drizzle-orm + ts-jest incompatibility; see
- * `library-identity-backfill.spec.js` header). The `claimRow` helper below
- * mirrors `claimRowForEnrichment`; when that file is hand-edited the SQL here
- * must follow.
+ * `library-identity-backfill.spec.js` header). The `claimRow` helper is the
+ * shared mirror of `claimRowForEnrichment` in `tests/utils/enrichment-claim.js`
+ * (one canonical copy across the claim/sweep/backpressure specs); when
+ * `claim.ts` is hand-edited that helper must follow.
  *
  * Why no hard throughput SLO: wall-clock through a 5-connection pool on a
  * shared CI runner is not a stable number, so the burst's elapsed time is
@@ -50,6 +51,7 @@
  */
 
 const { getTestDb } = require('../utils/db');
+const { claimRow } = require('../utils/enrichment-claim');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
@@ -70,23 +72,6 @@ const BURST_TEST_TIMEOUT_MS = 60_000;
 
 /** Distinctive prefix so cleanup (and any post-mortem) is unambiguous. */
 const ARTIST_PREFIX = 'enrichment-backpressure-artist-';
-
-/**
- * Issue the worker's CAS-UPDATE directly. Mirrors `claimRowForEnrichment`
- * in `apps/enrichment-worker/claim.ts` — when that file is hand-edited the
- * SQL here must follow. Identical to the sibling claim spec's helper.
- */
-async function claimRow(sql, id) {
-  const rows = await sql`
-    UPDATE ${sql(SCHEMA)}.flowsheet
-       SET metadata_status = 'enriching',
-           enriching_since = now()
-     WHERE id = ${id}
-       AND metadata_status = 'pending'
-    RETURNING id
-  `;
-  return rows.length > 0 ? { claimed: true, id: rows[0].id } : { claimed: false };
-}
 
 /**
  * Bulk-insert `n` fresh pending track rows in a single server-side
