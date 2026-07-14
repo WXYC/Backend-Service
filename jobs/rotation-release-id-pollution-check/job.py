@@ -207,10 +207,14 @@ def make_pause_probe(conn, schema: str, lookback_seconds: float, pause_ms: float
     psycopg implicit transaction now() is transaction_timestamp(), frozen at
     the transaction's first statement, so one track logged after that instant
     keeps the probe live forever (BS#1636 — Run 1 wedged 34h this way).
-    ``max_pause_ms`` is the second, unconditional guard: cumulative wall-clock
-    this probe may spend in its pause loop across the whole run (0 = uncapped).
-    On exhaustion it fires ``on_budget_exhausted`` once and every later call
-    returns immediately — no clock or data shape can wedge the run again."""
+    ``max_pause_ms`` is the second guard: cumulative wall-clock this probe may
+    spend in its pause loop across the whole run. At the default (30 min) no
+    clock or data shape can wedge the run — on exhaustion it fires
+    ``on_budget_exhausted`` once and every later call returns immediately.
+    ``0`` opts out of that ceiling (uncapped): the autocommit fix still bars the
+    frozen-clock wedge, but under a genuinely sustained live show the loop then
+    pauses for as long as DJs keep adding tracks, so keep a non-zero budget in
+    production."""
     sql = (
         f'SELECT 1 FROM "{schema}"."flowsheet" '
         "WHERE \"entry_type\" = 'track' "
