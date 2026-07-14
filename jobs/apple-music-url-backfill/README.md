@@ -27,7 +27,7 @@ WHERE f.entry_type = 'track'
 
 Per candidate the job runs up to TWO LML lookups (artist + album + song, `extended: true`): the second fires only when the first returned no Apple URL, after `BACKFILL_SECOND_PASS_DELAY_MS`, to catch LML#706's eventual-consistency fill. Repeat (artist, album, track) triples are served from an in-run cache — the track component is load-bearing because LML's `apple_music_url` can be a per-track `/song/<id>` URL (BS#1192).
 
-Candidate-count caveat: flowsheet rows carrying the BS#1628 `discogs_url = ''` synthetic-match sentinel satisfy the `IS NOT NULL` arm, so the candidate counts include them. Harmless — the job only ever writes the null Apple slot — but expect them in the totals when sizing the run.
+Candidate-count caveat: rows carrying the BS#1628 `discogs_url = ''` synthetic-match sentinel satisfy the `IS NOT NULL` arm in BOTH phases — flowsheet directly, and `album_metadata` via the enrichment worker's linked-row UPSERT (`discogs_url: artwork.release_url ?? null` persists LML's synthetic `release_url: ''`). Harmless — the job only ever writes the null Apple slot — but expect sentinel rows in both phases' candidate totals when sizing the run.
 
 ## Pre-flight checklist
 

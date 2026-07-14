@@ -243,11 +243,17 @@ describe('runbook log contract — stopped step', () => {
     const result = await runBackfill(baseOpts(lookup, apply));
 
     // The README jq selects finished OR stopped OR failed; a stopped run
-    // MUST be distinguishable so the operator knows to resume.
+    // MUST be distinguishable so the operator knows to resume, and it
+    // interpolates the SAME fields as finished — dry_run plus BOTH nested
+    // phase objects (resume needs .flowsheet.last_id even when the stop
+    // landed in phase A).
     expect(stdoutLines.find((l) => l.step === 'finished')).toBeUndefined();
     const stopped = stdoutLines.find((l) => l.step === 'stopped');
     expect(stopped).toBeDefined();
     expect(stopped?.stopped).toBe(true);
+    expect(stopped?.dry_run).toBe(false);
+    expectPhaseTotalsShape(stopped?.album_metadata);
+    expectPhaseTotalsShape(stopped?.flowsheet);
     expect((stopped?.album_metadata as Record<string, unknown>).last_id).toBe(5);
     expect(result.stopped).toBe(true);
   });
