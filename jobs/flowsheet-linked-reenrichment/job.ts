@@ -65,6 +65,7 @@ import {
 } from '@wxyc/database';
 import { bulkLookupMetadata, type BulkLookupItem, type LookupResponse } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
+import * as Sentry from '@sentry/node';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'flowsheet-linked-reenrichment';
@@ -472,6 +473,13 @@ export const runBatch = async (
   let lml_error = 0;
   let db_error = 0;
   let unexpected_index = 0;
+  // First-mismatch coordinates, captured once so the Sentry event below carries
+  // a concrete example without one breadcrumb per row (the default maxBreadcrumbs
+  // is 100 FIFO; per-row emission under a full contract break would evict the
+  // upstream LML span / DB trail before the captured event could attach to them).
+  let firstMismatchIndex: number | null = null;
+  let firstMismatchGot: number | null = null;
+  let firstMismatchAlbumId: number | null = null;
   // (albumId, upsert-promise) so a rejected UPSERT can be counted as db_error
   // without aborting sibling writes.
   const upsertPromises: Array<Promise<boolean>> = [];
@@ -479,6 +487,11 @@ export const runBatch = async (
     const result = response.results[i];
     if (!result || result.index !== i) {
       unexpected_index += 1;
+      if (firstMismatchIndex === null) {
+        firstMismatchIndex = i;
+        firstMismatchGot = result?.index ?? null;
+        firstMismatchAlbumId = resolved[i]?.album_id ?? null;
+      }
       log('warn', 'unexpected_result_index', `LML result.index mismatch at position ${i}; skipping write`, {
         expected_index: i,
         got_index: result?.index ?? null,
@@ -515,6 +528,37 @@ export const runBatch = async (
   }
   const upserts = (await Promise.all(upsertPromises)).filter(Boolean).length;
 
+  // Surface a non-zero `unexpected_index` to Sentry (mirrors the donor,
+  // jobs/album-level-backfill/job.ts). Without a captured event the per-row
+  // counter aggregates only in the `batch_done` / `finished` log lines and
+  // evaporates from the Sentry Issues view at process exit — an operator
+  // alerting on Sentry rather than log-scraping would miss a live break of
+  // LML's input-order contract (BS#1088). One breadcrumb + one stable-
+  // fingerprint message per non-zero batch caps FIFO pressure.
+  if (unexpected_index > 0) {
+    Sentry.addBreadcrumb({
+      category: JOB_NAME,
+      message: 'unexpected_result_index',
+      level: 'warning',
+      data: {
+        mismatch_count: unexpected_index,
+        first_mismatch_index: firstMismatchIndex,
+        first_mismatch_got: firstMismatchGot,
+        first_mismatch_album_id: firstMismatchAlbumId,
+      },
+    });
+    Sentry.captureMessage(`${JOB_NAME}.unexpected_index`, {
+      level: 'warning',
+      tags: { source: JOB_NAME },
+      extra: {
+        unexpected_index,
+        scanned: items.length,
+        batch_first_id: resolved[0]?.album_id ?? null,
+      },
+      fingerprint: [JOB_NAME, 'unexpected_index'],
+    });
+  }
+
   return { batchSize: items.length, match, no_match, lml_error, db_error, upserts, unexpected_index };
 };
 
@@ -526,6 +570,8 @@ export interface ReenrichmentSummary {
   /** Rows flipped to enriched_match from populated album_metadata (both lanes). */
   flipped_from_album_metadata: number;
   lane_a_flipped: number;
+  /** Lane B scope count logged before its paired flip (0 when no upserts ran). */
+  lane_b_candidates: number;
   lane_b_flipped: number;
   /** Distinct residual albums enumerated for Lane B. */
   residual_albums: number;
@@ -611,6 +657,7 @@ export const runReenrichment = async (options: ReenrichmentOptions): Promise<Ree
     lane_a_candidates: 0,
     flipped_from_album_metadata: 0,
     lane_a_flipped: 0,
+    lane_b_candidates: 0,
     lane_b_flipped: 0,
     residual_albums: 0,
     batches: 0,
@@ -707,6 +754,16 @@ export const runReenrichment = async (options: ReenrichmentOptions): Promise<Ree
   // pass touches only Lane B's new matches.
   if (summary.upserts > 0) {
     await analyzeAlbumMetadata();
+    // Scope-verifying SELECT before the Lane B UPDATE lane (spec: "Run the
+    // scope-verifying SELECT before each UPDATE lane"), mirroring Lane A's
+    // pre-flip count. After the ANALYZE above, the still-`enriched_no_match`
+    // cohort rows for Lane B's newly-populated albums now match
+    // `populatedAlbumMetadata`; Lane A already flipped the pre-populated
+    // albums, so this count is exactly Lane B's flippable rows.
+    summary.lane_b_candidates = await countPopulatedFlipCandidates(options.readTimeoutMs);
+    log('info', 'lane_b_scope', `Lane B: ${summary.lane_b_candidates} cohort rows now joinable to populated metadata`, {
+      lane_b_candidates: summary.lane_b_candidates,
+    });
     summary.lane_b_flipped = await flipPopulatedCohort(
       'lane_b',
       options.flipBatchSize,
