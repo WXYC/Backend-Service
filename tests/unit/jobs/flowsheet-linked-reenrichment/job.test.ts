@@ -29,6 +29,7 @@ jest.mock('@sentry/node', () => ({
   close: jest.fn(() => Promise.resolve(true)),
 }));
 
+import * as Sentry from '@sentry/node';
 import { db, album_metadata, checkLiveActivity } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import {
@@ -551,6 +552,19 @@ describe('runBatch', () => {
       expect(out.upserts).toBe(expected.upserts);
       expect(out.unexpected_index).toBe(expected.unexpected_index);
       expect((db.insert as jest.Mock).mock.calls.length).toBe(expected.upserts);
+      // A non-zero unexpected_index must surface to Sentry with a stable
+      // fingerprint (donor parity — the signal otherwise evaporates at exit).
+      if (expected.unexpected_index > 0) {
+        expect(Sentry.captureMessage as jest.Mock).toHaveBeenCalledWith(
+          'flowsheet-linked-reenrichment.unexpected_index',
+          expect.objectContaining({
+            level: 'warning',
+            fingerprint: ['flowsheet-linked-reenrichment', 'unexpected_index'],
+          })
+        );
+      } else {
+        expect(Sentry.captureMessage as jest.Mock).not.toHaveBeenCalled();
+      }
     });
   });
 });
@@ -688,6 +702,8 @@ describe('runReenrichment', () => {
       .mockResolvedValueOnce([]) // SET LOCAL (resolveAlbums)
       .mockResolvedValueOnce([{ album_id: 7, artist_name: 'Chuquimamani-Condori', album_title: 'Edits' }]) // resolve
       .mockResolvedValueOnce([]) // ANALYZE album_metadata
+      .mockResolvedValueOnce([]) // SET LOCAL (lane B scope count)
+      .mockResolvedValueOnce([{ count: 1 }]) // lane B scope count
       .mockResolvedValueOnce([]) // SET LOCAL (lane B flip batch 1)
       .mockResolvedValueOnce([{ id: 9 }]) // lane B UPDATE → 1
       .mockResolvedValueOnce([]) // SET LOCAL (lane B flip batch 2)
@@ -702,6 +718,7 @@ describe('runReenrichment', () => {
     expect(summary.residual_albums).toBe(1);
     expect(summary.lml_match).toBe(1);
     expect(summary.upserts).toBe(1);
+    expect(summary.lane_b_candidates).toBe(1);
     expect(summary.lane_b_flipped).toBe(1);
     expect(summary.flipped_from_album_metadata).toBe(3);
     expect(mockBulkLookupMetadata).toHaveBeenCalledTimes(1);
@@ -727,6 +744,8 @@ describe('runReenrichment', () => {
     expect(summary.lane_a_flipped).toBe(0);
     expect(summary.lml_no_match).toBe(1);
     expect(summary.upserts).toBe(0);
+    // upserts=0 → the Lane B flip block (scope count + flip + ANALYZE) is skipped.
+    expect(summary.lane_b_candidates).toBe(0);
     expect(summary.lane_b_flipped).toBe(0);
     expect(summary.flipped_from_album_metadata).toBe(0);
     // upserts=0 → album_metadata ANALYZE skipped.
