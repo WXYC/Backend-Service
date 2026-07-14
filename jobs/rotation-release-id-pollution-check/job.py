@@ -46,10 +46,11 @@ Optional env (in-code defaults when absent):
     BACKFILL_LML_RESOLVE_TIMEOUT_MS=N  default 15000, per LML call
     LIVE_ACTIVITY_LOOKBACK_SECONDS=N   default 60; 0 disables cooperative pause
     LIVE_ACTIVITY_PAUSE_MS=N           default 30000
-    LIVE_ACTIVITY_MAX_PAUSE_MS=N       default 1800000 (30 min); 0 uncapped.
-                                       Cumulative pause budget per run — once
-                                       spent, the run proceeds without pausing
-                                       so it can never wedge (BS#1636).
+    LIVE_ACTIVITY_MAX_PAUSE_MS=N       default 1800000 (30 min). Cumulative
+                                       pause budget per run; once spent the run
+                                       proceeds without pausing, so a non-zero
+                                       budget can never wedge (BS#1636). 0 opts
+                                       out (uncapped) — keep non-zero in prod.
     WXYC_SCHEMA_NAME                   default wxyc_schema
 
 One-shot invocation (smoke test on the EC2 host):
