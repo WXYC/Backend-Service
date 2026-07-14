@@ -1,0 +1,44 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-linked-reenrichment-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/flowsheet-linked-reenrichment ./jobs/flowsheet-linked-reenrichment
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-linked-reenrichment
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-linked-reenrichment
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/flowsheet-linked-reenrichment/package* ./jobs/flowsheet-linked-reenrichment/
+COPY ./shared/database/package* ./shared/database/
+
+# `@wxyc/database` declares `@wxyc/shared` transitively as a registry
+# dependency (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without
+# NPM_TOKEN + .npmrc the prod stage's npm install 401s. Mirrors the pattern
+# in Dockerfile.album-level-backfill / Dockerfile.backend.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./flowsheet-linked-reenrichment-builder/jobs/flowsheet-linked-reenrichment/dist ./jobs/flowsheet-linked-reenrichment/dist
+COPY --from=builder ./flowsheet-linked-reenrichment-builder/shared/database/dist ./shared/database/dist
+
+# Identifies the connection in pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-flowsheet-linked-reenrichment
+
+# ENTRYPOINT + empty CMD so docker-level args (e.g. `--execute`) pass through
+# to the job rather than replacing the launcher. With `CMD ["npm", "start"]`,
+# `docker run <image> --execute` replaces the whole command and node tries to
+# parse `--execute` itself. ENTRYPOINT pins the launcher; any args after
+# `<image>` extend it.
+ENTRYPOINT ["node", "/flowsheet-linked-reenrichment/jobs/flowsheet-linked-reenrichment/dist/job.js"]
+CMD []
