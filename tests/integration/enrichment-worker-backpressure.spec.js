@@ -117,13 +117,14 @@ async function bulkInsertPendingRows(sql, n) {
 
 /**
  * Assert the terminal DB state of a fully-drained burst: none of `ids` left
- * `'pending'`, and exactly `expectedEnriched` of them moved to `'enriching'`.
- * Both burst tests assert this same post-condition; keeping it in one place
- * mirrors the single-`claimRow`-mirror rationale in `tests/utils/enrichment-claim.js`.
- * Local to this spec by design — it encodes the backpressure post-condition,
- * not a cross-spec contract, so it stays beside the tests that use it.
+ * `'pending'`, and every one of them moved to `'enriching'` (the enriching
+ * count equals `ids.length`). Both burst tests assert this same post-condition;
+ * keeping it in one place mirrors the single-`claimRow`-mirror rationale in
+ * `tests/utils/enrichment-claim.js`. Local to this spec by design — it encodes
+ * the backpressure post-condition, not a cross-spec contract, so it stays
+ * beside the tests that use it.
  */
-async function expectAllEnriched(sql, ids, expectedEnriched) {
+async function expectAllEnriched(sql, ids) {
   const pendingLeft = await sql`
     SELECT count(*)::int AS n
       FROM ${sql(SCHEMA)}.flowsheet
@@ -138,7 +139,7 @@ async function expectAllEnriched(sql, ids, expectedEnriched) {
      WHERE id = ANY(${ids})
        AND metadata_status = 'enriching'
   `;
-  expect(enrichingCount[0].n).toBe(expectedEnriched);
+  expect(enrichingCount[0].n).toBe(ids.length);
 }
 
 describe('enrichment-worker backpressure — 1000-event burst (real PG)', () => {
@@ -187,7 +188,7 @@ describe('enrichment-worker backpressure — 1000-event burst (real PG)', () => 
       expect(wonIds).toEqual([...ids].sort((a, b) => a - b));
 
       // DB state: all rows moved pending → enriching; none stranded pending.
-      await expectAllEnriched(sql, ids, BURST_SIZE);
+      await expectAllEnriched(sql, ids);
 
       // Throughput is logged, not asserted (see file header).
       console.log(
@@ -241,7 +242,7 @@ describe('enrichment-worker backpressure — 1000-event burst (real PG)', () => 
       expect([...distinctWonIds].sort((a, b) => a - b)).toEqual([...ids].sort((a, b) => a - b));
 
       // DB state: no row stranded pending; every row ended enriching.
-      await expectAllEnriched(sql, ids, BURST_SIZE);
+      await expectAllEnriched(sql, ids);
 
       console.log(
         `[backpressure] N×N fan-out: ${N_WORKERS * BURST_SIZE} claim attempts ` +
