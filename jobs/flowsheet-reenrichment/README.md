@@ -131,16 +131,20 @@ Monitor real-time LML p95 via Sentry trace explorer; stay within +20% of baselin
      AND add_time < '2026-06-16T17:53:53Z'::timestamptz;
    ```
 
-   **Rescue** (only if the audit returns rows): re-arm them for the nightly backfill cron (`flowsheet-metadata-backfill`), which filters on `metadata_attempt_at IS NULL` and will re-call LML. Setting `metadata_status='pending'` alone is NOT sufficient — the CDC consumer fires only on INSERT, and the backfill cron's WHERE keys on `metadata_attempt_at`. Clear BOTH:
+   **Rescue** (only if the audit returns rows): as of BS#1638 this whole cohort has a dedicated one-shot job — **`jobs/flowsheet-linked-reenrichment`** — which is the automated Option-1 path BS#1443 chose. It flips cohort rows whose album already has populated `album_metadata` (Lane A, pure SQL) and re-looks-up the residual albums via LML (Lane B, fill-null UPSERT), and it deliberately **never** sets `pending` or resets `metadata_attempt_at` (so BS#1011's drain-completion signal and BS#895's C6 retune stay untouched). Prefer running that job over the manual re-arm below.
+
+   The manual re-arm (Option 2, kept for reference only) re-armed these rows for the nightly `flowsheet-metadata-backfill` cron by clearing BOTH `metadata_status` and `metadata_attempt_at` (setting `pending` alone is insufficient — the CDC consumer fires only on INSERT and the cron keys on `metadata_attempt_at`):
 
    ```sql
+   -- Option 2 (superseded by jobs/flowsheet-linked-reenrichment; do not use
+   -- unless that job is unavailable):
    UPDATE wxyc_schema.flowsheet
       SET metadata_status = 'pending',
           metadata_attempt_at = NULL
     WHERE id = ANY(ARRAY[<audit_ids>]);  -- explicit ID list, not a re-SELECT
    ```
 
-   Do NOT use `WHERE metadata_status='enriched_no_match' AND album_id IS NOT NULL` — that would race a concurrent linkage flip and re-arm rows still being processed. Use the explicit ID list from the audit's output.
+   If you ever do run the manual re-arm, do NOT use `WHERE metadata_status='enriched_no_match' AND album_id IS NOT NULL` — that would race a concurrent linkage flip and re-arm rows still being processed. Use the explicit ID list from the audit's output.
 
 3. **Spot-check 20 sample rows that flipped** — verify `discogs_url`, `artwork_url`, `release_year` populated and correct against the live Discogs release.
 
