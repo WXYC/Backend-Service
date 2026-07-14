@@ -160,7 +160,6 @@ let stopRequested = false;
 export const requestStop = (): void => {
   stopRequested = true;
 };
-export const isStopRequested = (): boolean => stopRequested;
 /** Test-only seam to reset the singleton between tests. */
 export const __resetStopForTesting = (): void => {
   stopRequested = false;
