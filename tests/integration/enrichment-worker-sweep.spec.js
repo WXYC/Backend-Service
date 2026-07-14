@@ -31,6 +31,7 @@
  */
 
 const { getTestDb } = require('../utils/db');
+const { claimRow } = require('../utils/enrichment-claim');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
@@ -82,22 +83,6 @@ async function insertPendingRow(sql, suffix) {
 }
 
 /**
- * Mirror of the worker's claim SQL — flip the row to `'enriching'` and
- * stamp `enriching_since = now()`. Returns whether the claim won.
- */
-async function claimRow(sql, id) {
-  const rows = await sql`
-    UPDATE ${sql(SCHEMA)}.flowsheet
-       SET metadata_status = 'enriching',
-           enriching_since = now()
-     WHERE id = ${id}
-       AND metadata_status = 'pending'
-    RETURNING id
-  `;
-  return rows.length > 0;
-}
-
-/**
  * Backdate a row's `enriching_since` past the 60s TTL so the next sweep
  * picks it up. Mirrors the conditions a process death between claim and
  * finalize would produce, ~minutes after the fact.
@@ -130,7 +115,7 @@ describe('enrichment-worker stranded-claim sweep (real PG)', () => {
     const id = await insertPendingRow(sql, 'single-stranded');
     insertedIds.push(id);
 
-    expect(await claimRow(sql, id)).toBe(true);
+    expect((await claimRow(sql, id)).claimed).toBe(true);
     // Backdate well above any reasonable derived TTL so the test pinning
     // remains correct if STRANDED_TTL_SECONDS grows beyond 60s.
     await backdateEnrichingSince(sql, id, 600);
@@ -146,7 +131,7 @@ describe('enrichment-worker stranded-claim sweep (real PG)', () => {
     expect(row.enriching_since).toBeNull();
 
     // Row is claimable again — the contract the C2 worker depends on.
-    expect(await claimRow(sql, id)).toBe(true);
+    expect((await claimRow(sql, id)).claimed).toBe(true);
   });
 
   test('batch recovery: 5 stranded rows are reverted in a single sweep tick', async () => {
@@ -179,7 +164,7 @@ describe('enrichment-worker stranded-claim sweep (real PG)', () => {
     const id = await insertPendingRow(sql, 'recent-claim');
     insertedIds.push(id);
 
-    expect(await claimRow(sql, id)).toBe(true);
+    expect((await claimRow(sql, id)).claimed).toBe(true);
     // enriching_since defaulted to now() — well inside the 60s TTL.
     await runSweep(sql, [id]);
 

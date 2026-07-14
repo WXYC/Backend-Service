@@ -38,25 +38,9 @@
  */
 
 const { getTestDb } = require('../utils/db');
+const { claimRow } = require('../utils/enrichment-claim');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
-
-/**
- * Issue the worker's CAS-UPDATE directly. Mirrors `claimRowForEnrichment`
- * in `apps/enrichment-worker/claim.ts` — when that file is hand-edited the
- * SQL here must follow.
- */
-async function claimRow(sql, id) {
-  const rows = await sql`
-    UPDATE ${sql(SCHEMA)}.flowsheet
-       SET metadata_status = 'enriching',
-           enriching_since = now()
-     WHERE id = ${id}
-       AND metadata_status = 'pending'
-    RETURNING id
-  `;
-  return rows.length > 0 ? { claimed: true, id: rows[0].id } : { claimed: false };
-}
 
 /**
  * Insert a fresh pending track row. Returns the new id. Uses an obviously
