@@ -19,10 +19,12 @@
  * `bulkInsertPendingRows` helpers are deliberately NOT shared: they use
  * genuinely different insert strategies (single-row VALUES with a
  * human-readable per-test artist suffix vs. bulk `generate_series`) and
- * distinct `play_order` sentinels (`99999` / `99998` / `800000+g`) chosen so
- * sibling specs can't collide under the shared `--runInBand` schema. Folding
- * those into one parametric helper would be speculative generality that
- * degrades the readable-suffix cleanup for no real dedup win.
+ * per-spec `play_order` sentinels (`99999` / `99998` / `800000+g`) kept
+ * distinct for unambiguous post-mortem attribution — not for collision
+ * avoidance: `play_order` carries no uniqueness constraint, and cleanup is
+ * keyed on `id`/`artist_name`. Folding those into one parametric helper would
+ * be speculative generality that degrades the readable-suffix cleanup for no
+ * real dedup win.
  */
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
