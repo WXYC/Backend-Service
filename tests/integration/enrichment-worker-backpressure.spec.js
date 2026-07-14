@@ -34,17 +34,25 @@
  * Why no hard throughput SLO: wall-clock through a 5-connection pool on a
  * shared CI runner is not a stable number, so the burst's elapsed time is
  * logged (not asserted). The real "the consumer keeps up / does not deadlock"
- * guard is the per-test timeout — a lock-escalation or seq-scan regression on
- * the claim (e.g. the `flowsheet_metadata_status_pending_idx` partial index
- * getting dropped) manifests as a timeout, not a wrong answer.
+ * guard is the per-test timeout. The claim is a primary-key point lookup
+ * (`WHERE id = $1 AND metadata_status = 'pending'`), so what a timeout catches
+ * is a genuine deadlock or a pathological lock-contention collapse under the
+ * burst — not an index regression: the partial `flowsheet_metadata_status_pending_idx`
+ * serves the C6 bulk `WHERE metadata_status='pending'` scan, never this per-id
+ * claim, so dropping it wouldn't slow the burst. Such a hang manifests as a
+ * timeout, not a wrong answer.
  *
  * Coverage:
  *   1. Single-worker 1000-event burst: every row claimed exactly once; no row
  *      left pending. (Throughput/volume — one worker draining a full burst.)
  *   2. N×N fan-out burst: N workers each receive all 1000 events (N×1000
  *      claim attempts); exactly 1000 win, N×1000−1000 lose cleanly, every
- *      winning id is distinct, and no row is left pending. (Fan-out
- *      correctness under burst — the property that makes N×N safe.)
+ *      winning id is distinct, and no row is left pending. (The single-statement
+ *      CAS is exactly-once by construction under row-level locking, so this
+ *      pins that that invariant survives the live schema + index + pool at the
+ *      N×N acceptance volume — it's the exactly-once claim that makes N×N
+ *      delivery safe, verified at burst scale, not a proof that concurrency
+ *      alone could break it.)
  *
  * @see WXYC/Backend-Service#892
  * @see tests/integration/enrichment-worker-claim.spec.js
@@ -80,9 +88,13 @@ const ARTIST_PREFIX = 'enrichment-backpressure-artist-';
  * claim spec's `insertPendingRow` uses:
  *   - `metadata_status='pending'` is the claimable state (BS#891).
  *   - `show_id` is intentionally omitted (flowsheet permits NULL show_id).
- *   - `play_order` (NOT NULL) is given a distinct high value per row so this
- *     spec can't collide with sibling specs on any (show_id, play_order)
- *     constraint a future migration might add.
+ *   - `play_order` (NOT NULL) draws from an 800000+ band unique to this spec,
+ *     keeping it clear of the sibling specs' sentinels (claim `99999`, sweep
+ *     `99998`) under the shared `--runInBand` schema. Both burst tests draw
+ *     from the same band (their rows coexist until the shared `afterAll`),
+ *     which is safe today because `play_order` carries no uniqueness constraint
+ *     and `show_id` is NULL — so even a future `(show_id, play_order)` unique
+ *     wouldn't fire on these rows.
  */
 async function bulkInsertPendingRows(sql, n) {
   const rows = await sql`
@@ -101,6 +113,32 @@ async function bulkInsertPendingRows(sql, n) {
     RETURNING id
   `;
   return rows.map((r) => r.id);
+}
+
+/**
+ * Assert the terminal DB state of a fully-drained burst: none of `ids` left
+ * `'pending'`, and exactly `expectedEnriched` of them moved to `'enriching'`.
+ * Both burst tests assert this same post-condition; keeping it in one place
+ * mirrors the single-`claimRow`-mirror rationale in `tests/utils/enrichment-claim.js`.
+ * Local to this spec by design — it encodes the backpressure post-condition,
+ * not a cross-spec contract, so it stays beside the tests that use it.
+ */
+async function expectAllEnriched(sql, ids, expectedEnriched) {
+  const pendingLeft = await sql`
+    SELECT count(*)::int AS n
+      FROM ${sql(SCHEMA)}.flowsheet
+     WHERE id = ANY(${ids})
+       AND metadata_status = 'pending'
+  `;
+  expect(pendingLeft[0].n).toBe(0);
+
+  const enrichingCount = await sql`
+    SELECT count(*)::int AS n
+      FROM ${sql(SCHEMA)}.flowsheet
+     WHERE id = ANY(${ids})
+       AND metadata_status = 'enriching'
+  `;
+  expect(enrichingCount[0].n).toBe(expectedEnriched);
 }
 
 describe('enrichment-worker backpressure — 1000-event burst (real PG)', () => {
@@ -149,21 +187,7 @@ describe('enrichment-worker backpressure — 1000-event burst (real PG)', () => 
       expect(wonIds).toEqual([...ids].sort((a, b) => a - b));
 
       // DB state: all rows moved pending → enriching; none stranded pending.
-      const pendingLeft = await sql`
-        SELECT count(*)::int AS n
-          FROM ${sql(SCHEMA)}.flowsheet
-         WHERE id = ANY(${ids})
-           AND metadata_status = 'pending'
-      `;
-      expect(pendingLeft[0].n).toBe(0);
-
-      const enrichingCount = await sql`
-        SELECT count(*)::int AS n
-          FROM ${sql(SCHEMA)}.flowsheet
-         WHERE id = ANY(${ids})
-           AND metadata_status = 'enriching'
-      `;
-      expect(enrichingCount[0].n).toBe(BURST_SIZE);
+      await expectAllEnriched(sql, ids, BURST_SIZE);
 
       // Throughput is logged, not asserted (see file header).
       console.log(
@@ -203,7 +227,8 @@ describe('enrichment-worker backpressure — 1000-event burst (real PG)', () => 
       const losses = results.filter((r) => !r.claimed);
 
       // Exactly one claim per row wins; the other (N_WORKERS−1) per row lose
-      // cleanly. This is the property that makes N×N delivery safe.
+      // cleanly — the exactly-once invariant the single-statement CAS gives by
+      // construction, pinned here against the live table at burst volume.
       expect(wins).toHaveLength(BURST_SIZE);
       expect(losses).toHaveLength((N_WORKERS - 1) * BURST_SIZE);
 
@@ -216,21 +241,7 @@ describe('enrichment-worker backpressure — 1000-event burst (real PG)', () => 
       expect([...distinctWonIds].sort((a, b) => a - b)).toEqual([...ids].sort((a, b) => a - b));
 
       // DB state: no row stranded pending; every row ended enriching.
-      const pendingLeft = await sql`
-        SELECT count(*)::int AS n
-          FROM ${sql(SCHEMA)}.flowsheet
-         WHERE id = ANY(${ids})
-           AND metadata_status = 'pending'
-      `;
-      expect(pendingLeft[0].n).toBe(0);
-
-      const enrichingCount = await sql`
-        SELECT count(*)::int AS n
-          FROM ${sql(SCHEMA)}.flowsheet
-         WHERE id = ANY(${ids})
-           AND metadata_status = 'enriching'
-      `;
-      expect(enrichingCount[0].n).toBe(BURST_SIZE);
+      await expectAllEnriched(sql, ids, BURST_SIZE);
 
       console.log(
         `[backpressure] N×N fan-out: ${N_WORKERS * BURST_SIZE} claim attempts ` +
