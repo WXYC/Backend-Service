@@ -136,15 +136,21 @@ describe('applyUpdate', () => {
     expect(Object.keys(setArgs).sort()).toEqual(['apple_music_url', 'updated_at']);
   });
 
-  it.each(['album_metadata', 'flowsheet'] as const)(
-    '%s: WHERE narrows by the row id AND apple_music_url (the never-overwrite guard lives in SQL)',
-    async (target) => {
+  it.each([
+    { target: 'album_metadata' as const, idColumn: 'album_id' },
+    { target: 'flowsheet' as const, idColumn: 'id' },
+  ])(
+    '$target: WHERE is exactly id-equality AND apple_music_url IS NULL (the never-overwrite guard lives in SQL)',
+    async ({ target, idColumn }) => {
       await applyUpdate(target, 42, APPLE_URL);
 
+      // Exact shape from tests/__mocks__/drizzle-orm.ts (and/eq/isNull) —
+      // a mutation to e.g. eq(apple_music_url, url) must fail this, not
+      // slip past a loose substring match.
       const whereCall = mockDb._chain.where.mock.calls[0]?.[0];
-      const whereStr = JSON.stringify(whereCall);
-      expect(whereStr).toMatch(/apple_music_url/);
-      expect(whereStr).toMatch(/42/);
+      expect(whereCall).toEqual({
+        and: [{ eq: [idColumn, 42] }, { isNull: 'apple_music_url' }],
+      });
     }
   );
 

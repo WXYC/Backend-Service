@@ -27,6 +27,8 @@ WHERE f.entry_type = 'track'
 
 Per candidate the job runs up to TWO LML lookups (artist + album + song, `extended: true`): the second fires only when the first returned no Apple URL, after `BACKFILL_SECOND_PASS_DELAY_MS`, to catch LML#706's eventual-consistency fill. Repeat (artist, album, track) triples are served from an in-run cache — the track component is load-bearing because LML's `apple_music_url` can be a per-track `/song/<id>` URL (BS#1192).
 
+Candidate-count caveat: flowsheet rows carrying the BS#1628 `discogs_url = ''` synthetic-match sentinel satisfy the `IS NOT NULL` arm, so the candidate counts include them. Harmless — the job only ever writes the null Apple slot — but expect them in the totals when sizing the run.
+
 ## Pre-flight checklist
 
 1. **LML#782 deployed to LML production** (the gate on this whole ticket — without it the re-query just re-persists nulls). Verify the LML prod deploy includes the #786 fix before `--execute`; a dry-run's `would_resolve` count doubling as a live probe is the cheap way to confirm.
@@ -106,7 +108,7 @@ The SIGTERM handler flips a cooperative-stop flag checked between rows (and insi
 ## Resumability & idempotency
 
 - Resolved rows drop out of the WHERE (`apple_music_url IS NULL`), so plain re-runs are always safe and only re-visit still-null rows.
-- To skip already-swept still-null rows after a `stopped`/`failed` run, pass the summary line's per-phase `last_id` cursors: `-e BACKFILL_ALBUM_AFTER_ID=<n> -e BACKFILL_FLOWSHEET_AFTER_ID=<n>`.
+- To skip already-swept still-null rows after a `stopped`/`failed` run, pass the summary line's per-phase `last_id` cursors: `-e BACKFILL_ALBUM_AFTER_ID=<n> -e BACKFILL_FLOWSHEET_AFTER_ID=<n>`. A cursored resume also skips any rows counted `lml_error` below the cursor — those still match the predicate, so a final plain re-run WITHOUT cursors picks them back up.
 - Never-overwrite is enforced in the UPDATE's WHERE (`... AND apple_music_url IS NULL`), not just app logic — a URL that appears mid-run makes the UPDATE match 0 rows (counted `skipped_non_null`).
 
 ## Post-run
