@@ -556,7 +556,17 @@ type UpdateAlbumRequest = {
   artist_id?: number;
   alternate_artist_name?: string | null;
   disc_quantity?: number;
+  // BS#1281 (Not-on-Discogs 1a): the music director's write surface for
+  // suppressing false LML fuzzy matches. camelCase per the issue spec; the DB
+  // columns are `discogs_unavailable` / `discogs_unavailable_note`.
+  // `last_discogs_recheck_at` is deliberately absent — it is server-write-only
+  // (the recheck cron writes it directly), so any client-supplied value is
+  // silently dropped rather than read here.
+  discogsUnavailable?: boolean;
+  discogsUnavailableNote?: string | null;
 };
+
+const MAX_DISCOGS_UNAVAILABLE_NOTE_LENGTH = 500;
 
 const UPDATABLE_ALBUM_FIELDS = [
   'album_title',
@@ -567,6 +577,8 @@ const UPDATABLE_ALBUM_FIELDS = [
   'artist_id',
   'alternate_artist_name',
   'disc_quantity',
+  'discogsUnavailable',
+  'discogsUnavailableNote',
 ] as const;
 
 // `album_title`, `alternate_artist_name`, and `label` are all `varchar(128)`
@@ -718,6 +730,54 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       updates.label = trimmedLabel;
     }
   }
+
+  // --- discogs_unavailable block (BS#1281 / Not-on-Discogs 1a) ------------
+  // Runs before the no-op short-circuit below so a discogs-only PATCH lands in
+  // `updates` and is seen by the effectiveChange check. Enforces the
+  // `note alive ⟺ flag alive` invariant the DB CHECK
+  // (`discogs_unavailable OR discogs_unavailable_note IS NULL`) also guards.
+  const hasUnavailableFlag = 'discogsUnavailable' in body;
+  const hasUnavailableNote = 'discogsUnavailableNote' in body;
+  if (hasUnavailableFlag || hasUnavailableNote) {
+    if (hasUnavailableFlag && typeof body.discogsUnavailable !== 'boolean') {
+      throw new WxycError('discogsUnavailable must be a boolean', 400);
+    }
+
+    let note: string | null | undefined;
+    if (hasUnavailableNote) {
+      if (body.discogsUnavailableNote !== null && typeof body.discogsUnavailableNote !== 'string') {
+        throw new WxycError('discogsUnavailableNote must be a string or null', 400);
+      }
+      note = body.discogsUnavailableNote === null ? null : body.discogsUnavailableNote.trim() || null;
+      if (note !== null && note.length > MAX_DISCOGS_UNAVAILABLE_NOTE_LENGTH) {
+        throw new WxycError(
+          `discogsUnavailableNote must be at most ${MAX_DISCOGS_UNAVAILABLE_NOTE_LENGTH} characters`,
+          400
+        );
+      }
+    }
+
+    // Effective flag: the incoming value if the body sets it, else the row's
+    // current value (so a note-only PATCH is judged against the live flag).
+    const effectiveFlag = hasUnavailableFlag ? (body.discogsUnavailable as boolean) : existing.discogs_unavailable;
+    if (hasUnavailableFlag) {
+      updates.discogs_unavailable = body.discogsUnavailable as boolean;
+    }
+
+    if (!effectiveFlag) {
+      // No flag ⟹ no note. A non-null note here contradicts the invariant;
+      // reject rather than let the DB CHECK surface it as a 500.
+      if (note != null) {
+        throw new WxycError('discogsUnavailableNote requires discogsUnavailable: true', 400);
+      }
+      // Clearing the flag (or a note-null PATCH on an already-unflagged row)
+      // clears any lingering note, even when the body omits it.
+      updates.discogs_unavailable_note = null;
+    } else if (hasUnavailableNote) {
+      updates.discogs_unavailable_note = note ?? null;
+    }
+  }
+  // --- end discogs_unavailable block --------------------------------------
 
   // Short-circuit a no-op edit: updateAlbumInDB always SETs last_modified =
   // NOW(), which fires the touch_library_watermark trigger and advances the

@@ -604,6 +604,8 @@ describe('library.controller', () => {
       disc_quantity: 1,
       code_number: 3,
       artist_name: 'Juana Molina',
+      discogs_unavailable: false,
+      discogs_unavailable_note: null,
     };
 
     const reqFor = (body: Record<string, unknown>) => ({ params: { id: '42' }, body }) as unknown as Request;
@@ -776,6 +778,106 @@ describe('library.controller', () => {
         expect(mockUpdateOnStreaming).toHaveBeenCalledWith(42, true);
         expect(mockUpdateArtworkUrl).toHaveBeenCalledWith(42, 'https://i.discogs.com/new.jpg');
         expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
+    // BS#1281 (Not-on-Discogs 1a): PATCH /library/:id accepts the MD's
+    // discogs_unavailable write surface. The DB-tier behaviors (column
+    // defaults, CHECK constraint, migration idempotency — issue tests 1–3)
+    // are covered by the migrate-dryrun + integration CI tiers; these unit
+    // tests cover the handler contract (issue tests 4–6 plus input validation).
+    describe('discogs_unavailable', () => {
+      it('persists a discogsUnavailable + note round-trip (issue test 4)', async () => {
+        const res = mockResponse();
+        await updateAlbum(reqFor({ discogsUnavailable: true, discogsUnavailableNote: 'embargoed promo' }), res, next);
+
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
+          42,
+          expect.objectContaining({ discogs_unavailable: true, discogs_unavailable_note: 'embargoed promo' })
+        );
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('clears any note when discogsUnavailable is set false with the note omitted (issue test 5)', async () => {
+        // Start from a flagged row that HAS a note, so clearing it is an
+        // observable UPDATE rather than a no-op the #1555 short-circuit skips.
+        mockGetLibraryRowById.mockResolvedValue({
+          ...existingRow,
+          discogs_unavailable: true,
+          discogs_unavailable_note: 'was embargoed',
+        });
+        const res = mockResponse();
+        await updateAlbum(reqFor({ discogsUnavailable: false }), res, next);
+
+        const updates = mockUpdateAlbumInDB.mock.calls[0][1];
+        expect(updates).toMatchObject({ discogs_unavailable: false, discogs_unavailable_note: null });
+      });
+
+      it('drops a client-supplied lastDiscogsRecheckAt — server-write-only (issue test 6)', async () => {
+        const res = mockResponse();
+        await updateAlbum(
+          reqFor({ discogsUnavailable: true, lastDiscogsRecheckAt: '2020-01-01T00:00:00Z' }),
+          res,
+          next
+        );
+
+        const updates = mockUpdateAlbumInDB.mock.calls[0][1];
+        expect(updates).not.toHaveProperty('last_discogs_recheck_at');
+        expect(updates).toMatchObject({ discogs_unavailable: true });
+      });
+
+      it('rejects a non-null note contradicting discogsUnavailable: false (flag⟺note invariant)', async () => {
+        const res = mockResponse();
+        await expect(
+          updateAlbum(reqFor({ discogsUnavailable: false, discogsUnavailableNote: 'still embargoed' }), res, next)
+        ).rejects.toThrow(/discogsUnavailable/);
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('rejects a non-boolean discogsUnavailable', async () => {
+        const res = mockResponse();
+        await expect(updateAlbum(reqFor({ discogsUnavailable: 'yes' }), res, next)).rejects.toThrow(
+          /discogsUnavailable must be a boolean/
+        );
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('rejects a note longer than 500 characters', async () => {
+        const res = mockResponse();
+        await expect(
+          updateAlbum(reqFor({ discogsUnavailable: true, discogsUnavailableNote: 'x'.repeat(501) }), res, next)
+        ).rejects.toThrow(/500/);
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('adds a note to an already-flagged row when only the note is supplied', async () => {
+        mockGetLibraryRowById.mockResolvedValue({ ...existingRow, discogs_unavailable: true });
+        const res = mockResponse();
+        await updateAlbum(reqFor({ discogsUnavailableNote: 'audience-segment only' }), res, next);
+
+        const updates = mockUpdateAlbumInDB.mock.calls[0][1];
+        expect(updates).toMatchObject({ discogs_unavailable_note: 'audience-segment only' });
+        expect(updates).not.toHaveProperty('discogs_unavailable');
+      });
+
+      it('rejects a note on a not-yet-flagged row when the flag is omitted', async () => {
+        // existingRow.discogs_unavailable === false and the body does not flip it.
+        const res = mockResponse();
+        await expect(updateAlbum(reqFor({ discogsUnavailableNote: 'orphan note' }), res, next)).rejects.toThrow(
+          /discogsUnavailable/
+        );
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('accepts a discogs-unavailable-only PATCH (satisfies the at-least-one-field guard)', async () => {
+        const res = mockResponse();
+        await updateAlbum(reqFor({ discogsUnavailable: true }), res, next);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        const updates = mockUpdateAlbumInDB.mock.calls[0][1];
+        expect(updates).toMatchObject({ discogs_unavailable: true });
+        // Flag-only (note untouched) leaves the existing note intact.
+        expect(updates).not.toHaveProperty('discogs_unavailable_note');
       });
     });
   });

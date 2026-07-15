@@ -82,6 +82,9 @@ export const library = {
   canonical_entity_id: 'canonical_entity_id',
   canonical_entity_confidence: 'canonical_entity_confidence',
   canonical_entity_resolved_at: 'canonical_entity_resolved_at',
+  discogs_unavailable: 'discogs_unavailable',
+  discogs_unavailable_note: 'discogs_unavailable_note',
+  last_discogs_recheck_at: 'last_discogs_recheck_at',
 };
 export const artists = {
   id: 'id',
