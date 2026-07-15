@@ -400,13 +400,28 @@ describe('upsertAlbumMatchFillNull', () => {
 // ---------------------------------------------------------------------------
 
 describe('ANALYZE', () => {
-  it('analyzeFlowsheet issues ANALYZE flowsheet', async () => {
-    await analyzeFlowsheet();
+  // BS#1638 prod run 1: ANALYZE ran on the raw connection under the @wxyc/database
+  // 5s statement_timeout and was cancelled on the 2.6M-row flowsheet, aborting the
+  // whole job after Lane A. Both ANALYZEs must run inside a transaction that raises
+  // statement_timeout (mirroring the flip batches), and a stats-refresh failure must
+  // never abort a completed data lane.
+  it('analyzeFlowsheet issues ANALYZE flowsheet inside a raised-timeout transaction', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await analyzeFlowsheet(300_000);
     expect(renderSql(findExecuteCallMatching(/ANALYZE/i)?.[0])).toMatch(/flowsheet/i);
+    expect((db.transaction as jest.Mock).mock.calls.length).toBe(1);
+    expect(renderSql(findExecuteCallMatching(/SET\s+LOCAL\s+statement_timeout/i)?.[0])).toMatch(/300000ms/);
   });
-  it('analyzeAlbumMetadata issues ANALYZE album_metadata', async () => {
-    await analyzeAlbumMetadata();
+  it('analyzeAlbumMetadata issues ANALYZE album_metadata inside a raised-timeout transaction', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await analyzeAlbumMetadata(300_000);
     expect(renderSql(findExecuteCallMatching(/ANALYZE/i)?.[0])).toMatch(/album_metadata/i);
+    expect(renderSql(findExecuteCallMatching(/SET\s+LOCAL\s+statement_timeout/i)?.[0])).toMatch(/300000ms/);
+  });
+  it('is non-fatal: a failing ANALYZE is swallowed (a stats refresh must not abort a completed lane)', async () => {
+    (db.transaction as jest.Mock).mockRejectedValueOnce(new Error('canceling statement due to statement timeout'));
+    await expect(analyzeFlowsheet(300_000)).resolves.toBeUndefined();
+    expect(Sentry.captureException).toHaveBeenCalled();
   });
 });
 
@@ -696,11 +711,13 @@ describe('runReenrichment', () => {
       .mockResolvedValueOnce([{ id: 1 }, { id: 2 }]) // lane A UPDATE → 2
       .mockResolvedValueOnce([]) // SET LOCAL (lane A flip batch 2)
       .mockResolvedValueOnce([]) // lane A UPDATE → 0
+      .mockResolvedValueOnce([]) // SET LOCAL (ANALYZE flowsheet, lane A)
       .mockResolvedValueOnce([]) // ANALYZE flowsheet (lane A)
       .mockResolvedValueOnce([]) // SET LOCAL (enumerate)
       .mockResolvedValueOnce([{ album_id: 7 }]) // residual → 1 album
       .mockResolvedValueOnce([]) // SET LOCAL (resolveAlbums)
       .mockResolvedValueOnce([{ album_id: 7, artist_name: 'Chuquimamani-Condori', album_title: 'Edits' }]) // resolve
+      .mockResolvedValueOnce([]) // SET LOCAL (ANALYZE album_metadata)
       .mockResolvedValueOnce([]) // ANALYZE album_metadata
       .mockResolvedValueOnce([]) // SET LOCAL (lane B scope count)
       .mockResolvedValueOnce([{ count: 1 }]) // lane B scope count
@@ -708,6 +725,7 @@ describe('runReenrichment', () => {
       .mockResolvedValueOnce([{ id: 9 }]) // lane B UPDATE → 1
       .mockResolvedValueOnce([]) // SET LOCAL (lane B flip batch 2)
       .mockResolvedValueOnce([]) // lane B UPDATE → 0
+      .mockResolvedValueOnce([]) // SET LOCAL (ANALYZE flowsheet, lane B)
       .mockResolvedValueOnce([]); // ANALYZE flowsheet (lane B)
 
     mockBulkLookupMetadata.mockResolvedValue({ results: [{ index: 0, status: 'match', lookup: lookupWithArtwork() }] });

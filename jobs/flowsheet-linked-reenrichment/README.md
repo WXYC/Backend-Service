@@ -83,18 +83,19 @@ DROP INDEX CONCURRENTLY IF EXISTS wxyc_schema.flowsheet_linked_reenrichment_idx;
 
 ## Environment variables
 
-| Var                                 | Default  | Purpose                                                      |
-| ----------------------------------- | -------- | ------------------------------------------------------------ |
-| `LINKED_REENRICH_BULK_BATCH_SIZE`   | `5`      | Items per Lane B bulk-lookup request (LML cap 100).          |
-| `LINKED_REENRICH_BULK_RATE_PER_MIN` | `1`      | Lane B batches per minute.                                   |
-| `LINKED_REENRICH_BULK_BUDGET_MS`    | `25000`  | Per-item LML `X-Caller-Budget-Ms`.                           |
-| `LINKED_REENRICH_FLIP_BATCH_SIZE`   | `5000`   | Rows per flip UPDATE transaction.                            |
-| `LINKED_REENRICH_FLIP_TIMEOUT_MS`   | `300000` | Statement timeout per flip batch.                            |
-| `LINKED_REENRICH_READ_TIMEOUT_MS`   | `300000` | Statement timeout for count/enumerate/resolve SELECTs.       |
-| `LINKED_REENRICH_ALBUM_AFTER_ID`    | `0`      | Lane B resume cursor.                                        |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`    | `300`    | Cooperative-pause lookback; `0` disables.                    |
-| `LIBRARY_METADATA_URL`              | —        | LML base URL. Required for `--execute` (Lane B).             |
-| `DB_*`, `SENTRY_*`                  | —        | Standard DB + observability config (see `docs/env-vars.md`). |
+| Var                                  | Default  | Purpose                                                                                                                                                     |
+| ------------------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LINKED_REENRICH_BULK_BATCH_SIZE`    | `5`      | Items per Lane B bulk-lookup request (LML cap 100).                                                                                                         |
+| `LINKED_REENRICH_BULK_RATE_PER_MIN`  | `1`      | Lane B batches per minute.                                                                                                                                  |
+| `LINKED_REENRICH_BULK_BUDGET_MS`     | `25000`  | Per-item LML `X-Caller-Budget-Ms`.                                                                                                                          |
+| `LINKED_REENRICH_FLIP_BATCH_SIZE`    | `5000`   | Rows per flip UPDATE transaction.                                                                                                                           |
+| `LINKED_REENRICH_FLIP_TIMEOUT_MS`    | `300000` | Statement timeout per flip batch.                                                                                                                           |
+| `LINKED_REENRICH_READ_TIMEOUT_MS`    | `300000` | Statement timeout for count/enumerate/resolve SELECTs.                                                                                                      |
+| `LINKED_REENRICH_ANALYZE_TIMEOUT_MS` | `300000` | Statement timeout for the post-lane `ANALYZE` (own raised-timeout tx; the 5s connection default cancels ANALYZE on the 2.6M-row flowsheet — BS#1638 run 1). |
+| `LINKED_REENRICH_ALBUM_AFTER_ID`     | `0`      | Lane B resume cursor.                                                                                                                                       |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `300`    | Cooperative-pause lookback; `0` disables.                                                                                                                   |
+| `LIBRARY_METADATA_URL`               | —        | LML base URL. Required for `--execute` (Lane B).                                                                                                            |
+| `DB_*`, `SENTRY_*`                   | —        | Standard DB + observability config (see `docs/env-vars.md`).                                                                                                |
 
 ## References
 

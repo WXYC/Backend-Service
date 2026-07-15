@@ -54,7 +54,7 @@
  * (out-of-band partial index pre-flight, off-peak window, resume knobs).
  */
 
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import {
   album_metadata,
   db,
@@ -111,6 +111,12 @@ export const FLIP_TIMEOUT_DEFAULT = 5 * 60 * 1000;
  * margin even if that pre-flight was skipped and the scan degrades. */
 export const READ_TIMEOUT_ENV = 'LINKED_REENRICH_READ_TIMEOUT_MS';
 export const READ_TIMEOUT_DEFAULT = 5 * 60 * 1000;
+
+/** Statement timeout for the post-lane ANALYZE. Runs in its own raised-timeout
+ * transaction because ANALYZE on the 2.6M-row flowsheet exceeds the 5s
+ * connection default (BS#1638 prod run 1 aborted here). 5min is a wide margin. */
+export const ANALYZE_TIMEOUT_ENV = 'LINKED_REENRICH_ANALYZE_TIMEOUT_MS';
+export const ANALYZE_TIMEOUT_DEFAULT = 5 * 60 * 1000;
 
 /** Resume cursor for Lane B's residual-album enumeration. The summary log's
  * `last_album_id` carries the value to resume a stopped run from. Lane A's
@@ -391,15 +397,41 @@ export const awaitQuietWindow = async (lookbackSeconds: number, pauseMs: number)
 
 // -- ANALYZE -----------------------------------------------------------------
 
-export const analyzeFlowsheet = async (): Promise<void> => {
-  log('info', 'analyze_started', 'ANALYZE flowsheet');
-  await db.execute(sql`ANALYZE "wxyc_schema"."flowsheet"`);
+/**
+ * Run an ANALYZE inside a transaction that raises `statement_timeout` off the
+ * @wxyc/database 5s connection default (same wrapper the flip batches use).
+ * ANALYZE on the 2.6M-row `flowsheet` runs well past 5s, so on the raw
+ * connection it is cancelled — which aborted the whole job after Lane A on
+ * BS#1638 prod run 1. A stats refresh is an optimization, not correctness, so
+ * a failure here is swallowed (logged + Sentry) rather than allowed to abort a
+ * data lane that already committed. ANALYZE is permitted inside a transaction
+ * block (unlike VACUUM).
+ */
+const runAnalyze = async (
+  table: 'flowsheet' | 'album_metadata',
+  analyzeStmt: SQL,
+  timeoutMs: number
+): Promise<void> => {
+  log('info', 'analyze_started', `ANALYZE ${table}`);
+  try {
+    await db.transaction(async (tx) => {
+      await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${timeoutMs}ms'`));
+      await tx.execute(analyzeStmt);
+    });
+  } catch (err) {
+    log('warn', 'analyze_failed', `ANALYZE ${table} failed (non-fatal)`, {
+      table,
+      error_message: err instanceof Error ? err.message : String(err),
+    });
+    captureError(err, 'analyze_failed', { table });
+  }
 };
 
-export const analyzeAlbumMetadata = async (): Promise<void> => {
-  log('info', 'analyze_started', 'ANALYZE album_metadata');
-  await db.execute(sql`ANALYZE "wxyc_schema"."album_metadata"`);
-};
+export const analyzeFlowsheet = (timeoutMs: number = ANALYZE_TIMEOUT_DEFAULT): Promise<void> =>
+  runAnalyze('flowsheet', sql`ANALYZE "wxyc_schema"."flowsheet"`, timeoutMs);
+
+export const analyzeAlbumMetadata = (timeoutMs: number = ANALYZE_TIMEOUT_DEFAULT): Promise<void> =>
+  runAnalyze('album_metadata', sql`ANALYZE "wxyc_schema"."album_metadata"`, timeoutMs);
 
 // -- Lane B: per-batch orchestration -----------------------------------------
 
@@ -593,6 +625,7 @@ export interface ReenrichmentOptions {
   flipBatchSize: number;
   flipTimeoutMs: number;
   readTimeoutMs: number;
+  analyzeTimeoutMs: number;
   albumAfterId: number;
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
@@ -623,6 +656,7 @@ export const resolveOptions = (
     flipBatchSize: requirePositiveInt(env[FLIP_BATCH_SIZE_ENV], FLIP_BATCH_SIZE_ENV, FLIP_BATCH_SIZE_DEFAULT, ctx),
     flipTimeoutMs: requirePositiveInt(env[FLIP_TIMEOUT_ENV], FLIP_TIMEOUT_ENV, FLIP_TIMEOUT_DEFAULT, ctx),
     readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
+    analyzeTimeoutMs: requirePositiveInt(env[ANALYZE_TIMEOUT_ENV], ANALYZE_TIMEOUT_ENV, ANALYZE_TIMEOUT_DEFAULT, ctx),
     albumAfterId: requireNonNegativeInt(env[ALBUM_AFTER_ID_ENV], ALBUM_AFTER_ID_ENV, 0, {
       ...ctx,
       note: 'Resume cursor — the summary log of the previous run carries last_album_id.',
@@ -685,7 +719,7 @@ export const runReenrichment = async (options: ReenrichmentOptions): Promise<Ree
       options.liveActivityLookbackSeconds,
       options.liveActivityPauseMs
     );
-    if (summary.lane_a_flipped > 0) await analyzeFlowsheet();
+    if (summary.lane_a_flipped > 0) await analyzeFlowsheet(options.analyzeTimeoutMs);
   }
 
   // ---- Lane B: LML re-lookup for the residual albums ----------------------
@@ -753,7 +787,7 @@ export const runReenrichment = async (options: ReenrichmentOptions): Promise<Ree
   // Lane A; because Lane A already flipped the pre-populated albums, this
   // pass touches only Lane B's new matches.
   if (summary.upserts > 0) {
-    await analyzeAlbumMetadata();
+    await analyzeAlbumMetadata(options.analyzeTimeoutMs);
     // Scope-verifying SELECT before the Lane B UPDATE lane (spec: "Run the
     // scope-verifying SELECT before each UPDATE lane"), mirroring Lane A's
     // pre-flip count. After the ANALYZE above, the still-`enriched_no_match`
@@ -771,7 +805,7 @@ export const runReenrichment = async (options: ReenrichmentOptions): Promise<Ree
       options.liveActivityLookbackSeconds,
       options.liveActivityPauseMs
     );
-    if (summary.lane_b_flipped > 0) await analyzeFlowsheet();
+    if (summary.lane_b_flipped > 0) await analyzeFlowsheet(options.analyzeTimeoutMs);
   }
 
   summary.flipped_from_album_metadata = summary.lane_a_flipped + summary.lane_b_flipped;
