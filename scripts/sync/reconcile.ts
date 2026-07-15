@@ -704,10 +704,14 @@ async function processSseFrame(
 // --- WebSocket CDC client (used for Backend-Service direction) ---
 
 function connectCdc(label: string, wsUrl: string, tableHandlers: Record<string, (event: CdcEvent) => Promise<void>>) {
-  const url = `${wsUrl}?key=${CDC_SECRET}`;
   logInfo(`[${label}] Connecting to ${wsUrl}...`);
 
-  const ws = new WebSocket(url);
+  // Auth via the `Authorization: Bearer` header (BS#1136), not a `?key=` query
+  // parameter — the query string leaks the secret to access logs. The header
+  // is compared in constant time by the CDC WebSocket upgrade handler.
+  const ws = new WebSocket(wsUrl, {
+    headers: { Authorization: `Bearer ${CDC_SECRET}` },
+  });
   let reconnectDelay = 1000;
 
   ws.on('open', () => {
