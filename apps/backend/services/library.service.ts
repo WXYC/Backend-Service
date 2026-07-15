@@ -48,6 +48,7 @@ import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.se
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
+import { ilikeEscaped } from '../utils/sql-like.js';
 
 /**
  * Catalog freshness watermark for the conditional-GET path (BS#1467 / Epic F
@@ -1502,9 +1503,6 @@ export type ArtistInGenreSearchRow = {
   code_number: number;
 };
 
-/** Escape LIKE/ILIKE metacharacters so user input matches literally. */
-const escapeLikePattern = (value: string): string => value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-
 /**
  * Prefix search for artists in a genre (catalog add-entry autocomplete).
  * `code_number` is the artist's number within that genre (`artist_genre_code`).
@@ -1523,8 +1521,6 @@ export const searchArtistsInGenre = async (
 
   // Escape %/_ so e.g. q='%a' can't short the prefix-search contract into a
   // contains-anything scan (review issue 14).
-  const pattern = escapeLikePattern(prefix) + '%';
-
   return db
     .select({
       id: artists.id,
@@ -1534,7 +1530,7 @@ export const searchArtistsInGenre = async (
     })
     .from(artists)
     .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
-    .where(and(eq(genre_artist_crossreference.genre_id, genre_id), sql`${artists.artist_name} ILIKE ${pattern}`))
+    .where(and(eq(genre_artist_crossreference.genre_id, genre_id), ilikeEscaped(artists.artist_name, prefix, 'prefix')))
     .orderBy(asc(artists.artist_name))
     .limit(cappedLimit);
 };
@@ -2052,7 +2048,7 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
                 compilation_track_artist.library_id,
                 rows.map((r) => r.id)
               ),
-              sql`${compilation_track_artist.track_title} ILIKE ${'%' + query + '%'}`
+              ilikeEscaped(compilation_track_artist.track_title, query, 'contains')
             )
           )) as Array<{ library_id: number }>);
   const ctaCovered = new Set(ctaRows.map((r) => r.library_id));
@@ -2314,8 +2310,7 @@ export async function searchLibraryByCTARaw(
 
   await checkLibraryArtistNameHealth();
 
-  const likePattern = `%${trimmed}%`;
-  const matchPredicate = sql`(${compilation_track_artist.track_title} ILIKE ${likePattern} OR ${compilation_track_artist.artist_name} ILIKE ${likePattern})`;
+  const matchPredicate = sql`(${ilikeEscaped(compilation_track_artist.track_title, trimmed, 'contains')} OR ${ilikeEscaped(compilation_track_artist.artist_name, trimmed, 'contains')})`;
   const streamingPredicate = on_streaming !== undefined ? sql` AND ${library.on_streaming} = ${on_streaming}` : sql``;
 
   // Raw SQL because we need both the library_artist_view projection and the

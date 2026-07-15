@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { db, artists, library, flowsheet, library_artist_view, compilation_track_artist } from '@wxyc/database';
+import { ilikeEscaped } from '../utils/sql-like.js';
 
 export type SuggestTrackResult = {
   track_title: string;
@@ -22,7 +23,7 @@ export async function suggestArtists(prefix: string, limit = 5): Promise<string[
     SELECT ${artists.artist_name} AS artist_name, SUM(COALESCE(${library.plays}, 0)) AS total_plays
     FROM ${artists}
     JOIN ${library} ON ${library.artist_id} = ${artists.id}
-    WHERE ${artists.artist_name} ILIKE ${prefix + '%'}
+    WHERE ${ilikeEscaped(artists.artist_name, prefix, 'prefix')}
     GROUP BY ${artists.artist_name}
     ORDER BY total_plays DESC
     LIMIT ${limit}
@@ -47,8 +48,8 @@ export async function suggestTracks(prefix: string, artistName: string, limit = 
       ${flowsheet.album_title} AS album_title,
       ${flowsheet.record_label} AS record_label
     FROM ${flowsheet}
-    WHERE ${flowsheet.artist_name} ILIKE ${artistName}
-      AND ${flowsheet.track_title} ILIKE ${prefix + '%'}
+    WHERE ${ilikeEscaped(flowsheet.artist_name, artistName, 'exact')}
+      AND ${ilikeEscaped(flowsheet.track_title, prefix, 'prefix')}
       AND ${flowsheet.entry_type} = 'track'
     ORDER BY ${flowsheet.track_title}, ${flowsheet.add_time} DESC
     LIMIT ${limit}
@@ -69,8 +70,8 @@ export async function suggestTracks(prefix: string, artistName: string, limit = 
            ${library.label} AS record_label
     FROM ${compilation_track_artist}
     JOIN ${library} ON ${library.id} = ${compilation_track_artist.library_id}
-    WHERE ${compilation_track_artist.artist_name} ILIKE ${artistName}
-      AND ${compilation_track_artist.track_title} ILIKE ${prefix + '%'}
+    WHERE ${ilikeEscaped(compilation_track_artist.artist_name, artistName, 'exact')}
+      AND ${ilikeEscaped(compilation_track_artist.track_title, prefix, 'prefix')}
     LIMIT ${limit}
   `;
 
@@ -100,8 +101,8 @@ export async function getTrackDetails(artistName: string, trackTitle: string): P
   const flowsheetQuery = sql`
     SELECT ${flowsheet.album_title} AS album_title, ${flowsheet.record_label} AS record_label
     FROM ${flowsheet}
-    WHERE ${flowsheet.artist_name} ILIKE ${artistName}
-      AND ${flowsheet.track_title} ILIKE ${trackTitle}
+    WHERE ${ilikeEscaped(flowsheet.artist_name, artistName, 'exact')}
+      AND ${ilikeEscaped(flowsheet.track_title, trackTitle, 'exact')}
       AND ${flowsheet.entry_type} = 'track'
     ORDER BY ${flowsheet.add_time} DESC
     LIMIT 1
@@ -119,7 +120,7 @@ export async function getTrackDetails(artistName: string, trackTitle: string): P
     SELECT ${library_artist_view.album_title} AS album_title,
            ${library_artist_view.label} AS record_label
     FROM ${library_artist_view}
-    WHERE ${library_artist_view.artist_name} ILIKE ${artistName}
+    WHERE ${ilikeEscaped(library_artist_view.artist_name, artistName, 'exact')}
     ORDER BY ${library_artist_view.album_title}
     LIMIT 1
   `;
