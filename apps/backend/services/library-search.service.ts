@@ -20,6 +20,7 @@ import { runCatalogTrackSearchCascade, type TaggedLibraryViewEntry } from './lib
 import type { ArtistMatchHint, ArtistSearchAliasSource } from './requestLine/types.js';
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import WxycError from '../utils/error.js';
+import { ilikeEscaped } from '../utils/sql-like.js';
 
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
 export type CatalogOrder = 'asc' | 'desc';
@@ -518,7 +519,7 @@ function buildColumnMatch(field: CatalogField, value: string, exact: boolean): S
   if (exact) {
     return sql`${col} = ${value}`;
   }
-  return sql`${col} ILIKE ${'%' + value + '%'}`;
+  return ilikeEscaped(col, value, 'contains');
 }
 
 function buildAllFieldMatch(value: string, exact: boolean): SQL {
@@ -536,8 +537,7 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
   // UNION ALL design (BS#1318) alias-only hits surface from branch (b)'s
   // INNER JOIN against the `alias_hits` CTE, not from an OR predicate
   // injected into this fragment.
-  const pattern = '%' + value + '%';
-  return sql`(${library_artist_view.artist_name} ILIKE ${pattern} OR ${library_artist_view.album_title} ILIKE ${pattern} OR ${library_artist_view.label} ILIKE ${pattern})`;
+  return sql`(${ilikeEscaped(library_artist_view.artist_name, value, 'contains')} OR ${ilikeEscaped(library_artist_view.album_title, value, 'contains')} OR ${ilikeEscaped(library_artist_view.label, value, 'contains')})`;
 }
 
 function buildFilterClause(params: LibraryQueryParams): SQL | null {

@@ -6,6 +6,7 @@ import {
   type FlowsheetField,
   type SearchCondition,
 } from './search-parser.service.js';
+import { ilikeEscaped } from '../utils/sql-like.js';
 
 export type SearchParams = {
   q: string;
@@ -236,7 +237,7 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
   if (exact) {
     return sql`${col} = ${value}`;
   }
-  return sql`${col} ILIKE ${'%' + value + '%'}`;
+  return ilikeEscaped(col, value, 'contains');
 }
 
 /**
@@ -263,8 +264,7 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
   }
   // Trigram fallback: short queries, pure-punctuation strings, and any other
   // input that the tsvector path would tokenize away.
-  const pattern = '%' + value + '%';
-  return sql`(${flowsheet.artist_name} ILIKE ${pattern} OR ${flowsheet.track_title} ILIKE ${pattern} OR ${flowsheet.album_title} ILIKE ${pattern} OR ${flowsheet.record_label} ILIKE ${pattern})`;
+  return sql`(${ilikeEscaped(flowsheet.artist_name, value, 'contains')} OR ${ilikeEscaped(flowsheet.track_title, value, 'contains')} OR ${ilikeEscaped(flowsheet.album_title, value, 'contains')} OR ${ilikeEscaped(flowsheet.record_label, value, 'contains')})`;
 }
 
 function buildDjNameMatch(value: string, exact: boolean): SQL {
@@ -280,7 +280,7 @@ function buildDjNameMatch(value: string, exact: boolean): SQL {
   if (exact) {
     return sql`${flowsheet.dj_name} = ${value}`;
   }
-  return sql`${flowsheet.dj_name} ILIKE ${'%' + value + '%'}`;
+  return ilikeEscaped(flowsheet.dj_name, value, 'contains');
 }
 
 function buildDateMatch(value: string): SQL {
