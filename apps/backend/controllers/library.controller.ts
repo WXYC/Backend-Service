@@ -569,6 +569,11 @@ const UPDATABLE_ALBUM_FIELDS = [
   'disc_quantity',
 ] as const;
 
+// `album_title`, `alternate_artist_name`, and `label` are all `varchar(128)`
+// in the library schema. Reject over-length input as a 400 rather than letting
+// it reach the UPDATE and trip PG 22001 ("value too long") → 500 (#1551).
+const MAX_ALBUM_TEXT_LENGTH = 128;
+
 /**
  * PATCH /library/:id with true partial semantics (PR #1154 review issues
  * 5–8, 10–13): only fields present in the body are validated and written, so
@@ -596,14 +601,22 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
     if (typeof body.album_title !== 'string' || body.album_title.trim() === '') {
       throw new WxycError('album_title must be a non-empty string', 400);
     }
-    updates.album_title = body.album_title.trim();
+    const trimmedTitle = body.album_title.trim();
+    if (trimmedTitle.length > MAX_ALBUM_TEXT_LENGTH) {
+      throw new WxycError(`album_title must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
+    }
+    updates.album_title = trimmedTitle;
   }
 
   if ('alternate_artist_name' in body) {
     if (body.alternate_artist_name !== null && typeof body.alternate_artist_name !== 'string') {
       throw new WxycError('alternate_artist_name must be a string or null', 400);
     }
-    updates.alternate_artist_name = body.alternate_artist_name?.trim() || null;
+    const trimmedAlternate = body.alternate_artist_name?.trim() || null;
+    if (trimmedAlternate !== null && trimmedAlternate.length > MAX_ALBUM_TEXT_LENGTH) {
+      throw new WxycError(`alternate_artist_name must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
+    }
+    updates.alternate_artist_name = trimmedAlternate;
   }
 
   if (body.disc_quantity !== undefined) {
@@ -616,6 +629,14 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
   if (body.format_id !== undefined) {
     if (!Number.isInteger(body.format_id) || body.format_id < 1) {
       throw new WxycError('format_id must be a positive integer', 400);
+    }
+    // Validate against the format table so a stale/guessed id surfaces as 400
+    // instead of a PG 23503 → 500 (mirrors the label_id guard). This runs
+    // before the label upsert below, so a bad format_id can't strand an orphan
+    // labels row on the failure path (#1550).
+    const formatRow = await libraryService.getFormatById(body.format_id);
+    if (!formatRow) {
+      throw new WxycError('format_id does not reference an existing format', 400);
     }
     updates.format_id = body.format_id;
   }
@@ -667,6 +688,9 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       // long-stable label_id (issue 6). Clearing must be explicit.
       throw new WxycError('label must be a non-empty string; clear the label by sending label_id: null', 400);
     }
+    if (trimmedLabel !== undefined && trimmedLabel.length > MAX_ALBUM_TEXT_LENGTH) {
+      throw new WxycError(`label must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
+    }
 
     if (labelIdProvided && body.label_id === null) {
       if (trimmedLabel) {
@@ -693,6 +717,23 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       updates.label_id = resolvedLabel.id;
       updates.label = trimmedLabel;
     }
+  }
+
+  // Short-circuit a no-op edit: updateAlbumInDB always SETs last_modified =
+  // NOW(), which fires the touch_library_watermark trigger and advances the
+  // catalog conditional-GET watermark — forcing every iOS / dj-site poller to
+  // re-download the full catalog for a write that changed nothing (#1555). A
+  // PATCH resolves to no-op when every computed update already equals the
+  // stored value (e.g. `{artist_id: <same>}`, or a dj-site "Save" that
+  // resubmits the unchanged record). Compare against the already-fetched row
+  // and return it unchanged rather than running the UPDATE.
+  const effectiveChange = (Object.keys(updates) as Array<keyof libraryService.UpdateAlbumRow>).some(
+    (key) => updates[key] !== existing[key as keyof typeof existing]
+  );
+  if (!effectiveChange) {
+    const album = await libraryService.getAlbumFromDB(albumId);
+    res.status(200).json(album);
+    return;
   }
 
   // Identity-affecting edits invalidate the LML enrichment columns and
@@ -830,11 +871,22 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
   }
   const q = req.query.q ?? '';
 
+  // Express's `simple` query parser yields a string[] for a repeated key, and
+  // parseInt(['1','2']) stringifies to '1,2' → 1, silently coercing instead of
+  // erroring. Reject repeated page/limit keys the same way `q` is rejected
+  // above, so a malformed request fails loudly rather than paginating wrong
+  // (#1553).
+  if (req.query.page !== undefined && typeof req.query.page !== 'string') {
+    throw new WxycError('page must be a single string value', 400);
+  }
   const page = parseInt(req.query.page ?? '0');
   if (isNaN(page) || page < 0) {
     throw new WxycError('page must be a non-negative integer', 400);
   }
 
+  if (req.query.limit !== undefined && typeof req.query.limit !== 'string') {
+    throw new WxycError('limit must be a single string value', 400);
+  }
   const limit = parseInt(req.query.limit ?? String(DEFAULT_LIMIT));
   if (isNaN(limit) || limit < 1) {
     throw new WxycError('limit must be a positive integer', 400);

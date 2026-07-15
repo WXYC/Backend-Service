@@ -5,6 +5,7 @@ import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
 import {
+  AlbumFormat,
   Artist,
   NewAlbum,
   NewAlbumFormat,
@@ -221,6 +222,17 @@ export const getFormatsFromDB = async () => {
 export const insertFormat = async (new_format: NewAlbumFormat) => {
   const response = await db.insert(format).values(new_format).returning();
   return response[0];
+};
+
+/**
+ * Look up a single format row by id. Used by PATCH /library/:id to validate an
+ * incoming `format_id` against the `format` table so a stale/guessed id
+ * surfaces as a 400 instead of tripping the NOT NULL FK (PG 23503) → 500
+ * (BS#1550), mirroring `labelsService.getLabelById`.
+ */
+export const getFormatById = async (id: number): Promise<AlbumFormat | undefined> => {
+  const result = await db.select().from(format).where(eq(format.id, id)).limit(1);
+  return result[0];
 };
 
 export interface Rotation {
