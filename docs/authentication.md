@@ -25,7 +25,7 @@ The `shared/authentication` workspace package wraps better-auth and provides JWT
 
 **`requirePermissions` middleware flow:**
 
-1. Extract Bearer token from `Authorization` header
+1. Extract Bearer token from `Authorization` header via the shared `parseBearerToken` helper — the Bearer scheme is matched case-insensitively per RFC 6750 §2.1 (`bearer`/`Bearer`/`BEARER`), and a bare `Bearer` with no token is rejected with 401. The same helper serves the `AUTH_BYPASS` branch so the two cannot drift (BS#1125).
 2. Verify against JWKS endpoint (`BETTER_AUTH_JWKS_URL`)
 3. Check issuer and audience claims
 4. Validate role exists in `WXYCRoles`

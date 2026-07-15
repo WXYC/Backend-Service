@@ -31,6 +31,30 @@ function getJWKS() {
   return _jwks;
 }
 
+/**
+ * Extract the token from an `Authorization` header carrying the Bearer scheme.
+ *
+ * The scheme name is case-insensitive per RFC 6750 §2.1 (`bearer`, `Bearer`,
+ * and `BEARER` are equivalent), and one or more whitespace characters may
+ * separate the scheme from the token. Returns the trimmed token, or `null`
+ * when the header is absent, does not carry the Bearer scheme, or carries the
+ * scheme with no token (e.g. a bare `Bearer`).
+ *
+ * Shared by both the production and AUTH_BYPASS branches of
+ * `requirePermissions` so the two parsers cannot drift apart again (BS#1125).
+ */
+export function parseBearerToken(authHeader: string | undefined): string | null {
+  if (!authHeader) {
+    return null;
+  }
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match) {
+    return null;
+  }
+  const token = match[1].trim();
+  return token.length > 0 ? token : null;
+}
+
 async function verify(token: string) {
   const issuer = process.env.BETTER_AUTH_ISSUER;
   const audience = process.env.BETTER_AUTH_AUDIENCE;
@@ -78,11 +102,10 @@ export function requirePermissions(required: RequiredPermissions) {
       if (!authHeader) {
         return res.status(401).json({ error: 'Unauthorized: Missing Authorization header.' });
       }
-      const match = authHeader.match(/^Bearer\s+(.+)$/i);
-      if (!match) {
+      const token = parseBearerToken(authHeader);
+      if (!token) {
         return res.status(401).json({ error: 'Unauthorized: Missing token in Authorization header.' });
       }
-      const token = match[1].trim();
       // Try to decode the JWT so req.auth is populated for controllers.
       // If the token is not a valid JWT (e.g. integration tests pass a raw
       // user ID), fall back to using the token value as the user ID directly.
@@ -111,10 +134,10 @@ export function requirePermissions(required: RequiredPermissions) {
       return res.status(401).json({ error: 'Unauthorized: Missing Authorization header.' });
     }
 
-    // Extract token from Authorization header
-    // Support both "Bearer <token>" and plain "<token>" formats
-    // Tests may use plain format, but Bearer format is standard
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader.trim();
+    // Parse the Bearer token with the same case-insensitive helper the bypass
+    // branch uses (BS#1125), so the two paths cannot diverge on scheme casing
+    // or malformed-header handling (RFC 6750 §2.1).
+    const token = parseBearerToken(authHeader);
 
     if (!token) {
       return res.status(401).json({ error: 'Unauthorized: Missing token in Authorization header.' });
