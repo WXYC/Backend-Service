@@ -647,6 +647,22 @@ describe('CDC WebSocket upgrade auth (BS#1136)', () => {
     });
   });
 
+  it('accepts a Bearer header whose scheme/token separator is a tab or multiple spaces (RFC 7235 1*SP)', async () => {
+    await withCdcSecret(SECRET, async () => {
+      const server = makeServer();
+      await setupCdcWebSocket(server);
+      const handler = getUpgradeHandler(server);
+
+      for (const sep of ['\t', '  ', ' \t ']) {
+        wssHandleUpgradeMock.mockClear();
+        const socket = makeSocket();
+        handler(makeUpgradeRequest({ authorization: `Bearer${sep}${SECRET}` }), socket, Buffer.alloc(0));
+        expect(wssHandleUpgradeMock).toHaveBeenCalledTimes(1);
+        expect(socket.destroy).not.toHaveBeenCalled();
+      }
+    });
+  });
+
   it('rejects a wrong Bearer secret without calling handleUpgrade', async () => {
     await withCdcSecret(SECRET, async () => {
       const server = makeServer();
