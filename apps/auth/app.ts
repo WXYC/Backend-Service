@@ -20,6 +20,7 @@ import { CompleteOnboardingError, completeOnboardingFromRequest } from './comple
 import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
+import { createAutoDjUser } from './create-auto-dj-user';
 import { resolveOrganization } from './resolve-organization';
 import { shouldCaptureAuthExpressError } from './sentry-error-filter';
 import { E2E_INCOMPLETE_USER_ID, E2E_INCOMPLETE_USER_PASSWORD } from './e2e-test-constants';
@@ -569,6 +570,9 @@ const syncAdminRoles = async () => {
 // Initialize default user and sync admin roles before starting the server
 void (async () => {
   await createDefaultUser();
+  // Runs after createDefaultUser so the default org already exists. Gated by
+  // CREATE_AUTO_DJ_USER (default off); idempotent skip-if-exists. See #1644.
+  await createAutoDjUser();
   await syncAdminRoles();
 
   // Bootstrap oauthApplication rows for every trustedClient. See
