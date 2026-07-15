@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import * as Sentry from '@sentry/node';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, rotation, library, truncate, user } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
@@ -605,29 +606,40 @@ internal_route.post('/streaming-status-webhook', async (req, res) => {
   }
 
   let processed = 0;
-  let errors = 0;
+  const failures: { library_release_id: number; error: string }[] = [];
 
-  try {
-    await db.transaction(async (tx) => {
-      for (const change of changes as StreamingChange[]) {
-        try {
-          const legacyId = change.library_release_id;
-          const onStreaming = change.on_streaming ?? null;
+  // Per-row autocommit (BS#1114). Each UPDATE runs as its own independent
+  // statement rather than inside one shared `db.transaction`. The old shape wrapped
+  // the whole loop in a single transaction with a per-row catch: when one row
+  // raised, Postgres aborted the surrounding transaction, and every later
+  // `tx.update(...)` threw `current transaction is aborted, commands ignored until
+  // end of transaction block`. The per-row catch swallowed all of them into a
+  // meaningless `errors` count while the first row's real error was lost. Without
+  // the wrapper a bad row fails in isolation, the surviving rows still commit, and
+  // the failing row's actual error is surfaced in the response (and to Sentry)
+  // below. These updates are idempotent column writes, so there is no cross-row
+  // invariant that needs the atomicity a shared transaction would give.
+  for (const change of changes as StreamingChange[]) {
+    const legacyId = change.library_release_id;
+    try {
+      const onStreaming = change.on_streaming ?? null;
 
-          await tx.update(library).set({ on_streaming: onStreaming }).where(eq(library.legacy_release_id, legacyId));
+      await db.update(library).set({ on_streaming: onStreaming }).where(eq(library.legacy_release_id, legacyId));
 
-          processed++;
-        } catch (e) {
-          console.error('[webhook] Streaming status update error:', e);
-          errors++;
-        }
-      }
-    });
-  } catch (e) {
-    console.error('[webhook] Streaming status transaction error:', e);
-    res.status(500).json({ error: 'Internal server error' });
-    return;
+      processed++;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(`[webhook] Streaming status update error (library_release_id=${legacyId}):`, e);
+      failures.push({ library_release_id: legacyId, error: message });
+    }
   }
 
-  res.json({ processed, errors });
+  if (failures.length > 0) {
+    Sentry.captureMessage(`[webhook] streaming-status: ${failures.length}/${changes.length} row update(s) failed`, {
+      level: 'warning',
+      extra: { failures: failures.slice(0, 20) },
+    });
+  }
+
+  res.json({ processed, errors: failures.length, failures });
 });
