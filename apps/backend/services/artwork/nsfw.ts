@@ -28,11 +28,22 @@ async function getModel(): Promise<nsfwjs.NSFWJS> {
   if (model) return model;
   if (modelLoading) return modelLoading;
 
-  modelLoading = nsfwjs.load().then((m) => {
-    model = m;
-    console.log('[NSFWClassifier] Model loaded');
-    return m;
-  });
+  modelLoading = nsfwjs
+    .load()
+    .then((m) => {
+      model = m;
+      console.log('[NSFWClassifier] Model loaded');
+      return m;
+    })
+    .catch((err) => {
+      // Don't memoize the rejection (#1121): a transient first-load failure
+      // (cold-start GPU init, network blip, OOM) would otherwise wedge the
+      // slot on a rejected promise and 500 every subsequent classify() for the
+      // life of the process. Reset the in-flight slot so the next call retries,
+      // and re-throw so the current caller still sees the error.
+      modelLoading = null;
+      throw err;
+    });
 
   return modelLoading;
 }
@@ -76,7 +87,15 @@ export async function classify(imageBuffer: Buffer): Promise<NSFWResult> {
 
 /**
  * Preloads the NSFW model. Call at server startup to avoid cold-start latency.
+ *
+ * A transient load failure here must not crash the server (#1121): swallow and
+ * log it, leaving the in-flight slot reset so the lazy classify() path retries
+ * the load on the first real request.
  */
 export async function preloadModel(): Promise<void> {
-  await getModel();
+  try {
+    await getModel();
+  } catch (err) {
+    console.error('[NSFWClassifier] Model preload failed; will retry lazily on first classify()', err);
+  }
 }
