@@ -183,11 +183,15 @@ export async function searchLibrary(
     const queryWhereAliasOff = buildWhereClause(conditions);
     const branchAWhere = combineWhere(queryWhereAliasOff, filterWhere);
     // Branch (b): the row satisfies `filterWhere` AND its artist_id has an
-    // alias hit AND the row would NOT have matched branch (a). When
-    // queryWhereAliasOff is null (defensive — aliasActive gates on
-    // hasAllFieldCondition so this is unreachable today), the NOT becomes
-    // vacuously false and (b) emits nothing, which is what we want.
-    const dedupeWhere = queryWhereAliasOff ? sql`NOT ${queryWhereAliasOff}` : sql`FALSE`;
+    // alias hit AND the row would NOT have matched branch (a). Uses the
+    // NULL-safe `IS NOT TRUE` rather than `NOT (...)` (BS#1557): `label` is
+    // nullable, so an alias-only hit on a NULL-label row makes
+    // queryWhereAliasOff evaluate to NULL — `NOT NULL` is NULL (dropped from
+    // both arms), but `NULL IS NOT TRUE` is TRUE (kept in b), which is exactly
+    // the alias-only row the feature exists to surface. When queryWhereAliasOff
+    // is null (defensive — aliasActive gates on hasAllFieldCondition so this is
+    // unreachable today), (b) emits nothing, which is what we want.
+    const dedupeWhere = queryWhereAliasOff ? sql`(${queryWhereAliasOff}) IS NOT TRUE` : sql`FALSE`;
     const branchBWhere = combineWhere(dedupeWhere, filterWhere);
 
     const orderBy = sql`${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
@@ -331,8 +335,11 @@ export async function searchLibrary(
   // LML's `Semaphore(5) + TokenBucket(50/min)` chokepoint; pagination beyond
   // page 0 stays empty so clients don't scroll a bounded fallback list.
   if (params.page !== 0) return { results, total };
-  // Cascade rows carry no date_lost/date_found — skip when missing filter is set.
-  if (params.missing !== undefined) return { results, total };
+  // Cascade rows carry no date_lost/date_found, so they can never be
+  // known-missing — skip the cascade only for `missing=true` (BS#1552).
+  // `missing=false` (dj-site's default "hide lost records" filter) still runs
+  // it: cascade rows are, by construction, non-missing and must surface.
+  if (params.missing === true) return { results, total };
   const trimmed = params.q.trim();
   if (!passesCascadeGate(trimmed, conditions)) return { results, total };
 
