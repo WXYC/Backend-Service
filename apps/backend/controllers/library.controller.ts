@@ -736,17 +736,20 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
     return;
   }
 
-  // Identity-affecting edits invalidate the LML enrichment columns and
-  // re-fire the same pipeline addAlbum runs (issue 12); otherwise
-  // on_streaming / artwork_url / canonical_entity stay bound to the OLD
-  // (artist, title) identity and no drain job repairs them.
+  // Identity-affecting edits re-fire the same LML pipeline addAlbum runs (issue
+  // 12), so on_streaming / artwork_url / canonical_entity can be rebound to the
+  // NEW (artist, title) identity. We do NOT null those columns up front:
+  // enrichAlbumAfterIdentityChange overwrites each one only on a successful
+  // lookup (refill-then-swap), so an unconfigured LML or a no-match re-lookup
+  // leaves the prior — still-better-than-blank — enrichment intact rather than
+  // permanently wiping it with no repair path (BS#1549).
   const identityChanged =
     (updates.artist_id !== undefined && updates.artist_id !== existing.artist_id) ||
     (updates.album_title !== undefined && updates.album_title !== existing.album_title) ||
     ('alternate_artist_name' in body &&
       (updates.alternate_artist_name ?? null) !== (existing.alternate_artist_name ?? null));
 
-  const updated = await libraryService.updateAlbumInDB(albumId, updates, { resetEnrichment: identityChanged });
+  const updated = await libraryService.updateAlbumInDB(albumId, updates);
   if (!updated) {
     throw new WxycError('Album not found', 404);
   }

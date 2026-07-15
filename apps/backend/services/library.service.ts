@@ -1661,11 +1661,7 @@ export type UpdateAlbumRow = {
   code_number?: number;
 };
 
-export const updateAlbumInDB = async (
-  album_id: number,
-  updates: UpdateAlbumRow,
-  opts?: { resetEnrichment?: boolean }
-) => {
+export const updateAlbumInDB = async (album_id: number, updates: UpdateAlbumRow) => {
   const set: Record<string, unknown> = { last_modified: sql`NOW()` };
   for (const key of [
     'album_title',
@@ -1681,18 +1677,15 @@ export const updateAlbumInDB = async (
   ] as const) {
     if (updates[key] !== undefined) set[key] = updates[key];
   }
-  // Identity-affecting edits invalidate LML-derived columns: the old
-  // on_streaming / artwork / canonical-entity linkage belongs to the previous
-  // (artist, title) identity. The controller re-fires enrichment after the
-  // write; nulling first means a failed lookup leaves the row visibly
-  // unenriched instead of silently bound to the wrong identity.
-  if (opts?.resetEnrichment) {
-    set.on_streaming = null;
-    set.artwork_url = null;
-    set.canonical_entity_id = null;
-    set.canonical_entity_confidence = null;
-    set.canonical_entity_resolved_at = null;
-  }
+  // Deliberately NOT nulling the LML-derived columns (on_streaming /
+  // artwork_url / canonical_entity_*) here. The old reset-then-maybe-refill
+  // shape permanently wiped enrichment whenever the post-write re-lookup was
+  // skipped (LML unconfigured) or found no match (transient outage, or a
+  // freeform-radio artist with no Discogs "direct" match) — and no recurring
+  // job repairs those columns (BS#1549). The controller now re-fires
+  // enrichment and overwrites each column only on a successful lookup
+  // (refill-then-swap), so a failed/empty lookup leaves the prior values
+  // intact instead of stranding the row blank.
   const result = await db.update(library).set(set).where(eq(library.id, album_id)).returning({ id: library.id });
   return result[0];
 };

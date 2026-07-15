@@ -722,6 +722,62 @@ describe('library.controller', () => {
         expect(res.status).toHaveBeenCalledWith(200);
       });
     });
+
+    describe('enrichment repair on identity change (#1549)', () => {
+      it('does not null enrichment columns when LML is unconfigured', async () => {
+        mockIsLmlConfigured.mockReturnValue(false);
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_title: 'A New Title' }), res, next);
+
+        // Two-arg call, no resetEnrichment flag: updateAlbumInDB never NULLs
+        // on_streaming / artwork_url / canonical_entity_*.
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ album_title: 'A New Title' }));
+        expect(mockUpdateAlbumInDB.mock.calls[0]).toHaveLength(2);
+        // LML unconfigured -> no re-enrichment fired, so nothing is wiped or rewritten.
+        expect(mockUpdateOnStreaming).not.toHaveBeenCalled();
+        expect(mockUpdateArtworkUrl).not.toHaveBeenCalled();
+        expect(mockUpdateCanonicalEntity).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('preserves prior enrichment when the identity re-lookup finds no match', async () => {
+        mockIsLmlConfigured.mockReturnValue(true);
+        mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: null });
+        mockLookupMetadata.mockResolvedValue(null); // no match: coordinator returns null
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_title: 'A New Title' }), res, next);
+        // Drain the fire-and-forget canonical-entity lookup before asserting.
+        await new Promise((r) => setImmediate(r));
+
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ album_title: 'A New Title' }));
+        expect(mockUpdateAlbumInDB.mock.calls[0]).toHaveLength(2);
+        // A no-match re-lookup writes nothing, so the prior artwork / streaming /
+        // canonical values survive the edit instead of being NULLed-and-abandoned.
+        expect(mockUpdateOnStreaming).not.toHaveBeenCalled();
+        expect(mockUpdateArtworkUrl).not.toHaveBeenCalled();
+        expect(mockUpdateCanonicalEntity).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('swaps in the newly looked-up artwork/streaming when the re-lookup matches', async () => {
+        mockIsLmlConfigured.mockReturnValue(true);
+        mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: true });
+        mockLookupMetadata.mockResolvedValue({
+          search_type: 'direct',
+          results: [{ artwork: { artwork_url: 'https://i.discogs.com/new.jpg' } }],
+        });
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_title: 'A New Title' }), res, next);
+        await new Promise((r) => setImmediate(r));
+
+        expect(mockUpdateOnStreaming).toHaveBeenCalledWith(42, true);
+        expect(mockUpdateArtworkUrl).toHaveBeenCalledWith(42, 'https://i.discogs.com/new.jpg');
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
   });
 
   describe('searchLibraryQueryEndpoint', () => {
