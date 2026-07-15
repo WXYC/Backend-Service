@@ -1,5 +1,6 @@
 import rateLimit, { Options, MemoryStore } from 'express-rate-limit';
 import { Request, Response, NextFunction } from 'express';
+import { rateLimitKeyFromRequest } from './rate-limit-key';
 
 // Environment-based configuration
 const isTestEnv = process.env.NODE_ENV === 'test' || process.env.USE_MOCK_SERVICES === 'true';
@@ -50,13 +51,9 @@ export const songRequestRateLimit = shouldEnableRateLimiting
       standardHeaders: true,
       legacyHeaders: false,
       store: songRequestStore,
-      keyGenerator: (req: Request) => {
-        // Use user ID (set by requirePermissions middleware, which runs before this)
-        if (req.auth?.id) {
-          return req.auth.id;
-        }
-        return 'unknown';
-      },
+      // Authenticated callers key on their user id; unauthenticated callers
+      // key per-client-IP instead of a single shared bucket (BS#1127).
+      keyGenerator: rateLimitKeyFromRequest,
       handler: (_req: Request, res: Response) => {
         res.status(429).json({
           message: 'Too many requests. Please wait before submitting more song requests.',
@@ -84,12 +81,9 @@ export const proxyRateLimit = shouldEnableRateLimiting
       standardHeaders: true,
       legacyHeaders: false,
       store: proxyStore,
-      keyGenerator: (req: Request) => {
-        if (req.auth?.id) {
-          return req.auth.id;
-        }
-        return 'unknown';
-      },
+      // Authenticated callers key on their user id; unauthenticated callers
+      // key per-client-IP instead of a single shared bucket (BS#1127).
+      keyGenerator: rateLimitKeyFromRequest,
       handler: (_req: Request, res: Response) => {
         res.status(429).json({
           message: 'Too many proxy requests. Please try again shortly.',
