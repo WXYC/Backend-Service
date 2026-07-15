@@ -4,7 +4,7 @@ import * as concertsService from '../services/concerts.service.js';
 import WxycError from '../utils/error.js';
 
 /**
- * `GET /concerts` — Touring Soon feed (BS#1603, touring-events Phase 2).
+ * `GET /concerts` — On Tour feed (BS#1603, on-tour Phase 2).
  *
  * Contract lives in `wxyc-shared/api.yaml` v1.15.0 (`ConcertsResponse`).
  * Pagination follows the spec's `PaginationParams` conventions: 1-indexed

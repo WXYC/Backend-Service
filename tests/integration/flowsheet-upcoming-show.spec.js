@@ -1,6 +1,6 @@
 /**
  * BS#1607 — per-playcut `upcoming_show` enrichment on the V2 flowsheet feed
- * (touring-events Phase 3).
+ * (on-tour Phase 3).
  *
  * Postgres-backed: seeds a show, flowsheet track rows linked to library
  * albums (whose artists come from the fixed-ID seed fixture), and a set of

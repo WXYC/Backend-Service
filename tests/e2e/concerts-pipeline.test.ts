@@ -1,5 +1,5 @@
 /**
- * Concerts Pipeline E2E Tests (touring events)
+ * Concerts Pipeline E2E Tests (On Tour)
  *
  * The full scraper → DB → resolver → API pipeline, end to end against a live
  * stack. Where the integration spec (`tests/integration/concerts.spec.js`)

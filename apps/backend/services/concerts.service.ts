@@ -2,7 +2,7 @@ import { and, asc, eq, gte, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import { artists, concerts, db, normalizeFreetextArtist, venues } from '@wxyc/database';
 
 /**
- * Concerts read service — backs `GET /concerts` (BS#1603, touring-events
+ * Concerts read service — backs `GET /concerts` (BS#1603, on-tour
  * Phase 2). Pure DB reads over the `concerts`/`venues` tables that the
  * venue-events-scraper and triangle-shows ETL populate; no LML calls.
  *
@@ -229,7 +229,7 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
 
 /**
  * Batched upcoming-concert lookup backing the V2 flowsheet feed's per-playcut
- * `upcoming_show` enrichment (BS#1607, widened by BS#1613; touring-events
+ * `upcoming_show` enrichment (BS#1607, widened by BS#1613; on-tour
  * Phase 3).
  *
  * ONE indexed query for a whole feed page — never one query per row. The caller
@@ -273,7 +273,7 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  *     clean-name filter" rationale). RESIDUAL (accepted; #1614 is the real
  *     lever): two DISTINCT artists sharing a normalized name (homonyms, e.g. two
  *     bands named `Wire`) collapse to one key — the soonest wins and can attach
- *     to a play of the other. Low-harm for a "Touring Soon" CTA, not engineered
+ *     to a play of the other. Low-harm for a "On Tour" CTA, not engineered
  *     around here.
  *
  * The venue-embedding join and DTO mapping reuse `getConcertsPage`'s projection

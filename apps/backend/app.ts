@@ -96,7 +96,7 @@ app.use('/proxy', proxy_route);
 // Enriched playlist proxy (unauthenticated, matches tubafrenzy path)
 app.use('/playlists', playlist_route);
 
-// Touring Soon concerts feed (anonymous auth, pure DB read) — BS#1603
+// On Tour concerts feed (anonymous auth, pure DB read) — BS#1603
 app.use('/concerts', concerts_route);
 
 // Business logic routes

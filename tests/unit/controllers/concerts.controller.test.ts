@@ -1,5 +1,5 @@
 /**
- * Unit tests for `GET /concerts` (BS#1603, touring-events Phase 2).
+ * Unit tests for `GET /concerts` (BS#1603, on-tour Phase 2).
  *
  * Service is mocked; these tests pin the controller contract: query-param
  * validation (page/limit/curated/from/to), the 1-indexed page → offset math,

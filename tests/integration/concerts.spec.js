@@ -1,5 +1,5 @@
 /**
- * BS#1603 — `GET /concerts` (Touring Soon feed, touring-events Phase 2).
+ * BS#1603 — `GET /concerts` (On Tour feed, on-tour Phase 2).
  *
  * Postgres-backed: direct SQL seeds one venue and a deterministic set of
  * concert rows keyed by a `bs1603:` source_id prefix, so cleanup is a

@@ -1938,7 +1938,7 @@ export const concertSourceEnum = wxyc_schema.enum('concert_source_enum', [
 
 /**
  * Lifecycle state of a concert. Listener-facing surfaces (the iOS app's
- * "Touring Soon" tab, the dj-site weekly digest) read this to grey out /
+ * "On Tour" tab, the dj-site weekly digest) read this to grey out /
  * hide / strike through. The scraper writes `on_sale` by default and
  * promotes to `sold_out` / `cancelled` when the source page says so.
  */
