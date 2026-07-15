@@ -112,5 +112,7 @@
   "0113_concerts-active-starts-on-idx": "eed76d7e1a3548eb5f7d5aa7560182ff16bd0a89b188f4c5142df621665abf83",
   "0114_concerts-flowsheet-watermark": "f97e2f04d370d93ac489910aa517f3094c836c4cd546efc90946a20e95e95b20",
   "0115_concerts-event-url": "59e1aa603c3e173e2cf8e45b090a9ecf9bae941995b5ed63e9778462ede52d44",
-  "0116_concerts-headliner-discogs-artist-id": "8dfb83c5d0c77cc6f6c731cc116b984d6be89ea569e1fdb30c9ed6d562465c04"
+  "0116_concerts-headliner-discogs-artist-id": "8dfb83c5d0c77cc6f6c731cc116b984d6be89ea569e1fdb30c9ed6d562465c04",
+  "0117_recheck-after-unavailable-enum": "fdff626914a4d5cb0f6e4be56bbd403aff0fef2ee34f95a57699e1969c964deb",
+  "0118_library-discogs-unavailable": "6543b7a9e5a2accb716ad9583d7dc608345d6be94978add701cf5b089b052cae"
 }

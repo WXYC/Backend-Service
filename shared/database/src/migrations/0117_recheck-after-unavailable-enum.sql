@@ -1,0 +1,21 @@
+-- 0117 — add `recheck_after_unavailable` to
+--   `discogs_release_id_source_enum` (BS#1281 / Not-on-Discogs 1a, epic #1280).
+--
+-- New value:
+--   recheck_after_unavailable — written by the future "Not on Discogs" recheck
+--     cron when a `library.discogs_unavailable` release is re-checked against
+--     Discogs and a release id is (re)minted. No runtime writer emits it yet;
+--     this migration lands the value ahead of its consumer.
+--
+-- Why its own migration (split from the library-columns migration 0118): PG12+
+-- allows `ALTER TYPE ... ADD VALUE` inside a transaction but the new value is
+-- not usable until commit, and Drizzle wraps each migration in a transaction.
+-- Isolating the ADD VALUE guarantees it is committed before any later migration
+-- or app code references it (same shape as 0109 / 0086). Plain ADD VALUE (no
+-- IF NOT EXISTS), matching 0109 and the migrations-doc rule that reserves
+-- IF NOT EXISTS for the out-of-band CREATE INDEX pattern only.
+--
+-- @no-analyze-needed: ALTER TYPE ADD VALUE is type-system metadata only. No
+-- rows are rewritten, no planner stats to refresh.
+
+ALTER TYPE "wxyc_schema"."discogs_release_id_source_enum" ADD VALUE 'recheck_after_unavailable';

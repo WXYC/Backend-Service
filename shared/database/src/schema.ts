@@ -511,6 +511,17 @@ export const library = wxyc_schema.table(
     canonical_entity_id: text('canonical_entity_id'),
     canonical_entity_confidence: real('canonical_entity_confidence'),
     canonical_entity_resolved_at: timestamp('canonical_entity_resolved_at', { withTimezone: true }),
+    // "Not on Discogs" flag (BS#1281 / epic #1280). The music director marks a
+    // release the LML pipeline keeps false-fuzzy-matching (embargoed promos,
+    // audience-segment pressings) so lookups stop returning wrong metadata.
+    // `discogs_unavailable_note` is the MD's optional rationale; the
+    // `library_discogs_unavailable_note_check` CHECK enforces
+    // `note alive ⟺ flag alive` at the DB level. `last_discogs_recheck_at` is
+    // server-write-only, stamped by the recheck cron (later sub-issue) — the
+    // PATCH handler never writes it.
+    discogs_unavailable: boolean('discogs_unavailable').default(false).notNull(),
+    discogs_unavailable_note: varchar('discogs_unavailable_note', { length: 500 }),
+    last_discogs_recheck_at: timestamp('last_discogs_recheck_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, album=B). NULL for rows where artist_name has
     // not been backfilled yet — A.2 populates legacy rows, A.3 keeps live
@@ -537,6 +548,17 @@ export const library = wxyc_schema.table(
       ),
       librarySearchDocIdx: index('library_search_doc_idx').using('gin', sql`${table.search_doc}`),
       libraryCanonicalEntityIdIdx: index('library_canonical_entity_id_idx').on(table.canonical_entity_id),
+      // BS#1281: `note alive ⟺ flag alive`. A note may only exist while the
+      // row is flagged unavailable.
+      discogsUnavailableNoteCheck: check(
+        'library_discogs_unavailable_note_check',
+        sql`${table.discogs_unavailable} OR ${table.discogs_unavailable_note} IS NULL`
+      ),
+      // Partial index over the small flagged subset — the recheck cron's
+      // candidate query and the album-level-backfill candidate filter.
+      discogsUnavailableIdx: index('library_discogs_unavailable_idx')
+        .on(table.discogs_unavailable)
+        .where(sql`${table.discogs_unavailable} = true`),
     };
   }
 );
@@ -689,6 +711,12 @@ export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_s
   'discogs_direct_backfill',
   'library_identity',
   'md_verified',
+  // BS#1281 (Not-on-Discogs 1a). Written by the future recheck cron when a
+  // `library.discogs_unavailable` release is re-checked against Discogs and a
+  // release id is (re)minted. Added in its own migration (before the
+  // library-columns migration) because `ALTER TYPE ... ADD VALUE` is not usable
+  // in the same transaction that adds it.
+  'recheck_after_unavailable',
 ]);
 /**
  * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes

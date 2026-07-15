@@ -1659,6 +1659,11 @@ export type UpdateAlbumRow = {
   alternate_artist_name?: string | null;
   disc_quantity?: number;
   code_number?: number;
+  // BS#1281 (Not-on-Discogs 1a). `discogs_unavailable_note` accepts an
+  // explicit null (clearing the note when the flag drops); the SET loop below
+  // preserves null because `null !== undefined`.
+  discogs_unavailable?: boolean;
+  discogs_unavailable_note?: string | null;
 };
 
 export const updateAlbumInDB = async (album_id: number, updates: UpdateAlbumRow) => {
@@ -1674,6 +1679,8 @@ export const updateAlbumInDB = async (album_id: number, updates: UpdateAlbumRow)
     'alternate_artist_name',
     'disc_quantity',
     'code_number',
+    'discogs_unavailable',
+    'discogs_unavailable_note',
   ] as const) {
     if (updates[key] !== undefined) set[key] = updates[key];
   }
@@ -1705,6 +1712,10 @@ export const getLibraryRowById = async (album_id: number) => {
       disc_quantity: library.disc_quantity,
       code_number: library.code_number,
       artist_name: library.artist_name,
+      // BS#1281: the PATCH handler reads the live flag to judge a note-only
+      // edit against the `flag ⟺ note` invariant.
+      discogs_unavailable: library.discogs_unavailable,
+      discogs_unavailable_note: library.discogs_unavailable_note,
     })
     .from(library)
     .where(eq(library.id, album_id))
