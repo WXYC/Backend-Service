@@ -15,6 +15,16 @@ jest.mock('../../../apps/backend/utils/serverEvents', () => ({
   serverEventsMgr: { broadcast: mockBroadcast },
 }));
 
+// The streaming-status webhook alerts Sentry once per batch when any row fails
+// (BS#1114). Mock it so the failure-surfacing path is assertable without a real
+// Sentry client. Harmless to the flowsheet/rotation blocks, which don't call it.
+const mockCaptureMessage = jest.fn();
+
+jest.mock('@sentry/node', () => ({
+  captureMessage: mockCaptureMessage,
+  captureException: jest.fn(),
+}));
+
 import { db } from '@wxyc/database';
 import express from 'express';
 import request from 'supertest';
@@ -1050,5 +1060,114 @@ describe('POST /internal/streaming-status-webhook', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.processed).toBe(1);
+  });
+
+  // -- Per-row isolation (BS#1114) --
+  //
+  // The handler previously wrapped every row's UPDATE in one `db.transaction`.
+  // When a mid-loop row raised, Postgres aborted the surrounding transaction and
+  // the per-row catch swallowed both the original error and every subsequent
+  // `current transaction is aborted` — the response came back with a meaningless
+  // `errors` count and the first row's real error lost. The fix drops the shared
+  // transaction so each UPDATE autocommits independently, and surfaces the
+  // failing row's actual error rather than only counting it.
+  //
+  // NOTE: the mocked driver can't reproduce Postgres's transaction-abort
+  // poisoning (it runs the callback against the same chain), so these unit tests
+  // pin the *shape* of the fix — no shared transaction, and the real error
+  // surfaced. The poisoning behaviour itself is covered at the integration tier.
+
+  const chain = (db as unknown as { _chain: Record<string, jest.Mock> })._chain;
+  const dbTransaction = (db as unknown as { transaction: jest.Mock }).transaction;
+
+  it('does not wrap the batch in a single shared transaction', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [
+          { library_release_id: 42, on_streaming: true },
+          { library_release_id: 99, on_streaming: false },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    // A shared transaction is exactly what let one aborted statement swallow the
+    // rest — the fix runs each row as its own autocommitted UPDATE.
+    expect(dbTransaction).not.toHaveBeenCalled();
+  });
+
+  it('commits the surviving rows and surfaces the failing row with its real error', async () => {
+    // Row index 1 fails; rows 0 and 2 must still commit and the failure must be
+    // reported with the actual error keyed by its library_release_id — not lost
+    // behind a bare `errors` count.
+    chain.where
+      .mockReturnValueOnce(chain) // row 0 commits
+      .mockRejectedValueOnce(new Error('null value violates not-null constraint')) // row 1 fails
+      .mockReturnValueOnce(chain); // row 2 commits
+
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [
+          { library_release_id: 1, on_streaming: true },
+          { library_release_id: 2, on_streaming: false },
+          { library_release_id: 3, on_streaming: true },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(2);
+    expect(res.body.errors).toBe(1);
+    expect(res.body.failures).toEqual([
+      expect.objectContaining({
+        library_release_id: 2,
+        error: expect.stringContaining('not-null constraint'),
+      }),
+    ]);
+  });
+
+  it('alerts Sentry once for a batch that had at least one failing row', async () => {
+    chain.where
+      .mockReturnValueOnce(chain)
+      .mockRejectedValueOnce(new Error('deadlock detected'))
+      .mockReturnValueOnce(chain);
+
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [
+          { library_release_id: 1, on_streaming: true },
+          { library_release_id: 2, on_streaming: false },
+          { library_release_id: 3, on_streaming: true },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+    expect(mockCaptureMessage).toHaveBeenCalledWith(
+      expect.stringContaining('streaming-status'),
+      expect.objectContaining({ level: 'warning' })
+    );
+  });
+
+  it('does not alert Sentry and returns an empty failures array when every row commits', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [
+          { library_release_id: 42, on_streaming: true },
+          { library_release_id: 99, on_streaming: false },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(2);
+    expect(res.body.errors).toBe(0);
+    expect(res.body.failures).toEqual([]);
+    expect(mockCaptureMessage).not.toHaveBeenCalled();
   });
 });
