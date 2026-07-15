@@ -487,13 +487,17 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
   // The batched lookup scans `concerts` a small, bounded number of times per
   // feed read regardless of how many matching rows the page carries. A per-row
   // implementation would scan once per matching row, so with MANY_MATCHES rows
-  // the delta would be >= MANY_MATCHES. We assert the delta stays well under
+  // the delta would be >= 1 + MANY_MATCHES. We assert the delta stays well under
   // that count — the clean separation between "one batched query" (a handful of
-  // scans) and "one query per row" (>= 9). An absolute bound is used rather
-  // than a small-vs-large diff because a single query's scan count already
-  // varies by 1-2 (index probe + heap access) run to run.
-  const MANY_MATCHES = 8;
-  const BATCHED_SCAN_CEILING = 5;
+  // scans) and "one query per row" (>= 1 + MANY_MATCHES). An absolute bound is
+  // used rather than a small-vs-large diff because a single query's scan count
+  // already varies run to run (BS#1661: seq_scan-vs-idx_scan + index probe +
+  // heap access observed at 4-6). The ceiling carries one unit of headroom above
+  // that observed max, and MANY_MATCHES is set high enough that the per-row
+  // threshold (13) stays far above the ceiling — so the anti-N+1 contract still
+  // reads cleanly without the ceiling flaking on planner variance.
+  const MANY_MATCHES = 12;
+  const BATCHED_SCAN_CEILING = 7;
 
   it('batches the lookup: concerts-table scans do not grow with page match count', async () => {
     // Add many more matching tracks, all resolving to ARTIST_WITH_SHOW, so the
@@ -518,7 +522,10 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     // before/after can spuriously read 0.
     expect(largeDelta).toBeGreaterThanOrEqual(1);
     // Upper bounds (anti-N+1): never one-scan-per-row — a per-row impl would
-    // push this to >= 9.
+    // push this to >= 1 + MANY_MATCHES (13). The `< 1 + MANY_MATCHES` assertion
+    // is the load-bearing anti-N+1 guarantee; BATCHED_SCAN_CEILING is the
+    // tighter "still just a handful of scans" bound, with headroom for planner
+    // variance (BS#1661).
     expect(largeDelta).toBeLessThanOrEqual(BATCHED_SCAN_CEILING);
     expect(largeDelta).toBeLessThan(1 + MANY_MATCHES);
   });
