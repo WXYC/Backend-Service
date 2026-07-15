@@ -1,6 +1,6 @@
 # triangle-shows-etl
 
-Nightly pull ETL (BS#1589, Phase 1 of the [BS#1570](https://github.com/WXYC/Backend-Service/issues/1570) touring-events integration): mirrors the [triangle-shows](https://github.com/WXYC/triangle-shows) concert calendar into `venues`/`concerts` for the **16 Triangle venues the RHP `venue-events-scraper` doesn't cover**. The existing `concerts-artist-resolver` stamps `headlining_artist_id` on the new rows in the same nightly cycle with no changes (its claim query selects on `headlining_artist_id IS NULL` with no source filter).
+Nightly pull ETL (BS#1589, Phase 1 of the [BS#1570](https://github.com/WXYC/Backend-Service/issues/1570) on-tour integration): mirrors the [triangle-shows](https://github.com/WXYC/triangle-shows) concert calendar into `venues`/`concerts` for the **16 Triangle venues the RHP `venue-events-scraper` doesn't cover**. The existing `concerts-artist-resolver` stamps `headlining_artist_id` on the new rows in the same nightly cycle with no changes (its claim query selects on `headlining_artist_id IS NULL` with no source filter).
 
 ## Schedule
 

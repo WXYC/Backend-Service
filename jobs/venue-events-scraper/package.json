@@ -2,7 +2,7 @@
   "name": "@wxyc/venue-events-scraper",
   "cron-schedule": "0 5 * * *",
   "version": "1.0.0",
-  "description": "WXYC daily scraper: pull upcoming concerts from Rockhouse Partners-powered Triangle venue sites (catscradle.com, local506.com) by parsing schema.org Event JSON-LD; UPSERT into the concerts table by (source, source_id). First source for the touring-events feature.",
+  "description": "WXYC daily scraper: pull upcoming concerts from Rockhouse Partners-powered Triangle venue sites (catscradle.com, local506.com) by parsing schema.org Event JSON-LD; UPSERT into the concerts table by (source, source_id). First source for the on-tour feature.",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {

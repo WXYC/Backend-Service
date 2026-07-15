@@ -2,7 +2,7 @@
 
 Daily cron job that pulls upcoming concerts from Rockhouse Partners-powered Triangle venue sites (catscradle.com, local506.com — extensible via [`rhp-venues.ts`](rhp-venues.ts)) and UPSERTs them into the `concerts` table.
 
-First ingestion source for the touring-events feature. Future sources (Bandsintown live-fetch, editorial submissions) extend the `concert_source_enum` rather than replacing this job — see the migration block comment in [`shared/database/src/migrations/0091_venues-and-concerts.sql`](../../shared/database/src/migrations/0091_venues-and-concerts.sql).
+First ingestion source for the on-tour feature. Future sources (Bandsintown live-fetch, editorial submissions) extend the `concert_source_enum` rather than replacing this job — see the migration block comment in [`shared/database/src/migrations/0091_venues-and-concerts.sql`](../../shared/database/src/migrations/0091_venues-and-concerts.sql).
 
 ## What it does
 

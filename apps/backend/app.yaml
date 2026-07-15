@@ -1628,7 +1628,7 @@ paths:
 
   /concerts:
     get:
-      summary: List upcoming concerts (Touring Soon feed)
+      summary: List upcoming concerts (On Tour feed)
       description: >-
         Upcoming non-removed concerts windowed on the venue-local calendar
         date `starts_on`, ordered by `starts_on` ascending, paginated.

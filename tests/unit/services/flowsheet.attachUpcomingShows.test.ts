@@ -1,6 +1,6 @@
 /**
  * Unit tests for the per-playcut upcoming-show enrichment (BS#1607, widened to
- * a hybrid id-arm ∪ name-arm match in BS#1613, touring-events Phase 3).
+ * a hybrid id-arm ∪ name-arm match in BS#1613, on-tour Phase 3).
  *
  * `@wxyc/database` resolves to tests/mocks/database.mock.ts, so these pin the
  * pure batching + fan-out logic without PostgreSQL:
