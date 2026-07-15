@@ -84,7 +84,12 @@ export function constantTimeEqual(a: string, b: string): boolean {
 function extractCdcSecret(request: IncomingMessage, url: URL): string | null {
   const authHeader = request.headers.authorization;
   if (authHeader) {
-    const match = /^Bearer (.+)$/i.exec(authHeader);
+    // `\s+` (not a literal single space) matches the repo's Bearer-parsing
+    // convention (`authenticateBearer` in apps/backend/routes/internal.route.ts,
+    // `auth.middleware.ts`) and RFC 7235's `1*SP` between scheme and token, so a
+    // tab- or multi-space-separated header authenticates instead of spuriously
+    // 403ing or capturing leading whitespace into the compared secret.
+    const match = /^Bearer\s+(.+)$/i.exec(authHeader);
     if (match) return match[1];
   }
 
