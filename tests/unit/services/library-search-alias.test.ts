@@ -322,6 +322,53 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(renderedCount).not.toContain('alias_hits');
     });
 
+    it('flag on: branch-B dedupe predicate is NULL-safe so alias-only NULL-label rows survive (BS#1557)', async () => {
+      // BS#1557 regression pin. `queryWhereAliasOff` is
+      // `(artist ILIKE q OR album ILIKE q OR label ILIKE q)`. `library.label`
+      // is nullable, so for an alias-only hit whose matched album has a NULL
+      // label the predicate evaluates to NULL (FALSE OR FALSE OR NULL). The
+      // old dedupe `NOT (queryWhereAliasOff)` is then `NOT NULL = NULL`, which
+      // drops the row from branch B — exactly the row the alias path exists to
+      // surface. The fix uses the NULL-safe `(queryWhereAliasOff) IS NOT TRUE`.
+      //
+      // The mocked DB can't exercise Postgres three-valued logic, so the
+      // load-bearing assertion is on the rendered dedupe predicate: it must be
+      // the `IS NOT TRUE` form. We also confirm a NULL-label alias-only row the
+      // mock returns still projects through unharmed.
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+      stubGenreFormatLookups();
+
+      const nullLabelAliasRow = {
+        ...baseQueryRow,
+        label: null,
+        alias_max_sim: 0.81,
+        alias_matched_variant: 'Thee Oh Sees',
+        alias_matched_source: 'discogs_name_variation',
+      };
+      db.execute.mockReset();
+      db.execute.mockResolvedValueOnce([nullLabelAliasRow]).mockResolvedValueOnce([{ total: 1 }]);
+
+      const { results } = await searchCatalogQuery(baseQueryParams);
+
+      const dataCall = db.execute.mock.calls[0]?.[0];
+      const countCall = db.execute.mock.calls[1]?.[0];
+      const renderedData = JSON.stringify(dataCall ?? '');
+      const renderedCount = JSON.stringify(countCall ?? '');
+
+      // The NULL-safe dedupe form must be present in both arms of the UNION.
+      expect(renderedData).toContain('IS NOT TRUE');
+      expect(renderedCount).toContain('IS NOT TRUE');
+
+      // The NULL-label alias-only row still surfaces with its alias hint.
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(42);
+      expect(results[0].label).toBe('');
+      expect(results[0].matched_via_alias).toEqual([
+        { matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' },
+      ]);
+    });
+
     it('flag on: emits ALT1 UNION ALL shape with alias_hits CTE (BS#1318)', async () => {
       // BS#1318 regression pin: the alias-aware catalog path must use the
       // CTE + UNION ALL form, not the LATERAL JOIN. The LATERAL had a 3-6.5×
