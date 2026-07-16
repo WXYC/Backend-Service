@@ -93,13 +93,22 @@ const buildConflictSet = (
   last_modified: sql`now()`,
 });
 
-/** One IS DISTINCT FROM arm per content column. `submitted_at` binds a JS
- *  Date, so its param carries an explicit `::timestamptz` cast (BS#802 —
- *  see module docstring). */
+/** One IS DISTINCT FROM arm per content column. `submitted_at` needs
+ *  special handling on BOTH sides of the BS#802 trap: a param interpolated
+ *  into a raw sql fragment bypasses the column encoder (drizzle maps
+ *  Date→string only for real column bindings), so a JS Date here reaches
+ *  postgres-js's `unsafe()` unserialized and throws ERR_INVALID_ARG_TYPE at
+ *  the driver boundary. The arm therefore binds the ISO STRING itself, and
+ *  the explicit `::timestamptz` cast restores instant semantics for the
+ *  comparison. Caught end to end by
+ *  tests/e2e/album-reviews-pipeline.test.ts (the raw-SQL integration spec
+ *  binds through postgres-js tagged templates, which DO serialize Dates —
+ *  so only a real run of this builder could surface it). */
 const distinctFromArm = (col: ContentColumn, content: SubmissionContent): SQL => {
   const column = album_review_submissions[col];
   if (col === 'submitted_at') {
-    return sql`${column} IS DISTINCT FROM ${content.submitted_at}::timestamptz`;
+    const isoSubmittedAt = content.submitted_at == null ? null : content.submitted_at.toISOString();
+    return sql`${column} IS DISTINCT FROM ${isoSubmittedAt}::timestamptz`;
   }
   return sql`${column} IS DISTINCT FROM ${content[col]}`;
 };

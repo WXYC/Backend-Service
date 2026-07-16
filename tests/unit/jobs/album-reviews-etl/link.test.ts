@@ -9,6 +9,7 @@ import { db, normalizeAlbumTitle } from '@wxyc/database';
 import {
   decideLink,
   linkSubmissions,
+  textArrayLiteral,
   writeLink,
   type LibraryCandidate,
   type UnlinkedSubmission,
@@ -44,6 +45,35 @@ const candidate = (overrides: Partial<LibraryCandidate> = {}): LibraryCandidate 
     ...overrides,
   };
 };
+
+describe('textArrayLiteral (BS#1068/BS#1071 single-param array binding)', () => {
+  // Drizzle/postgres-js splats a JS array interpolated into a raw sql
+  // fragment into N positional placeholders — `ANY(($1, $2))`, which PG
+  // rejects. The repo idiom (album-level-backfill, alias-consumer) binds a
+  // single PG-array-literal STRING param with an explicit cast. Those jobs
+  // carry int[] (join is enough); norms are TEXT, so every element must be
+  // double-quoted with backslash and quote escaping or a band name with a
+  // comma/quote/brace corrupts the literal.
+  it('quotes each element', () => {
+    expect(textArrayLiteral(['juana molina', 'jessica pratt'])).toBe('{"juana molina","jessica pratt"}');
+  });
+
+  it('escapes embedded double quotes', () => {
+    expect(textArrayLiteral(['the "5" royales'])).toBe('{"the \\"5\\" royales"}');
+  });
+
+  it('escapes backslashes before quotes (order matters)', () => {
+    expect(textArrayLiteral(['ac\\dc'])).toBe('{"ac\\\\dc"}');
+  });
+
+  it('keeps commas and braces inert inside the quoted element', () => {
+    expect(textArrayLiteral(['medeski, martin & wood', 'x{y}z'])).toBe('{"medeski, martin & wood","x{y}z"}');
+  });
+
+  it('renders an empty array as {}', () => {
+    expect(textArrayLiteral([])).toBe('{}');
+  });
+});
 
 describe('decideLink (pure singleton rule)', () => {
   it('links when exactly one library row matches artist AND album', () => {
