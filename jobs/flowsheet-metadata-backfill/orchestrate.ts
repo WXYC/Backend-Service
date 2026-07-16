@@ -12,17 +12,29 @@
  *     the un-tried tail at any point in the lifecycle (see #639).
  *   - The 60-second race guard avoids racing the runtime fire-and-forget
  *     UPDATE on rows just inserted via the tubafrenzy webhook.
- *   - Within a single run, batches paginate by `id` (last-id cursor).
- *     Across runs, the WHERE filter is what restarts — the cursor doesn't
- *     need to persist.
+ *   - Within a single run, row order comes from a play-priority work-list
+ *     materialized once at run start (BS#1591, `worklist.ts`): pending row
+ *     ids ordered by per-artist total plays descending, with non-library
+ *     artists below a configurable play-floor excluded at query time. The
+ *     high-value cache-friendly head drains first; the uncacheable one-off
+ *     tail stops consuming Discogs fan-out (the 2026-07-10 LML 502 flood).
+ *     A monotonic array cursor drains the list — it advances
+ *     unconditionally, so a failing row can never be re-selected within a
+ *     run (the BS#1011 wedge-proof property, preserved under value order
+ *     where a naive head-of-cohort re-SELECT would jam on the highest-play
+ *     failing row). Across runs, the WHERE filter is what restarts — the
+ *     work-list doesn't need to persist. Rows inserted mid-run are not in
+ *     the list and simply wait for the next run (the live enrichment-worker
+ *     owns new rows anyway).
  *   - A per-row failure — an LML throw (`lml_error`) or a DB-write throw
  *     (`enrich_error`, e.g. a mojibake title overflowing a varchar column,
  *     BS#1011) — is logged, counted, and the loop continues. The row stays
  *     `metadata_attempt_at IS NULL`, so the next sweep (recurring
- *     drift-repair, #639 Phase 2) retries it; the id-cursor still advances
- *     within the run, so one bad row can never wedge the drain.
+ *     drift-repair, #639 Phase 2) retries it; the in-run cursor still
+ *     advances, so one bad row can never wedge the drain.
  *   - Cooperative pause: WXYC has no quiet hours — there is always a DJ in
- *     the booth. Before each batch, the orchestrator probes `flowsheet` for
+ *     the booth. Before the work-list build and before each batch, the
+ *     orchestrator probes `flowsheet` for
  *     any track row added in the last `LIVE_ACTIVITY_LOOKBACK_SECONDS`
  *     (default 60). If found, the batch is deferred for
  *     `LIVE_ACTIVITY_PAUSE_MS` (default 30000) and re-probed. The loop
@@ -62,6 +74,7 @@ import type { EnrichRow, EnrichOutcome } from './enrich.js';
 import { stampDeadLetter as defaultStampDeadLetter } from './enrich.js';
 import type { LookupResult } from './lml-fetch.js';
 import { captureError, log } from './logger.js';
+import { buildWorkList as defaultBuildWorkList, FLOWSHEET_TABLE, type BuildWorkListFn } from './worklist.js';
 
 const JOB_NAME = 'flowsheet-metadata-backfill';
 
@@ -79,13 +92,21 @@ export const BATCH_SIZE = 500;
 export const THROTTLE_MS = 100;
 
 /**
- * Schema-qualified table reference, honoring `WXYC_SCHEMA_NAME` so parallel
- * Jest workers (which override the env var) and any future integration test
- * harness target the right schema. The default `wxyc_schema` matches
- * production. Sanitised against `"` to keep the SQL well-formed.
+ * Default non-library play-floor (BS#1591): free-text rows whose artist is
+ * not in the library and has fewer than this many total plays are excluded
+ * from the drain at query time. The value 5 was decided in the 2026-07-13
+ * triage — enrich repeat freeform artists, deprioritize the deep
+ * uncacheable one-off tail.
  */
-const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
-const FLOWSHEET_TABLE = sql.raw(`"${SCHEMA}"."flowsheet"`);
+export const PLAY_FLOOR_DEFAULT = 5;
+
+/**
+ * Default recency exemption window in days (BS#1591 decision 5): rows
+ * younger than this are always eligible regardless of the floor, so the
+ * BS#895 recovery-sweep role can't be poisoned by the floor stranding
+ * consumer-missed rows of below-floor artists.
+ */
+export const FLOOR_RECENCY_DAYS_DEFAULT = 7;
 
 /**
  * Resolve `BACKFILL_BATCH_SIZE` from the environment, falling back to
@@ -123,6 +144,28 @@ export const resolveLiveActivityLookback = (
 
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
   requireNonNegativeInt(raw, 'LIVE_ACTIVITY_PAUSE_MS', LIVE_ACTIVITY_PAUSE_MS_DEFAULT, { unit: 'ms' });
+
+/**
+ * Resolve `BACKFILL_NONLIBRARY_PLAY_FLOOR` (BS#1591). `0` disables the
+ * floor entirely; misconfiguration throws at startup — this is a
+ * cron-driven job, loud failure is preferred.
+ */
+export const resolvePlayFloor = (raw: string | undefined = process.env.BACKFILL_NONLIBRARY_PLAY_FLOOR): number =>
+  requireNonNegativeInt(raw, 'BACKFILL_NONLIBRARY_PLAY_FLOOR', PLAY_FLOOR_DEFAULT, {
+    unit: 'plays',
+    note: 'Use 0 to disable the non-library play-floor.',
+  });
+
+/**
+ * Resolve `BACKFILL_FLOOR_RECENCY_DAYS` (BS#1591 decision 5). `0` disables
+ * the recency exemption — only sensible while this cron remains a pure
+ * historical drain; keep it non-zero once BS#895 lands.
+ */
+export const resolveFloorRecencyDays = (raw: string | undefined = process.env.BACKFILL_FLOOR_RECENCY_DAYS): number =>
+  requireNonNegativeInt(raw, 'BACKFILL_FLOOR_RECENCY_DAYS', FLOOR_RECENCY_DAYS_DEFAULT, {
+    unit: 'days',
+    note: 'Use 0 to disable the recency exemption from the play-floor.',
+  });
 
 /**
  * Resolve PARTITION_INDEX / PARTITION_COUNT env vars into a SQL fragment that
@@ -245,6 +288,15 @@ export type Totals = {
   // from "we couldn't persist" — a spike in this bucket points at data, not
   // the upstream (BS#1011: mojibake titles overflowing varchar(512) columns).
   enrich_error: number;
+  // BS#1591: pending rows deliberately excluded by the non-library
+  // play-floor (constant per run, from the work-list build). The pending
+  // cohort no longer drains to literal 0 — the retire criterion is
+  // "pending == below_floor_skipped" — so dashboards need this to subtract.
+  below_floor_skipped: number;
+  // BS#1591: work-list ids that vanished before their batch load (enriched
+  // mid-run by the worker/runtime — the batch SELECT's marker re-check
+  // dropped them before an LML call was spent). Measures mid-run overlap.
+  stale_skipped: number;
 };
 
 export type ProcessOutcome = EnrichOutcome | 'lml_error' | 'enrich_error';
@@ -357,18 +409,22 @@ export const processRow = async (
 };
 
 /**
- * Read the next batch of unprocessed flowsheet rows.
+ * Load one work-list slice's rows by id (BS#1591). The work-list already
+ * guaranteed the canonical pending filter at build time; only the marker is
+ * re-checked here so rows enriched mid-run by the worker/runtime drop out
+ * BEFORE an LML call is spent (`applyEnrichment`'s id+marker guard remains
+ * the last line of defense). Ids bind as a single PG-array-literal string
+ * param (`'{1,2,3}'::int[]`) — drizzle/postgres-js splats a bare JS array
+ * into N positional placeholders, which PG rejects (BS#1068 / BS#1071; see
+ * `jobs/album-level-backfill/job.ts` for the incident lineage). Safe by
+ * construction: the ids are numbers from our own work-list.
  *
- * The id-cursor predicate keeps the SELECT bounded as the run progresses.
- * Combined with the partial index from #659
- * (`flowsheet_metadata_attempt_pending_idx ON (id) WHERE entry_type='track'
- * AND artist_name IS NOT NULL AND metadata_attempt_at IS NULL`), the
- * planner does an Index Scan with `Index Cond: (id > $afterId)` and the
- * partial WHERE is implicit in the index choice. Verified pre-#659 merge
- * via EXPLAIN (see PR #660).
+ * `= ANY` does not preserve order, so the caller re-orders results to
+ * work-list order.
  */
-const loadBatch = async (afterId: number, batchSize: number, partitionFilter: SQL | null): Promise<EnrichRow[]> => {
-  const partitionClause = partitionFilter ?? sql``;
+const loadBatchByIds = async (ids: number[]): Promise<EnrichRow[]> => {
+  if (ids.length === 0) return [];
+  const idArrayLiteral = `{${ids.join(',')}}`;
   const rows = (await db.execute(sql`
     SELECT
       "id",
@@ -377,14 +433,8 @@ const loadBatch = async (afterId: number, batchSize: number, partitionFilter: SQ
       "track_title",
       "album_id"
     FROM ${FLOWSHEET_TABLE}
-    WHERE "entry_type" = 'track'
-      AND "artist_name" IS NOT NULL
+    WHERE "id" = ANY(${idArrayLiteral}::int[])
       AND "metadata_attempt_at" IS NULL
-      AND "add_time" < now() - interval '60 seconds'
-      AND "id" > ${afterId}
-      ${partitionClause}
-    ORDER BY "id" ASC
-    LIMIT ${batchSize}
   `)) as unknown as EnrichRow[];
   return rows ?? [];
 };
@@ -394,7 +444,8 @@ const formatTotals = (totals: Totals): string =>
   `enriched_match_raced=${totals.enriched_match_raced} ` +
   `enriched_no_match=${totals.enriched_no_match} ` +
   `enriched_no_match_raced=${totals.enriched_no_match_raced} lml_error=${totals.lml_error} ` +
-  `enrich_error=${totals.enrich_error}`;
+  `enrich_error=${totals.enrich_error} below_floor_skipped=${totals.below_floor_skipped} ` +
+  `stale_skipped=${totals.stale_skipped}`;
 
 /**
  * Project the run totals onto a Sentry span with numeric attributes set at
@@ -429,6 +480,10 @@ const projectTotalsSpan = (totals: Totals): void => {
         'backfill.enriched_no_match_raced': totals.enriched_no_match_raced,
         'backfill.lml_error': totals.lml_error,
         'backfill.enrich_error': totals.enrich_error,
+        // BS#1591: the deliberate below-floor residual (dashboards subtract
+        // it from the pending cohort) and the mid-run worker-overlap count.
+        'backfill.below_floor_skipped': totals.below_floor_skipped,
+        'backfill.stale_skipped': totals.stale_skipped,
       },
     },
     () => {
@@ -447,6 +502,9 @@ export const runBackfill = async (opts: {
   liveActivityPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
   cacheStats?: CacheStatsFn;
+  playFloor?: number;
+  floorRecencyDays?: number;
+  buildWorkList?: BuildWorkListFn;
 }): Promise<RunResult> => {
   const batchSize = opts.batchSize ?? resolveBatchSize();
   const throttleMs = opts.throttleMs ?? resolveThrottleMs();
@@ -454,6 +512,9 @@ export const runBackfill = async (opts: {
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
+  const playFloor = opts.playFloor ?? resolvePlayFloor();
+  const floorRecencyDays = opts.floorRecencyDays ?? resolveFloorRecencyDays();
+  const buildList = opts.buildWorkList ?? defaultBuildWorkList;
 
   log('info', 'started', `${JOB_NAME} starting`, {
     batch_size: batchSize,
@@ -461,6 +522,8 @@ export const runBackfill = async (opts: {
     partition: partition.description,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
     live_activity_pause_ms: liveActivityPauseMs,
+    play_floor: playFloor,
+    floor_recency_days: floorRecencyDays,
   });
 
   const totals: Totals = {
@@ -471,30 +534,78 @@ export const runBackfill = async (opts: {
     enriched_no_match_raced: 0,
     lml_error: 0,
     enrich_error: 0,
+    below_floor_skipped: 0,
+    stale_skipped: 0,
   };
-  let lastId = 0;
+
+  // Cooperative pause (#735): yield whenever a DJ is actively touching the
+  // playout. Gates the work-list build (itself a heavy read) and every
+  // batch slice.
+  const waitForQuietBooth = async (): Promise<void> => {
+    if (liveActivityLookbackSeconds <= 0) return;
+    while (await probe(liveActivityLookbackSeconds)) {
+      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
+        lookback_seconds: liveActivityLookbackSeconds,
+        pause_ms: liveActivityPauseMs,
+      });
+      if (liveActivityPauseMs > 0) await sleep(liveActivityPauseMs);
+    }
+  };
+
+  await waitForQuietBooth();
+  const buildStart = Date.now();
+  const workList = await buildList({
+    playFloor,
+    recencyDays: floorRecencyDays,
+    partitionFilter: partition.sqlFragment,
+  });
+  totals.below_floor_skipped = workList.belowFloorSkipped;
+  const workListSize = workList.ids.length;
+  log('info', 'worklist_built', `work-list built: ${workListSize} rows in play-descending priority`, {
+    worklist_size: workListSize,
+    pending_total: workList.pendingTotal,
+    below_floor_skipped: workList.belowFloorSkipped,
+    build_ms: Date.now() - buildStart,
+    max_plays: workListSize > 0 ? workList.plays[0] : null,
+    min_plays: workListSize > 0 ? workList.plays[workListSize - 1] : null,
+  });
+
+  // Monotonic cursor over the materialized work-list (BS#1591 design
+  // decision 1). It advances before the slice is processed and no outcome
+  // can rewind it, so a failing row — which deliberately stays
+  // `metadata_attempt_at IS NULL` for the next run — can never be
+  // re-selected within this run. That is the BS#1011 wedge-proof property
+  // under play-descending order, where a naive head-of-cohort re-SELECT
+  // would jam on the highest-play failing row forever.
+  let cursor = 0;
   let batchIndex = 0;
 
-  while (true) {
-    if (liveActivityLookbackSeconds > 0) {
-      while (await probe(liveActivityLookbackSeconds)) {
-        log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
-          lookback_seconds: liveActivityLookbackSeconds,
-          pause_ms: liveActivityPauseMs,
-        });
-        if (liveActivityPauseMs > 0) await sleep(liveActivityPauseMs);
-      }
-    }
+  while (cursor < workListSize) {
+    await waitForQuietBooth();
 
-    const rows = await loadBatch(lastId, batchSize, partition.sqlFragment);
-    if (rows.length === 0) break;
+    const sliceEnd = Math.min(cursor + batchSize, workListSize);
+    const sliceIds = workList.ids.slice(cursor, sliceEnd);
+    const batchPlaysMax = workList.plays[cursor];
+    const batchPlaysMin = workList.plays[sliceEnd - 1];
+    cursor = sliceEnd;
+
+    const rows = await loadBatchByIds(sliceIds);
+    // `= ANY` returns rows in arbitrary order; restore work-list order so
+    // same-artist contiguity (and the LookupCache dedup clustering it buys)
+    // survives into the per-row loop. Ids coerced defensively — a driver
+    // returning string ids would otherwise miss every Map lookup.
+    const rowsById = new Map(rows.map((row) => [Number(row.id), row]));
+    const orderedRows = sliceIds.flatMap((id) => {
+      const row = rowsById.get(id);
+      return row ? [row] : [];
+    });
+    totals.stale_skipped += sliceIds.length - orderedRows.length;
 
     batchIndex += 1;
-    for (const row of rows) {
+    for (const row of orderedRows) {
       const { outcome, cacheHit } = await processRow(row, { lookup: opts.lookup, enrich: opts.enrich });
       totals.scanned += 1;
       totals[outcome] += 1;
-      lastId = row.id;
       // Throttle exists to pace LML calls (BACKFILL_THROTTLE_MS docstring
       // above). A cache hit makes no LML call, so sleeping after one is
       // wall-clock waste — at the documented 42% hit rate over ~628k
@@ -506,7 +617,9 @@ export const runBackfill = async (opts: {
 
     log('info', 'batch_done', `batch ${batchIndex} done`, {
       batch_index: batchIndex,
-      last_id: lastId,
+      worklist_cursor: cursor,
+      batch_plays_max: batchPlaysMax,
+      batch_plays_min: batchPlaysMin,
       ...totals,
       ...cacheFields,
     });

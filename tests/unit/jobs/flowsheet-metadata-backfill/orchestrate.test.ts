@@ -1,38 +1,47 @@
 /**
  * Unit tests for flowsheet-metadata-backfill orchestrate.ts.
  *
- * Pins five behaviors the historical drain depends on:
- *   1. The loadBatch SELECT carries the canonical filter (entry_type='track'
- *      + artist_name IS NOT NULL + metadata_attempt_at IS NULL + 60s race
- *      guard + id-cursor + ORDER BY id ASC + LIMIT batchSize).
+ * Pins five behaviors the historical drain depends on (BS#1591 shape: a
+ * play-priority work-list materialized once per run, drained by a
+ * monotonic array cursor — see worklist.test.ts for the work-list SQL):
+ *   1. Rows are processed in work-list (play-descending) order; each batch
+ *      slice loads by id-array with a `metadata_attempt_at IS NULL`
+ *      re-check and re-orders results to work-list order.
  *   2. processRow returns 'lml_error' on a thrown lookup; the orchestrator
  *      counts it and continues. The row stays metadata_attempt_at IS NULL
- *      via `applyEnrichment` *not* being called on the error path.
+ *      via `applyEnrichment` *not* being called on the error path — and the
+ *      no-wedge test pins that it is never re-selected within the run.
  *   3. Match → enriched_match outcome; no-match → enriched_no_match outcome.
- *      Totals are bumped on the right counter.
- *   4. resolvePartitionFilter handles default (no-op), valid N/M, and
- *      throws on bad inputs.
- *   5. The id-cursor advances across batches and the loop terminates when
- *      a batch returns empty.
+ *      Totals are bumped on the right counter; below_floor_skipped and
+ *      stale_skipped surface in totals and log lines.
+ *   4. resolvePartitionFilter / resolvePlayFloor / resolveFloorRecencyDays
+ *      handle defaults, valid input, and throw on bad input.
+ *   5. The array cursor advances unconditionally and the loop terminates
+ *      when the work-list is exhausted (no terminal empty poll).
  */
 import { jest } from '@jest/globals';
 
 import { db, type CheckLiveActivityFn } from '@wxyc/database';
 import {
   BATCH_SIZE,
+  FLOOR_RECENCY_DAYS_DEFAULT,
+  PLAY_FLOOR_DEFAULT,
   THROTTLE_MS,
   isPermanentEnrichError,
   processRow,
   resolveBatchSize,
+  resolveFloorRecencyDays,
   resolveLiveActivityLookback,
   resolveLiveActivityPauseMs,
   resolvePartitionFilter,
+  resolvePlayFloor,
   resolveThrottleMs,
   runBackfill,
   type EnrichFn,
   type LookupFn,
   type StampDeadLetterFn,
 } from '../../../../jobs/flowsheet-metadata-backfill/orchestrate';
+import type { BuildWorkListFn, WorkList } from '../../../../jobs/flowsheet-metadata-backfill/worklist';
 import type { LookupResponse } from '@wxyc/lml-client';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
@@ -458,7 +467,52 @@ describe('processRow', () => {
   });
 });
 
-describe('runBackfill', () => {
+describe('resolvePlayFloor (BS#1591)', () => {
+  it('falls back to PLAY_FLOOR_DEFAULT (5) when env var is unset or empty', () => {
+    expect(PLAY_FLOOR_DEFAULT).toBe(5);
+    expect(resolvePlayFloor(undefined)).toBe(5);
+    expect(resolvePlayFloor('')).toBe(5);
+    expect(resolvePlayFloor('   ')).toBe(5);
+  });
+
+  it('accepts 0 (disables the non-library play-floor)', () => {
+    expect(resolvePlayFloor('0')).toBe(0);
+  });
+
+  it('returns the parsed value for a positive integer', () => {
+    expect(resolvePlayFloor('12')).toBe(12);
+  });
+
+  it('throws on negative, non-integer, or garbage input', () => {
+    expect(() => resolvePlayFloor('-1')).toThrow(/BACKFILL_NONLIBRARY_PLAY_FLOOR/);
+    expect(() => resolvePlayFloor('1.5')).toThrow(/BACKFILL_NONLIBRARY_PLAY_FLOOR/);
+    expect(() => resolvePlayFloor('abc')).toThrow(/BACKFILL_NONLIBRARY_PLAY_FLOOR/);
+  });
+});
+
+describe('resolveFloorRecencyDays (BS#1591 / decision 5)', () => {
+  it('falls back to FLOOR_RECENCY_DAYS_DEFAULT (7) when env var is unset or empty', () => {
+    expect(FLOOR_RECENCY_DAYS_DEFAULT).toBe(7);
+    expect(resolveFloorRecencyDays(undefined)).toBe(7);
+    expect(resolveFloorRecencyDays('')).toBe(7);
+  });
+
+  it('accepts 0 (disables the recency exemption)', () => {
+    expect(resolveFloorRecencyDays('0')).toBe(0);
+  });
+
+  it('returns the parsed value for a positive integer', () => {
+    expect(resolveFloorRecencyDays('14')).toBe(14);
+  });
+
+  it('throws on negative, non-integer, or garbage input', () => {
+    expect(() => resolveFloorRecencyDays('-1')).toThrow(/BACKFILL_FLOOR_RECENCY_DAYS/);
+    expect(() => resolveFloorRecencyDays('0.5')).toThrow(/BACKFILL_FLOOR_RECENCY_DAYS/);
+    expect(() => resolveFloorRecencyDays('abc')).toThrow(/BACKFILL_FLOOR_RECENCY_DAYS/);
+  });
+});
+
+describe('runBackfill (BS#1591 work-list drain)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -466,65 +520,250 @@ describe('runBackfill', () => {
   const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
   const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
 
-  it('issues a SELECT carrying the canonical WHERE filter (entry_type, artist_name, marker, race guard, cursor, ORDER BY, LIMIT)', async () => {
-    (db.execute as jest.Mock).mockResolvedValue([]);
-
-    await runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0 });
-
-    const call = (db.execute as jest.Mock).mock.calls[0];
-    expect(call).toBeDefined();
-    const sql = renderSql(call?.[0]);
-    expect(sql).toMatch(/"entry_type"\s*=\s*'track'/);
-    expect(sql).toMatch(/"artist_name"\s+IS\s+NOT\s+NULL/i);
-    expect(sql).toMatch(/"metadata_attempt_at"\s+IS\s+NULL/i);
-    expect(sql).toMatch(/"add_time"\s*<\s*now\(\)\s*-\s*interval\s*'60 seconds'/i);
-    expect(sql).toMatch(/"id"\s*>/);
-    expect(sql).toMatch(/ORDER BY\s+"id"\s+ASC/i);
-    expect(sql).toMatch(/LIMIT/i);
-    // BS#1027: SELECT must project album_id so the enricher can branch on
-    // linked vs unlinked and UPSERT album_metadata instead of inline-writing
-    // to flowsheet.
-    expect(sql).toMatch(/"album_id"/);
+  const rowFor = (id: number, artist = `artist-${id}`): EnrichRowFixture => ({
+    id,
+    artist_name: artist,
+    album_title: null,
+    track_title: null,
+    album_id: null,
   });
 
-  it('advances the id-cursor across batches and terminates on empty', async () => {
-    const batch1 = [
-      { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
-      { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
-    ];
-    const batch2 = [{ id: 30, artist_name: 'c', album_title: null, track_title: null, album_id: null }];
+  type EnrichRowFixture = {
+    id: number;
+    artist_name: string;
+    album_title: string | null;
+    track_title: string | null;
+    album_id: number | null;
+  };
 
-    (db.execute as jest.Mock).mockResolvedValueOnce(batch1).mockResolvedValueOnce(batch2).mockResolvedValueOnce([]);
+  /** Build a WorkList fixture from [id, plays] pairs. */
+  const makeWorkList = (
+    entries: Array<[number, number]>,
+    extra?: { pendingTotal?: number; belowFloorSkipped?: number }
+  ): WorkList => ({
+    ids: entries.map(([id]) => id),
+    plays: entries.map(([, plays]) => plays),
+    pendingTotal: extra?.pendingTotal ?? entries.length,
+    belowFloorSkipped: extra?.belowFloorSkipped ?? 0,
+  });
 
-    const result = await runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0 });
+  const injectWorkList = (
+    entries: Array<[number, number]>,
+    extra?: { pendingTotal?: number; belowFloorSkipped?: number }
+  ) => jest.fn<BuildWorkListFn>().mockResolvedValue(makeWorkList(entries, extra));
 
-    expect((db.execute as jest.Mock).mock.calls.length).toBe(3);
+  it('consults the real work-list builder by default and early-exits on an empty pending cohort', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ pending_total: 0 }]);
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+    });
+
+    // Only the pending-count statement ran (buildWorkList's early exit);
+    // no batch SELECT, no lookups.
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(1);
+    expect(renderSql((db.execute as jest.Mock).mock.calls[0]?.[0])).toMatch(/COUNT\(\*\)/i);
+    expect(result.totals.scanned).toBe(0);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('passes resolved floor / recency / partition into the work-list builder', async () => {
+    const buildWorkList = injectWorkList([]);
+
+    await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      playFloor: 3,
+      floorRecencyDays: 2,
+      buildWorkList,
+    });
+
+    expect(buildWorkList).toHaveBeenCalledTimes(1);
+    expect(buildWorkList).toHaveBeenCalledWith({ playFloor: 3, recencyDays: 2, partitionFilter: null });
+  });
+
+  it('processes the work-list in play-descending order across batch slices and terminates when exhausted', async () => {
+    // Work-list order is (plays DESC, artist, id) — ids 30, 10, 20. With
+    // batchSize=2 the slices are [30,10] then [20]. The first batch SELECT
+    // deliberately returns rows OUT of work-list order to pin the in-batch
+    // re-ordering (`= ANY` does not preserve order).
+    const buildWorkList = injectWorkList([
+      [30, 12],
+      [10, 12],
+      [20, 3],
+    ]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(30)]).mockResolvedValueOnce([rowFor(20)]);
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      batchSize: 2,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
+    });
+
     expect(result.totals.scanned).toBe(3);
     expect(result.totals.enriched_match).toBe(3);
-    expect(result.totals.lml_error).toBe(0);
+    // Rows processed in work-list order, not SELECT-return order.
+    expect(lookup.mock.calls.map((call) => call[0])).toEqual(['artist-30', 'artist-10', 'artist-20']);
 
-    // The 2nd SELECT must paginate from id > 20 (the largest id of batch1).
-    // The 3rd from id > 30.
-    const sql2 = renderSql((db.execute as jest.Mock).mock.calls[1]?.[0]);
-    const sql3 = renderSql((db.execute as jest.Mock).mock.calls[2]?.[0]);
-    // Cursor values are passed as drizzle params, so they don't appear
-    // literally in `sql.join('')` — they're in `values`. Pull them out.
+    // Each slice loads by id-array literal + the marker re-check; no ORDER
+    // BY / cursor predicate anywhere (the work-list IS the order).
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(2);
+    const sql1 = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(sql1).toMatch(/=\s*ANY\(/i);
+    expect(sql1).toMatch(/::int\[\]/);
+    expect(sql1).toMatch(/"metadata_attempt_at"\s+IS\s+NULL/i);
+    expect(sql1).toMatch(/"album_id"/);
+    expect(sql1).not.toMatch(/ORDER BY/i);
+    const values1 = ((db.execute as jest.Mock).mock.calls[0]?.[0] as { values?: unknown[] })?.values;
     const values2 = ((db.execute as jest.Mock).mock.calls[1]?.[0] as { values?: unknown[] })?.values;
-    const values3 = ((db.execute as jest.Mock).mock.calls[2]?.[0] as { values?: unknown[] })?.values;
-    expect(values2).toContain(20);
-    expect(values3).toContain(30);
-    // Sanity: all three SQL strings carry the cursor predicate
-    [sql2, sql3].forEach((s) => expect(s).toMatch(/"id"\s*>/));
+    expect(values1).toContain('{30,10}');
+    expect(values2).toContain('{20}');
+  });
+
+  it('no-wedge: a failing row is never re-selected within the run; it stays for the next run (BS#1011 lineage)', async () => {
+    // The hard-won BS#1011 property under the new ordering: an lml_error row
+    // stays metadata_attempt_at IS NULL (deliberately retryable), so a naive
+    // head-of-cohort re-SELECT would re-pick the same high-play failing row
+    // forever. The materialized work-list makes that impossible — each id
+    // appears exactly once and the array cursor only moves forward.
+    const buildWorkList = injectWorkList([
+      [10, 100],
+      [20, 50],
+    ]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10)]).mockResolvedValueOnce([rowFor(20)]);
+
+    const flakyLookup = jest
+      .fn<LookupFn>()
+      .mockRejectedValueOnce(new Error('LML 502'))
+      .mockResolvedValueOnce(matchedResult(false));
+
+    const result = await runBackfill({
+      lookup: flakyLookup,
+      enrich,
+      batchSize: 1,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
+    });
+
+    // The failing head row was attempted exactly once; the run terminated
+    // normally with the failure counted.
+    expect(flakyLookup).toHaveBeenCalledTimes(2);
+    expect(flakyLookup.mock.calls[0]?.[0]).toBe('artist-10');
+    expect(result.totals.lml_error).toBe(1);
+    expect(result.totals.enriched_match).toBe(1);
+    expect(result.totals.scanned).toBe(2);
+
+    // And id 10 appears in exactly one batch SELECT — never re-selected.
+    const allBatchLiterals = (db.execute as jest.Mock).mock.calls
+      .map((call) => ((call[0] as { values?: unknown[] })?.values ?? []).filter((v) => typeof v === 'string'))
+      .flat();
+    expect(allBatchLiterals).toEqual(['{10}', '{20}']);
+  });
+
+  it('counts work-list ids that vanished before their batch load as stale_skipped (mid-run worker overlap)', async () => {
+    // A row enriched by the live worker between work-list build and its
+    // batch slice drops out of the `metadata_attempt_at IS NULL` re-check.
+    // It must be counted (not silently absorbed) and must not reach LML.
+    const buildWorkList = injectWorkList([
+      [10, 9],
+      [20, 8],
+    ]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(20)]);
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      batchSize: 2,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
+    });
+
+    expect(result.totals.stale_skipped).toBe(1);
+    expect(result.totals.scanned).toBe(1);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(lookup).toHaveBeenCalledWith('artist-20', undefined, undefined);
+  });
+
+  it('propagates below_floor_skipped into totals and emits worklist_built / batch_done / finished log fields', async () => {
+    const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+    const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+    initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-below-floor' });
+    const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    try {
+      const buildWorkList = injectWorkList([[10, 9]], { pendingTotal: 8, belowFloorSkipped: 7 });
+      (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10)]);
+
+      const result = await runBackfill({
+        lookup,
+        enrich,
+        throttleMs: 0,
+        liveActivityLookbackSeconds: 0,
+        playFloor: 5,
+        floorRecencyDays: 7,
+        buildWorkList,
+      });
+
+      expect(result.totals.below_floor_skipped).toBe(7);
+
+      const lines = writeSpy.mock.calls.map((args) => String(args[0]));
+      const parse = (step: string) => {
+        const line = lines.find((l) => l.includes(`"step":"${step}"`));
+        if (!line) throw new Error(`expected a ${step} log line`);
+        return JSON.parse(line.trim());
+      };
+
+      const started = parse('started');
+      expect(started.play_floor).toBe(5);
+      expect(started.floor_recency_days).toBe(7);
+
+      const built = parse('worklist_built');
+      expect(built.worklist_size).toBe(1);
+      expect(built.pending_total).toBe(8);
+      expect(built.below_floor_skipped).toBe(7);
+      expect(built.max_plays).toBe(9);
+      expect(built.min_plays).toBe(9);
+      expect(typeof built.build_ms).toBe('number');
+
+      const batchDone = parse('batch_done');
+      expect(batchDone.batch_plays_max).toBe(9);
+      expect(batchDone.batch_plays_min).toBe(9);
+      expect(batchDone.below_floor_skipped).toBe(7);
+
+      const finished = parse('finished');
+      expect(finished.below_floor_skipped).toBe(7);
+      expect(finished.stale_skipped).toBe(0);
+    } finally {
+      writeSpy.mockRestore();
+      await closeLogger();
+    }
   });
 
   it('counts lml_error when LML throws and continues processing', async () => {
-    const batch = [
-      { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
-      { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
-      { id: 30, artist_name: 'c', album_title: null, track_title: null, album_id: null },
-    ];
-
-    (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+    const buildWorkList = injectWorkList([
+      [10, 3],
+      [20, 2],
+      [30, 1],
+    ]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(20), rowFor(30)]);
 
     const lookupFlaky = jest
       .fn<LookupFn>()
@@ -541,6 +780,9 @@ describe('runBackfill', () => {
       enrich: enrichLocal,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
     });
 
     expect(result.totals.scanned).toBe(3);
@@ -555,18 +797,16 @@ describe('runBackfill', () => {
   it('counts enrich_error and drains the rest of the batch when one row’s enrich throws (BS#1011 poison-pill jam regression)', async () => {
     // The wedge that stalled the BS#1011 drain for ~2.5 weeks: a mojibake
     // album title overflowed flowsheet.bandcamp_url varchar(512), the enrich
-    // UPDATE threw, and the throw aborted the whole run. The failed row never
-    // got its metadata_attempt_at marker, so the next run re-selected it as
-    // the smallest pending id and crashed again — zero forward progress. This
-    // pins that the poison row is now isolated (counted as enrich_error), the
-    // id-cursor advances past it, and the remaining rows in the batch drain.
-    const batch = [
-      { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
-      { id: 20, artist_name: 'b', album_title: 'mojibake', track_title: null, album_id: null },
-      { id: 30, artist_name: 'c', album_title: null, track_title: null, album_id: null },
-    ];
-
-    (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+    // UPDATE threw, and the throw aborted the whole run. This pins that the
+    // poison row is isolated (counted as enrich_error) and the remaining
+    // rows in the batch drain; the no-wedge test above pins that it is not
+    // re-selected within the run.
+    const buildWorkList = injectWorkList([
+      [10, 3],
+      [20, 2],
+      [30, 1],
+    ]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(20), rowFor(30)]);
 
     const enrichPoison = jest
       .fn<EnrichFn>()
@@ -579,6 +819,9 @@ describe('runBackfill', () => {
       enrich: enrichPoison,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
     });
 
     // Run completes normally (no exit 1). All three rows scanned; the poison
@@ -590,16 +833,13 @@ describe('runBackfill', () => {
     // enrich is attempted on all three (the lookup succeeded for each) — the
     // poison row is only skipped *after* its DB write throws, not before.
     expect(enrichPoison).toHaveBeenCalledTimes(3);
-
-    // The terminal (empty) poll must paginate from id > 30 — proof the cursor
-    // advanced *past* the poison row (id 20) rather than jamming on it.
-    const terminalPoll = (db.execute as jest.Mock).mock.calls[1]?.[0] as { values?: unknown[] };
-    expect(terminalPoll?.values).toContain(30);
   });
 
-  it('exposes BATCH_SIZE and THROTTLE_MS constants for ops tuning', () => {
+  it('exposes the ops-tuning constants', () => {
     expect(BATCH_SIZE).toBe(500);
     expect(THROTTLE_MS).toBe(100);
+    expect(PLAY_FLOOR_DEFAULT).toBe(5);
+    expect(FLOOR_RECENCY_DAYS_DEFAULT).toBe(7);
   });
 
   it('default resolvers produce the shared 60s lookback / 30s pause', () => {
@@ -607,9 +847,9 @@ describe('runBackfill', () => {
     expect(resolveLiveActivityPauseMs(undefined)).toBe(30_000);
   });
 
-  it('defers a batch when checkLiveActivity returns true, then proceeds when it clears', async () => {
-    // First two probes return true (DJ active), third clears.
-    // Then loadBatch returns one row, then empty.
+  it('defers the work-list build and each batch when checkLiveActivity returns true, then proceeds when it clears', async () => {
+    // First two probes return true (DJ active), third clears → work-list
+    // builds. One more probe (false) gates the single batch slice.
     const checkLiveActivity = jest
       .fn<CheckLiveActivityFn>()
       .mockResolvedValueOnce(true)
@@ -617,8 +857,8 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValue(false);
 
-    const batch = [{ id: 99, artist_name: 'a', album_title: null, track_title: null, album_id: null }];
-    (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+    const buildWorkList = injectWorkList([[99, 4]]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(99)]);
 
     const result = await runBackfill({
       lookup,
@@ -627,21 +867,26 @@ describe('runBackfill', () => {
       liveActivityLookbackSeconds: 60,
       liveActivityPauseMs: 0,
       checkLiveActivity,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
     });
 
-    // Three probes: two-true-then-false before the first batch, then one
-    // probe before the (empty) terminal poll.
+    // Three probes before the build (two-true-then-false), one before the
+    // only slice. The loop ends when the work-list is exhausted — there is
+    // no terminal empty poll (and so no probe for one) anymore.
     expect(checkLiveActivity).toHaveBeenCalledTimes(4);
     expect(result.totals.scanned).toBe(1);
     expect(result.totals.enriched_match).toBe(1);
-    // loadBatch was called only after the probe cleared; lookup was not
-    // called during the deferral window.
-    expect((db.execute as jest.Mock).mock.calls.length).toBe(2);
+    // The build waited for the probe to clear.
+    expect(buildWorkList.mock.invocationCallOrder[0]).toBeGreaterThan(checkLiveActivity.mock.invocationCallOrder[2]);
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(1);
   });
 
   it('skips the cooperative-pause probe when liveActivityLookbackSeconds is 0', async () => {
     const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true);
-    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+    const buildWorkList = injectWorkList([[10, 4]]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10)]);
 
     await runBackfill({
       lookup,
@@ -650,6 +895,9 @@ describe('runBackfill', () => {
       liveActivityLookbackSeconds: 0,
       liveActivityPauseMs: 0,
       checkLiveActivity,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
     });
 
     // With lookback=0 the probe is bypassed entirely; no calls even though
@@ -659,7 +907,7 @@ describe('runBackfill', () => {
 
   it('forwards liveActivityLookbackSeconds to checkLiveActivity so the probe window is tunable', async () => {
     const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
-    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+    const buildWorkList = injectWorkList([]);
 
     await runBackfill({
       lookup,
@@ -668,6 +916,9 @@ describe('runBackfill', () => {
       liveActivityLookbackSeconds: 120,
       liveActivityPauseMs: 0,
       checkLiveActivity,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
     });
 
     expect(checkLiveActivity).toHaveBeenCalledWith(120);
@@ -694,15 +945,24 @@ describe('runBackfill', () => {
       const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
       try {
-        const batch = [
-          { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
-          { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
-        ];
-        (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+        const buildWorkList = injectWorkList([
+          [10, 3],
+          [20, 2],
+        ]);
+        (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(20)]);
 
         const cacheStats = jest.fn<() => CacheStats>().mockReturnValue({ size: 1, hits: 1, misses: 1, overwrites: 0 });
 
-        await runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0, cacheStats });
+        await runBackfill({
+          lookup,
+          enrich,
+          throttleMs: 0,
+          liveActivityLookbackSeconds: 0,
+          cacheStats,
+          playFloor: 5,
+          floorRecencyDays: 7,
+          buildWorkList,
+        });
 
         const stdoutLines = writeSpy.mock.calls.map((args) => String(args[0]));
         const batchDoneLine = stdoutLines.find((l) => l.includes('"step":"batch_done"'));
@@ -739,10 +999,18 @@ describe('runBackfill', () => {
       const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
       try {
-        const batch = [{ id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null }];
-        (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+        const buildWorkList = injectWorkList([[10, 3]]);
+        (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10)]);
 
-        await runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0 });
+        await runBackfill({
+          lookup,
+          enrich,
+          throttleMs: 0,
+          liveActivityLookbackSeconds: 0,
+          playFloor: 5,
+          floorRecencyDays: 7,
+          buildWorkList,
+        });
 
         const batchDoneLine = writeSpy.mock.calls
           .map((args) => String(args[0]))
@@ -777,8 +1045,8 @@ describe('runBackfill', () => {
         const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
         try {
-          const batch = [{ id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null }];
-          (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+          const buildWorkList = injectWorkList([[10, 3]]);
+          (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10)]);
 
           const cacheStats = jest.fn<() => CacheStats>().mockImplementation(() => {
             throw thrown;
@@ -790,6 +1058,9 @@ describe('runBackfill', () => {
             throttleMs: 0,
             liveActivityLookbackSeconds: 0,
             cacheStats,
+            playFloor: 5,
+            floorRecencyDays: 7,
+            buildWorkList,
           });
 
           // Run completes normally; totals were committed per row.
@@ -819,13 +1090,13 @@ describe('runBackfill', () => {
       // in sibling tests.
       const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
       try {
-        const batch = [
-          { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
-          { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
-          { id: 30, artist_name: 'c', album_title: null, track_title: null, album_id: null },
-          { id: 40, artist_name: 'd', album_title: null, track_title: null, album_id: null },
-        ];
-        (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+        const buildWorkList = injectWorkList([
+          [10, 4],
+          [20, 3],
+          [30, 2],
+          [40, 1],
+        ]);
+        (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(20), rowFor(30), rowFor(40)]);
 
         // 1 miss + 3 hits → exactly 1 throttle sleep, not 4.
         const mixedLookup = jest
@@ -841,6 +1112,9 @@ describe('runBackfill', () => {
           enrich,
           throttleMs: THROTTLE,
           liveActivityLookbackSeconds: 0,
+          playFloor: 5,
+          floorRecencyDays: 7,
+          buildWorkList,
         });
 
         const throttleCalls = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === THROTTLE);
@@ -855,13 +1129,12 @@ describe('runBackfill', () => {
     // Race scenario at the orchestrator level: enrich returns the
     // *_raced variant when 0 rows updated. The orchestrator must bump
     // the matching counter rather than treating it as a regular match.
-    const batch = [
-      { id: 10, artist_name: 'a', album_title: null, track_title: null, album_id: null },
-      { id: 20, artist_name: 'b', album_title: null, track_title: null, album_id: null },
-      { id: 30, artist_name: 'c', album_title: null, track_title: null, album_id: null },
-    ];
-
-    (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
+    const buildWorkList = injectWorkList([
+      [10, 3],
+      [20, 2],
+      [30, 1],
+    ]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(20), rowFor(30)]);
 
     const enrichWithRaces = jest
       .fn<EnrichFn>()
@@ -874,6 +1147,9 @@ describe('runBackfill', () => {
       enrich: enrichWithRaces,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
     });
 
     expect(result.totals.scanned).toBe(3);
