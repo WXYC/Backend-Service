@@ -10,9 +10,14 @@
  *  2. `add_date` (INSERT-only import anchor) and `album_id`
  *     (link-pass-owned — a sheet edit must never clobber a link) are
  *     OMITTED from the ON CONFLICT `set`.
- *  3. `setWhere` carries an IS DISTINCT FROM guard over exactly the
- *     content columns, so no-op nightly runs don't churn `last_modified`.
- *  4. `xmax = 0` returning distinguishes inserted/updated; an empty
+ *  3. Both the `set` object and the `setWhere` IS DISTINCT FROM arms are
+ *     DERIVED from SET_CONTENT_COLUMNS (single source of truth) — the
+ *     tests assert every member appears in both generated structures, and
+ *     that the list itself equals the SubmissionContent shape minus the
+ *     conflict key, so map/writer drift fails here.
+ *  4. The `submitted_at` arm carries an explicit `::timestamptz` cast on
+ *     its bound param (the BS#802 Date-through-raw-template trap).
+ *  5. `xmax = 0` returning distinguishes inserted/updated; an empty
  *     returning (setWhere suppressed the UPDATE) reports unchanged.
  */
 import { db } from '@wxyc/database';
@@ -155,21 +160,58 @@ describe('upsertSubmission', () => {
     expect(values).toHaveProperty('source_key', 'form:2021-07-15T18:05:33.000Z');
   });
 
-  it('guards the UPDATE with an IS DISTINCT FROM check over every content column (no-op runs must not churn last_modified)', async () => {
+  /** Collect the setWhere's IS DISTINCT FROM arms from the OR-reduction
+   *  tree the writer builds. Handles both fragment shapes: the unit env's
+   *  drizzle-orm stub tag ({ sql: strings, values }) and real drizzle
+   *  (queryChunks). A leaf arm's first interpolation is the column (the
+   *  mock table maps columns to their name strings). */
+  const collectDistinctArms = (node: unknown, arms: Array<{ column: string; text: string }> = []) => {
+    if (!node || typeof node !== 'object') return arms;
+    const n = node as { sql?: readonly string[]; values?: unknown[]; queryChunks?: unknown[] };
+    const text = Array.isArray(n.sql) ? n.sql.join('|') : '';
+    if (text.includes('IS DISTINCT FROM')) {
+      arms.push({ column: String(n.values?.[0]), text });
+      return arms;
+    }
+    for (const child of [...(n.values ?? []), ...(n.queryChunks ?? [])]) collectDistinctArms(child, arms);
+    return arms;
+  };
+
+  it('derives the setWhere guard from SET_CONTENT_COLUMNS: one IS DISTINCT FROM arm per member, nothing else', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
     await upsertSubmission(makeContent());
 
     const config = upsertConfig();
     expect(config.setWhere).toBeDefined();
-    const text = fragmentText(config.setWhere);
-    // One IS DISTINCT FROM arm per content column — a column dropped from
-    // the guard would freeze propagation of its sheet edits exactly when
-    // ONLY that column changed.
-    const arms = text.match(/IS DISTINCT FROM/g) ?? [];
-    expect(arms).toHaveLength(SET_CONTENT_COLUMNS.length);
-    expect(text).not.toMatch(/last_modified/);
-    expect(text).not.toMatch(/add_date/);
-    expect(text).not.toMatch(/album_id/);
+    const arms = collectDistinctArms(config.setWhere);
+    // Set equality with the single source of truth: a column dropped from
+    // the derivation would freeze propagation of its sheet edits exactly
+    // when ONLY that column changed; an extra one would churn last_modified.
+    expect(arms.map((a) => a.column).sort()).toEqual([...SET_CONTENT_COLUMNS].sort());
+    const armColumns = new Set(arms.map((a) => a.column));
+    expect(armColumns.has('last_modified')).toBe(false);
+    expect(armColumns.has('add_date')).toBe(false);
+    expect(armColumns.has('album_id')).toBe(false);
+  });
+
+  it('casts the submitted_at arm param to timestamptz (BS#802 Date-binding trap) and ONLY that arm', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
+    await upsertSubmission(makeContent());
+
+    const arms = collectDistinctArms(upsertConfig().setWhere);
+    const cast = arms.filter((a) => a.text.includes('::timestamptz'));
+    expect(cast.map((a) => a.column)).toEqual(['submitted_at']);
+  });
+
+  it('derives the set object from SET_CONTENT_COLUMNS: every member present with the mapped value', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
+    const content = makeContent();
+    await upsertSubmission(content);
+
+    const set = upsertConfig().set ?? {};
+    for (const col of SET_CONTENT_COLUMNS) {
+      expect(set).toHaveProperty(col, content[col]);
+    }
   });
 
   it('pins the content-column list to the SubmissionContent shape minus the conflict key', () => {

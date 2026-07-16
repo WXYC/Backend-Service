@@ -22,12 +22,24 @@
  *  4. Rows are never deleted: a row vanishing from the sheet leaves the DB
  *     row untouched (org data-safety rule).
  *
+ * SINGLE SOURCE OF TRUTH: `SET_CONTENT_COLUMNS` drives BOTH the ON
+ * CONFLICT `set` object and the `setWhere` arms by construction — the
+ * three-parallel-hand-maintained-lists failure mode (a column added to
+ * one list but not another silently freezing that column's propagation,
+ * or churning last_modified on no-op runs) cannot occur.
+ *
+ * The `submitted_at` arm casts its bound param to `timestamptz`
+ * explicitly: a JS Date bound through a raw sql fragment is the exact
+ * BS#802 trap the module header cites — without the cast the comparison
+ * can degrade to text/unknown typing at the driver boundary. Pinned end
+ * to end by `tests/integration/album-reviews-writer.spec.js`.
+ *
  * `xmax = 0` in `returning` distinguishes inserted from updated for the
  * run counters.
  */
 
 import { db, album_review_submissions } from '@wxyc/database';
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 
 import type { SubmissionContent } from './map.js';
 
@@ -38,12 +50,12 @@ export type UpsertOutcome = {
 };
 
 /**
- * The content columns the ON CONFLICT `set` refreshes (and the setWhere
- * guard compares) — exactly the `SubmissionContent` keys minus
+ * The content columns the ON CONFLICT `set` refreshes and the `setWhere`
+ * guard compares — exactly the `SubmissionContent` keys minus
  * `source_key` (the conflict target; equal on both sides by definition).
- * Exported so the writer test can pin the list against the map shape:
- * a column added to `SubmissionContent` but forgotten here would silently
- * stop propagating sheet edits for that column.
+ * `satisfies` pins every entry to a real `SubmissionContent` key at
+ * compile time; the writer test pins the missing-key direction (list ==
+ * content keys minus source_key), so map/writer drift fails CI.
  */
 export const SET_CONTENT_COLUMNS = [
   'artist_name',
@@ -64,7 +76,38 @@ export const SET_CONTENT_COLUMNS = [
   'source',
   'norm_artist',
   'norm_album',
-] as const;
+] as const satisfies readonly (keyof SubmissionContent)[];
+
+type ContentColumn = (typeof SET_CONTENT_COLUMNS)[number];
+
+/** The ON CONFLICT `set`: every content column from the single source of
+ *  truth, plus the SQL-side `last_modified` refresh. */
+const buildConflictSet = (content: SubmissionContent): { [K in ContentColumn]: SubmissionContent[K] } & {
+  last_modified: SQL;
+} => ({
+  ...(Object.fromEntries(SET_CONTENT_COLUMNS.map((col) => [col, content[col]])) as {
+    [K in ContentColumn]: SubmissionContent[K];
+  }),
+  last_modified: sql`now()`,
+});
+
+/** One IS DISTINCT FROM arm per content column. `submitted_at` binds a JS
+ *  Date, so its param carries an explicit `::timestamptz` cast (BS#802 —
+ *  see module docstring). */
+const distinctFromArm = (col: ContentColumn, content: SubmissionContent): SQL => {
+  const column = album_review_submissions[col];
+  if (col === 'submitted_at') {
+    return sql`${column} IS DISTINCT FROM ${content.submitted_at}::timestamptz`;
+  }
+  return sql`${column} IS DISTINCT FROM ${content[col]}`;
+};
+
+/** OR-join of the per-column arms, derived from SET_CONTENT_COLUMNS.
+ *  Built by reduction rather than `sql.join` — the alias-consumer writer
+ *  test documents that drizzle's compiled `sql.join` doesn't survive
+ *  ts-jest's transform. */
+const buildSetWhere = (content: SubmissionContent): SQL =>
+  SET_CONTENT_COLUMNS.map((col) => distinctFromArm(col, content)).reduce((acc, arm) => sql`${acc} OR ${arm}`);
 
 /**
  * UPSERT one mapped submission. Idempotent on `source_key`; see the module
@@ -81,49 +124,10 @@ export const upsertSubmission = async (content: SubmissionContent): Promise<Upse
       // The 0119 unique index is partial — the conflict target must name
       // its predicate or PG can't match the arbiter index.
       targetWhere: sql`${t.source_key} IS NOT NULL`,
-      set: {
-        artist_name: content.artist_name,
-        album_title: content.album_title,
-        record_label: content.record_label,
-        artist_blurb: content.artist_blurb,
-        review: content.review,
-        recommended_tracks: content.recommended_tracks,
-        buzzwords: content.buzzwords,
-        fcc_violations: content.fcc_violations,
-        review_purpose: content.review_purpose,
-        reviewer_raw: content.reviewer_raw,
-        social_consent_raw: content.social_consent_raw,
-        social_consent: content.social_consent,
-        released_within_six_months: content.released_within_six_months,
-        rotated: content.rotated,
-        submitted_at: content.submitted_at,
-        source: content.source,
-        norm_artist: content.norm_artist,
-        norm_album: content.norm_album,
-        last_modified: sql`now()`,
-      },
+      set: buildConflictSet(content),
       // Skip the UPDATE when nothing changed so `last_modified` stays an
-      // honest audit signal instead of ticking every nightly run. One arm
-      // per content column — must stay in lockstep with `set` above (the
-      // writer test pins the arm count to SET_CONTENT_COLUMNS.length).
-      setWhere: sql`${t.artist_name} IS DISTINCT FROM ${content.artist_name}
-        OR ${t.album_title} IS DISTINCT FROM ${content.album_title}
-        OR ${t.record_label} IS DISTINCT FROM ${content.record_label}
-        OR ${t.artist_blurb} IS DISTINCT FROM ${content.artist_blurb}
-        OR ${t.review} IS DISTINCT FROM ${content.review}
-        OR ${t.recommended_tracks} IS DISTINCT FROM ${content.recommended_tracks}
-        OR ${t.buzzwords} IS DISTINCT FROM ${content.buzzwords}
-        OR ${t.fcc_violations} IS DISTINCT FROM ${content.fcc_violations}
-        OR ${t.review_purpose} IS DISTINCT FROM ${content.review_purpose}
-        OR ${t.reviewer_raw} IS DISTINCT FROM ${content.reviewer_raw}
-        OR ${t.social_consent_raw} IS DISTINCT FROM ${content.social_consent_raw}
-        OR ${t.social_consent} IS DISTINCT FROM ${content.social_consent}
-        OR ${t.released_within_six_months} IS DISTINCT FROM ${content.released_within_six_months}
-        OR ${t.rotated} IS DISTINCT FROM ${content.rotated}
-        OR ${t.submitted_at} IS DISTINCT FROM ${content.submitted_at}
-        OR ${t.source} IS DISTINCT FROM ${content.source}
-        OR ${t.norm_artist} IS DISTINCT FROM ${content.norm_artist}
-        OR ${t.norm_album} IS DISTINCT FROM ${content.norm_album}`,
+      // honest audit signal instead of ticking every nightly run.
+      setWhere: buildSetWhere(content),
     })
     .returning({
       id: t.id,
