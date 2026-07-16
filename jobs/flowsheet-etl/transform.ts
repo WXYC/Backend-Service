@@ -23,14 +23,7 @@ export const truncate = _truncate;
  *   8-10 = reserved (treated as message)
  */
 type BackendEntryType =
-  | 'track'
-  | 'show_start'
-  | 'show_end'
-  | 'breakpoint'
-  | 'talkset'
-  | 'dj_join'
-  | 'dj_leave'
-  | 'message';
+  'track' | 'show_start' | 'show_end' | 'breakpoint' | 'talkset' | 'dj_join' | 'dj_leave' | 'message';
 
 const ENTRY_TYPE_MAP: Record<number, BackendEntryType> = {
   0: 'track',

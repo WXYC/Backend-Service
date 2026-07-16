@@ -1045,11 +1045,7 @@ export type ArtistResolveMethod = 'identity_store' | 'api_search';
  * `cache_trigram` neighbors never veto.
  */
 export type ArtistResolveCacheLeg =
-  | 'cache_exact'
-  | 'cache_member'
-  | 'cache_alias'
-  | 'cache_name_variation'
-  | 'cache_trigram';
+  'cache_exact' | 'cache_member' | 'cache_alias' | 'cache_name_variation' | 'cache_trigram';
 
 /**
  * Why a name did not resolve. `not_found` / `ambiguous` are terminal;

@@ -14,9 +14,7 @@ export const MIN_USERNAME_LENGTH = 3;
 export const MAX_USERNAME_LENGTH = 30;
 
 export type UsernameValidationError =
-  | { kind: 'too-short'; min: number }
-  | { kind: 'too-long'; max: number }
-  | { kind: 'invalid-characters' };
+  { kind: 'too-short'; min: number } | { kind: 'too-long'; max: number } | { kind: 'invalid-characters' };
 
 export function validateUsername(username: string): UsernameValidationError | null {
   if (username.length < MIN_USERNAME_LENGTH) {

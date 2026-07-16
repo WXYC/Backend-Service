@@ -31,9 +31,7 @@ export type LoadCandidatesFn = () => Promise<Candidate[]>;
  * (need Discogs/catalog additions).
  */
 export type LookupOutcome =
-  | { kind: 'resolved'; releaseId: number }
-  | { kind: 'no_match' }
-  | { kind: 'trust_rejected'; searchType: string };
+  { kind: 'resolved'; releaseId: number } | { kind: 'no_match' } | { kind: 'trust_rejected'; searchType: string };
 
 export type LookupFn = (artist: string, album: string) => Promise<LookupOutcome>;
 
