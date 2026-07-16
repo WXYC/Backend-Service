@@ -94,6 +94,23 @@ export const loadUnlinked = async (): Promise<UnlinkedSubmission[]> => {
   return unwrapRows<UnlinkedSubmission>(result);
 };
 
+/** Quote one `text[]` array-literal element: escape backslashes FIRST,
+ *  then double quotes, then wrap. Exported for the unit escaping table. */
+const quoteArrayElement = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+/**
+ * Render a JS string array as a single PG `text[]` array-literal param
+ * (`'{"a","b"}'::text[]`) — the BS#1068/BS#1071 idiom
+ * (album-level-backfill, alias-consumer): drizzle/postgres-js splats a JS
+ * array interpolated into a raw sql fragment into N positional
+ * placeholders (`ANY(($1, $2))`), which PG rejects with `op ANY/ALL
+ * (array) requires array on right side`. The int[] jobs get away with a
+ * bare join; norms are TEXT, so each element is double-quoted with
+ * backslash/quote escaping — a band name carrying a comma, quote, brace,
+ * or backslash must stay one element.
+ */
+export const textArrayLiteral = (values: string[]): string => `{${values.map(quoteArrayElement).join(',')}}`;
+
 /**
  * One sweep of `library` for every row whose normalized artist_name OR
  * album_artist is in `norms`. The MATERIALIZED CTE forces each
@@ -103,6 +120,9 @@ export const loadUnlinked = async (): Promise<UnlinkedSubmission[]> => {
  * The album comparison happens TS-side (`enrichCandidateRow`).
  */
 export const loadCandidates = async (norms: string[]): Promise<LibraryCandidate[]> => {
+  // Single text[] param (see textArrayLiteral) — never interpolate the JS
+  // array itself.
+  const normsArrayLiteral = textArrayLiteral(norms);
   const result: unknown = await db.execute(sql`
     WITH normalized AS MATERIALIZED (
       SELECT
@@ -114,8 +134,8 @@ export const loadCandidates = async (norms: string[]): Promise<LibraryCandidate[
     )
     SELECT "id", "album_title", norm_primary, norm_album_artist
     FROM normalized
-    WHERE norm_primary = ANY(${norms})
-       OR norm_album_artist = ANY(${norms})
+    WHERE norm_primary = ANY(${normsArrayLiteral}::text[])
+       OR norm_album_artist = ANY(${normsArrayLiteral}::text[])
   `);
   return unwrapRows<LibraryCandidateRow>(result).map(enrichCandidateRow);
 };

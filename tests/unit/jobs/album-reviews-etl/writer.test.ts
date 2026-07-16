@@ -165,7 +165,10 @@ describe('upsertSubmission', () => {
    *  drizzle-orm stub tag ({ sql: strings, values }) and real drizzle
    *  (queryChunks). A leaf arm's first interpolation is the column (the
    *  mock table maps columns to their name strings). */
-  const collectDistinctArms = (node: unknown, arms: Array<{ column: string; text: string }> = []) => {
+  const collectDistinctArms = (
+    node: unknown,
+    arms: Array<{ column: string; text: string; values: unknown[] }> = []
+  ) => {
     if (!node || typeof node !== 'object') return arms;
     const n = node as { sql?: readonly string[]; values?: unknown[]; queryChunks?: unknown[] };
     const text = Array.isArray(n.sql) ? n.sql.join('|') : '';
@@ -173,7 +176,7 @@ describe('upsertSubmission', () => {
       // The mock table maps columns to their name strings; anything else
       // is a fixture bug worth seeing verbatim in the assertion diff.
       const first = n.values?.[0];
-      arms.push({ column: typeof first === 'string' ? first : JSON.stringify(first), text });
+      arms.push({ column: typeof first === 'string' ? first : JSON.stringify(first), text, values: n.values ?? [] });
       return arms;
     }
     for (const child of [...(n.values ?? []), ...(n.queryChunks ?? [])]) collectDistinctArms(child, arms);
@@ -204,6 +207,28 @@ describe('upsertSubmission', () => {
     const arms = collectDistinctArms(upsertConfig().setWhere);
     const cast = arms.filter((a) => a.text.includes('::timestamptz'));
     expect(cast.map((a) => a.column)).toEqual(['submitted_at']);
+  });
+
+  it('binds the submitted_at arm as an ISO string, never a raw Date (the cast alone is not enough)', async () => {
+    // A param interpolated into a raw sql fragment bypasses the column
+    // encoder (drizzle maps Date→string only for real column bindings), so
+    // a JS Date here reaches postgres-js's unsafe() unserialized and blows
+    // up at the driver boundary (ERR_INVALID_ARG_TYPE at Buffer.byteLength)
+    // — the exact BS#802 trap, in its raw-fragment form. Caught end to end
+    // by tests/e2e/album-reviews-pipeline.test.ts; pinned here so the arm
+    // can never regress to binding the Date object again.
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
+    const content = makeContent();
+    await upsertSubmission(content);
+
+    const arms = collectDistinctArms(upsertConfig().setWhere);
+    const submittedAtArm = arms.find((a) => a.column === 'submitted_at');
+    if (!submittedAtArm) throw new Error('setWhere is missing the submitted_at arm');
+    if (content.submitted_at == null) throw new Error('fixture row must carry a parsed timestamp');
+    expect(submittedAtArm.values).toContain(content.submitted_at.toISOString());
+    for (const value of submittedAtArm.values) {
+      expect(value).not.toBeInstanceOf(Date);
+    }
   });
 
   it('derives the set object from SET_CONTENT_COLUMNS: every member present with the mapped value', async () => {
