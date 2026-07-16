@@ -6,14 +6,22 @@
  * monotonic array cursor — see worklist.test.ts for the work-list SQL):
  *   1. Rows are processed in work-list (play-descending) order; each batch
  *      slice loads by id-array with a `metadata_attempt_at IS NULL`
- *      re-check and re-orders results to work-list order.
+ *      re-check + `metadata_status` fetch, re-orders results to work-list
+ *      order, and PARTITIONS on the worker lifecycle: only still-`pending`
+ *      rows reach LML; worker-terminal rows (enriched_match /
+ *      enriched_no_match / failed_no_retry) get a marker-only reconcile
+ *      stamp (`worker_reconciled`); `enriching` and unknown statuses are
+ *      left untouched (`worker_inflight_skipped`).
  *   2. processRow returns 'lml_error' on a thrown lookup; the orchestrator
  *      counts it and continues. The row stays metadata_attempt_at IS NULL
  *      via `applyEnrichment` *not* being called on the error path — and the
  *      no-wedge test pins that it is never re-selected within the run.
  *   3. Match → enriched_match outcome; no-match → enriched_no_match outcome.
  *      Totals are bumped on the right counter; below_floor_skipped and
- *      stale_skipped surface in totals and log lines.
+ *      stale_skipped (vanished ids: hard-deleted or marker stamped
+ *      out-of-band — the CDC worker never writes the marker, so worker
+ *      overlap surfaces as worker_reconciled instead) surface in totals
+ *      and log lines.
  *   4. resolvePartitionFilter / resolvePlayFloor / resolveFloorRecencyDays
  *      handle defaults, valid input, and throw on bad input.
  *   5. The array cursor advances unconditionally and the loop terminates
@@ -491,10 +499,14 @@ describe('resolvePlayFloor (BS#1591)', () => {
 });
 
 describe('resolveFloorRecencyDays (BS#1591 / decision 5)', () => {
-  it('falls back to FLOOR_RECENCY_DAYS_DEFAULT (7) when env var is unset or empty', () => {
-    expect(FLOOR_RECENCY_DAYS_DEFAULT).toBe(7);
-    expect(resolveFloorRecencyDays(undefined)).toBe(7);
-    expect(resolveFloorRecencyDays('')).toBe(7);
+  it('falls back to FLOOR_RECENCY_DAYS_DEFAULT (30) when env var is unset or empty', () => {
+    // 30, not 7: the window must outlive a full drain pass — a
+    // consumer-missed below-floor row sorts near the plays-DESC tail, so a
+    // window shorter than the catch-up wall-clock would strand it in the
+    // residual (the exact outcome decision 5 exists to prevent).
+    expect(FLOOR_RECENCY_DAYS_DEFAULT).toBe(30);
+    expect(resolveFloorRecencyDays(undefined)).toBe(30);
+    expect(resolveFloorRecencyDays('')).toBe(30);
   });
 
   it('accepts 0 (disables the recency exemption)', () => {
@@ -520,20 +532,23 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
   const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
   const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
 
-  const rowFor = (id: number, artist = `artist-${id}`): EnrichRowFixture => ({
+  const rowFor = (id: number, artist = `artist-${id}`, metadataStatus = 'pending'): BatchRowFixture => ({
     id,
     artist_name: artist,
     album_title: null,
     track_title: null,
     album_id: null,
+    metadata_status: metadataStatus,
   });
 
-  type EnrichRowFixture = {
+  type BatchRowFixture = {
     id: number;
     artist_name: string;
     album_title: string | null;
     track_title: string | null;
     album_id: number | null;
+    // Worker lifecycle column (BS#891 enum) the batch partition keys on.
+    metadata_status: string;
   };
 
   /** Build a WorkList fixture from [id, plays] pairs. */
@@ -675,10 +690,13 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     expect(allBatchLiterals).toEqual(['{10}', '{20}']);
   });
 
-  it('counts work-list ids that vanished before their batch load as stale_skipped (mid-run worker overlap)', async () => {
-    // A row enriched by the live worker between work-list build and its
-    // batch slice drops out of the `metadata_attempt_at IS NULL` re-check.
-    // It must be counted (not silently absorbed) and must not reach LML.
+  it('counts work-list ids that vanished before their batch load as stale_skipped (hard-deleted or marker stamped out-of-band)', async () => {
+    // A row hard-deleted mid-run (flowsheet deleteEntry), or whose marker an
+    // out-of-band writer stamped, drops out of the batch SELECT. It must be
+    // counted (not silently absorbed) and must not reach LML. NOTE this is
+    // NOT the worker-overlap signal — the CDC worker never writes the
+    // marker, so worker-enriched rows still load and surface as
+    // worker_reconciled (pinned below).
     const buildWorkList = injectWorkList([
       [10, 9],
       [20, 8],
@@ -700,6 +718,109 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     expect(result.totals.scanned).toBe(1);
     expect(lookup).toHaveBeenCalledTimes(1);
     expect(lookup).toHaveBeenCalledWith('artist-20', undefined, undefined);
+  });
+
+  it('reconciles worker-terminal rows with a marker-only stamp and zero LML calls (worker_reconciled)', async () => {
+    // The CDC worker finalizes via metadata_status WITHOUT stamping
+    // metadata_attempt_at (BS#891 design), so worker-enriched rows pass the
+    // marker re-check. Pre-partition, the drain would burn a redundant LML
+    // lookup per such row and silently double-write; now they get a bulk
+    // marker-only stamp so the cohort converges. failed_no_retry is
+    // terminal too — reconciled, never re-looked-up.
+    const buildWorkList = injectWorkList([
+      [10, 90], // worker already enriched (match)
+      [20, 80], // still pending — the only LML call
+      [30, 70], // worker exhausted retries — terminal
+    ]);
+    (db.execute as jest.Mock)
+      // batch SELECT: all three still marker-NULL
+      .mockResolvedValueOnce([
+        rowFor(10, 'artist-10', 'enriched_match'),
+        rowFor(20, 'artist-20', 'pending'),
+        rowFor(30, 'artist-30', 'failed_no_retry'),
+      ])
+      // reconcile UPDATE ... RETURNING "id"
+      .mockResolvedValueOnce([{ id: 10 }, { id: 30 }]);
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
+    });
+
+    expect(result.totals.worker_reconciled).toBe(2);
+    expect(result.totals.scanned).toBe(1);
+    expect(result.totals.enriched_match).toBe(1);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(lookup).toHaveBeenCalledWith('artist-20', undefined, undefined);
+
+    // The reconcile statement is a marker-guarded, marker-only UPDATE with
+    // RETURNING (the count comes from rows actually stamped), binding the
+    // terminal ids as one array literal.
+    const reconcileSql = renderSql((db.execute as jest.Mock).mock.calls[1]?.[0]);
+    expect(reconcileSql).toMatch(/UPDATE/i);
+    expect(reconcileSql).toMatch(/SET\s+"metadata_attempt_at"\s*=\s*now\(\)/i);
+    expect(reconcileSql).toMatch(/"metadata_attempt_at"\s+IS\s+NULL/i);
+    expect(reconcileSql).toMatch(/RETURNING/i);
+    expect(reconcileSql).not.toMatch(/metadata_status"?\s*=/i);
+    const reconcileValues = ((db.execute as jest.Mock).mock.calls[1]?.[0] as { values?: unknown[] })?.values;
+    expect(reconcileValues).toContain('{10,30}');
+  });
+
+  it('leaves in-flight worker claims and unknown statuses completely untouched (worker_inflight_skipped)', async () => {
+    // 'enriching' = the worker owns the row right now; racing it is the
+    // interleaved-write hazard. Unknown future enum values fall to the same
+    // untouched arm (fail-safe: still retryable next run). Neither an LML
+    // call nor a reconcile UPDATE may fire.
+    const buildWorkList = injectWorkList([
+      [10, 9],
+      [20, 8],
+    ]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([
+      rowFor(10, 'artist-10', 'enriching'),
+      rowFor(20, 'artist-20', 'some_future_status'),
+    ]);
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
+    });
+
+    expect(result.totals.worker_inflight_skipped).toBe(2);
+    expect(result.totals.worker_reconciled).toBe(0);
+    expect(result.totals.scanned).toBe(0);
+    expect(lookup).not.toHaveBeenCalled();
+    // Exactly one db.execute: the batch SELECT. No reconcile UPDATE ran.
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(1);
+  });
+
+  it('throws loudly on an injected non-positive batchSize instead of spinning the cursor loop forever', async () => {
+    // The env path is guarded by requirePositiveInt; this pins the
+    // injectable seam. The old id-cursor loop self-terminated on LIMIT 0 —
+    // the work-list cursor would spin, so the guard must fire before any
+    // work starts.
+    const buildWorkList = injectWorkList([[10, 9]]);
+
+    await expect(runBackfill({ lookup, enrich, batchSize: 0, buildWorkList })).rejects.toThrow(
+      /batchSize must be a positive integer/
+    );
+    await expect(runBackfill({ lookup, enrich, batchSize: -5, buildWorkList })).rejects.toThrow(
+      /batchSize must be a positive integer/
+    );
+    await expect(runBackfill({ lookup, enrich, batchSize: 1.5, buildWorkList })).rejects.toThrow(
+      /batchSize must be a positive integer/
+    );
+    expect(buildWorkList).not.toHaveBeenCalled();
+    expect(lookup).not.toHaveBeenCalled();
   });
 
   it('propagates below_floor_skipped into totals and emits worklist_built / batch_done / finished log fields', async () => {
@@ -839,7 +960,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     expect(BATCH_SIZE).toBe(500);
     expect(THROTTLE_MS).toBe(100);
     expect(PLAY_FLOOR_DEFAULT).toBe(5);
-    expect(FLOOR_RECENCY_DAYS_DEFAULT).toBe(7);
+    expect(FLOOR_RECENCY_DAYS_DEFAULT).toBe(30);
   });
 
   it('default resolvers produce the shared 60s lookback / 30s pause', () => {
