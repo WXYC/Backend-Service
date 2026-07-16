@@ -1453,6 +1453,93 @@ export const reviews = wxyc_schema.table('reviews', {
   author: varchar('author', { length: 32 }),
 });
 
+/**
+ * Form-sourced album-review ARCHIVE (ADR 0011) — the ~1,650 DJ-written
+ * reviews collected since March 2021 in the "Album Review Responses"
+ * Google Form, mirrored nightly by `jobs/album-reviews-etl/`.
+ *
+ * Deliberately separate from the `reviews` table above: ADR 0006 reserves
+ * `reviews` as the one-per-album, author-owned (`author_dj_id`), MD-queued
+ * in-app Review model at `/reviews`. This archive conflicts with that
+ * model on every axis — multiple reviews per album, free-text alumni
+ * reviewers with no `auth_user`, immutable submissions — so the two never
+ * merge (see docs/adr/0011-album-review-submissions-separate-archive.md).
+ *
+ * Identity is free-text: `album_id` is a best-effort link written only by
+ * the ETL's singleton-match link pass (never overwritten; ON DELETE SET
+ * NULL so a library deletion can't take the submission with it).
+ *
+ * PII: `reviewer_raw` holds real names and the form promised "your name
+ * will not be shared" — stored for internal curation, NEVER emitted by
+ * the read endpoint (the `flowsheet.dj_name` posture). Same for the
+ * name-adjacent asides in `social_consent_raw`.
+ *
+ * `source` is text with a documented vocabulary rather than a pgEnum (the
+ * 0109 lesson: enum additions cost a migration each). Values so far:
+ *   'google_form' — jobs/album-reviews-etl, written explicitly by the ETL.
+ *
+ * `source_key` is the UPSERT natural key: `form:<ISO-8601 UTC>` of the
+ * parsed form timestamp, or the collision-proofed
+ * `nots:<norm_artist>:<norm_album>:<sha256[0:8](reviewer_raw)>` fallback
+ * for the rare timestamp-less row. Partial-unique (WHERE NOT NULL) so any
+ * future source without a natural key can leave it NULL.
+ *
+ * `norm_artist`/`norm_album` are persisted `normalizeArtistName`/
+ * `normalizeAlbumTitle` outputs (the `flowsheet_freetext_resolution`
+ * precedent; `normalizeAlbumTitle` has no SQL twin, so persisting is what
+ * makes re-link passes and dedup queryable). `add_date` is the INSERT-only
+ * import date (the review's own date is `submitted_at`).
+ */
+export const album_review_submissions = wxyc_schema.table(
+  'album_review_submissions',
+  {
+    id: serial('id').primaryKey(),
+    album_id: integer('album_id').references(() => library.id, { onDelete: 'set null' }),
+    // Raw form values, verbatim.
+    artist_name: text('artist_name'),
+    album_title: text('album_title'),
+    record_label: text('record_label'),
+    artist_blurb: text('artist_blurb'),
+    review: text('review'),
+    // Raw, including the form's `!`-rating markers.
+    recommended_tracks: text('recommended_tracks'),
+    buzzwords: text('buzzwords'),
+    // Verbatim — blank ≠ "None"; the n/a family is deliberately NOT collapsed.
+    fcc_violations: text('fcc_violations'),
+    // Raw multi-select.
+    review_purpose: text('review_purpose'),
+    // PII-internal; never exposed by the read endpoint. See table JSDoc.
+    reviewer_raw: text('reviewer_raw'),
+    social_consent_raw: text('social_consent_raw'),
+    social_consent: boolean('social_consent'),
+    released_within_six_months: boolean('released_within_six_months'),
+    rotated: boolean('rotated'),
+    // Form submission instant, parsed as wall-clock America/New_York.
+    submitted_at: timestamp('submitted_at', { withTimezone: true }),
+    source: text('source').notNull().default('google_form'),
+    source_key: text('source_key'),
+    norm_artist: text('norm_artist'),
+    norm_album: text('norm_album'),
+    // INSERT-only import-date anchor; the writer omits it from the ON
+    // CONFLICT set. Review date is `submitted_at`.
+    add_date: date('add_date').defaultNow().notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // The UPSERT conflict target. Partial so a future source may leave
+    // source_key NULL without tripping uniqueness.
+    uniqueIndex('album_review_submissions_source_key_uq')
+      .on(table.source_key)
+      .where(sql`${table.source_key} IS NOT NULL`),
+    index('album_review_submissions_album_id_idx').on(table.album_id),
+    index('album_review_submissions_submitted_at_idx').on(table.submitted_at),
+    index('album_review_submissions_norm_artist_idx').on(table.norm_artist),
+  ]
+);
+
+export type AlbumReviewSubmission = InferSelectModel<typeof album_review_submissions>;
+export type NewAlbumReviewSubmission = InferInsertModel<typeof album_review_submissions>;
+
 export type NewBinEntry = InferInsertModel<typeof bins>;
 export type BinEntry = InferSelectModel<typeof bins>;
 export const bins = wxyc_schema.table('bins', {
