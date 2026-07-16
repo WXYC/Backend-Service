@@ -75,6 +75,7 @@ describe('runEtl — counters', () => {
       valid: 3,
       skipped_invalid: 1,
       fallback_keys: 0,
+      duplicate_key_skipped: 0,
       inserted: 1,
       updated: 1,
       unchanged: 1,
@@ -93,6 +94,19 @@ describe('runEtl — counters', () => {
     expect(totals.fallback_keys).toBe(1);
     expect(totals.valid).toBe(4);
     expect(opts.upserts.some((k) => k.startsWith('nots:'))).toBe(true);
+  });
+
+  it('skips an in-run duplicate source_key instead of letting the second row overwrite the first', async () => {
+    const dupe = row('7/15/2021 14:05:33', 'Juana Molina', 'DOGA');
+    const opts = makeOpts({
+      fetchRows: () => Promise.resolve([HEADERS, dupe, dupe, ...validRows.slice(1)]),
+    });
+    const totals = await runEtl(opts);
+
+    expect(totals.duplicate_key_skipped).toBe(1);
+    expect(totals.valid).toBe(4); // both dupes pass validity; the second just never reaches the writer
+    expect(opts.upserts.filter((k) => k === 'form:2021-07-15T18:05:33.000Z')).toHaveLength(1);
+    expect(opts.upserts).toHaveLength(3);
   });
 
   it('keys upserts on the form timestamp', async () => {
@@ -160,6 +174,32 @@ describe('runEtl — run guards', () => {
     const opts = makeOpts({ upsertSubmission: () => Promise.reject(new Error('permission denied')) });
     await expect(runEtl(opts)).rejects.toThrow(/0 written|zero writ/i);
   });
+
+  it('fails the run when fallback keys exceed max(5, 1% of valid) — the whole-sheet timestamp-format drift', async () => {
+    // Six distinct timestamp-less rows: enough to clear the floor of 5.
+    const fallbackRows = [
+      'Nilüfer Yanya',
+      'Hermanos Gutiérrez',
+      'Csillagrablók',
+      'Cat Power',
+      'Chuquimamani-Condori',
+      'Kuku Sebsibe',
+    ].map((artist, i) => row('', artist, `Album ${i + 1}`));
+    const opts = makeOpts({ fetchRows: () => Promise.resolve([HEADERS, ...fallbackRows, ...validRows]) });
+    await expect(runEtl(opts)).rejects.toThrow(/fallback/i);
+    // The guard fires BEFORE any write — a re-keyed archive must never half-write.
+    expect(opts.upserts).toHaveLength(0);
+  });
+
+  it('passes at exactly the fallback floor (> is the guard, not >=)', async () => {
+    const fallbackRows = ['Nilüfer Yanya', 'Hermanos Gutiérrez', 'Csillagrablók', 'Cat Power', 'Kuku Sebsibe'].map(
+      (artist, i) => row('', artist, `Album ${i + 1}`)
+    );
+    const opts = makeOpts({ fetchRows: () => Promise.resolve([HEADERS, ...fallbackRows, ...validRows]) });
+    const totals = await runEtl(opts);
+    expect(totals.fallback_keys).toBe(5);
+    expect(opts.upserts).toHaveLength(8);
+  });
 });
 
 describe('runEtl — DRY_RUN', () => {
@@ -198,6 +238,7 @@ describe('runEtl — DRY_RUN', () => {
         valid: 4,
         skipped_invalid: 1,
         fallback_keys: 1,
+        duplicate_key_skipped: 0,
         would_write: 4,
       });
     } finally {

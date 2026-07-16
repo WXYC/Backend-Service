@@ -48,6 +48,10 @@ export type Totals = {
   skipped_invalid: number;
   /** Valid rows keyed via the `nots:` fallback (missing/unparseable timestamp). */
   fallback_keys: number;
+  /** Valid rows skipped because an earlier row in the SAME run produced the
+   *  identical source_key — upserting the second would silently overwrite
+   *  the first (two timestamp-less rows with blank reviewers collide). */
+  duplicate_key_skipped: number;
   inserted: number;
   updated: number;
   /** setWhere-suppressed no-op upserts — the idempotent-nightly signal. */
@@ -62,6 +66,7 @@ const emptyTotals = (): Totals => ({
   valid: 0,
   skipped_invalid: 0,
   fallback_keys: 0,
+  duplicate_key_skipped: 0,
   inserted: 0,
   updated: 0,
   unchanged: 0,
@@ -127,6 +132,7 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
   const dataRows = rows.slice(1);
   totals.fetched = dataRows.length;
   const mapped: Array<{ content: SubmissionContent; rowIndex: number }> = [];
+  const seenKeys = new Set<string>();
   for (const [index, dataRow] of dataRows.entries()) {
     // Sheet row number for log attribution: +2 (1-based + header row).
     const sheetRow = index + 2;
@@ -158,6 +164,24 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
       log('warn', 'normalization_anomaly', `sheet row ${sheetRow}: ${warning}`, { sheet_row: sheetRow });
       warnOnce(`${JOB_NAME}: ${warning}`, 'normalization_anomaly');
     }
+    // In-run duplicate source_key: the UPSERT would make the later row
+    // silently overwrite the earlier one (reachable when two timestamp-less
+    // rows share artist+album+reviewer-hash). First occurrence wins; the
+    // duplicate is counted and skipped, never written.
+    if (result.content.source_key !== null && seenKeys.has(result.content.source_key)) {
+      totals.duplicate_key_skipped += 1;
+      log('warn', 'duplicate_key', `sheet row ${sheetRow} duplicates source_key ${result.content.source_key}; skipping`, {
+        sheet_row: sheetRow,
+        source_key: result.content.source_key,
+      });
+      warnOnce(
+        `${JOB_NAME}: in-run duplicate source_key — a later sheet row would overwrite an earlier one; skipped`,
+        'duplicate_key',
+        { source_key: result.content.source_key }
+      );
+      continue;
+    }
+    if (result.content.source_key !== null) seenKeys.add(result.content.source_key);
     mapped.push({ content: result.content, rowIndex: sheetRow });
   }
 
@@ -174,6 +198,17 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
         'wholesale sheet drift (header/shape change); refusing to write'
     );
   }
+  // Fallback-rate guard: a handful of nots: keys is the known corpus shape
+  // (exactly 1 today); a spike means the sheet's timestamp FORMAT changed
+  // (e.g. locale flipped to 12-hour AM/PM, which parseFormTimestamp
+  // rejects) and every row would silently re-key + lose submitted_at.
+  const fallbackFloor = Math.max(5, Math.ceil(totals.valid * 0.01));
+  if (totals.fallback_keys > fallbackFloor) {
+    throw new Error(
+      `${totals.fallback_keys} of ${totals.valid} valid rows keyed via the nots: fallback (floor ${fallbackFloor}) — ` +
+        'sheet timestamp format likely drifted; refusing to re-key the archive'
+    );
+  }
 
   if (dryRun) {
     // Locked report schema — documented in the job README; consumers may
@@ -185,7 +220,8 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
       valid: totals.valid,
       skipped_invalid: totals.skipped_invalid,
       fallback_keys: totals.fallback_keys,
-      would_write: totals.valid,
+      duplicate_key_skipped: totals.duplicate_key_skipped,
+      would_write: mapped.length,
     };
     process.stdout.write(JSON.stringify(report) + '\n');
     log('info', 'finished', `${JOB_NAME} dry run done (no writes)`, { ...totals });
