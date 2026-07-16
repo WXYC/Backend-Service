@@ -1,0 +1,30 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+WORKDIR /album-reviews-etl-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/album-reviews-etl ./jobs/album-reviews-etl
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/album-reviews-etl
+
+#Production stage
+FROM node:24-alpine AS prod
+
+WORKDIR /album-reviews-etl
+
+ENV DB_STATEMENT_TIMEOUT_MS=60000
+ENV DB_APPLICATION_NAME=wxyc-album-reviews-etl
+
+COPY ./package* ./
+COPY ./jobs/album-reviews-etl/package* ./jobs/album-reviews-etl/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./album-reviews-etl-builder/jobs/album-reviews-etl/dist ./jobs/album-reviews-etl/dist
+COPY --from=builder ./album-reviews-etl-builder/shared/database/dist ./shared/database/dist
+
+CMD ["npm", "start", "--workspace=@wxyc/album-reviews-etl"]
