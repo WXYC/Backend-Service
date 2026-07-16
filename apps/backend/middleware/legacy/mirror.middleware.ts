@@ -37,10 +37,16 @@ export const createBackendMirrorMiddleware =
           const mirrorOn = await isMirrorEnabled(req);
           if (!mirrorOn) return;
 
+          const statements = await createCommand(req, data);
+          // An empty statement list means "nothing to mirror" (e.g. deleteEntry
+          // of a row with no tubafrenzy id). Skip the enqueue rather than push an
+          // empty `START TRANSACTION; COMMIT;` for the SSH executor to run.
+          if (statements.length === 0) return;
+
           console.log('Enqueuing mirror work...');
 
           const queue = MirrorCommandQueue.instance();
-          queue.enqueue(await createCommand(req, data));
+          queue.enqueue(statements);
         } catch (e) {
           console.error('Error in mirror middleware:', e);
           Sentry.captureException(e, { tags: { subsystem: 'legacy-mirror', variant: 'sql' } });
