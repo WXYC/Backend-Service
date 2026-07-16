@@ -62,6 +62,8 @@ When `u.dj_name`, `s.legacy_dj_name`, `u.name` are _all_ NULL (which happens whe
 - Add `AND COALESCE(...) IS NOT NULL` to the WHERE clause (skip rows that would be no-ops), or
 - Provide a non-null fallback in the SET (e.g., `'Unknown DJ'`).
 
+**Value-ordered drains — the work-list-cursor variant (BS#1591)**: the id-cursor recipe (`id > lastId`) is what makes a drain wedge-proof, but it only works when the drain order is id order. If a drain must process rows in some _value_ order (e.g. play-count-descending), a naive "re-SELECT the head of the cohort each batch" re-selects the same failing row at the top forever — failing rows deliberately stay in the cohort for cross-run retry. The recipe: materialize the run's work-list ONCE (ordered ids, in memory or a scratch table) and advance a monotonic cursor over it; a failed row waits for the next run's work-list, and within the run each id is selected at most once. See `jobs/flowsheet-metadata-backfill/worklist.ts` + `orchestrate.ts` for the reference implementation.
+
 ## Sync-gap remediation
 
 For 24 of the 25 stuck rows from the 2026-04-27 incident, the `dj_name` was actually present in tubafrenzy (`FLOWSHEET_RADIO_SHOW_PROD.DJ_NAME`) — Backend-Service's `shows.legacy_dj_name` just hadn't synced. The fix path:
