@@ -39,7 +39,9 @@ describe('schema: album_review_submissions (album-reviews-etl, ADR 0011)', () =>
   describe('table declaration (schema.ts)', () => {
     it('is declared as a wxyc_schema table with Infer types exported', () => {
       expect(schemaSource).toMatch(/export const album_review_submissions\s*=\s*wxyc_schema\.table/);
-      expect(schemaSource).toMatch(/export type AlbumReviewSubmission = InferSelectModel<typeof album_review_submissions>/);
+      expect(schemaSource).toMatch(
+        /export type AlbumReviewSubmission = InferSelectModel<typeof album_review_submissions>/
+      );
       expect(schemaSource).toMatch(
         /export type NewAlbumReviewSubmission = InferInsertModel<typeof album_review_submissions>/
       );
@@ -148,9 +150,7 @@ describe('schema: album_review_submissions (album-reviews-etl, ADR 0011)', () =>
     });
 
     it('declares the album_id FK with ON DELETE SET NULL', () => {
-      expect(sql).toMatch(
-        /FOREIGN KEY \("album_id"\) REFERENCES "wxyc_schema"\."library"\("id"\) ON DELETE set null/i
-      );
+      expect(sql).toMatch(/FOREIGN KEY \("album_id"\) REFERENCES "wxyc_schema"\."library"\("id"\) ON DELETE set null/i);
     });
 
     it('creates the partial UNIQUE source_key index and the three btree indexes, all IF NOT EXISTS (out-of-band CONCURRENTLY runbook)', () => {

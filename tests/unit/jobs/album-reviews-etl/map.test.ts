@@ -93,7 +93,7 @@ const makeRow = (overrides: Partial<Record<FieldName, string>> = {}): string[] =
     rotated: 'y',
   };
   for (const [field, value] of Object.entries({ ...defaults, ...overrides })) {
-    row[FIELD_COLUMN[field as FieldName]] = value as string;
+    row[FIELD_COLUMN[field as FieldName]] = value;
   }
   return row;
 };
@@ -239,7 +239,9 @@ describe('mapRow — field mapping', () => {
   });
 
   it('persists norm_artist/norm_album via the shared normalizers', () => {
-    const mapped = expectValid(mapRow(makeRow({ artist: 'The Jessica Pratt', album: 'On Your Own Love Again (Deluxe Edition)' }), headers));
+    const mapped = expectValid(
+      mapRow(makeRow({ artist: 'The Jessica Pratt', album: 'On Your Own Love Again (Deluxe Edition)' }), headers)
+    );
     expect(mapped.content.norm_artist).toBe(normalizeArtistName('The Jessica Pratt'));
     expect(mapped.content.norm_album).toBe(normalizeAlbumTitle('On Your Own Love Again (Deluxe Edition)'));
   });
@@ -258,7 +260,9 @@ describe('mapRow — source_key', () => {
   });
 
   it('falls back to nots:<norm_artist>:<norm_album>:<sha256[0:8](reviewer_raw)> on a missing timestamp, flagged for the warn log', () => {
-    const mapped = expectValid(mapRow(makeRow({ timestamp: '', artist: 'Bianca Scout', album: 'The Heart of the Anchoress' }), headers));
+    const mapped = expectValid(
+      mapRow(makeRow({ timestamp: '', artist: 'Bianca Scout', album: 'The Heart of the Anchoress' }), headers)
+    );
     const hash = createHash('sha256').update('DJ Ana, 7/15/21').digest('hex').slice(0, 8);
     expect(mapped.content.source_key).toBe(
       `nots:${normalizeArtistName('Bianca Scout')}:${normalizeAlbumTitle('The Heart of the Anchoress')}:${hash}`

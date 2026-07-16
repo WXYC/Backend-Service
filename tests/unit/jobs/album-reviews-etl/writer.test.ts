@@ -71,8 +71,12 @@ const makeContent = (): SubmissionContent => {
   return mapped.content;
 };
 
-const upsertConfig = (): { target?: unknown; targetWhere?: unknown; set?: Record<string, unknown>; setWhere?: unknown } =>
-  mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as ReturnType<typeof upsertConfig>;
+const upsertConfig = (): {
+  target?: unknown;
+  targetWhere?: unknown;
+  set?: Record<string, unknown>;
+  setWhere?: unknown;
+} => mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as ReturnType<typeof upsertConfig>;
 
 /** Literal SQL text of a drizzle fragment, robust to both SQL-object
  *  shapes (donor idiom): real drizzle exposes queryChunks; the stub tag
