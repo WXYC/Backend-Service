@@ -101,11 +101,19 @@ describe('buildWorkList (BS#1591 play-priority work-list)', () => {
     expect(sql).toMatch(/"artists"/);
     expect(sql).toMatch(/"artist_search_alias"/);
     expect(sql).toMatch(/UNION/i);
-    // Eligibility arms: linked, library-by-name, floor, recency.
+    // Eligibility arms: linked, floor, recency, library-by-name.
     expect(sql).toMatch(/"album_id"\s+IS\s+NOT\s+NULL/i);
     expect(sql).toMatch(/EXISTS/i);
     expect(sql).toMatch(/plays\s*>=/i);
     expect(sql).toMatch(/interval\s*'1 day'/i);
+    // Arm ORDER is load-bearing (PG evaluates OR arms left-to-right with
+    // short-circuit): the free plays/recency comparisons must precede the
+    // correlated EXISTS subplan so most rows never pay the probe.
+    expect(sql.search(/plays\s*>=/i)).toBeLessThan(sql.search(/EXISTS/i));
+    // The probe keys on the join-bound p.artist_norm — re-computing
+    // normalize_artist_name inside the EXISTS would double-evaluate the
+    // regexp per probed row (no cross-clause CSE in PG).
+    expect(sql).toMatch(/la\.artist_norm\s*=\s*p\.artist_norm/i);
     // Priority order with the same-artist contiguity tiebreak.
     expect(sql).toMatch(/ORDER BY\s+p\.plays\s+DESC\s*,\s*p\.artist_norm\s+ASC\s*,\s*f\."id"\s+ASC/i);
     // Floor + recency are bound params.
@@ -200,5 +208,40 @@ describe('buildWorkList (BS#1591 play-priority work-list)', () => {
     expect(result.plays).toEqual([12]);
     expect(result.pendingTotal).toBe(4);
     expect(result.belowFloorSkipped).toBe(3);
+  });
+
+  // Loud-unwrap contract (review follow-up): a driver/ORM result-shape
+  // change must crash the run, never coerce to a green zero-work no-op.
+  // The `{rows: [...]}` wrapper (node-postgres shape) is the one known
+  // alternate contract and is accepted; anything else throws.
+  it('accepts the {rows: [...]} driver result wrapper on both statements', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce({ rows: pendingCount(5) })
+      .mockResolvedValueOnce({ rows: listRows });
+
+    const result = await buildWorkList({ playFloor: 5, recencyDays: 7, partitionFilter: null });
+
+    expect(result.pendingTotal).toBe(5);
+    expect(result.ids).toEqual([30, 10, 20]);
+    expect(result.belowFloorSkipped).toBe(2);
+  });
+
+  it('throws loudly on an unrecognized db.execute result shape instead of early-exiting as a zero-work run', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce({ rowCount: 1 });
+
+    await expect(buildWorkList({ playFloor: 5, recencyDays: 7, partitionFilter: null })).rejects.toThrow(
+      /unrecognized db\.execute\(\) result shape/
+    );
+  });
+
+  it('throws loudly when the pending count returns no row or a non-numeric total', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+    await expect(buildWorkList({ playFloor: 5, recencyDays: 7, partitionFilter: null })).rejects.toThrow(
+      /pending count returned 0 rows/
+    );
+
+    (db.execute as jest.Mock).mockReset();
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ pending_total: 'not-a-number' }]);
+    await expect(buildWorkList({ playFloor: 5, recencyDays: 7, partitionFilter: null })).rejects.toThrow(/non-numeric/);
   });
 });

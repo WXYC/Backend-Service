@@ -61,9 +61,27 @@ async function countScopedPending(sql) {
 
 /**
  * Mirror of the work-list statement in
- * `jobs/flowsheet-metadata-backfill/worklist.ts:buildWorkList`.
+ * `jobs/flowsheet-metadata-backfill/worklist.ts:buildWorkList`, INCLUDING
+ * its conditional assembly: the recency arm is omitted at recencyDays=0 and
+ * the whole eligibility clause at playFloor=0, so the floor-0 / recency-0
+ * tests below execute the same statement SHAPES production would render
+ * (a tautology stand-in would hide a dangling AND/OR in the omitted
+ * shapes). Arm order mirrors production too — free comparisons before the
+ * correlated EXISTS, which probes the join-bound p.artist_norm.
  */
 async function scopedWorkList(sql, { playFloor = PLAY_FLOOR, recencyDays = RECENCY_DAYS } = {}) {
+  const recencyArm = recencyDays > 0 ? sql`OR f."add_time" > now() - (${recencyDays} * interval '1 day')` : sql``;
+  const eligibility =
+    playFloor > 0
+      ? sql`AND (
+        f."album_id" IS NOT NULL
+        OR p.plays >= ${playFloor} ${recencyArm}
+        OR EXISTS (
+          SELECT 1 FROM library_artists la
+          WHERE la.artist_norm = p.artist_norm
+        )
+      )`
+      : sql``;
   return await sql`
     WITH plays AS (
       SELECT ${sql(SCHEMA)}.normalize_artist_name("artist_name") AS artist_norm, COUNT(*)::int AS plays
@@ -84,15 +102,7 @@ async function scopedWorkList(sql, { playFloor = PLAY_FLOOR, recencyDays = RECEN
       AND f."metadata_attempt_at" IS NULL
       AND f."add_time" < now() - interval '60 seconds'
       AND f."artist_name" ILIKE '%bs1591%'
-      AND (
-        f."album_id" IS NOT NULL
-        OR EXISTS (
-          SELECT 1 FROM library_artists la
-          WHERE la.artist_norm = ${sql(SCHEMA)}.normalize_artist_name(f."artist_name")
-        )
-        OR p.plays >= ${playFloor}
-        OR f."add_time" > now() - (${recencyDays} * interval '1 day')
-      )
+      ${eligibility}
     ORDER BY p.plays DESC, p.artist_norm ASC, f."id" ASC
   `;
 }
@@ -247,20 +257,20 @@ describe('flowsheet-metadata-backfill work-list (real PG, BS#1591)', () => {
     expect(pendingTotal - workList.length).toBe(2);
   });
 
-  it('playFloor=0 disables the floor: every pending row is eligible', async () => {
-    // The production statement omits the eligibility clause entirely at
-    // floor 0; a floor of 0 in the mirrored clause is equivalent
-    // (plays >= 0 is a tautology) and pins the same end state.
+  it('playFloor=0 disables the floor: every pending row is eligible (clause-omission shape, as production renders it)', async () => {
+    // The mirror omits the eligibility clause entirely at floor 0 exactly
+    // like production, so this executes the no-eligibility statement SHAPE
+    // against real PG — a dangling AND after the omission would fail here.
     const pendingTotal = await countScopedPending(sql);
     const workList = await scopedWorkList(sql, { playFloor: 0 });
 
     expect(workList.length).toBe(pendingTotal);
   });
 
-  it('recencyDays exemption is what saves the recent below-floor row', async () => {
-    // With the recency arm effectively disabled (0 days), the 1h-old
-    // below-floor non-library row falls out — proof its eligibility in the
-    // default run came from the recency arm, not another arm.
+  it('recencyDays exemption is what saves the recent below-floor row (arm-omission shape, as production renders it)', async () => {
+    // recencyDays=0 omits the recency arm from the disjunction (production's
+    // conditional), so this both proves the recent row's eligibility came
+    // from that arm AND executes the arm-omitted statement shape on real PG.
     const workList = await scopedWorkList(sql, { recencyDays: 0 });
     const artists = new Set(workList.map((r) => r.artist_name));
 

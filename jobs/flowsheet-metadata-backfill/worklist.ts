@@ -35,19 +35,28 @@
  * `pending_total - worklist_size` — from a cheap COUNT over the pending
  * partial index (#659/#660), not by re-running the expensive CTEs with the
  * complement predicate. The two statements share the `pendingPredicate`
- * fragment so they cannot drift. The count runs FIRST so an empty cohort
- * skips the expensive statement entirely; rows stamped or aging past the
- * race guard between the two statements can skew the subtraction by a hair,
- * which is why it is clamped at 0 — the field is observability, not control
- * flow.
+ * fragment so they cannot drift. The count runs FIRST as a cheap defensive
+ * guard (see the note at the early-exit below); the two statements are
+ * separate snapshots, so a row hard-deleted, marker-stamped by an
+ * out-of-band writer (the live CDC worker never writes the marker — it
+ * finalizes via `metadata_status`), or aging past the 60s guard in between
+ * can skew the subtraction by a few rows. That is why it is clamped at 0
+ * and why the retire-criterion docs call the residual approximate — the
+ * field is observability, not control flow.
  *
  * Cost: the `plays` CTE is a seq scan + regexp + GROUP BY over ~2.9M track
  * rows and the outer join computes `normalize_artist_name` per pending row.
  * Expected tens of seconds; the job container ships
  * `DB_STATEMENT_TIMEOUT_MS=300000` (Dockerfile.flowsheet-metadata-backfill)
- * so the budget is 5 minutes. Memory: two packed number arrays (~14MB at a
- * 900k cohort) steady-state, with a transient postgres-js row-object peak an
- * order of magnitude smaller than the host's headroom.
+ * so the budget is 5 minutes (measured ~31s cold on prod, 2026-07-16). A
+ * build failure aborts the run with zero rows drained and Sentry fires; if
+ * it ever becomes PERSISTENT (the realistic cause is a planner regression
+ * after an un-ANALYZEd bulk flowsheet UPDATE — see
+ * docs/bulk-update-playbook.md), the escalation levers are ANALYZE, raising
+ * `DB_STATEMENT_TIMEOUT_MS`, or materializing `plays` into a scratch table
+ * (README). Memory: two packed number arrays (~14MB at a 900k cohort)
+ * steady-state, with a transient postgres-js row-object peak an order of
+ * magnitude smaller than the host's headroom.
  */
 
 import { sql, type SQL } from 'drizzle-orm';
@@ -106,11 +115,35 @@ const pendingPredicate = (partitionFilter: SQL | null): SQL => sql`
 type WorkListRow = { id: number | string; plays: number | string };
 
 /**
+ * Loud unwrap of a `db.execute` result (same shape-contract rationale as
+ * `jobs/concerts-artist-resolver/query.ts:unwrapRows`, where the docstring
+ * names the hazard: a silent `[]`/`?? 0` fallback on a driver-contract
+ * change turns the cron into a healthy-looking zero-work no-op — green
+ * `finished` log, all-zero Sentry span — while the pending cohort piles up.
+ * A drizzle/driver upgrade that changes the result shape must crash the run
+ * loudly, not drain zero rows forever.) Exported for the orchestrator's
+ * batch loader and reconcile UPDATE.
+ */
+export const unwrapRows = <T>(result: unknown, statement: string): T[] => {
+  if (Array.isArray(result)) return result as T[];
+  if (result && typeof result === 'object' && Array.isArray((result as { rows?: unknown }).rows)) {
+    return (result as { rows: T[] }).rows;
+  }
+  throw new Error(`flowsheet-metadata-backfill: unrecognized db.execute() result shape for ${statement}`);
+};
+
+/**
  * Build the run's work-list. Two statements:
  *
  *   1. `COUNT(*)` of the whole pending cohort — served by the partial index
- *      from #659/#660, cheap. A zero count early-exits before the expensive
- *      statement (relevant once BS#895 re-scopes this cron to hourly).
+ *      from #659/#660, cheap. NOTE the zero-count early-exit below is a
+ *      defensive guard, not a steady-state optimization: with the floor on,
+ *      the deliberate below-floor residual keeps this count permanently
+ *      non-zero (the pending cohort no longer drains to literal 0), so the
+ *      exit fires only in floor-disabled fully-drained worlds, fresh
+ *      environments, and CI. A BS#895 hourly re-scope that wants a cheap
+ *      no-op probe needs a different key (e.g. an EXISTS over the
+ *      recency/linked arms) — this count cannot provide it.
  *   2. The priority SELECT: plays aggregate CTE + library-artists CTE +
  *      pending predicate + eligibility disjunction + priority ORDER BY.
  *
@@ -120,12 +153,21 @@ type WorkListRow = { id: number | string; plays: number | string };
  * single-shape assembly.
  */
 export const buildWorkList: BuildWorkListFn = async ({ playFloor, recencyDays, partitionFilter }) => {
-  const countRows = (await db.execute(sql`
+  const countRows = unwrapRows<{ pending_total: number | string }>(
+    await db.execute(sql`
     SELECT COUNT(*)::int AS pending_total
     FROM ${FLOWSHEET_TABLE} f
     WHERE ${pendingPredicate(partitionFilter)}
-  `)) as unknown as Array<{ pending_total: number | string }>;
-  const pendingTotal = Number(countRows?.[0]?.pending_total ?? 0);
+  `),
+    'pending count'
+  );
+  if (countRows.length !== 1) {
+    throw new Error(`flowsheet-metadata-backfill: pending count returned ${countRows.length} rows; expected 1`);
+  }
+  const pendingTotal = Number(countRows[0].pending_total);
+  if (!Number.isFinite(pendingTotal)) {
+    throw new Error(`flowsheet-metadata-backfill: pending count returned non-numeric ${JSON.stringify(countRows[0])}`);
+  }
 
   if (pendingTotal === 0) {
     return { ids: [], plays: [], pendingTotal: 0, belowFloorSkipped: 0 };
@@ -140,23 +182,46 @@ export const buildWorkList: BuildWorkListFn = async ({ playFloor, recencyDays, p
         OR f."add_time" > now() - (${recencyDays} * interval '1 day')`
       : sql``;
 
-  // Eligibility disjunction (decision 4): linked OR library-by-name OR at/
-  // above the floor OR recent. Omitted entirely at playFloor=0 — the floor
-  // is disabled and every pending row is eligible.
+  // Eligibility disjunction (decision 4): linked OR at/above the floor OR
+  // recent OR library-by-name. Omitted entirely at playFloor=0 — the floor
+  // is disabled and every pending row is eligible. Arm order is deliberate:
+  // PG evaluates OR arms left-to-right with short-circuit (the planner's
+  // cost reordering applies only to top-level ANDed quals), so the free
+  // comparisons run before the correlated EXISTS subplan — most library
+  // artists clear the plays arm without ever probing. The EXISTS keys on
+  // `p.artist_norm`, which the INNER JOIN already bound to
+  // `normalize_artist_name(f."artist_name")` (the function is total, so the
+  // join never drops a pending row); re-computing the normalize call inside
+  // the EXISTS would evaluate the inlined regexp a second time per probed
+  // row — PG does no cross-clause common-subexpression elimination.
   const eligibility =
     playFloor > 0
       ? sql`
       AND (
         f."album_id" IS NOT NULL
+        OR p.plays >= ${playFloor}${recencyArm}
         OR EXISTS (
           SELECT 1 FROM library_artists la
-          WHERE la.artist_norm = ${NORMALIZE_FN}(f."artist_name")
+          WHERE la.artist_norm = p.artist_norm
         )
-        OR p.plays >= ${playFloor}${recencyArm}
       )`
       : sql``;
 
-  const rows = (await db.execute(sql`
+  // `library_artists` reads `artist_search_alias` SOURCE-BLIND — a
+  // deliberate choice, sanctioned by BS#1591 decision 3's literal
+  // "OR-extended with `artist_search_alias.variant`". This diverges from
+  // jobs/concerts-artist-resolver/query.ts's SYNONYM/RELATIONAL source
+  // partition (BS#1383) on purpose: that partition guards FK *writes*
+  // (where a relational `discogs_member` alias mislabels data); here it
+  // only widens floor *eligibility*, and a row exempted via a member-alias
+  // still enriches under its own artist name — no mislabel is possible,
+  // and member-of-library-band names are typically cacheable anyway.
+  // CHOKEPOINT: if LML ever emits a broader relational source (collaborator
+  // / label-roster class), the alias consumer ingests it automatically and
+  // this CTE silently widens the exemption — revisit against
+  // SYNONYM_ALIAS_SOURCES then.
+  const rows = unwrapRows<WorkListRow>(
+    await db.execute(sql`
     WITH plays AS (
       SELECT ${NORMALIZE_FN}("artist_name") AS artist_norm, COUNT(*)::int AS plays
       FROM ${FLOWSHEET_TABLE}
@@ -173,20 +238,23 @@ export const buildWorkList: BuildWorkListFn = async ({ playFloor, recencyDays, p
     JOIN plays p ON p.artist_norm = ${NORMALIZE_FN}(f."artist_name")
     WHERE ${pendingPredicate(partitionFilter)}${eligibility}
     ORDER BY p.plays DESC, p.artist_norm ASC, f."id" ASC
-  `)) as unknown as WorkListRow[];
+  `),
+    'work-list select'
+  );
 
-  const resultRows = rows ?? [];
-  const ids = new Array<number>(resultRows.length);
-  const plays = new Array<number>(resultRows.length);
-  resultRows.forEach((row, i) => {
+  const ids = new Array<number>(rows.length);
+  const plays = new Array<number>(rows.length);
+  rows.forEach((row, i) => {
     ids[i] = Number(row.id);
     plays[i] = Number(row.plays);
   });
 
   // Exact complement of the eligibility disjunction within the pending set,
-  // computed by subtraction. Clamped: mid-build races (a row stamped by the
-  // worker, or a fresh row aging past the 60s guard, between the two
-  // statements) can skew by a hair, and this field is observability only.
+  // computed by subtraction. Clamped: mid-build races (a row hard-deleted,
+  // marker-stamped by an out-of-band writer — the CDC worker never writes
+  // the marker — or a fresh row aging past the 60s guard, between the two
+  // statements) can skew by a few rows, and this field is observability
+  // only; the retire-criterion comparison in the docs is approximate.
   const belowFloorSkipped = playFloor === 0 ? 0 : Math.max(0, pendingTotal - ids.length);
 
   return { ids, plays, pendingTotal, belowFloorSkipped };
