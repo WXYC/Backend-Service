@@ -1,15 +1,18 @@
 name: Set EC2 env var (manual)
 
 # One-shot ops workflow: upserts a single env var into the EC2 host's .env
-# file and restarts the backend container so it picks up the change. Avoids
-# a full image rebuild for env-var-only changes.
+# file and restarts the target container (backend or auth) so it picks up
+# the change. Avoids a full image rebuild for env-var-only changes.
 #
 # Usage:
 #   gh workflow run set-ec2-env-var.yml --ref main -f key=LML_API_KEY -f secret_name=LML_API_KEY
+#   gh workflow run set-ec2-env-var.yml --ref main -f key=AUTO_DJ_PASSWORD -f restart_target=auth
 #
 # The value is read from a GH secret whose name is provided via secret_name
 # (defaults to the same name as `key`). The value never appears in logs;
-# the verify step prints only key + length.
+# the verify step prints only key + length. restart_target selects which
+# container is stopped+run to re-read .env (backend by default; auth for
+# vars only the auth service consumes, e.g. AUTO_DJ_*).
 
 on:
   workflow_dispatch:
@@ -22,6 +25,14 @@ on:
         description: 'GH secret name holding the value (defaults to `key`)'
         required: false
         type: string
+      restart_target:
+        description: 'Container to stop+run so it re-reads .env. auth for AUTO_DJ_*/auth-only vars; backend otherwise.'
+        required: false
+        default: 'backend'
+        type: choice
+        options:
+          - backend
+          - auth
 
 # Workflow-level GITHUB_TOKEN scope. No job in this file pushes code,
 # comments on PRs, or creates releases; all writes to external services
@@ -45,6 +56,16 @@ jobs:
           # client — there is no companion `WXYC_CANARY_OIDC_CLIENT_SECRET`
           # by design; do not add one.
           WXYC_CANARY_OIDC_CLIENT_ID: ${{ secrets.WXYC_CANARY_OIDC_CLIENT_ID }}
+          # Auto-DJ service-account bootstrap (WXYC/Backend-Service#1644).
+          # AUTO_DJ_PASSWORD is a genuine secret; CREATE_AUTO_DJ_USER ('TRUE')
+          # and AUTO_DJ_EMAIL ('auto-dj@wxyc.org') are non-sensitive config
+          # carried through the same allowlist so the whole bootstrap env can
+          # be upserted without an image rebuild. Push each with a separate
+          # workflow run (one key per invocation), and pass restart_target=auth
+          # — these vars are read only at auth-service startup.
+          AUTO_DJ_PASSWORD: ${{ secrets.AUTO_DJ_PASSWORD }}
+          CREATE_AUTO_DJ_USER: ${{ secrets.CREATE_AUTO_DJ_USER }}
+          AUTO_DJ_EMAIL: ${{ secrets.AUTO_DJ_EMAIL }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -53,6 +74,9 @@ jobs:
             LML_API_KEY) VALUE="$LML_API_KEY" ;;
             LIBRARY_METADATA_URL) VALUE="$LIBRARY_METADATA_URL" ;;
             WXYC_CANARY_OIDC_CLIENT_ID) VALUE="$WXYC_CANARY_OIDC_CLIENT_ID" ;;
+            AUTO_DJ_PASSWORD) VALUE="$AUTO_DJ_PASSWORD" ;;
+            CREATE_AUTO_DJ_USER) VALUE="$CREATE_AUTO_DJ_USER" ;;
+            AUTO_DJ_EMAIL) VALUE="$AUTO_DJ_EMAIL" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1
@@ -74,24 +98,28 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_ENV"
           echo "KEY=$KEY" >> "$GITHUB_ENV"
+          # Which container re-reads .env after the upsert. Forwarded to the
+          # SSH step via `envs:` (same reason as KEY above).
+          echo "TARGET=${{ inputs.restart_target }}" >> "$GITHUB_ENV"
           echo "length=${#VALUE}" >> "$GITHUB_OUTPUT"
 
-      - name: Upsert in .env + restart backend container
+      - name: Upsert in .env + restart target container
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: KEY,VALUE
+          envs: KEY,VALUE,TARGET
           script_stop: true
           script: |
             set -euo pipefail
 
-            # KEY/VALUE are passed via the `envs:` field above. Quoting VALUE
-            # with double-quotes so a base64 = doesn't trip up the shell.
+            # KEY/VALUE/TARGET are passed via the `envs:` field above. Quoting
+            # VALUE with double-quotes so a base64 = doesn't trip up the shell.
             if [ -z "${KEY:-}" ] || [ -z "${VALUE:-}" ]; then
               echo "Missing KEY or VALUE in script env"; exit 1
             fi
+            TARGET="${TARGET:-backend}"
 
             ENV_FILE="$HOME/.env"
             test -f "$ENV_FILE" || { echo "$ENV_FILE missing on host"; exit 1; }
@@ -112,26 +140,30 @@ jobs:
             echo "Lines after:  $(wc -l < "$ENV_FILE")"
             grep -c "^${KEY}=" "$ENV_FILE" | xargs -I{} echo "Occurrences of ${KEY} in .env: {}"
 
-            # Restart the backend container so it picks up the new env var.
-            # The container was originally started with --env-file .env, so
-            # restarting alone is not enough — Docker re-reads --env-file only
-            # on `docker run`, not `docker restart`. Stop + start with the
-            # last-deployed image.
-            CURRENT_IMAGE=$(docker inspect -f '{{.Config.Image}}' backend 2>/dev/null || echo "")
-            CURRENT_CMD=$(docker inspect -f '{{json .Config.Cmd}}' backend 2>/dev/null || echo "[]")
-            CURRENT_PORT=$(docker port backend 8080/tcp 2>/dev/null | head -1 | awk -F: '{print $NF}' || echo "")
+            # Restart the TARGET container so it picks up the new env var. Each
+            # service runs as its own container named after the target, sharing
+            # ~/.env (see .github/actions/deploy-service/action.yml). Auth-only
+            # vars (e.g. the AUTO_DJ_* bootstrap, consumed at auth startup in
+            # apps/auth/create-auto-dj-user.ts) MUST restart `auth`, not
+            # `backend`, or the upsert lands in .env but never takes effect.
+            # The container was started with --env-file .env, and Docker
+            # re-reads --env-file only on `docker run`, not `docker restart`,
+            # so stop+run with the last-deployed image.
+            CURRENT_IMAGE=$(docker inspect -f '{{.Config.Image}}' "$TARGET" 2>/dev/null || echo "")
+            CURRENT_PORT=$(docker port "$TARGET" 8080/tcp 2>/dev/null | head -1 | awk -F: '{print $NF}' || echo "")
 
             if [ -z "$CURRENT_IMAGE" ]; then
-              echo "::error::No 'backend' container found on EC2. Was it ever deployed?"
+              echo "::error::No '$TARGET' container found on EC2. Was it ever deployed?"
               exit 1
             fi
 
+            echo "Restart target: $TARGET"
             echo "Current image: $CURRENT_IMAGE"
             echo "Current published port: $CURRENT_PORT"
 
-            docker stop backend
-            docker rm backend
-            docker run -d --name backend \
+            docker stop "$TARGET"
+            docker rm "$TARGET"
+            docker run -d --name "$TARGET" \
               -p "${CURRENT_PORT:-8080}:8080" \
               --restart unless-stopped \
               --memory=450m \
@@ -139,28 +171,23 @@ jobs:
               "$CURRENT_IMAGE"
 
             sleep 5
-            docker ps --filter name=backend --format '{{.Status}}'
+            docker ps --filter "name=$TARGET" --format '{{.Status}}'
 
-      - name: Health check
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script_stop: true
-          script: |
-            set -euo pipefail
+            # Health check the container we just restarted, on its own
+            # published port (not a hardcoded 8080 — backend and auth publish
+            # on different host ports).
+            HEALTH_PORT="${CURRENT_PORT:-8080}"
             for i in 1 2 3 4 5 6; do
-              if curl -sf -m 5 http://localhost:8080/healthcheck > /dev/null; then
+              if curl -sf -m 5 "http://localhost:${HEALTH_PORT}/healthcheck" > /dev/null; then
                 echo "Health attempt $i: ok"
                 exit 0
               fi
               echo "Health attempt $i: not ready, retrying..."
               sleep 5
             done
-            echo "::error::Backend healthcheck failed after 6 attempts"
+            echo "::error::$TARGET healthcheck failed on port $HEALTH_PORT after 6 attempts"
             exit 1
 
       - name: Summary
         run: |
-          echo "Upserted ${{ env.KEY }} (${{ steps.resolve.outputs.length }} chars) on EC2 and restarted backend container."
+          echo "Upserted ${{ env.KEY }} (${{ steps.resolve.outputs.length }} chars) on EC2 and restarted the ${{ env.TARGET }} container."
