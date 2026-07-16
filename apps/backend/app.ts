@@ -22,6 +22,7 @@ import { ses_events_route } from './routes/ses-events.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
 import { concerts_route } from './routes/concerts.route.js';
+import { album_reviews_route } from './routes/album-reviews.route.js';
 import { startPlaylistProxy, stopPlaylistProxy } from './services/playlist-proxy.service.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
 import {
@@ -98,6 +99,9 @@ app.use('/playlists', playlist_route);
 
 // On Tour concerts feed (anonymous auth, pure DB read) — BS#1603
 app.use('/concerts', concerts_route);
+
+// Form-review archive read (anonymous auth, pure DB read) — ADR 0011
+app.use('/album-reviews', album_reviews_route);
 
 // Business logic routes
 app.use('/labels', labels_route);
