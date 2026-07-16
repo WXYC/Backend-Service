@@ -82,7 +82,9 @@ type ContentColumn = (typeof SET_CONTENT_COLUMNS)[number];
 
 /** The ON CONFLICT `set`: every content column from the single source of
  *  truth, plus the SQL-side `last_modified` refresh. */
-const buildConflictSet = (content: SubmissionContent): { [K in ContentColumn]: SubmissionContent[K] } & {
+const buildConflictSet = (
+  content: SubmissionContent
+): { [K in ContentColumn]: SubmissionContent[K] } & {
   last_modified: SQL;
 } => ({
   ...(Object.fromEntries(SET_CONTENT_COLUMNS.map((col) => [col, content[col]])) as {

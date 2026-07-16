@@ -1,7 +1,7 @@
 /**
  * Unit tests for the album-reviews-etl library link pass: the pure
  * singleton-match decision (exactly one library match links; zero or many
- * never write), the norm-batched orchestration over injected loaders, and
+ * never write), the single-sweep orchestration over injected loaders, and
  * the no-overwrite UPDATE guard (`WHERE album_id IS NULL` — manual
  * corrections always win).
  */
@@ -32,13 +32,18 @@ const submission = (overrides: Partial<UnlinkedSubmission> = {}): UnlinkedSubmis
   ...overrides,
 });
 
-const candidate = (overrides: Partial<LibraryCandidate> = {}): LibraryCandidate => ({
-  id: 501,
-  album_title: 'DOGA',
-  norm_primary: 'juana molina',
-  norm_album_artist: '',
-  ...overrides,
-});
+const candidate = (overrides: Partial<LibraryCandidate> = {}): LibraryCandidate => {
+  const album_title = overrides.album_title ?? 'DOGA';
+  return {
+    id: 501,
+    album_title,
+    norm_primary: 'juana molina',
+    norm_album_artist: '',
+    // Mirrors enrichCandidateRow: computed once per candidate at load time.
+    norm_album_title: normalizeAlbumTitle(album_title),
+    ...overrides,
+  };
+};
 
 describe('decideLink (pure singleton rule)', () => {
   it('links when exactly one library row matches artist AND album', () => {
