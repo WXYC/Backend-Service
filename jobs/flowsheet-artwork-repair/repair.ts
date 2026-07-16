@@ -70,11 +70,7 @@ export type LinkedAlbum = {
 };
 
 export type RepairOutcome =
-  | 'free_form_repaired'
-  | 'free_form_raced'
-  | 'linked_repaired'
-  | 'linked_raced'
-  | 'still_null_after_lml';
+  'free_form_repaired' | 'free_form_raced' | 'linked_repaired' | 'linked_raced' | 'still_null_after_lml';
 
 /**
  * Synthesize the three search URLs the runtime path falls back to on

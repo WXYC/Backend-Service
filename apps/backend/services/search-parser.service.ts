@@ -54,13 +54,7 @@ const isDateRange = (value: string): boolean => {
 };
 
 export type FlowsheetField =
-  | 'artist_name'
-  | 'track_title'
-  | 'album_title'
-  | 'record_label'
-  | 'dj_name'
-  | 'add_time'
-  | 'add_time_range';
+  'artist_name' | 'track_title' | 'album_title' | 'record_label' | 'dj_name' | 'add_time' | 'add_time_range';
 
 export const FLOWSHEET_PARSER_CONFIG: ParserConfig<FlowsheetField> = {
   fieldPrefixes: {

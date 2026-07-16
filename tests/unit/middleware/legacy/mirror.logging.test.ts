@@ -133,8 +133,7 @@ describe('mirror.logging', () => {
     test('truncates string values in extra payload', () => {
       captureMirrorException(new Error('boom'), { mirrorCmdId: 'cmd-1' }, { huge: 'x'.repeat(5000) });
       const extras = mockSetExtra.mock.calls.find((c) => (c[0] as string) === 'mirror') as
-        | [string, { huge: string }]
-        | undefined;
+        [string, { huge: string }] | undefined;
       expect(extras).toBeDefined();
       expect(extras[1].huge.length).toBeLessThanOrEqual(1024);
     });

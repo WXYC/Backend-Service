@@ -17,9 +17,8 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
 type SpanLike = { setAttribute: jest.Mock; setAttributes: jest.Mock };
 type SpanOpts = { name: string; op: string; attributes?: Record<string, unknown> };
 const spanInstance: SpanLike = { setAttribute: jest.fn(), setAttributes: jest.fn() };
-const mockStartSpan = jest.fn(
-  <T>(_opts: SpanOpts, callback: (span: SpanLike) => T | Promise<T>): Promise<T> =>
-    Promise.resolve(callback(spanInstance))
+const mockStartSpan = jest.fn(<T>(_opts: SpanOpts, callback: (span: SpanLike) => T | Promise<T>): Promise<T> =>
+  Promise.resolve(callback(spanInstance))
 );
 jest.mock('@sentry/node', () => ({
   startSpan: <T>(opts: SpanOpts, callback: (span: SpanLike) => T | Promise<T>): Promise<T> =>

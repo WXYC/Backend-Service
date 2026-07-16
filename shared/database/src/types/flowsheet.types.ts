@@ -13,14 +13,7 @@
  */
 
 export type FlowsheetEntryType =
-  | 'track'
-  | 'show_start'
-  | 'show_end'
-  | 'dj_join'
-  | 'dj_leave'
-  | 'talkset'
-  | 'breakpoint'
-  | 'message';
+  'track' | 'show_start' | 'show_end' | 'dj_join' | 'dj_leave' | 'talkset' | 'breakpoint' | 'message';
 
 /** Base fields shared by all entry types */
 interface BaseEntry {

@@ -15,10 +15,7 @@
 
 /** `artist_search_alias.source` enum values that LML emits. */
 export type ArtistSearchAliasSource =
-  | 'discogs_name_variation'
-  | 'discogs_alias'
-  | 'discogs_member'
-  | 'wxyc_library_alt';
+  'discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt';
 
 /** `artist_search_alias.method` enum values that LML emits. */
 export type ArtistSearchAliasMethod = 'name_variation' | 'alias_curated' | 'member_group' | 'alt_curated';

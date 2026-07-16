@@ -233,8 +233,7 @@ describe('MirrorCommandQueue', () => {
 
       expect(mockMkdir).toHaveBeenCalledWith('/tmp/test-mirror-logs', { recursive: true });
       const fatalCall = mockWriteFile.mock.calls.find((c) => (c[0] as string).includes('queue-fatal-ring-')) as
-        | [string, string]
-        | undefined;
+        [string, string] | undefined;
       expect(fatalCall).toBeDefined();
 
       const [filePath, content] = fatalCall;
@@ -262,8 +261,7 @@ describe('MirrorCommandQueue', () => {
       await jest.advanceTimersByTimeAsync(50);
 
       const fatalCall = mockWriteFile.mock.calls.find((c) => (c[0] as string).includes('queue-fatal-ring-')) as
-        | [string, string]
-        | undefined;
+        [string, string] | undefined;
       expect(fatalCall).toBeDefined();
       const parsed = JSON.parse(fatalCall[1]);
       expect(parsed.truncated).toBe(true);
@@ -281,8 +279,7 @@ describe('MirrorCommandQueue', () => {
       await jest.advanceTimersByTimeAsync(50);
 
       const secondaryCall = mockWriteFile.mock.calls.find((c) => (c[0] as string).includes('queue-secondary-ring-')) as
-        | [string, string]
-        | undefined;
+        [string, string] | undefined;
       expect(secondaryCall).toBeDefined();
       const parsed = JSON.parse(secondaryCall[1]);
       expect(parsed.reportType).toBe('secondary');
@@ -331,8 +328,7 @@ describe('MirrorCommandQueue', () => {
 
       // Find the syncComplete broadcast
       const completeCall = mockBroadcast.mock.calls.find((c) => (c[1] as { type: string }).type === 'syncComplete') as
-        | [string, { type: string; payload: MirrorCommand }]
-        | undefined;
+        [string, { type: string; payload: MirrorCommand }] | undefined;
       expect(completeCall).toBeDefined();
       const payload = completeCall[1].payload;
       expect(payload).toHaveProperty('id');

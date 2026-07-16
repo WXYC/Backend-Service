@@ -55,9 +55,4 @@ export interface SesDeliveryDelayEvent extends SesEventBase {
 }
 
 export type SesEvent =
-  | SesSendEvent
-  | SesDeliveryEvent
-  | SesBounceEvent
-  | SesComplaintEvent
-  | SesRejectEvent
-  | SesDeliveryDelayEvent;
+  SesSendEvent | SesDeliveryEvent | SesBounceEvent | SesComplaintEvent | SesRejectEvent | SesDeliveryDelayEvent;
