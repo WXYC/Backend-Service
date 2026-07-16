@@ -72,7 +72,15 @@ const mockDb = db as unknown as { _chain: Record<string, jest.Mock> };
  *  will not be shared" promise protects; the rest are internal ETL
  *  bookkeeping. */
 const PII_COLUMNS = ['reviewer_raw', 'social_consent_raw'];
-const INTERNAL_COLUMNS = [...PII_COLUMNS, 'source', 'source_key', 'norm_artist', 'norm_album', 'add_date', 'last_modified'];
+const INTERNAL_COLUMNS = [
+  ...PII_COLUMNS,
+  'source',
+  'source_key',
+  'norm_artist',
+  'norm_album',
+  'add_date',
+  'last_modified',
+];
 
 const WIRE_KEYS = [
   'id',
