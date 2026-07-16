@@ -343,21 +343,34 @@ export const updateEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entr
   await mirrorUpdateEntry(tubafrenzyId, body);
 });
 
-export const deleteEntry = createBackendMirrorMiddleware<FSEntry>(async (req, removed) => {
-  const statements: string[] = [];
+export const deleteEntry = createBackendMirrorMiddleware<FSEntry>(async (_req, removed) => {
+  // Delete by the tubafrenzy surrogate key persisted on the row at insert
+  // (`legacy_entry_id` — the same identity uses #1/#3 key their `ON CONFLICT`
+  // on; see addEntry's persist above and `shared/database/src/schema.ts`).
+  // BS#1101.
+  //
+  // The prior implementation resolved the show via `MAX(ID)` and matched the
+  // row positionally by `SEQUENCE_WITHIN_SHOW = play_order`. Both predicates
+  // are wrong:
+  //   - `MAX(ID)` is the newest tubafrenzy show, not the deleted entry's, so
+  //     correcting an older show deletes from the wrong show.
+  //   - Even for the right show, tubafrenzy's `SEQUENCE_WITHIN_SHOW` (assigned
+  //     at insert as `MAX(SEQUENCE_WITHIN_SHOW)+1` into `@SEQ_NUM`; see addEntry
+  //     above) and BS `play_order` are assigned independently and diverge — BS
+  //     `play_order` counts lifecycle markers tubafrenzy never materializes as
+  //     entry rows — so the positional predicate misses even in the happy path.
+  //
+  // When `legacy_entry_id` is null — a residual pre-mirror row, or a row whose
+  // mirror POST failed — there is no safe target, so no-op (return no
+  // statements) rather than guess. The middleware skips the enqueue on empty.
+  // Log the skip: a failed insert-mirror leaves a tubafrenzy row this delete
+  // can never reach, so the residual is at least countable in the logs.
+  if (removed.legacy_entry_id == null) {
+    console.warn('[mirror] Skipping tubafrenzy delete: no legacy_entry_id on removed row', removed.id);
+    return [];
+  }
 
-  // Resolve the RADIO_SHOW_ID first
-  statements.push(`SET @RS_ID := (SELECT IFNULL(MAX(ID), 0) FROM ${RADIO_SHOW_TABLE});`);
-
-  // Delete by RADIO_SHOW_ID and SEQUENCE_WITHIN_SHOW
-  statements.push(
-    `DELETE FROM ${FLOWSHEET_ENTRY_TABLE}
-      WHERE RADIO_SHOW_ID = @RS_ID
-        AND SEQUENCE_WITHIN_SHOW = ${safeSqlNum(removed.play_order)}
-      LIMIT 1;`
-  );
-
-  return statements;
+  return [`DELETE FROM ${FLOWSHEET_ENTRY_TABLE} WHERE ID = ${safeSqlNum(removed.legacy_entry_id)} LIMIT 1;`];
 });
 
 /*

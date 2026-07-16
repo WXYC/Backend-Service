@@ -272,20 +272,11 @@ describe('flowsheet.mirror SQL generation', () => {
       });
     });
 
-    describe('deleteEntry SQL', () => {
-      it('generates DELETE statement by RADIO_SHOW_ID and SEQUENCE_WITHIN_SHOW', () => {
-        const entry = createMockEntry({ play_order: 3 });
-        const sql = `DELETE FROM ${FLOWSHEET_ENTRY_TABLE}
-      WHERE RADIO_SHOW_ID = @RS_ID
-        AND SEQUENCE_WITHIN_SHOW = ${safeSqlNum(entry.play_order)}
-      LIMIT 1;`;
-
-        expect(sql).toContain('DELETE FROM');
-        expect(sql).toContain('RADIO_SHOW_ID = @RS_ID');
-        expect(sql).toContain('SEQUENCE_WITHIN_SHOW = 3');
-        expect(sql).toContain('LIMIT 1');
-      });
-    });
+    // deleteEntry SQL keys on the tubafrenzy surrogate `legacy_entry_id`, not
+    // the positional `RADIO_SHOW_ID`/`SEQUENCE_WITHIN_SHOW` predicate this block
+    // used to assert (BS#1101). The real coverage — which drives the middleware
+    // and inspects the enqueued statement — lives in
+    // `delete-entry-legacy-id.test.ts`.
   });
 
   describe('SQL value escaping', () => {
