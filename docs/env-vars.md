@@ -204,6 +204,13 @@ The triangle-shows ETL (`jobs/triangle-shows-etl/`) mirrors the [triangle-shows]
 
 - `TRIANGLE_SHOWS_URL` — Base URL of the triangle-shows API, no trailing slash (a trailing slash is stripped defensively). Required; the job fails fast at startup when unset.
 
+The album-reviews ETL (`jobs/album-reviews-etl/`) mirrors the "Album Review Responses" Google Form spreadsheet into `album_review_submissions` nightly (ADR 0011). No SSH tunnel and no sync-notify — it reads the Sheets REST v4 `values.get` surface authed by a Google service-account JWT (scope `spreadsheets.readonly`; the SA email must have Viewer access to the spreadsheet). All resolvers fail fast at startup when a required var is unset or malformed.
+
+- `ALBUM_REVIEWS_SHEET_ID` — The spreadsheet id (the long token in the sheet's URL). Required.
+- `ALBUM_REVIEWS_SHEET_RANGE` — The tab the form writes to (default `Form Responses 1`). A bare sheet name reads the whole tab; override only if the form is ever re-pointed at a new tab.
+- `GOOGLE_SERVICE_ACCOUNT_JSON_B64` — Base64 of the service account's downloaded JSON key file (`base64 -i key.json`). Required. Base64 because the key JSON is multi-line and must survive the single-line `KEY=VALUE` constraint of the EC2 `.env` and the set-ec2-env-var workflow. Must decode to JSON containing `client_email` and `private_key`.
+- `DRY_RUN` — Locked truthy values: `true`, `1` (case-insensitive). When set, the run fetches + maps + evaluates the run guards but skips every UPSERT and the link pass, emitting a single locked-schema JSON report line on stdout (see `jobs/album-reviews-etl/README.md`). Harmless to forget — the UPSERT is idempotent across reruns.
+
 ### One-shot backfill jobs
 
 One-shot backfill jobs under `jobs/*-backfill/` run via `Manual Build & Deploy` and `docker run`. They share a small set of operator knobs:
