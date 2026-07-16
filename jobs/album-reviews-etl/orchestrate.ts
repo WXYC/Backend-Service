@@ -168,20 +168,21 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
     // silently overwrite the earlier one (reachable when two timestamp-less
     // rows share artist+album+reviewer-hash). First occurrence wins; the
     // duplicate is counted and skipped, never written.
-    if (result.content.source_key !== null && seenKeys.has(result.content.source_key)) {
+    const sourceKey = result.content.source_key;
+    if (sourceKey != null && seenKeys.has(sourceKey)) {
       totals.duplicate_key_skipped += 1;
-      log('warn', 'duplicate_key', `sheet row ${sheetRow} duplicates source_key ${result.content.source_key}; skipping`, {
+      log('warn', 'duplicate_key', `sheet row ${sheetRow} duplicates source_key ${sourceKey}; skipping`, {
         sheet_row: sheetRow,
-        source_key: result.content.source_key,
+        source_key: sourceKey,
       });
       warnOnce(
         `${JOB_NAME}: in-run duplicate source_key — a later sheet row would overwrite an earlier one; skipped`,
         'duplicate_key',
-        { source_key: result.content.source_key }
+        { source_key: sourceKey }
       );
       continue;
     }
-    if (result.content.source_key !== null) seenKeys.add(result.content.source_key);
+    if (sourceKey != null) seenKeys.add(sourceKey);
     mapped.push({ content: result.content, rowIndex: sheetRow });
   }
 

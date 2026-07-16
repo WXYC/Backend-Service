@@ -5,7 +5,7 @@
  *
  * Candidates are the still-unlinked rows (`album_id IS NULL AND
  * artist_name IS NOT NULL`): all rows on the first run, new and
- * previously-unmatched rows thereafter. One batched query sweeps
+ * previously-unmatched rows thereafter. One query sweeps
  * `library` on the artist leg using the migration-0092 SQL twin
  * `wxyc_schema.normalize_artist_name(...)` over BOTH `artist_name` and
  * `album_artist` (compilations file the artist in the latter), then the
@@ -31,17 +31,14 @@ const SUBMISSIONS_TABLE = sql.raw(`"${SCHEMA}"."album_review_submissions"`);
 const LIBRARY_TABLE = sql.raw(`"${SCHEMA}"."library"`);
 const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
 
-/** Distinct norm_artist values per candidate sweep. The whole corpus is
- *  ~1.6k rows / fewer distinct artists, so this is 2-8 round-trips. */
-const NORM_BATCH_SIZE = 200;
-
 export type UnlinkedSubmission = {
   id: number;
   norm_artist: string;
   norm_album: string;
 };
 
-export type LibraryCandidate = {
+/** Raw SQL projection from the library sweep. */
+type LibraryCandidateRow = {
   id: number;
   album_title: string;
   /** `normalize_artist_name(coalesce(artist_name, ''))`, computed in SQL. */
@@ -49,6 +46,21 @@ export type LibraryCandidate = {
   /** `normalize_artist_name(coalesce(album_artist, ''))`, computed in SQL. */
   norm_album_artist: string;
 };
+
+export type LibraryCandidate = LibraryCandidateRow & {
+  /** `normalizeAlbumTitle(album_title)`, computed ONCE per candidate at
+   *  load time — decideLink runs per (submission × candidate), and
+   *  re-normalizing there would be K×M redundant regex passes for a
+   *  multi-review artist. */
+  norm_album_title: string;
+};
+
+/** TS-side half of the candidate projection (no SQL twin for album
+ *  normalization — the reason the enrichment lives here, once per row). */
+export const enrichCandidateRow = (row: LibraryCandidateRow): LibraryCandidate => ({
+  ...row,
+  norm_album_title: normalizeAlbumTitle(row.album_title),
+});
 
 export type LinkDecision =
   | { kind: 'linked'; library_id: number }
@@ -85,22 +97,29 @@ export const loadUnlinked = async (): Promise<UnlinkedSubmission[]> => {
 };
 
 /**
- * One batched sweep of `library` for every row whose normalized
- * artist_name OR album_artist is in `norms`. The 0092 functional indexes
- * drive the artist_name leg; the album comparison happens TS-side.
+ * One sweep of `library` for every row whose normalized artist_name OR
+ * album_artist is in `norms`. The MATERIALIZED CTE forces each
+ * normalize_artist_name to be evaluated exactly once per library row per
+ * leg — inlined, the OR-across-both-legs predicate re-evaluates the
+ * functions in both the WHERE and the projection (up to 4× per row).
+ * The album comparison happens TS-side (`enrichCandidateRow`).
  */
 export const loadCandidates = async (norms: string[]): Promise<LibraryCandidate[]> => {
   const result: unknown = await db.execute(sql`
-    SELECT
-      "id",
-      "album_title",
-      ${NORMALIZE_FN}(coalesce("artist_name", '')) AS norm_primary,
-      ${NORMALIZE_FN}(coalesce("album_artist", '')) AS norm_album_artist
-    FROM ${LIBRARY_TABLE}
-    WHERE ${NORMALIZE_FN}(coalesce("artist_name", '')) = ANY(${norms})
-       OR ${NORMALIZE_FN}(coalesce("album_artist", '')) = ANY(${norms})
+    WITH normalized AS MATERIALIZED (
+      SELECT
+        "id",
+        "album_title",
+        ${NORMALIZE_FN}(coalesce("artist_name", '')) AS norm_primary,
+        ${NORMALIZE_FN}(coalesce("album_artist", '')) AS norm_album_artist
+      FROM ${LIBRARY_TABLE}
+    )
+    SELECT "id", "album_title", norm_primary, norm_album_artist
+    FROM normalized
+    WHERE norm_primary = ANY(${norms})
+       OR norm_album_artist = ANY(${norms})
   `);
-  return unwrapRows<LibraryCandidate>(result);
+  return unwrapRows<LibraryCandidateRow>(result).map(enrichCandidateRow);
 };
 
 /**
@@ -126,7 +145,7 @@ export const decideLink = (submission: UnlinkedSubmission, candidates: LibraryCa
   for (const c of candidates) {
     const artistMatches = c.norm_primary === submission.norm_artist || c.norm_album_artist === submission.norm_artist;
     if (!artistMatches) continue;
-    if (normalizeAlbumTitle(c.album_title) !== submission.norm_album) continue;
+    if (c.norm_album_title !== submission.norm_album) continue;
     matches.add(c.id);
   }
   if (matches.size === 1) return { kind: 'linked', library_id: [...matches][0] };
@@ -153,8 +172,9 @@ export const linkSubmissions = async (deps: Partial<LinkDeps> = {}): Promise<Lin
   const unlinked = await load();
   if (unlinked.length === 0) return totals;
 
-  // Group submissions by norm_artist so each distinct artist is fetched
-  // once, then sweep the library in bounded batches.
+  // Group submissions by norm_artist so each distinct artist is decided
+  // against one candidate bucket, then sweep the library ONCE — the whole
+  // distinct-norm set (~hundreds) fits a single `= ANY` comfortably.
   const byNorm = new Map<string, UnlinkedSubmission[]>();
   for (const submission of unlinked) {
     const group = byNorm.get(submission.norm_artist);
@@ -163,38 +183,34 @@ export const linkSubmissions = async (deps: Partial<LinkDeps> = {}): Promise<Lin
   }
 
   const norms = [...byNorm.keys()];
-  for (let offset = 0; offset < norms.length; offset += NORM_BATCH_SIZE) {
-    const batch = norms.slice(offset, offset + NORM_BATCH_SIZE);
-    const batchCandidates = await candidates(batch);
+  const allCandidates = await candidates(norms);
 
-    // Index candidates under every norm they can satisfy (either leg).
-    const candidatesByNorm = new Map<string, LibraryCandidate[]>();
-    const indexUnder = (norm: string, candidate: LibraryCandidate): void => {
-      const bucket = candidatesByNorm.get(norm);
-      if (bucket) bucket.push(candidate);
-      else candidatesByNorm.set(norm, [candidate]);
-    };
-    for (const candidate of batchCandidates) {
-      indexUnder(candidate.norm_primary, candidate);
-      if (candidate.norm_album_artist !== candidate.norm_primary) {
-        indexUnder(candidate.norm_album_artist, candidate);
-      }
+  // Index candidates under every norm they can satisfy (either leg).
+  const candidatesByNorm = new Map<string, LibraryCandidate[]>();
+  const indexUnder = (norm: string, candidate: LibraryCandidate): void => {
+    const bucket = candidatesByNorm.get(norm);
+    if (bucket) bucket.push(candidate);
+    else candidatesByNorm.set(norm, [candidate]);
+  };
+  for (const candidate of allCandidates) {
+    indexUnder(candidate.norm_primary, candidate);
+    if (candidate.norm_album_artist !== candidate.norm_primary) {
+      indexUnder(candidate.norm_album_artist, candidate);
     }
+  }
 
-    for (const norm of batch) {
-      const group = byNorm.get(norm) ?? [];
-      const artistCandidates = candidatesByNorm.get(norm) ?? [];
-      for (const submission of group) {
-        const decision = decideLink(submission, artistCandidates);
-        if (decision.kind === 'linked') {
-          // The guarded UPDATE can decline (row linked out-of-band since
-          // the SELECT); only count rows actually written.
-          if (await write(submission.id, decision.library_id)) totals.linked += 1;
-        } else if (decision.kind === 'ambiguous') {
-          totals.link_ambiguous += 1;
-        } else {
-          totals.link_unmatched += 1;
-        }
+  for (const [norm, group] of byNorm) {
+    const artistCandidates = candidatesByNorm.get(norm) ?? [];
+    for (const submission of group) {
+      const decision = decideLink(submission, artistCandidates);
+      if (decision.kind === 'linked') {
+        // The guarded UPDATE can decline (row linked out-of-band since
+        // the SELECT); only count rows actually written.
+        if (await write(submission.id, decision.library_id)) totals.linked += 1;
+      } else if (decision.kind === 'ambiguous') {
+        totals.link_ambiguous += 1;
+      } else {
+        totals.link_unmatched += 1;
       }
     }
   }
