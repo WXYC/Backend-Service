@@ -63,9 +63,7 @@ export const enrichCandidateRow = (row: LibraryCandidateRow): LibraryCandidate =
 });
 
 export type LinkDecision =
-  | { kind: 'linked'; library_id: number }
-  | { kind: 'ambiguous'; library_ids: number[] }
-  | { kind: 'unmatched' };
+  { kind: 'linked'; library_id: number } | { kind: 'ambiguous'; library_ids: number[] } | { kind: 'unmatched' };
 
 export type LinkTotals = {
   linked: number;
