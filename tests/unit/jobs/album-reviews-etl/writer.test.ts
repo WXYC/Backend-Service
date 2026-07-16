@@ -170,7 +170,10 @@ describe('upsertSubmission', () => {
     const n = node as { sql?: readonly string[]; values?: unknown[]; queryChunks?: unknown[] };
     const text = Array.isArray(n.sql) ? n.sql.join('|') : '';
     if (text.includes('IS DISTINCT FROM')) {
-      arms.push({ column: String(n.values?.[0]), text });
+      // The mock table maps columns to their name strings; anything else
+      // is a fixture bug worth seeing verbatim in the assertion diff.
+      const first = n.values?.[0];
+      arms.push({ column: typeof first === 'string' ? first : JSON.stringify(first), text });
       return arms;
     }
     for (const child of [...(n.values ?? []), ...(n.queryChunks ?? [])]) collectDistinctArms(child, arms);
