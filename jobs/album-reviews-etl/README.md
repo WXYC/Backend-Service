@@ -38,6 +38,7 @@ The DRY_RUN report is a **locked schema** — exactly these keys, one JSON line 
   "valid": 0,
   "skipped_invalid": 0,
   "fallback_keys": 0,
+  "duplicate_key_skipped": 0,
   "would_write": 0
 }
 ```
@@ -74,7 +75,7 @@ Row validity: artist + album non-empty (drops the sheet's formula-residue junk r
 
 ## Keying (load-bearing)
 
-`source_key = 'form:' + <ISO-8601 UTC of the parsed timestamp>` — unique across all current rows, and the UPSERT conflict target (partial-unique index `WHERE source_key IS NOT NULL`). A data row with no parseable timestamp (exactly 1 today) keys as `nots:<norm_artist>:<norm_album>:<sha256[0:8](reviewer_raw)>`, warn-logged: the reviewer-hash suffix makes two distinct timestamp-less reviews of the same album collision-proof, and it deliberately EXCLUDES the review body so curation edits propagate as updates. An edited reviewer string on such a row mints a new row — acceptable, warn-logged.
+`source_key = 'form:' + <ISO-8601 UTC of the parsed timestamp>` — unique across all current rows, and the UPSERT conflict target (partial-unique index `WHERE source_key IS NOT NULL`). A data row with no parseable timestamp (exactly 1 today) keys as `nots:<norm_artist>:<norm_album>:<sha256[0:8](reviewer_raw)>`, warn-logged: the reviewer-hash suffix makes two distinct timestamp-less reviews of the same album collision-proof, and it deliberately EXCLUDES the review body so curation edits propagate as updates. An edited reviewer string on such a row mints a new row — acceptable, warn-logged. The same applies in reverse: if a curator later FIXES a missing timestamp cell, the row re-ingests under its new `form:` key and the old `nots:` row must be manually deleted (rows are never deleted automatically).
 
 ## Invariants (do not weaken)
 
@@ -85,4 +86,4 @@ Row validity: artist + album non-empty (drops the sheet's formula-residue junk r
 
 ## Run guards + observability
 
-Zero valid rows, a >50%-invalid sheet, or valid-rows-but-zero-written all throw (non-zero exit) so cron monitoring can't stay green through a wholesale regression. Per-row upsert errors are caught, counted in the `finished` log, and Sentry-deduped per (step, digit-normalized message class). Counters: `{fetched, valid, skipped_invalid, fallback_keys, inserted, updated, unchanged, linked, link_ambiguous, link_unmatched}`. Logger is the per-job copy (`logger.ts`, incl. `captureWarning`); traces default off per the cron convention.
+Zero valid rows, a >50%-invalid sheet, a fallback-key spike (more than max(5, 1% of valid) rows keyed via `nots:` — the signature of the sheet's timestamp format drifting, e.g. a locale flip to 12-hour AM/PM), or valid-rows-but-zero-written all throw (non-zero exit) so cron monitoring can't stay green through a wholesale regression. An in-run duplicate source_key is skipped (first occurrence wins, counted as `duplicate_key_skipped`) so a later sheet row can never silently overwrite an earlier one. Per-row upsert errors are caught, counted in the `finished` log, and Sentry-deduped per (step, digit-normalized message class). Counters: `{fetched, valid, skipped_invalid, fallback_keys, duplicate_key_skipped, inserted, updated, unchanged, linked, link_ambiguous, link_unmatched}`. Upserts are one statement per row (~1.6k serial round-trips nightly, seconds at LAN RTT) — deliberate, matching the donor writers; the setWhere guard makes the steady-state cost read-mostly. Logger is the per-job copy (`logger.ts`, incl. `captureWarning`); traces default off per the cron convention.
