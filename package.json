@@ -101,10 +101,10 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.61.1",
     "wait-on": "^9.0.10",
-    "ws": "^8.21.0"
+    "ws": "^8.21.1"
   },
   "dependencies": {
-    "@sentry/node": "^10.59.0",
+    "@sentry/node": "^10.66.0",
     "eventsource": "^4.1.0",
     "jose": "^6.2.3"
   },
