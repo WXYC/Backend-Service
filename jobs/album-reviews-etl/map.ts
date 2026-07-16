@@ -154,25 +154,33 @@ const cell = (row: string[], idx: number | null): string | null => {
 
 type Normalized = { value: boolean | null; anomaly: boolean };
 
-/** `rotated? (y/n)`: y/Y -> true, any n-prefixed value -> false (covers
- *  'n', 'no', and the 'N/A ...' family), blank -> null (unanswered, not an
- *  anomaly), anything else -> null + warn. */
+/** `rotated? (y/n)`: any y-prefixed value -> true (covers 'y', 'Y', and a
+ *  curator-typed 'Yes' — this is a hand-edited sheet column, not a form
+ *  dropdown), any n-prefixed value -> false (covers 'n', 'no', and the
+ *  'N/A ...' family), blank -> null (unanswered, not an anomaly), anything
+ *  else -> null + warn. */
 const normalizeRotated = (raw: string | null): Normalized => {
   if (raw === null) return { value: null, anomaly: false };
   const lowered = raw.toLowerCase();
-  if (lowered === 'y') return { value: true, anomaly: false };
+  if (lowered.startsWith('y')) return { value: true, anomaly: false };
   if (lowered.startsWith('n')) return { value: false, anomaly: false };
   return { value: null, anomaly: true };
 };
 
-/** Social-media consent: y-/ok-prefixed -> true (every "remove my name"
- *  variant is still consent=true — names are never shared regardless),
- *  exactly 'no' -> false, blank -> null, anything else -> null + warn.
- *  The raw string is kept verbatim in `social_consent_raw`. */
+/** Social-media consent is a CLOSED vocabulary: 'yes…' / 'ya' / 'ya …' /
+ *  'ok…' -> true (every "remove my name" variant is still consent=true —
+ *  names are never shared regardless), exactly 'no' -> false, blank ->
+ *  null, anything else -> null + warn. Deliberately NOT a bare y-prefix:
+ *  consent must never be inferred from an unrecognized answer (a refusal
+ *  like "You may not post this" starts with 'y'), so unknowns fail toward
+ *  no-consent-recorded. The raw string is kept verbatim in
+ *  `social_consent_raw`. */
 const normalizeSocialConsent = (raw: string | null): Normalized => {
   if (raw === null) return { value: null, anomaly: false };
   const lowered = raw.toLowerCase();
-  if (lowered.startsWith('y') || lowered.startsWith('ok')) return { value: true, anomaly: false };
+  const affirmative =
+    lowered.startsWith('yes') || lowered === 'ya' || lowered.startsWith('ya ') || lowered.startsWith('ok');
+  if (affirmative) return { value: true, anomaly: false };
   if (lowered === 'no') return { value: false, anomaly: false };
   return { value: null, anomaly: true };
 };

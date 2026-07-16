@@ -288,6 +288,8 @@ describe('mapRow — closed-vocabulary normalization', () => {
   it.each<[string, boolean | null, boolean]>([
     ['y', true, false],
     ['Y', true, false],
+    ['Yes', true, false], // y-prefix family — a curator-typed 'Yes' must not degrade to an anomaly
+    ['yes!', true, false],
     ['n', false, false],
     ['no', false, false],
     ['N/A - not in rotation', false, false], // n-prefixed family
@@ -302,12 +304,19 @@ describe('mapRow — closed-vocabulary normalization', () => {
   it.each<[string, boolean | null, boolean]>([
     ['Yes', true, false],
     ['yes!', true, false],
+    ['ya', true, false],
+    ['ya and feel free to use my name', true, false], // the real corpus answer the 'ya' branch exists for
     ['Ok', true, false],
     ['ok, but please remove my name', true, false], // consent stays true — names are never shared regardless
     ['no', false, false],
     ['No', false, false],
     ['', null, false],
     ['ask me first', null, true],
+    // Consent must be a CLOSED vocabulary: a bare y-prefix rule would read
+    // this refusal as consent-granted. Unrecognized NEVER defaults to true.
+    ['You may not post this', null, true],
+    ['y', null, true], // bare 'y' is outside the consent vocabulary (unlike rotated's)
+    ['yappari...', null, true], // ya-prefix without the word boundary is not 'ya'
   ])('social_consent %p -> %p (warn: %p)', (raw, expected, warns) => {
     const mapped = expectValid(mapRow(makeRow({ consent: raw }), headers));
     expect(mapped.content.social_consent).toBe(expected);
