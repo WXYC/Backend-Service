@@ -624,6 +624,105 @@ components:
             hasMore:
               type: boolean
 
+    AlbumReview:
+      type: object
+      description: >-
+        One archived DJ album review from the WXYC album-review Google Form,
+        synced nightly by the album-reviews ETL (ADR 0011). Distinct from
+        the in-app Review model reserved at /reviews (ADR 0006). Reviewer
+        identity (reviewer_raw, social_consent_raw) is never exposed. This
+        block is Swagger display only; the SSOT is wxyc-shared/api.yaml.
+      required:
+        - id
+        - album_id
+        - artist_name
+        - album_title
+        - record_label
+        - artist_blurb
+        - review
+        - recommended_tracks
+        - buzzwords
+        - fcc_violations
+        - review_purpose
+        - rotated
+        - released_within_six_months
+        - social_consent
+        - submitted_at
+      properties:
+        id:
+          type: integer
+        album_id:
+          type: integer
+          nullable: true
+          description: WXYC library album id when the free-text artist/album resolved to exactly one catalog row; null otherwise.
+        artist_name:
+          type: string
+          nullable: true
+        album_title:
+          type: string
+          nullable: true
+        record_label:
+          type: string
+          nullable: true
+        artist_blurb:
+          type: string
+          nullable: true
+        review:
+          type: string
+          nullable: true
+        recommended_tracks:
+          type: string
+          nullable: true
+          description: Raw recommended-tracks text, including the form's `!`-rating notation.
+        buzzwords:
+          type: string
+          nullable: true
+        fcc_violations:
+          type: string
+          nullable: true
+          description: Verbatim reviewer answer; blank (unanswered) is distinct from "None"/"N/A".
+        review_purpose:
+          type: string
+          nullable: true
+        rotated:
+          type: boolean
+          nullable: true
+        released_within_six_months:
+          type: boolean
+          nullable: true
+        social_consent:
+          type: boolean
+          nullable: true
+        submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    AlbumReviewsResponse:
+      type: object
+      required:
+        - album_reviews
+        - pagination
+      properties:
+        album_reviews:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlbumReview'
+        pagination:
+          type: object
+          required:
+            - page
+            - limit
+          properties:
+            page:
+              type: integer
+            limit:
+              type: integer
+            total:
+              type: integer
+            hasMore:
+              type: boolean
+
 security:
   - BearerAuth: []
 
@@ -1677,6 +1776,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConcertsResponse'
+        '400':
+          description: Invalid query parameters
+        '401':
+          description: Authentication required
+
+  /album-reviews:
+    get:
+      summary: List archived DJ album-review submissions
+      description: >-
+        Album-review submissions from the WXYC album-review Google Form
+        archive (ADR 0011), ordered by submitted_at descending (nulls
+        last), paginated. Filterable by linked library album or by artist
+        name (normalized exact match). Deliberately not /reviews, which is
+        reserved for the in-app Review model (ADR 0006). Requires anonymous
+        session auth. Reviewer names are never included in responses. This
+        block is Swagger display only; the SSOT is wxyc-shared/api.yaml.
+      parameters:
+        - name: album_id
+          in: query
+          schema:
+            type: integer
+          description: Return only submissions linked to this library album id.
+        - name: artist
+          in: query
+          schema:
+            type: string
+          description: Artist-name filter; matched against the submission's normalized artist name (case-insensitive, leading-"the"-insensitive).
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number (1-indexed)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          description: Page size
+      responses:
+        '200':
+          description: Paginated list of album-review submissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlbumReviewsResponse'
         '400':
           description: Invalid query parameters
         '401':

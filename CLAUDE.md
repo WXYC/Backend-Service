@@ -65,6 +65,7 @@ Express 5 application with these route groups:
 | `/config`       | Public app bootstrap configuration                         |
 | `/proxy`        | iOS proxy endpoints (anonymous auth + rate limit)          |
 | `/library`      | Music library catalog                                      |
+| `/album-reviews` | Form-review archive reads (ADR 0011; anon-JWT, PII-excluding projection) |
 | `/flowsheet`    | V1 flowsheet (legacy)                                      |
 | `/v2/flowsheet` | V2 flowsheet (uses `@wxyc/shared` DTOs)                    |
 | `/djs`          | DJ profiles and management                                 |
