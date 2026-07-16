@@ -31,7 +31,15 @@ First-prod-run procedure: verify the crontab entry `# wxyc_album-reviews-etl` ex
 The DRY_RUN report is a **locked schema** — exactly these keys, one JSON line on stdout; treat as an interface:
 
 ```json
-{ "job": "album-reviews-etl", "dry_run": true, "fetched": 0, "valid": 0, "skipped_invalid": 0, "fallback_keys": 0, "would_write": 0 }
+{
+  "job": "album-reviews-etl",
+  "dry_run": true,
+  "fetched": 0,
+  "valid": 0,
+  "skipped_invalid": 0,
+  "fallback_keys": 0,
+  "would_write": 0
+}
 ```
 
 ## GCP service-account setup (operator, once)
@@ -45,22 +53,22 @@ The DRY_RUN report is a **locked schema** — exactly these keys, one JSON line 
 
 Columns resolve from the header row by **case-insensitive distinctive prefixes** — never by position (the sheet has dead columns and Forms appends new ones). Tolerant of reorder and additions; a missing REQUIRED header fails the run.
 
-| Column | Match rule | Required |
-| --- | --- | --- |
-| `Timestamp` | prefix | yes |
-| `Artist Name` | prefix | yes |
-| `Album Name` | prefix | yes |
-| `Please write your review here` | prefix | yes |
-| `Record Label` | prefix | no |
-| `Please write a short 1-2 sentences…` (artist blurb) | prefix | no |
-| `Please identify at least 2…` (recommended tracks) | prefix | no |
-| `Name of reviewer…` | prefix | no |
-| `List any FCC violations…` | prefix | no |
-| `Buzzwords` | **exact** — the prefix rule would collide with the dead long-form "Buzzwords about the album (examples include…)" column | no |
-| `Are you comfortable…` (social consent) | prefix | no |
-| `Was this album released…` (last 6 months) | prefix | no |
-| `What is this review for?` | prefix | no |
-| `rotated? (y/n)` | prefix | no |
+| Column                                               | Match rule                                                                                                               | Required |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------- |
+| `Timestamp`                                          | prefix                                                                                                                   | yes      |
+| `Artist Name`                                        | prefix                                                                                                                   | yes      |
+| `Album Name`                                         | prefix                                                                                                                   | yes      |
+| `Please write your review here`                      | prefix                                                                                                                   | yes      |
+| `Record Label`                                       | prefix                                                                                                                   | no       |
+| `Please write a short 1-2 sentences…` (artist blurb) | prefix                                                                                                                   | no       |
+| `Please identify at least 2…` (recommended tracks)   | prefix                                                                                                                   | no       |
+| `Name of reviewer…`                                  | prefix                                                                                                                   | no       |
+| `List any FCC violations…`                           | prefix                                                                                                                   | no       |
+| `Buzzwords`                                          | **exact** — the prefix rule would collide with the dead long-form "Buzzwords about the album (examples include…)" column | no       |
+| `Are you comfortable…` (social consent)              | prefix                                                                                                                   | no       |
+| `Was this album released…` (last 6 months)           | prefix                                                                                                                   | no       |
+| `What is this review for?`                           | prefix                                                                                                                   | no       |
+| `rotated? (y/n)`                                     | prefix                                                                                                                   | no       |
 
 Row validity: artist + album non-empty (drops the sheet's formula-residue junk row). Timestamps (`M/D/YYYY H:MM:SS`, sheet locale) parse as wall-clock America/New_York with DST-correct offsets via `nyWallClockToUtc`. Closed-vocabulary fields normalize to nullable booleans (`rotated`: y/Y→true, n-prefix→false; consent: y/ok-prefix→true, 'no'→false; released: Yes/No) with the raw strings kept verbatim; anything unrecognized stores null and warn-logs.
 

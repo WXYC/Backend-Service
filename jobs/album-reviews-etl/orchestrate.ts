@@ -139,10 +139,15 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
     totals.valid += 1;
     if (result.fallback_key) {
       totals.fallback_keys += 1;
-      log('warn', 'fallback_key', `sheet row ${sheetRow} has no parseable timestamp; keyed ${result.content.source_key}`, {
-        sheet_row: sheetRow,
-        source_key: result.content.source_key,
-      });
+      log(
+        'warn',
+        'fallback_key',
+        `sheet row ${sheetRow} has no parseable timestamp; keyed ${result.content.source_key}`,
+        {
+          sheet_row: sheetRow,
+          source_key: result.content.source_key,
+        }
+      );
       warnOnce(
         `${JOB_NAME}: row keyed via the nots: fallback (missing/unparseable form timestamp) — an edited reviewer string on such a row mints a new row`,
         'fallback_key',

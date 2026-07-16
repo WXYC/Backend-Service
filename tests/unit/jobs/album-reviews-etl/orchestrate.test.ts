@@ -20,15 +20,13 @@ const HEADERS = [
   'rotated? (y/n)',
 ];
 
-const row = (timestamp: string, artist: string, album: string, review = 'Great record.', reviewer = 'DJ Ana'): string[] => [
-  timestamp,
-  artist,
-  album,
-  'Merge',
-  review,
-  reviewer,
-  '',
-];
+const row = (
+  timestamp: string,
+  artist: string,
+  album: string,
+  review = 'Great record.',
+  reviewer = 'DJ Ana'
+): string[] => [timestamp, artist, album, 'Merge', review, reviewer, ''];
 
 const validRows = [
   row('7/15/2021 14:05:33', 'Juana Molina', 'DOGA'),
@@ -38,15 +36,13 @@ const validRows = [
 
 const junkRow = row('B1163=', '', ''); // formula residue, no artist/album
 
-const makeOpts = (
-  overrides: Partial<RunOptions> = {}
-): RunOptions & { upserts: string[]; linkCalls: number[] } => {
+const makeOpts = (overrides: Partial<RunOptions> = {}): RunOptions & { upserts: string[]; linkCalls: number[] } => {
   const upserts: string[] = [];
   const linkCalls: number[] = [];
   const opts: RunOptions & { upserts: string[]; linkCalls: number[] } = {
     fetchRows: () => Promise.resolve([HEADERS, ...validRows]),
     upsertSubmission: (content) => {
-      upserts.push(content.source_key as string);
+      upserts.push(content.source_key ?? '<null>');
       return Promise.resolve<UpsertOutcome>({ inserted: true, updated: false, unchanged: false });
     },
     linkPass: () => {
@@ -192,11 +188,9 @@ describe('runEtl — DRY_RUN', () => {
 
       // The locked report schema (documented in the job README): exactly
       // these keys, one JSON line on stdout.
-      const reportLine = stdoutSpy.mock.calls
-        .map((c) => String(c[0]))
-        .find((line) => line.includes('"dry_run":true'));
-      expect(reportLine).toBeDefined();
-      const report = JSON.parse((reportLine as string).trim());
+      const reportLine = stdoutSpy.mock.calls.map((c) => String(c[0])).find((line) => line.includes('"dry_run":true'));
+      if (reportLine === undefined) throw new Error('no dry-run report line written to stdout');
+      const report = JSON.parse(reportLine.trim());
       expect(report).toEqual({
         job: 'album-reviews-etl',
         dry_run: true,

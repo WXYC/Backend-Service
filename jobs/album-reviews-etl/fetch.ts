@@ -51,7 +51,8 @@ export const resolveServiceAccountCredentials = (
   } catch (error) {
     throw new Error(
       `GOOGLE_SERVICE_ACCOUNT_JSON_B64 did not decode to JSON (${(error as Error).message}) — ` +
-        `expected base64 of the downloaded service-account key file`
+        `expected base64 of the downloaded service-account key file`,
+      { cause: error }
     );
   }
   const creds = parsed as Partial<ServiceAccountCredentials>;
@@ -88,7 +89,11 @@ export const padRows = (rows: unknown[][]): string[][] => {
   return rows.map((row) =>
     Array.from({ length: width }, (_, i) => {
       const cell = row[i];
-      return cell === null || cell === undefined ? '' : String(cell);
+      if (typeof cell === 'string') return cell;
+      // FORMATTED_VALUE emits strings, but the feed is untrusted: keep
+      // scalar coercions, drop anything object-shaped to empty.
+      if (typeof cell === 'number' || typeof cell === 'boolean') return String(cell);
+      return '';
     })
   );
 };

@@ -158,7 +158,9 @@ describe('writeLink (no-overwrite guard)', () => {
     seen.add(node);
     const n = node as Record<string, unknown>;
     if (n.isNull === 'album_id') return true; // stub shape
-    if (Array.isArray(n.value) && (n.value as unknown[]).some((v) => /is null/i.test(String(v)))) return true;
+    if (Array.isArray(n.value) && (n.value as unknown[]).some((v) => typeof v === 'string' && /is null/i.test(v))) {
+      return true;
+    }
     for (const child of [n.and, n.queryChunks]) {
       if (Array.isArray(child) && child.some((c) => hasAlbumIdIsNullGuard(c, seen))) return true;
     }
