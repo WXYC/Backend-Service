@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/node';
 import { sql, type SQL } from 'drizzle-orm';
 import { db, flowsheet } from '@wxyc/database';
 import {
@@ -55,6 +56,22 @@ type SearchResultRow = {
 };
 
 type CountRow = { total: number };
+
+/**
+ * Upper bound on the exact count reported by /flowsheet/search (BS#1681).
+ *
+ * An unbounded `COUNT(*)` over the `entry_type = 'track'` set is a parallel seq
+ * scan of the whole 3.3 GB / ~2M-row flowsheet heap — ~12s in prod, well past
+ * the 5s HTTP `statement_timeout`, which 500'd the endpoint for every query
+ * (the empty default listing and broad terms like "the" match nearly every
+ * row). Wrapping the count in a `LIMIT COUNT_CAP + 1` derived table bounds the
+ * work to at most this many matching rows regardless of selectivity (33-105ms
+ * measured), at the cost of reporting `COUNT_CAP + 1` as a "10000+" sentinel
+ * once the true match set exceeds the cap. Deep offset pagination past the cap
+ * was never meaningful for the multi-million-row historical archive, and the
+ * forward path (cursor mode) doesn't depend on `total` at all.
+ */
+export const COUNT_CAP = 10000;
 
 export type SearchResult = {
   id: number;
@@ -148,12 +165,35 @@ export async function searchFlowsheet(
     ${limitClause}
   `;
 
-  const countQuery = sql`SELECT COUNT(*)::int AS total ${fullWhere}`;
+  // Capped count (BS#1681): `COUNT(*)` over a `LIMIT COUNT_CAP + 1` derived
+  // table stops scanning once the cap is reached, bounding cost regardless of
+  // how many rows the predicate actually matches.
+  const countQuery = sql`SELECT COUNT(*)::int AS total FROM (SELECT 1 ${fullWhere} LIMIT ${COUNT_CAP + 1}) AS capped`;
 
-  const [dataRows, countRows] = await Promise.all([db.execute(dataQuery), db.execute(countQuery)]);
+  // allSettled, not all: the count is now cheap enough that it should never
+  // time out, but if it (or a future predicate) does, the data page is already
+  // in hand — degrade to a lower-bound total rather than 500-ing the whole
+  // request the way the pre-BS#1681 `Promise.all` did.
+  const [dataSettled, countSettled] = await Promise.allSettled([db.execute(dataQuery), db.execute(countQuery)]);
 
-  const results = (dataRows as unknown as SearchResultRow[]).map(transformRow);
-  const total = (countRows as unknown as CountRow[])[0]?.total ?? 0;
+  if (dataSettled.status === 'rejected') {
+    // No data page means nothing to serve — a data-query failure stays fatal
+    // and propagates to the error handler as a 500.
+    throw dataSettled.reason;
+  }
+
+  const results = (dataSettled.value as unknown as SearchResultRow[]).map(transformRow);
+
+  let total: number;
+  if (countSettled.status === 'fulfilled') {
+    total = (countSettled.value as unknown as CountRow[])[0]?.total ?? 0;
+  } else {
+    // Lower bound on the true total: everything up to and including this page.
+    // In cursor mode `offset` is 0, so this collapses to the current page size.
+    total = offset + results.length;
+    Sentry.captureException(countSettled.reason);
+    console.error('flowsheet search count query failed; returning lower-bound total', countSettled.reason);
+  }
 
   // nextCursor only when cursor mode is active AND we got a full page —
   // a short page means there are no more rows.
