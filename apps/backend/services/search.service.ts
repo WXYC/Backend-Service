@@ -188,10 +188,16 @@ export async function searchFlowsheet(
   if (countSettled.status === 'fulfilled') {
     total = (countSettled.value as unknown as CountRow[])[0]?.total ?? 0;
   } else {
-    // Lower bound on the true total: everything up to and including this page.
-    // In cursor mode `offset` is 0, so this collapses to the current page size.
+    // Best-effort total when the count is unavailable: the rows we've already
+    // paged past plus this page. Exact for a partial final page, a lower bound
+    // for a full page, and — only in the rare empty-page-past-end offset case —
+    // an over-estimate bounded by `offset`. In cursor mode `offset` is 0, so
+    // this collapses to the current page size.
     total = offset + results.length;
-    Sentry.captureException(countSettled.reason);
+    Sentry.captureException(countSettled.reason, {
+      tags: { subsystem: 'flowsheet-search' },
+      extra: { q, page, limit },
+    });
     console.error('flowsheet search count query failed; returning lower-bound total', countSettled.reason);
   }
 

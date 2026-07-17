@@ -100,6 +100,19 @@ describe('BS#1681 fix #1: capped count query', () => {
 
     expect(result.total).toBe(COUNT_CAP + 1);
   });
+
+  it('does not report to Sentry when the count query succeeds', async () => {
+    // The degradation capture must stay inside the count-failure branch — a
+    // regression that fired it unconditionally would spam Sentry on every
+    // successful search (the hot, high-volume default listing).
+    const captureException = Sentry.captureException as unknown as jest.Mock;
+    mockDataAndCount([makeRow()], 42);
+
+    const result = await searchFlowsheet({ q: '', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+    expect(result.total).toBe(42);
+    expect(captureException).not.toHaveBeenCalled();
+  });
 });
 
 describe('BS#1681 fix #2: count failure degrades instead of 500-ing', () => {
