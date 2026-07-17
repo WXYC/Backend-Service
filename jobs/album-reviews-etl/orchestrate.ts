@@ -107,7 +107,10 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
     captureWarning(message, step, extra);
   };
   const captureOnce = (error: unknown, step: string, extra: Record<string, unknown> = {}): void => {
-    const key = `${step}:${(error as Error).message.replace(/\d+/g, '#')}`;
+    // Non-Error throws (postgres-js and drizzle always throw Errors, but
+    // the writer is injectable) still need a usable dedup key.
+    const message = error instanceof Error ? error.message : String(error);
+    const key = `${step}:${message.replace(/\d+/g, '#')}`;
     if (capturedKeys.has(key)) return;
     capturedKeys.add(key);
     captureError(error, step, extra);
