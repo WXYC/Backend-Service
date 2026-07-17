@@ -100,10 +100,12 @@ const buildConflictSet = (
  *  postgres-js's `unsafe()` unserialized and throws ERR_INVALID_ARG_TYPE at
  *  the driver boundary. The arm therefore binds the ISO STRING itself, and
  *  the explicit `::timestamptz` cast restores instant semantics for the
- *  comparison. Caught end to end by
- *  tests/e2e/album-reviews-pipeline.test.ts (the raw-SQL integration spec
- *  binds through postgres-js tagged templates, which DO serialize Dates —
- *  so only a real run of this builder could surface it). */
+ *  comparison. The ISO-string binding is pinned by
+ *  tests/unit/jobs/album-reviews-etl/writer.test.ts and the cast's SQL
+ *  semantics by tests/integration/album-reviews-writer.spec.js — note the
+ *  raw spec alone could never surface a Date-binding regression here (its
+ *  postgres-js parameter binding DOES serialize Dates), which is why the
+ *  unit pin exists. */
 const distinctFromArm = (col: ContentColumn, content: SubmissionContent): SQL => {
   const column = album_review_submissions[col];
   if (col === 'submitted_at') {
