@@ -1301,6 +1301,14 @@ export interface ArtistGenresResultItem {
   genres: string[];
   styles: string[];
   source: ArtistGenresSource;
+  /**
+   * Echoed back from the request by LML (LML#781) for index verification. When
+   * present on both sides, the alignment guard asserts it matches the request
+   * item at the same index — turning the positional contract from a length
+   * check into an identity check. Optional: a name-only request item has no id
+   * for LML to echo.
+   */
+  discogs_artist_id?: number;
 }
 
 export interface ArtistGenresBulkRequest {
@@ -1343,9 +1351,11 @@ const ARTIST_GENRES_TIMEOUT_SLACK_MS = 20_000;
  * `options.limiter` (the documented consumer does).
  *
  * Client-side validation rejects empty + oversize batches before the wire call;
- * the response is validated to be an index-aligned 1:1 array before return so a
- * consumer that zips verdicts to artists positionally can never mis-attribute a
- * genre set. All failures throw `LmlClientError`.
+ * the response is validated to be an index-aligned 1:1 array before return — by
+ * length AND, wherever the request supplied a Discogs id, by LML's echoed
+ * `discogs_artist_id` at each index — so a consumer that zips verdicts to
+ * artists positionally can never mis-attribute a genre set. All failures throw
+ * `LmlClientError`.
  *
  * @param artists - Artists to resolve (1..=`ARTIST_GENRES_BATCH_CAP`).
  * @param options.timeoutMs - Override the batch-size-scaled default socket timeout (ms).
@@ -1405,15 +1415,35 @@ export async function fetchArtistGenresBulk(
       }
 
       // Positional contract: `results[i]` is the verdict for `artists[i]`. A
-      // short / long / reordered / missing array would let the consumer write
-      // one artist's genres onto another's Discogs id. Fail loud at the
+      // short / long / missing array — or a null body — would let the consumer
+      // write one artist's genres onto another's Discogs id. Fail loud at the
       // chokepoint (mirrors `resolveArtistNamesBulk`).
-      if (!Array.isArray(parsed.results) || parsed.results.length !== artists.length) {
-        const got = Array.isArray(parsed.results) ? `${parsed.results.length} result(s)` : 'a non-array results field';
+      if (parsed == null || !Array.isArray(parsed.results) || parsed.results.length !== artists.length) {
+        const got =
+          parsed != null && Array.isArray(parsed.results)
+            ? `${parsed.results.length} result(s)`
+            : 'a non-array results field';
         throw new LmlClientError(
           `fetchArtistGenresBulk: LML returned ${got} for ${artists.length} artist(s); expected an index-aligned 1:1 array`,
           502
         );
+      }
+
+      // Defense-in-depth beyond length: when both the request item and the
+      // echoed verdict carry a Discogs id, they MUST match at this index. LML
+      // echoes `discogs_artist_id` for exactly this check (LML#781); a mismatch
+      // means the array was reordered under us, which the length check alone
+      // can't catch. The consumer (BS#1624) zips genres to Discogs ids
+      // positionally, so a silent reorder would mis-attribute a genre set.
+      for (let i = 0; i < artists.length; i++) {
+        const sent = artists[i].discogs_artist_id;
+        const echoed = parsed.results[i].discogs_artist_id;
+        if (sent != null && echoed != null && sent !== echoed) {
+          throw new LmlClientError(
+            `fetchArtistGenresBulk: LML echoed discogs_artist_id ${echoed} at index ${i} but the request sent ${sent}; the results array is misordered`,
+            502
+          );
+        }
       }
 
       return parsed;

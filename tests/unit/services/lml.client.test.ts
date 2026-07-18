@@ -1148,6 +1148,42 @@ describe('lml.client', () => {
       expect((err as LmlClientError).message).toMatch(/index-aligned 1:1 array/);
     });
 
+    it('throws LmlClientError(502) when LML echoes a discogs_artist_id out of order (same length, reordered)', async () => {
+      // Right length, but the echoed ids don't line up with the request order —
+      // a length-only check would miss it and mis-attribute genres. The client
+      // verifies the echoed `discogs_artist_id` per index (LML#781).
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [
+              { genres: ['Rock'], styles: [], source: 'cache', discogs_artist_id: 2 },
+              { genres: ['Jazz'], styles: [], source: 'cache', discogs_artist_id: 1 },
+            ],
+          }),
+      } as unknown as globalThis.Response);
+
+      const err = await fetchArtistGenresBulk([
+        { artist_name: 'Cat Power', discogs_artist_id: 1 },
+        { artist_name: 'Stereolab', discogs_artist_id: 2 },
+      ]).catch((e) => e);
+      expect(err).toBeInstanceOf(LmlClientError);
+      expect((err as LmlClientError).statusCode).toBe(502);
+      expect((err as LmlClientError).message).toMatch(/misordered/);
+    });
+
+    it('throws LmlClientError(502), not a raw TypeError, when a 200 body is null', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(null),
+      } as unknown as globalThis.Response);
+
+      const err = await fetchArtistGenresBulk([{ artist_name: 'Juana Molina' }]).catch((e) => e);
+      expect(err).toBeInstanceOf(LmlClientError);
+      expect((err as LmlClientError).statusCode).toBe(502);
+      expect((err as LmlClientError).message).toMatch(/index-aligned 1:1 array/);
+    });
+
     it('projects lml.bulk.size + caller onto the span', async () => {
       mockFetch.mockResolvedValue(okBatch(1));
 
