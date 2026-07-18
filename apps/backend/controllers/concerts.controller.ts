@@ -133,10 +133,24 @@ export const getConcerts: RequestHandler<object, unknown, object, ConcertsQueryP
  * playlist proxy's public-cache pattern at the ~5-minute TTL the spec calls
  * for). Error paths never set it — a shared cache must not pin a 404/400.
  */
+
+/**
+ * PostgreSQL int4 ceiling. `concerts.id` is a serial (int4), so a well-formed
+ * integer above this can never exist — but without a guard it reaches the
+ * Postgres bind, which rejects it with "integer out of range" → an unhandled
+ * 500 (plus Sentry noise) that any unauthenticated URL probe could mint on
+ * this public route. Mapped to 404 (a miss, not a malformed request), before
+ * any query.
+ */
+const MAX_SERIAL_ID = 2_147_483_647;
+
 export const getConcertById: RequestHandler<{ id: string }> = async (req, res) => {
   const id = parsePositiveInt(req.params.id, 'id');
   if (id < 1) {
     throw new WxycError('id must be a positive integer', 400);
+  }
+  if (id > MAX_SERIAL_ID) {
+    throw new WxycError(`No concert with id ${req.params.id}`, 404);
   }
 
   const concert = await concertsService.getConcertById(id);
