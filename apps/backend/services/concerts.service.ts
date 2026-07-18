@@ -1,5 +1,7 @@
 import { and, asc, eq, gte, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { artist_metadata, artists, concerts, db, normalizeFreetextArtist, venues } from '@wxyc/database';
+import { LRUCache } from 'lru-cache';
+import * as Sentry from '@sentry/node';
 
 /**
  * Concerts read service — backs `GET /concerts` (BS#1603, on-tour
@@ -368,3 +370,81 @@ export const getUpcomingShowsMaps = async (
 
   return { byArtistId, byNormName };
 };
+
+/** Resolved return of {@link getUpcomingShowsMaps}, aliased for the cache below. */
+type UpcomingShowsMaps = Awaited<ReturnType<typeof getUpcomingShowsMaps>>;
+
+/**
+ * Per-process cache of the two `upcoming_show` maps (BS#1616).
+ *
+ * {@link getUpcomingShowsMaps} runs on the hot V2 flowsheet read path — including
+ * `getLatest`, the single-entry "now playing" tick the iOS/Android apps and the
+ * uptime canary poll continuously — and each call scans the entire unbounded
+ * upcoming-concerts set (`removed_at IS NULL AND starts_on >= today`, no upper
+ * bound) to rebuild the maps. This cache amortizes that: continuous polling
+ * collapses from one full-catalog scan PER read to ~one rebuild per TTL.
+ *
+ * Keyed on the ET `today` string (`nyCalendarDate`, supplied by the caller), so a
+ * midnight roll produces a miss and rebuilds rather than serving a just-passed
+ * show as upcoming. `max: 2` holds today plus a briefly-overlapping yesterday
+ * across the roll; `ttl: 60_000` keeps the amortization benefit (~1 rebuild/min
+ * regardless of poll rate) while surfacing a rare manual concert edit within a
+ * minute — `concerts` otherwise mutates only via the nightly ETL, so intra-day
+ * staleness cost is ~zero.
+ *
+ * The cached VALUE is the `Promise<Maps>`, not the resolved maps, so concurrent
+ * cold callers atomically share one in-flight build (the get/set is synchronous
+ * on Node's single thread). A rejected build is evicted, never cached (see the
+ * wrapper). Per-process only — like the LML lookup coordinator's cache,
+ * cross-instance coalescing is out of scope; session stickiness collapses most
+ * same-key bursts.
+ */
+const upcomingShowsMapsCache = new LRUCache<string, Promise<UpcomingShowsMaps>>({
+  max: 2,
+  ttl: 60_000,
+});
+
+/**
+ * Cached wrapper around {@link getUpcomingShowsMaps} for the hot read path
+ * (`flowsheet.service` `attachUpcomingShows`). A cold miss builds and `.set`s the
+ * in-flight promise synchronously so concurrent callers coalesce onto it; a warm
+ * hit returns the settled promise for the rest of the TTL.
+ *
+ * INVARIANT — the returned maps, and the `ConcertDTO` instances inside them, are
+ * handed out BY REFERENCE to every caller within the TTL and MUST be treated as
+ * read-only. The sole consumer, `attachUpcomingShows`, only reads them (it shares
+ * a `ConcertDTO` onto `entry.upcoming_show`; `transformToV2` spreads it into a
+ * fresh response object and never mutates it). Never mutate a returned map or DTO.
+ *
+ * Error handling: the ORIGINAL promise is returned, so a build failure rejects to
+ * the caller (→ Express error handler) exactly as the uncached builder did. A
+ * SEPARATE `.catch` evicts the rejected entry so the error is not cached — the
+ * next call issues a fresh query. Both consumers handle the rejection, so there
+ * is no unhandled-rejection footgun.
+ */
+export const getUpcomingShowsMapsCached = (today: string): Promise<UpcomingShowsMaps> => {
+  const hit = upcomingShowsMapsCache.get(today);
+  // Boolean attribute is safe via the late setAttribute path (the numeric
+  // string-typing trap of BS#1070/#1081 only affects avg/p50 aggregations on
+  // numbers). Lets prod confirm getLatest's hit ratio — i.e. that it stopped
+  // scanning `concerts` on every poll.
+  Sentry.getActiveSpan()?.setAttribute('concerts.upcoming_maps.cache_hit', hit !== undefined);
+  if (hit !== undefined) {
+    return hit;
+  }
+  const build = getUpcomingShowsMaps(today);
+  upcomingShowsMapsCache.set(today, build);
+  build.catch(() => upcomingShowsMapsCache.delete(today)); // evict on failure; never cache an error
+  return build;
+};
+
+/**
+ * Test-only hook to clear the module-scoped cache between cases — mirrors the
+ * `__reset…ForTests` helpers in `library.service` / `proxy.controller`. Any suite
+ * that exercises the real wrapper (the cache unit tests; the out-of-process
+ * integration spec, via the test-gated `/internal/test/reset-upcoming-shows-cache`
+ * endpoint) must reset it, or a warm entry leaks a prior case's maps.
+ */
+export function __resetUpcomingShowsMapsCacheForTests(): void {
+  upcomingShowsMapsCache.clear();
+}

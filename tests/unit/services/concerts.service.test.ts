@@ -16,9 +16,11 @@ import { db } from '@wxyc/database';
 import {
   ConcertDTO,
   ConcertJoinRow,
+  __resetUpcomingShowsMapsCacheForTests,
   getConcertsCount,
   getConcertsPage,
   getUpcomingShowsMaps,
+  getUpcomingShowsMapsCached,
   toConcertDTO,
 } from '../../../apps/backend/services/concerts.service';
 
@@ -425,5 +427,85 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
     const { byArtistId, byNormName } = await getUpcomingShowsMaps('2026-08-01');
     expect(byArtistId.size).toBe(0);
     expect(byNormName.size).toBe(0);
+  });
+});
+
+/**
+ * BS#1616 — `getUpcomingShowsMaps` runs on the hot V2 flowsheet read path
+ * (including `getLatest`, the single-entry "now playing" tick the iOS/Android
+ * apps and the uptime canary poll continuously), and each call scans the entire
+ * unbounded upcoming-concerts set to rebuild the two maps.
+ * `getUpcomingShowsMapsCached` wraps the pure builder in a per-process,
+ * promise-valued LRU keyed on the ET `today` string (`max: 2`, `ttl: 60s`) so
+ * repeat reads within the TTL are served without re-querying `concerts`. The
+ * builder itself stays pure and is pinned by the suite above; these pin only the
+ * cache behavior.
+ *
+ * Build count == `db.select` call count: the builder issues exactly one
+ * `db.select(...)` per invocation, and the DB mock aliases `db.select` to
+ * `mockDb._chain.select`, so a warm hit (no build) leaves the counter fixed. The
+ * cache is module-scoped, so `__resetUpcomingShowsMapsCacheForTests()` runs in
+ * `beforeEach` to keep a prior case's maps from leaking into the next.
+ */
+describe('getUpcomingShowsMapsCached (BS#1616 per-process map cache)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    __resetUpcomingShowsMapsCacheForTests();
+  });
+
+  it('builds once on a cold miss', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    await getUpcomingShowsMapsCached('2026-08-01');
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(1);
+  });
+
+  it('serves a warm hit within the TTL without re-querying (identical maps reference)', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    const first = await getUpcomingShowsMapsCached('2026-08-01');
+    const second = await getUpcomingShowsMapsCached('2026-08-01');
+    // Same object reference proves the second call resolved the cached promise,
+    // not a fresh build.
+    expect(second).toBe(first);
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(1);
+  });
+
+  it('rebuilds after __resetUpcomingShowsMapsCacheForTests clears the cache', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
+    await getUpcomingShowsMapsCached('2026-08-01');
+    __resetUpcomingShowsMapsCacheForTests();
+    await getUpcomingShowsMapsCached('2026-08-01');
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
+  });
+
+  it('rebuilds for a distinct today key (date roll → miss)', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
+    await getUpcomingShowsMapsCached('2026-08-01');
+    await getUpcomingShowsMapsCached('2026-08-02'); // a different ET calendar day
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces two concurrent cold calls into a single build', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    const [a, b] = await Promise.all([
+      getUpcomingShowsMapsCached('2026-08-01'),
+      getUpcomingShowsMapsCached('2026-08-01'),
+    ]);
+    // Both callers awaited the same in-flight promise → same resolved object.
+    expect(a).toBe(b);
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a rejected build — the next call retries', async () => {
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.reject(new Error('boom')))
+      .mockReturnValueOnce(Promise.resolve([]));
+    await expect(getUpcomingShowsMapsCached('2026-08-01')).rejects.toThrow('boom');
+    // The failed promise was evicted, so this is a fresh cold miss (not a cached
+    // error): the builder runs again and resolves.
+    await expect(getUpcomingShowsMapsCached('2026-08-01')).resolves.toEqual({
+      byArtistId: new Map(),
+      byNormName: new Map(),
+    });
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
   });
 });

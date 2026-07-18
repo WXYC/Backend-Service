@@ -9,6 +9,7 @@ import {
   resolveRadioHour,
   type BackendEntryType,
 } from '../utils/flowsheet-transform.js';
+import { __resetUpcomingShowsMapsCacheForTests } from '../services/concerts.service.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
 
@@ -41,6 +42,28 @@ export const internal_route = Router();
  */
 function authenticateInternal(key: string | undefined): boolean {
   return !!ETL_NOTIFY_KEY && key === ETL_NOTIFY_KEY;
+}
+
+/**
+ * POST /internal/test/reset-upcoming-shows-cache — dev/test-only.
+ *
+ * The `upcoming_show` map cache (BS#1616) lives in THIS server process, so the
+ * out-of-process integration spec (which talks to the backend over HTTP) can't
+ * clear it with an in-process helper. It resets through this endpoint instead,
+ * to get a genuine cold read for the anti-N+1 batching + cache-hit assertions.
+ *
+ * Registered ONLY when NODE_ENV is development/test — the route does not exist in
+ * production. Mirrors the `isDevOrTest` gate in internal-bans.route.ts and the
+ * auth server's `/auth/test/*` surface. No auth key: it only clears an ephemeral
+ * in-memory cache (no data at risk) and the route is absent in prod anyway.
+ */
+const isDevOrTest = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
+
+if (isDevOrTest) {
+  internal_route.post('/test/reset-upcoming-shows-cache', (_req, res) => {
+    __resetUpcomingShowsMapsCacheForTests();
+    res.sendStatus(204);
+  });
 }
 
 /**
