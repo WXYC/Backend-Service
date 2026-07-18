@@ -33,6 +33,9 @@ import {
   resolveArtistNamesBulk,
   ARTIST_RESOLVE_BATCH_CAP,
   type ArtistResolveResult,
+  fetchArtistGenresBulk,
+  ARTIST_GENRES_BATCH_CAP,
+  type ArtistGenresSource,
   LmlClientError,
   checkStreamingAvailability,
   searchLibrary,
@@ -1048,6 +1051,123 @@ describe('lml.client', () => {
       const err = await resolveArtistNamesBulk(['Wishy']).catch((e) => e);
       expect(err).toBeInstanceOf(LmlClientError);
       expect((err as LmlClientError).statusCode).toBe(413);
+    });
+  });
+
+  describe('fetchArtistGenresBulk (BS#1624 / LML#781)', () => {
+    // Index-aligned genre/style verdict; both arrays always present per contract.
+    // `source` defaults to 'cache'; the pass-through test varies it explicitly.
+    const genreResult = (genres: string[], styles: string[], source: ArtistGenresSource = 'cache') => ({
+      genres,
+      styles,
+      source,
+    });
+
+    const okBatch = (count: number) =>
+      ({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: Array.from({ length: count }, () => genreResult(['Rock'], ['Indie Rock'])) }),
+      }) as unknown as globalThis.Response;
+
+    beforeEach(() => {
+      // Reset the process-wide default limiter so the timeout tests draw from a
+      // full TokenBucket (mirrors the resolveArtistNamesBulk block's guard).
+      _resetLmlClientLimitersForTest();
+    });
+
+    it('POSTs to /api/v1/artists/genres/bulk wrapping items in an {artists} envelope', async () => {
+      mockFetch.mockResolvedValue(okBatch(2));
+
+      await fetchArtistGenresBulk([
+        { artist_name: 'Juana Molina', discogs_artist_id: 100 },
+        { artist_name: 'Jessica Pratt' },
+      ]);
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://lml.test:8000/api/v1/artists/genres/bulk');
+      expect(init.method).toBe('POST');
+      const body = JSON.parse(init.body as string) as { artists: unknown[] };
+      expect(body.artists).toEqual([
+        { artist_name: 'Juana Molina', discogs_artist_id: 100 },
+        { artist_name: 'Jessica Pratt' },
+      ]);
+    });
+
+    it('returns genre/style verdicts index-aligned with the input artists, passing `source` through', async () => {
+      // Vary `source` across the batch: the consumer's retry-vs-negative-cache
+      // routing (BS#1624 skips `unavailable`) depends on it surviving the client.
+      const mockResponse = {
+        results: [
+          genreResult(['Electronic'], ['Experimental'], 'cache'),
+          genreResult([], [], 'unavailable'),
+          genreResult(['Jazz'], [], 'discogs_api'),
+        ],
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      } as unknown as globalThis.Response);
+
+      const result = await fetchArtistGenresBulk([
+        { artist_name: 'Chuquimamani-Condori', discogs_artist_id: 1 },
+        { artist_name: 'Stereolab', discogs_artist_id: 2 },
+        { artist_name: 'Duke Ellington & John Coltrane', discogs_artist_id: 3 },
+      ]);
+
+      expect(result.results).toHaveLength(3);
+      expect(result.results[0]).toEqual({ genres: ['Electronic'], styles: ['Experimental'], source: 'cache' });
+      expect(result.results[1]).toEqual({ genres: [], styles: [], source: 'unavailable' });
+      expect(result.results[2]).toEqual({ genres: ['Jazz'], styles: [], source: 'discogs_api' });
+    });
+
+    it('rejects an empty batch client-side before the wire call', async () => {
+      await expect(fetchArtistGenresBulk([])).rejects.toThrow(/at least 1 artist/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects an over-cap batch client-side before the wire call', async () => {
+      const artists = Array.from({ length: ARTIST_GENRES_BATCH_CAP + 1 }, (_, i) => ({ artist_name: `A${i}` }));
+      await expect(fetchArtistGenresBulk(artists)).rejects.toThrow(/cap of 25 artists/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('throws LmlClientError(502) when the response array length is misaligned with the request', async () => {
+      // Two artists in, one verdict back — a positional mis-attribution hazard.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [genreResult(['Rock'], [])] }),
+      } as unknown as globalThis.Response);
+
+      const err = await fetchArtistGenresBulk([{ artist_name: 'Cat Power' }, { artist_name: 'Stereolab' }]).catch(
+        (e) => e
+      );
+      expect(err).toBeInstanceOf(LmlClientError);
+      expect((err as LmlClientError).statusCode).toBe(502);
+      expect((err as LmlClientError).message).toMatch(/index-aligned 1:1 array/);
+    });
+
+    it('projects lml.bulk.size + caller onto the span', async () => {
+      mockFetch.mockResolvedValue(okBatch(1));
+
+      await fetchArtistGenresBulk([{ artist_name: 'Juana Molina' }], { caller: 'concerts-genre-enrichment' });
+
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith(
+        expect.objectContaining({ 'lml.bulk.size': 1, 'lml.caller': 'concerts-genre-enrichment' })
+      );
+    });
+
+    it('surfaces a 5xx as LmlClientError(502)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+      } as unknown as globalThis.Response);
+
+      const err = await fetchArtistGenresBulk([{ artist_name: 'Juana Molina' }]).catch((e) => e);
+      expect(err).toBeInstanceOf(LmlClientError);
+      expect((err as LmlClientError).statusCode).toBe(502);
     });
   });
 
