@@ -4,8 +4,8 @@
  *
  * `@wxyc/database` resolves to tests/mocks/database.mock.ts, so these pin the
  * pure batching + fan-out logic without PostgreSQL:
- *   - `attachUpcomingShows` does exactly ONE `getUpcomingShowsMaps` call for a
- *     feed page (the no-N+1 guarantee), then fans the soonest concert onto each
+ *   - `attachUpcomingShows` does exactly ONE `getUpcomingShowsMapsCached` call
+ *     for a feed page (the no-N+1 guarantee), then fans the soonest concert onto each
  *     track via the id arm (album-resolved `artist_id`) with a normalized-name
  *     arm fallback (free-text plays + clean unresolved concerts, BS#1613);
  *   - `transformToV2` emits `upcoming_show` only when present, so a no-match
@@ -106,7 +106,11 @@ describe('attachUpcomingShows (BS#1607 id arm + BS#1613 name arm)', () => {
 
   beforeEach(() => {
     jest.restoreAllMocks();
-    lookup = jest.spyOn(concertsService, 'getUpcomingShowsMaps');
+    // attachUpcomingShows now calls the cached wrapper (BS#1616), so intercept
+    // that — spying on the pure builder would no longer see the call. The spy
+    // fully replaces the wrapper, so the real LRU is never exercised here (no
+    // cache reset needed); the cache itself is pinned in concerts.service.test.ts.
+    lookup = jest.spyOn(concertsService, 'getUpcomingShowsMapsCached');
   });
 
   it('skips the DB when no track row carries an artist id or a non-empty name', async () => {
@@ -119,7 +123,7 @@ describe('attachUpcomingShows (BS#1607 id arm + BS#1613 name arm)', () => {
     expect(entries[1].upcoming_show).toBeUndefined();
   });
 
-  it('does exactly ONE getUpcomingShowsMaps call for an N-row page, with a today date', async () => {
+  it('does exactly ONE getUpcomingShowsMapsCached call for an N-row page, with a today date', async () => {
     lookup.mockResolvedValueOnce(maps());
     const entries = [
       createTrackEntry({ id: 1, artist_id: 4211 }),

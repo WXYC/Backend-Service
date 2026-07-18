@@ -23,7 +23,7 @@ import {
   nyCalendarDate,
   nyStartOfDay,
 } from '@wxyc/database';
-import { getUpcomingShowsMaps } from './concerts.service.js';
+import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -1116,8 +1116,11 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> =>
  * events Phase 3).
  *
  * Batched — ONE indexed concerts query for the whole page via
- * `getUpcomingShowsMaps`, never one per row (the no-N+1 guarantee; project #32
- * perf posture). Each track row resolves through two arms, id first:
+ * `getUpcomingShowsMapsCached`, never one per row (the no-N+1 guarantee; project
+ * #32 perf posture). And that query only fires on a cold build: the wrapper
+ * memoizes the maps per ET day for a short TTL (BS#1616), so the hot poll path
+ * (`getLatest`) skips the concerts scan entirely on warm reads. Each track row
+ * resolves through two arms, id first:
  *   1. id arm — `byArtistId.get(artist_id)`: the album-resolved catalog artist
  *      (`flowsheet.album_id → library.artist_id`) matched a resolved concert.
  *      Precise; the sole BS#1607 path, kept as-is (regression-guarded).
@@ -1154,7 +1157,7 @@ export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry
     return entries;
   }
 
-  const { byArtistId, byNormName } = await getUpcomingShowsMaps(nyCalendarDate(new Date()));
+  const { byArtistId, byNormName } = await getUpcomingShowsMapsCached(nyCalendarDate(new Date()));
 
   for (const entry of entries) {
     if (entry.entry_type !== 'track') {
