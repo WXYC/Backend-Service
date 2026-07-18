@@ -30,6 +30,11 @@ const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const SOURCE_ID_PREFIX = 'bs1603:';
 const VENUE_SLUG = 'bs1603-probe-room';
 const ARTIST_NAME = 'BS#1603 Touring Probe Artist';
+// Synthetic Discogs id for the resolved headliner; high enough to avoid
+// colliding with any real artists/artist_metadata row in the CI clone.
+const ARTIST_DISCOGS_ID = 91624001;
+const ARTIST_GENRES = ['Rock', 'Electronic'];
+const ARTIST_STYLES = ['Indie Rock'];
 
 function makeSql() {
   return postgres({
@@ -113,6 +118,7 @@ describe('GET /concerts (BS#1603)', () => {
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".concerts WHERE source_id LIKE $1`, [`${SOURCE_ID_PREFIX}%`]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".venues WHERE slug = $1`, [VENUE_SLUG]);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".artist_metadata WHERE discogs_artist_id = $1`, [ARTIST_DISCOGS_ID]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name = $1`, [ARTIST_NAME]);
   };
 
@@ -130,11 +136,21 @@ describe('GET /concerts (BS#1603)', () => {
     const venueId = venue.id;
 
     const [artist] = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters)
-       VALUES ($1, $1, 'ZZ') RETURNING id`,
-      [ARTIST_NAME]
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters, discogs_artist_id)
+       VALUES ($1, $1, 'ZZ', $2) RETURNING id`,
+      [ARTIST_NAME, ARTIST_DISCOGS_ID]
     );
     artistId = artist.id;
+
+    // Enrichment output for the resolved headliner: the BS#1624 genres
+    // projection LEFT JOINs artist_metadata on COALESCE(headlining_discogs_
+    // artist_id, artists.discogs_artist_id). Seeding a row here proves genres
+    // surface on the wire; the un-enriched rows below prove the null-safe miss.
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles)
+       VALUES ($1, $2, $3)`,
+      [ARTIST_DISCOGS_ID, ARTIST_GENRES, ARTIST_STYLES]
+    );
 
     // Past row — excluded by the default "today forward" window.
     await seedConcert({
@@ -275,6 +291,26 @@ describe('GET /concerts (BS#1603)', () => {
         expect(timed).not.toHaveProperty(internal);
         expect(timed.venue).not.toHaveProperty(internal);
       }
+    });
+  });
+
+  describe('genres projection (BS#1624)', () => {
+    it('surfaces artist_metadata.genres on a resolved headliner and leaves un-enriched rows null', async () => {
+      const res = await auth.get('/concerts').query({ limit: 100 });
+      expect(res.status).toBe(200);
+      const rows = seeded(res.body);
+
+      // Resolved headliner (artists.discogs_artist_id → artist_metadata) →
+      // genres projected onto the wire.
+      const enriched = rows.find((c) => c.headlining_artist_raw === ARTIST_NAME);
+      expect(enriched).toBeDefined();
+      expect(enriched.genres).toEqual(ARTIST_GENRES);
+
+      // Un-enriched row (unresolved headliner, no artist_metadata) → the LEFT
+      // JOIN misses and the field is null, never an empty array or absent.
+      const unenriched = rows.find((c) => c.headlining_artist_raw === 'Date-Only Billing');
+      expect(unenriched).toBeDefined();
+      expect(unenriched.genres).toBeNull();
     });
   });
 
