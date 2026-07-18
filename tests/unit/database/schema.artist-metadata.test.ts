@@ -25,7 +25,12 @@ describe('schema: artist_metadata (migration 0121, concerts-genre-enrichment)', 
   const sql = sqlPath && fs.existsSync(sqlPath) ? fs.readFileSync(sqlPath, 'utf-8') : '';
 
   const extractTableDef = (tableName: string): string => {
-    const regex = new RegExp(`export const ${tableName}\\b[\\s\\S]*?^\\);`, 'm');
+    // Bound to the table's own `});` close (drizzle `wxyc_schema.table(...)`
+    // literals end with `});` at line-start). An earlier `^\);` stopped at the
+    // first line beginning with `);`, which — since no table closes that way —
+    // over-captured into whatever construct followed, sweeping in an adjacent
+    // table's FK (e.g. artist_similar_artists, BS#1626).
+    const regex = new RegExp(`export const ${tableName}\\b[\\s\\S]*?^\\}\\);`, 'm');
     const match = schemaSource.match(regex);
     if (!match) throw new Error(`Table definition for ${tableName} not found in schema`);
     return match[0];

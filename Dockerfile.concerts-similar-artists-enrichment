@@ -1,0 +1,41 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /concerts-similar-artists-enrichment-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/concerts-similar-artists-enrichment ./jobs/concerts-similar-artists-enrichment
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/concerts-similar-artists-enrichment
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /concerts-similar-artists-enrichment
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/concerts-similar-artists-enrichment/package* ./jobs/concerts-similar-artists-enrichment/
+COPY ./shared/database/package* ./shared/database/
+
+# `@wxyc/database` declares `@wxyc/shared` as a registry dependency
+# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
+# .npmrc the prod stage's npm install 401s on @wxyc/shared. Mirrors the
+# pattern in Dockerfile.concerts-genre-enrichment.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./concerts-similar-artists-enrichment-builder/jobs/concerts-similar-artists-enrichment/dist ./jobs/concerts-similar-artists-enrichment/dist
+COPY --from=builder ./concerts-similar-artists-enrichment-builder/shared/database/dist ./shared/database/dist
+
+# Identifies the connection in pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-concerts-similar-artists-enrichment
+
+# ENTRYPOINT + empty CMD so docker-level args (e.g. `--backfill`, `--dry-run`)
+# pass through to the job rather than replacing the launcher.
+ENTRYPOINT ["node", "/concerts-similar-artists-enrichment/jobs/concerts-similar-artists-enrichment/dist/job.js"]
+CMD []
