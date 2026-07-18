@@ -1,5 +1,14 @@
 import { and, asc, eq, gte, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
-import { artist_metadata, artists, concerts, db, normalizeFreetextArtist, venues } from '@wxyc/database';
+import {
+  artist_metadata,
+  artist_similar_artists,
+  artists,
+  concerts,
+  db,
+  normalizeFreetextArtist,
+  type SimilarArtistNeighbor,
+  venues,
+} from '@wxyc/database';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
 
@@ -64,6 +73,14 @@ export type ConcertDTO = {
   // compatibly; mirrored here as `genres?` to keep the compile-time
   // `Equal<ConcertDTO, ApiYamlConcert>` pin in concerts.service.test.ts honest.
   genres?: string[] | null;
+  // Top-K affinity neighbors of the resolved headlining artist (BS#1626, On Tour
+  // R3b), sourced from `artist_similar_artists` via a null-safe LEFT JOIN on
+  // `headlining_artist_id`. Each `{ artist_id, weight }` is in the WXYC catalog
+  // keyspace (same as `headlining_artist_id`), so on-device For You matching
+  // intersects it against liked-artist ids in one id space. Null when the
+  // headliner has no in-library id OR the nightly enrichment hasn't run. Same
+  // optional-and-nullable discipline as `genres` (wxyc-shared#222).
+  similar_artists?: SimilarArtistNeighbor[] | null;
 };
 
 export type ConcertsQueryFilters = {
@@ -105,6 +122,11 @@ export type ConcertJoinRow = {
   // and selects this. The `getUpcomingShowsMaps` projection omits it, so its
   // rows leave it undefined and `toConcertDTO` coalesces to null.
   genres?: string[] | null;
+  // Optional: only the `getConcertsPage` projection LEFT-joins
+  // `artist_similar_artists` and selects this. The `getUpcomingShowsMaps` embed
+  // omits it (the #1616 hot-path guard), so its rows leave it undefined and
+  // `toConcertDTO` coalesces to null.
+  similar_artists?: SimilarArtistNeighbor[] | null;
 };
 
 // Explicit select list — the projection is the leak barrier: internal
@@ -172,6 +194,9 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
   // `upcoming_show` embed) leaves `genres` undefined → null on the wire; a
   // resolved-but-unenriched headliner surfaces as null too (no joined row).
   genres: row.genres ?? null,
+  // Same null-safe discipline (BS#1626): undefined on the embed projection,
+  // null for a headliner with no in-library id or no enrichment row.
+  similar_artists: row.similar_artists ?? null,
 });
 
 /**
@@ -214,12 +239,14 @@ const buildWhere = ({ from, to, curated }: ConcertsQueryFilters) => {
 const effectiveHeadlinerDiscogsId = sql`COALESCE(${concerts.headlining_discogs_artist_id}, ${artists.discogs_artist_id})`;
 
 // Page projection: the shared concerts⋈venues fields plus the LEFT-joined
-// artist-level genres. Kept separate from `concertJoinFields` so the
-// `getUpcomingShowsMaps` / count paths (which don't join `artist_metadata`)
-// can't accidentally reference `artist_metadata.genres`.
+// artist-level genres (BS#1624) and affinity neighbors (BS#1626). Kept separate
+// from `concertJoinFields` so the `getUpcomingShowsMaps` / count paths (which
+// don't join `artist_metadata` / `artist_similar_artists`) can't accidentally
+// reference those tables' columns.
 const concertPageFields = {
   ...concertJoinFields,
   genres: artist_metadata.genres,
+  similar_artists: artist_similar_artists.neighbors,
 };
 
 /**
@@ -229,8 +256,14 @@ const concertPageFields = {
  * Genres projection (BS#1624): a LEFT JOIN to `artists` (to reach a library
  * headliner's `discogs_artist_id`) and a LEFT JOIN to `artist_metadata` on the
  * effective Discogs id. Both are LEFT joins so an unresolved or un-enriched
- * headliner keeps the row and surfaces `genres: null` — never dropped. Purely
- * additive to the BS#1603 shape; no existing field's behavior changes.
+ * headliner keeps the row and surfaces `genres: null` — never dropped.
+ *
+ * Similar-artists projection (BS#1626): a LEFT JOIN to `artist_similar_artists`
+ * on `headlining_artist_id` directly — a clean catalog FK, no Discogs COALESCE
+ * needed, because the affinity graph is keyed on the library artist id. LEFT so
+ * a headliner with no in-library id or no enrichment row surfaces
+ * `similar_artists: null`. Purely additive to the BS#1603 shape; no existing
+ * field's behavior changes.
  */
 export const getConcertsPage = async (
   filters: ConcertsQueryFilters,
@@ -243,6 +276,7 @@ export const getConcertsPage = async (
     .innerJoin(venues, eq(venues.id, concerts.venue_id))
     .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
     .leftJoin(artist_metadata, eq(artist_metadata.discogs_artist_id, effectiveHeadlinerDiscogsId))
+    .leftJoin(artist_similar_artists, eq(artist_similar_artists.artist_id, concerts.headlining_artist_id))
     .where(buildWhere(filters))
     .orderBy(asc(concerts.starts_on), asc(concerts.id))
     .limit(limit)

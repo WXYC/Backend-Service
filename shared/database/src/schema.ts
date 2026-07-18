@@ -1406,6 +1406,55 @@ export type ArtistMetadata = InferSelectModel<typeof artist_metadata>;
 export type NewArtistMetadata = InferInsertModel<typeof artist_metadata>;
 
 /**
+ * One affinity neighbor of a resolved concert headliner, drawn from the
+ * semantic-index graph (On Tour R3b, BS#1626). Mirrors the `SimilarArtist`
+ * schema in `wxyc-shared/api.yaml` (merged wxyc-shared#222) verbatim, so the
+ * stored jsonb IS the `Concert.similar_artists` wire shape — persisted and
+ * re-emitted with zero field mapping.
+ *
+ * `artist_id` is a WXYC catalog artist id (`artists.id`), the SAME keyspace as
+ * `Concert.headlining_artist_id`, so on-device For You matching intersects it
+ * against liked-artist ids in one id space. `weight` is a raw semantic-index
+ * affinity composite — list-relative (comparable within one headliner's list,
+ * not across lists); persisted as-is, ranked/capped client-side.
+ */
+export type SimilarArtistNeighbor = { artist_id: number; weight: number };
+
+/**
+ * Artist-level cache of a headliner's top-K affinity neighbors from the
+ * semantic-index graph (On Tour R3b, BS#1626), keyed on `artists.id`. The
+ * artist analog of `artist_metadata` (which caches Discogs genres), but keyed
+ * on the LIBRARY artist id rather than the Discogs id: the affinity graph is
+ * built from the WXYC library, so only IN-LIBRARY headliners
+ * (`concerts.headlining_artist_id IS NOT NULL`) have a neighbor list — hence a
+ * real FK to `artists.id` (with `ON DELETE CASCADE`), unlike `artist_metadata`'s
+ * bare external Discogs id. Two curated concerts by the same headliner share
+ * one row.
+ *
+ * `neighbors` is an ordered `SimilarArtistNeighbor[]` (weight descending) — the
+ * exact `Concert.similar_artists` wire shape — that `GET /concerts` projects via
+ * a null-safe LEFT JOIN on `headlining_artist_id`.
+ *
+ * Population: `jobs/concerts-similar-artists-enrichment/` (nightly, chained
+ * after the artist resolvers + genre enrichment). Unlike genres (static Discogs
+ * data, presence-anti-join idempotency), affinity neighbors are recomputed on
+ * every semantic-index graph rebuild, so the job re-fetches the entire upcoming
+ * curated in-library cohort every night and OVERWRITES (`ON CONFLICT DO UPDATE`)
+ * — keeping neighbors current with the graph.
+ */
+export const artist_similar_artists = wxyc_schema.table('artist_similar_artists', {
+  artist_id: integer('artist_id')
+    .primaryKey()
+    .notNull()
+    .references(() => artists.id, { onDelete: 'cascade' }),
+  neighbors: jsonb('neighbors').$type<SimilarArtistNeighbor[]>().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type ArtistSimilarArtists = InferSelectModel<typeof artist_similar_artists>;
+export type NewArtistSimilarArtists = InferInsertModel<typeof artist_similar_artists>;
+
+/**
  * Free-text (artist, album) → Discogs release+master resolution cache
  * (BS#1491 / catalog-popularity Phase-2 Track 1).
  *

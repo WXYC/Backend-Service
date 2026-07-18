@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/concerts-similar-artists-enrichment",
+  "cron-schedule": "55 5 * * *",
+  "version": "1.0.0",
+  "description": "WXYC nightly cron (BS#1626): enrich upcoming curated in-library concert headliners with artist-level affinity neighbors from the semantic-index graph (WXYC/semantic-index#354), overwriting top-K neighbors on artist_similar_artists keyed by artists.id (the key GET /concerts projects onto Concert.similar_artists). Runs after the 05:15/05:35 artist resolvers + 05:45 genre enrichment; full-window nightly re-fetch keeps neighbors current with the graph rebuild; --backfill front-fills existing resolved in-library headliners once; cooperative pause defers when DJs are active.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_concerts_similar_artists_enrichment:ci -f ../../Dockerfile.concerts-similar-artists-enrichment ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.66.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

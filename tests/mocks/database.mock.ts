@@ -235,6 +235,11 @@ export const artist_metadata = {
   styles: 'styles',
   updated_at: 'updated_at',
 };
+export const artist_similar_artists = {
+  artist_id: 'artist_id',
+  neighbors: 'neighbors',
+  updated_at: 'updated_at',
+};
 export const flowsheet_freetext_resolution = {
   norm_artist: 'norm_artist',
   norm_album: 'norm_album',

@@ -834,6 +834,13 @@
       "when": 1784334036771,
       "tag": "0121_concerts-artist-genres",
       "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1784334036772,
+      "tag": "0122_concerts-similar-artists",
+      "breakpoints": true
     }
   ]
 }

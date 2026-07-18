@@ -64,6 +64,9 @@ type ApiYamlConcert = {
   // BS#1624 / wxyc-shared#221: nullable AND optional (not in the api.yaml
   // `required` set), so `genres?: string[] | null`.
   genres?: string[] | null;
+  // BS#1626 / wxyc-shared#222: the `SimilarArtist` schema (`{ artist_id, weight }`)
+  // as an optional + nullable array, same discipline as `genres`.
+  similar_artists?: { artist_id: number; weight: number }[] | null;
 };
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -104,6 +107,12 @@ const timedRow: ConcertJoinRow = {
   // Resolved + enriched headliner: the LEFT JOIN to `artist_metadata` produced
   // a genres array (BS#1624).
   genres: ['Rock', 'Electronic'],
+  // Resolved + enriched headliner: the LEFT JOIN to `artist_similar_artists`
+  // produced an affinity-neighbor array (BS#1626).
+  similar_artists: [
+    { artist_id: 5121, weight: 4.83 },
+    { artist_id: 88, weight: 2.1 },
+  ],
 };
 
 const dateOnlyRow: ConcertJoinRow = {
@@ -122,9 +131,10 @@ const dateOnlyRow: ConcertJoinRow = {
   price_max: null,
   age_restriction: null,
   venue_address: null,
-  // Unresolved headliner (headlining_artist_id null): the LEFT JOIN misses, so
-  // the projection yields NULL genres.
+  // Unresolved headliner (headlining_artist_id null): the LEFT JOINs miss, so
+  // the projection yields NULL genres and NULL similar_artists.
   genres: null,
+  similar_artists: null,
 };
 
 describe('ConcertDTO structural pin', () => {
@@ -212,6 +222,28 @@ describe('toConcertDTO', () => {
     expect(dto.genres).toBeNull();
   });
 
+  // BS#1626 — similar_artists come from the LEFT JOIN to artist_similar_artists.
+  // Present for a resolved + enriched headliner; null when unresolved or the
+  // enrichment hasn't run; null when the embed projection omits the join.
+  it('passes the joined similar_artists array through for a resolved, enriched headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.similar_artists).toEqual([
+      { artist_id: 5121, weight: 4.83 },
+      { artist_id: 88, weight: 2.1 },
+    ]);
+  });
+
+  it('emits null similar_artists for an unresolved headliner (LEFT JOIN miss)', () => {
+    expect(toConcertDTO(dateOnlyRow).similar_artists).toBeNull();
+  });
+
+  it('coalesces an undefined row.similar_artists (embed projection without the join) to null', () => {
+    const { similar_artists: _drop, ...without } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(without);
+    expect(dto.similar_artists).toBeNull();
+  });
+
   it('emits exactly the Concert wire keys — no internal ingestion columns', () => {
     const dto = toConcertDTO(timedRow);
     expect(Object.keys(dto).sort()).toEqual(
@@ -233,6 +265,7 @@ describe('toConcertDTO', () => {
         'age_restriction',
         'status',
         'genres',
+        'similar_artists',
       ].sort()
     );
     for (const internal of INTERNAL_COLUMNS) {
