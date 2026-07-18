@@ -262,6 +262,40 @@ export const getConcertsCount = async (filters: ConcertsQueryFilters): Promise<n
 };
 
 /**
+ * Single-concert read backing the public `GET /concerts/:id` (BS#1694, On
+ * Tour sharing; contract `wxyc-shared/api.yaml` v1.18.0, wxyc-shared#236).
+ * Reuses the list's exact projection (`concertPageFields`, BS#1624 genres
+ * LEFT JOIN included) and the same `toConcertDTO` mapper, so the by-id wire
+ * shape can never drift from `getConcertsPage`'s.
+ *
+ * Deliberately WINDOWLESS — the one place `buildWhere` is NOT used: no
+ * `starts_on` bound and no `removed_at IS NULL` conjunct. The share page and
+ * the iOS universal-link fallback render past and source-delisted
+ * (tombstoned) shows as "this one's passed" with whatever `status` the row
+ * last carried, so those rows must come back rather than 404. The leak
+ * barrier is untouched: the explicit select list never includes `removed_at`
+ * or the other ingestion columns, so a tombstoned row is served without
+ * exposing that it is one.
+ *
+ * Resolves null when no row matches (or when the venue INNER JOIN drops a
+ * dangling `venue_id` — same strictness as the list; a Concert without its
+ * embedded Venue can't satisfy the contract). The controller maps null → 404.
+ */
+export const getConcertById = async (id: number): Promise<ConcertDTO | null> => {
+  const rows = await db
+    .select(concertPageFields)
+    .from(concerts)
+    .innerJoin(venues, eq(venues.id, concerts.venue_id))
+    .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
+    .leftJoin(artist_metadata, eq(artist_metadata.discogs_artist_id, effectiveHeadlinerDiscogsId))
+    .where(eq(concerts.id, id))
+    .limit(1);
+
+  const row = (rows as ConcertJoinRow[])[0];
+  return row === undefined ? null : toConcertDTO(row);
+};
+
+/**
  * Adds the canonical catalog artist name to the concerts ⋈ venues projection
  * for the `upcoming_show` name arm. Sourced via the LEFT JOIN to `artists`, so
  * a resolved concert keys its name-map entry off the artist's CURRENT catalog

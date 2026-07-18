@@ -1,5 +1,5 @@
 /**
- * Unit tests for the concerts read service (BS#1603).
+ * Unit tests for the concerts read service (BS#1603, BS#1694).
  *
  * `@wxyc/database` resolves to tests/mocks/database.mock.ts, so these pin
  * the pieces that don't need PostgreSQL:
@@ -8,15 +8,20 @@
  *     key set: no internal ingestion columns.
  *   - The select projection never references the internal columns, so they
  *     can't reach the response regardless of the mapper.
+ *   - `getConcertById` — first-row → DTO via the same mapper as the list,
+ *     empty → null, and the shared leak-barrier projection.
  *
  * Windowing behavior (date-only rows, curated predicate, pagination against
- * real SQL) is covered by tests/integration/concerts.spec.js.
+ * real SQL) is covered by tests/integration/concerts.spec.js; the by-id
+ * read's WINDOWLESS semantics (past + tombstoned rows served) are covered by
+ * tests/integration/concerts-by-id.spec.js.
  */
 import { db } from '@wxyc/database';
 import {
   ConcertDTO,
   ConcertJoinRow,
   __resetUpcomingShowsMapsCacheForTests,
+  getConcertById,
   getConcertsCount,
   getConcertsPage,
   getUpcomingShowsMaps,
@@ -277,6 +282,49 @@ describe('getConcertsCount', () => {
   it('returns 0 when the aggregate row is missing', async () => {
     mockDb._chain.where.mockReturnValueOnce(Promise.resolve([]));
     await expect(getConcertsCount({ from: '2026-08-01', curated: true })).resolves.toBe(0);
+  });
+});
+
+/**
+ * BS#1694 — single-concert read behind the public `GET /concerts/:id`. The
+ * load-bearing property here is SHAPE PARITY with the list: the same
+ * projection and the same `toConcertDTO` mapper, asserted by comparing the
+ * result to `toConcertDTO(row)` rather than to hand-written literals. The
+ * windowless half of the contract (no `starts_on` bound, no `removed_at`
+ * filter) is real-SQL behavior, pinned in
+ * tests/integration/concerts-by-id.spec.js.
+ */
+describe('getConcertById', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('maps the found row through toConcertDTO — the exact list serialization', async () => {
+    // Terminal .limit(1) resolves the row set for this call.
+    mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([timedRow]));
+
+    await expect(getConcertById(101)).resolves.toEqual(toConcertDTO(timedRow));
+  });
+
+  it('resolves null when no row matches the id', async () => {
+    mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([]));
+
+    await expect(getConcertById(999999)).resolves.toBeNull();
+  });
+
+  it('selects the shared list projection — never the internal ingestion columns', async () => {
+    mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([timedRow]));
+
+    await getConcertById(101);
+
+    const projection = mockDb._chain.select.mock.calls[0][0] as Record<string, string>;
+    const selectedColumns = Object.values(projection);
+    for (const internal of INTERNAL_COLUMNS) {
+      expect(selectedColumns).not.toContain(internal);
+    }
+    // Parity pin: the by-id projection carries the BS#1624 genres join, so a
+    // by-id read can never lag the list's enrichment fields.
+    expect(Object.keys(projection)).toContain('genres');
   });
 });
 

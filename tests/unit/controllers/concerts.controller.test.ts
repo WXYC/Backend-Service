@@ -1,24 +1,33 @@
 /**
- * Unit tests for `GET /concerts` (BS#1603, on-tour Phase 2).
+ * Unit tests for `GET /concerts` (BS#1603, on-tour Phase 2) and the public
+ * `GET /concerts/:id` (BS#1694, On Tour sharing).
  *
  * Service is mocked; these tests pin the controller contract: query-param
  * validation (page/limit/curated/from/to), the 1-indexed page → offset math,
- * the default `starts_on` window ("today forward", America/New_York), and
- * the `ConcertsResponse` wire shape (`concerts` + `PaginationInfo`).
+ * the default `starts_on` window ("today forward", America/New_York), the
+ * `ConcertsResponse` wire shape (`concerts` + `PaginationInfo`), and the
+ * by-id contract (id validation, null → 404, `Cache-Control: public` on the
+ * 200 path only).
  */
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
 
 const mockGetConcertsPage = jest.fn<() => Promise<unknown[]>>();
 const mockGetConcertsCount = jest.fn<() => Promise<number>>();
+const mockGetConcertById = jest.fn<() => Promise<unknown>>();
 
 jest.mock('../../../apps/backend/services/concerts.service', () => ({
   getConcertsPage: mockGetConcertsPage,
   getConcertsCount: mockGetConcertsCount,
+  getConcertById: mockGetConcertById,
 }));
 
 import { nyCalendarDate } from '@wxyc/database';
-import { getConcerts, ConcertsQueryParams } from '../../../apps/backend/controllers/concerts.controller';
+import {
+  getConcertById,
+  getConcerts,
+  ConcertsQueryParams,
+} from '../../../apps/backend/controllers/concerts.controller';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -205,6 +214,97 @@ describe('concerts.controller getConcerts', () => {
   it('propagates service failures to the error handler', async () => {
     const failure = new Error('db unavailable');
     mockGetConcertsPage.mockRejectedValue(failure);
+    await expect(invoke()).rejects.toThrow(failure);
+  });
+});
+
+/**
+ * `GET /concerts/:id` (BS#1694) — public, windowless single-concert read per
+ * `wxyc-shared/api.yaml` v1.18.0 (`/concerts/{id}`, wxyc-shared#236). The
+ * service is mocked, so these pin the controller half of the contract: the
+ * all-digits id guard (same strictness as the list's page/limit — a bare
+ * parseInt would coerce '12abc'), null → 404 WxycError, and public
+ * cacheability on the 200 path only (an error response must never pick up the
+ * public Cache-Control, or a shared cache could pin a 404/400 for 5 minutes).
+ * Auth-tier wiring (no middleware) is pinned in the route + integration tests;
+ * windowless/tombstone semantics are pinned against real SQL in
+ * tests/integration/concerts-by-id.spec.js.
+ */
+describe('concerts.controller getConcertById', () => {
+  let req: Partial<Request>;
+  let res: Partial<Response>;
+  const mockNext = jest.fn<NextFunction>();
+
+  const invoke = () => getConcertById(req as Request, res as Response, mockNext);
+
+  const concert = {
+    id: 4821,
+    venue: { id: 3, slug: 'cats-cradle', name: "Cat's Cradle", city: 'Carrboro', state: 'NC', address: null },
+    starts_on: '2026-08-14',
+    status: 'on_sale',
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetConcertById.mockResolvedValue(concert);
+    req = { params: { id: '4821' } };
+    res = {
+      status: jest.fn().mockReturnThis() as unknown as Response['status'],
+      json: jest.fn() as unknown as Response['json'],
+      set: jest.fn().mockReturnThis() as unknown as Response['set'],
+    };
+  });
+
+  const setId = (id: string) => {
+    req.params = { id };
+  };
+
+  it('serves the concert the service resolves, verbatim', async () => {
+    await invoke();
+
+    expect(mockGetConcertById).toHaveBeenCalledWith(4821);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(concert);
+  });
+
+  it('marks the 200 publicly cacheable with the ~5-minute TTL the spec calls for', async () => {
+    await invoke();
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'public, max-age=300');
+  });
+
+  it('maps a service null to a 404 WxycError and never sets Cache-Control', async () => {
+    mockGetConcertById.mockResolvedValue(null);
+    setId('999999');
+
+    await expect(invoke()).rejects.toMatchObject({ statusCode: 404 });
+    expect(res.set).not.toHaveBeenCalled();
+    expect(res.json).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['abc'],
+    // trailing-garbage / radix inputs a bare parseInt would coerce
+    ['12abc'],
+    ['0x10'],
+    ['-1'],
+    ['1.5'],
+    [''],
+    // 0 is all-digits but not a valid serial id — reject before the query
+    ['0'],
+  ])('rejects id=%s with a 400 WxycError without querying', async (id) => {
+    setId(id);
+
+    await expect(invoke()).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'id must be a positive integer',
+    });
+    expect(mockGetConcertById).not.toHaveBeenCalled();
+    expect(res.set).not.toHaveBeenCalled();
+  });
+
+  it('propagates service failures to the error handler', async () => {
+    const failure = new Error('db unavailable');
+    mockGetConcertById.mockRejectedValue(failure);
     await expect(invoke()).rejects.toThrow(failure);
   });
 });

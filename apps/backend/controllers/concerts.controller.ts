@@ -113,3 +113,37 @@ export const getConcerts: RequestHandler<object, unknown, object, ConcertsQueryP
     },
   });
 };
+
+/**
+ * `GET /concerts/:id` — public single-concert read (BS#1694, On Tour
+ * sharing).
+ *
+ * Contract lives in `wxyc-shared/api.yaml` v1.18.0 (`/concerts/{id}`,
+ * wxyc-shared#236): no authentication (the route registers this handler with
+ * no middleware — see concerts.route.ts), no date window, tombstoned rows
+ * served with the `status` they last carried, 404 only for ids with no row.
+ *
+ * The id runs through the same all-digits guard as the list's page/limit (a
+ * bare parseInt would accept '12abc'), then the `< 1` check the sibling by-id
+ * read (`GET /library/rotation/:rotation_id/tracks`) applies — 400 either
+ * way, before any query.
+ *
+ * The 200 carries `Cache-Control: public, max-age=300`: no per-session
+ * variance, so the share Worker and CDNs can absorb share-spike traffic (the
+ * playlist proxy's public-cache pattern at the ~5-minute TTL the spec calls
+ * for). Error paths never set it — a shared cache must not pin a 404/400.
+ */
+export const getConcertById: RequestHandler<{ id: string }> = async (req, res) => {
+  const id = parsePositiveInt(req.params.id, 'id');
+  if (id < 1) {
+    throw new WxycError('id must be a positive integer', 400);
+  }
+
+  const concert = await concertsService.getConcertById(id);
+  if (concert === null) {
+    throw new WxycError(`No concert with id ${id}`, 404);
+  }
+
+  res.set('Cache-Control', 'public, max-age=300');
+  res.status(200).json(concert);
+};
