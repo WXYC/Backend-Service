@@ -59,6 +59,9 @@ type ApiYamlConcert = {
   price_max: number | null;
   age_restriction: string | null;
   status: 'on_sale' | 'sold_out' | 'cancelled' | 'rescheduled';
+  // BS#1624 / wxyc-shared#221: nullable AND optional (not in the api.yaml
+  // `required` set), so `genres?: string[] | null`.
+  genres?: string[] | null;
 };
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -96,6 +99,9 @@ const timedRow: ConcertJoinRow = {
   venue_city: 'Carrboro',
   venue_state: 'NC',
   venue_address: '300 E Main St, Carrboro, NC 27510',
+  // Resolved + enriched headliner: the LEFT JOIN to `artist_metadata` produced
+  // a genres array (BS#1624).
+  genres: ['Rock', 'Electronic'],
 };
 
 const dateOnlyRow: ConcertJoinRow = {
@@ -114,6 +120,9 @@ const dateOnlyRow: ConcertJoinRow = {
   price_max: null,
   age_restriction: null,
   venue_address: null,
+  // Unresolved headliner (headlining_artist_id null): the LEFT JOIN misses, so
+  // the projection yields NULL genres.
+  genres: null,
 };
 
 describe('ConcertDTO structural pin', () => {
@@ -182,6 +191,25 @@ describe('toConcertDTO', () => {
     expect(dto.supporting_artists_raw).toEqual([]);
   });
 
+  // BS#1624 — genres come from the LEFT JOIN to artist_metadata. Present for a
+  // resolved + enriched headliner; null when the headliner is unresolved or the
+  // enrichment hasn't run.
+  it('passes the joined genres array through for a resolved, enriched headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.genres).toEqual(['Rock', 'Electronic']);
+  });
+
+  it('emits null genres for an unresolved headliner (LEFT JOIN miss)', () => {
+    expect(toConcertDTO(dateOnlyRow).genres).toBeNull();
+  });
+
+  it('coalesces an undefined row.genres (projection without the join) to null', () => {
+    const { genres: _drop, ...withoutGenres } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(withoutGenres);
+    expect(dto.genres).toBeNull();
+  });
+
   it('emits exactly the Concert wire keys — no internal ingestion columns', () => {
     const dto = toConcertDTO(timedRow);
     expect(Object.keys(dto).sort()).toEqual(
@@ -202,6 +230,7 @@ describe('toConcertDTO', () => {
         'price_max',
         'age_restriction',
         'status',
+        'genres',
       ].sort()
     );
     for (const internal of INTERNAL_COLUMNS) {
