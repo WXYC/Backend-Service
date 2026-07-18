@@ -30,6 +30,7 @@ import {
   resolveServiceAccountCredentials,
   resolveSheetId,
   resolveSheetRange,
+  withSheetRetry,
 } from './fetch.js';
 import { upsertSubmission } from './writer.js';
 import { linkSubmissions } from './link.js';
@@ -47,7 +48,11 @@ const main = async (): Promise<void> => {
     const dryRun = resolveDryRun();
     log('info', 'init', `${JOB_NAME} initialized`, { sheet_id: sheetId, range, dry_run: dryRun });
 
-    const request = createSheetsRequest(credentials);
+    // Bounded retry over the authed fetch: a transient Google 5xx/429 (from
+    // the token mint or the values GET) is absorbed with backoff rather than
+    // failing the whole night; deterministic 4xx config errors still fail
+    // fast. See fetch.ts's withSheetRetry (BS#1692).
+    const request = withSheetRetry(createSheetsRequest(credentials));
 
     // Run guards (empty sheet, zero valid rows, majority-invalid, zero
     // writes) live in runEtl so orchestrate.test.ts can exercise them — a
