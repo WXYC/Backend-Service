@@ -13,6 +13,9 @@ import {
   padRows,
   fetchSheetRows,
   createSheetsRequest,
+  withSheetRetry,
+  isRetryableStatus,
+  extractStatus,
 } from '../../../../jobs/album-reviews-etl/fetch';
 
 const jwtInstances: Array<Record<string, unknown>> = [];
@@ -153,5 +156,111 @@ describe('createSheetsRequest (SA auth, mocked)', () => {
     const request = createSheetsRequest(resolveServiceAccountCredentials(SA_B64));
     await expect(request('https://sheets.googleapis.com/whatever')).resolves.toEqual({ values: [['x']] });
     expect(mockRequest).toHaveBeenCalledWith({ url: 'https://sheets.googleapis.com/whatever' });
+  });
+});
+
+describe('isRetryableStatus', () => {
+  it('retries transient upstream statuses (408, 429, all 5xx)', () => {
+    expect(isRetryableStatus(408)).toBe(true);
+    expect(isRetryableStatus(429)).toBe(true);
+    expect(isRetryableStatus(500)).toBe(true);
+    expect(isRetryableStatus(503)).toBe(true);
+    expect(isRetryableStatus(599)).toBe(true);
+  });
+
+  it('does NOT retry deterministic 4xx config errors', () => {
+    expect(isRetryableStatus(400)).toBe(false);
+    expect(isRetryableStatus(401)).toBe(false);
+    expect(isRetryableStatus(403)).toBe(false);
+    expect(isRetryableStatus(404)).toBe(false);
+  });
+});
+
+describe('extractStatus', () => {
+  it('reads GaxiosError-shaped .status', () => {
+    expect(extractStatus({ status: 503 })).toBe(503);
+  });
+
+  it('falls back to .response.status', () => {
+    expect(extractStatus({ response: { status: 429 } })).toBe(429);
+  });
+
+  it('returns undefined for non-HTTP errors', () => {
+    expect(extractStatus(new Error('ECONNRESET'))).toBeUndefined();
+    expect(extractStatus('boom')).toBeUndefined();
+    expect(extractStatus(undefined)).toBeUndefined();
+  });
+});
+
+describe('withSheetRetry (bounded transient retry, BS#1692)', () => {
+  // Deterministic + instant: no real backoff, no jitter.
+  const noWait = { sleep: () => Promise.resolve(), random: () => 0 };
+  const gaxios = (status: number): Error & { status: number } =>
+    Object.assign(new Error(`upstream ${status}`), { status });
+
+  it('retries a transient 503 then returns the eventual success', async () => {
+    const underlying = jest
+      .fn<Promise<{ values: string[][] }>, [string]>()
+      .mockRejectedValueOnce(gaxios(503))
+      .mockRejectedValueOnce(gaxios(503))
+      .mockResolvedValueOnce({ values: [['ok']] });
+    const request = withSheetRetry(underlying, noWait);
+
+    await expect(request('https://sheets/url')).resolves.toEqual({ values: [['ok']] });
+    expect(underlying).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry a deterministic 403 — fails fast on the first attempt', async () => {
+    const underlying = jest.fn().mockRejectedValue(gaxios(403));
+    const request = withSheetRetry(underlying, noWait);
+
+    await expect(request('https://sheets/url')).rejects.toMatchObject({ status: 403 });
+    expect(underlying).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a non-HTTP error (no status) — fails fast', async () => {
+    const underlying = jest.fn().mockRejectedValue(new Error('boom'));
+    const request = withSheetRetry(underlying, noWait);
+
+    await expect(request('https://sheets/url')).rejects.toThrow('boom');
+    expect(underlying).toHaveBeenCalledTimes(1);
+  });
+
+  it('rethrows the last error once retries are exhausted', async () => {
+    const underlying = jest.fn().mockRejectedValue(gaxios(503));
+    const request = withSheetRetry(underlying, { ...noWait, retries: 3 });
+
+    await expect(request('https://sheets/url')).rejects.toMatchObject({ status: 503 });
+    // 1 initial attempt + 3 retries.
+    expect(underlying).toHaveBeenCalledTimes(4);
+  });
+
+  it('honors a smaller retry budget', async () => {
+    const underlying = jest.fn().mockRejectedValue(gaxios(500));
+    const request = withSheetRetry(underlying, { ...noWait, retries: 1 });
+
+    await expect(request('https://sheets/url')).rejects.toMatchObject({ status: 500 });
+    expect(underlying).toHaveBeenCalledTimes(2);
+  });
+
+  it('applies jittered exponential backoff between attempts', async () => {
+    const delays: number[] = [];
+    const underlying = jest
+      .fn()
+      .mockRejectedValueOnce(gaxios(503))
+      .mockRejectedValueOnce(gaxios(503))
+      .mockResolvedValueOnce({ values: [] });
+    const request = withSheetRetry(underlying, {
+      sleep: (ms: number) => {
+        delays.push(ms);
+        return Promise.resolve();
+      },
+      random: () => 0.5,
+      baseDelayMs: 100,
+    });
+
+    await request('https://sheets/url');
+    // backoff 100*2^0 + jitter(0.5*100=50), then 100*2^1 + 50.
+    expect(delays).toEqual([150, 250]);
   });
 });
