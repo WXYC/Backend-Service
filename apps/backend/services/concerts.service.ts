@@ -1,5 +1,5 @@
 import { and, asc, eq, gte, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
-import { artists, concerts, db, normalizeFreetextArtist, venues } from '@wxyc/database';
+import { artist_metadata, artists, concerts, db, normalizeFreetextArtist, venues } from '@wxyc/database';
 
 /**
  * Concerts read service — backs `GET /concerts` (BS#1603, on-tour
@@ -54,6 +54,14 @@ export type ConcertDTO = {
   price_max: number | null;
   age_restriction: string | null;
   status: 'on_sale' | 'sold_out' | 'cancelled' | 'rescheduled';
+  // Discogs genre tags for the resolved headlining artist (BS#1624, On Tour
+  // R2), sourced from `artist_metadata` via a null-safe LEFT JOIN. Null when
+  // the headliner is unresolved OR the nightly genre enrichment hasn't run.
+  // Optional (not in the api.yaml `required` set — wxyc-shared#221) so the
+  // field can land ahead of any consumer and older clients decode forward-
+  // compatibly; mirrored here as `genres?` to keep the compile-time
+  // `Equal<ConcertDTO, ApiYamlConcert>` pin in concerts.service.test.ts honest.
+  genres?: string[] | null;
 };
 
 export type ConcertsQueryFilters = {
@@ -91,6 +99,10 @@ export type ConcertJoinRow = {
   venue_city: string;
   venue_state: string;
   venue_address: string | null;
+  // Optional: only the `getConcertsPage` projection LEFT-joins `artist_metadata`
+  // and selects this. The `getUpcomingShowsMaps` projection omits it, so its
+  // rows leave it undefined and `toConcertDTO` coalesces to null.
+  genres?: string[] | null;
 };
 
 // Explicit select list — the projection is the leak barrier: internal
@@ -154,6 +166,10 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
   price_max: toDollars(row.price_max),
   age_restriction: row.age_restriction,
   status: row.status,
+  // Null-safe: a projection that doesn't LEFT-join `artist_metadata` (the
+  // `upcoming_show` embed) leaves `genres` undefined → null on the wire; a
+  // resolved-but-unenriched headliner surfaces as null too (no joined row).
+  genres: row.genres ?? null,
 });
 
 /**
@@ -182,8 +198,37 @@ const buildWhere = ({ from, to, curated }: ConcertsQueryFilters) => {
 };
 
 /**
+ * The headliner's effective Discogs artist id, keyed off whichever resolution
+ * lane stamped the concert: the offline LML pass writes
+ * `concerts.headlining_discogs_artist_id` directly (BS#1614), while a
+ * library-resolved headliner reaches its Discogs id through
+ * `artists.discogs_artist_id`. When both are present they agree (the LML pass
+ * FK-loop-closes on the singleton `artists.discogs_artist_id` match), so the
+ * COALESCE order is immaterial in that case. This is the exact key
+ * `jobs/concerts-genre-enrichment/` writes `artist_metadata` rows under, so the
+ * projection and the enrichment SELECT resolve genres through the same
+ * expression.
+ */
+const effectiveHeadlinerDiscogsId = sql`COALESCE(${concerts.headlining_discogs_artist_id}, ${artists.discogs_artist_id})`;
+
+// Page projection: the shared concerts⋈venues fields plus the LEFT-joined
+// artist-level genres. Kept separate from `concertJoinFields` so the
+// `getUpcomingShowsMaps` / count paths (which don't join `artist_metadata`)
+// can't accidentally reference `artist_metadata.genres`.
+const concertPageFields = {
+  ...concertJoinFields,
+  genres: artist_metadata.genres,
+};
+
+/**
  * One page of upcoming concerts with their venues embedded, ordered by
  * `starts_on` ascending (id as a stable tiebreak).
+ *
+ * Genres projection (BS#1624): a LEFT JOIN to `artists` (to reach a library
+ * headliner's `discogs_artist_id`) and a LEFT JOIN to `artist_metadata` on the
+ * effective Discogs id. Both are LEFT joins so an unresolved or un-enriched
+ * headliner keeps the row and surfaces `genres: null` — never dropped. Purely
+ * additive to the BS#1603 shape; no existing field's behavior changes.
  */
 export const getConcertsPage = async (
   filters: ConcertsQueryFilters,
@@ -191,9 +236,11 @@ export const getConcertsPage = async (
   offset: number
 ): Promise<ConcertDTO[]> => {
   const rows = await db
-    .select(concertJoinFields)
+    .select(concertPageFields)
     .from(concerts)
     .innerJoin(venues, eq(venues.id, concerts.venue_id))
+    .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
+    .leftJoin(artist_metadata, eq(artist_metadata.discogs_artist_id, effectiveHeadlinerDiscogsId))
     .where(buildWhere(filters))
     .orderBy(asc(concerts.starts_on), asc(concerts.id))
     .limit(limit)

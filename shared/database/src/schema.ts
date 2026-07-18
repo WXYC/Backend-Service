@@ -1367,6 +1367,45 @@ export const album_metadata = wxyc_schema.table('album_metadata', {
 });
 
 /**
+ * Artist-level metadata cache, keyed by external Discogs artist id (BS#1624).
+ *
+ * The artist analog of `album_metadata`: a home for per-artist enrichment
+ * that isn't tied to any one album/release. Seeded here with the Discogs
+ * `genres`/`styles` taxonomy that the On Tour feature projects onto
+ * `Concert.genres` (`GET /concerts`) — the same taxonomy #1336 persisted on
+ * `album_metadata` for albums, but resolved for the artist as a whole (LML
+ * majority-take across the artist's releases, LML#781).
+ *
+ * Key: `discogs_artist_id` (PK) — a bare external Discogs id with NO FK, the
+ * same modelling choice as `album_metadata.discogs_artist_id` and
+ * `concerts.headlining_discogs_artist_id`. It is the identity both concert
+ * resolution lanes converge on: the offline LML pass (BS#1614) writes
+ * `concerts.headlining_discogs_artist_id` directly, and a library-resolved
+ * headliner reaches its Discogs id through `artists.discogs_artist_id`. A
+ * bare id (not an FK to `artists.id`) is required because the touring
+ * artists this feature surfaces are largely absent from the WXYC `artists`
+ * table. `.notNull()` is redundant with `.primaryKey()` at the SQL level but
+ * makes `InferInsertModel` mark the column required (same rationale as
+ * `album_metadata.album_id`).
+ *
+ * Population: `jobs/concerts-genre-enrichment/` (nightly, chained after the
+ * artist resolvers). It selects resolved headliners lacking an
+ * `artist_metadata` row, calls LML's bulk artist-genres endpoint (LML#781),
+ * and UPSERTs `ON CONFLICT DO NOTHING` — never overwriting a collected row.
+ * Both `genres` and `styles` are nullable `text[]` (LML may resolve one and
+ * not the other).
+ */
+export const artist_metadata = wxyc_schema.table('artist_metadata', {
+  discogs_artist_id: integer('discogs_artist_id').primaryKey().notNull(),
+  genres: text('genres').array(),
+  styles: text('styles').array(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type ArtistMetadata = InferSelectModel<typeof artist_metadata>;
+export type NewArtistMetadata = InferInsertModel<typeof artist_metadata>;
+
+/**
  * Free-text (artist, album) → Discogs release+master resolution cache
  * (BS#1491 / catalog-popularity Phase-2 Track 1).
  *

@@ -89,6 +89,7 @@ export const library = {
 export const artists = {
   id: 'id',
   artist_name: 'artist_name',
+  discogs_artist_id: 'discogs_artist_id',
 };
 export const genres = {};
 export const format = {};
@@ -226,6 +227,12 @@ export const album_metadata = {
   soundcloud_url: 'soundcloud_url',
   artist_bio: 'artist_bio',
   artist_wikipedia_url: 'artist_wikipedia_url',
+  updated_at: 'updated_at',
+};
+export const artist_metadata = {
+  discogs_artist_id: 'discogs_artist_id',
+  genres: 'genres',
+  styles: 'styles',
   updated_at: 'updated_at',
 };
 export const flowsheet_freetext_resolution = {
