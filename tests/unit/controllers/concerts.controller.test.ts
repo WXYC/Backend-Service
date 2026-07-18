@@ -302,6 +302,22 @@ describe('concerts.controller getConcertById', () => {
     expect(res.set).not.toHaveBeenCalled();
   });
 
+  // Ids beyond the int4 serial ceiling are well-formed integers that can
+  // never exist. Without this guard the Postgres bind rejects them with
+  // "integer out of range" → an unhandled 500 (plus Sentry noise) that any
+  // unauthenticated URL probe could mint on this public route. They are a
+  // miss, not a malformed request: 404, before any query.
+  it.each([
+    ['2147483648'], // int4 max + 1
+    ['99999999999999'],
+  ])('maps out-of-int4-range id=%s to a 404 without querying', async (id) => {
+    setId(id);
+
+    await expect(invoke()).rejects.toMatchObject({ statusCode: 404 });
+    expect(mockGetConcertById).not.toHaveBeenCalled();
+    expect(res.set).not.toHaveBeenCalled();
+  });
+
   it('propagates service failures to the error handler', async () => {
     const failure = new Error('db unavailable');
     mockGetConcertById.mockRejectedValue(failure);

@@ -270,6 +270,12 @@ describe('GET /concerts/:id (BS#1694)', () => {
       expect(res.body).toHaveProperty('message');
     });
 
+    it('returns 404 (not a bind 500) for an all-digits id beyond the int4 serial range', async () => {
+      const res = await request.get('/concerts/99999999999999');
+      expect(res.status).toBe(404);
+      expect(res.body).toHaveProperty('message');
+    });
+
     it.each([['abc'], ['12abc'], ['0']])(
       'returns 400 in the standard error shape for non-integer id %s',
       async (id) => {
