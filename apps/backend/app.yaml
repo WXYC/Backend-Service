@@ -1681,3 +1681,37 @@ paths:
           description: Invalid query parameters
         '401':
           description: Authentication required
+
+  /concerts/{id}:
+    get:
+      summary: Get a single concert by id (public share/deep-link read)
+      description: >-
+        Public, windowless single-concert read (BS#1694). Unlike the list,
+        this endpoint requires NO authentication and applies NO date window:
+        past concerts and concerts delisted at the source (tombstoned
+        upstream — never deleted, never exposed) are served with whatever
+        `status` they last carried, so the wxyc.org/shows share page can
+        render "this one's passed" and the iOS universal-link fallback can
+        resolve any shared id. Responses are publicly cacheable
+        (`Cache-Control: public, max-age=300`). The canonical wire contract
+        is `/concerts/{id}` in wxyc-shared/api.yaml (the SSOT); this
+        app.yaml is Swagger display only.
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The concert's serial id
+      responses:
+        '200':
+          description: The concert
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Concert'
+        '400':
+          description: Non-integer id
+        '404':
+          description: No concert with this id exists
