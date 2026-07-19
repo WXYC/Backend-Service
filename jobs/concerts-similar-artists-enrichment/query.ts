@@ -6,10 +6,15 @@
  * genre sibling's (BS#1624): genres key on
  * `COALESCE(headlining_discogs_artist_id, artists.discogs_artist_id)`, which
  * also covers BS#1614's LML-minted headliners that carry a Discogs id but have
- * no `artists` row (touring artists absent from the WXYC library). Similar
- * artists CANNOT cover those — the affinity graph is built from the WXYC
- * library, so a headliner with no `artists.id` has no `library_artist_id` to
- * send at all. Hence the filter is `headlining_artist_id IS NOT NULL`.
+ * no `artists` row (touring artists absent from the WXYC library). This LIBRARY
+ * lane keys on `artists.id`, so its filter is `headlining_artist_id IS NOT
+ * NULL`; the Discogs-only headliners ARE covered — by the SIBLING discogs lane
+ * (`discogs-query.ts`, BS#1701) keyed on the bare Discogs id, not by this query.
+ * The two cohorts PARTITION the resolved-headliner space (`IS NOT NULL` here vs
+ * `IS NULL AND headlining_discogs_artist_id IS NOT NULL` there), so no headliner
+ * is written to both tables. (The affinity graph itself covers both — it is
+ * built from EVERYTHING played on WXYC, not just the catalog — so the split is
+ * purely about which id keys the lookup, not which headliners are reachable.)
  *
  * NO presence anti-join (unlike genres). The refresh policy is a full-window
  * nightly re-fetch + OVERWRITE: affinity neighbors are recomputed on every
