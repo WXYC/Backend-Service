@@ -397,7 +397,11 @@ describe('concerts similar-artists enrichment (BS#1626)', () => {
       expect(unresolved.similar_artists).toBeNull();
     });
 
-    it('emits null similar_artists for a Discogs-only headliner (no in-library id)', async () => {
+    it('emits null similar_artists for a Discogs-only headliner un-enriched in the discogs lane', async () => {
+      // This spec never seeds a `discogs_artist_similar_artists` row, so the
+      // Discogs-only headliner is un-enriched in BOTH lanes and its COALESCE is
+      // null. The discogs lane populating this case is BS#1701's job — covered by
+      // concerts-similar-artists-discogs-lane.spec.js, not here.
       const res = await auth.get(`/concerts?from=${IN_10}&to=${IN_10}`).expect(200);
       const discogsOnly = res.body.concerts.find((c) => c.headlining_artist_raw === 'Touring Act Absent From Library');
       expect(discogsOnly).toBeDefined();

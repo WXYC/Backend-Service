@@ -1421,15 +1421,20 @@ export type NewArtistMetadata = InferInsertModel<typeof artist_metadata>;
 export type SimilarArtistNeighbor = { artist_id: number; weight: number };
 
 /**
- * Artist-level cache of a headliner's top-K affinity neighbors from the
- * semantic-index graph (On Tour R3b, BS#1626), keyed on `artists.id`. The
+ * Artist-level cache of an IN-LIBRARY headliner's top-K affinity neighbors from
+ * the semantic-index graph (On Tour R3b, BS#1626), keyed on `artists.id`. The
  * artist analog of `artist_metadata` (which caches Discogs genres), but keyed
- * on the LIBRARY artist id rather than the Discogs id: the affinity graph is
- * built from the WXYC library, so only IN-LIBRARY headliners
- * (`concerts.headlining_artist_id IS NOT NULL`) have a neighbor list — hence a
- * real FK to `artists.id` (with `ON DELETE CASCADE`), unlike `artist_metadata`'s
- * bare external Discogs id. Two curated concerts by the same headliner share
- * one row.
+ * on the LIBRARY artist id rather than the Discogs id — hence a real FK to
+ * `artists.id` (with `ON DELETE CASCADE`), unlike `artist_metadata`'s bare
+ * external Discogs id. Two curated concerts by the same headliner share one row.
+ *
+ * This is the LIBRARY lane of a two-lane design (BS#1701): a Discogs-only
+ * touring headliner (absent from the WXYC library, so no `artists.id`) gets its
+ * neighbor list from the sibling `discogs_artist_similar_artists` table instead,
+ * keyed on the bare Discogs id. `GET /concerts` COALESCEs the two lanes (this
+ * one wins). The affinity graph itself covers both — it is built from EVERYTHING
+ * played in the flowsheet, not just the catalog — so the split is purely about
+ * which id keys the cache row.
  *
  * `neighbors` is an ordered `SimilarArtistNeighbor[]` (weight descending) — the
  * exact `Concert.similar_artists` wire shape — that `GET /concerts` projects via
@@ -1488,6 +1493,42 @@ export const artist_station_plays = wxyc_schema.table('artist_station_plays', {
 
 export type ArtistStationPlays = InferSelectModel<typeof artist_station_plays>;
 export type NewArtistStationPlays = InferInsertModel<typeof artist_station_plays>;
+
+/**
+ * DISCOGS lane of the two-lane similar-artists design (BS#1701) — the sibling of
+ * `artist_similar_artists` for headliners that resolved ONLY to a Discogs artist
+ * id (`concerts.headlining_discogs_artist_id`, BS#1614's LML-minted touring
+ * artists) and have no `artists.id` to key the library lane on.
+ *
+ * Keyed on a BARE external Discogs artist id (no FK to `artists.id`), exactly
+ * like `artist_metadata`: the touring artists this lane covers are largely
+ * absent from the WXYC `artists` table, so a library FK is impossible. A single
+ * Discogs-keyed table could NOT replace the library lane — 23 of the 38
+ * currently-covered in-library headliners carry a NULL `artists.discogs_artist_id`
+ * (the column is nullable), so re-keying `artist_similar_artists` on the Discogs
+ * id would drop them (a 61% coverage regression). Hence two lanes, partitioned
+ * by cohort so no headliner is written to both.
+ *
+ * `neighbors` is the SAME `SimilarArtistNeighbor[]` wire shape as the library
+ * lane — the neighbors are WXYC catalog artist ids in both lanes (semantic-index
+ * returns library-code neighbors regardless of the lookup key; #367 reuses
+ * #354's translate path), so on-device For You matching intersects one id space.
+ * `GET /concerts` LEFT-joins on `COALESCE(headlining_discogs_artist_id,
+ * artists.discogs_artist_id)` and COALESCEs `artist_similar_artists.neighbors`
+ * (library lane) over this table's (library wins on the rare both-present row).
+ *
+ * Population: `jobs/concerts-similar-artists-enrichment/` discogs lane (nightly).
+ * Same OVERWRITE (`ON CONFLICT DO UPDATE`) refresh policy as the library lane —
+ * affinity neighbors are recomputed on every semantic-index graph rebuild.
+ */
+export const discogs_artist_similar_artists = wxyc_schema.table('discogs_artist_similar_artists', {
+  discogs_artist_id: integer('discogs_artist_id').primaryKey().notNull(),
+  neighbors: jsonb('neighbors').$type<SimilarArtistNeighbor[]>().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type DiscogsArtistSimilarArtists = InferSelectModel<typeof discogs_artist_similar_artists>;
+export type NewDiscogsArtistSimilarArtists = InferInsertModel<typeof discogs_artist_similar_artists>;
 
 /**
  * Free-text (artist, album) → Discogs release+master resolution cache

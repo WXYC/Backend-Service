@@ -121,11 +121,23 @@ export interface EnrichDeps {
   fetchHealth: () => Promise<{ mapped_artist_count: number | null }>;
   /** Overwrite the cohort's rows (UPSERT + scoped DELETE); returns counts. */
   overwrite: (upserts: SimilarArtistsRow[], deleteArtistIds: number[]) => Promise<{ written: number; deleted: number }>;
-  /** UPSERT the cohort's station-plays rows (BS#1702; UPSERT-only, no DELETE). */
-  writeStation: (rows: StationPlaysRow[]) => Promise<{ written: number }>;
+  /**
+   * UPSERT the cohort's station-plays rows (BS#1702; UPSERT-only, no DELETE).
+   * OPTIONAL (BS#1701): station plays are an in-library signal keyed on
+   * `artists.id` and sourced from the library endpoint's `source_plays`, so the
+   * Discogs lane (Discogs-only headliners, no `artists.id`, `#367` returns no
+   * `source_plays`) OMITS this dep. When absent, the whole station path —
+   * collection, UPSERT, and the `station_empty_skip` guard — is skipped, so the
+   * Discogs lane never mistakes its (structurally empty) plays for an undeployed
+   * `#369`.
+   */
+  writeStation?: (rows: StationPlaysRow[]) => Promise<{ written: number }>;
   /** Cooperative pause — awaited before each chunk. */
   awaitQuiet?: () => Promise<void>;
 }
+
+/** Default cohort noun for log lines — the library lane's wording. */
+export const DEFAULT_COHORT_LABEL = 'in-library headliners';
 
 export interface EnrichOptions {
   /** Top-K neighbors per headliner (K=20 in production). */
@@ -133,6 +145,13 @@ export interface EnrichOptions {
   /** Ids per endpoint chunk (<= SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP). */
   chunkSize: number;
   dryRun: boolean;
+  /**
+   * Human noun for the cohort in log lines (the orchestrator is lane-agnostic
+   * on the id, so this keeps the `enumerated`/`dry_run_plan` prose accurate).
+   * Defaults to the library lane's `in-library headliners`; the discogs lane
+   * passes `Discogs-only headliners`. Purely cosmetic — does not affect writes.
+   */
+  cohortLabel?: string;
 }
 
 const chunk = <T>(arr: T[], size: number): T[][] => {
@@ -144,6 +163,8 @@ const chunk = <T>(arr: T[], size: number): T[][] => {
 export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): Promise<Totals> => {
   const totals = emptyTotals();
 
+  const cohortLabel = options.cohortLabel ?? DEFAULT_COHORT_LABEL;
+
   const candidates = await deps.loadCandidates();
   totals.cohort = candidates.length;
 
@@ -151,8 +172,9 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
     candidates.map((c) => c.artist_id),
     options.chunkSize
   );
-  log('info', 'enumerated', `${candidates.length} in-library headliners in the upcoming curated window`, {
+  log('info', 'enumerated', `${candidates.length} ${cohortLabel} in the upcoming curated window`, {
     cohort: candidates.length,
+    cohort_label: cohortLabel,
     planned_chunks: chunks.length,
     chunk_size: options.chunkSize,
     limit: options.limit,
@@ -172,7 +194,11 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
   const fetched = new Map<number, SimilarArtistNeighbor[]>();
   // BS#1702: station play counts collected across chunks, INDEPENDENTLY of the
   // neighbor verdicts. Persisted before the neighbors null-wipe early return so a
-  // heavily-played artist with no neighbors still gets its count.
+  // heavily-played artist with no neighbors still gets its count. Captured once
+  // (BS#1701): a lane WITHOUT `writeStation` (the Discogs lane) skips the whole
+  // station path — the collection below and the write block — rather than
+  // mistake its structurally-empty `source_plays` for an undeployed #369.
+  const writeStation = deps.writeStation;
   const stationPlays = new Map<number, number>();
 
   for (const ids of chunks) {
@@ -202,8 +228,12 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
       // valid play count. The client already validated each value to a
       // non-negative integer, so a present value is trustworthy; an absent one is
       // simply not recorded (semantic-index#369 not deployed, or no play data).
-      const plays = response.source_plays[String(id)];
-      if (typeof plays === 'number') stationPlays.set(id, plays);
+      // Only the station-participating lane (library) collects — the Discogs lane
+      // (no `writeStation`) skips it entirely (BS#1701).
+      if (writeStation) {
+        const plays = response.source_plays[String(id)];
+        if (typeof plays === 'number') stationPlays.set(id, plays);
+      }
 
       // The contract guarantees every requested id is present as an array (the
       // client already sanitized well-formed arrays to `{artist_id, weight}` and
@@ -250,8 +280,10 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
   // DELETE — a stale count is harmless. Independent of the neighbor write in
   // every way: it runs even when the neighbors sweep is all-empty, and a
   // station-write failure leaves the neighbor path untouched (and vice versa).
+  // The whole block is gated on `writeStation` (BS#1701): the Discogs lane omits
+  // it and does no station work at all (no write, no empty-skip guard).
   const stationRows: StationPlaysRow[] = Array.from(stationPlays, ([artist_id, plays]) => ({ artist_id, plays }));
-  if (stationRows.length === 0) {
+  if (writeStation && stationRows.length === 0) {
     // Station empty-map guard, mirroring the neighbors `all_empty_sweep`: a
     // RESPONDED run (>=1 chunk came back) with no `source_plays` for any
     // headliner means the endpoint isn't returning the field yet
@@ -271,9 +303,9 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
         }
       );
     }
-  } else {
+  } else if (writeStation) {
     try {
-      const { written } = await deps.writeStation(stationRows);
+      const { written } = await writeStation(stationRows);
       totals.station_written = written;
     } catch (err) {
       // A station-write failure leaves the rows as they were (retryable next

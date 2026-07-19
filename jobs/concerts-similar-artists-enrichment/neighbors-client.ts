@@ -95,33 +95,62 @@ const pickNeighborFields = (n: SimilarArtistNeighbor): SimilarArtistNeighbor => 
 const baseUrl = (): string => (process.env.SEMANTIC_INDEX_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
 
 /**
- * Fetch top-K affinity neighbors for a batch of library artist ids.
- *
- * @param libraryArtistIds - `artists.id` values (1..=`SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP`).
- * @param limit - top-K per input id (K=20 in production).
- * @param options.timeoutMs - override the batch-scaled socket timeout.
- * @throws NeighborsClientError on empty/oversize input, non-2xx, or a body
- *   whose `results` is not an object — the whole chunk is then retryable next
- *   run (the caller counts it and continues, never wiping rows).
+ * The two batch-neighbors endpoints differ only by the reverse-lookup KEY: the
+ * library lane (semantic-index#354) keys on `artists.id`; the discogs lane
+ * (semantic-index#367) keys on the external Discogs artist id. Everything else —
+ * the cap, timeout, `{ results: { "<id>": [...] } }` response shape, and the
+ * catalog-id neighbor keyspace — is identical, so both share one impl. Only the
+ * request `path` and the JSON body's id-array field name change per lane.
  */
-export async function fetchNeighborsBatch(
-  libraryArtistIds: number[],
+type NeighborsEndpoint = {
+  /** POST path under the base URL. */
+  path: string;
+  /** The JSON body key carrying the id array. */
+  bodyKey: 'library_artist_ids' | 'discogs_artist_ids';
+  /** Public-function name for error prefixes (so a thrown error names its lane). */
+  label: string;
+};
+
+const LIBRARY_ENDPOINT: NeighborsEndpoint = {
+  path: '/graph/library-artists/neighbors/batch',
+  bodyKey: 'library_artist_ids',
+  label: 'fetchNeighborsBatch',
+};
+
+const DISCOGS_ENDPOINT: NeighborsEndpoint = {
+  path: '/graph/discogs-artists/neighbors/batch',
+  bodyKey: 'discogs_artist_ids',
+  label: 'fetchDiscogsNeighborsBatch',
+};
+
+/**
+ * Shared batch-neighbors fetch for both lanes. Validates the batch, POSTs the
+ * id array under `endpoint.bodyKey` to `endpoint.path`, and sanitizes each
+ * verdict to exactly `{ artist_id, weight }`.
+ *
+ * @throws NeighborsClientError on empty/oversize input, non-2xx, or a body whose
+ *   `results` is not an object — the whole chunk is then retryable next run (the
+ *   caller counts it and continues, never wiping rows).
+ */
+async function fetchNeighborsBatchImpl(
+  ids: number[],
   limit: number,
+  endpoint: NeighborsEndpoint,
   options?: { timeoutMs?: number }
 ): Promise<NeighborsBatchResponse> {
-  if (libraryArtistIds.length === 0) {
-    throw new NeighborsClientError('fetchNeighborsBatch requires at least 1 id.', 400);
+  if (ids.length === 0) {
+    throw new NeighborsClientError(`${endpoint.label} requires at least 1 id.`, 400);
   }
-  if (libraryArtistIds.length > SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP) {
+  if (ids.length > SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP) {
     throw new NeighborsClientError(
-      `fetchNeighborsBatch exceeded the cap of ${SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP} ids (received ${libraryArtistIds.length}).`,
+      `${endpoint.label} exceeded the cap of ${SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP} ids (received ${ids.length}).`,
       400
     );
   }
 
-  const timeoutMs = options?.timeoutMs ?? libraryArtistIds.length * PER_ID_TIMEOUT_MS + TIMEOUT_SLACK_MS;
+  const timeoutMs = options?.timeoutMs ?? ids.length * PER_ID_TIMEOUT_MS + TIMEOUT_SLACK_MS;
   // heat is deliberately omitted — the server default (0.5) is the production blend.
-  const body = JSON.stringify({ library_artist_ids: libraryArtistIds, limit });
+  const body = JSON.stringify({ [endpoint.bodyKey]: ids, limit });
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -131,7 +160,7 @@ export async function fetchNeighborsBatch(
   try {
     let response: Response;
     try {
-      response = await fetch(`${baseUrl()}/graph/library-artists/neighbors/batch`, {
+      response = await fetch(`${baseUrl()}${endpoint.path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
@@ -139,12 +168,12 @@ export async function fetchNeighborsBatch(
       });
     } catch (err) {
       const reason = (err as Error).name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err as Error).message;
-      throw new NeighborsClientError(`fetchNeighborsBatch: request failed (${reason}).`);
+      throw new NeighborsClientError(`${endpoint.label}: request failed (${reason}).`);
     }
 
     if (!response.ok) {
       throw new NeighborsClientError(
-        `fetchNeighborsBatch: semantic-index returned HTTP ${response.status}.`,
+        `${endpoint.label}: semantic-index returned HTTP ${response.status}.`,
         response.status
       );
     }
@@ -154,12 +183,12 @@ export async function fetchNeighborsBatch(
       parsed = await response.json();
     } catch (err) {
       const reason = (err as Error).name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err as Error).message;
-      throw new NeighborsClientError(`fetchNeighborsBatch: unparseable body (${reason}).`, 502);
+      throw new NeighborsClientError(`${endpoint.label}: unparseable body (${reason}).`, 502);
     }
 
     const results = (parsed as { results?: unknown } | null)?.results;
     if (results === null || typeof results !== 'object' || Array.isArray(results)) {
-      throw new NeighborsClientError('fetchNeighborsBatch: response `results` is not an object.', 502);
+      throw new NeighborsClientError(`${endpoint.label}: response \`results\` is not an object.`, 502);
     }
 
     // Narrow each verdict to exactly `{ artist_id, weight }` — the leak barrier
@@ -197,6 +226,42 @@ export async function fetchNeighborsBatch(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Fetch top-K affinity neighbors for a batch of LIBRARY artist ids
+ * (semantic-index#354 — the in-library lane).
+ *
+ * @param libraryArtistIds - `artists.id` values (1..=`SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP`).
+ * @param limit - top-K per input id (K=20 in production).
+ * @param options.timeoutMs - override the batch-scaled socket timeout.
+ */
+export function fetchNeighborsBatch(
+  libraryArtistIds: number[],
+  limit: number,
+  options?: { timeoutMs?: number }
+): Promise<NeighborsBatchResponse> {
+  return fetchNeighborsBatchImpl(libraryArtistIds, limit, LIBRARY_ENDPOINT, options);
+}
+
+/**
+ * Fetch top-K affinity neighbors for a batch of external DISCOGS artist ids
+ * (semantic-index#367 — the Discogs-only touring-headliner lane, BS#1701). The
+ * returned neighbors are still WXYC catalog artist ids (#367 reuses #354's
+ * translate-drop-cut path), so the sanitized `{ artist_id, weight }` verdicts
+ * are persisted and re-emitted with zero field mapping, exactly like the library
+ * lane.
+ *
+ * @param discogsArtistIds - external Discogs artist ids (1..=`SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP`).
+ * @param limit - top-K per input id (K=20 in production).
+ * @param options.timeoutMs - override the batch-scaled socket timeout.
+ */
+export function fetchDiscogsNeighborsBatch(
+  discogsArtistIds: number[],
+  limit: number,
+  options?: { timeoutMs?: number }
+): Promise<NeighborsBatchResponse> {
+  return fetchNeighborsBatchImpl(discogsArtistIds, limit, DISCOGS_ENDPOINT, options);
 }
 
 /**

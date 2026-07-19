@@ -11,6 +11,7 @@ import { jest } from '@jest/globals';
 import {
   NeighborsClientError,
   SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP,
+  fetchDiscogsNeighborsBatch,
   fetchGraphHealth,
   fetchNeighborsBatch,
 } from '../../../../jobs/concerts-similar-artists-enrichment/neighbors-client';
@@ -149,6 +150,71 @@ describe('fetchNeighborsBatch (semantic-index#354)', () => {
     // Only the non-negative integers survive (0 is valid); the fractional,
     // negative, and non-number values are dropped.
     expect(res.source_plays).toEqual({ '1': 312, '5': 0 });
+  });
+});
+
+describe('fetchDiscogsNeighborsBatch (semantic-index#367 — discogs lane)', () => {
+  const realFetch = global.fetch;
+  let fetchMock: jest.Mock;
+
+  beforeEach(() => {
+    fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    delete process.env.SEMANTIC_INDEX_URL;
+  });
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it('POSTs {discogs_artist_ids, limit} (heat omitted) to the discogs-artists batch route', async () => {
+    // The response `artist_id`s are catalog (library-code) ids in BOTH lanes —
+    // only the request KEY differs (external Discogs ids here).
+    fetchMock.mockResolvedValue(okJson({ results: { '900123': [{ artist_id: 5121, weight: 4.83 }], '900999': [] } }));
+
+    const res = await fetchDiscogsNeighborsBatch([900123, 900999], 20);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://explore.wxyc.org/graph/discogs-artists/neighbors/batch');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body as string);
+    expect(body).toEqual({ discogs_artist_ids: [900123, 900999], limit: 20 });
+    expect(body).not.toHaveProperty('library_artist_ids'); // not the library lane's key
+    expect(body).not.toHaveProperty('heat');
+    // Keyed by the stringified requested Discogs id; neighbors are catalog ids.
+    expect(res.results['900123']).toEqual([{ artist_id: 5121, weight: 4.83 }]);
+    expect(res.results['900999']).toEqual([]);
+  });
+
+  it('honours SEMANTIC_INDEX_URL and strips a trailing slash', async () => {
+    process.env.SEMANTIC_INDEX_URL = 'http://localhost:9999/';
+    fetchMock.mockResolvedValue(okJson({ results: { '1': [] } }));
+    await fetchDiscogsNeighborsBatch([1], 20);
+    expect((fetchMock.mock.calls[0] as [string])[0]).toBe(
+      'http://localhost:9999/graph/discogs-artists/neighbors/batch'
+    );
+  });
+
+  it('throws on empty input without calling fetch', async () => {
+    await expect(fetchDiscogsNeighborsBatch([], 20)).rejects.toBeInstanceOf(NeighborsClientError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('throws on an over-cap batch without calling fetch (error names the discogs lane)', async () => {
+    const ids = Array.from({ length: SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP + 1 }, (_, i) => i + 1);
+    await expect(fetchDiscogsNeighborsBatch(ids, 20)).rejects.toThrow(/fetchDiscogsNeighborsBatch exceeded the cap/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('throws NeighborsClientError carrying the HTTP status on a non-2xx (e.g. 422)', async () => {
+    fetchMock.mockResolvedValue(errStatus(422));
+    await expect(fetchDiscogsNeighborsBatch([1, 2], 20)).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('narrows each neighbor to exactly {artist_id, weight} (same leak barrier as the library lane)', async () => {
+    fetchMock.mockResolvedValue(okJson({ results: { '900123': [{ artist_id: 5121, weight: 4.83, name: 'leak' }] } }));
+    const res = await fetchDiscogsNeighborsBatch([900123], 20);
+    expect(res.results['900123']).toEqual([{ artist_id: 5121, weight: 4.83 }]);
   });
 });
 

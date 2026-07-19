@@ -245,6 +245,11 @@ export const artist_station_plays = {
   plays: 'plays',
   updated_at: 'updated_at',
 };
+export const discogs_artist_similar_artists = {
+  discogs_artist_id: 'discogs_artist_id',
+  neighbors: 'neighbors',
+  updated_at: 'updated_at',
+};
 export const flowsheet_freetext_resolution = {
   norm_artist: 'norm_artist',
   norm_album: 'norm_album',
