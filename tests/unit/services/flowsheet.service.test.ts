@@ -170,6 +170,33 @@ describe('flowsheet.service', () => {
         expect(result.label_id).toBe(42);
       });
 
+      it('projects the resolved catalog artist_id on a library-linked track (BS#1625)', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          artist_name: 'Juana Molina',
+          album_title: 'Halo',
+          album_id: 1,
+          artist_id: 501,
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.artist_id).toBe(501);
+      });
+
+      it('projects artist_id as null for a free-text track with no album_id (BS#1625)', () => {
+        const entry = createBaseEntry({
+          entry_type: 'track',
+          artist_name: 'Some Unlinked Artist',
+          album_id: null,
+          artist_id: null,
+        });
+
+        const result = transformToV2(entry);
+
+        expect(result.artist_id).toBeNull();
+      });
+
       it.each([
         { value: true, description: 'true' },
         { value: false, description: 'false' },

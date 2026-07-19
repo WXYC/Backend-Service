@@ -67,6 +67,7 @@ components:
       description: >
         Discriminated union keyed by entry_type.
         track entries include artist_name, album_title, track_title, record_label, rotation_bin, metadata fields.
+        track entries also carry artist_id — the resolved WXYC catalog artist id (flowsheet.album_id → library.artist_id), additive and nullable (null for free-form entries and library rows with no artist link). Shares the artists.id keyspace with concerts.headlining_artist_id / upcoming_show so on-device features (the On Tour likes match) can intersect a liked playcut against concert headliners (BS#1625). Canonical wire contract: FlowsheetV2TrackEntry.artist_id in wxyc-shared/api.yaml (the SSOT).
         track entries MAY also carry upcoming_show — an optional embedded Concert (see the Concert schema and GET /concerts) attached server-side at feed-assembly time when the track's resolved catalog artist (flowsheet.album_id → library.artist_id) has a curated, non-tombstoned, upcoming Triangle-area date (concerts.headlining_artist_id match; soonest date wins). Absent when there is no such match; older clients decode the absent field as "no touring CTA" (BS#1607). The canonical wire contract is FlowsheetV2TrackEntry.upcoming_show in wxyc-shared/api.yaml (the SSOT); this app.yaml is Swagger display only.
         show_start/show_end entries include dj_name and timestamp.
         dj_join/dj_leave entries include dj_name.
