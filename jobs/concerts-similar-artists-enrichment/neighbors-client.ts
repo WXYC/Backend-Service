@@ -13,10 +13,16 @@
  *   POST /graph/library-artists/neighbors/batch
  *     body   { "library_artist_ids": [4210, 887, ...], "limit": 20 }   // heat omitted → server default 0.5
  *     cap    100 ids/call; a structured 422 beyond (never silent truncation).
- *     resp   { "results": { "4210": [{"artist_id": 5121, "weight": 4.83}, ...], "887": [] } }
+ *     resp   { "results": { "4210": [{"artist_id": 5121, "weight": 4.83}, ...], "887": [] },
+ *              "source_plays": { "4210": 312, "887": 58 } }
  *            keyed by STRINGIFIED input id; every requested id present; weights
  *            descending, list-relative. An empty list = unknown/unmapped/
  *            ambiguous headliner → "no enrichment", NOT an error.
+ *            `source_plays` (semantic-index#369) is an ADDITIVE map of the
+ *            headliner's all-time WXYC flowsheet play count (`artist.total_plays`),
+ *            keyed by the same stringified input id — the BS#1702 station-affinity
+ *            signal. Absent on an un-deployed semantic-index → `{}` here (forward-
+ *            and backward-compatible; the station writer simply writes nothing).
  *
  * `library_artist_ids` and the response `artist_id`s are both WXYC catalog
  * artist ids (`artists.id`) — the SAME keyspace as `concerts.headlining_artist_id`
@@ -53,8 +59,17 @@ export class NeighborsClientError extends Error {
   }
 }
 
-/** `results` keyed by the STRINGIFIED input id → that headliner's neighbor list. */
-export type NeighborsBatchResponse = { results: Record<string, SimilarArtistNeighbor[]> };
+/**
+ * `results` keyed by the STRINGIFIED input id → that headliner's neighbor list.
+ * `source_plays` (semantic-index#369, BS#1702) is the additive all-time play
+ * count keyed by the same stringified input id; the client always surfaces it as
+ * an object (defaulting to `{}` when the un-deployed endpoint omits it), already
+ * validated to non-negative integers.
+ */
+export type NeighborsBatchResponse = {
+  results: Record<string, SimilarArtistNeighbor[]>;
+  source_plays: Record<string, number>;
+};
 
 /** True when `n` is a well-formed neighbor (numeric `artist_id` + `weight`). */
 const isSimilarArtistNeighbor = (n: unknown): n is SimilarArtistNeighbor =>
@@ -62,6 +77,14 @@ const isSimilarArtistNeighbor = (n: unknown): n is SimilarArtistNeighbor =>
   n !== null &&
   typeof (n as SimilarArtistNeighbor).artist_id === 'number' &&
   typeof (n as SimilarArtistNeighbor).weight === 'number';
+
+/**
+ * True when `v` is a valid play count: a non-negative integer. Mirrors the
+ * neighbor sanitization's discipline (reject non-integer/negative rather than
+ * trust the wire) — a fractional or negative `total_plays` is a contract
+ * violation and is dropped rather than persisted onto `Concert.station_plays`.
+ */
+const isPlayCount = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
 
 /** Keep ONLY the two contract fields — drops any extra key the endpoint adds. */
 const pickNeighborFields = (n: SimilarArtistNeighbor): SimilarArtistNeighbor => ({
@@ -154,7 +177,23 @@ export async function fetchNeighborsBatch(
         .filter(([, value]) => Array.isArray(value))
         .map(([key, value]) => [key, (value as unknown[]).filter(isSimilarArtistNeighbor).map(pickNeighborFields)])
     ) as Record<string, SimilarArtistNeighbor[]>;
-    return { results: sanitized };
+
+    // `source_plays` (semantic-index#369, BS#1702) is ADDITIVE: an un-deployed
+    // endpoint omits it, so a missing / non-object value degrades to `{}` (the
+    // station writer then writes nothing) rather than throwing. Keep only
+    // stringified-id → non-negative-integer entries — same "validate, don't
+    // trust the wire" discipline as the neighbor verdicts above. Built via
+    // `Object.fromEntries` (not a computed-key assignment) to avoid a dynamic
+    // object-injection sink on the response-controlled keys.
+    const rawPlays = (parsed as { source_plays?: unknown } | null)?.source_plays;
+    const sourcePlays =
+      rawPlays !== null && typeof rawPlays === 'object' && !Array.isArray(rawPlays)
+        ? (Object.fromEntries(
+            Object.entries(rawPlays as Record<string, unknown>).filter(([, value]) => isPlayCount(value))
+          ) as Record<string, number>)
+        : {};
+
+    return { results: sanitized, source_plays: sourcePlays };
   } finally {
     clearTimeout(timer);
   }

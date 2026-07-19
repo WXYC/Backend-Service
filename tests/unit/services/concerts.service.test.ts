@@ -72,6 +72,9 @@ type ApiYamlConcert = {
   // BS#1626 / wxyc-shared#222: the `SimilarArtist` schema (`{ artist_id, weight }`)
   // as an optional + nullable array, same discipline as `genres`.
   similar_artists?: { artist_id: number; weight: number }[] | null;
+  // BS#1702: the station-affinity play count as an optional + nullable integer,
+  // same discipline as `genres`/`similar_artists`.
+  station_plays?: number | null;
 };
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -118,6 +121,9 @@ const timedRow: ConcertJoinRow = {
     { artist_id: 5121, weight: 4.83 },
     { artist_id: 88, weight: 2.1 },
   ],
+  // Resolved + enriched headliner: the LEFT JOIN to `artist_station_plays`
+  // produced an all-time play count (BS#1702).
+  station_plays: 312,
 };
 
 const dateOnlyRow: ConcertJoinRow = {
@@ -137,9 +143,10 @@ const dateOnlyRow: ConcertJoinRow = {
   age_restriction: null,
   venue_address: null,
   // Unresolved headliner (headlining_artist_id null): the LEFT JOINs miss, so
-  // the projection yields NULL genres and NULL similar_artists.
+  // the projection yields NULL genres, similar_artists, and station_plays.
   genres: null,
   similar_artists: null,
+  station_plays: null,
 };
 
 describe('ConcertDTO structural pin', () => {
@@ -249,6 +256,25 @@ describe('toConcertDTO', () => {
     expect(dto.similar_artists).toBeNull();
   });
 
+  // BS#1702 — station_plays comes from the LEFT JOIN to artist_station_plays.
+  // Present for a resolved + enriched headliner; null when unresolved or the
+  // enrichment hasn't run; null when the embed projection omits the join.
+  it('passes the joined station_plays count through for a resolved, enriched headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.station_plays).toBe(312);
+  });
+
+  it('emits null station_plays for an unresolved headliner (LEFT JOIN miss)', () => {
+    expect(toConcertDTO(dateOnlyRow).station_plays).toBeNull();
+  });
+
+  it('coalesces an undefined row.station_plays (embed projection without the join) to null', () => {
+    const { station_plays: _drop, ...without } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(without);
+    expect(dto.station_plays).toBeNull();
+  });
+
   it('emits exactly the Concert wire keys — no internal ingestion columns', () => {
     const dto = toConcertDTO(timedRow);
     expect(Object.keys(dto).sort()).toEqual(
@@ -271,6 +297,7 @@ describe('toConcertDTO', () => {
         'status',
         'genres',
         'similar_artists',
+        'station_plays',
       ].sort()
     );
     for (const internal of INTERNAL_COLUMNS) {
@@ -376,9 +403,11 @@ describe('getConcertById', () => {
     for (const internal of INTERNAL_COLUMNS) {
       expect(selectedColumns).not.toContain(internal);
     }
-    // Parity pin: the by-id projection carries the BS#1624 genres join, so a
-    // by-id read can never lag the list's enrichment fields.
+    // Parity pin: the by-id projection carries the BS#1624 genres and BS#1702
+    // station_plays joins, so a by-id read can never lag the list's enrichment
+    // fields (the BS#1694 lockstep-join invariant).
     expect(Object.keys(projection)).toContain('genres');
+    expect(Object.keys(projection)).toContain('station_plays');
   });
 });
 

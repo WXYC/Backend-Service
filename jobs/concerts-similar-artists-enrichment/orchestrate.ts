@@ -31,6 +31,7 @@
 import type { NeighborsBatchResponse, SimilarArtistNeighbor } from './neighbors-client.js';
 import type { EnrichmentCandidate } from './query.js';
 import type { SimilarArtistsRow } from './writer.js';
+import type { StationPlaysRow } from './station-writer.js';
 import { captureError, log } from './logger.js';
 
 /**
@@ -76,6 +77,21 @@ export type Totals = {
   all_empty_skip: boolean;
   /** Set when the DELETE branch was suppressed by the empty-fraction/count guard. */
   deletes_suppressed: boolean;
+  /**
+   * Station-plays rows written (BS#1702). Accounted separately from `enriched`
+   * because the station write lands BEFORE the neighbors null-wipe early return —
+   * a heavily-played headliner with no neighbors still gets its count.
+   */
+  station_written: number;
+  /**
+   * Set when a RESPONDED run returned no `source_plays` for any headliner and the
+   * station write wrote nothing (semantic-index#369 not yet deployed, or a fault).
+   * Benign — never a null wipe (this table is UPSERT-only) and never a non-zero
+   * exit; `station_plays` is documented harmless before it's populated.
+   */
+  station_empty_skip: boolean;
+  /** Set when the station-plays UPSERT threw (rows left as-is, retryable). */
+  station_write_failed: boolean;
 };
 
 export const emptyTotals = (): Totals => ({
@@ -91,6 +107,9 @@ export const emptyTotals = (): Totals => ({
   write_failed: false,
   all_empty_skip: false,
   deletes_suppressed: false,
+  station_written: 0,
+  station_empty_skip: false,
+  station_write_failed: false,
 });
 
 export interface EnrichDeps {
@@ -102,6 +121,8 @@ export interface EnrichDeps {
   fetchHealth: () => Promise<{ mapped_artist_count: number | null }>;
   /** Overwrite the cohort's rows (UPSERT + scoped DELETE); returns counts. */
   overwrite: (upserts: SimilarArtistsRow[], deleteArtistIds: number[]) => Promise<{ written: number; deleted: number }>;
+  /** UPSERT the cohort's station-plays rows (BS#1702; UPSERT-only, no DELETE). */
+  writeStation: (rows: StationPlaysRow[]) => Promise<{ written: number }>;
   /** Cooperative pause — awaited before each chunk. */
   awaitQuiet?: () => Promise<void>;
 }
@@ -149,6 +170,10 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
   // Collect verdicts only for ids on RESPONDED chunks. A thrown chunk's ids
   // never enter this map, so they are neither upserted nor deleted.
   const fetched = new Map<number, SimilarArtistNeighbor[]>();
+  // BS#1702: station play counts collected across chunks, INDEPENDENTLY of the
+  // neighbor verdicts. Persisted before the neighbors null-wipe early return so a
+  // heavily-played artist with no neighbors still gets its count.
+  const stationPlays = new Map<number, number>();
 
   for (const ids of chunks) {
     if (deps.awaitQuiet) await deps.awaitQuiet();
@@ -172,6 +197,14 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
     totals.chunks += 1;
 
     for (const id of ids) {
+      // BS#1702: the station play count is independent of the neighbor verdict —
+      // collect it first so a malformed/absent/empty neighbor list doesn't skip a
+      // valid play count. The client already validated each value to a
+      // non-negative integer, so a present value is trustworthy; an absent one is
+      // simply not recorded (semantic-index#369 not deployed, or no play data).
+      const plays = response.source_plays[String(id)];
+      if (typeof plays === 'number') stationPlays.set(id, plays);
+
       // The contract guarantees every requested id is present as an array (the
       // client already sanitized well-formed arrays to `{artist_id, weight}` and
       // dropped non-array values). An id ABSENT here is therefore a contract
@@ -208,6 +241,51 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
       'malformed_verdicts',
       { malformed: totals.malformed, cohort: totals.cohort }
     );
+  }
+
+  // BS#1702 station-plays write — persisted HERE, BEFORE the neighbors null-wipe
+  // early return, and via its own writer/table: a heavily-played headliner with
+  // no affinity neighbors must still get its `station_plays` count (that is the
+  // cold-start "For You" card this feature exists to surface). UPSERT-only, no
+  // DELETE — a stale count is harmless. Independent of the neighbor write in
+  // every way: it runs even when the neighbors sweep is all-empty, and a
+  // station-write failure leaves the neighbor path untouched (and vice versa).
+  const stationRows: StationPlaysRow[] = Array.from(stationPlays, ([artist_id, plays]) => ({ artist_id, plays }));
+  if (stationRows.length === 0) {
+    // Station empty-map guard, mirroring the neighbors `all_empty_sweep`: a
+    // RESPONDED run (>=1 chunk came back) with no `source_plays` for any
+    // headliner means the endpoint isn't returning the field yet
+    // (semantic-index#369 undeployed) or faulted. Write nothing and record the
+    // benign skip — never read "endpoint returned no plays" as "all artists have
+    // 0 plays" (which would UPSERT zeros over real counts). Not set on a total
+    // outage (no chunk responded) — that is already carried by `errors`.
+    if (totals.chunks > 0) {
+      totals.station_empty_skip = true;
+      log(
+        'warn',
+        'station_empty_sweep',
+        `no source_plays returned for any of ${totals.chunks} responded chunk(s); writing no station plays`,
+        {
+          responded_chunks: totals.chunks,
+          hint: 'semantic-index#369 (source_plays on neighbors/batch) may not be deployed yet — station_plays stays null on the wire, which is harmless',
+        }
+      );
+    }
+  } else {
+    try {
+      const { written } = await deps.writeStation(stationRows);
+      totals.station_written = written;
+    } catch (err) {
+      // A station-write failure leaves the rows as they were (retryable next
+      // run). Flag it (distinct from the neighbor `write_failed`) so the
+      // entrypoint's exit-code check can alert; the neighbor path is untouched.
+      totals.station_write_failed = true;
+      log('warn', 'station_write_failed', `writeStationPlays threw for ${stationRows.length} row(s)`, {
+        rows: stationRows.length,
+        error_message: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
+      captureError(err, 'station_write_failed', { rows: stationRows.length });
+    }
   }
 
   // Null-wipe guard: a wholly-empty sweep over a non-empty responded set is the
