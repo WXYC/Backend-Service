@@ -1,4 +1,5 @@
 import { LmlClientError } from '@wxyc/lml-client';
+import { carriedClientStatus } from './errorHandler.js';
 
 /**
  * Decides whether `Sentry.setupExpressErrorHandler` should auto-capture an
@@ -17,7 +18,13 @@ import { LmlClientError } from '@wxyc/lml-client';
  */
 export function shouldCaptureExpressError(error: Error): boolean {
   if (error instanceof LmlClientError) return false;
-  const statusCode = (error as { statusCode?: number | string }).statusCode;
-  const numeric = typeof statusCode === 'string' ? parseInt(statusCode, 10) : statusCode;
-  return numeric === undefined || Number.isNaN(numeric) || numeric >= 500;
+  // Suppress exactly the integer-4xx band that errorHandler echoes as a
+  // client error — via the SAME `carriedClientStatus` helper, so the two
+  // tiers can never classify one error divergently. This covers WxycError's
+  // `statusCode`, http-errors' dual aliases, and Express's own `status`
+  // (router percent-decode URIErrors carry ONLY `status: 400`, and are
+  // unauthenticated-reachable via the public GET /concerts/:id — BS#1694 —
+  // so missing the alias would spam Sentry with client-input noise).
+  // Everything else renders as a generic 500 and MUST be captured.
+  return carriedClientStatus(error) === null;
 }
