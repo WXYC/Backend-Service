@@ -331,12 +331,20 @@ export const getConcertById = async (id: number): Promise<ConcertDTO | null> => 
     return null;
   }
 
+  // Join set MUST stay identical to `getConcertsPage`: both select
+  // `concertPageFields`, and Drizzle throws at runtime ("table … is not part
+  // of the query") if the projection references a table the query never
+  // joined. BS#1626 adding `similar_artists` to the shared projection while
+  // this query was in flight is exactly how the by-id read 500'd on every
+  // row-returning request (BS#1694 hotfix) — the by-id spec's
+  // serialization-parity test is the regression guard.
   const rows = await db
     .select(concertPageFields)
     .from(concerts)
     .innerJoin(venues, eq(venues.id, concerts.venue_id))
     .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
     .leftJoin(artist_metadata, eq(artist_metadata.discogs_artist_id, effectiveHeadlinerDiscogsId))
+    .leftJoin(artist_similar_artists, eq(artist_similar_artists.artist_id, concerts.headlining_artist_id))
     .where(eq(concerts.id, id))
     .limit(1);
 
