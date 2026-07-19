@@ -54,16 +54,22 @@ const isValidIsoDate = (value: string): boolean => {
 const todayEastern = (): string => nyCalendarDate(new Date());
 
 /**
- * Parse a positive-integer query param behind an all-digits guard. A bare
+ * Parse a positive-integer param behind an all-digits guard. A bare
  * `parseInt` would accept '1abc' → 1 and '0x10' → 16; requiring the raw
- * value to be all digits (and using an explicit radix) rejects both.
- * Returns 400 on malformed input via `WxycError`.
+ * value to be all digits (and using an explicit radix) rejects both. The
+ * `< 1` rejection makes the name honest — '0' is all-digits but not
+ * positive — so callers need no follow-up check. Returns 400 on malformed
+ * input via `WxycError`.
  */
 const parsePositiveInt = (raw: string, field: string): number => {
   if (!/^\d+$/.test(raw)) {
     throw new WxycError(`${field} must be a positive integer`, 400);
   }
-  return Number.parseInt(raw, 10);
+  const parsed = Number.parseInt(raw, 10);
+  if (parsed < 1) {
+    throw new WxycError(`${field} must be a positive integer`, 400);
+  }
+  return parsed;
 };
 
 export const getConcerts: RequestHandler<object, unknown, object, ConcertsQueryParams> = async (req, res) => {
@@ -72,12 +78,6 @@ export const getConcerts: RequestHandler<object, unknown, object, ConcertsQueryP
   const page = parsePositiveInt(query.page ?? '1', 'page');
   const limit = parsePositiveInt(query.limit ?? String(DEFAULT_LIMIT), 'limit');
 
-  if (page < 1) {
-    throw new WxycError('page must be a positive integer', 400);
-  }
-  if (limit < 1) {
-    throw new WxycError('limit must be a positive integer', 400);
-  }
   if (limit > MAX_LIMIT) {
     throw new WxycError(`limit must be at most ${MAX_LIMIT}`, 400);
   }
@@ -116,42 +116,31 @@ export const getConcerts: RequestHandler<object, unknown, object, ConcertsQueryP
 
 /**
  * `GET /concerts/:id` — public single-concert read (BS#1694, On Tour
- * sharing).
+ * sharing). Contract: `wxyc-shared/api.yaml` v1.18.0 (`/concerts/{id}`,
+ * wxyc-shared#236) — no authentication (the route registers this handler
+ * with no middleware; see concerts.route.ts), no date window, tombstoned
+ * rows served with the `status` they last carried, 404 only for ids with no
+ * row.
  *
- * Contract lives in `wxyc-shared/api.yaml` v1.18.0 (`/concerts/{id}`,
- * wxyc-shared#236): no authentication (the route registers this handler with
- * no middleware — see concerts.route.ts), no date window, tombstoned rows
- * served with the `status` they last carried, 404 only for ids with no row.
+ * The id runs through the same all-digits/positive guard as the list's
+ * page/limit (a bare parseInt would accept '12abc') — 400 before any query.
+ * Ids that pass the guard but cannot exist for an int4 serial (beyond
+ * 2^31-1) resolve to null in the service, which owns that persistence fact,
+ * and surface as the same 404 as any other miss.
  *
- * The id runs through the same all-digits guard as the list's page/limit (a
- * bare parseInt would accept '12abc'), then the `< 1` check the sibling by-id
- * read (`GET /library/rotation/:rotation_id/tracks`) applies — 400 either
- * way, before any query.
- *
- * The 200 carries `Cache-Control: public, max-age=300`: no per-session
- * variance, so the share Worker and CDNs can absorb share-spike traffic (the
- * playlist proxy's public-cache pattern at the ~5-minute TTL the spec calls
- * for). Error paths never set it — a shared cache must not pin a 404/400.
+ * Caching: every response starts pinned `Cache-Control: no-store`; only the
+ * 200 path upgrades to `public, max-age=300` (the playlist proxy's
+ * public-cache pattern at the spec's ~5-minute TTL — no per-session
+ * variance, so the share Worker and CDNs absorb share-spike traffic).
+ * Omitting the header on errors would NOT keep them out of shared caches:
+ * 404 is heuristically cacheable by default (RFC 9110 §15.5.5), and concert
+ * ids are predictable serials, so a header-less 404 could pin a
+ * freshly-shared id as dead at the edge for the CDN's default error TTL.
  */
-
-/**
- * PostgreSQL int4 ceiling. `concerts.id` is a serial (int4), so a well-formed
- * integer above this can never exist — but without a guard it reaches the
- * Postgres bind, which rejects it with "integer out of range" → an unhandled
- * 500 (plus Sentry noise) that any unauthenticated URL probe could mint on
- * this public route. Mapped to 404 (a miss, not a malformed request), before
- * any query.
- */
-const MAX_SERIAL_ID = 2_147_483_647;
-
 export const getConcertById: RequestHandler<{ id: string }> = async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+
   const id = parsePositiveInt(req.params.id, 'id');
-  if (id < 1) {
-    throw new WxycError('id must be a positive integer', 400);
-  }
-  if (id > MAX_SERIAL_ID) {
-    throw new WxycError(`No concert with id ${req.params.id}`, 404);
-  }
 
   const concert = await concertsService.getConcertById(id);
   if (concert === null) {

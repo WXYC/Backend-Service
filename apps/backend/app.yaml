@@ -1692,10 +1692,13 @@ paths:
         upstream — never deleted, never exposed) are served with whatever
         `status` they last carried, so the wxyc.org/shows share page can
         render "this one's passed" and the iOS universal-link fallback can
-        resolve any shared id. Responses are publicly cacheable
-        (`Cache-Control: public, max-age=300`). The canonical wire contract
-        is `/concerts/{id}` in wxyc-shared/api.yaml (the SSOT); this
-        app.yaml is Swagger display only.
+        resolve any shared id. 200 responses are publicly cacheable
+        (`Cache-Control: public, max-age=300`); handler error responses
+        (400/404/5xx) are pinned `no-store` so a shared cache can never
+        hold a miss. (The router-level 400 for an undecodable path escape
+        carries no cache header; 400 is not heuristically cacheable.) The
+        canonical wire contract is `/concerts/{id}` in wxyc-shared/api.yaml
+        (the SSOT); this app.yaml is Swagger display only.
       security: []
       parameters:
         - name: id
@@ -1712,6 +1715,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/Concert'
         '400':
-          description: Non-integer id
+          description: Malformed id (non-integer, non-positive, or an undecodable path escape)
         '404':
           description: No concert with this id exists
