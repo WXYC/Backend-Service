@@ -297,7 +297,7 @@ describe('GET /concerts/:id (BS#1694)', () => {
     });
 
     it.each([['abc'], ['12abc'], ['0']])(
-      'returns 400 pinned no-store in the standard error shape for non-integer id %s',
+      'returns 400 pinned no-store in the standard error shape for malformed id %s',
       async (id) => {
         const res = await request.get(`/concerts/${id}`);
         expect(res.status).toBe(400);

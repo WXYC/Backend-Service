@@ -74,8 +74,15 @@ describe('errorHandler middleware', () => {
    * (body-parser). Rendering those as 500s turns any malformed escape in a
    * public path segment (`GET /concerts/%ZZ` — BS#1694 made the first such
    * unauthenticated param route) into a probe-mintable fake internal error.
-   * Only the 4xx band is trusted and echoed; foreign 5xx-status errors stay
-   * on the generic-500 path so internals never leak.
+   *
+   * Echo requires TRUST, not just a 4xx number: upstream SDK errors
+   * (groq-sdk APIError et al.) mirror the provider's HTTP status onto
+   * `.status` and embed the raw provider body in `message` — echoing those
+   * would leak provider/org/quota internals to unauthenticated-tier callers
+   * and misreport our own dependency failures as the caller's 4xx. Trusted =
+   * `expose: true` (the http-errors convention body-parser follows) or the
+   * router's own percent-decode URIError. Everything else stays on the
+   * generic-500 path.
    */
   describe('foreign errors carrying an HTTP status (express/router/body-parser convention)', () => {
     it('answers the carried 4xx status for a router percent-decode URIError (status, no statusCode)', () => {
@@ -88,9 +95,10 @@ describe('errorHandler middleware', () => {
       expect(jsonMock).toHaveBeenCalledWith({ message: "Failed to decode param '%ZZ'" });
     });
 
-    it('answers a 4xx carried as statusCode (http-errors convention, e.g. body-parser)', () => {
+    it('answers a 4xx carried as statusCode when the error declares expose (http-errors, e.g. body-parser)', () => {
       const { res, statusMock, jsonMock } = mockResponse();
-      const error = Object.assign(new Error('request entity too large'), { statusCode: 413 });
+      // Real body-parser shape: SyntaxError with status+statusCode+expose:true.
+      const error = Object.assign(new Error('request entity too large'), { statusCode: 413, expose: true });
 
       errorHandler(error, mockReq, res, mockNext);
 
@@ -100,12 +108,33 @@ describe('errorHandler middleware', () => {
 
     it('parses a string-encoded 4xx status (express convention)', () => {
       const { res, statusMock, jsonMock } = mockResponse();
-      const error = Object.assign(new Error('bad escape'), { status: '400' });
+      const error = Object.assign(new Error('bad escape'), { status: '400', expose: true });
 
       errorHandler(error, mockReq, res, mockNext);
 
       expect(statusMock).toHaveBeenCalledWith(400);
       expect(jsonMock).toHaveBeenCalledWith({ message: 'bad escape' });
+    });
+
+    // The groq-sdk APIError shape: integer `.status` mirroring the provider's
+    // HTTP status, no `statusCode`, no `expose`, message embedding the raw
+    // provider body. POST /request/parse rethrows these raw (parseOnly), so
+    // without the trust gate an anonymous-session caller would receive the
+    // provider's org/model/quota internals as a 429 — and Sentry would treat
+    // it as client noise. It must stay a generic 500 (captured).
+    it('does NOT echo an untrusted 4xx (no expose, not a URIError) — e.g. an upstream SDK error', () => {
+      const { res, statusMock, jsonMock } = mockResponse();
+      const error = Object.assign(
+        new Error(
+          '429 {"error":{"message":"Rate limit reached for model llama-3.3-70b-versatile in organization org_01abc"}}'
+        ),
+        { status: 429 }
+      );
+
+      errorHandler(error, mockReq, res, mockNext);
+
+      expect(statusMock).toHaveBeenCalledWith(500);
+      expect(jsonMock).toHaveBeenCalledWith({ message: 'Internal server error' });
     });
 
     it('keeps foreign 5xx-status errors on the generic 500 path (no internals leak)', () => {
