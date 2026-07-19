@@ -306,6 +306,28 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
             : 'mapped_artist_count is 0/null — mapping not yet rebuilt (bootstrap night); expected pre-rebuild',
       }
     );
+    // BS#1702: the non-zero exit for an all-empty sweep is now suppressed when
+    // station plays were written this run (`all_empty_skip && station_written === 0`
+    // in job.ts) — a night that made station-affinity progress isn't "wrote
+    // nothing." That suppression must NOT also blind the alert for a genuine
+    // neighbor-graph fault. Unlike every other exit-suppressible failure kind
+    // (chunk_failed / malformed_verdicts / overwrite_failed / station_write_failed),
+    // the all-empty sweep had no Sentry fallback — only this stderr log — so once
+    // the exit could be suppressed the fault would be invisible to alerting. When
+    // the graph reports a healthy mapped_artist_count the empty sweep is "likely a
+    // real fault, not a bootstrap," so raise ONE aggregate Sentry signal so the
+    // fault stays visible even at exit 0. A 0/null count is the expected
+    // pre-rebuild bootstrap → log only, no Sentry noise.
+    if (health.mapped_artist_count !== null && health.mapped_artist_count > 0) {
+      captureError(
+        new Error(
+          `all ${fetched.size} responded headliners returned empty neighbor lists over a healthy graph ` +
+            `(mapped_artist_count=${health.mapped_artist_count}) — likely a real semantic-index fault`
+        ),
+        'all_empty_sweep',
+        { responded: fetched.size, mapped_artist_count: health.mapped_artist_count }
+      );
+    }
     return totals;
   }
 

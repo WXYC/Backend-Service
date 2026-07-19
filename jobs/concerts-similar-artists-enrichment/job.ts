@@ -163,7 +163,9 @@ const main = async (): Promise<void> => {
     //     / fault) AND the run wrote no station plays either. A night that writes
     //     station plays (BS#1702) but has an all-empty neighbor sweep DID make
     //     progress, so it stays exit 0 — the loud `all_empty_sweep` error log
-    //     still fires for visibility, but the run is not "wrote nothing."
+    //     still fires, and a healthy-graph sweep also raises a Sentry signal
+    //     (orchestrate.ts), so a genuine fault stays alertable even at exit 0;
+    //     the run is simply not counted as "wrote nothing."
     //   - wrote nothing while some signal failed — a total transport outage (every
     //     chunk threw → errors), a wholly-malformed sweep (malformed), or a write
     //     that threw (write_failed / station_write_failed). A PARTIAL failure that
