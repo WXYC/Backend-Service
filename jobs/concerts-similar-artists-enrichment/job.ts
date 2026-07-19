@@ -171,11 +171,18 @@ export type LaneTotals = { library: Totals; discogs: Totals };
  * healthy-graph Sentry signal in orchestrate.ts keep a genuine fault alertable).
  * `station_empty_skip` is NOT a failure — an undeployed semantic-index#369 is the
  * expected pre-populate state.
+ *
+ * `all_empty_expected` (BS#1701) neutralizes the all-empty term for the discogs
+ * lane: an all-empty discogs sweep is the EXPECTED common case (its cohort is
+ * largely absent from the WXYC-library-built graph), so it must not fail the
+ * cron. Genuine discogs failures (transport errors, a thrown write) still alert
+ * via the `wroteNothing && somethingFailed` arm.
  */
 export const laneShouldAlert = (t: Totals): boolean => {
   const wroteNothing = t.enriched === 0 && t.cleared === 0 && t.station_written === 0;
   const somethingFailed = t.errors > 0 || t.malformed > 0 || t.write_failed || t.station_write_failed;
-  return (t.all_empty_skip && t.station_written === 0) || (wroteNothing && somethingFailed);
+  const allEmptyAlerts = t.all_empty_skip && !t.all_empty_expected;
+  return (allEmptyAlerts && t.station_written === 0) || (wroteNothing && somethingFailed);
 };
 
 export const runJob = async (options: EnrichJobOptions): Promise<LaneTotals> => {
@@ -223,7 +230,11 @@ export const runJob = async (options: EnrichJobOptions): Promise<LaneTotals> => 
         ),
       awaitQuiet,
     },
-    { ...sharedOptions, cohortLabel: DISCOGS_COHORT_LABEL }
+    // `allEmptyExpected`: an all-empty discogs sweep is the common case (most
+    // touring artists aren't in the graph), so it must not raise a false "real
+    // fault" Sentry signal or fail the cron — see `laneShouldAlert` + the
+    // orchestrator's all-empty guard. The write is still suppressed either way.
+    { ...sharedOptions, cohortLabel: DISCOGS_COHORT_LABEL, allEmptyExpected: true }
   );
 
   return { library, discogs };
