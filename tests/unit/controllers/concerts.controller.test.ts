@@ -269,15 +269,29 @@ describe('concerts.controller getConcertById', () => {
 
   it('marks the 200 publicly cacheable with the ~5-minute TTL the spec calls for', async () => {
     await invoke();
-    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'public, max-age=300');
+    // The public directive must be the FINAL Cache-Control written — it
+    // overrides the no-store default the handler pins first.
+    expect(res.set).toHaveBeenLastCalledWith('Cache-Control', 'public, max-age=300');
   });
 
-  it('maps a service null to a 404 WxycError and never sets Cache-Control', async () => {
+  // Omitting Cache-Control does NOT keep a 404 out of shared caches: 404 is
+  // heuristically cacheable by default (RFC 9110 §15.5.5), and the CDN tier
+  // this route is built for caches header-less 404s for minutes — long
+  // enough to pin a freshly-shared id as dead at the edge. Every response
+  // therefore starts explicitly `no-store`; only the 200 path upgrades to
+  // the public directive.
+  it('pins the no-store default before anything can throw', async () => {
+    await invoke();
+    expect(res.set).toHaveBeenNthCalledWith(1, 'Cache-Control', 'no-store');
+  });
+
+  it('maps a service null to a 404 WxycError with Cache-Control pinned no-store', async () => {
     mockGetConcertById.mockResolvedValue(null);
     setId('999999');
 
     await expect(invoke()).rejects.toMatchObject({ statusCode: 404 });
-    expect(res.set).not.toHaveBeenCalled();
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    expect(res.set).not.toHaveBeenCalledWith('Cache-Control', 'public, max-age=300');
     expect(res.json).not.toHaveBeenCalled();
   });
 
@@ -299,24 +313,15 @@ describe('concerts.controller getConcertById', () => {
       message: 'id must be a positive integer',
     });
     expect(mockGetConcertById).not.toHaveBeenCalled();
-    expect(res.set).not.toHaveBeenCalled();
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    expect(res.set).not.toHaveBeenCalledWith('Cache-Control', 'public, max-age=300');
   });
 
-  // Ids beyond the int4 serial ceiling are well-formed integers that can
-  // never exist. Without this guard the Postgres bind rejects them with
-  // "integer out of range" → an unhandled 500 (plus Sentry noise) that any
-  // unauthenticated URL probe could mint on this public route. They are a
-  // miss, not a malformed request: 404, before any query.
-  it.each([
-    ['2147483648'], // int4 max + 1
-    ['99999999999999'],
-  ])('maps out-of-int4-range id=%s to a 404 without querying', async (id) => {
-    setId(id);
-
-    await expect(invoke()).rejects.toMatchObject({ statusCode: 404 });
-    expect(mockGetConcertById).not.toHaveBeenCalled();
-    expect(res.set).not.toHaveBeenCalled();
-  });
+  // Out-of-int4-range ids (e.g. '2147483648') are well-formed integers that
+  // can never exist; the SERVICE owns that persistence fact and resolves
+  // them to null (see concerts.service.test.ts), which the null → 404
+  // mapping above already covers at this tier. The full wire behavior is
+  // pinned end-to-end in tests/integration/concerts-by-id.spec.js.
 
   it('propagates service failures to the error handler', async () => {
     const failure = new Error('db unavailable');

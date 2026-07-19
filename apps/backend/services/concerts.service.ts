@@ -261,6 +261,9 @@ export const getConcertsCount = async (filters: ConcertsQueryFilters): Promise<n
   return Number(result[0]?.count ?? 0);
 };
 
+/** PostgreSQL int4 ceiling — the largest id a `serial` column can hold. */
+const MAX_SERIAL_ID = 2_147_483_647;
+
 /**
  * Single-concert read backing the public `GET /concerts/:id` (BS#1694, On
  * Tour sharing; contract `wxyc-shared/api.yaml` v1.18.0, wxyc-shared#236).
@@ -277,11 +280,23 @@ export const getConcertsCount = async (filters: ConcertsQueryFilters): Promise<n
  * or the other ingestion columns, so a tombstoned row is served without
  * exposing that it is one.
  *
- * Resolves null when no row matches (or when the venue INNER JOIN drops a
- * dangling `venue_id` — same strictness as the list; a Concert without its
- * embedded Venue can't satisfy the contract). The controller maps null → 404.
+ * Resolves null when no row matches, when the venue INNER JOIN drops a
+ * dangling `venue_id` (same strictness as the list; a Concert without its
+ * embedded Venue can't satisfy the contract), or when the id is impossible
+ * for the int4 serial (non-integral, < 1, or > 2^31-1) — short-circuited
+ * below, before any query. The controller maps null → 404.
  */
 export const getConcertById = async (id: number): Promise<ConcertDTO | null> => {
+  // `concerts.id` is a serial (int4): an id outside (0, MAX_SERIAL_ID] — or a
+  // non-integer — can never match a row, and without this short-circuit it
+  // would reach the Postgres bind, which rejects it ("integer out of range")
+  // as an unhandled error. The service owns that persistence fact so EVERY
+  // caller (the public route today, the share-page BFF chain tomorrow) gets
+  // miss semantics instead of a bind 500.
+  if (!Number.isInteger(id) || id < 1 || id > MAX_SERIAL_ID) {
+    return null;
+  }
+
   const rows = await db
     .select(concertPageFields)
     .from(concerts)

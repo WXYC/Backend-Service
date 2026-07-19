@@ -264,25 +264,58 @@ describe('GET /concerts/:id (BS#1694)', () => {
   });
 
   describe('misses', () => {
-    it('returns 404 in the standard error shape for an id with no row', async () => {
-      const res = await request.get('/concerts/2100000000');
+    /**
+     * A guaranteed-missing id derived from the live table (MAX + 1) rather
+     * than a hardcoded literal — the schema is shared across suites, so a
+     * fixed value would silently flip to 200 if any other spec ever seeded
+     * an explicit high id.
+     */
+    const missingId = async () => {
+      const [{ next_id: nextId }] = await sql.unsafe(
+        `SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM "${SCHEMA}".concerts`
+      );
+      return nextId;
+    };
+
+    // Misses must never be edge-cached: 404 is heuristically cacheable by
+    // default (RFC 9110 §15.5.5), so without the explicit no-store a CDN
+    // could pin "dead" onto an id minutes before its row lands (concert ids
+    // are predictable serials). The explicit directive enforces what
+    // omission only implied.
+    it('returns 404 pinned no-store in the standard error shape for an id with no row', async () => {
+      const res = await request.get(`/concerts/${await missingId()}`);
       expect(res.status).toBe(404);
       expect(res.body).toHaveProperty('message');
+      expect(res.headers['cache-control']).toBe('no-store');
     });
 
     it('returns 404 (not a bind 500) for an all-digits id beyond the int4 serial range', async () => {
       const res = await request.get('/concerts/99999999999999');
       expect(res.status).toBe(404);
       expect(res.body).toHaveProperty('message');
+      expect(res.headers['cache-control']).toBe('no-store');
     });
 
     it.each([['abc'], ['12abc'], ['0']])(
-      'returns 400 in the standard error shape for non-integer id %s',
+      'returns 400 pinned no-store in the standard error shape for non-integer id %s',
       async (id) => {
         const res = await request.get(`/concerts/${id}`);
         expect(res.status).toBe(400);
         expect(res.body).toHaveProperty('message');
+        expect(res.headers['cache-control']).toBe('no-store');
       }
     );
+
+    // A malformed percent-escape fails URL-decoding inside the Express
+    // router itself — before any controller runs. That URIError carries
+    // `status: 400` (not `statusCode`), which the errorHandler must answer
+    // as a clean client error: pre-fix it surfaced as a 500 plus a Sentry
+    // capture, mintable by any unauthenticated probe on this public route
+    // (a share link truncated mid-escape is enough).
+    it('returns 400 in the standard error shape for a malformed percent-escape', async () => {
+      const res = await request.get('/concerts/%ZZ');
+      expect(res.status).toBe(400);
+      expect(res.body).toHaveProperty('message');
+    });
   });
 });

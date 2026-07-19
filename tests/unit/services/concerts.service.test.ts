@@ -312,6 +312,27 @@ describe('getConcertById', () => {
     await expect(getConcertById(999999)).resolves.toBeNull();
   });
 
+  // `concerts.id` is an int4 serial, so ids outside (0, 2^31-1] — and
+  // non-integers — can never match a row. The service owns that persistence
+  // fact and short-circuits to null BEFORE the query: the Postgres int4 bind
+  // would otherwise reject the value ("integer out of range") as an unhandled
+  // 500, and the service's `id: number` signature must stay total for
+  // non-route callers (the share-page BFF chain) that skip the controller's
+  // parse guard.
+  it.each([
+    ['int4 max + 1', 2_147_483_648],
+    ['far beyond int4', 99_999_999_999_999],
+    ['zero', 0],
+    ['negative', -7],
+    ['non-integer', 3.5],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['NaN', Number.NaN],
+  ])('short-circuits an impossible id (%s) to null without querying', async (_label, id) => {
+    await expect(getConcertById(id)).resolves.toBeNull();
+
+    expect(mockDb._chain.select).not.toHaveBeenCalled();
+  });
+
   it('selects the shared list projection — never the internal ingestion columns', async () => {
     mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([timedRow]));
 
