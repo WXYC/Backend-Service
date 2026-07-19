@@ -204,9 +204,11 @@ const FSEntryFieldsRaw = {
   // library FK join already present on every read path below
   // (`leftJoin(library, library.id = flowsheet.album_id)`). NULL for
   // free-form entries (no album_id) and for library rows with no artist link.
-  // Not a client-facing wire field itself — it's the batch key the V2 feed
-  // uses to attach the per-playcut `upcoming_show` enrichment (BS#1607),
-  // matched against `concerts.headlining_artist_id` (same `artists.id` space).
+  // Two roles: (1) the batch key the V2 feed uses to attach the per-playcut
+  // `upcoming_show` enrichment (BS#1607), matched against
+  // `concerts.headlining_artist_id` (same `artists.id` space); and (2) since
+  // BS#1625, a client-facing wire field — `transformToV2` projects it onto
+  // the V2 track shape as `artist_id` for the iOS On Tour likes match.
   artist_id: library.artist_id,
   request_flag: flowsheet.request_flag,
   segue: flowsheet.segue,
@@ -1197,6 +1199,15 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         ...baseFields,
         album_id: entry.album_id,
         rotation_id: entry.rotation_id,
+        // Resolved catalog artist id (flowsheet.album_id -> library.artist_id),
+        // already computed on the read path (FSEntryFieldsRaw). Additive,
+        // nullable wire field (BS#1625): null for free-form entries (no
+        // album_id) and library rows with no artist link. Shares the artists.id
+        // keyspace with concerts.headlining_artist_id / upcoming_show, so the
+        // iOS On Tour likes match can intersect a liked playcut against
+        // concert headliners. SSOT: FlowsheetV2TrackEntry.artist_id (wxyc-shared
+        // api.yaml 1.19.0).
+        artist_id: entry.artist_id ?? null,
         artist_name: entry.artist_name,
         album_title: entry.album_title,
         track_title: entry.track_title,
