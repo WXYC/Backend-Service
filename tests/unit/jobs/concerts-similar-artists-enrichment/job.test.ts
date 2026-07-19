@@ -151,28 +151,48 @@ describe('runJob two-lane wiring (BS#1701)', () => {
     expect(DISCOGS_COHORT_LABEL).toBe('Discogs-only headliners');
   });
 
-  it('detects a single failing lane independently (discogs all-empty-skip, library ok)', async () => {
+  it('treats a discogs all-empty sweep as EXPECTED (write suppressed, NO alert), library unaffected (BS#1701)', async () => {
     mock(loadEnrichmentCandidates).mockResolvedValue([{ artist_id: 100 }] as EnrichmentCandidate[]);
     mock(loadDiscogsEnrichmentCandidates).mockResolvedValue([
       { discogs_artist_id: 900123 },
     ] as DiscogsEnrichmentCandidate[]);
     mock(fetchNeighborsBatch).mockResolvedValue(response({ 100: [{ artist_id: 1000, weight: 4.2 }] }));
-    // Discogs lane: the only responded verdict is empty → null-wipe guard fires,
-    // writes nothing, sets all_empty_skip.
+    // Discogs lane: the only responded verdict is empty → null-wipe guard fires
+    // and the write is suppressed, but because the discogs cohort is largely
+    // absent from the graph, `runJob` wires `allEmptyExpected` so it is NOT a fault.
     mock(fetchDiscogsNeighborsBatch).mockResolvedValue(response({ 900123: [] }));
     mock(overwriteNeighbors).mockImplementation(passThroughWriter());
     mock(overwriteDiscogsNeighbors).mockImplementation(passThroughWriter());
 
     const result = await runJob(jobOptions());
 
-    expect(result.library.all_empty_skip).toBe(false);
-    expect(result.discogs.all_empty_skip).toBe(true);
-    // The per-lane predicate `main` ORs: library is fine, discogs alerts.
-    expect(laneShouldAlert(result.library)).toBe(false);
-    expect(laneShouldAlert(result.discogs)).toBe(true);
-    // Discogs lane wrote nothing (guard held); the library write survived.
+    expect(result.discogs.all_empty_skip).toBe(true); // write still suppressed
+    expect(result.discogs.all_empty_expected).toBe(true); // …but flagged as expected
     expect(mock(overwriteDiscogsNeighbors)).not.toHaveBeenCalled();
+    // Neither lane alerts: the library lane succeeded, the discogs all-empty is expected.
+    expect(laneShouldAlert(result.library)).toBe(false);
+    expect(laneShouldAlert(result.discogs)).toBe(false);
     expect(result.library.enriched).toBe(1);
+  });
+
+  it('still alerts on a GENUINE discogs-lane failure (transport outage), independently of the library lane', async () => {
+    mock(loadEnrichmentCandidates).mockResolvedValue([{ artist_id: 100 }] as EnrichmentCandidate[]);
+    mock(loadDiscogsEnrichmentCandidates).mockResolvedValue([
+      { discogs_artist_id: 900123 },
+    ] as DiscogsEnrichmentCandidate[]);
+    mock(fetchNeighborsBatch).mockResolvedValue(response({ 100: [{ artist_id: 1000, weight: 4.2 }] }));
+    // Discogs chunk THROWS → errors, no responded verdict, wrote nothing. The
+    // expected-quiet suppression covers all-empty sweeps only, NOT real failures.
+    mock(fetchDiscogsNeighborsBatch).mockRejectedValue(new Error('semantic-index 503'));
+    mock(overwriteNeighbors).mockImplementation(passThroughWriter());
+    mock(overwriteDiscogsNeighbors).mockImplementation(passThroughWriter());
+
+    const result = await runJob(jobOptions());
+
+    expect(result.discogs.errors).toBeGreaterThan(0);
+    expect(result.discogs.all_empty_expected).toBe(false); // a failure, not an all-empty sweep
+    expect(laneShouldAlert(result.discogs)).toBe(true);
+    expect(laneShouldAlert(result.library)).toBe(false);
   });
 });
 
@@ -183,8 +203,10 @@ describe('laneShouldAlert (per-lane exit predicate, BS#1701)', () => {
     expect(laneShouldAlert(emptyTotals())).toBe(false);
   });
 
-  it('alerts when the null-wipe guard fired (all_empty_skip)', () => {
+  it('alerts when the null-wipe guard fired (all_empty_skip) UNLESS it was expected', () => {
     expect(laneShouldAlert(totals({ all_empty_skip: true }))).toBe(true);
+    // BS#1701: an EXPECTED all-empty sweep (the discogs lane) does not alert.
+    expect(laneShouldAlert(totals({ all_empty_skip: true, all_empty_expected: true }))).toBe(false);
   });
 
   it('alerts when it wrote nothing AND a signal failed (errors / malformed / write_failed)', () => {

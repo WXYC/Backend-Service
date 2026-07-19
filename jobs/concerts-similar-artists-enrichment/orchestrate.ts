@@ -1,12 +1,16 @@
 /**
- * Orchestrator for jobs/concerts-similar-artists-enrichment (BS#1626).
+ * Orchestrator for jobs/concerts-similar-artists-enrichment (BS#1626 + BS#1701).
  *
- * Unit of work: `(in-library headliner artist → semantic-index affinity
- * neighbors → artist_similar_artists row)`. Loads the cohort (distinct
- * `artists.id` of upcoming curated in-library headliners), chunks it through
- * semantic-index's batch neighbors endpoint (WXYC/semantic-index#354), and
- * OVERWRITES the artist-level rows — a full-window nightly re-fetch, not a
- * presence anti-join, so neighbors stay current with the nightly graph rebuild.
+ * The lane-agnostic engine SHARED by both similar-artists lanes: `job.ts`
+ * injects it once per lane with lane-specific deps + `EnrichOptions`. Unit of
+ * work: `(headliner → semantic-index affinity neighbors → cache row)`. Loads a
+ * cohort of ids, chunks it through a batch neighbors endpoint, and OVERWRITES
+ * the cache rows — a full-window nightly re-fetch, not a presence anti-join, so
+ * neighbors stay current with the nightly graph rebuild. The library lane
+ * (BS#1626) loads `artists.id` → `#354` → `artist_similar_artists`; the discogs
+ * lane (BS#1701) loads Discogs ids → `#367` → `discogs_artist_similar_artists`
+ * and additionally sets `allEmptyExpected` (see the all-empty guard below). The
+ * id is opaque here — the deps translate at the boundary.
  *
  * Refresh + write model (differs from the genre sibling):
  *   - non-empty verdict → UPSERT (overwrite) the neighbor list.
@@ -17,12 +21,16 @@
  *     retried next run (transport failures must never wipe a healthy row).
  *
  * Null-wipe guard: if EVERY responded id came back empty (a non-empty cohort),
- * that is the integration-day "mapping not yet rebuilt" case (or a real fault).
- * The run logs loudly with `/health` `mapped_artist_count` and writes NOTHING —
- * never wiping the collected rows. A broad-but-partial empties (empty fraction
- * above `EMPTY_DELETE_FRACTION_CEIL`) suppresses the DELETE branch too: a
- * partial mapping rebuild shouldn't clear rows, while a genuine ~1% churn still
- * clears.
+ * the run writes NOTHING — never wiping the collected rows. For the LIBRARY lane
+ * that is the "mapping not yet rebuilt" case or a real fault, so it logs loudly
+ * with `/health` `mapped_artist_count` and escalates (Sentry on a healthy graph;
+ * non-zero exit). For the DISCOGS lane (`allEmptyExpected`) an all-empty sweep is
+ * the EXPECTED common case (its cohort is largely absent from the graph) and the
+ * library-keyspace health count can't judge it — so it suppresses the write the
+ * same way but does NOT probe /health or escalate. A broad-but-partial empties
+ * (empty fraction above `EMPTY_DELETE_FRACTION_CEIL`) suppresses the DELETE
+ * branch too: a partial mapping rebuild shouldn't clear rows, while a genuine
+ * ~1% churn still clears.
  *
  * Dep-injected so the unit suite drives the loop without PG or the network —
  * see tests/unit/jobs/concerts-similar-artists-enrichment/orchestrate.test.ts.
@@ -75,6 +83,14 @@ export type Totals = {
   write_failed: boolean;
   /** Set when a whole sweep came back empty and the run wrote nothing. */
   all_empty_skip: boolean;
+  /**
+   * Set (only alongside `all_empty_skip`) when the lane treats an all-empty sweep
+   * as EXPECTED rather than a fault (BS#1701 — the discogs lane via
+   * `EnrichOptions.allEmptyExpected`). Suppresses the Sentry escalation and the
+   * non-zero exit for that lane while STILL suppressing the write (null-wipe
+   * protection is unconditional). The library lane never sets this.
+   */
+  all_empty_expected: boolean;
   /** Set when the DELETE branch was suppressed by the empty-fraction/count guard. */
   deletes_suppressed: boolean;
   /**
@@ -106,6 +122,7 @@ export const emptyTotals = (): Totals => ({
   malformed: 0,
   write_failed: false,
   all_empty_skip: false,
+  all_empty_expected: false,
   deletes_suppressed: false,
   station_written: 0,
   station_empty_skip: false,
@@ -152,6 +169,19 @@ export interface EnrichOptions {
    * passes `Discogs-only headliners`. Purely cosmetic — does not affect writes.
    */
   cohortLabel?: string;
+  /**
+   * When true, treat a wholly-empty neighbor sweep as EXPECTED, not a fault
+   * (BS#1701 — the discogs lane). Most Discogs-only touring artists aren't in the
+   * WXYC-library-built graph at all (the feature's honest impact ceiling), so an
+   * all-empty discogs sweep is the common case — and the `fetchHealth`
+   * `mapped_artist_count` is a LIBRARY-keyspace number that can't disambiguate
+   * "expected-absent" from "fault" for the discogs keyspace anyway. So this lane
+   * skips the health probe + Sentry escalation + non-zero exit on all-empty,
+   * while STILL suppressing the write (a transient endpoint fault must never wipe
+   * collected rows). Defaults to false (the library lane keeps its
+   * fault-alerting all-empty guard, tuned in BS#1702).
+   */
+  allEmptyExpected?: boolean;
 }
 
 const chunk = <T>(arr: T[], size: number): T[][] => {
@@ -323,8 +353,24 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
   // Null-wipe guard: a wholly-empty sweep over a non-empty responded set is the
   // "mapping not yet rebuilt" case (or a real fault). Write nothing.
   if (fetched.size > 0 && totals.with_neighbors === 0) {
-    const health = await deps.fetchHealth();
     totals.all_empty_skip = true;
+    // Expected-quiet lane (discogs, BS#1701): an all-empty sweep is the common
+    // case (most Discogs-only touring artists aren't in the graph), and the
+    // library-keyspace `mapped_artist_count` can't judge the discogs keyspace —
+    // so skip the health probe, the Sentry escalation, and the non-zero exit.
+    // The write is STILL suppressed above (null-wipe protection is unconditional:
+    // a transient endpoint fault must never clear the collected discogs-lane rows).
+    if (options.allEmptyExpected) {
+      totals.all_empty_expected = true;
+      log(
+        'warn',
+        'all_empty_sweep_expected',
+        `all ${fetched.size} responded headliners returned empty neighbor lists; skipping write (expected — this lane's cohort is largely absent from the graph)`,
+        { responded: fetched.size }
+      );
+      return totals;
+    }
+    const health = await deps.fetchHealth();
     log(
       'error',
       'all_empty_sweep',

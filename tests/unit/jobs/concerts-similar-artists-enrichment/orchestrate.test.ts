@@ -248,6 +248,27 @@ describe('runEnrichment (BS#1626)', () => {
     });
   });
 
+  it('allEmptyExpected (discogs lane): an all-empty sweep suppresses the write + escalation but NOT via /health (BS#1701)', async () => {
+    // The discogs lane's all-empty sweep is the EXPECTED common case, so it must
+    // NOT probe the library-keyspace /health, NOT escalate, but STILL suppress
+    // the write (null-wipe protection is unconditional).
+    const { deps, overwrite, fetchHealth } = makeDeps([candidate(1), candidate(2)], {
+      fetchNeighbors: jest.fn<FetchNeighborsFn>().mockResolvedValue(neighborsResponse({ 1: [], 2: [] })),
+    });
+
+    const totals = await runEnrichment(deps, options({ allEmptyExpected: true }));
+
+    expect(overwrite).not.toHaveBeenCalled(); // write still suppressed
+    expect(fetchHealth).not.toHaveBeenCalled(); // library-keyspace probe skipped for this lane
+    expect(totals).toMatchObject({
+      with_neighbors: 0,
+      enriched: 0,
+      cleared: 0,
+      all_empty_skip: true,
+      all_empty_expected: true,
+    });
+  });
+
   it('a thrown chunk leaves its ids in NEITHER upserts NOR deletes (retryable, never wiped)', async () => {
     // Two chunks (chunkSize 6): chunk 1 (ids 1-6) responds — 1-5 have neighbors,
     // 6 is empty; chunk 2 (ids 7,8) throws. The thrown chunk's ids 7 & 8 must be
