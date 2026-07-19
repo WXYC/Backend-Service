@@ -119,5 +119,6 @@
   "0120_flowsheet-autovacuum-tuning": "7c4fa83924946e82f4f8756322bf472b4478f43ce9efb6c1a6e431d661aecc81",
   "0121_concerts-artist-genres": "246fd69ab64011af85ceb131be71e6b437377d4467f1cda959f37fe805c7e4ff",
   "0122_concerts-similar-artists": "7a76ba662728e529d331e398af753e550493b04fae25ca196145221c7b8af6df",
-  "0123_artist-station-plays": "27a035161a03b42b583736e677aeb9fd20b1e28fe13bf0ae35180d487959006b"
+  "0123_artist-station-plays": "27a035161a03b42b583736e677aeb9fd20b1e28fe13bf0ae35180d487959006b",
+  "0124_discogs-artist-similar-artists": "151015f4cfe0c071ee0286dcfdc086a077249a5544551c1e44c0ae5f6db62a79"
 }

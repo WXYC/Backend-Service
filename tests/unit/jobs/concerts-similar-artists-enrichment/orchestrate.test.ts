@@ -25,11 +25,13 @@
 import { jest } from '@jest/globals';
 
 import {
+  DEFAULT_COHORT_LABEL,
   EMPTY_DELETE_FRACTION_CEIL,
   runEnrichment,
   type EnrichDeps,
   type EnrichOptions,
 } from '../../../../jobs/concerts-similar-artists-enrichment/orchestrate';
+import * as logger from '../../../../jobs/concerts-similar-artists-enrichment/logger';
 import type {
   NeighborsBatchResponse,
   SimilarArtistNeighbor,
@@ -146,6 +148,33 @@ describe('runEnrichment (BS#1626)', () => {
       errors: 0,
       all_empty_skip: false,
     });
+  });
+
+  it('threads a custom cohortLabel into the enumerated log (discogs lane accuracy, BS#1701)', async () => {
+    const logSpy = jest.spyOn(logger, 'log').mockImplementation(() => {});
+    try {
+      const { deps } = makeDeps([candidate(900123)]);
+      await runEnrichment(deps, options({ cohortLabel: 'Discogs-only headliners' }));
+      const enumerated = logSpy.mock.calls.find((c) => c[1] === 'enumerated');
+      expect(enumerated).toBeDefined();
+      expect(enumerated?.[2]).toContain('Discogs-only headliners');
+      expect(enumerated?.[3]).toMatchObject({ cohort_label: 'Discogs-only headliners' });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('defaults the enumerated cohort noun to the library-lane wording when no label is passed', async () => {
+    const logSpy = jest.spyOn(logger, 'log').mockImplementation(() => {});
+    try {
+      const { deps } = makeDeps([candidate(100)]);
+      await runEnrichment(deps, options());
+      const enumerated = logSpy.mock.calls.find((c) => c[1] === 'enumerated');
+      expect(enumerated?.[2]).toContain(DEFAULT_COHORT_LABEL);
+      expect(enumerated?.[3]).toMatchObject({ cohort_label: DEFAULT_COHORT_LABEL });
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it('makes zero endpoint calls when the cohort is empty', async () => {

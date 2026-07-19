@@ -6,6 +6,7 @@ import {
   artists,
   concerts,
   db,
+  discogs_artist_similar_artists,
   normalizeFreetextArtist,
   type SimilarArtistNeighbor,
   venues,
@@ -75,12 +76,14 @@ export type ConcertDTO = {
   // `Equal<ConcertDTO, ApiYamlConcert>` pin in concerts.service.test.ts honest.
   genres?: string[] | null;
   // Top-K affinity neighbors of the resolved headlining artist (BS#1626, On Tour
-  // R3b), sourced from `artist_similar_artists` via a null-safe LEFT JOIN on
-  // `headlining_artist_id`. Each `{ artist_id, weight }` is in the WXYC catalog
-  // keyspace (same as `headlining_artist_id`), so on-device For You matching
-  // intersects it against liked-artist ids in one id space. Null when the
-  // headliner has no in-library id OR the nightly enrichment hasn't run. Same
-  // optional-and-nullable discipline as `genres` (wxyc-shared#222).
+  // R3b; extended BS#1701), COALESCEd from the two enrichment lanes: the library
+  // lane (`artist_similar_artists`, keyed on `headlining_artist_id`) and the
+  // discogs lane (`discogs_artist_similar_artists`, keyed on the effective
+  // Discogs id — covers Discogs-only touring headliners absent from the WXYC
+  // library). Each `{ artist_id, weight }` is a WXYC catalog id in BOTH lanes, so
+  // on-device For You matching intersects it against liked-artist ids in one id
+  // space. Null when the headliner is in NEITHER lane OR the nightly enrichment
+  // hasn't run. Same optional-and-nullable discipline as `genres` (wxyc-shared#222).
   similar_artists?: SimilarArtistNeighbor[] | null;
   // All-time WXYC flowsheet play count of the resolved (in-library) headliner
   // (BS#1702, On Tour "For You" station-affinity tier), sourced from
@@ -131,10 +134,10 @@ export type ConcertJoinRow = {
   // and selects this. The `getUpcomingShowsMaps` projection omits it, so its
   // rows leave it undefined and `toConcertDTO` coalesces to null.
   genres?: string[] | null;
-  // Optional: only the `getConcertsPage` projection LEFT-joins
-  // `artist_similar_artists` and selects this. The `getUpcomingShowsMaps` embed
-  // omits it (the #1616 hot-path guard), so its rows leave it undefined and
-  // `toConcertDTO` coalesces to null.
+  // Optional: only the `getConcertsPage` projection LEFT-joins the two
+  // similar-artists lanes and selects the COALESCEd value. The
+  // `getUpcomingShowsMaps` embed omits it (the #1616 hot-path guard), so its rows
+  // leave it undefined and `toConcertDTO` coalesces to null.
   similar_artists?: SimilarArtistNeighbor[] | null;
   // Optional: only the `getConcertsPage` / `getConcertById` projection LEFT-joins
   // `artist_station_plays` and selects this. The `getUpcomingShowsMaps` embed
@@ -208,8 +211,8 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
   // `upcoming_show` embed) leaves `genres` undefined → null on the wire; a
   // resolved-but-unenriched headliner surfaces as null too (no joined row).
   genres: row.genres ?? null,
-  // Same null-safe discipline (BS#1626): undefined on the embed projection,
-  // null for a headliner with no in-library id or no enrichment row.
+  // Same null-safe discipline (BS#1626 + BS#1701): undefined on the embed
+  // projection, null for a headliner in neither lane or with no enrichment row.
   similar_artists: row.similar_artists ?? null,
   // Same null-safe discipline (BS#1702): undefined on the embed projection, null
   // for a headliner with no in-library id or no station-plays enrichment row.
@@ -256,14 +259,23 @@ const buildWhere = ({ from, to, curated }: ConcertsQueryFilters) => {
 const effectiveHeadlinerDiscogsId = sql`COALESCE(${concerts.headlining_discogs_artist_id}, ${artists.discogs_artist_id})`;
 
 // Page projection: the shared concerts⋈venues fields plus the LEFT-joined
-// artist-level genres (BS#1624) and affinity neighbors (BS#1626). Kept separate
-// from `concertJoinFields` so the `getUpcomingShowsMaps` / count paths (which
-// don't join `artist_metadata` / `artist_similar_artists`) can't accidentally
-// reference those tables' columns.
+// artist-level genres (BS#1624), affinity neighbors (BS#1626 + BS#1701), and
+// station plays (BS#1702). Kept separate from `concertJoinFields` so the
+// `getUpcomingShowsMaps` / count paths (which don't join the enrichment tables)
+// can't accidentally reference those tables' columns.
+//
+// `similar_artists` COALESCEs the two enrichment lanes (BS#1701): the library
+// lane (`artist_similar_artists`, keyed on `headlining_artist_id`) wins over the
+// discogs lane (`discogs_artist_similar_artists`, keyed on
+// `effectiveHeadlinerDiscogsId`) when both are present — the rare overlap where
+// the same Discogs id was independently enriched via the discogs lane resolves
+// to the same neighbors anyway. Null when the headliner is in NEITHER lane.
 const concertPageFields = {
   ...concertJoinFields,
   genres: artist_metadata.genres,
-  similar_artists: artist_similar_artists.neighbors,
+  similar_artists: sql<
+    SimilarArtistNeighbor[] | null
+  >`COALESCE(${artist_similar_artists.neighbors}, ${discogs_artist_similar_artists.neighbors})`,
   station_plays: artist_station_plays.plays,
 };
 
@@ -276,16 +288,17 @@ const concertPageFields = {
  * effective Discogs id. Both are LEFT joins so an unresolved or un-enriched
  * headliner keeps the row and surfaces `genres: null` — never dropped.
  *
- * Similar-artists projection (BS#1626): a LEFT JOIN to `artist_similar_artists`
- * on `headlining_artist_id` directly — a clean catalog FK, no Discogs COALESCE
- * needed, because the affinity graph is keyed on the library artist id. LEFT so
- * a headliner with no in-library id or no enrichment row surfaces
- * `similar_artists: null`. Purely additive to the BS#1603 shape; no existing
- * field's behavior changes.
+ * Similar-artists projection (BS#1626 + BS#1701): TWO LEFT JOINs, one per lane.
+ * The library lane joins `artist_similar_artists` on `headlining_artist_id` (a
+ * clean catalog FK); the discogs lane joins `discogs_artist_similar_artists` on
+ * `effectiveHeadlinerDiscogsId` (the same key the genres join uses), covering
+ * Discogs-only touring headliners that have no in-library id. `similar_artists`
+ * COALESCEs the two (library wins). Both LEFT so a headliner in neither lane
+ * surfaces `similar_artists: null`. Purely additive to the BS#1603 shape.
  *
  * Station-plays projection (BS#1702): a LEFT JOIN to `artist_station_plays`,
- * same key and shape as the similar-artists join (library-key only, no COALESCE)
- * — surfaces `station_plays: null` for a headliner with no in-library id or no
+ * library-key only (no COALESCE — station plays are an in-library signal) —
+ * surfaces `station_plays: null` for a headliner with no in-library id or no
  * enrichment row.
  */
 export const getConcertsPage = async (
@@ -300,6 +313,10 @@ export const getConcertsPage = async (
     .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
     .leftJoin(artist_metadata, eq(artist_metadata.discogs_artist_id, effectiveHeadlinerDiscogsId))
     .leftJoin(artist_similar_artists, eq(artist_similar_artists.artist_id, concerts.headlining_artist_id))
+    .leftJoin(
+      discogs_artist_similar_artists,
+      eq(discogs_artist_similar_artists.discogs_artist_id, effectiveHeadlinerDiscogsId)
+    )
     .leftJoin(artist_station_plays, eq(artist_station_plays.artist_id, concerts.headlining_artist_id))
     .where(buildWhere(filters))
     .orderBy(asc(concerts.starts_on), asc(concerts.id))
@@ -360,10 +377,10 @@ export const getConcertById = async (id: number): Promise<ConcertDTO | null> => 
   // of the query") if the projection references a table the query never
   // joined. BS#1626 adding `similar_artists` to the shared projection while
   // this query was in flight is exactly how the by-id read 500'd on every
-  // row-returning request (BS#1694 hotfix) — the by-id spec's
-  // serialization-parity test is the regression guard. BS#1702 added
-  // `station_plays` (its `artist_station_plays` join) under the same discipline:
-  // both queries gain the join in lockstep.
+  // row-returning request (BS#1694 hotfix). BS#1702's `station_plays`
+  // (`artist_station_plays` join) and BS#1701's `discogs_artist_similar_artists`
+  // COALESCE lane are the same class of hazard, so BOTH LEFT JOINs are mirrored
+  // here too — the by-id spec's serialization-parity test is the regression guard.
   const rows = await db
     .select(concertPageFields)
     .from(concerts)
@@ -371,6 +388,10 @@ export const getConcertById = async (id: number): Promise<ConcertDTO | null> => 
     .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
     .leftJoin(artist_metadata, eq(artist_metadata.discogs_artist_id, effectiveHeadlinerDiscogsId))
     .leftJoin(artist_similar_artists, eq(artist_similar_artists.artist_id, concerts.headlining_artist_id))
+    .leftJoin(
+      discogs_artist_similar_artists,
+      eq(discogs_artist_similar_artists.discogs_artist_id, effectiveHeadlinerDiscogsId)
+    )
     .leftJoin(artist_station_plays, eq(artist_station_plays.artist_id, concerts.headlining_artist_id))
     .where(eq(concerts.id, id))
     .limit(1);

@@ -1,25 +1,42 @@
 /**
- * Nightly cron: enrich upcoming curated IN-LIBRARY concert headliners with
- * artist-level affinity neighbors from the semantic-index graph (BS#1626,
- * On Tour R3b), so `GET /concerts` can project `Concert.similar_artists` for the
- * iOS On Tour "For You" shelf (WXYC/wxyc-ios-64#493).
+ * Nightly cron: enrich upcoming curated concert headliners with artist-level
+ * affinity neighbors from the semantic-index graph, so `GET /concerts` can
+ * project `Concert.similar_artists` for the iOS On Tour "For You" shelf
+ * (WXYC/wxyc-ios-64#493). Runs TWO lanes over the shared `runEnrichment`
+ * orchestrator:
+ *
+ *   - LIBRARY lane (BS#1626): distinct IN-LIBRARY headliners
+ *     (`concerts.headlining_artist_id IS NOT NULL`) → semantic-index's
+ *     `POST /graph/library-artists/neighbors/batch` (#354, keyed by `artists.id`)
+ *     → OVERWRITE `artist_similar_artists` keyed by `artists.id`.
+ *   - DISCOGS lane (BS#1701): distinct DISCOGS-ONLY headliners
+ *     (`headlining_artist_id IS NULL AND headlining_discogs_artist_id IS NOT
+ *     NULL` — BS#1614's LML-minted touring artists absent from the WXYC library)
+ *     → `POST /graph/discogs-artists/neighbors/batch` (#367, keyed by the Discogs
+ *     id) → OVERWRITE `discogs_artist_similar_artists` keyed by the Discogs id.
+ *
+ * The two cohorts PARTITION the resolved-headliner space, so no headliner is
+ * written to both tables. Both lanes return WXYC catalog neighbor ids, so
+ * `GET /concerts` COALESCEs the two lanes (library wins). The orchestrator is
+ * id-agnostic; the discogs lane translates its `discogs_artist_id` at the dep
+ * boundary (below) into the orchestrator's `artist_id`-named seam and back.
+ *
+ * The LIBRARY lane also writes STATION PLAYS (BS#1702): it reads each headliner's
+ * all-time play count off the same `neighbors/batch` response (`source_plays`,
+ * #369) and UPSERTs `artist_station_plays` for `Concert.station_plays`. This is
+ * an in-library, `artists.id`-keyed signal, so the discogs lane omits the
+ * `writeStation` dep and does no station work (its #367 endpoint returns no
+ * `source_plays`).
  *
  * Chained AFTER the artist resolvers (05:15 strict/alias, 05:35 LML) and the
- * 05:45 genre enrichment, so it only ever sees headliners those passes have
- * FK-resolved (`concerts.headlining_artist_id` must be populated — the 05:35 LML
- * resolver closes that FK on singleton Discogs matches). For each distinct
- * in-library headliner it calls semantic-index's
- * `POST /graph/library-artists/neighbors/batch` (WXYC/semantic-index#354) and
- * OVERWRITES the top-K (K=20) neighbors on `artist_similar_artists`, keyed by
- * `artists.id` — the key `GET /concerts` LEFT-joins for `similar_artists`.
- * Default schedule `55 5 * * *` UTC.
+ * 05:45 genre enrichment. Default schedule `55 5 * * *` UTC.
  *
  * Modes:
- *   - default (nightly): upcoming-only cohort (venue-local Eastern date),
+ *   - default (nightly): upcoming-only cohorts (venue-local Eastern date),
  *     re-fetched + overwritten every night to stay current with the graph.
  *   - `--backfill`: drop the window and front-fill every existing resolved
- *     in-library headliner — the one-time deploy backfill.
- *   - `--dry-run`: enumerate + log the plan; no network calls, no writes.
+ *     headliner in BOTH lanes — the one-time deploy backfill.
+ *   - `--dry-run`: enumerate + log the plan for both lanes; no network, no writes.
  *
  * The endpoint is public + no-auth (a bounded local SQLite read), so unlike the
  * LML jobs there is no API key, no shared chokepoint, and no rate limiter — see
@@ -28,10 +45,17 @@
 
 import { sql } from 'drizzle-orm';
 import { closeDatabaseConnection, db, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
-import { SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP, fetchGraphHealth, fetchNeighborsBatch } from './neighbors-client.js';
+import {
+  SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP,
+  fetchDiscogsNeighborsBatch,
+  fetchGraphHealth,
+  fetchNeighborsBatch,
+} from './neighbors-client.js';
 import { loadEnrichmentCandidates } from './query.js';
+import { loadDiscogsEnrichmentCandidates } from './discogs-query.js';
 import { runEnrichment, type Totals } from './orchestrate.js';
 import { overwriteNeighbors } from './writer.js';
+import { overwriteDiscogsNeighbors } from './discogs-writer.js';
 import { writeStationPlays } from './station-writer.js';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
@@ -124,7 +148,37 @@ export const awaitQuietWindow = async (lookbackSeconds: number, pauseMs: number)
 
 // -- Entrypoint ----------------------------------------------------------------
 
-export const runJob = async (options: EnrichJobOptions): Promise<Totals> => {
+/** Log noun for the discogs lane's cohort (the library lane keeps the default). */
+export const DISCOGS_COHORT_LABEL = 'Discogs-only headliners';
+
+/** Per-lane `Totals`, one per `runEnrichment` pass. */
+export type LaneTotals = { library: Totals; discogs: Totals };
+
+/**
+ * A lane "failed such that the cron should alert": either the neighbors null-wipe
+ * guard fired (mapping not rebuilt / fault) AND no station plays were written
+ * either, OR it wrote nothing (neighbors AND station) while some signal failed
+ * (total transport outage, wholly-malformed sweep, or a thrown write). A PARTIAL
+ * failure that still wrote something stays non-failing — the failure kinds
+ * already reach Sentry via `captureError`. Evaluated PER LANE so a single failing
+ * lane still alerts and isn't masked by the other lane's success.
+ *
+ * The station terms (BS#1702) are inert for the discogs lane (it has no
+ * `writeStation`, so `station_written` is always 0 and `station_write_failed`
+ * always false) — there the predicate reduces to the pre-station form. For the
+ * library lane a night that wrote station plays but had an all-empty neighbor
+ * sweep DID make progress and stays exit 0 (the loud `all_empty_sweep` log +
+ * healthy-graph Sentry signal in orchestrate.ts keep a genuine fault alertable).
+ * `station_empty_skip` is NOT a failure — an undeployed semantic-index#369 is the
+ * expected pre-populate state.
+ */
+export const laneShouldAlert = (t: Totals): boolean => {
+  const wroteNothing = t.enriched === 0 && t.cleared === 0 && t.station_written === 0;
+  const somethingFailed = t.errors > 0 || t.malformed > 0 || t.write_failed || t.station_write_failed;
+  return (t.all_empty_skip && t.station_written === 0) || (wroteNothing && somethingFailed);
+};
+
+export const runJob = async (options: EnrichJobOptions): Promise<LaneTotals> => {
   log('info', 'started', `${JOB_NAME} starting`, {
     limit: options.limit,
     chunk_size: options.chunkSize,
@@ -133,21 +187,46 @@ export const runJob = async (options: EnrichJobOptions): Promise<Totals> => {
     dry_run: options.dryRun,
   });
 
-  return await runEnrichment(
+  const awaitQuiet = (): Promise<void> =>
+    awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs);
+  const sharedOptions = { limit: options.limit, chunkSize: options.chunkSize, dryRun: options.dryRun };
+
+  // Library lane (BS#1626): in-library headliners keyed on artists.id.
+  const library = await runEnrichment(
     {
       loadCandidates: () => loadEnrichmentCandidates(options.backfill),
       fetchNeighbors: (ids) => fetchNeighborsBatch(ids, options.limit),
       fetchHealth: fetchGraphHealth,
       overwrite: overwriteNeighbors,
+      // Library lane writes station plays (BS#1702); the discogs lane omits this
+      // dep (station plays are an in-library, artists.id-keyed signal).
       writeStation: writeStationPlays,
-      awaitQuiet: () => awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs),
+      awaitQuiet,
     },
-    {
-      limit: options.limit,
-      chunkSize: options.chunkSize,
-      dryRun: options.dryRun,
-    }
+    sharedOptions
   );
+
+  // Discogs lane (BS#1701): Discogs-only touring headliners keyed on the bare
+  // Discogs id. The shared orchestrator's seam is named `artist_id`; translate
+  // this lane's `discogs_artist_id` in on load and out on overwrite (two
+  // `.map()`s) so each lane's own SQL stays honestly named.
+  const discogs = await runEnrichment(
+    {
+      loadCandidates: async () =>
+        (await loadDiscogsEnrichmentCandidates(options.backfill)).map((c) => ({ artist_id: c.discogs_artist_id })),
+      fetchNeighbors: (ids) => fetchDiscogsNeighborsBatch(ids, options.limit),
+      fetchHealth: fetchGraphHealth,
+      overwrite: (upserts, deleteIds) =>
+        overwriteDiscogsNeighbors(
+          upserts.map((r) => ({ discogs_artist_id: r.artist_id, neighbors: r.neighbors })),
+          deleteIds
+        ),
+      awaitQuiet,
+    },
+    { ...sharedOptions, cohortLabel: DISCOGS_COHORT_LABEL }
+  );
+
+  return { library, discogs };
 };
 
 const main = async (): Promise<void> => {
@@ -155,31 +234,17 @@ const main = async (): Promise<void> => {
 
   try {
     const options = enrichJobOptions();
-    const totals = await runJob(options);
-    log('info', 'finished', `${JOB_NAME} done`, { ...totals });
-    // Surface a non-zero exit (so the cron alerts rather than reporting OK) on a
-    // "wrote nothing AND something went wrong" run:
-    //   - all_empty_skip: the NEIGHBORS null-wipe guard fired (mapping not rebuilt
-    //     / fault) AND the run wrote no station plays either. A night that writes
-    //     station plays (BS#1702) but has an all-empty neighbor sweep DID make
-    //     progress, so it stays exit 0 — the loud `all_empty_sweep` error log
-    //     still fires, and a healthy-graph sweep also raises a Sentry signal
-    //     (orchestrate.ts), so a genuine fault stays alertable even at exit 0;
-    //     the run is simply not counted as "wrote nothing."
-    //   - wrote nothing while some signal failed — a total transport outage (every
-    //     chunk threw → errors), a wholly-malformed sweep (malformed), or a write
-    //     that threw (write_failed / station_write_failed). A PARTIAL failure that
-    //     still wrote something (enriched/cleared/station_written > 0) stays exit
-    //     0; the failure kinds already reach Sentry via captureError (chunk_failed
-    //     / malformed_verdicts / overwrite_failed / station_write_failed), so a
-    //     partial-omission run is visible without the alarm of a non-zero exit.
-    // `station_empty_skip` is NOT a failure — semantic-index#369 being undeployed
-    // is the expected pre-populate state (station_plays harmless while null).
-    const wroteNothing = totals.enriched === 0 && totals.cleared === 0 && totals.station_written === 0;
-    const somethingFailed =
-      totals.errors > 0 || totals.malformed > 0 || totals.write_failed || totals.station_write_failed;
-    if ((totals.all_empty_skip && totals.station_written === 0) || (wroteNothing && somethingFailed))
-      process.exitCode = 1;
+    const { library, discogs } = await runJob(options);
+    // Flatten each lane's Totals into prefixed top-level keys (`library_enriched`,
+    // `discogs_cleared`, …) so the structured log stays flat/queryable rather than
+    // nesting a `Totals` object per lane.
+    const laneCtx = (prefix: string, t: Totals): Record<string, number | boolean> =>
+      Object.fromEntries(Object.entries(t).map(([k, v]) => [`${prefix}_${k}`, v]));
+    log('info', 'finished', `${JOB_NAME} done`, { ...laneCtx('library', library), ...laneCtx('discogs', discogs) });
+    // Surface a non-zero exit (so the cron alerts rather than reporting OK) when
+    // EITHER lane should alert — evaluated per-lane so one lane's success can't
+    // mask the other's failure. See `laneShouldAlert`.
+    if (laneShouldAlert(library) || laneShouldAlert(discogs)) process.exitCode = 1;
   } catch (err) {
     captureError(err, 'main');
     log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {

@@ -1,19 +1,32 @@
-# concerts-similar-artists-enrichment (BS#1626)
+# concerts-similar-artists-enrichment (BS#1626 + BS#1701)
 
-Nightly cron that enriches **upcoming curated in-library concert headliners** with artist-level **affinity neighbors** from the semantic-index graph, so `GET /concerts` can project `Concert.similar_artists` (wxyc-shared#222) for the iOS On Tour "For You" shelf (wxyc-ios-64#493 / R3b). The iOS client matches concerts against on-device likes by set intersection: `concert.similar_artists ∩ likedIds`.
+Nightly cron that enriches **upcoming curated concert headliners** with artist-level **affinity neighbors** from the semantic-index graph, so `GET /concerts` can project `Concert.similar_artists` (wxyc-shared#222) for the iOS On Tour "For You" shelf (wxyc-ios-64#493 / R3b). The iOS client matches concerts against on-device likes by set intersection: `concert.similar_artists ∩ likedIds`.
 
-Sibling of `concerts-genre-enrichment` (BS#1624) — same standalone-nightly-job shape and read-projection split — but reads a **different service** (semantic-index, not LML), keys at a **different id-space** (`artists.id`, not a Discogs id), and uses a **different refresh policy** (full-window nightly overwrite, not a presence anti-join).
+Sibling of `concerts-genre-enrichment` (BS#1624) — same standalone-nightly-job shape and read-projection split — but reads a **different service** (semantic-index, not LML) and uses a **different refresh policy** (full-window nightly overwrite, not a presence anti-join).
 
-## What it does
+## Two lanes
 
-1. Load the cohort: distinct `artists.id` of **in-library** headliners (`concerts.headlining_artist_id IS NOT NULL`) of non-removed upcoming curated concerts. No anti-join — the whole cohort is re-fetched every night.
-2. Chunk (<= 100 ids/chunk) through semantic-index's `POST /graph/library-artists/neighbors/batch` (semantic-index#354), `{ library_artist_ids, limit: 20 }`.
-3. **Overwrite** `artist_similar_artists` keyed on `artists.id`:
-   - non-empty verdict → UPSERT (`ON CONFLICT (artist_id) DO UPDATE` — keeps neighbors current with the graph rebuild);
+The graph is built from **everything played on WXYC**, catalog or not, but a headliner is reachable in it by two different keys depending on how the concert resolved. So the job runs **two lanes** over the shared `runEnrichment` orchestrator, one per key:
+
+| Lane                  | Cohort                                                                      | Endpoint                                                                       | Table (keyed on)                                          |
+| --------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------- |
+| **library** (BS#1626) | `headlining_artist_id IS NOT NULL`                                          | `POST /graph/library-artists/neighbors/batch` (#354), `{ library_artist_ids }` | `artist_similar_artists` (`artists.id`, FK)               |
+| **discogs** (BS#1701) | `headlining_artist_id IS NULL AND headlining_discogs_artist_id IS NOT NULL` | `POST /graph/discogs-artists/neighbors/batch` (#367), `{ discogs_artist_ids }` | `discogs_artist_similar_artists` (bare Discogs id, no FK) |
+
+The two cohorts **partition** the resolved-headliner space, so no headliner is written to both tables. **Both lanes return WXYC catalog neighbor ids** (semantic-index returns library-code neighbors regardless of the lookup key — #367 reuses #354's translate-drop-cut path), so the persisted `SimilarArtist.artist_id`s are matchable against on-device likes in one id space either way. `GET /concerts` COALESCEs the two lanes on `COALESCE(headlining_discogs_artist_id, artists.discogs_artist_id)` (library lane winning the rare both-present row).
+
+**Why two tables, not one Discogs-keyed table** (like the genre sibling's `artist_metadata`): 23 of 38 currently-covered in-library headliners carry a NULL `artists.discogs_artist_id` (the column is nullable), so re-keying the library lane on the Discogs id would drop them (a 61% coverage regression). The library lane must stay keyed on `artists.id`; the discogs lane is purely additive.
+
+## What each lane does
+
+1. Load the cohort (distinct ids; no anti-join — the whole cohort is re-fetched every night).
+2. Chunk (<= 100 ids/chunk) through the lane's neighbors endpoint, `limit: 20`.
+3. **Overwrite** the lane's table keyed on its id:
+   - non-empty verdict → UPSERT (`ON CONFLICT DO UPDATE` — keeps neighbors current with the graph rebuild);
    - empty verdict from a responded chunk → DELETE the row (the genuine now-unmapped/ambiguous ~1%);
    - a chunk whose fetch **throws** → its ids are neither upserted nor deleted (retryable next run; a transport failure never wipes a healthy row).
 
-`headlining_artist_id`, `library_artist_ids`, and the response `artist_id`s are all one keyspace (`artists.id`; verified against semantic-index#358), so the job sends and persists ids verbatim — no translation, no join.
+The shared orchestrator is id-agnostic (it operates on an opaque numeric write-key); the discogs lane translates its `discogs_artist_id` to/from the orchestrator's `artist_id`-named seam at the dep boundary in `job.ts` (two `.map()`s), keeping each lane's own SQL honestly named.
 
 ## Station-affinity play count (BS#1702)
 
@@ -26,7 +39,7 @@ Two deliberate differences from the neighbors write:
 
 ## Id-space (the linchpin)
 
-semantic-index#358 populates the graph's `artist.wxyc_library_code_id` from `wxyc_schema.artists.id` — "definitionally the consumer's id-space (`SimilarArtist.artist_id` keyspace)". So `concerts.headlining_artist_id` is exactly what the endpoint keys on, and the returned `SimilarArtist.artist_id` re-emits with zero field mapping. Discogs-only headliners (no `artists.id`) have no `library_artist_id` and are **out of scope** (the genre sibling covers their genres; the affinity graph can't cover them).
+semantic-index#358 populates the graph's `artist.wxyc_library_code_id` from `wxyc_schema.artists.id` — "definitionally the consumer's id-space (`SimilarArtist.artist_id` keyspace)". Both endpoints return neighbors in **that** keyspace; only the lookup **key** differs (library `artists.id` vs external Discogs id). So the returned `SimilarArtist.artist_id` re-emits with zero field mapping in both lanes, and unbinding the headliner key (discogs lane) never moves the neighbor key.
 
 ## Null-wipe guard (integration-day + drift safety)
 
@@ -38,11 +51,13 @@ Chained **after** the artist resolvers (05:15 strict/alias, 05:35 LML) and the 0
 
 ## Modes
 
-| Invocation                    | Cohort window                                                                    | Writes                             |
-| ----------------------------- | -------------------------------------------------------------------------------- | ---------------------------------- |
-| `node dist/job.js` (nightly)  | upcoming-only (`starts_on >= today`, venue-local Eastern)                        | yes (overwrite)                    |
-| `node dist/job.js --backfill` | **all dates** — the one-time deploy backfill over existing in-library headliners | yes (overwrite)                    |
-| `node dist/job.js --dry-run`  | (either)                                                                         | no — enumerate + log the plan only |
+Modes apply to **both** lanes.
+
+| Invocation                    | Cohort window                                                         | Writes                             |
+| ----------------------------- | --------------------------------------------------------------------- | ---------------------------------- |
+| `node dist/job.js` (nightly)  | upcoming-only (`starts_on >= today`, venue-local Eastern)             | yes (overwrite)                    |
+| `node dist/job.js --backfill` | **all dates** — the one-time deploy backfill over existing headliners | yes (overwrite)                    |
+| `node dist/job.js --dry-run`  | (either)                                                              | no — enumerate + log the plan only |
 
 ## One-time backfill at deploy
 
@@ -64,6 +79,8 @@ Run off-peak, after semantic-index#358 has deployed and a nightly graph rebuild 
 
 No API key: the endpoint is public and its worst case is a bounded local SQLite read, so there is no shared LML chokepoint and no rate limiter (~1 request/night).
 
-## Endpoint contract (semantic-index#354)
+## Endpoint contract (semantic-index#354 + #367)
 
-The call is isolated behind `fetchNeighborsBatch` in `neighbors-client.ts`. Request `{ library_artist_ids: number[], limit }` (heat omitted → server default 0.5, the production blend). Response `{ results: { "<id>": [{ artist_id, weight }, ...] }, source_plays: { "<id>": <int> } }` keyed by stringified input id; every requested id present; weights descending and **list-relative** (comparable within one headliner's list, not across headliners — persisted as-is, ranked/capped client-side per wxyc-ios-64#493). `source_plays` (semantic-index#369, BS#1702) is **additive** — absent on an un-deployed semantic-index, in which case the client degrades it to `{}` (the station writer then writes nothing). The client validates each play count to a non-negative integer, mirroring the neighbor sanitization. Cap 100 ids/call with a structured 422 beyond; the job chunks at 100. An empty list means unknown/unmapped/ambiguous → "no enrichment", not an error. Every test mocks the network call; nothing here hits a live endpoint.
+Both calls are isolated in `neighbors-client.ts` behind one shared impl: `fetchNeighborsBatch` (library lane, `{ library_artist_ids }` → `/graph/library-artists/neighbors/batch`) and `fetchDiscogsNeighborsBatch` (discogs lane, `{ discogs_artist_ids }` → `/graph/discogs-artists/neighbors/batch`). Only the request path and the id-array field name differ; everything else is identical: `limit` (heat omitted → server default 0.5, the production blend), the cap (100 ids/call, structured 422 beyond — the job chunks at 100), and the response `{ results: { "<id>": [{ artist_id, weight }, ...] }, source_plays: { "<id>": <int> } }` keyed by stringified input id, every requested id present, weights descending and **list-relative** (comparable within one headliner's list, not across headliners — persisted as-is, ranked/capped client-side per wxyc-ios-64#493). An empty list means unknown/unmapped/ambiguous → "no enrichment", not an error.
+
+`source_plays` (semantic-index#369, BS#1702) is the **library lane's** station-affinity signal — an additive map of each headliner's all-time WXYC flowsheet play count, validated to a non-negative integer, absent on an un-deployed semantic-index (degrades to `{}`, the station writer then writes nothing). The **discogs endpoint (#367) returns no `source_plays`**, and station plays are keyed on `artists.id`, so the discogs lane omits the `writeStation` dep entirely and does no station work. Every test mocks the network call; nothing here hits a live endpoint.
