@@ -358,8 +358,10 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
     // case (most Discogs-only touring artists aren't in the graph), and the
     // library-keyspace `mapped_artist_count` can't judge the discogs keyspace —
     // so skip the health probe, the Sentry escalation, and the non-zero exit.
-    // The write is STILL suppressed above (null-wipe protection is unconditional:
-    // a transient endpoint fault must never clear the collected discogs-lane rows).
+    // The neighbor write below (the `overwrite` UPSERT + scoped DELETE) is STILL
+    // skipped — this branch `return`s first, and null-wipe protection is
+    // unconditional: a transient endpoint fault must never clear the collected
+    // discogs-lane rows.
     if (options.allEmptyExpected) {
       totals.all_empty_expected = true;
       log(
