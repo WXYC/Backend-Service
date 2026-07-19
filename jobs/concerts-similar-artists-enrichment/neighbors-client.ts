@@ -56,6 +56,19 @@ export class NeighborsClientError extends Error {
 /** `results` keyed by the STRINGIFIED input id → that headliner's neighbor list. */
 export type NeighborsBatchResponse = { results: Record<string, SimilarArtistNeighbor[]> };
 
+/** True when `n` is a well-formed neighbor (numeric `artist_id` + `weight`). */
+const isSimilarArtistNeighbor = (n: unknown): n is SimilarArtistNeighbor =>
+  typeof n === 'object' &&
+  n !== null &&
+  typeof (n as SimilarArtistNeighbor).artist_id === 'number' &&
+  typeof (n as SimilarArtistNeighbor).weight === 'number';
+
+/** Keep ONLY the two contract fields — drops any extra key the endpoint adds. */
+const pickNeighborFields = (n: SimilarArtistNeighbor): SimilarArtistNeighbor => ({
+  artist_id: n.artist_id,
+  weight: n.weight,
+});
+
 const baseUrl = (): string => (process.env.SEMANTIC_INDEX_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
 
 /**
@@ -126,7 +139,22 @@ export async function fetchNeighborsBatch(
       throw new NeighborsClientError('fetchNeighborsBatch: response `results` is not an object.', 502);
     }
 
-    return { results: results as Record<string, SimilarArtistNeighbor[]> };
+    // Narrow each verdict to exactly `{ artist_id, weight }` — the leak barrier
+    // for jsonb sub-objects. The projected column is persisted verbatim and
+    // re-emitted on `Concert.similar_artists`, so any extra per-neighbor field a
+    // future endpoint adds would silently violate the api.yaml `SimilarArtist`
+    // contract. Drop malformed elements (non-numeric id/weight) rather than
+    // store garbage. A NON-array value for an id is DROPPED from the sanitized
+    // map so the orchestrator routes that id as a malformed verdict (skip +
+    // retry), never as an observed-empty (which would delete a healthy row).
+    // Built via `Object.fromEntries` (not a computed-key assignment) to avoid a
+    // dynamic object-injection sink on the response-controlled keys.
+    const sanitized = Object.fromEntries(
+      Object.entries(results as Record<string, unknown>)
+        .filter(([, value]) => Array.isArray(value))
+        .map(([key, value]) => [key, (value as unknown[]).filter(isSimilarArtistNeighbor).map(pickNeighborFields)])
+    ) as Record<string, SimilarArtistNeighbor[]>;
+    return { results: sanitized };
   } finally {
     clearTimeout(timer);
   }

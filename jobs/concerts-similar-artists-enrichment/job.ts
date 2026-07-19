@@ -155,15 +155,17 @@ const main = async (): Promise<void> => {
     const options = enrichJobOptions();
     const totals = await runJob(options);
     log('info', 'finished', `${JOB_NAME} done`, { ...totals });
-    // Surface a non-zero exit (so the cron alerts rather than reporting OK) on
-    // either "wrote nothing" failure mode:
+    // Surface a non-zero exit (so the cron alerts rather than reporting OK) on a
+    // "wrote nothing AND something went wrong" run:
     //   - all_empty_skip: the null-wipe guard fired (mapping not rebuilt / fault);
-    //   - a run that made zero successful writes despite errors — e.g. a total
-    //     transport outage where every chunk threw, or a write that threw. A
-    //     PARTIAL failure (some chunks succeeded → enriched/cleared > 0) stays
-    //     exit 0; its per-chunk failures already reach Sentry via captureError.
-    const madeNoProgress = totals.errors > 0 && totals.enriched === 0 && totals.cleared === 0;
-    if (totals.all_empty_skip || madeNoProgress) process.exitCode = 1;
+    //   - wrote nothing while some signal failed — a total transport outage (every
+    //     chunk threw → errors), a wholly-malformed sweep (malformed), or a write
+    //     that threw (write_failed). A PARTIAL failure that still wrote something
+    //     (enriched/cleared > 0) stays exit 0; its per-item failures already reach
+    //     Sentry via captureError.
+    const wroteNothing = totals.enriched === 0 && totals.cleared === 0;
+    const somethingFailed = totals.errors > 0 || totals.malformed > 0 || totals.write_failed;
+    if (totals.all_empty_skip || (wroteNothing && somethingFailed)) process.exitCode = 1;
   } catch (err) {
     captureError(err, 'main');
     log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {

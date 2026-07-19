@@ -80,6 +80,41 @@ describe('fetchNeighborsBatch (semantic-index#354)', () => {
     fetchMock.mockResolvedValue(okJson({ results: [] }));
     await expect(fetchNeighborsBatch([1], 20)).rejects.toThrow(/`results` is not an object/);
   });
+
+  it('narrows each neighbor to exactly {artist_id, weight}, dropping extra fields (leak barrier)', async () => {
+    // A future endpoint field must not be persisted + re-emitted on
+    // Concert.similar_artists (would violate the api.yaml SimilarArtist contract).
+    fetchMock.mockResolvedValue(
+      okJson({ results: { '4210': [{ artist_id: 5121, weight: 4.83, name: 'leak', heat: 0.9 }] } })
+    );
+    const res = await fetchNeighborsBatch([4210], 20);
+    expect(res.results['4210']).toEqual([{ artist_id: 5121, weight: 4.83 }]);
+    expect(res.results['4210'][0]).not.toHaveProperty('name');
+  });
+
+  it('drops malformed neighbor elements (non-numeric id/weight) rather than store garbage', async () => {
+    fetchMock.mockResolvedValue(
+      okJson({
+        results: {
+          '4210': [
+            { artist_id: 5121, weight: 4.83 },
+            { artist_id: 'x', weight: 1 }, // bad id
+            { artist_id: 9 }, // missing weight
+            null,
+          ],
+        },
+      })
+    );
+    const res = await fetchNeighborsBatch([4210], 20);
+    expect(res.results['4210']).toEqual([{ artist_id: 5121, weight: 4.83 }]);
+  });
+
+  it('omits a non-array verdict value so the orchestrator routes that id as malformed', async () => {
+    fetchMock.mockResolvedValue(okJson({ results: { '1': [{ artist_id: 2, weight: 1 }], '3': 'oops' } }));
+    const res = await fetchNeighborsBatch([1, 3], 20);
+    expect(res.results['1']).toEqual([{ artist_id: 2, weight: 1 }]);
+    expect(res.results).not.toHaveProperty('3'); // dropped → absent → malformed downstream
+  });
 });
 
 describe('fetchGraphHealth', () => {
