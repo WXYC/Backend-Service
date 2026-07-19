@@ -274,14 +274,24 @@ describe('runEnrichment (BS#1626)', () => {
     expect(totals).toMatchObject({ cohort: 1, chunks: 0, enriched: 0 });
   });
 
-  it('counts a thrown overwrite as errors and returns', async () => {
+  it('flags a thrown overwrite via write_failed (distinct from fetch errors) and returns', async () => {
     const { deps } = makeDeps([candidate(1), candidate(2)], {
       overwrite: jest.fn<OverwriteFn>().mockRejectedValue(new Error('deadlock')),
     });
 
     const totals = await runEnrichment(deps, options());
 
-    expect(totals).toMatchObject({ cohort: 2, chunks: 1, fetched: 2, enriched: 0, errors: 2 });
+    // write_failed (not errors) carries the write failure; fetch `errors` stays
+    // 0. main() reads write_failed + wroteNothing to raise a non-zero exit.
+    expect(totals).toMatchObject({
+      cohort: 2,
+      chunks: 1,
+      fetched: 2,
+      enriched: 0,
+      cleared: 0,
+      errors: 0,
+      write_failed: true,
+    });
   });
 
   it('awaits the cooperative pause before each chunk', async () => {
@@ -319,11 +329,12 @@ describe('runEnrichment (BS#1626)', () => {
     });
   });
 
-  it('treats a malformed non-array verdict as empty (never writes garbage jsonb)', async () => {
-    // A contract-violating non-array value must not be pushed into `upserts`
-    // (which would write garbage into the jsonb column). `Array.isArray` coerces
-    // it to empty; here id 5 is a string, so it becomes an empty verdict
-    // (1/5 = 20%, at the ceiling → deleted) while 1-4 upsert normally.
+  it('routes a malformed non-array verdict to `malformed` (skip + retry), never DELETE', async () => {
+    // A contract-violating non-array value is NOT an observed-empty verdict, so
+    // it must NOT be pushed to `upserts` (garbage jsonb) NOR to the DELETE set
+    // (wiping a healthy row on an upstream glitch). Here id 5 is a string → it is
+    // skipped entirely (neither upserted nor deleted) and counted as `malformed`,
+    // while 1-4 upsert normally.
     const bad = { 1: oneNeighbor(1), 2: oneNeighbor(2), 3: oneNeighbor(3), 4: oneNeighbor(4), 5: 'not-an-array' };
     const { deps, recorded } = makeDeps([1, 2, 3, 4, 5].map(candidate), {
       fetchNeighbors: jest
@@ -334,15 +345,14 @@ describe('runEnrichment (BS#1626)', () => {
     const totals = await runEnrichment(deps, options());
 
     expect(recorded.upserts.map((u) => u.artist_id)).toEqual([1, 2, 3, 4]);
-    expect(recorded.deletes).toEqual([5]);
-    expect(totals).toMatchObject({ fetched: 5, with_neighbors: 4 });
+    expect(recorded.deletes).toEqual([]); // id 5 is NOT deleted
+    expect(totals).toMatchObject({ fetched: 4, with_neighbors: 4, malformed: 1, cleared: 0 });
   });
 
-  it('defaults a contract-guaranteed-present id missing from results to empty (no throw)', async () => {
-    // The contract guarantees every requested id is present; if the server ever
-    // omits one, treat it as empty rather than crashing the run. Here id 5 is
-    // absent from results — handled as an empty verdict (1/5 = 20%, at the
-    // ceiling, so still deleted).
+  it('routes an id absent from results to `malformed` (skip + retry), never DELETE', async () => {
+    // A contract violation: the endpoint must return every requested id. If one
+    // is omitted (a partial upstream fault), treat it as malformed — skip it, do
+    // not crash, and above all do not DELETE its healthy row. Here id 5 is absent.
     const { deps, recorded } = makeDeps([1, 2, 3, 4, 5].map(candidate), {
       fetchNeighbors: jest
         .fn<FetchNeighborsFn>()
@@ -354,7 +364,26 @@ describe('runEnrichment (BS#1626)', () => {
     const totals = await runEnrichment(deps, options());
 
     expect(recorded.upserts.map((u) => u.artist_id)).toEqual([1, 2, 3, 4]);
-    expect(recorded.deletes).toEqual([5]);
-    expect(totals).toMatchObject({ fetched: 5, with_neighbors: 4 });
+    expect(recorded.deletes).toEqual([]); // id 5 is NOT deleted
+    expect(totals).toMatchObject({ fetched: 4, with_neighbors: 4, malformed: 1, cleared: 0 });
+  });
+
+  it('deletes a single genuine empty even in a small cohort (below the count floor)', async () => {
+    // 3-id cohort, one observed-empty (id 2): 1/3 ≈ 33% is above the 20% fraction
+    // ceiling, but only 1 empty is below EMPTY_DELETE_MIN_COUNT (3) — so it is
+    // real churn, not a partial rebuild, and MUST still clear. This is the
+    // small-cohort case the fraction-only guard would wrongly suppress.
+    const { deps, recorded } = makeDeps([candidate(1), candidate(2), candidate(3)], {
+      fetchNeighbors: jest
+        .fn<FetchNeighborsFn>()
+        .mockResolvedValue(neighborsResponse({ 1: oneNeighbor(1), 2: [], 3: oneNeighbor(3) })),
+    });
+
+    const totals = await runEnrichment(deps, options());
+
+    expect(1 / 3).toBeGreaterThan(EMPTY_DELETE_FRACTION_CEIL); // fraction ceiling alone would suppress
+    expect(recorded.upserts.map((u) => u.artist_id)).toEqual([1, 3]);
+    expect(recorded.deletes).toEqual([2]); // but the count floor lets a single genuine empty clear
+    expect(totals).toMatchObject({ enriched: 2, cleared: 1, deletes_suppressed: false });
   });
 });

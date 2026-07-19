@@ -60,10 +60,12 @@ export const overwriteNeighbors = async (
           target: artist_similar_artists.artist_id,
           // Overwrite with the freshly-fetched list (the conflict-excluded value)
           // and bump the timestamp — this is what keeps neighbors current with
-          // the nightly graph rebuild.
+          // the nightly graph rebuild. `now()` (DB clock) matches the column's
+          // INSERT-path `defaultNow()`, so inserted and updated rows stamp from
+          // one clock.
           set: {
             neighbors: sql`excluded."neighbors"`,
-            updated_at: new Date(),
+            updated_at: sql`now()`,
           },
         })
         .returning({ artist_id: artist_similar_artists.artist_id });

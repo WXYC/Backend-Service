@@ -34,19 +34,25 @@ import type { SimilarArtistsRow } from './writer.js';
 import { captureError, log } from './logger.js';
 
 /**
- * Above this fraction of empty responded ids, the DELETE branch is suppressed —
- * a broad empties smells like a partial mapping rebuild, not real churn. A
- * genuine now-unmapped cohort is the ~1% homonym tail, far below this. UPSERTs
- * of the non-empty verdicts still proceed; only the row-clearing is held back.
+ * The DELETE branch is suppressed only when BOTH bounds trip: more than
+ * `EMPTY_DELETE_FRACTION_CEIL` of the responded ids came back empty AND at least
+ * `EMPTY_DELETE_MIN_COUNT` of them did. A broad wave of empties smells like a
+ * partial mapping rebuild, not real churn — so hold back the row-clearing (the
+ * UPSERTs of the non-empty verdicts still proceed). The absolute floor keeps a
+ * SMALL cohort honest: on a slow week with ≤4 upcoming headliners, a single
+ * genuinely now-unmapped one is >20% of the set but is real churn, not a
+ * rebuild, so it must still clear. A genuine now-unmapped cohort is the ~1%
+ * homonym tail; a real partial rebuild empties many rows at once.
  */
 export const EMPTY_DELETE_FRACTION_CEIL = 0.2;
+export const EMPTY_DELETE_MIN_COUNT = 3;
 
 export type Totals = {
   /** In-library headliners loaded (distinct artists.id). */
   cohort: number;
   /** Endpoint chunks that received a response. */
   chunks: number;
-  /** Ids across all responded chunks (present in `results`). */
+  /** Ids on responded chunks with a well-formed (array) verdict. */
   fetched: number;
   /** Of `fetched`, how many came back with >= 1 neighbor. */
   with_neighbors: number;
@@ -58,9 +64,17 @@ export type Totals = {
   cleared: number;
   /** Ids on chunks whose fetch threw — left untouched + retryable. */
   errors: number;
+  /**
+   * Ids on a RESPONDED chunk that were absent from `results` or carried a
+   * non-array value (a contract violation). Skipped — NOT routed to the DELETE
+   * set — so an upstream omission can't clear a healthy row; retried next run.
+   */
+  malformed: number;
+  /** Set when the overwrite transaction threw (cohort left as-is, retryable). */
+  write_failed: boolean;
   /** Set when a whole sweep came back empty and the run wrote nothing. */
   all_empty_skip: boolean;
-  /** Set when the DELETE branch was suppressed by the empty-fraction ceiling. */
+  /** Set when the DELETE branch was suppressed by the empty-fraction/count guard. */
   deletes_suppressed: boolean;
 };
 
@@ -73,6 +87,8 @@ export const emptyTotals = (): Totals => ({
   enriched: 0,
   cleared: 0,
   errors: 0,
+  malformed: 0,
+  write_failed: false,
   all_empty_skip: false,
   deletes_suppressed: false,
 });
@@ -156,17 +172,26 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
     totals.chunks += 1;
 
     for (const id of ids) {
-      // Contract guarantees every requested id is present as an array; treat a
-      // missing OR malformed (non-array) value as [] defensively — `Array.isArray`
-      // (not `?? []`) so a stray non-array truthy can neither be written into the
-      // jsonb column as garbage nor slip past the empty check.
+      // The contract guarantees every requested id is present as an array (the
+      // client already sanitized well-formed arrays to `{artist_id, weight}` and
+      // dropped non-array values). An id ABSENT here is therefore a contract
+      // violation / partial upstream fault — NOT an observed-empty verdict. Route
+      // it to `malformed` (skip + retry next run), never into `fetched`: an
+      // observed-empty `[]` is delete-eligible, but an omission must never clear
+      // a healthy row (the writer's stated invariant).
       const raw = response.results[String(id)];
-      const list = Array.isArray(raw) ? raw : [];
-      fetched.set(id, list);
+      if (!Array.isArray(raw)) {
+        totals.malformed += 1;
+        log('warn', 'malformed_verdict', `id ${id} absent/non-array in results; skipping (retryable)`, {
+          artist_id: id,
+        });
+        continue;
+      }
+      fetched.set(id, raw);
       totals.fetched += 1;
-      if (list.length > 0) {
+      if (raw.length > 0) {
         totals.with_neighbors += 1;
-        totals.neighbors_total += list.length;
+        totals.neighbors_total += raw.length;
       }
     }
   }
@@ -200,18 +225,20 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
     else emptyIds.push(artist_id);
   }
 
-  // Suppress the DELETE branch on a broad-but-partial empties — a partial
-  // mapping rebuild shouldn't clear rows. A genuine ~1% churn stays well under
-  // the ceiling and clears normally.
+  // Suppress the DELETE branch only on a BROAD wave of empties (both bounds: a
+  // >CEIL fraction AND at least MIN_COUNT of them) — the signature of a partial
+  // mapping rebuild, which shouldn't clear rows. A small number of genuine
+  // now-unmapped headliners (the ~1% churn) stays under the count floor and
+  // clears normally even in a tiny cohort where it exceeds the fraction.
   const emptyFraction = fetched.size > 0 ? emptyIds.length / fetched.size : 0;
   let deleteIds = emptyIds;
-  if (emptyIds.length > 0 && emptyFraction > EMPTY_DELETE_FRACTION_CEIL) {
+  if (emptyIds.length >= EMPTY_DELETE_MIN_COUNT && emptyFraction > EMPTY_DELETE_FRACTION_CEIL) {
     totals.deletes_suppressed = true;
     deleteIds = [];
     log(
       'warn',
       'deletes_suppressed',
-      `empty fraction ${(emptyFraction * 100).toFixed(1)}% exceeds ${(EMPTY_DELETE_FRACTION_CEIL * 100).toFixed(0)}%; suppressing ${emptyIds.length} DELETE(s) (possible partial rebuild)`,
+      `${emptyIds.length} empty verdicts (${(emptyFraction * 100).toFixed(1)}% of responded, > ${(EMPTY_DELETE_FRACTION_CEIL * 100).toFixed(0)}%); suppressing DELETEs (possible partial rebuild)`,
       { empty_ids: emptyIds.length, responded: fetched.size, empty_fraction: emptyFraction }
     );
   }
@@ -222,8 +249,9 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
     totals.cleared = deleted;
   } catch (err) {
     // A write failure leaves the cohort's rows as they were (retryable next
-    // run). Count the attempted writes as errors and continue to return.
-    totals.errors += upserts.length + deleteIds.length;
+    // run). Flag it (distinct from per-chunk fetch `errors`) so the entrypoint's
+    // exit-code check can alert; the row set is untouched.
+    totals.write_failed = true;
     log(
       'warn',
       'overwrite_failed',
