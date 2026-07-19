@@ -450,7 +450,9 @@ app.get('/healthcheck', async (req, res) => {
 // `shouldHandleError` falls back to a "treat unknown status as 500" rule that
 // captures errors without an explicit status (bare TypeErrors, deserialisation
 // faults) indistinguishably from genuine 5xx faults. The named predicate
-// documents intent and mirrors the backend service's `shouldCaptureExpressError`.
+// documents intent. (It deliberately does NOT mirror the backend's
+// `shouldCaptureExpressError`, which suppresses only the trusted 4xx band its
+// errorHandler echoes — see the predicate's JSDoc for the divergence.)
 Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureAuthExpressError });
 
 // Fallback error handler — sanitises response body, forwards full error to
