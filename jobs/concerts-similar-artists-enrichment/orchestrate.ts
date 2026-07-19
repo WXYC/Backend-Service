@@ -196,6 +196,20 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
     }
   }
 
+  // A malformed/absent verdict is a semantic-index contract violation (the
+  // endpoint guarantees every requested id present as an array), never an
+  // expected outcome like an empty list — so raise ONE aggregate Sentry signal
+  // per run (the per-id `warn` logs above stay for CloudWatch). This is what
+  // makes a persistent partial-omission run visible even when it still wrote
+  // some rows and therefore exits 0.
+  if (totals.malformed > 0) {
+    captureError(
+      new Error(`${totals.malformed} malformed/absent neighbor verdict(s) — semantic-index contract violation`),
+      'malformed_verdicts',
+      { malformed: totals.malformed, cohort: totals.cohort }
+    );
+  }
+
   // Null-wipe guard: a wholly-empty sweep over a non-empty responded set is the
   // "mapping not yet rebuilt" case (or a real fault). Write nothing.
   if (fetched.size > 0 && totals.with_neighbors === 0) {

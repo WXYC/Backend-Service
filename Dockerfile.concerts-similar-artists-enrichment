@@ -23,10 +23,13 @@ COPY ./package* ./
 COPY ./jobs/concerts-similar-artists-enrichment/package* ./jobs/concerts-similar-artists-enrichment/
 COPY ./shared/database/package* ./shared/database/
 
-# `@wxyc/database` declares `@wxyc/shared` as a registry dependency
-# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
-# .npmrc the prod stage's npm install 401s on @wxyc/shared. Mirrors the
-# pattern in Dockerfile.concerts-genre-enrichment.
+# The .npmrc + NPM_TOKEN are carried from the fleet Dockerfile template so the
+# prod-stage `npm install` can authenticate to GitHub Packages (`@wxyc:registry`)
+# if any workspace ever pulls a scoped registry package. This job's graph is
+# currently all public-registry + local workspaces (@wxyc/database deps only
+# drizzle-orm/postgres/node-ssh — no @wxyc/shared, unlike the genre sibling whose
+# lml-client → @wxyc/shared makes the token load-bearing), so the token is inert
+# here but kept for parity and future-proofing. `.npmrc` is removed after install.
 RUN npm install --omit=dev && rm -f .npmrc
 
 COPY --from=builder ./concerts-similar-artists-enrichment-builder/jobs/concerts-similar-artists-enrichment/dist ./jobs/concerts-similar-artists-enrichment/dist

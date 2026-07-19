@@ -161,8 +161,10 @@ const main = async (): Promise<void> => {
     //   - wrote nothing while some signal failed — a total transport outage (every
     //     chunk threw → errors), a wholly-malformed sweep (malformed), or a write
     //     that threw (write_failed). A PARTIAL failure that still wrote something
-    //     (enriched/cleared > 0) stays exit 0; its per-item failures already reach
-    //     Sentry via captureError.
+    //     (enriched/cleared > 0) stays exit 0; all three failure kinds already
+    //     reach Sentry via captureError (chunk_failed / malformed_verdicts /
+    //     overwrite_failed), so a partial-omission run is visible without the
+    //     alarm of a non-zero exit.
     const wroteNothing = totals.enriched === 0 && totals.cleared === 0;
     const somethingFailed = totals.errors > 0 || totals.malformed > 0 || totals.write_failed;
     if (totals.all_empty_skip || (wroteNothing && somethingFailed)) process.exitCode = 1;

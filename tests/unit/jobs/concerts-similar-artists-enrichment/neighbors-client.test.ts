@@ -46,7 +46,8 @@ describe('fetchNeighborsBatch (semantic-index#354)', () => {
     const body = JSON.parse(init.body as string);
     expect(body).toEqual({ library_artist_ids: [4210, 887], limit: 20 });
     expect(body).not.toHaveProperty('heat'); // server default 0.5 is the prod blend
-    // Response passes through verbatim, keyed by stringified id.
+    // Verdicts are keyed by stringified id; a well-formed {artist_id, weight}
+    // survives sanitization unchanged, and an empty list is preserved as [].
     expect(res.results['4210']).toEqual([{ artist_id: 5121, weight: 4.83 }]);
     expect(res.results['887']).toEqual([]);
   });
