@@ -1455,6 +1455,41 @@ export type ArtistSimilarArtists = InferSelectModel<typeof artist_similar_artist
 export type NewArtistSimilarArtists = InferInsertModel<typeof artist_similar_artists>;
 
 /**
+ * Artist-level cache of a headliner's all-time WXYC flowsheet play count from
+ * the semantic-index graph (`artist.total_plays`), keyed on `artists.id` (On
+ * Tour "For You" station-affinity tier, BS#1702). The absolute play count is
+ * the station-affinity signal behind the On Tour "For You" shelf: a cold-start
+ * listener (no personal likes) sees heavy-rotation touring artists ranked by
+ * this scalar. Identical for every listener — carries no listener data.
+ *
+ * Kept in a SIBLING table rather than a column on `artist_similar_artists`
+ * (BS#1626) deliberately: that table's DELETE-on-empty-neighbors lifecycle
+ * would drop a play count for a heavily-played artist that happens to have no
+ * affinity neighbors — exactly the cold-start card this feature exists to
+ * surface. This table is UPSERT-only (no DELETE): a stale row for an artist no
+ * longer touring is harmless (no upcoming concert joins it) and `total_plays`
+ * drifts slowly. A real FK to `artists.id` with `ON DELETE CASCADE`, mirroring
+ * `artist_similar_artists` — the affinity graph is built from the WXYC library,
+ * so only IN-LIBRARY headliners (`concerts.headlining_artist_id IS NOT NULL`)
+ * have a play count.
+ *
+ * Population: `jobs/concerts-similar-artists-enrichment/` reads the `source_plays`
+ * map off the same nightly `neighbors/batch` call (semantic-index#369) and
+ * UPSERTs here — `GET /concerts` LEFT-joins it onto `Concert.station_plays`.
+ */
+export const artist_station_plays = wxyc_schema.table('artist_station_plays', {
+  artist_id: integer('artist_id')
+    .primaryKey()
+    .notNull()
+    .references(() => artists.id, { onDelete: 'cascade' }),
+  plays: integer('plays').notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type ArtistStationPlays = InferSelectModel<typeof artist_station_plays>;
+export type NewArtistStationPlays = InferInsertModel<typeof artist_station_plays>;
+
+/**
  * Free-text (artist, album) → Discogs release+master resolution cache
  * (BS#1491 / catalog-popularity Phase-2 Track 1).
  *
