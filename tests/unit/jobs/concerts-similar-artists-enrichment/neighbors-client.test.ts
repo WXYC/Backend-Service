@@ -116,6 +116,40 @@ describe('fetchNeighborsBatch (semantic-index#354)', () => {
     expect(res.results['1']).toEqual([{ artist_id: 2, weight: 1 }]);
     expect(res.results).not.toHaveProperty('3'); // dropped → absent → malformed downstream
   });
+
+  // BS#1702 / semantic-index#369 — the additive `source_plays` map.
+  it('parses source_plays keyed by the stringified input id', async () => {
+    fetchMock.mockResolvedValue(
+      okJson({ results: { '4210': [], '887': [] }, source_plays: { '4210': 312, '887': 58 } })
+    );
+    const res = await fetchNeighborsBatch([4210, 887], 20);
+    expect(res.source_plays).toEqual({ '4210': 312, '887': 58 });
+  });
+
+  it('defaults source_plays to {} when the field is absent (un-deployed semantic-index)', async () => {
+    fetchMock.mockResolvedValue(okJson({ results: { '1': [{ artist_id: 2, weight: 1 }] } }));
+    const res = await fetchNeighborsBatch([1], 20);
+    expect(res.source_plays).toEqual({});
+  });
+
+  it('defaults source_plays to {} when the field is not an object', async () => {
+    fetchMock.mockResolvedValue(okJson({ results: { '1': [] }, source_plays: [312] }));
+    const res = await fetchNeighborsBatch([1], 20);
+    expect(res.source_plays).toEqual({});
+  });
+
+  it('drops non-integer, negative, and non-number play counts (validate, do not trust the wire)', async () => {
+    fetchMock.mockResolvedValue(
+      okJson({
+        results: { '1': [], '2': [], '3': [], '4': [], '5': [] },
+        source_plays: { '1': 312, '2': 4.5, '3': -7, '4': 'x', '5': 0 },
+      })
+    );
+    const res = await fetchNeighborsBatch([1, 2, 3, 4, 5], 20);
+    // Only the non-negative integers survive (0 is valid); the fractional,
+    // negative, and non-number values are dropped.
+    expect(res.source_plays).toEqual({ '1': 312, '5': 0 });
+  });
 });
 
 describe('fetchGraphHealth', () => {

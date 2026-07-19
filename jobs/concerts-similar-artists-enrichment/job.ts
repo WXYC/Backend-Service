@@ -32,6 +32,7 @@ import { SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP, fetchGraphHealth, fetchNeighborsBat
 import { loadEnrichmentCandidates } from './query.js';
 import { runEnrichment, type Totals } from './orchestrate.js';
 import { overwriteNeighbors } from './writer.js';
+import { writeStationPlays } from './station-writer.js';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'concerts-similar-artists-enrichment';
@@ -138,6 +139,7 @@ export const runJob = async (options: EnrichJobOptions): Promise<Totals> => {
       fetchNeighbors: (ids) => fetchNeighborsBatch(ids, options.limit),
       fetchHealth: fetchGraphHealth,
       overwrite: overwriteNeighbors,
+      writeStation: writeStationPlays,
       awaitQuiet: () => awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs),
     },
     {
@@ -157,17 +159,25 @@ const main = async (): Promise<void> => {
     log('info', 'finished', `${JOB_NAME} done`, { ...totals });
     // Surface a non-zero exit (so the cron alerts rather than reporting OK) on a
     // "wrote nothing AND something went wrong" run:
-    //   - all_empty_skip: the null-wipe guard fired (mapping not rebuilt / fault);
+    //   - all_empty_skip: the NEIGHBORS null-wipe guard fired (mapping not rebuilt
+    //     / fault) AND the run wrote no station plays either. A night that writes
+    //     station plays (BS#1702) but has an all-empty neighbor sweep DID make
+    //     progress, so it stays exit 0 — the loud `all_empty_sweep` error log
+    //     still fires for visibility, but the run is not "wrote nothing."
     //   - wrote nothing while some signal failed — a total transport outage (every
     //     chunk threw → errors), a wholly-malformed sweep (malformed), or a write
-    //     that threw (write_failed). A PARTIAL failure that still wrote something
-    //     (enriched/cleared > 0) stays exit 0; all three failure kinds already
-    //     reach Sentry via captureError (chunk_failed / malformed_verdicts /
-    //     overwrite_failed), so a partial-omission run is visible without the
-    //     alarm of a non-zero exit.
-    const wroteNothing = totals.enriched === 0 && totals.cleared === 0;
-    const somethingFailed = totals.errors > 0 || totals.malformed > 0 || totals.write_failed;
-    if (totals.all_empty_skip || (wroteNothing && somethingFailed)) process.exitCode = 1;
+    //     that threw (write_failed / station_write_failed). A PARTIAL failure that
+    //     still wrote something (enriched/cleared/station_written > 0) stays exit
+    //     0; the failure kinds already reach Sentry via captureError (chunk_failed
+    //     / malformed_verdicts / overwrite_failed / station_write_failed), so a
+    //     partial-omission run is visible without the alarm of a non-zero exit.
+    // `station_empty_skip` is NOT a failure — semantic-index#369 being undeployed
+    // is the expected pre-populate state (station_plays harmless while null).
+    const wroteNothing = totals.enriched === 0 && totals.cleared === 0 && totals.station_written === 0;
+    const somethingFailed =
+      totals.errors > 0 || totals.malformed > 0 || totals.write_failed || totals.station_write_failed;
+    if ((totals.all_empty_skip && totals.station_written === 0) || (wroteNothing && somethingFailed))
+      process.exitCode = 1;
   } catch (err) {
     captureError(err, 'main');
     log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {

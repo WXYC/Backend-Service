@@ -36,25 +36,36 @@ import type {
 } from '../../../../jobs/concerts-similar-artists-enrichment/neighbors-client';
 import type { EnrichmentCandidate } from '../../../../jobs/concerts-similar-artists-enrichment/query';
 import type { SimilarArtistsRow } from '../../../../jobs/concerts-similar-artists-enrichment/writer';
+import type { StationPlaysRow } from '../../../../jobs/concerts-similar-artists-enrichment/station-writer';
 
 type FetchNeighborsFn = EnrichDeps['fetchNeighbors'];
 type FetchHealthFn = EnrichDeps['fetchHealth'];
 type OverwriteFn = EnrichDeps['overwrite'];
+type WriteStationFn = EnrichDeps['writeStation'];
 type LoadCandidatesFn = EnrichDeps['loadCandidates'];
 
 const candidate = (artist_id: number): EnrichmentCandidate => ({ artist_id });
 
-/** Build a `results`-keyed-by-stringified-id response from an id→neighbors map. */
-const neighborsResponse = (byId: Record<number, SimilarArtistNeighbor[]>): NeighborsBatchResponse => {
+/**
+ * Build a response from an id→neighbors map plus an optional id→plays map
+ * (BS#1702 `source_plays`). Both are keyed by the stringified input id, matching
+ * the semantic-index#354/#369 contract.
+ */
+const neighborsResponse = (
+  byId: Record<number, SimilarArtistNeighbor[]>,
+  plays: Record<number, number> = {}
+): NeighborsBatchResponse => {
   const results: Record<string, SimilarArtistNeighbor[]> = {};
   for (const [id, list] of Object.entries(byId)) results[String(id)] = list;
-  return { results };
+  const source_plays: Record<string, number> = {};
+  for (const [id, n] of Object.entries(plays)) source_plays[String(id)] = n;
+  return { results, source_plays };
 };
 
 /** A one-neighbor list keyed off the input id, so fixtures needn't spell weights. */
 const oneNeighbor = (id: number): SimilarArtistNeighbor[] => [{ artist_id: id * 10, weight: 1 }];
 
-type Recorded = { upserts: SimilarArtistsRow[]; deletes: number[] };
+type Recorded = { upserts: SimilarArtistsRow[]; deletes: number[]; station: StationPlaysRow[] };
 
 const makeDeps = (
   candidates: EnrichmentCandidate[],
@@ -65,10 +76,11 @@ const makeDeps = (
   fetchNeighbors: jest.Mock<FetchNeighborsFn>;
   fetchHealth: jest.Mock<FetchHealthFn>;
   overwrite: jest.Mock<OverwriteFn>;
+  writeStation: jest.Mock<WriteStationFn>;
   awaitQuiet: jest.Mock<() => Promise<void>>;
   recorded: Recorded;
 } => {
-  const recorded: Recorded = { upserts: [], deletes: [] };
+  const recorded: Recorded = { upserts: [], deletes: [], station: [] };
   const loadCandidates =
     (overrides.loadCandidates as jest.Mock<LoadCandidatesFn>) ??
     jest.fn<LoadCandidatesFn>().mockResolvedValue(candidates);
@@ -90,11 +102,17 @@ const makeDeps = (
       recorded.deletes.push(...deletes);
       return Promise.resolve({ written: upserts.length, deleted: deletes.length });
     });
+  const writeStation =
+    (overrides.writeStation as jest.Mock<WriteStationFn>) ??
+    jest.fn<WriteStationFn>().mockImplementation((rows: StationPlaysRow[]) => {
+      recorded.station.push(...rows);
+      return Promise.resolve({ written: rows.length });
+    });
   const awaitQuiet =
     (overrides.awaitQuiet as jest.Mock<() => Promise<void>>) ??
     jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-  const deps: EnrichDeps = { loadCandidates, fetchNeighbors, fetchHealth, overwrite, awaitQuiet };
-  return { deps, loadCandidates, fetchNeighbors, fetchHealth, overwrite, awaitQuiet, recorded };
+  const deps: EnrichDeps = { loadCandidates, fetchNeighbors, fetchHealth, overwrite, writeStation, awaitQuiet };
+  return { deps, loadCandidates, fetchNeighbors, fetchHealth, overwrite, writeStation, awaitQuiet, recorded };
 };
 
 const options = (over: Partial<EnrichOptions> = {}): EnrichOptions => ({
@@ -337,9 +355,10 @@ describe('runEnrichment (BS#1626)', () => {
     // while 1-4 upsert normally.
     const bad = { 1: oneNeighbor(1), 2: oneNeighbor(2), 3: oneNeighbor(3), 4: oneNeighbor(4), 5: 'not-an-array' };
     const { deps, recorded } = makeDeps([1, 2, 3, 4, 5].map(candidate), {
-      fetchNeighbors: jest
-        .fn<FetchNeighborsFn>()
-        .mockResolvedValue({ results: bad as unknown as Record<string, SimilarArtistNeighbor[]> }),
+      fetchNeighbors: jest.fn<FetchNeighborsFn>().mockResolvedValue({
+        results: bad as unknown as Record<string, SimilarArtistNeighbor[]>,
+        source_plays: {},
+      }),
     });
 
     const totals = await runEnrichment(deps, options());
@@ -385,5 +404,130 @@ describe('runEnrichment (BS#1626)', () => {
     expect(recorded.upserts.map((u) => u.artist_id)).toEqual([1, 3]);
     expect(recorded.deletes).toEqual([2]); // but the count floor lets a single genuine empty clear
     expect(totals).toMatchObject({ enriched: 2, cleared: 1, deletes_suppressed: false });
+  });
+});
+
+/**
+ * BS#1702 station-affinity write. The orchestrator collects the additive
+ * `source_plays` map across chunks and UPSERTs it through the injected
+ * `writeStation` dep — INDEPENDENTLY of the neighbor write, and crucially
+ * BEFORE the neighbors null-wipe early return so a heavily-played headliner with
+ * no affinity neighbors still gets its count. These pin the orchestration
+ * decisions over a mocked writer; the real PG UPSERT is asserted in the
+ * integration spec.
+ */
+describe('runEnrichment station-plays (BS#1702)', () => {
+  it('collects source_plays across chunks and UPSERTs them via the station writer', async () => {
+    const { deps, writeStation, recorded } = makeDeps([candidate(1), candidate(2), candidate(3)], {
+      fetchNeighbors: jest
+        .fn<FetchNeighborsFn>()
+        .mockResolvedValueOnce(neighborsResponse({ 1: oneNeighbor(1), 2: oneNeighbor(2) }, { 1: 312, 2: 58 }))
+        .mockResolvedValueOnce(neighborsResponse({ 3: oneNeighbor(3) }, { 3: 9 })),
+    });
+
+    const totals = await runEnrichment(deps, options({ chunkSize: 2 }));
+
+    expect(writeStation).toHaveBeenCalledTimes(1);
+    expect(recorded.station).toEqual([
+      { artist_id: 1, plays: 312 },
+      { artist_id: 2, plays: 58 },
+      { artist_id: 3, plays: 9 },
+    ]);
+    expect(totals).toMatchObject({ station_written: 3, station_empty_skip: false, station_write_failed: false });
+  });
+
+  it('writes station plays even when the neighbors sweep is all-empty (before the null-wipe return)', async () => {
+    // Every neighbor list empty (all_empty_sweep fires) BUT plays are present —
+    // the heavily-played-artist-with-no-neighbors cold-start case this feature
+    // targets. The station write MUST land before the neighbors early return.
+    const { deps, writeStation, overwrite, recorded } = makeDeps([candidate(1), candidate(2)], {
+      fetchNeighbors: jest
+        .fn<FetchNeighborsFn>()
+        .mockResolvedValue(neighborsResponse({ 1: [], 2: [] }, { 1: 999, 2: 500 })),
+    });
+
+    const totals = await runEnrichment(deps, options());
+
+    // Neighbors: all-empty sweep → null-wipe guard fires, overwrite NOT called.
+    expect(overwrite).not.toHaveBeenCalled();
+    expect(totals.all_empty_skip).toBe(true);
+    // Station: written despite the neighbors sweep being all-empty.
+    expect(writeStation).toHaveBeenCalledTimes(1);
+    expect(recorded.station).toEqual([
+      { artist_id: 1, plays: 999 },
+      { artist_id: 2, plays: 500 },
+    ]);
+    expect(totals.station_written).toBe(2);
+  });
+
+  it('flags station_empty_skip and writes nothing when a responded run returns no source_plays', async () => {
+    // Neighbors present, but source_plays empty for the whole run (the default
+    // fetch mock omits plays) — semantic-index#369 not yet deployed. Write no
+    // station rows; never UPSERT zeros over real counts.
+    const { deps, writeStation } = makeDeps([candidate(1), candidate(2)]);
+
+    const totals = await runEnrichment(deps, options());
+
+    expect(writeStation).not.toHaveBeenCalled();
+    expect(totals).toMatchObject({ enriched: 2, station_written: 0, station_empty_skip: true });
+  });
+
+  it('does not flag station_empty_skip on a total outage (no chunk responded)', async () => {
+    // Every chunk throws → no response, no source_plays. The empty station map is
+    // an outage (already carried by `errors`), NOT the "endpoint returned no
+    // plays" signal, so station_empty_skip stays false.
+    const { deps, writeStation } = makeDeps([candidate(1), candidate(2)], {
+      fetchNeighbors: jest.fn<FetchNeighborsFn>().mockRejectedValue(new Error('semantic-index down')),
+    });
+
+    const totals = await runEnrichment(deps, options({ chunkSize: 1 }));
+
+    expect(writeStation).not.toHaveBeenCalled();
+    expect(totals).toMatchObject({ chunks: 0, errors: 2, station_written: 0, station_empty_skip: false });
+  });
+
+  it('collects a play count for an id whose neighbor verdict is absent (independent of the malformed skip)', async () => {
+    // id 2 is absent from `results` (a malformed neighbor verdict) but present in
+    // source_plays — its play count is collected BEFORE the malformed continue,
+    // proving station-plays is independent of the neighbor verdict.
+    const { deps, recorded, writeStation } = makeDeps([candidate(1), candidate(2)], {
+      fetchNeighbors: jest
+        .fn<FetchNeighborsFn>()
+        .mockResolvedValue(neighborsResponse({ 1: oneNeighbor(1) }, { 1: 100, 2: 42 })),
+    });
+
+    const totals = await runEnrichment(deps, options());
+
+    expect(totals.malformed).toBe(1); // id 2 absent from results
+    expect(writeStation).toHaveBeenCalledTimes(1);
+    expect(recorded.station).toEqual([
+      { artist_id: 1, plays: 100 },
+      { artist_id: 2, plays: 42 },
+    ]);
+    expect(totals).toMatchObject({ enriched: 1, station_written: 2 });
+  });
+
+  it('flags station_write_failed when the station UPSERT throws (neighbors path untouched)', async () => {
+    const { deps, overwrite } = makeDeps([candidate(1), candidate(2)], {
+      fetchNeighbors: jest
+        .fn<FetchNeighborsFn>()
+        .mockResolvedValue(neighborsResponse({ 1: oneNeighbor(1), 2: oneNeighbor(2) }, { 1: 10, 2: 20 })),
+      writeStation: jest.fn<WriteStationFn>().mockRejectedValue(new Error('deadlock')),
+    });
+
+    const totals = await runEnrichment(deps, options());
+
+    expect(totals.station_write_failed).toBe(true);
+    expect(totals.station_written).toBe(0);
+    // The neighbor overwrite still ran — the two writes are independent.
+    expect(overwrite).toHaveBeenCalledTimes(1);
+    expect(totals.enriched).toBe(2);
+  });
+
+  it('does not write station plays on a dry run', async () => {
+    const { deps, writeStation } = makeDeps([candidate(1)]);
+    const totals = await runEnrichment(deps, options({ dryRun: true }));
+    expect(writeStation).not.toHaveBeenCalled();
+    expect(totals).toMatchObject({ station_written: 0, station_empty_skip: false });
   });
 });

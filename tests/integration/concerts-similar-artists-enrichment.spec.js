@@ -14,8 +14,11 @@
  *       UPSERT `ON CONFLICT DO UPDATE` OVERWRITES an existing row (the opposite
  *       of the genre sibling's DO-NOTHING), and the scoped DELETE clears an
  *       emptied row.
- *  2. The read projection: `GET /concerts` emits `similar_artists` for a
- *     resolved + enriched headliner and `null` when unresolved or un-enriched.
+ *  2. The read projection: `GET /concerts` (and `GET /concerts/:id`) emit
+ *     `similar_artists` (BS#1626) and `station_plays` (BS#1702) for a resolved +
+ *     enriched headliner and `null` when unresolved or un-enriched. The by-id
+ *     assertion is the regression guard for the lockstep `artist_station_plays`
+ *     LEFT JOIN (the same class of miss as the BS#1694 by-id 500).
  *
  * Pure SQL for half 1 — does NOT import the TS job (the integration runner is
  * babel-jest with no TS support); the SQL here mirrors query.ts / writer.ts and
@@ -122,6 +125,25 @@ async function deleteNeighbors(sql, artistIds) {
   `;
 }
 
+/**
+ * UPSERT mirror of station-writer.ts#writeStationPlays (BS#1702). UPSERT-only,
+ * no DELETE — a stale count is harmless.
+ */
+async function upsertStationPlays(sql, rows) {
+  const returned = [];
+  for (const r of rows) {
+    const [row] = await sql`
+      INSERT INTO ${sql(SCHEMA)}."artist_station_plays" ("artist_id", "plays")
+      VALUES (${r.artist_id}, ${r.plays})
+      ON CONFLICT ("artist_id") DO UPDATE
+        SET "plays" = excluded."plays", "updated_at" = now()
+      RETURNING "artist_id"
+    `;
+    returned.push(row);
+  }
+  return returned;
+}
+
 describe('concerts similar-artists enrichment (BS#1626)', () => {
   let auth;
   let sql;
@@ -199,6 +221,12 @@ describe('concerts similar-artists enrichment (BS#1626)', () => {
         { artist_id: 5121, weight: 4.83 },
         { artist_id: 88, weight: 2.1 },
       ])})
+    `;
+    // The enriched artist's persisted station-plays count (BS#1702). The
+    // unenriched artist deliberately has NO row, so its station_plays is null.
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}."artist_station_plays" ("artist_id", "plays")
+      VALUES (${enrichedArtistId}, 312)
     `;
 
     // In-library, resolved + enriched, upcoming — TWO shows for the SAME artist
@@ -326,6 +354,21 @@ describe('concerts similar-artists enrichment (BS#1626)', () => {
     });
   });
 
+  describe('station-plays UPSERT writer (BS#1702, mirror of station-writer.ts)', () => {
+    it('UPSERT overwrites an existing station-plays row (UPSERT-only, no DELETE)', async () => {
+      const first = await upsertStationPlays(sql, [{ artist_id: writerAId, plays: 100 }]);
+      expect(first).toHaveLength(1);
+
+      // A second UPSERT with a DIFFERENT count OVERWRITES the row (DO UPDATE),
+      // keeping the play count current with the nightly graph.
+      await upsertStationPlays(sql, [{ artist_id: writerAId, plays: 275 }]);
+      const [persisted] = await sql.unsafe(`SELECT plays FROM "${SCHEMA}".artist_station_plays WHERE artist_id = $1`, [
+        writerAId,
+      ]);
+      expect(Number(persisted.plays)).toBe(275);
+    });
+  });
+
   describe('GET /concerts similar_artists projection', () => {
     it('emits the joined similar_artists array for a resolved + enriched headliner', async () => {
       const res = await auth.get(`/concerts?from=${IN_10}&to=${IN_10}`).expect(200);
@@ -359,6 +402,52 @@ describe('concerts similar-artists enrichment (BS#1626)', () => {
       const discogsOnly = res.body.concerts.find((c) => c.headlining_artist_raw === 'Touring Act Absent From Library');
       expect(discogsOnly).toBeDefined();
       expect(discogsOnly.similar_artists).toBeNull();
+    });
+  });
+
+  describe('GET /concerts station_plays projection (BS#1702)', () => {
+    it('emits the joined station_plays count for a resolved + enriched headliner', async () => {
+      const res = await auth.get(`/concerts?from=${IN_10}&to=${IN_10}`).expect(200);
+      const enriched = res.body.concerts.find((c) => c.headlining_artist_raw === ARTIST_ENRICHED);
+      expect(enriched).toBeDefined();
+      expect(enriched.station_plays).toBe(312);
+    });
+
+    it('emits null station_plays for a resolved-but-unenriched headliner', async () => {
+      // The unenriched library artist has a concert (IN_15) but no
+      // artist_station_plays row, so the LEFT JOIN misses and the field is null.
+      const res = await auth.get(`/concerts?from=${IN_15}&to=${IN_15}`).expect(200);
+      const unenriched = res.body.concerts.find((c) => c.headlining_artist_raw === ARTIST_UNENRICHED);
+      expect(unenriched).toBeDefined();
+      expect(unenriched.station_plays).toBeNull();
+    });
+
+    it('emits null station_plays for an unresolved headliner', async () => {
+      const res = await auth.get(`/concerts?from=${IN_10}&to=${IN_10}`).expect(200);
+      const unresolved = res.body.concerts.find((c) => c.headlining_artist_raw === 'Some Unresolved Billing & Another');
+      expect(unresolved).toBeDefined();
+      expect(unresolved.station_plays).toBeNull();
+    });
+
+    it('emits null station_plays for a Discogs-only headliner (no in-library id)', async () => {
+      const res = await auth.get(`/concerts?from=${IN_10}&to=${IN_10}`).expect(200);
+      const discogsOnly = res.body.concerts.find((c) => c.headlining_artist_raw === 'Touring Act Absent From Library');
+      expect(discogsOnly).toBeDefined();
+      expect(discogsOnly.station_plays).toBeNull();
+    });
+
+    // Regression guard for the lockstep `artist_station_plays` LEFT JOIN: the
+    // by-id read selects the same `concertPageFields` projection, so a missing
+    // join in `getConcertById` would 500 every by-id request (the BS#1694 class
+    // of miss). Assert the by-id read projects station_plays for the same row.
+    it('GET /concerts/:id projects station_plays for the enriched headliner', async () => {
+      const list = await auth.get(`/concerts?from=${IN_10}&to=${IN_10}`).expect(200);
+      const enriched = list.body.concerts.find((c) => c.headlining_artist_raw === ARTIST_ENRICHED);
+      expect(enriched).toBeDefined();
+
+      const byId = await request.get(`/concerts/${enriched.id}`).expect(200);
+      expect(byId.body.id).toBe(enriched.id);
+      expect(byId.body.station_plays).toBe(312);
     });
   });
 });

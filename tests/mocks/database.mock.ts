@@ -240,6 +240,11 @@ export const artist_similar_artists = {
   neighbors: 'neighbors',
   updated_at: 'updated_at',
 };
+export const artist_station_plays = {
+  artist_id: 'artist_id',
+  plays: 'plays',
+  updated_at: 'updated_at',
+};
 export const flowsheet_freetext_resolution = {
   norm_artist: 'norm_artist',
   norm_album: 'norm_album',

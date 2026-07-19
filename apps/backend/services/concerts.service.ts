@@ -2,6 +2,7 @@ import { and, asc, eq, gte, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import {
   artist_metadata,
   artist_similar_artists,
+  artist_station_plays,
   artists,
   concerts,
   db,
@@ -81,6 +82,14 @@ export type ConcertDTO = {
   // headliner has no in-library id OR the nightly enrichment hasn't run. Same
   // optional-and-nullable discipline as `genres` (wxyc-shared#222).
   similar_artists?: SimilarArtistNeighbor[] | null;
+  // All-time WXYC flowsheet play count of the resolved (in-library) headliner
+  // (BS#1702, On Tour "For You" station-affinity tier), sourced from
+  // `artist_station_plays` via a null-safe LEFT JOIN on `headlining_artist_id`.
+  // The station-affinity signal behind the "For You" shelf — identical for every
+  // listener, carries no listener data. Null when the headliner has no in-library
+  // id OR the nightly enrichment hasn't run. Same optional-and-nullable discipline
+  // as `genres`/`similar_artists` (not in the api.yaml `required` set).
+  station_plays?: number | null;
 };
 
 export type ConcertsQueryFilters = {
@@ -127,6 +136,11 @@ export type ConcertJoinRow = {
   // omits it (the #1616 hot-path guard), so its rows leave it undefined and
   // `toConcertDTO` coalesces to null.
   similar_artists?: SimilarArtistNeighbor[] | null;
+  // Optional: only the `getConcertsPage` / `getConcertById` projection LEFT-joins
+  // `artist_station_plays` and selects this. The `getUpcomingShowsMaps` embed
+  // omits it (the #1616 embed boundary), so its rows leave it undefined and
+  // `toConcertDTO` coalesces to null.
+  station_plays?: number | null;
 };
 
 // Explicit select list — the projection is the leak barrier: internal
@@ -197,6 +211,9 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
   // Same null-safe discipline (BS#1626): undefined on the embed projection,
   // null for a headliner with no in-library id or no enrichment row.
   similar_artists: row.similar_artists ?? null,
+  // Same null-safe discipline (BS#1702): undefined on the embed projection, null
+  // for a headliner with no in-library id or no station-plays enrichment row.
+  station_plays: row.station_plays ?? null,
 });
 
 /**
@@ -247,6 +264,7 @@ const concertPageFields = {
   ...concertJoinFields,
   genres: artist_metadata.genres,
   similar_artists: artist_similar_artists.neighbors,
+  station_plays: artist_station_plays.plays,
 };
 
 /**
@@ -264,6 +282,11 @@ const concertPageFields = {
  * a headliner with no in-library id or no enrichment row surfaces
  * `similar_artists: null`. Purely additive to the BS#1603 shape; no existing
  * field's behavior changes.
+ *
+ * Station-plays projection (BS#1702): a LEFT JOIN to `artist_station_plays`,
+ * same key and shape as the similar-artists join (library-key only, no COALESCE)
+ * — surfaces `station_plays: null` for a headliner with no in-library id or no
+ * enrichment row.
  */
 export const getConcertsPage = async (
   filters: ConcertsQueryFilters,
@@ -277,6 +300,7 @@ export const getConcertsPage = async (
     .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
     .leftJoin(artist_metadata, eq(artist_metadata.discogs_artist_id, effectiveHeadlinerDiscogsId))
     .leftJoin(artist_similar_artists, eq(artist_similar_artists.artist_id, concerts.headlining_artist_id))
+    .leftJoin(artist_station_plays, eq(artist_station_plays.artist_id, concerts.headlining_artist_id))
     .where(buildWhere(filters))
     .orderBy(asc(concerts.starts_on), asc(concerts.id))
     .limit(limit)
@@ -337,7 +361,9 @@ export const getConcertById = async (id: number): Promise<ConcertDTO | null> => 
   // joined. BS#1626 adding `similar_artists` to the shared projection while
   // this query was in flight is exactly how the by-id read 500'd on every
   // row-returning request (BS#1694 hotfix) — the by-id spec's
-  // serialization-parity test is the regression guard.
+  // serialization-parity test is the regression guard. BS#1702 added
+  // `station_plays` (its `artist_station_plays` join) under the same discipline:
+  // both queries gain the join in lockstep.
   const rows = await db
     .select(concertPageFields)
     .from(concerts)
@@ -345,6 +371,7 @@ export const getConcertById = async (id: number): Promise<ConcertDTO | null> => 
     .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
     .leftJoin(artist_metadata, eq(artist_metadata.discogs_artist_id, effectiveHeadlinerDiscogsId))
     .leftJoin(artist_similar_artists, eq(artist_similar_artists.artist_id, concerts.headlining_artist_id))
+    .leftJoin(artist_station_plays, eq(artist_station_plays.artist_id, concerts.headlining_artist_id))
     .where(eq(concerts.id, id))
     .limit(1);
 
