@@ -1,4 +1,5 @@
 import type { FSEntry } from '@wxyc/database';
+import { isSpotifyUrl, isAppleMusicUrl } from '@wxyc/lml-client';
 
 /**
  * Client-facing flowsheet-row projection (BS#1513).
@@ -87,6 +88,11 @@ export type ClientFacingFSEntry = Pick<FSEntry, (typeof CLIENT_FACING_FLOWSHEET_
  * internal column. Written as an explicit field-by-field object literal (rather
  * than a loop) so that TypeScript enforces the shape against `ClientFacingFSEntry`
  * and a schema change that renames a client-facing column is a compile error.
+ *
+ * BS#1714: `spotify_url` / `apple_music_url` are host-guarded on the way out — a
+ * value whose host isn't Spotify/Apple (mislabeled at the LML boundary before
+ * #1712 shipped) is dropped to `null` rather than emitted under the hardwired
+ * iOS "Spotify"/"Apple Music" button. Every other column passes through as-is.
  */
 export function projectFlowsheetEntry(row: FSEntry): ClientFacingFSEntry {
   return {
@@ -112,8 +118,10 @@ export function projectFlowsheetEntry(row: FSEntry): ClientFacingFSEntry {
     artwork_url: row.artwork_url,
     discogs_url: row.discogs_url,
     release_year: row.release_year,
-    spotify_url: row.spotify_url,
-    apple_music_url: row.apple_music_url,
+    // BS#1714: null a non-Spotify/non-Apple value; leave a nullish or genuine
+    // value untouched — same `!= null &&` shape as `sanitizeLookupStreamingUrls`.
+    spotify_url: row.spotify_url != null && !isSpotifyUrl(row.spotify_url) ? null : row.spotify_url,
+    apple_music_url: row.apple_music_url != null && !isAppleMusicUrl(row.apple_music_url) ? null : row.apple_music_url,
     youtube_music_url: row.youtube_music_url,
     bandcamp_url: row.bandcamp_url,
     soundcloud_url: row.soundcloud_url,
@@ -130,7 +138,12 @@ export function projectFlowsheetEntry(row: FSEntry): ClientFacingFSEntry {
  * apply. It loops the same `CLIENT_FACING_FLOWSHEET_COLUMNS` allow-list — one
  * list, zero drift with the typed projector — and copies only the columns
  * actually present on the row, so a partial row is not padded with invented
- * keys. Values pass through untouched (an ISO-string date stays an ISO string).
+ * keys. Values pass through untouched (an ISO-string date stays an ISO string),
+ * with the sole exception of the BS#1714 host guard below: a `spotify_url` /
+ * `apple_music_url` that is present but whose host isn't Spotify/Apple is nulled
+ * (the same suppression {@link projectFlowsheetEntry} applies), so the CDC
+ * `liveFs:update` SSE never carries a mislabeled URL under the hardwired iOS
+ * "Spotify"/"Apple Music" button. A column absent from the row stays absent.
  */
 export function pickClientFacingColumns(row: Record<string, unknown>): Record<string, unknown> {
   const projected: Record<string, unknown> = {};
@@ -139,6 +152,17 @@ export function pickClientFacingColumns(row: Record<string, unknown>): Record<st
       // eslint-disable-next-line security/detect-object-injection -- keys are the fixed allow-list const, not caller input
       projected[column] = row[column];
     }
+  }
+  // BS#1714 host guard. Values arrive as parsed JSON (`unknown`); the guards
+  // narrow a non-string to `false`, so the cast to the `string | null` these
+  // columns actually hold is safe. Only null a key that is present — a partial
+  // row that omitted it stays omitted (the "not padded with invented keys"
+  // contract above).
+  if (Object.hasOwn(projected, 'spotify_url') && !isSpotifyUrl(projected.spotify_url as string | null)) {
+    projected.spotify_url = null;
+  }
+  if (Object.hasOwn(projected, 'apple_music_url') && !isAppleMusicUrl(projected.apple_music_url as string | null)) {
+    projected.apple_music_url = null;
   }
   return projected;
 }
