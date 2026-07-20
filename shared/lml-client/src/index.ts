@@ -41,6 +41,15 @@ export type {
   StreamingCheckSources,
 } from '@wxyc/shared/dtos';
 
+// BS#1710: streaming-URL host guard. Enforces "a `spotify_url` field must
+// hold a Spotify URL" (and the Apple analogue) at the LML response boundary
+// — `sanitizeLookupStreamingUrls` is applied in `postLookup` +
+// `bulkLookupMetadata` below so every downstream writer + serve seam is
+// covered at one chokepoint. Imported (not just re-exported) so it's in
+// local scope for those callsites.
+import { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls } from './streaming-url-guard.js';
+export { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls };
+
 class LmlClientError extends Error {
   constructor(
     message: string,
@@ -525,7 +534,12 @@ async function postLookup(
         options?.timeoutMs
       );
 
-      const parsed = (await response.json()) as LookupResponse;
+      // BS#1710: enforce the streaming-URL host invariant at this untrusted
+      // boundary. LML's `artwork.spotify_url` can carry a non-Spotify URL
+      // (Deezer/Apple/…) sourced from the library `streaming_links` artifact;
+      // null it here so no downstream writer persists it under the Spotify
+      // slot and the writers' `?? searchUrls.spotify_url` fallback wins.
+      const parsed = sanitizeLookupStreamingUrls((await response.json()) as LookupResponse);
 
       // cache_stats schema is freeform today (additionalProperties: true). Until
       // wxyc-shared#86 tightens the type, treat it as a loose record and only
@@ -675,6 +689,12 @@ export async function bulkLookupMetadata(
             console.warn('lml.client: failed to project cache_stats onto bulk span', err);
           }
         }
+      }
+
+      // BS#1710: same streaming-URL host invariant as postLookup, applied to
+      // each per-item verdict's nested LookupResponse (null on `status: error`).
+      for (const item of parsed.results ?? []) {
+        if (item.lookup != null) sanitizeLookupStreamingUrls(item.lookup);
       }
 
       return { results: parsed.results };
