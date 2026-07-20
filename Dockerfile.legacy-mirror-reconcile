@@ -1,0 +1,55 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /legacy-mirror-reconcile-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+# The reconcile re-drives tubafrenzy via @wxyc/legacy-mirror (byte-identical
+# payloads to the live mirror path); its dist must be present for the job build.
+COPY ./shared/legacy-mirror ./shared/legacy-mirror
+COPY ./jobs/legacy-mirror-reconcile ./jobs/legacy-mirror-reconcile
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/legacy-mirror --workspace=@wxyc/legacy-mirror-reconcile
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /legacy-mirror-reconcile
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/legacy-mirror-reconcile/package* ./jobs/legacy-mirror-reconcile/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/legacy-mirror/package* ./shared/legacy-mirror/
+
+# All of this job's deps (posthog-node, @sentry/node, drizzle-orm, postgres,
+# node-ssh) and its @wxyc/* deps (resolved as local workspaces) come from the
+# public registry, so NPM_TOKEN isn't strictly required — the .npmrc is copied
+# only to keep the install identical to the other job images. Removed after.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./legacy-mirror-reconcile-builder/jobs/legacy-mirror-reconcile/dist ./jobs/legacy-mirror-reconcile/dist
+COPY --from=builder ./legacy-mirror-reconcile-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./legacy-mirror-reconcile-builder/shared/legacy-mirror/dist ./shared/legacy-mirror/dist
+
+# The reconcile's selection SELECTs run NOT EXISTS anti-joins over flowsheet
+# bounded to the recent window; a cold-cache scan can exceed the API's tight 5s
+# default. 60s is comfortable for a cron and well under any live-request SLA.
+ENV DB_STATEMENT_TIMEOUT_MS=60000
+
+# Identifies the connection (incl. the advisory-lock holder) in
+# pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-legacy-mirror-reconcile
+
+# TUBAFRENZY_URL, MIRROR_API_KEY, POSTHOG_API_KEY, SENTRY_DSN, and the DB_*
+# connection vars are supplied at run time via `--env-file .env` (see
+# docs/env-vars.md). The moved http-mirror client reads TUBAFRENZY_URL /
+# MIRROR_API_KEY, the flag gate reads POSTHOG_API_KEY, and both the mirror
+# helpers and the detection captureMessage report to SENTRY_DSN.
+
+CMD ["npm", "start", "--workspace=@wxyc/legacy-mirror-reconcile"]
