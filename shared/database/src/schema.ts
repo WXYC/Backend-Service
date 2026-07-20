@@ -1771,8 +1771,18 @@ export const album_critic_reviews = wxyc_schema.table(
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    // UPSERT conflict target + the serve-path lookup index (album_id is the
-    // leading column, so `WHERE album_id = ?` uses this index directly).
+    // UPSERT conflict target AND the serve-path lookup index: album_id is the
+    // leading column, so `WHERE album_id = ?` (the selective predicate) is an
+    // index range scan on this index directly. The serve query's residual
+    // `ORDER BY published_at DESC NULLS LAST, id DESC LIMIT 5` is a top-N sort
+    // over only the matched rows — a per-album handful for a curated critic
+    // corpus, capped at CRITIC_REVIEWS_LIMIT (5) on the read — so it stays
+    // sub-ms in memory. A dedicated `(album_id, published_at DESC NULLS LAST,
+    // id DESC)` ordered index would let the planner skip that sort, but the
+    // payoff is immeasurable at this row count while the write-amplification on
+    // every seed/ETL UPSERT is real; it's deliberately deferred until per-album
+    // counts grow enough to warrant it (and the serve path is flag-gated off in
+    // prod today regardless). See ADR 0012.
     uniqueIndex('album_critic_reviews_album_id_source_url_uq').on(table.album_id, table.source_url),
   ]
 );

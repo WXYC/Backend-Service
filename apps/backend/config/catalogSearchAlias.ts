@@ -9,32 +9,14 @@
  *
  * Defaults to `false` so production behavior is unchanged until an operator
  * opts in. See: `Backend-Service/plans/artist-search-alias.md` §PR 5.
+ *
+ * The singleton mechanics (strict-`true` parse, lazy cache, `resetConfig` test
+ * hook) come from the shared {@link createEnvFlagConfig} factory. Tests that
+ * mutate `process.env.CATALOG_SEARCH_ALIAS_ENABLED` between cases must call
+ * `resetConfig()` in `beforeEach` so the next `getConfig()` re-reads the env.
  */
+import { createEnvFlagConfig, type EnvFlagConfig } from './envFlag.js';
 
-export interface CatalogSearchAliasConfig {
-  enabled: boolean;
-}
+export type CatalogSearchAliasConfig = EnvFlagConfig;
 
-export function loadConfig(): CatalogSearchAliasConfig {
-  return {
-    enabled: process.env.CATALOG_SEARCH_ALIAS_ENABLED === 'true',
-  };
-}
-
-let _config: CatalogSearchAliasConfig | null = null;
-
-export function getConfig(): CatalogSearchAliasConfig {
-  if (!_config) {
-    _config = loadConfig();
-  }
-  return _config;
-}
-
-/**
- * Reset the cached singleton. Tests that mutate
- * `process.env.CATALOG_SEARCH_ALIAS_ENABLED` between cases must call this
- * in `beforeEach` so the next `getConfig()` re-reads the environment.
- */
-export function resetConfig(): void {
-  _config = null;
-}
+export const { loadConfig, getConfig, resetConfig } = createEnvFlagConfig('CATALOG_SEARCH_ALIAS_ENABLED');

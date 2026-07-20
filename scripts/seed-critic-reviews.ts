@@ -3,10 +3,11 @@
  * (album-critic-reviews slice, ADR 0012).
  *
  * This is the write-side companion to the read path
- * `lookupCriticReviewsByAlbumKey` (apps/backend/services/album-metadata-lookup.service.ts).
+ * `lookupCriticReviewsByAlbumId` (apps/backend/services/album-metadata-lookup.service.ts).
  * It takes a prepared manifest of candidate review articles, resolves each to
- * a linked library album via the SAME normalized flowsheet lookup key the
- * serve path uses (so a seeded row is guaranteed reachable by the endpoint),
+ * a linked library album via the SAME `resolveLinkedAlbumId` the serve path
+ * uses — imported, not re-implemented, so a seeded row is guaranteed reachable
+ * by the endpoint and the two can never drift —
  * asks Claude Haiku to pull ONE short verbatim excerpt + attribution, and
  * UPSERTs into `album_critic_reviews` keyed on `(album_id, source_url)`.
  *
@@ -58,8 +59,9 @@ import { config } from 'dotenv';
 config();
 
 import { readFileSync } from 'node:fs';
-import { sql, desc } from 'drizzle-orm';
-import { db, closeDatabaseConnection, flowsheet, album_critic_reviews } from '@wxyc/database';
+import { sql } from 'drizzle-orm';
+import { db, closeDatabaseConnection, album_critic_reviews } from '@wxyc/database';
+import { resolveLinkedAlbumId } from '../apps/backend/services/album-metadata-lookup.service.js';
 
 /** One candidate review, normalized from either source (b1) or (b2). */
 export interface CorpusItem {
@@ -127,32 +129,6 @@ function loadManifest(path: string): CorpusItem[] {
     }
   });
   return items;
-}
-
-/**
- * Resolve the linked library album_id for an (artist, album) pair using the
- * exact normalized key the serve path resolves against
- * (`resolveLinkedAlbumId` in album-metadata-lookup.service.ts). Kept in sync
- * by construction: same `lower(trim(...))` composition, same
- * `album_id IS NOT NULL` filter, same newest-row tiebreak. A review whose
- * album isn't linked in the flowsheet has nowhere to surface, so we skip it.
- */
-async function resolveAlbumId(artist: string, album: string): Promise<number | null> {
-  const trimmedArtist = artist.trim();
-  const trimmedAlbum = album.trim();
-  if (trimmedArtist.length === 0 || trimmedAlbum.length === 0) return null;
-
-  const key = `${trimmedArtist.toLowerCase()}-${trimmedAlbum.toLowerCase()}`;
-  const keyExpr = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
-
-  const rows = await db
-    .select({ album_id: flowsheet.album_id })
-    .from(flowsheet)
-    .where(sql`${keyExpr} = ${key} AND ${flowsheet.album_id} IS NOT NULL`)
-    .orderBy(desc(flowsheet.id))
-    .limit(1);
-
-  return rows[0]?.album_id ?? null;
 }
 
 const EXTRACTION_SYSTEM = [
@@ -273,8 +249,21 @@ function toRow(
   if (snippet.length === 0) return null;
   if (snippet.length > MAX_SNIPPET) {
     const cut = snippet.slice(0, MAX_SNIPPET);
-    const boundary = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf(' '));
-    snippet = boundary > MAX_SNIPPET * 0.6 ? cut.slice(0, boundary).trim() : '';
+    // Prefer ending on a full sentence, then fall back to a word boundary,
+    // then drop. `sentenceEnd` is the index of the sentence-ending punctuation
+    // (`.`/`!`/`?` before a space), so slice `+ 1` to keep that punctuation and
+    // land a clean sentence. A word-boundary slice stops at the space, dropping
+    // the trailing partial word. Both must land past 60% of the cap — a cut
+    // that early isn't a usable quote, so we reject rather than persist a stub.
+    const sentenceEnd = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
+    const wordEnd = cut.lastIndexOf(' ');
+    if (sentenceEnd > MAX_SNIPPET * 0.6) {
+      snippet = cut.slice(0, sentenceEnd + 1).trim();
+    } else if (wordEnd > MAX_SNIPPET * 0.6) {
+      snippet = cut.slice(0, wordEnd).trim();
+    } else {
+      snippet = '';
+    }
     if (snippet.length === 0) return null; // couldn't cap cleanly — drop it
   }
   return {
@@ -335,7 +324,7 @@ async function main(): Promise<void> {
   for (const item of items) {
     const label = `"${item.artist} — ${item.album}" (${item.source})`;
     try {
-      const albumId = await resolveAlbumId(item.artist, item.album);
+      const albumId = await resolveLinkedAlbumId(item.artist, item.album);
       if (albumId === null) {
         stats.skippedUnlinked++;
         console.log(`   ⤳ skip (no linked library album) ${label}`);

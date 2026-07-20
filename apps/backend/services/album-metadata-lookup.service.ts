@@ -1,42 +1,39 @@
 /**
- * Local lookup helper for the cache-first `/proxy/metadata/album` path
- * (BS#1331). Resolves an `(artistName, releaseTitle)` tuple against BS's
- * own persisted state — `album_metadata` keyed by the `album_id` of a
- * matching `flowsheet` row — so the steady-state read path skips the LML
- * cascade entirely.
+ * Local read helpers backing the cache-first `/proxy/metadata/album` path
+ * (BS#1331) and the external critic-review snippets attached to it
+ * (album-critic-reviews slice, ADR 0012). All three read BS's own persisted
+ * state so the steady-state serve path skips the LML cascade entirely.
  *
- * Query shape is a two-step lookup with the partial functional index
- * `flowsheet_album_link_lookup_idx` (migration 0081) doing the work:
- *   1. Find one `album_id` whose `flowsheet` row matches the normalized
- *      lookup key (`lower(trim(artist)) || '-' || lower(trim(coalesce(
- *      album, '')))`). The partial index's `WHERE album_id IS NOT NULL`
- *      predicate aligns with the explicit `WHERE` here so the planner
- *      uses the index without a sort.
- *   2. PK-lookup on `album_metadata` by that `album_id`.
+ * Three exported helpers, keyed on the `album_id` of a matching `flowsheet`
+ * row and staged so the handler resolves that id exactly once per request:
+ *   - {@link resolveLinkedAlbumId} — normalized `(artist, release)` key →
+ *     one `library.id`, via the partial functional index
+ *     `flowsheet_album_link_lookup_idx` (migration 0081). Deterministic
+ *     `ORDER BY flowsheet.id DESC LIMIT 1` row-pick so multi-`album_id` keys
+ *     (V/A multi-format, dual-pressings, librarian duplicates) can't flap
+ *     between distinct albums across polls.
+ *   - {@link lookupAlbumMetadataById} — PK-lookup on `album_metadata` for a
+ *     resolved id; the 10 base columns the proxy response is built from plus
+ *     the 8 LML-only enrichment fields (`discogs_artist_id` / `label` /
+ *     `full_release_date` / `genres` / `styles` / `tracklist` /
+ *     `artist_image_url` / `bio_tokens`, BS#1336) so a cache hit carries the
+ *     same shape as the cold LML-fallthrough path.
+ *   - {@link lookupCriticReviewsByAlbumId} — up to `CRITIC_REVIEWS_LIMIT`
+ *     attributed snippets for a resolved id, independent of whether
+ *     `album_metadata` enrichment has run.
  *
- * The two-step form avoids the `ORDER BY flowsheet.id DESC LIMIT 1` sort
- * cost on hot keys (a popular release played hundreds of times would
- * otherwise force the planner to materialize all matching flowsheet rows
- * before taking the head). All flowsheet rows for the same album resolve
- * to the same `album_metadata` row anyway, so the row-pick within a key
- * is degenerate as long as we land on one matching `album_id`.
+ * The `/proxy/metadata/album` handler calls {@link resolveLinkedAlbumId}
+ * once and feeds the id to both the metadata and reviews reads, so a
+ * concurrent flowsheet insert can't make the two reads describe two
+ * different albums for one request (the reads used to each re-resolve the
+ * key, which was both racy and coupled reviews to the metadata read).
  *
- * Returns the 10 base columns the proxy response is built from plus the 8
- * LML-only enrichment fields (`discogs_artist_id` / `label` /
- * `full_release_date` / `genres` / `styles` / `tracklist` /
- * `artist_image_url` / `bio_tokens`) added by BS#1336. Before that, those
- * fields lived only on the cold LML-fallthrough response, so a cache hit
- * shed the artist+release subtree (dj-site / iOS V1 gate the artist
- * sub-panel on `discogsArtistId`); the enrichment-worker now persists them
- * (`extended: true`) and the read path surfaces them, so a hit carries the
- * same shape as the cold path.
- *
- * `null` return means "no enriched local row for this key" — the caller
- * should fall through to LML. Free-form flowsheet rows (`album_id IS
- * NULL`) by definition can't hit, so iOS surfaces for those still pay
- * the LML round-trip. That's accepted scope: the cache-first goal
- * targets the linked-row cohort (the steady state for entries old enough
- * to be of interest to a detail-view fetch).
+ * A `null` metadata result means "no enriched local row for this id" — the
+ * caller falls through to LML. Free-form flowsheet rows (`album_id IS NULL`)
+ * can't resolve at all, so iOS surfaces for those still pay the LML
+ * round-trip. That's accepted scope: the cache-first goal targets the
+ * linked-row cohort (the steady state for entries old enough to be of
+ * interest to a detail-view fetch).
  */
 import { sql, eq, desc } from 'drizzle-orm';
 import { db, flowsheet, album_metadata, album_critic_reviews } from '@wxyc/database';
@@ -94,29 +91,16 @@ export interface PersistedAlbumMetadata {
 }
 
 /**
- * Resolve `(artistName, releaseTitle)` against persisted state.
- * Returns the row's metadata, or `null` when no `album_id`-bearing
- * flowsheet row exists for the key. `null` means "cold — go to LML".
- *
- * An empty/whitespace-only `artistName` short-circuits to `null` (the
- * caller's 400 path runs first, but this guard means a key of `'-'`
- * — which any blank-artist linked row would also produce — can't
- * accidentally serve arbitrary metadata).
- *
- * `releaseTitle` is similarly required for a meaningful hit: an
- * undefined/blank releaseTitle keys into `'<artist>-'`, which matches
- * any linked flowsheet row whose DJ left `album_title` blank, returning
- * whichever `album_id` that row carried. The artist-card surfaces that
- * call this endpoint without a releaseTitle are better served by an
- * LML lookup or a dedicated artist-only handler.
- */
-/**
  * Resolve `(artistName, releaseTitle)` to the `library.id` of a matching
  * linked flowsheet row, or `null` when no `album_id`-bearing flowsheet row
  * exists for the key. Shared Step-1 for both the album-metadata read
- * (`lookupAlbumMetadataByKey`) and the critic-reviews read
- * (`lookupCriticReviewsByAlbumKey`) so they resolve the *same* album key
- * for a given query.
+ * (`lookupAlbumMetadataById`) and the critic-reviews read
+ * (`lookupCriticReviewsByAlbumId`). Callers that need both — the
+ * `/proxy/metadata/album` handler — resolve the key *once* here and pass the
+ * id to both reads, so a concurrent flowsheet insert can't make the two
+ * reads disagree on which album they describe. The seed writer
+ * (`scripts/seed-critic-reviews.ts`) imports this to key its UPSERTs against
+ * the exact same normalized flowsheet key the serve path reads.
  *
  * Uses the partial functional index `flowsheet_album_link_lookup_idx`. The
  * explicit `flowsheet.album_id IS NOT NULL` predicate matches the index's
@@ -135,7 +119,7 @@ export interface PersistedAlbumMetadata {
  * linked flowsheet row whose DJ left `album_title` blank and return an
  * arbitrary `album_id`.
  */
-async function resolveLinkedAlbumId(artistName: string, releaseTitle?: string): Promise<number | null> {
+export async function resolveLinkedAlbumId(artistName: string, releaseTitle?: string): Promise<number | null> {
   const trimmedArtist = artistName.trim();
   const trimmedRelease = (releaseTitle ?? '').trim();
   if (trimmedArtist.length === 0 || trimmedRelease.length === 0) return null;
@@ -152,21 +136,21 @@ async function resolveLinkedAlbumId(artistName: string, releaseTitle?: string): 
   return candidate[0]?.album_id ?? null;
 }
 
-export async function lookupAlbumMetadataByKey(
-  artistName: string,
-  releaseTitle?: string
-): Promise<PersistedAlbumMetadata | null> {
-  // Step 1: resolve the album_id via the partial functional index.
-  const albumId = await resolveLinkedAlbumId(artistName, releaseTitle);
-  if (albumId === null) return null;
-
-  // Step 2: PK-lookup on album_metadata. Returns null when the row
-  // doesn't exist yet (race window: flowsheet INSERT landed but the
-  // enrichment-worker hasn't UPSERTed album_metadata yet). Falling
-  // through to LML in that window is the right behavior — the worker
-  // is already paying the LML cost concurrently, but a stale or
-  // pre-enrichment response would otherwise persist in the iOS cache
-  // for the duration of the response Cache-Control TTL.
+/**
+ * PK-lookup of persisted `album_metadata` for an already-resolved
+ * `library.id`. Returns `null` when the row doesn't exist yet (race window:
+ * flowsheet INSERT landed but the enrichment-worker hasn't UPSERTed
+ * `album_metadata` yet). Falling through to LML in that window is the right
+ * behavior — the worker is already paying the LML cost concurrently, but a
+ * stale or pre-enrichment response would otherwise persist in the iOS cache
+ * for the duration of the response Cache-Control TTL.
+ *
+ * The caller resolves `albumId` via {@link resolveLinkedAlbumId} once and
+ * passes it to both this read and {@link lookupCriticReviewsByAlbumId}, so a
+ * concurrent flowsheet insert can't make metadata and reviews describe two
+ * different albums for one request.
+ */
+export async function lookupAlbumMetadataById(albumId: number): Promise<PersistedAlbumMetadata | null> {
   const rows = await db
     .select({
       artwork_url: album_metadata.artwork_url,
@@ -201,14 +185,23 @@ export async function lookupAlbumMetadataByKey(
 }
 
 /**
- * Wire projection of one external critic-review snippet, matching the
- * `CriticReviewItem` schema in wxyc-shared `api.yaml` (album-critic-reviews
- * slice, ADR 0012). Only the six wire fields are surfaced; the internal
- * columns (`id`, `album_id`, `discogs_release_id`, `source_key`, timestamps)
- * never leave the service. `url` maps to the `source_url` column;
- * `publishedDate` maps to `published_at`. Optional fields are omitted from
- * the response when null so iOS `decodeIfPresent` and dj-site optional
- * chaining stay decode-compatible.
+ * Wire projection of one external critic-review snippet (album-critic-reviews
+ * slice, ADR 0012). Only the six wire fields are surfaced; the internal columns
+ * (`id`, `album_id`, `discogs_release_id`, `source_key`, timestamps) never
+ * leave the service. `url` maps to the `source_url` column; `publishedDate`
+ * maps to `published_at`. Optional fields are omitted from the response when
+ * null so iOS `decodeIfPresent` and dj-site optional chaining stay
+ * decode-compatible.
+ *
+ * SSOT: the canonical shape is the `CriticReviewItem` schema in wxyc-shared
+ * `api.yaml` (contract WXYC/wxyc-shared#242, PR WXYC/wxyc-shared#243). That PR
+ * must merge and `@wxyc/shared` must publish before this endpoint change ships
+ * — the dependency is encoded as BS#1719 blocked-by wxyc-shared#242 so the
+ * specs can't drift. This interface is a deliberate temporary hand-mirror kept
+ * field-for-field in sync with that schema; once the generated type is
+ * published, replace this declaration with an import of the generated
+ * `CriticReviewItem` (this is the only local copy — the controller and seed
+ * both consume it from here).
  */
 export interface CriticReviewItem {
   source: string;
@@ -229,15 +222,17 @@ export interface CriticReviewItem {
 const CRITIC_REVIEWS_LIMIT = 5;
 
 /**
- * Resolve `(artistName, releaseTitle)` to its attributed external critic
- * snippets (album-critic-reviews slice, ADR 0012). Shares Step-1
- * (`resolveLinkedAlbumId`) with `lookupAlbumMetadataByKey`, so a given query
- * resolves the same `library.id` for both metadata and reviews.
+ * Attributed external critic snippets for an already-resolved `library.id`
+ * (album-critic-reviews slice, ADR 0012). The caller resolves the id via
+ * {@link resolveLinkedAlbumId} once and shares it with
+ * {@link lookupAlbumMetadataById}, so a given request describes the same
+ * album for both metadata and reviews.
  *
- * Returns `[]` (never `null`) when the key doesn't resolve to a linked album
- * or the album has no seeded snippets — the caller attaches `criticReviews`
- * only when the array is non-empty, so an empty result keeps the response
- * shape identical to an un-seeded album.
+ * Returns `[]` (never `null`) when the album has no seeded snippets — the
+ * caller attaches `criticReviews` only when the array is non-empty, so an
+ * empty result keeps the response shape identical to an un-seeded album. This
+ * read is independent of whether `album_metadata` enrichment has run: a linked
+ * album with seeded reviews but no metadata row still surfaces its reviews.
  *
  * Ordered newest-first (`published_at DESC NULLS LAST`, then `id DESC` as a
  * stable tiebreak for undated rows and same-day rows) and capped at
@@ -245,13 +240,7 @@ const CRITIC_REVIEWS_LIMIT = 5;
  * it as an ISO `YYYY-MM-DD` string, which is exactly the `publishedDate`
  * wire shape.
  */
-export async function lookupCriticReviewsByAlbumKey(
-  artistName: string,
-  releaseTitle?: string
-): Promise<CriticReviewItem[]> {
-  const albumId = await resolveLinkedAlbumId(artistName, releaseTitle);
-  if (albumId === null) return [];
-
+export async function lookupCriticReviewsByAlbumId(albumId: number): Promise<CriticReviewItem[]> {
   const rows = await db
     .select({
       source: album_critic_reviews.source,

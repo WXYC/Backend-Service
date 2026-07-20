@@ -40,18 +40,29 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   lmlLookupCoordinator: { lookup: mockLookupMetadata },
 }));
 
-// BS#1331: getAlbumMetadata now consults local persisted state first via
-// `lookupAlbumMetadataByKey` before falling through to LML. Mocked here so
-// each test can set local-hit, catch-arm-row, or cold-miss explicitly.
-const mockLookupAlbumMetadataByKey = jest.fn<(artist: string, release?: string) => Promise<unknown>>();
-// ADR 0012: getAlbumMetadata also attaches external critic-review snippets
-// (flag-gated). Mocked so each test can set the returned snippets, an empty
-// result, or a thrown error explicitly.
-const mockLookupCriticReviewsByAlbumKey = jest.fn<(artist: string, release?: string) => Promise<unknown[]>>();
+// BS#1331 + ADR 0012: getAlbumMetadata resolves the linked `album_id` ONCE via
+// `resolveLinkedAlbumId`, then feeds it to the by-id persisted-metadata read
+// (`lookupAlbumMetadataById`) and — flag-gated — the by-id critic-reviews read
+// (`lookupCriticReviewsByAlbumId`). Resolving once makes the metadata and
+// reviews reads observe the same album_id atomically and decouples the reviews
+// attach from metadata-enrichment state. Each is mocked so a test can set the
+// resolved id, a local-hit/catch-arm/cold metadata row, or the returned
+// snippets independently.
+const mockResolveLinkedAlbumId = jest.fn<(artist: string, release?: string) => Promise<number | null>>();
+const mockLookupAlbumMetadataById = jest.fn<(albumId: number) => Promise<unknown>>();
+const mockLookupCriticReviewsByAlbumId = jest.fn<(albumId: number) => Promise<unknown[]>>();
 jest.mock('../../../apps/backend/services/album-metadata-lookup.service', () => ({
-  lookupAlbumMetadataByKey: mockLookupAlbumMetadataByKey,
-  lookupCriticReviewsByAlbumKey: mockLookupCriticReviewsByAlbumKey,
+  resolveLinkedAlbumId: mockResolveLinkedAlbumId,
+  lookupAlbumMetadataById: mockLookupAlbumMetadataById,
+  lookupCriticReviewsByAlbumId: mockLookupCriticReviewsByAlbumId,
 }));
+
+// Default album_id the resolve step returns across getAlbumMetadata tests so
+// both the by-id metadata read and the (flag-gated) reviews read are reachable.
+// Tests that assert the cold/local-hit metadata shape control it via the by-id
+// mock's resolved value; the resolved id itself only matters where a test pins
+// the call argument.
+const DEFAULT_LINKED_ALBUM_ID = 4242;
 
 // ADR 0012 flag: getConfig().enabled gates the criticReviews attach. Default
 // off (matches prod) so unrelated getAlbumMetadata tests keep their exact
@@ -257,9 +268,13 @@ describe('proxy.controller', () => {
 
   describe('getAlbumMetadata', () => {
     beforeEach(() => {
-      // Default to cold case: no local row, so existing tests fall through
-      // to LML. Local-hit tests override below. BS#1331.
-      mockLookupAlbumMetadataByKey.mockResolvedValue(null);
+      // Default: a linked album_id resolves (so the reviews attach is
+      // reachable) but no persisted metadata row exists — the cold case, so
+      // existing tests fall through to LML. Local-hit tests override the by-id
+      // metadata mock below. `clearAllMocks` clears calls, not the resolved
+      // value a prior test set, so both defaults are re-asserted here. BS#1331.
+      mockResolveLinkedAlbumId.mockResolvedValue(DEFAULT_LINKED_ALBUM_ID);
+      mockLookupAlbumMetadataById.mockResolvedValue(null);
     });
 
     // ADR 0012: attach external critic-review snippets, flag-gated. These run
@@ -279,33 +294,36 @@ describe('proxy.controller', () => {
         // Even with the lookup primed to return snippets, the flag gate must
         // keep the response byte-identical to before — the #32 freeze-safety
         // invariant.
-        mockLookupCriticReviewsByAlbumKey.mockResolvedValue(sampleReviews);
+        mockLookupCriticReviewsByAlbumId.mockResolvedValue(sampleReviews);
         const req = { query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' } } as unknown as Request;
         const res = createMockRes();
 
         await getAlbumMetadata(req, res as Response, mockNext);
 
-        expect(mockLookupCriticReviewsByAlbumKey).not.toHaveBeenCalled();
+        expect(mockLookupCriticReviewsByAlbumId).not.toHaveBeenCalled();
         const result = (res.json as jest.Mock).mock.calls[0][0];
         expect(result).not.toHaveProperty('criticReviews');
       });
 
       it('flag on + non-empty: attaches criticReviews', async () => {
         mockCriticReviewsConfig.mockReturnValue({ enabled: true });
-        mockLookupCriticReviewsByAlbumKey.mockResolvedValue(sampleReviews);
+        mockLookupCriticReviewsByAlbumId.mockResolvedValue(sampleReviews);
         const req = { query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' } } as unknown as Request;
         const res = createMockRes();
 
         await getAlbumMetadata(req, res as Response, mockNext);
 
-        expect(mockLookupCriticReviewsByAlbumKey).toHaveBeenCalledWith('Juana Molina', 'DOGA');
+        // Reviews are read by the resolved album_id, not by artist/release —
+        // the resolve happened once and both reads observe the same id.
+        expect(mockResolveLinkedAlbumId).toHaveBeenCalledWith('Juana Molina', 'DOGA');
+        expect(mockLookupCriticReviewsByAlbumId).toHaveBeenCalledWith(DEFAULT_LINKED_ALBUM_ID);
         const result = (res.json as jest.Mock).mock.calls[0][0];
         expect(result.criticReviews).toEqual(sampleReviews);
       });
 
       it('flag on + empty result: omits criticReviews so an un-seeded album is byte-identical', async () => {
         mockCriticReviewsConfig.mockReturnValue({ enabled: true });
-        mockLookupCriticReviewsByAlbumKey.mockResolvedValue([]);
+        mockLookupCriticReviewsByAlbumId.mockResolvedValue([]);
         const req = { query: { artistName: 'Unseeded', releaseTitle: 'Album' } } as unknown as Request;
         const res = createMockRes();
 
@@ -317,7 +335,7 @@ describe('proxy.controller', () => {
 
       it('flag on + lookup throws: degrades to omitting criticReviews, still responds 200', async () => {
         mockCriticReviewsConfig.mockReturnValue({ enabled: true });
-        mockLookupCriticReviewsByAlbumKey.mockRejectedValue(new Error('db down'));
+        mockLookupCriticReviewsByAlbumId.mockRejectedValue(new Error('db down'));
         const req = { query: { artistName: 'Any', releaseTitle: 'Album' } } as unknown as Request;
         const res = createMockRes();
 
@@ -953,7 +971,7 @@ describe('proxy.controller', () => {
     // 0 on local hit so the cohort split survives in the trace explorer.
     describe('cache-first local lookup (BS#1331)', () => {
       it('serves persisted state without invoking LML when local row is enriched', async () => {
-        mockLookupAlbumMetadataByKey.mockResolvedValue({
+        mockLookupAlbumMetadataById.mockResolvedValue({
           artwork_url: 'https://i.discogs.com/cached.jpg',
           discogs_url: 'https://www.discogs.com/release/54321',
           release_year: 2024,
@@ -973,7 +991,8 @@ describe('proxy.controller', () => {
 
         await getAlbumMetadata(req, res as Response, mockNext);
 
-        expect(mockLookupAlbumMetadataByKey).toHaveBeenCalledWith('Cached Artist', 'Cached Album');
+        expect(mockResolveLinkedAlbumId).toHaveBeenCalledWith('Cached Artist', 'Cached Album');
+        expect(mockLookupAlbumMetadataById).toHaveBeenCalledWith(DEFAULT_LINKED_ALBUM_ID);
         expect(mockLookupMetadata).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(200);
 
@@ -1000,7 +1019,7 @@ describe('proxy.controller', () => {
         // LML-fallthrough returned them, a hit omitted them. Now the worker
         // persists them and this branch emits them with the same conventions
         // as `populateReleaseMetadata` + `populateCommonMetadataFields`.
-        mockLookupAlbumMetadataByKey.mockResolvedValue({
+        mockLookupAlbumMetadataById.mockResolvedValue({
           artwork_url: 'https://i.discogs.com/art.jpg',
           discogs_url: 'https://www.discogs.com/release/12345',
           release_year: 2001,
@@ -1052,7 +1071,7 @@ describe('proxy.controller', () => {
         // its *no-match* branch emits neither artwork nor discogsArtistId. The
         // local branch mirrors both: gated on `discogs_url` (the match-shape
         // marker), so a match row with a null artist id still carries the key.
-        mockLookupAlbumMetadataByKey.mockResolvedValueOnce({
+        mockLookupAlbumMetadataById.mockResolvedValueOnce({
           artwork_url: 'https://i.discogs.com/art.jpg',
           discogs_url: 'https://www.discogs.com/release/55',
           release_year: 2019,
@@ -1083,7 +1102,7 @@ describe('proxy.controller', () => {
 
         // No-match-shaped row: discogs_url null (the no-match UPSERT writes only
         // search URLs), so discogsArtistId is omitted like the cold no-match.
-        mockLookupAlbumMetadataByKey.mockResolvedValueOnce({
+        mockLookupAlbumMetadataById.mockResolvedValueOnce({
           artwork_url: null,
           discogs_url: null,
           release_year: null,
@@ -1121,7 +1140,7 @@ describe('proxy.controller', () => {
         // request time doesn't poison persisted state, and matching the
         // LML-fallthrough branch's behavior means iOS sees the same
         // degraded-but-usable shape regardless of cohort.
-        mockLookupAlbumMetadataByKey.mockResolvedValue({
+        mockLookupAlbumMetadataById.mockResolvedValue({
           artwork_url: null,
           discogs_url: null,
           release_year: null,
@@ -1168,7 +1187,7 @@ describe('proxy.controller', () => {
         // with all 10 columns null. Without request-time synthesis the
         // handler would return `{}` to iOS — every streaming button greys
         // out. Synthesizing here matches the cold-path behavior.
-        mockLookupAlbumMetadataByKey.mockResolvedValue({
+        mockLookupAlbumMetadataById.mockResolvedValue({
           artwork_url: null,
           discogs_url: null,
           release_year: null,
@@ -1203,7 +1222,7 @@ describe('proxy.controller', () => {
         // pre-#649 flowsheet rows. The local-hit path must scrub via
         // filterSpacerGif so iOS's "missing → placeholder" fallback
         // doesn't render the 1×1 tracking pixel as cover art.
-        mockLookupAlbumMetadataByKey.mockResolvedValue({
+        mockLookupAlbumMetadataById.mockResolvedValue({
           artwork_url: 'https://s.discogs.com/images/spacer.gif',
           discogs_url: 'https://www.discogs.com/release/777',
           release_year: 2015,
@@ -1236,7 +1255,7 @@ describe('proxy.controller', () => {
         // return 500, regressing availability versus the pre-PR endpoint
         // (which had zero DB-failure surface). The graceful degradation
         // matches the LML-fallthrough path's own try/catch.
-        mockLookupAlbumMetadataByKey.mockRejectedValue(new Error('asyncpg: connection refused'));
+        mockLookupAlbumMetadataById.mockRejectedValue(new Error('asyncpg: connection refused'));
         mockLookupMetadata.mockResolvedValue({
           results: [
             {
@@ -1269,7 +1288,8 @@ describe('proxy.controller', () => {
       });
 
       it('falls through to LML when no local row matches (true cold case)', async () => {
-        mockLookupAlbumMetadataByKey.mockResolvedValue(null);
+        // No linked album resolves at all — the by-id metadata read never runs.
+        mockResolveLinkedAlbumId.mockResolvedValue(null);
         mockLookupMetadata.mockResolvedValue({
           results: [
             {
@@ -1297,8 +1317,9 @@ describe('proxy.controller', () => {
 
         await getAlbumMetadata(req, res as Response, mockNext);
 
-        expect(mockLookupAlbumMetadataByKey).toHaveBeenCalledWith('Cold Artist', 'Cold Album');
-        // LML was consulted because the local lookup returned null.
+        expect(mockResolveLinkedAlbumId).toHaveBeenCalledWith('Cold Artist', 'Cold Album');
+        expect(mockLookupAlbumMetadataById).not.toHaveBeenCalled();
+        // LML was consulted because the resolve step found no linked album.
         expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
         expect(res.status).toHaveBeenCalledWith(200);
 
@@ -1312,7 +1333,7 @@ describe('proxy.controller', () => {
         // is a fallthrough, 0 is a steady-state hit. Without this signal
         // we can't distinguish "the cache-first path saved 5s" from "we
         // never reached the cache-first path" in the prod p95.
-        mockLookupAlbumMetadataByKey.mockResolvedValue({
+        mockLookupAlbumMetadataById.mockResolvedValue({
           artwork_url: 'https://i.discogs.com/x.jpg',
           discogs_url: 'https://www.discogs.com/release/1',
           release_year: 2020,

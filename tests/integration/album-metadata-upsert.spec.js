@@ -253,7 +253,7 @@ describe('album_metadata UPSERT contract (real PG)', () => {
     expect(row.full_release_date).toBe('2022-09-30');
     expect(row.artist_image_url).toBe(EXTENDED_PAYLOAD.artist_image_url);
     // text[] must come back as a JS array, NOT a '{Rock,Jazz}' literal string —
-    // the read path (lookupAlbumMetadataByKey) and buildLocalMetadataResponse
+    // the read path (lookupAlbumMetadataById) and buildLocalMetadataResponse
     // spread it (`[...persisted.genres]`), which would corrupt a string.
     expect(Array.isArray(row.genres)).toBe(true);
     expect(row.genres).toEqual(['Rock', 'Jazz']);

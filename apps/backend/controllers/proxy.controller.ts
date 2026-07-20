@@ -27,8 +27,9 @@ import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
 import { filterSpacerGif, isSyntheticArtwork } from '../services/metadata/metadata.service.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 import {
-  lookupAlbumMetadataByKey,
-  lookupCriticReviewsByAlbumKey,
+  resolveLinkedAlbumId,
+  lookupAlbumMetadataById,
+  lookupCriticReviewsByAlbumId,
   type PersistedAlbumMetadata,
 } from '../services/album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
@@ -383,7 +384,7 @@ function buildLocalMetadataResponse(persisted: PersistedAlbumMetadata): Record<s
   if (persisted.artist_wikipedia_url) metadata.artistWikipediaUrl = persisted.artist_wikipedia_url;
   // LML-only enrichment fields (BS#1336). The `[...]` array copies match the
   // LML branch's convention and future-proof the field against a cached
-  // lookup layer: `lookupAlbumMetadataByKey` reads fresh from the DB today (no
+  // lookup layer: `lookupAlbumMetadataById` reads fresh from the DB today (no
   // aliasing hazard), but proxy.controller is cache-heavy and the cache-
   // hierarchy work (project #32) may front this lookup with an LRU — at which
   // point an uncopied array assigned onto the response could be mutated by a
@@ -446,14 +447,22 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   // fills missing streaming URLs at the bottom of the handler. iOS sees
   // the same shape it would on the LML-fallthrough path.
   //
+  // Resolve the `album_id` from the normalized `(artist, album)` lookup key
+  // ONCE, then feed it to both the persisted-metadata read and (below) the
+  // critic-reviews read. Resolving per-read would let a flowsheet insert
+  // between the two calls make metadata and reviews describe different albums
+  // for the same request.
+  //
   // A thrown DB error here would propagate as 500 and regress availability
   // versus the LML-fallthrough path (which catches LML errors and degrades
   // to synthesized search URLs). Treat any DB failure as a cache miss and
   // fall through to LML — the caller's worst-case latency goes up, but the
   // request still completes with a 200.
+  let albumId: number | null = null;
   let persisted: PersistedAlbumMetadata | null = null;
   try {
-    persisted = await lookupAlbumMetadataByKey(artistName, releaseTitle);
+    albumId = await resolveLinkedAlbumId(artistName, releaseTitle);
+    if (albumId !== null) persisted = await lookupAlbumMetadataById(albumId);
   } catch (lookupError) {
     console.warn('[ProxyController] local metadata lookup failed; falling through to LML:', lookupError);
   }
@@ -531,13 +540,17 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   // Flag-gated (`CRITIC_REVIEWS_ENABLED`, default off) so prod behavior — the
   // response shape and the serve-path query plan — is unchanged until an
   // operator opts in, keeping this compatible with the #32 hardening freeze
-  // on the album-metadata serve path. Attached only when non-empty so an
-  // un-seeded album's response is byte-identical to before. Wrapped in
-  // try/catch: the reviews read is strictly additive and must never break the
-  // metadata response, so a DB failure degrades to omitting the field.
-  if (getCriticReviewsConfig().enabled) {
+  // on the album-metadata serve path. Reuses the `album_id` resolved for the
+  // metadata read above (one extra indexed read, not a second key resolve),
+  // and runs whenever the key resolved to a linked album — independent of
+  // whether `album_metadata` enrichment has landed, so a linked album with
+  // reviews but no metadata row still surfaces its reviews. Attached only when
+  // non-empty so an un-seeded album's response is byte-identical to before.
+  // Wrapped in try/catch: the reviews read is strictly additive and must never
+  // break the metadata response, so a DB failure degrades to omitting the field.
+  if (getCriticReviewsConfig().enabled && albumId !== null) {
     try {
-      const criticReviews = await lookupCriticReviewsByAlbumKey(artistName, releaseTitle);
+      const criticReviews = await lookupCriticReviewsByAlbumId(albumId);
       if (criticReviews.length > 0) metadata.criticReviews = criticReviews;
     } catch (reviewsError) {
       console.warn('[ProxyController] critic-reviews lookup failed; omitting criticReviews:', reviewsError);

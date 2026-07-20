@@ -1,26 +1,32 @@
 /**
- * Unit tests for the local-state cache-first helper that backs
- * `/proxy/metadata/album` (BS#1331). The helper itself is mocked away in
- * the controller's suite, so these tests cover the JS-side shape that
- * wouldn't otherwise surface in CI until prod:
- *   - empty/whitespace-key guard (artist or release blank → null)
- *   - two-step query semantics (step 1 finds an album_id; step 2 PK-looks
- *     up album_metadata; absent album_metadata → null fallthrough)
- *   - deterministic ORDER BY id DESC LIMIT 1 on step 1
+ * Unit tests for the local-state cache-first helpers that back
+ * `/proxy/metadata/album` (BS#1331, album-critic-reviews slice ADR 0012).
+ * The controller resolves the `album_id` once via `resolveLinkedAlbumId` and
+ * feeds it to `lookupAlbumMetadataById` and `lookupCriticReviewsByAlbumId`;
+ * all three are mocked away in the controller's suite, so these tests cover
+ * the JS-side shape that wouldn't otherwise surface in CI until prod:
+ *   - `resolveLinkedAlbumId`: empty/whitespace-key guard (artist or release
+ *     blank → null, no DB), cold-case (no match → null), deterministic
+ *     `ORDER BY id DESC LIMIT 1` on multi-album_id keys
+ *   - `lookupAlbumMetadataById`: PK-lookup projection; absent row → null
+ *     fallthrough; no ORDER BY (it's a PK read, not a pick)
+ *   - `lookupCriticReviewsByAlbumId`: newest-first ORDER BY, wire-shape
+ *     projection (url ← source_url, publishedDate ← published_at, null
+ *     optionals omitted)
  *
- * The drizzle DB chain is mocked at the module level so test cases can
- * stub each query's resolved rows independently. The shape mirrors
- * `tests/unit/services/playlist-proxy.service.test.ts`.
+ * The drizzle DB chain is mocked at the module level so test cases can stub
+ * each query's resolved rows independently. Each by-id helper issues exactly
+ * one `db.select(...)`, so a test pushes one rowset per call. The shape
+ * mirrors `tests/unit/services/playlist-proxy.service.test.ts`.
  */
 import { jest } from '@jest/globals';
 
 // --- Drizzle DB chain mock ---
 //
 // Each `db.select(...)` call returns a fresh chain whose terminal awaitable
-// is the array of rows pushed via `mockRowsQueue`. Tests push step-1 rows
-// first, then step-2 rows; the helper consumes them in order. The mock's
-// .from/.where/.orderBy/.limit are also captured on `chainSpy` so tests
-// can pin the SQL contract (`ORDER BY` on step 1, `eq()` on step 2).
+// is the next array of rows pushed via `mockRowsQueue`. The mock's
+// .from/.where/.orderBy/.limit are also captured on `chainSpy` so tests can
+// pin the SQL contract (`ORDER BY` presence per query).
 
 const mockRowsQueue: Array<Array<Record<string, unknown>>> = [];
 
@@ -103,8 +109,9 @@ jest.mock('@wxyc/database', () => ({
 }));
 
 import {
-  lookupAlbumMetadataByKey,
-  lookupCriticReviewsByAlbumKey,
+  resolveLinkedAlbumId,
+  lookupAlbumMetadataById,
+  lookupCriticReviewsByAlbumId,
 } from '../../../apps/backend/services/album-metadata-lookup.service';
 
 describe('album-metadata-lookup.service', () => {
@@ -117,89 +124,68 @@ describe('album-metadata-lookup.service', () => {
     chainSpy.limit.mockClear();
   });
 
-  describe('empty-key guard', () => {
-    // Pin the contract that the guard prevents *any* DB call: a regression
-    // that removes the guard would shift these from `select=0` to `select=1`,
-    // letting `'-'`-keyed requests reach the partial index.
-    it('returns null without touching the DB when artistName is empty', async () => {
-      const result = await lookupAlbumMetadataByKey('', 'Some Album');
-      expect(result).toBeNull();
-      expect(mockSelect).not.toHaveBeenCalled();
+  describe('resolveLinkedAlbumId', () => {
+    describe('empty-key guard', () => {
+      // Pin the contract that the guard prevents *any* DB call: a regression
+      // that removes the guard would shift these from `select=0` to `select=1`,
+      // letting `'-'`-keyed requests reach the partial index and resolve an
+      // arbitrary album_id.
+      it('returns null without touching the DB when artistName is empty', async () => {
+        expect(await resolveLinkedAlbumId('', 'Some Album')).toBeNull();
+        expect(mockSelect).not.toHaveBeenCalled();
+      });
+
+      it('returns null when artistName is whitespace-only', async () => {
+        expect(await resolveLinkedAlbumId('   ', 'Some Album')).toBeNull();
+        expect(mockSelect).not.toHaveBeenCalled();
+      });
+
+      it('returns null when releaseTitle is undefined (artist-card surfaces fall through to LML)', async () => {
+        expect(await resolveLinkedAlbumId('Some Artist', undefined)).toBeNull();
+        expect(mockSelect).not.toHaveBeenCalled();
+      });
+
+      it('returns null when releaseTitle is empty', async () => {
+        expect(await resolveLinkedAlbumId('Some Artist', '')).toBeNull();
+        expect(mockSelect).not.toHaveBeenCalled();
+      });
+
+      it('returns null when releaseTitle is whitespace-only', async () => {
+        expect(await resolveLinkedAlbumId('Some Artist', '\t  ')).toBeNull();
+        expect(mockSelect).not.toHaveBeenCalled();
+      });
     });
 
-    it('returns null when artistName is whitespace-only (matches no key meaningfully)', async () => {
-      const result = await lookupAlbumMetadataByKey('   ', 'Some Album');
-      expect(result).toBeNull();
-      expect(mockSelect).not.toHaveBeenCalled();
-    });
-
-    it('returns null when releaseTitle is undefined (artist-card surfaces fall through to LML)', async () => {
-      const result = await lookupAlbumMetadataByKey('Some Artist', undefined);
-      expect(result).toBeNull();
-      expect(mockSelect).not.toHaveBeenCalled();
-    });
-
-    it('returns null when releaseTitle is empty', async () => {
-      const result = await lookupAlbumMetadataByKey('Some Artist', '');
-      expect(result).toBeNull();
-      expect(mockSelect).not.toHaveBeenCalled();
-    });
-
-    it('returns null when releaseTitle is whitespace-only', async () => {
-      const result = await lookupAlbumMetadataByKey('Some Artist', '\t  ');
-      expect(result).toBeNull();
-      expect(mockSelect).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('two-step query', () => {
-    it('returns null when step 1 finds no matching flowsheet row (cold case) — step 2 short-circuits', async () => {
-      // Step 1 → empty rowset; pin that step 2 is skipped via select call count.
-      // A regression that removed the `albumId === undefined || albumId === null
-      // → return null` guard would shift this to `select=2`.
+    it('returns null on the cold case (no matching album_id-bearing flowsheet row)', async () => {
       mockRowsQueue.push([]);
-      const result = await lookupAlbumMetadataByKey('Unknown Artist', 'Unknown Album');
-      expect(result).toBeNull();
+      expect(await resolveLinkedAlbumId('Unknown Artist', 'Unknown Album')).toBeNull();
       expect(mockSelect).toHaveBeenCalledTimes(1);
     });
 
-    it('returns null when step 2 finds no album_metadata row (race window: flowsheet INSERT before worker UPSERT)', async () => {
-      // Step 1 finds album_id=42, step 2 returns empty (no album_metadata).
-      mockRowsQueue.push([{ album_id: 42 }]);
-      mockRowsQueue.push([]);
-      const result = await lookupAlbumMetadataByKey('In-Flight Artist', 'In-Flight Album');
-      expect(result).toBeNull();
-      expect(mockSelect).toHaveBeenCalledTimes(2);
-    });
-
-    it('issues ORDER BY on step 1 for deterministic row-pick on multi-album_id keys', async () => {
+    it('returns the album_id and issues ORDER BY for a deterministic row-pick on multi-album_id keys', async () => {
       // Pin BS#1331 round-2 review fix: dropping the ORDER BY here would
       // re-introduce iOS-visible flapping between distinct album_metadata
       // payloads when a lookup key resolves to multiple album_ids
       // (V/A multi-format, dual-pressings, librarian duplicates — empirically
       // present in the live `album_id` corpus).
-      mockRowsQueue.push([{ album_id: 1 }]);
-      mockRowsQueue.push([
-        {
-          artwork_url: null,
-          discogs_url: null,
-          release_year: null,
-          spotify_url: null,
-          apple_music_url: null,
-          youtube_music_url: null,
-          bandcamp_url: null,
-          soundcloud_url: null,
-          artist_bio: null,
-          artist_wikipedia_url: null,
-        },
-      ]);
-      await lookupAlbumMetadataByKey('Multi Artist', 'Same Title Different Pressings');
-      // Step 1 uses orderBy; step 2 (PK lookup) does not.
+      mockRowsQueue.push([{ album_id: 42 }]);
+      const albumId = await resolveLinkedAlbumId('Multi Artist', 'Same Title Different Pressings');
+      expect(albumId).toBe(42);
       expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('lookupAlbumMetadataById', () => {
+    it('returns null when no album_metadata row exists (race window: flowsheet INSERT before worker UPSERT)', async () => {
+      mockRowsQueue.push([]);
+      const result = await lookupAlbumMetadataById(42);
+      expect(result).toBeNull();
+      // A single PK read — no ORDER BY (the pick already happened in resolve).
+      expect(mockSelect).toHaveBeenCalledTimes(1);
+      expect(chainSpy.orderBy).not.toHaveBeenCalled();
     });
 
     it('returns the persisted 10-column projection on a hit', async () => {
-      mockRowsQueue.push([{ album_id: 7 }]);
       mockRowsQueue.push([
         {
           artwork_url: 'https://i.discogs.com/x.jpg',
@@ -214,7 +200,7 @@ describe('album-metadata-lookup.service', () => {
           artist_wikipedia_url: null,
         },
       ]);
-      const result = await lookupAlbumMetadataByKey('Hit Artist', 'Hit Album');
+      const result = await lookupAlbumMetadataById(7);
       expect(result).toEqual({
         artwork_url: 'https://i.discogs.com/x.jpg',
         discogs_url: 'https://www.discogs.com/release/7',
@@ -230,7 +216,6 @@ describe('album-metadata-lookup.service', () => {
     });
 
     it('returns the 8 LML-only enrichment fields on a hit (BS#1336)', async () => {
-      mockRowsQueue.push([{ album_id: 7 }]);
       mockRowsQueue.push([
         {
           artwork_url: 'https://i.discogs.com/x.jpg',
@@ -253,7 +238,7 @@ describe('album-metadata-lookup.service', () => {
           bio_tokens: [{ type: 'plainText', text: 'Argentine musician' }],
         },
       ]);
-      const result = await lookupAlbumMetadataByKey('Juana Molina', 'DOGA');
+      const result = await lookupAlbumMetadataById(7);
       expect(result?.discogs_artist_id).toBe(3840);
       expect(result?.label).toBe('Sonamos');
       expect(result?.full_release_date).toBe('2022-09-30');
@@ -265,7 +250,6 @@ describe('album-metadata-lookup.service', () => {
     });
 
     it('catch-arm-shape row (YT/BC/SC populated, others null) is returned faithfully — caller decides synthesis', async () => {
-      mockRowsQueue.push([{ album_id: 100 }]);
       mockRowsQueue.push([
         {
           artwork_url: null,
@@ -280,7 +264,7 @@ describe('album-metadata-lookup.service', () => {
           artist_wikipedia_url: null,
         },
       ]);
-      const result = await lookupAlbumMetadataByKey('Catch Arm Artist', 'Catch Arm Album');
+      const result = await lookupAlbumMetadataById(100);
       expect(result?.youtube_music_url).toContain('music.youtube.com');
       expect(result?.bandcamp_url).toContain('bandcamp.com');
       expect(result?.soundcloud_url).toContain('soundcloud.com');
@@ -290,43 +274,19 @@ describe('album-metadata-lookup.service', () => {
     });
   });
 
-  describe('lookupCriticReviewsByAlbumKey', () => {
-    // Shares Step-1 (resolveLinkedAlbumId) with the metadata read, so the
-    // same empty-key + cold-case guards apply. Then it projects
-    // album_critic_reviews rows onto the CriticReviewItem wire shape (ADR
-    // 0012): url ← source_url, publishedDate ← published_at, optional fields
-    // omitted when null.
+  describe('lookupCriticReviewsByAlbumId', () => {
+    // Projects album_critic_reviews rows onto the CriticReviewItem wire shape
+    // (ADR 0012): url ← source_url, publishedDate ← published_at, optional
+    // fields omitted when null.
 
-    it('returns [] without touching the DB when artistName is empty (shared guard)', async () => {
-      const result = await lookupCriticReviewsByAlbumKey('', 'Some Album');
-      expect(result).toEqual([]);
-      expect(mockSelect).not.toHaveBeenCalled();
-    });
-
-    it('returns [] without touching the DB when releaseTitle is blank (shared guard)', async () => {
-      const result = await lookupCriticReviewsByAlbumKey('Some Artist', '  ');
-      expect(result).toEqual([]);
-      expect(mockSelect).not.toHaveBeenCalled();
-    });
-
-    it('returns [] when the key resolves to no linked album (cold case) — reviews query short-circuits', async () => {
-      // Step 1 → empty rowset; pin that step 2 is skipped via select call count.
+    it('returns [] when the linked album has no seeded snippets', async () => {
       mockRowsQueue.push([]);
-      const result = await lookupCriticReviewsByAlbumKey('Unknown Artist', 'Unknown Album');
+      const result = await lookupCriticReviewsByAlbumId(42);
       expect(result).toEqual([]);
       expect(mockSelect).toHaveBeenCalledTimes(1);
     });
 
-    it('returns [] when the linked album has no seeded snippets', async () => {
-      mockRowsQueue.push([{ album_id: 42 }]);
-      mockRowsQueue.push([]);
-      const result = await lookupCriticReviewsByAlbumKey('Seeded Artist', 'Unseeded Album');
-      expect(result).toEqual([]);
-      expect(mockSelect).toHaveBeenCalledTimes(2);
-    });
-
     it('projects a full row onto the wire shape (url ← source_url, publishedDate ← published_at)', async () => {
-      mockRowsQueue.push([{ album_id: 7 }]);
       mockRowsQueue.push([
         {
           source: 'The Quietus',
@@ -337,7 +297,7 @@ describe('album-metadata-lookup.service', () => {
           rating: '8.0',
         },
       ]);
-      const result = await lookupCriticReviewsByAlbumKey('Juana Molina', 'DOGA');
+      const result = await lookupCriticReviewsByAlbumId(7);
       expect(result).toEqual([
         {
           source: 'The Quietus',
@@ -351,7 +311,6 @@ describe('album-metadata-lookup.service', () => {
     });
 
     it('omits optional fields (author/publishedDate/rating) when null so decodeIfPresent stays compatible', async () => {
-      mockRowsQueue.push([{ album_id: 7 }]);
       mockRowsQueue.push([
         {
           source: 'Pitchfork',
@@ -362,7 +321,7 @@ describe('album-metadata-lookup.service', () => {
           rating: null,
         },
       ]);
-      const result = await lookupCriticReviewsByAlbumKey('Jessica Pratt', 'On Your Own Love Again');
+      const result = await lookupCriticReviewsByAlbumId(7);
       expect(result).toEqual([
         {
           source: 'Pitchfork',
@@ -374,8 +333,7 @@ describe('album-metadata-lookup.service', () => {
       expect(Object.keys(result[0])).toEqual(['source', 'url', 'snippet']);
     });
 
-    it('preserves row order and returns every projected snippet on a multi-review hit', async () => {
-      mockRowsQueue.push([{ album_id: 9 }]);
+    it('preserves row order and pins the newest-first ORDER BY on a multi-review hit', async () => {
       mockRowsQueue.push([
         {
           source: 'A',
@@ -394,13 +352,11 @@ describe('album-metadata-lookup.service', () => {
           rating: null,
         },
       ]);
-      const result = await lookupCriticReviewsByAlbumKey('Multi Artist', 'Reviewed Album');
+      const result = await lookupCriticReviewsByAlbumId(9);
       expect(result.map((r) => r.source)).toEqual(['A', 'B']);
-      // Step 1 (resolveLinkedAlbumId) and step 2 (reviews) both order for
-      // determinism — pin that the reviews query carries an ORDER BY (the
-      // newest-first + stable-tiebreak contract) rather than relying on
-      // insertion order.
-      expect(chainSpy.orderBy).toHaveBeenCalledTimes(2);
+      // Pin that the reviews query carries an ORDER BY (the newest-first +
+      // stable-tiebreak contract) rather than relying on insertion order.
+      expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
     });
   });
 });
