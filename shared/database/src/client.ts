@@ -102,9 +102,15 @@ const synchronousCommit = resolveSynchronousCommit();
  *     incident triage.
  *   - `max` — pool size. Defaults to postgres-js's own default (10). Set
  *     to `1` for serial single-purpose clients.
+ *   - `maxLifetimeSeconds` — overrides postgres-js's `max_lifetime` (the
+ *     interval after which an idle connection is proactively recycled;
+ *     library default is a random 30–60 min). Pass `0` to disable recycling
+ *     entirely for a client that holds session-scoped state which must not
+ *     silently drop mid-run — e.g. a `pg_advisory_lock` single-flight guard,
+ *     whose lock is released the instant its owning connection is torn down.
  */
 export function createPostgresClient(
-  overrides: { statementTimeoutMs?: number; applicationName?: string; max?: number } = {}
+  overrides: { statementTimeoutMs?: number; applicationName?: string; max?: number; maxLifetimeSeconds?: number } = {}
 ): ReturnType<typeof postgres> {
   return postgres({
     host: process.env.DB_HOST,
@@ -113,6 +119,7 @@ export function createPostgresClient(
     username: process.env.DB_USERNAME,
     password: process.env.DB_PASSWORD,
     ...(overrides.max !== undefined && { max: overrides.max }),
+    ...(overrides.maxLifetimeSeconds !== undefined && { max_lifetime: overrides.maxLifetimeSeconds }),
     connection: {
       application_name: overrides.applicationName ?? process.env.DB_APPLICATION_NAME ?? 'wxyc-backend',
       // Server-enforced per-statement timeout. postgres-js issues this as

@@ -245,9 +245,19 @@ const runEntrySweep = async (
       const body = ports.mapEntryToTubafrenzy(entry, show.legacy_show_id, isRotationMatch);
       const legacyEntryId = await ports.mirrorCreateEntry(body);
       if (legacyEntryId == null) {
+        // STOP on the first failure — don't POST later entries past a gap.
+        // Entries drive in `play_order ASC` and tubafrenzy assigns its row
+        // SEQUENCE by insertion order, so continuing would append the tail
+        // out of order AND manufacture an un-healable middle gap (the show
+        // becomes PARTIAL — some entries mirrored, some NULL — and both
+        // sweeps skip it forever, routing it to the manual-remediation
+        // report). Breaking instead leaves a contiguous NULL suffix: if this
+        // was the first entry the show stays fully-unmirrored and Sweep 2
+        // re-drives it whole next run; if it was a later entry the remaining
+        // NULLs are the ordered tail, appendable in sequence next run.
         failuresThisShow += 1;
         totals.entries_failed += 1;
-        continue;
+        break;
       }
       await ports.persistLegacyEntryId(entry.id, legacyEntryId);
       totals.entries_created += 1;
