@@ -90,9 +90,22 @@ jest.mock('@wxyc/database', () => ({
     artist_image_url: 'artist_image_url',
     bio_tokens: 'bio_tokens',
   },
+  album_critic_reviews: {
+    id: 'id',
+    album_id: 'album_id',
+    source: 'source',
+    source_url: 'source_url',
+    snippet: 'snippet',
+    author: 'author',
+    published_at: 'published_at',
+    rating: 'rating',
+  },
 }));
 
-import { lookupAlbumMetadataByKey } from '../../../apps/backend/services/album-metadata-lookup.service';
+import {
+  lookupAlbumMetadataByKey,
+  lookupCriticReviewsByAlbumKey,
+} from '../../../apps/backend/services/album-metadata-lookup.service';
 
 describe('album-metadata-lookup.service', () => {
   beforeEach(() => {
@@ -274,6 +287,120 @@ describe('album-metadata-lookup.service', () => {
       expect(result?.apple_music_url).toBeNull();
       expect(result?.spotify_url).toBeNull();
       expect(result?.artwork_url).toBeNull();
+    });
+  });
+
+  describe('lookupCriticReviewsByAlbumKey', () => {
+    // Shares Step-1 (resolveLinkedAlbumId) with the metadata read, so the
+    // same empty-key + cold-case guards apply. Then it projects
+    // album_critic_reviews rows onto the CriticReviewItem wire shape (ADR
+    // 0012): url ← source_url, publishedDate ← published_at, optional fields
+    // omitted when null.
+
+    it('returns [] without touching the DB when artistName is empty (shared guard)', async () => {
+      const result = await lookupCriticReviewsByAlbumKey('', 'Some Album');
+      expect(result).toEqual([]);
+      expect(mockSelect).not.toHaveBeenCalled();
+    });
+
+    it('returns [] without touching the DB when releaseTitle is blank (shared guard)', async () => {
+      const result = await lookupCriticReviewsByAlbumKey('Some Artist', '  ');
+      expect(result).toEqual([]);
+      expect(mockSelect).not.toHaveBeenCalled();
+    });
+
+    it('returns [] when the key resolves to no linked album (cold case) — reviews query short-circuits', async () => {
+      // Step 1 → empty rowset; pin that step 2 is skipped via select call count.
+      mockRowsQueue.push([]);
+      const result = await lookupCriticReviewsByAlbumKey('Unknown Artist', 'Unknown Album');
+      expect(result).toEqual([]);
+      expect(mockSelect).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns [] when the linked album has no seeded snippets', async () => {
+      mockRowsQueue.push([{ album_id: 42 }]);
+      mockRowsQueue.push([]);
+      const result = await lookupCriticReviewsByAlbumKey('Seeded Artist', 'Unseeded Album');
+      expect(result).toEqual([]);
+      expect(mockSelect).toHaveBeenCalledTimes(2);
+    });
+
+    it('projects a full row onto the wire shape (url ← source_url, publishedDate ← published_at)', async () => {
+      mockRowsQueue.push([{ album_id: 7 }]);
+      mockRowsQueue.push([
+        {
+          source: 'The Quietus',
+          source_url: 'https://thequietus.com/articles/juana-molina-doga',
+          snippet: 'A record that dissolves the line between song and texture.',
+          author: 'A. Critic',
+          published_at: '2024-03-15',
+          rating: '8.0',
+        },
+      ]);
+      const result = await lookupCriticReviewsByAlbumKey('Juana Molina', 'DOGA');
+      expect(result).toEqual([
+        {
+          source: 'The Quietus',
+          url: 'https://thequietus.com/articles/juana-molina-doga',
+          snippet: 'A record that dissolves the line between song and texture.',
+          author: 'A. Critic',
+          publishedDate: '2024-03-15',
+          rating: '8.0',
+        },
+      ]);
+    });
+
+    it('omits optional fields (author/publishedDate/rating) when null so decodeIfPresent stays compatible', async () => {
+      mockRowsQueue.push([{ album_id: 7 }]);
+      mockRowsQueue.push([
+        {
+          source: 'Pitchfork',
+          source_url: 'https://pitchfork.com/reviews/albums/example',
+          snippet: 'The most quietly radical thing she has made.',
+          author: null,
+          published_at: null,
+          rating: null,
+        },
+      ]);
+      const result = await lookupCriticReviewsByAlbumKey('Jessica Pratt', 'On Your Own Love Again');
+      expect(result).toEqual([
+        {
+          source: 'Pitchfork',
+          url: 'https://pitchfork.com/reviews/albums/example',
+          snippet: 'The most quietly radical thing she has made.',
+        },
+      ]);
+      // No undefined optional keys leaked onto the item.
+      expect(Object.keys(result[0])).toEqual(['source', 'url', 'snippet']);
+    });
+
+    it('preserves row order and returns every projected snippet on a multi-review hit', async () => {
+      mockRowsQueue.push([{ album_id: 9 }]);
+      mockRowsQueue.push([
+        {
+          source: 'A',
+          source_url: 'https://a/1',
+          snippet: 'first',
+          author: null,
+          published_at: '2024-05-01',
+          rating: null,
+        },
+        {
+          source: 'B',
+          source_url: 'https://b/2',
+          snippet: 'second',
+          author: null,
+          published_at: '2023-01-01',
+          rating: null,
+        },
+      ]);
+      const result = await lookupCriticReviewsByAlbumKey('Multi Artist', 'Reviewed Album');
+      expect(result.map((r) => r.source)).toEqual(['A', 'B']);
+      // Step 1 (resolveLinkedAlbumId) and step 2 (reviews) both order for
+      // determinism — pin that the reviews query carries an ORDER BY (the
+      // newest-first + stable-tiebreak contract) rather than relying on
+      // insertion order.
+      expect(chainSpy.orderBy).toHaveBeenCalledTimes(2);
     });
   });
 });

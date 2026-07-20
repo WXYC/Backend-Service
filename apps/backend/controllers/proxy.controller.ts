@@ -28,7 +28,12 @@ import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
 import { filterSpacerGif, isSyntheticArtwork } from '../services/metadata/metadata.service.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
-import { lookupAlbumMetadataByKey, type PersistedAlbumMetadata } from '../services/album-metadata-lookup.service.js';
+import {
+  lookupAlbumMetadataByKey,
+  lookupCriticReviewsByAlbumKey,
+  type PersistedAlbumMetadata,
+} from '../services/album-metadata-lookup.service.js';
+import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
 
@@ -528,6 +533,23 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
     });
   } catch (err) {
     console.warn('[ProxyController] failed to project Sentry attrs', err);
+  }
+
+  // External critic-review snippets (album-critic-reviews slice, ADR 0012).
+  // Flag-gated (`CRITIC_REVIEWS_ENABLED`, default off) so prod behavior — the
+  // response shape and the serve-path query plan — is unchanged until an
+  // operator opts in, keeping this compatible with the #32 hardening freeze
+  // on the album-metadata serve path. Attached only when non-empty so an
+  // un-seeded album's response is byte-identical to before. Wrapped in
+  // try/catch: the reviews read is strictly additive and must never break the
+  // metadata response, so a DB failure degrades to omitting the field.
+  if (getCriticReviewsConfig().enabled) {
+    try {
+      const criticReviews = await lookupCriticReviewsByAlbumKey(artistName, releaseTitle);
+      if (criticReviews.length > 0) metadata.criticReviews = criticReviews;
+    } catch (reviewsError) {
+      console.warn('[ProxyController] critic-reviews lookup failed; omitting criticReviews:', reviewsError);
+    }
   }
 
   res.set('Cache-Control', 'private, max-age=600');

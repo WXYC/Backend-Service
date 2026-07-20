@@ -39,7 +39,7 @@
  * to be of interest to a detail-view fetch).
  */
 import { sql, eq, desc } from 'drizzle-orm';
-import { db, flowsheet, album_metadata } from '@wxyc/database';
+import { db, flowsheet, album_metadata, album_critic_reviews } from '@wxyc/database';
 import type { DiscogsResolvedToken, DiscogsTrackItem } from '@wxyc/lml-client';
 
 const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
@@ -110,28 +110,38 @@ export interface PersistedAlbumMetadata {
  * call this endpoint without a releaseTitle are better served by an
  * LML lookup or a dedicated artist-only handler.
  */
-export async function lookupAlbumMetadataByKey(
-  artistName: string,
-  releaseTitle?: string
-): Promise<PersistedAlbumMetadata | null> {
+/**
+ * Resolve `(artistName, releaseTitle)` to the `library.id` of a matching
+ * linked flowsheet row, or `null` when no `album_id`-bearing flowsheet row
+ * exists for the key. Shared Step-1 for both the album-metadata read
+ * (`lookupAlbumMetadataByKey`) and the critic-reviews read
+ * (`lookupCriticReviewsByAlbumKey`) so they resolve the *same* album key
+ * for a given query.
+ *
+ * Uses the partial functional index `flowsheet_album_link_lookup_idx`. The
+ * explicit `flowsheet.album_id IS NOT NULL` predicate matches the index's
+ * WHERE clause verbatim so the planner uses the partial index. `ORDER BY
+ * flowsheet.id DESC LIMIT 1` makes the row-pick deterministic on
+ * multi-album_id keys (V/A multi-format, dual-pressing, librarian
+ * duplicates — verified to exist in the live `album_id` corpus). Two
+ * requests for the same lookup key resolve to the same row, eliminating a
+ * flapping-response edge that would otherwise let iOS see two different
+ * albums for the same query across polls. Sort cost is bounded: the
+ * most-popular key has hundreds of matches, not thousands; the post-filter
+ * `id DESC` sort on the small match set is sub-ms in practice.
+ *
+ * An empty/whitespace-only `artistName` or `releaseTitle` short-circuits to
+ * `null`: the key `'<artist>-'` (blank release) would otherwise match any
+ * linked flowsheet row whose DJ left `album_title` blank and return an
+ * arbitrary `album_id`.
+ */
+async function resolveLinkedAlbumId(artistName: string, releaseTitle?: string): Promise<number | null> {
   const trimmedArtist = artistName.trim();
   const trimmedRelease = (releaseTitle ?? '').trim();
   if (trimmedArtist.length === 0 || trimmedRelease.length === 0) return null;
 
   const key = lookupKey(trimmedArtist, trimmedRelease);
 
-  // Step 1: find the album_id via the partial functional index. Explicit
-  // `flowsheet.album_id IS NOT NULL` predicate matches the index's WHERE
-  // clause verbatim so the planner uses the partial index. `ORDER BY
-  // flowsheet.id DESC LIMIT 1` makes the row-pick deterministic on
-  // multi-album_id keys (V/A multi-format, dual-pressing, librarian
-  // duplicates — verified to exist in the live `album_id` corpus). Two
-  // requests for the same lookup key resolve to the same row, eliminating
-  // a flapping-response edge that would otherwise let iOS see two
-  // different artworks/streaming URLs for the same album across polls.
-  // Sort cost is bounded: the most-popular key has hundreds of matches,
-  // not thousands; the index returns sorted-by-key but the post-filter
-  // `id DESC` sort on the small match set is sub-ms in practice.
   const candidate = await db
     .select({ album_id: flowsheet.album_id })
     .from(flowsheet)
@@ -139,8 +149,16 @@ export async function lookupAlbumMetadataByKey(
     .orderBy(desc(flowsheet.id))
     .limit(1);
 
-  const albumId = candidate[0]?.album_id;
-  if (albumId === undefined || albumId === null) return null;
+  return candidate[0]?.album_id ?? null;
+}
+
+export async function lookupAlbumMetadataByKey(
+  artistName: string,
+  releaseTitle?: string
+): Promise<PersistedAlbumMetadata | null> {
+  // Step 1: resolve the album_id via the partial functional index.
+  const albumId = await resolveLinkedAlbumId(artistName, releaseTitle);
+  if (albumId === null) return null;
 
   // Step 2: PK-lookup on album_metadata. Returns null when the row
   // doesn't exist yet (race window: flowsheet INSERT landed but the
@@ -180,4 +198,86 @@ export async function lookupAlbumMetadataByKey(
   // the typed projection here — the enrichment-worker is the sole writer and
   // persists the LML DTO shapes verbatim.
   return (rows[0] ?? null) as PersistedAlbumMetadata | null;
+}
+
+/**
+ * Wire projection of one external critic-review snippet, matching the
+ * `CriticReviewItem` schema in wxyc-shared `api.yaml` (album-critic-reviews
+ * slice, ADR 0012). Only the six wire fields are surfaced; the internal
+ * columns (`id`, `album_id`, `discogs_release_id`, `source_key`, timestamps)
+ * never leave the service. `url` maps to the `source_url` column;
+ * `publishedDate` maps to `published_at`. Optional fields are omitted from
+ * the response when null so iOS `decodeIfPresent` and dj-site optional
+ * chaining stay decode-compatible.
+ */
+export interface CriticReviewItem {
+  source: string;
+  url: string;
+  snippet: string;
+  author?: string;
+  publishedDate?: string;
+  rating?: string;
+}
+
+/**
+ * Cap on the number of snippets returned per album. The playcut detail view
+ * shows a short list, and an unbounded array on this hot serve path is a
+ * payload-size risk; a re-seed that somehow inserted dozens of rows for one
+ * album shouldn't bloat every response. Newest-first (see ORDER BY below)
+ * means the cap keeps the most recent coverage.
+ */
+const CRITIC_REVIEWS_LIMIT = 5;
+
+/**
+ * Resolve `(artistName, releaseTitle)` to its attributed external critic
+ * snippets (album-critic-reviews slice, ADR 0012). Shares Step-1
+ * (`resolveLinkedAlbumId`) with `lookupAlbumMetadataByKey`, so a given query
+ * resolves the same `library.id` for both metadata and reviews.
+ *
+ * Returns `[]` (never `null`) when the key doesn't resolve to a linked album
+ * or the album has no seeded snippets — the caller attaches `criticReviews`
+ * only when the array is non-empty, so an empty result keeps the response
+ * shape identical to an un-seeded album.
+ *
+ * Ordered newest-first (`published_at DESC NULLS LAST`, then `id DESC` as a
+ * stable tiebreak for undated rows and same-day rows) and capped at
+ * `CRITIC_REVIEWS_LIMIT`. `published_at` is a `date` column; drizzle returns
+ * it as an ISO `YYYY-MM-DD` string, which is exactly the `publishedDate`
+ * wire shape.
+ */
+export async function lookupCriticReviewsByAlbumKey(
+  artistName: string,
+  releaseTitle?: string
+): Promise<CriticReviewItem[]> {
+  const albumId = await resolveLinkedAlbumId(artistName, releaseTitle);
+  if (albumId === null) return [];
+
+  const rows = await db
+    .select({
+      source: album_critic_reviews.source,
+      source_url: album_critic_reviews.source_url,
+      snippet: album_critic_reviews.snippet,
+      author: album_critic_reviews.author,
+      published_at: album_critic_reviews.published_at,
+      rating: album_critic_reviews.rating,
+    })
+    .from(album_critic_reviews)
+    .where(eq(album_critic_reviews.album_id, albumId))
+    .orderBy(sql`${album_critic_reviews.published_at} DESC NULLS LAST`, desc(album_critic_reviews.id))
+    .limit(CRITIC_REVIEWS_LIMIT);
+
+  // Project to the wire shape, omitting optional fields when null so the
+  // response carries only present keys (matches the metadata handler's
+  // "assign only when present" convention).
+  return rows.map((row) => {
+    const item: CriticReviewItem = {
+      source: row.source,
+      url: row.source_url,
+      snippet: row.snippet,
+    };
+    if (row.author) item.author = row.author;
+    if (row.published_at) item.publishedDate = row.published_at;
+    if (row.rating) item.rating = row.rating;
+    return item;
+  });
 }
