@@ -227,6 +227,39 @@ describe('runReconcile — entry + signoff sweep', () => {
     expect(totals.signoffs).toBe(0);
   });
 
+  it('STOPS at the first entry failure and does not POST later entries (contiguous NULL suffix)', async () => {
+    // 3 entries in play_order; the SECOND POST fails. The third must NOT be
+    // attempted — driving it would append out of order past the gap and turn
+    // the show PARTIAL (un-healable). The remaining NULLs stay a contiguous,
+    // in-order tail that Sweep 2 re-drives next run.
+    const show = makeShow({ id: 3, legacy_show_id: 8080, end_time: new Date('2026-07-18T14:00:00Z') });
+    const ports = makePorts({
+      selectEntrySweepShows: mockAsync([show]),
+      selectOrphanEntries: mockAsync([
+        makeEntry({ id: 51, play_order: 1 }),
+        makeEntry({ id: 52, play_order: 2 }),
+        makeEntry({ id: 53, play_order: 3 }),
+      ]),
+      mirrorCreateEntry: jest
+        .fn<(body: Record<string, unknown>) => Promise<number | null>>()
+        .mockResolvedValueOnce(5001)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(5003),
+    });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    // Only two POSTs: the success and the failure. The third is never tried.
+    expect(ports.mirrorCreateEntry).toHaveBeenCalledTimes(2);
+    expect(ports.persistLegacyEntryId).toHaveBeenCalledTimes(1);
+    expect(ports.persistLegacyEntryId).toHaveBeenCalledWith(51, 5001);
+    expect(totals.entries_created).toBe(1);
+    expect(totals.entries_failed).toBe(1);
+    // Failure present → signoff deferred (show becomes partial/heals next run).
+    expect(ports.mirrorSignoffShow).not.toHaveBeenCalled();
+    expect(totals.signoffs).toBe(0);
+  });
+
   it('does NOT drive entries when the DJ flag is OFF', async () => {
     const show = makeShow({ id: 3, legacy_show_id: 8080, end_time: new Date() });
     const ports = makePorts({

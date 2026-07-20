@@ -243,11 +243,21 @@ const main = async (): Promise<void> => {
     : null;
   // Dedicated single-purpose client that HOLDS the advisory lock for the whole
   // run (not the pooled `db`, whose other connections would break the
-  // session-scoped lock's deterministic release).
-  const lockClient = createPostgresClient({ max: 1, applicationName: 'wxyc-legacy-mirror-reconcile' });
+  // session-scoped lock's deterministic release). `maxLifetimeSeconds: 0`
+  // disables postgres-js's idle-connection recycling (default: a random
+  // 30–60 min): the lock connection sits idle through the cooperative pause
+  // and a slow sweep, and a mid-run recycle would silently drop the advisory
+  // lock — defeating the single-flight guard exactly on a long run, the case
+  // it exists to cover.
+  const lockClient = createPostgresClient({
+    max: 1,
+    maxLifetimeSeconds: 0,
+    applicationName: 'wxyc-legacy-mirror-reconcile',
+  });
+  let locked = false;
 
   try {
-    const locked = await acquireAdvisoryLock(lockClient, ADVISORY_LOCK_KEY);
+    locked = await acquireAdvisoryLock(lockClient, ADVISORY_LOCK_KEY);
     if (!locked) {
       log('info', 'lock_not_acquired', `${JOB_NAME}: another reconcile holds the advisory lock; exiting 0`);
       return;
@@ -263,8 +273,6 @@ const main = async (): Promise<void> => {
 
     const totals = await runReconcile(buildPorts(posthog, options), options);
     log('info', 'finished', `${JOB_NAME} done`, { ...totals });
-
-    await releaseAdvisoryLock(lockClient, ADVISORY_LOCK_KEY);
   } catch (err) {
     captureError(err, 'main');
     log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {
@@ -275,10 +283,18 @@ const main = async (): Promise<void> => {
   } finally {
     // Order matters (review Medium #4 + R2 Medium): posthog-node keeps flush
     // timers alive → shut it down first or the process hangs. Then release the
-    // advisory lock by ending its dedicated client, then close the pooled DB,
-    // then flush Sentry (closeLogger). Each step is isolated via runShutdownStep
-    // so one rejection can't skip the rest — the Sentry flush must always run.
+    // advisory lock (explicit unlock when we hold it, then end its dedicated
+    // client — end() also drops the session lock, so the explicit call is
+    // belt-and-suspenders), then close the pooled DB, then flush Sentry
+    // (closeLogger). Releasing in `finally` rather than the try body means a
+    // failed unlock round-trip can't mask the run's result (it used to throw
+    // and flip a clean run to exitCode 1) or skip later teardown — each step
+    // is isolated via runShutdownStep so one rejection can't skip the rest,
+    // and the Sentry flush must always run.
     if (posthog) await runShutdownStep('posthog', () => posthog.shutdown());
+    if (locked) {
+      await runShutdownStep('advisory-unlock', () => releaseAdvisoryLock(lockClient, ADVISORY_LOCK_KEY));
+    }
     await runShutdownStep('advisory-lock-client', () => lockClient.end());
     await runShutdownStep('database', () => closeDatabaseConnection());
     await runShutdownStep('logger', () => closeLogger());
