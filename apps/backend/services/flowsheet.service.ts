@@ -23,6 +23,7 @@ import {
   nyCalendarDate,
   nyStartOfDay,
 } from '@wxyc/database';
+import { isSpotifyUrl, isAppleMusicUrl } from '@wxyc/lml-client';
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
@@ -258,7 +259,7 @@ const FSEntryFieldsRaw = {
 };
 
 // Raw result type from SQL query
-type FSEntryRaw = {
+export type FSEntryRaw = {
   id: number;
   show_id: number | null;
   album_id: number | null;
@@ -301,65 +302,82 @@ type FSEntryRaw = {
   radio_hour: Date | null;
 };
 
-/** Transform flat SQL result to nested IFSEntry structure */
-const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
-  id: raw.id,
-  show_id: raw.show_id,
-  album_id: raw.album_id,
-  legacy_entry_id: raw.legacy_entry_id ?? null,
-  legacy_release_id: raw.legacy_release_id ?? null,
-  entry_type: raw.entry_type as FSEntry['entry_type'],
-  artist_name: raw.artist_name,
-  album_title: raw.album_title,
-  track_title: raw.track_title,
-  track_position: raw.track_position,
-  record_label: raw.record_label,
-  label_id: raw.label_id,
-  rotation_id: raw.rotation_id,
-  rotation_bin: raw.rotation_bin,
-  artist_id: raw.artist_id ?? null,
-  request_flag: raw.request_flag ?? false,
-  segue: raw.segue ?? false,
-  message: raw.message,
-  play_order: raw.play_order ?? 0,
-  add_time: raw.add_time ?? new Date(),
-  dj_name: raw.dj_name,
-  linkage_source: raw.linkage_source,
-  linkage_confidence: raw.linkage_confidence,
-  linked_at: raw.linked_at,
-  // Metadata columns (on FSEntry since they're on the flowsheet table)
-  artwork_url: raw.artwork_url,
-  discogs_url: raw.discogs_url,
-  release_year: raw.release_year,
-  spotify_url: raw.spotify_url,
-  apple_music_url: raw.apple_music_url,
-  youtube_music_url: raw.youtube_music_url,
-  bandcamp_url: raw.bandcamp_url,
-  soundcloud_url: raw.soundcloud_url,
-  artist_bio: raw.artist_bio,
-  artist_wikipedia_url: raw.artist_wikipedia_url,
-  on_streaming: raw.on_streaming ?? null,
-  metadata_status: raw.metadata_status,
-  enriching_since: raw.enriching_since,
-  radio_hour: raw.radio_hour ?? null,
-  // Nested metadata view (used by transformToV2). genres/styles are
-  // album_metadata-only fields (BS#1441) and so live here, NOT as top-level
-  // IFSEntry/FSEntry fields (that type mirrors the flowsheet table).
-  metadata: {
+/**
+ * Transform flat SQL result to nested IFSEntry structure.
+ *
+ * Exported so the BS#1714 serve-seam host guard can be unit-tested directly:
+ * this is the single producer of every IFSEntry that reaches the `/flowsheet`
+ * (top-level fields) and `/v2/flowsheet` (`transformToV2`, nested `metadata`)
+ * read paths, so guarding the two hardwired streaming URLs here covers both.
+ */
+export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
+  // BS#1714: suppress a persisted `spotify_url`/`apple_music_url` whose host
+  // isn't Spotify/Apple (mislabeled at the LML boundary before #1712 shipped)
+  // so it never reaches the hardwired iOS "Spotify"/"Apple Music" button. No
+  // synthesized fallback exists at this seam, so a mislabeled value drops to
+  // null. Applied once and reused for both the top-level field and the nested
+  // `metadata` object below.
+  const spotify_url = isSpotifyUrl(raw.spotify_url) ? raw.spotify_url : null;
+  const apple_music_url = isAppleMusicUrl(raw.apple_music_url) ? raw.apple_music_url : null;
+  return {
+    id: raw.id,
+    show_id: raw.show_id,
+    album_id: raw.album_id,
+    legacy_entry_id: raw.legacy_entry_id ?? null,
+    legacy_release_id: raw.legacy_release_id ?? null,
+    entry_type: raw.entry_type as FSEntry['entry_type'],
+    artist_name: raw.artist_name,
+    album_title: raw.album_title,
+    track_title: raw.track_title,
+    track_position: raw.track_position,
+    record_label: raw.record_label,
+    label_id: raw.label_id,
+    rotation_id: raw.rotation_id,
+    rotation_bin: raw.rotation_bin,
+    artist_id: raw.artist_id ?? null,
+    request_flag: raw.request_flag ?? false,
+    segue: raw.segue ?? false,
+    message: raw.message,
+    play_order: raw.play_order ?? 0,
+    add_time: raw.add_time ?? new Date(),
+    dj_name: raw.dj_name,
+    linkage_source: raw.linkage_source,
+    linkage_confidence: raw.linkage_confidence,
+    linked_at: raw.linked_at,
+    // Metadata columns (on FSEntry since they're on the flowsheet table)
     artwork_url: raw.artwork_url,
     discogs_url: raw.discogs_url,
     release_year: raw.release_year,
-    spotify_url: raw.spotify_url,
-    apple_music_url: raw.apple_music_url,
+    spotify_url,
+    apple_music_url,
     youtube_music_url: raw.youtube_music_url,
     bandcamp_url: raw.bandcamp_url,
     soundcloud_url: raw.soundcloud_url,
     artist_bio: raw.artist_bio,
     artist_wikipedia_url: raw.artist_wikipedia_url,
-    genres: raw.genres,
-    styles: raw.styles,
-  },
-});
+    on_streaming: raw.on_streaming ?? null,
+    metadata_status: raw.metadata_status,
+    enriching_since: raw.enriching_since,
+    radio_hour: raw.radio_hour ?? null,
+    // Nested metadata view (used by transformToV2). genres/styles are
+    // album_metadata-only fields (BS#1441) and so live here, NOT as top-level
+    // IFSEntry/FSEntry fields (that type mirrors the flowsheet table).
+    metadata: {
+      artwork_url: raw.artwork_url,
+      discogs_url: raw.discogs_url,
+      release_year: raw.release_year,
+      spotify_url,
+      apple_music_url,
+      youtube_music_url: raw.youtube_music_url,
+      bandcamp_url: raw.bandcamp_url,
+      soundcloud_url: raw.soundcloud_url,
+      artist_bio: raw.artist_bio,
+      artist_wikipedia_url: raw.artist_wikipedia_url,
+      genres: raw.genres,
+      styles: raw.styles,
+    },
+  };
+};
 
 /**
  * Resolve the DJ name for a show using the priority:

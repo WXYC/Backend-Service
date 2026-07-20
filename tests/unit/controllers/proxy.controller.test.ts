@@ -25,15 +25,28 @@ class MockLmlClientError extends Error {
   }
 }
 
-jest.mock('@wxyc/lml-client', () => ({
-  lookupMetadata: mockLookupMetadata,
-  getRelease: mockGetRelease,
-  getArtistDetails: mockGetArtistDetails,
-  resolveEntity: mockResolveEntity,
-  searchLibrary: mockSearchLibrary,
-  envInt: (_name: string, fallback: number) => fallback,
-  LmlClientError: MockLmlClientError,
-}));
+jest.mock('@wxyc/lml-client', () => {
+  // BS#1714: buildLocalMetadataResponse now host-guards the persisted
+  // spotify_url/apple_music_url via these predicates. Pass the REAL
+  // (side-effect-free, type-only-dep) implementations through from the guard
+  // submodule so the suppression behaves exactly as in production — requiring
+  // the whole `@wxyc/lml-client` index would needlessly load Sentry + the HTTP
+  // client the rest of this factory deliberately stubs.
+  const { isSpotifyUrl, isAppleMusicUrl } = jest.requireActual<
+    typeof import('../../../shared/lml-client/src/streaming-url-guard')
+  >('../../../shared/lml-client/src/streaming-url-guard');
+  return {
+    lookupMetadata: mockLookupMetadata,
+    getRelease: mockGetRelease,
+    getArtistDetails: mockGetArtistDetails,
+    resolveEntity: mockResolveEntity,
+    searchLibrary: mockSearchLibrary,
+    envInt: (_name: string, fallback: number) => fallback,
+    isSpotifyUrl,
+    isAppleMusicUrl,
+    LmlClientError: MockLmlClientError,
+  };
+});
 
 // Backend code paths now route through the LmlLookupCoordinator (BS#885).
 jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
@@ -908,6 +921,47 @@ describe('proxy.controller', () => {
         expect(result.artistBio).toBe('A cached bio of the artist.');
         expect(result.artistWikipediaUrl).toBe('https://en.wikipedia.org/wiki/CachedArtist');
         expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=600');
+      });
+
+      it('suppresses a persisted mislabeled spotify_url/apple_music_url, synthesizing the search fallback (BS#1714)', async () => {
+        // Pre-#1712 fill-only persistence left non-Spotify/non-Apple URLs under
+        // these two columns (e.g. a Deezer URL under spotify_url on release
+        // id=1580). The host guard must not serve them under the hardwired iOS
+        // "Spotify"/"Apple Music" button; not setting them lets the request-time
+        // fallback synthesize a real open.spotify.com/search URL instead.
+        mockLookupAlbumMetadataByKey.mockResolvedValue({
+          artwork_url: 'https://i.discogs.com/cached.jpg',
+          discogs_url: 'https://www.discogs.com/release/1580',
+          release_year: 2024,
+          spotify_url: 'https://www.deezer.com/album/254381182',
+          apple_music_url: 'https://tidal.com/browse/album/254381182',
+          youtube_music_url: 'https://music.youtube.com/playlist?list=cachedyt',
+          bandcamp_url: 'https://artist.bandcamp.com/album/cached',
+          soundcloud_url: 'https://soundcloud.com/artist/cached-album',
+          artist_bio: 'A cached bio of the artist.',
+          artist_wikipedia_url: 'https://en.wikipedia.org/wiki/CachedArtist',
+        });
+
+        const req = {
+          query: { artistName: 'Cached Artist', releaseTitle: 'Cached Album', trackTitle: 'Cached Track' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        // Mislabeled → dropped, then synthesized (never the Deezer/Tidal URL).
+        expect(result.spotifyUrl).not.toBe('https://www.deezer.com/album/254381182');
+        expect(result.spotifyUrl).toContain('open.spotify.com/search');
+        expect(result.appleMusicUrl).not.toBe('https://tidal.com/browse/album/254381182');
+        expect(result.appleMusicUrl).toContain('music.apple.com/search');
+        // The other three streaming slots are untouched by the guard.
+        expect(result.youtubeMusicUrl).toBe('https://music.youtube.com/playlist?list=cachedyt');
+        expect(result.bandcampUrl).toBe('https://artist.bandcamp.com/album/cached');
+        expect(result.soundcloudUrl).toBe('https://soundcloud.com/artist/cached-album');
       });
 
       it('emits the 8 LML-only fields on a local hit, matching the cold extended-mode shape (BS#1336)', async () => {

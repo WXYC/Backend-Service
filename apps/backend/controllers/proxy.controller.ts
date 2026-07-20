@@ -19,6 +19,8 @@ import {
   resolveEntity as lmlResolveEntity,
   searchLibrary,
   envInt,
+  isSpotifyUrl,
+  isAppleMusicUrl,
   LmlClientError,
 } from '@wxyc/lml-client';
 import type { DiscogsMatchResult, DiscogsReleaseMetadata, DiscogsTrackItem, LookupResponse } from '@wxyc/lml-client';
@@ -369,8 +371,14 @@ function buildLocalMetadataResponse(persisted: PersistedAlbumMetadata): Record<s
   // real year or null, but check for both shapes defensively (mirrors
   // populateReleaseMetadata + extractAlbumMetadata, #1002).
   if (persisted.release_year) metadata.releaseYear = persisted.release_year;
-  if (persisted.spotify_url) metadata.spotifyUrl = persisted.spotify_url;
-  if (persisted.apple_music_url) metadata.appleMusicUrl = persisted.apple_music_url;
+  // BS#1714: a persisted `spotify_url`/`apple_music_url` mislabeled at the LML
+  // boundary before #1712 shipped (e.g. a Deezer URL under `spotify_url`) is
+  // suppressed rather than served under the hardwired iOS "Spotify"/"Apple
+  // Music" button. Not setting it leaves the L508-509 fallback to synthesize a
+  // real `open.spotify.com/search/…` URL — the same degradation the fresh-LML
+  // branch already emits.
+  if (isSpotifyUrl(persisted.spotify_url)) metadata.spotifyUrl = persisted.spotify_url;
+  if (isAppleMusicUrl(persisted.apple_music_url)) metadata.appleMusicUrl = persisted.apple_music_url;
   if (persisted.youtube_music_url) metadata.youtubeMusicUrl = persisted.youtube_music_url;
   if (persisted.bandcamp_url) metadata.bandcampUrl = persisted.bandcamp_url;
   if (persisted.soundcloud_url) metadata.soundcloudUrl = persisted.soundcloud_url;
