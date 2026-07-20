@@ -23,3 +23,4 @@ export const gte = jest.fn((a, b) => ({ gte: [a, b] }));
 export const lte = jest.fn((a, b) => ({ lte: [a, b] }));
 export const exists = jest.fn((sub) => ({ exists: sub }));
 export const notExists = jest.fn((sub) => ({ notExists: sub }));
+export const like = jest.fn((col, pattern) => ({ like: [col, pattern] }));
