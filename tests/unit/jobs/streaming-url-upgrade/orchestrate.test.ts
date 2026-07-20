@@ -46,6 +46,7 @@ import {
   type ApplyFn,
   type LookupFn,
 } from '../../../../jobs/streaming-url-upgrade/orchestrate';
+import { SERVICE_CONFIGS } from '../../../../jobs/streaming-url-upgrade/resolve';
 
 type SqlLike = { sql?: string | string[]; values?: unknown[]; raw?: string };
 /**
@@ -218,6 +219,24 @@ describe('runUpgrade — candidate selection predicates', () => {
     expect(batchSql).toMatch(/bandcamp\.com\/search\?q=/);
     expect(batchSql).not.toMatch(/apple_music_url/);
     expect(batchSql).toMatch(/ORDER BY/);
+  });
+
+  it('candidate predicate emits one LIKE clause per SERVICE_CONFIGS entry (derived, not hardcoded)', async () => {
+    // Guards the refactor that builds searchShapedOr from SERVICE_CONFIGS: a
+    // service appended to the list must appear in the SELECT WHERE, so this
+    // asserts every configured column + search prefix is present rather than
+    // a fixed spotify/bandcamp pair.
+    queueExecute([{ count: 1 }], [albumRow(5)], [], [{ count: 0 }], []);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(withBoth);
+    const apply = jest.fn<ApplyFn>().mockResolvedValue('upgraded');
+
+    await runUpgrade(baseOpts(lookup, apply));
+
+    const batchSql = renderSql((db.execute as jest.Mock).mock.calls[1]?.[0]);
+    for (const cfg of SERVICE_CONFIGS) {
+      expect(batchSql).toContain(`"${cfg.column}" LIKE`);
+      expect(batchSql).toContain(cfg.searchPrefix);
+    }
   });
 
   it('flowsheet SELECT: entry_type=track AND OR-pair AND artist_name IS NOT NULL AND add_time cutoff', async () => {
