@@ -34,17 +34,37 @@ function hostIsUnder(host: string, apex: string): boolean {
 }
 
 /**
+ * Parse `url` to a lowercased hostname, or `null` if it isn't a usable
+ * absolute URL. Returns `null` for a non-string or an unparseable value.
+ *
+ * Rejects any raw backslash up front — before `new URL()` sees it — to close
+ * a parser differential: for the http(s) special schemes WHATWG folds `\` to
+ * `/`, so `https://spotify.com\@evil.example/x` parses to hostname
+ * `spotify.com` and would pass the host check, yet the guard's keep-or-null
+ * contract persists that raw string verbatim, and a downstream URL parser that
+ * keeps the backslash resolves the same string to host `evil.example` — the
+ * "Spotify" button would then open `evil.example`. A genuine streaming URL
+ * never contains a raw backslash (it would be percent-encoded as `%5C`), so
+ * rejecting closes the differential at zero cost to real data (BS#1710).
+ */
+function safeHostname(url: string): string | null {
+  if (url.includes('\\')) return null;
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * True iff `url` parses to an absolute URL whose host is `spotify.com`
  * or a subdomain (`open.spotify.com`, `www.spotify.com`, …). Case-folds
  * the host; returns false for nullish, non-string, or unparseable input.
  */
 export function isSpotifyUrl(url: string | null | undefined): boolean {
   if (typeof url !== 'string') return false;
-  try {
-    return hostIsUnder(new URL(url).hostname.toLowerCase(), 'spotify.com');
-  } catch {
-    return false;
-  }
+  const host = safeHostname(url);
+  return host !== null && hostIsUnder(host, 'spotify.com');
 }
 
 /**
@@ -55,11 +75,8 @@ export function isSpotifyUrl(url: string | null | undefined): boolean {
  */
 export function isAppleMusicUrl(url: string | null | undefined): boolean {
   if (typeof url !== 'string') return false;
-  try {
-    return hostIsUnder(new URL(url).hostname.toLowerCase(), 'apple.com');
-  } catch {
-    return false;
-  }
+  const host = safeHostname(url);
+  return host !== null && hostIsUnder(host, 'apple.com');
 }
 
 /**
