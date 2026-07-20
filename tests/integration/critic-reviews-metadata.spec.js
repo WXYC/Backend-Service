@@ -2,8 +2,9 @@
  * Integration test for the `album_critic_reviews` serve contract
  * (album-critic-reviews slice, ADR 0012).
  *
- * `lookupCriticReviewsByAlbumKey` (apps/backend/services/album-metadata-lookup.service.ts)
- * resolves an album_id off the flowsheet lookup key, then issues:
+ * The serve path resolves an album_id off the flowsheet lookup key once
+ * (`resolveLinkedAlbumId`), then `lookupCriticReviewsByAlbumId`
+ * (apps/backend/services/album-metadata-lookup.service.ts) issues:
  *
  *   SELECT source, source_url, snippet, author, published_at, rating
  *     FROM album_critic_reviews
@@ -43,8 +44,8 @@ const { getTestDb } = require('../utils/db');
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 /**
- * The exact serve query issued by `lookupCriticReviewsByAlbumKey` after it
- * resolves an album_id. Returns rows newest-first, capped at 5.
+ * The exact serve query issued by `lookupCriticReviewsByAlbumId` for a
+ * resolved album_id. Returns rows newest-first, capped at 5.
  */
 async function serveReviews(sql, albumId) {
   return sql`
