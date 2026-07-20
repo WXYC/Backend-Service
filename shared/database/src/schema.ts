@@ -1707,6 +1707,79 @@ export const album_review_submissions = wxyc_schema.table(
 export type AlbumReviewSubmission = InferSelectModel<typeof album_review_submissions>;
 export type NewAlbumReviewSubmission = InferInsertModel<typeof album_review_submissions>;
 
+/**
+ * External critic-review snippets (ADR 0012) — short attributed excerpts
+ * of published third-party album reviews, surfaced in the iOS playcut
+ * detail view with mandatory attribution + link-out to the original.
+ *
+ * This is the FOURTH, deliberately-distinct review concept and must not be
+ * merged with any of the others:
+ *   - `reviews` (ADR 0006): one-per-album, DJ-authored, in-app Review model.
+ *   - `album_review_submissions` (ADR 0011): archived DJ Google-Form reviews.
+ *   - the closed `AlbumReview` DTO (WXYC/wxyc-shared#229).
+ * Those are all WXYC-authored. This table holds EXTERNAL critic text.
+ *
+ * Copyright posture (ADR 0012): store only a short excerpt (`snippet`,
+ * hard-capped at ~300 chars by the seed writer — the DB caps the column at
+ * 512 for headroom), never full article text; every row carries `source` +
+ * `source_url` so the client can attribute and link out. This is a conscious
+ * departure from the "Complement, Don't Confirm" stance (which keeps crawled
+ * critic text unattributed and internal) — see the ADR for the reasoning.
+ *
+ * Keyed on `library.id` (via `album_id`), the stable stack-wide album key
+ * `album_metadata` also FKs to, so `/proxy/metadata/album` joins these onto
+ * the response by the same resolved album id. `ON DELETE CASCADE`: a critic
+ * review has no meaning without its album.
+ *
+ * `source` is text with a documented vocabulary (the 0109 enum-cost lesson),
+ * not a pgEnum. Values so far:
+ *   'The Quietus' — the spike seed (`scripts/seed-critic-reviews.ts`).
+ *
+ * `source_key` is an optional provenance marker (the originating corpus row
+ * key) for audit; idempotent re-seed is guaranteed by the
+ * `(album_id, source_url)` unique constraint (the UPSERT conflict target),
+ * not by `source_key`. `discogs_release_id` is a nullable hook for a future
+ * release-level reconciliation pass; the spike leaves it NULL.
+ */
+export const album_critic_reviews = wxyc_schema.table(
+  'album_critic_reviews',
+  {
+    id: serial('id').primaryKey(),
+    album_id: integer('album_id')
+      .references(() => library.id, { onDelete: 'cascade' })
+      .notNull(),
+    // Publication / outlet name, e.g. 'The Quietus'. Shown as attribution.
+    source: text('source').notNull(),
+    // Link to the original review. Mandatory — this is the link-out target
+    // and half of the fair-use attribution posture. Also the UPSERT natural
+    // key (paired with album_id).
+    source_url: varchar('source_url', { length: 1024 }).notNull(),
+    // Short attributed excerpt. Capped at ~300 chars by the seed writer; the
+    // column allows 512 for headroom. NEVER full article text (ADR 0012).
+    snippet: varchar('snippet', { length: 512 }).notNull(),
+    // Byline, when known.
+    author: varchar('author', { length: 128 }),
+    // Publication date, when known.
+    published_at: date('published_at'),
+    // Source-native rating as free text (e.g. '8/10'), when present.
+    rating: varchar('rating', { length: 32 }),
+    // Nullable hook for a future release-level reconciliation pass.
+    discogs_release_id: integer('discogs_release_id'),
+    // Originating corpus row key, for audit. Not the idempotency key.
+    source_key: text('source_key'),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // UPSERT conflict target + the serve-path lookup index (album_id is the
+    // leading column, so `WHERE album_id = ?` uses this index directly).
+    uniqueIndex('album_critic_reviews_album_id_source_url_uq').on(table.album_id, table.source_url),
+  ]
+);
+
+export type AlbumCriticReview = InferSelectModel<typeof album_critic_reviews>;
+export type NewAlbumCriticReview = InferInsertModel<typeof album_critic_reviews>;
+
 export type NewBinEntry = InferInsertModel<typeof bins>;
 export type BinEntry = InferSelectModel<typeof bins>;
 export const bins = wxyc_schema.table('bins', {

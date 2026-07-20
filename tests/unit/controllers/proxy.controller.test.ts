@@ -44,8 +44,21 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
 // `lookupAlbumMetadataByKey` before falling through to LML. Mocked here so
 // each test can set local-hit, catch-arm-row, or cold-miss explicitly.
 const mockLookupAlbumMetadataByKey = jest.fn<(artist: string, release?: string) => Promise<unknown>>();
+// ADR 0012: getAlbumMetadata also attaches external critic-review snippets
+// (flag-gated). Mocked so each test can set the returned snippets, an empty
+// result, or a thrown error explicitly.
+const mockLookupCriticReviewsByAlbumKey = jest.fn<(artist: string, release?: string) => Promise<unknown[]>>();
 jest.mock('../../../apps/backend/services/album-metadata-lookup.service', () => ({
   lookupAlbumMetadataByKey: mockLookupAlbumMetadataByKey,
+  lookupCriticReviewsByAlbumKey: mockLookupCriticReviewsByAlbumKey,
+}));
+
+// ADR 0012 flag: getConfig().enabled gates the criticReviews attach. Default
+// off (matches prod) so unrelated getAlbumMetadata tests keep their exact
+// response shapes; the critic-reviews suite opts in per test.
+const mockCriticReviewsConfig = jest.fn<() => { enabled: boolean }>(() => ({ enabled: false }));
+jest.mock('../../../apps/backend/config/criticReviews', () => ({
+  getConfig: mockCriticReviewsConfig,
 }));
 
 // BS#1331 acceptance: the cohort split for trace explorer turns on
@@ -134,6 +147,10 @@ describe('proxy.controller', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockNext = jest.fn();
+    // Flag defaults off every test (clearAllMocks clears calls, not a
+    // mockReturnValue set by a prior test) so unrelated getAlbumMetadata
+    // assertions never see a leaked criticReviews attach.
+    mockCriticReviewsConfig.mockReturnValue({ enabled: false });
   });
 
   // --- searchArtwork ---
@@ -243,6 +260,73 @@ describe('proxy.controller', () => {
       // Default to cold case: no local row, so existing tests fall through
       // to LML. Local-hit tests override below. BS#1331.
       mockLookupAlbumMetadataByKey.mockResolvedValue(null);
+    });
+
+    // ADR 0012: attach external critic-review snippets, flag-gated. These run
+    // in the cold-case default (persisted=null, LML returns nothing); the
+    // attach happens after both the local-hit and cold branches, so the
+    // cohort is irrelevant to the attach behavior.
+    describe('criticReviews attach (ADR 0012)', () => {
+      const sampleReviews = [
+        {
+          source: 'The Quietus',
+          url: 'https://thequietus.com/articles/example',
+          snippet: 'A record that dissolves song into texture.',
+        },
+      ];
+
+      it('flag off (default): never calls the reviews lookup and omits criticReviews', async () => {
+        // Even with the lookup primed to return snippets, the flag gate must
+        // keep the response byte-identical to before — the #32 freeze-safety
+        // invariant.
+        mockLookupCriticReviewsByAlbumKey.mockResolvedValue(sampleReviews);
+        const req = { query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupCriticReviewsByAlbumKey).not.toHaveBeenCalled();
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result).not.toHaveProperty('criticReviews');
+      });
+
+      it('flag on + non-empty: attaches criticReviews', async () => {
+        mockCriticReviewsConfig.mockReturnValue({ enabled: true });
+        mockLookupCriticReviewsByAlbumKey.mockResolvedValue(sampleReviews);
+        const req = { query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupCriticReviewsByAlbumKey).toHaveBeenCalledWith('Juana Molina', 'DOGA');
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.criticReviews).toEqual(sampleReviews);
+      });
+
+      it('flag on + empty result: omits criticReviews so an un-seeded album is byte-identical', async () => {
+        mockCriticReviewsConfig.mockReturnValue({ enabled: true });
+        mockLookupCriticReviewsByAlbumKey.mockResolvedValue([]);
+        const req = { query: { artistName: 'Unseeded', releaseTitle: 'Album' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result).not.toHaveProperty('criticReviews');
+      });
+
+      it('flag on + lookup throws: degrades to omitting criticReviews, still responds 200', async () => {
+        mockCriticReviewsConfig.mockReturnValue({ enabled: true });
+        mockLookupCriticReviewsByAlbumKey.mockRejectedValue(new Error('db down'));
+        const req = { query: { artistName: 'Any', releaseTitle: 'Album' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result).not.toHaveProperty('criticReviews');
+      });
     });
 
     it('throws WxycError 400 when artistName is missing', async () => {
