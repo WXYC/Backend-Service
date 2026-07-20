@@ -42,7 +42,7 @@
  * at the bottom of this module.
  */
 
-import { and, asc, eq, exists, gt, isNotNull, isNull, lt, notExists, sql } from 'drizzle-orm';
+import { and, asc, eq, exists, gt, isNotNull, isNull, lt, notExists, notInArray, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, user, type FSEntry, type Show, type User } from '@wxyc/database';
 
 export type LogLevel = 'info' | 'warn' | 'error';
@@ -355,7 +355,38 @@ export const runReconcile = async (ports: ReconcilePorts, options: ReconcileOpti
 const windowFloor = (windowHours: number) => sql`now() - (interval '1 hour' * ${windowHours})`;
 const settleCeiling = (settleMinutes: number) => sql`now() - (interval '1 minute' * ${settleMinutes})`;
 
-/** Subquery: does show S have any entry with the given legacy_entry_id nullness? */
+/**
+ * Flowsheet entry types the live mirror path NEVER assigns a `legacy_entry_id`.
+ *
+ * `dj_join` / `dj_leave` markers are inserted as side effects of
+ * `joinShow` / `endShow` / `leaveShow` (apps/backend/services/flowsheet.service.ts)
+ * on the `POST /join` and `POST /end` routes, whose mirror middleware is
+ * `flowsheetMirror.startShow` / `.endShow`. Those handlers mirror only the show
+ * plus the `show_start` / `show_end` announcement — never these markers
+ * (apps/backend/middleware/legacy/flowsheet.mirror.ts). Only `addEntry`
+ * (`POST /`) drives an entry through `mirrorCreateEntry`, and join/leave markers
+ * are never created that way. They therefore carry `legacy_entry_id IS NULL`
+ * permanently.
+ *
+ * The job must exclude them everywhere it reasons about "an entry that SHOULD
+ * have been mirrored but wasn't". Counting them would (a) falsely flag every
+ * multi-DJ show as partially-mirrored on every run (it has both a mirrored
+ * track and a permanently-NULL marker) and never heal, and (b) drive Sweep 2 to
+ * POST them to tubafrenzy as talkset entries the live path never creates,
+ * breaking the byte-identical-payload parity this job is built on.
+ */
+const NON_MIRRORED_MARKER_TYPES = ['dj_join', 'dj_leave'] as const;
+
+/** A NULL-legacy row of a type the live path would actually have mirrored. */
+const mirrorableEntryType = notInArray(flowsheet.entry_type, [...NON_MIRRORED_MARKER_TYPES]);
+
+/**
+ * Subquery: does show S have any *mirrorable* entry with the given
+ * legacy_entry_id nullness? The `mirrorableEntryType` guard excludes the
+ * permanently-NULL join/leave markers (see `NON_MIRRORED_MARKER_TYPES`) from
+ * both branches, so `nullLegacy=true` means "has a genuinely un-mirrored entry"
+ * rather than "has a marker the live path was never going to mirror".
+ */
 const entryExists = (nullLegacy: boolean) =>
   db
     .select({ one: sql`1` })
@@ -363,6 +394,7 @@ const entryExists = (nullLegacy: boolean) =>
     .where(
       and(
         eq(flowsheet.show_id, shows.id),
+        mirrorableEntryType,
         nullLegacy ? isNull(flowsheet.legacy_entry_id) : isNotNull(flowsheet.legacy_entry_id)
       )
     );
@@ -382,13 +414,20 @@ export const selectShowsToCreate = async ({ windowHours, settleMinutes }: Window
     )
     .orderBy(asc(shows.start_time));
 
-export const selectEntrySweepShows = async ({ windowHours }: WindowOptions): Promise<Show[]> =>
+export const selectEntrySweepShows = async ({ windowHours, settleMinutes }: WindowOptions): Promise<Show[]> =>
   db
     .select()
     .from(shows)
     .where(
       and(
         isNotNull(shows.legacy_show_id),
+        // Same settle bound as Sweep 1: a show still inside the settle window may
+        // be mid-live-mirror — its show-create already persisted `legacy_show_id`
+        // while a just-added track sits NULL-legacy for the moment before the
+        // live path finishes mirroring it. Sweeping then would double-POST that
+        // entry. The cooperative pause mitigates but is a heuristic; this bound
+        // is deterministic.
+        lt(shows.start_time, settleCeiling(settleMinutes)),
         gt(shows.start_time, windowFloor(windowHours)),
         exists(entryExists(true)),
         notExists(entryExists(false))
@@ -396,14 +435,25 @@ export const selectEntrySweepShows = async ({ windowHours }: WindowOptions): Pro
     )
     .orderBy(asc(shows.start_time));
 
-export const selectPartialShows = async ({ windowHours }: WindowOptions): Promise<PartialShow[]> =>
+export const selectPartialShows = async ({ windowHours, settleMinutes }: WindowOptions): Promise<PartialShow[]> =>
   db
     .select({
       show_id: shows.id,
-      orphan_entry_count: sql<number>`(SELECT count(*)::int FROM ${flowsheet} WHERE ${flowsheet.show_id} = ${shows.id} AND ${flowsheet.legacy_entry_id} IS NULL)`,
+      orphan_entry_count: sql<number>`(SELECT count(*)::int FROM ${flowsheet} WHERE ${flowsheet.show_id} = ${shows.id} AND ${flowsheet.legacy_entry_id} IS NULL AND ${mirrorableEntryType})`,
     })
     .from(shows)
-    .where(and(gt(shows.start_time, windowFloor(windowHours)), exists(entryExists(true)), exists(entryExists(false))));
+    // Same settle bound as the sweeps: a show still inside the settle window may
+    // have one track mirrored and another mid-live-mirror, which looks partial
+    // but is transient. Reporting it would raise a false "partial → manual
+    // remediation" Sentry warning; the bound lets the live path finish first.
+    .where(
+      and(
+        lt(shows.start_time, settleCeiling(settleMinutes)),
+        gt(shows.start_time, windowFloor(windowHours)),
+        exists(entryExists(true)),
+        exists(entryExists(false))
+      )
+    );
 
 export const selectDj = async (djId: string): Promise<User | null> => {
   const rows = await db.select().from(user).where(eq(user.id, djId)).limit(1);
@@ -414,11 +464,21 @@ export const selectOrphanEntries = async (showId: number): Promise<FSEntry[]> =>
   db
     .select()
     .from(flowsheet)
-    .where(and(eq(flowsheet.show_id, showId), isNull(flowsheet.legacy_entry_id)))
+    // Exclude the permanently-NULL join/leave markers (`mirrorableEntryType`):
+    // Sweep 2 must POST only the entries the live path would have mirrored, or
+    // the reconciled tubafrenzy show diverges from the live-path shape.
+    .where(and(eq(flowsheet.show_id, showId), isNull(flowsheet.legacy_entry_id), mirrorableEntryType))
     .orderBy(asc(flowsheet.play_order));
 
 export const persistLegacyShowId = async (showId: number, legacyShowId: number): Promise<void> => {
-  await db.update(shows).set({ legacy_show_id: legacyShowId }).where(eq(shows.id, showId));
+  // `AND legacy_show_id IS NULL` matches the live path's idempotency convention:
+  // never overwrite a surrogate key another writer (a concurrent live mirror, a
+  // prior run) already set. A second racer's UPDATE then no-ops instead of
+  // repointing the show to a duplicate tubafrenzy row.
+  await db
+    .update(shows)
+    .set({ legacy_show_id: legacyShowId })
+    .where(and(eq(shows.id, showId), isNull(shows.legacy_show_id)));
 };
 
 /**
@@ -435,5 +495,11 @@ export const persistLegacyShowId = async (showId: number, legacyShowId: number):
  * is registered at `scripts/check-legacy-entry-id-writes.mjs`.
  */
 export const persistLegacyEntryId = async (entryId: number, legacyEntryId: number): Promise<void> => {
-  await db.update(flowsheet).set({ legacy_entry_id: legacyEntryId }).where(eq(flowsheet.id, entryId));
+  // `AND legacy_entry_id IS NULL` mirrors the live path's loop guard: an entry
+  // whose surrogate key is already set (a concurrent live mirror, a prior run)
+  // is never repointed, so a racing writer's UPDATE no-ops.
+  await db
+    .update(flowsheet)
+    .set({ legacy_entry_id: legacyEntryId })
+    .where(and(eq(flowsheet.id, entryId), isNull(flowsheet.legacy_entry_id)));
 };

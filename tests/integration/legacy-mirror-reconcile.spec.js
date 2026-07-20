@@ -79,6 +79,16 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
 
   // -- SQL twins of jobs/legacy-mirror-reconcile/orchestrate.ts --------------
 
+  // Twin of orchestrate.ts `mirrorableEntryType` (NON_MIRRORED_MARKER_TYPES):
+  // dj_join/dj_leave markers are inserted as side effects of joinShow/endShow/
+  // leaveShow on the /join and /end routes, whose mirror middleware mirrors only
+  // the show + show_start/show_end announcement — never these markers. Their
+  // legacy_entry_id therefore stays NULL forever, so every "un-mirrored entry"
+  // predicate must exclude them (else every multi-DJ show is falsely flagged
+  // partial on every run). Unqualified `entry_type` resolves to the flowsheet
+  // row in each (sub)query — `shows` has no such column.
+  const MIRRORABLE = `entry_type NOT IN ('dj_join', 'dj_leave')`;
+
   const selectShowsToCreate = async () =>
     (
       await sql.unsafe(
@@ -87,7 +97,7 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
            AND s.primary_dj_id IS NOT NULL
            AND s.start_time < now() - (interval '1 minute' * $1::int)
            AND s.start_time > now() - (interval '1 hour' * $2::int)
-           AND NOT EXISTS (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NOT NULL)
+           AND NOT EXISTS (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NOT NULL AND ${MIRRORABLE})
            AND s.id = ANY($3)
          ORDER BY s.start_time ASC`,
         [SETTLE_MINUTES, WINDOW_HOURS, allShowIds]
@@ -99,12 +109,13 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
       await sql.unsafe(
         `SELECT s.id FROM "${SCHEMA}".shows s
          WHERE s.legacy_show_id IS NOT NULL
-           AND s.start_time > now() - (interval '1 hour' * $1::int)
-           AND EXISTS     (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NULL)
-           AND NOT EXISTS (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NOT NULL)
-           AND s.id = ANY($2)
+           AND s.start_time < now() - (interval '1 minute' * $1::int)
+           AND s.start_time > now() - (interval '1 hour' * $2::int)
+           AND EXISTS     (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NULL AND ${MIRRORABLE})
+           AND NOT EXISTS (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NOT NULL AND ${MIRRORABLE})
+           AND s.id = ANY($3)
          ORDER BY s.start_time ASC`,
-        [WINDOW_HOURS, allShowIds]
+        [SETTLE_MINUTES, WINDOW_HOURS, allShowIds]
       )
     ).map((r) => Number(r.id));
 
@@ -112,13 +123,14 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
     (
       await sql.unsafe(
         `SELECT s.id AS show_id,
-                (SELECT count(*)::int FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NULL) AS orphan_entry_count
+                (SELECT count(*)::int FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NULL AND ${MIRRORABLE}) AS orphan_entry_count
          FROM "${SCHEMA}".shows s
-         WHERE s.start_time > now() - (interval '1 hour' * $1::int)
-           AND EXISTS (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NULL)
-           AND EXISTS (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NOT NULL)
-           AND s.id = ANY($2)`,
-        [WINDOW_HOURS, allShowIds]
+         WHERE s.start_time < now() - (interval '1 minute' * $1::int)
+           AND s.start_time > now() - (interval '1 hour' * $2::int)
+           AND EXISTS (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NULL AND ${MIRRORABLE})
+           AND EXISTS (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NOT NULL AND ${MIRRORABLE})
+           AND s.id = ANY($3)`,
+        [SETTLE_MINUTES, WINDOW_HOURS, allShowIds]
       )
     ).map((r) => ({ show_id: Number(r.show_id), orphan_entry_count: Number(r.orphan_entry_count) }));
 
@@ -126,22 +138,32 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
     (
       await sql.unsafe(
         `SELECT id, play_order FROM "${SCHEMA}".flowsheet
-         WHERE show_id = $1 AND legacy_entry_id IS NULL
+         WHERE show_id = $1 AND legacy_entry_id IS NULL AND ${MIRRORABLE}
          ORDER BY play_order ASC`,
         [showId]
       )
     ).map((r) => Number(r.play_order));
 
+  // Delete flowsheet BEFORE shows. `flowsheet.show_id` is ON DELETE SET NULL, so
+  // deleting a show first orphans its entries (show_id→NULL) while they keep
+  // their unique legacy_entry_id — which then collides with the next run's
+  // LEGACY_ENTRY_SEQ. The `artist_name` literal catches rows a prior run already
+  // orphaned (show_id NULL), which a show_id-scoped delete would miss.
   const cleanup = async () => {
     if (allShowIds.length > 0) {
       await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE show_id = ANY($1)`, [allShowIds]);
       await sql.unsafe(`DELETE FROM "${SCHEMA}".shows WHERE id = ANY($1)`, [allShowIds]);
     }
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE artist_name = 'BS1707 Artist'`);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".shows WHERE show_name LIKE 'BS1707 %'`);
   };
 
   beforeAll(async () => {
     sql = makeSql();
+    // Pre-clean residue from a prior run that didn't reach afterAll — flowsheet
+    // first (see cleanup) so an orphaned unique legacy_entry_id can't wedge the
+    // seed inserts below.
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE artist_name = 'BS1707 Artist'`);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".shows WHERE show_name LIKE 'BS1707 %'`);
 
     // Own the fixture shows with the seed's staging default user (auth_user is a
@@ -195,6 +217,36 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
     await seedEntry(showIds.H, 1, { legacyEntryId: LEGACY_ENTRY_SEQ++ });
     await seedEntry(showIds.H, 2);
 
+    // I — fully-mirrored multi-DJ show: show_start + every track + show_end
+    //     mirrored, PLUS dj_join/dj_leave markers the live path never mirrors
+    //     (legacy_entry_id stays NULL forever). Must NOT be flagged partial and
+    //     must NOT enter either sweep — the markers are excluded from the
+    //     "un-mirrored entry" predicates (BS#1707 review). Without that filter,
+    //     every co-hosted show would be falsely reported partial on every run.
+    await seedShow('I', { legacyShowId: LEGACY_SHOW_SEQ++, startExpr: "now() - interval '2 hours'" });
+    await seedEntry(showIds.I, 1, { legacyEntryId: LEGACY_ENTRY_SEQ++, entryType: 'show_start' });
+    await seedEntry(showIds.I, 2, { legacyEntryId: LEGACY_ENTRY_SEQ++, entryType: 'track' });
+    await seedEntry(showIds.I, 3, { entryType: 'dj_join' }); // orphan marker, never mirrored
+    await seedEntry(showIds.I, 4, { legacyEntryId: LEGACY_ENTRY_SEQ++, entryType: 'track' });
+    await seedEntry(showIds.I, 5, { entryType: 'dj_leave' }); // orphan marker, never mirrored
+    await seedEntry(showIds.I, 6, { legacyEntryId: LEGACY_ENTRY_SEQ++, entryType: 'show_end' });
+
+    // J — entry-sweep shape but too-recent: has a tubafrenzy show and is
+    //     all-or-nothing (orphan entries, none mirrored), but started inside the
+    //     settle window. A just-added track may still be mid-live-mirror, so
+    //     sweep 2 must NOT touch it yet (same settle bound as sweep 1).
+    await seedShow('J', { legacyShowId: LEGACY_SHOW_SEQ++, startExpr: "now() - interval '5 minutes'" });
+    await seedEntry(showIds.J, 1);
+    await seedEntry(showIds.J, 2);
+
+    // K — partial-shaped but too-recent: one mirrored entry + one orphan, but
+    //     started inside the settle window. Looks partial, but the orphan is
+    //     likely just mid-live-mirror, so the partial report must hold it back
+    //     (no false "manual remediation" alert). Excluded from both sweeps too.
+    await seedShow('K', { legacyShowId: LEGACY_SHOW_SEQ++, startExpr: "now() - interval '5 minutes'" });
+    await seedEntry(showIds.K, 1, { legacyEntryId: LEGACY_ENTRY_SEQ++ });
+    await seedEntry(showIds.K, 2);
+
     allShowIds = Object.values(showIds);
   });
 
@@ -209,11 +261,16 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
   });
 
   it('sweep 2 selects only the all-or-nothing show that already has a tubafrenzy show', async () => {
+    // F (3h old) qualifies; J (same shape but 5 min old) is held back by the
+    // settle bound, so the strict equality doubles as the settle-bound guard.
     const ids = await selectEntrySweepShows();
     expect(ids).toEqual([showIds.F]);
   });
 
   it('partial report surfaces every show with BOTH a mirrored and an orphan entry', async () => {
+    // E and H (both 2h old) qualify; K (same partial shape but 5 min old) is
+    // held back by the settle bound, so the strict set equality doubles as the
+    // partial-report settle-bound guard (no false mid-live-mirror alert).
     const partials = await selectPartialShows();
     const byId = Object.fromEntries(partials.map((p) => [p.show_id, p.orphan_entry_count]));
     expect(new Set(Object.keys(byId).map(Number))).toEqual(new Set([showIds.E, showIds.H]));
@@ -224,6 +281,21 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
   it('orphan-entry read returns the NULL-legacy entries in play_order order', async () => {
     const orders = await selectOrphanEntries(showIds.F);
     expect(orders).toEqual([1, 2, 3]);
+  });
+
+  it('excludes a fully-mirrored multi-DJ show whose only orphans are join/leave markers', async () => {
+    // Show I: show_start + tracks + show_end all mirrored, plus dj_join/dj_leave
+    // markers the live path never mirrors (legacy_entry_id NULL forever). The
+    // markers must not make it look partial, land it in a sweep, or get POSTed.
+    const sweep2 = await selectEntrySweepShows();
+    expect(sweep2).not.toContain(showIds.I);
+
+    const partials = await selectPartialShows();
+    expect(partials.map((p) => p.show_id)).not.toContain(showIds.I);
+
+    // Sweep 2's orphan read over I returns no markers to POST (live-path parity).
+    const orphans = await selectOrphanEntries(showIds.I);
+    expect(orphans).toEqual([]);
   });
 
   it('is idempotent: once F is healed it drops out of the sweep-2 candidate set', async () => {

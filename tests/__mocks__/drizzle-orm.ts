@@ -14,6 +14,7 @@ export const sql = Object.assign(
 export const desc = jest.fn((col) => ({ desc: col }));
 export const asc = jest.fn((col) => ({ asc: col }));
 export const inArray = jest.fn((col, values) => ({ inArray: [col, values] }));
+export const notInArray = jest.fn((col, values) => ({ notInArray: [col, values] }));
 export const isNull = jest.fn((col) => ({ isNull: col }));
 export const isNotNull = jest.fn((col) => ({ isNotNull: col }));
 export const gte = jest.fn((a, b) => ({ gte: [a, b] }));

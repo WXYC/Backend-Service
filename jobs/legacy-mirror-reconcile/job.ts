@@ -219,6 +219,21 @@ export const buildPorts = (client: PostHog | null, options: JobOptions): Reconci
 
 // ── Entrypoint ────────────────────────────────────────────────────────────────
 
+/**
+ * Run one best-effort shutdown step in isolation. A rejection is logged and
+ * swallowed so a single failing step (e.g. `posthog.shutdown()` hanging on a
+ * dead flush socket) can't skip the remaining teardown — most importantly the
+ * Sentry flush in `closeLogger`, which must always run so a failed run is
+ * actually reported (BS#1707 review).
+ */
+const runShutdownStep = async (label: string, step: () => Promise<unknown>): Promise<void> => {
+  try {
+    await step();
+  } catch (e) {
+    console.error(`[${JOB_NAME}] shutdown step '${label}' failed:`, e);
+  }
+};
+
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
 
@@ -261,11 +276,12 @@ const main = async (): Promise<void> => {
     // Order matters (review Medium #4 + R2 Medium): posthog-node keeps flush
     // timers alive → shut it down first or the process hangs. Then release the
     // advisory lock by ending its dedicated client, then close the pooled DB,
-    // then flush Sentry.
-    if (posthog) await posthog.shutdown();
-    await lockClient.end();
-    await closeDatabaseConnection();
-    await closeLogger();
+    // then flush Sentry (closeLogger). Each step is isolated via runShutdownStep
+    // so one rejection can't skip the rest — the Sentry flush must always run.
+    if (posthog) await runShutdownStep('posthog', () => posthog.shutdown());
+    await runShutdownStep('advisory-lock-client', () => lockClient.end());
+    await runShutdownStep('database', () => closeDatabaseConnection());
+    await runShutdownStep('logger', () => closeLogger());
   }
 };
 
