@@ -30,6 +30,18 @@ describe('isSpotifyUrl', () => {
     ['Qobuz', 'https://www.qobuz.com/album/foo'],
     ['host-suffix spoof', 'https://spotify.com.evil.example/album/abc'],
     ['substring-not-host spoof', 'https://evil.example/spotify.com/album'],
+    // WHATWG folds `\` to `/` for http(s), so `new URL(...).hostname` reads
+    // `spotify.com` and the naive host check would ACCEPT — but the raw string
+    // (persisted verbatim) resolves to `evil.example` under a parser that keeps
+    // the backslash. The guard must reject the raw backslash (BS#1710).
+    ['backslash-authority spoof', 'https://spotify.com\\@evil.example/x'],
+    ['backslash after subdomain', 'https://open.spotify.com\\@evil.example/x'],
+    // Tab/CR/LF need no special handling: unlike `\`, WHATWG strips them and
+    // resolves the authority to the real (evil) host, so the guard already
+    // rejects them. Characterized here so the backslash-only carve-out is
+    // documented, not accidental.
+    ['tab in authority (WHATWG resolves to evil host)', 'https://open.spotify.com\t@evil.example/x'],
+    ['newline in authority (WHATWG resolves to evil host)', 'https://open.spotify.com\n@evil.example/x'],
     ['not a URL', 'not a url'],
     ['empty string', ''],
   ])('rejects a non-Spotify URL (%s)', (_label, url) => {
@@ -58,6 +70,7 @@ describe('isAppleMusicUrl', () => {
     ['Spotify', 'https://open.spotify.com/album/abc'],
     ['Deezer', 'https://www.deezer.com/album/254381182'],
     ['host-suffix spoof', 'https://apple.com.evil.example/foo'],
+    ['backslash-authority spoof', 'https://apple.com\\@evil.example/foo'],
     ['null', null],
   ])('rejects a non-Apple URL (%s)', (_label, url) => {
     expect(isAppleMusicUrl(url)).toBe(false);
@@ -84,6 +97,14 @@ describe('sanitizeLookupStreamingUrls', () => {
     const resp = build({ apple_music_url: 'https://www.deezer.com/album/1' });
     const out = sanitizeLookupStreamingUrls(resp);
     expect(out.results[0].artwork?.apple_music_url).toBeNull();
+  });
+
+  it('nulls a backslash-authority spoof in the spotify_url slot (parser differential)', () => {
+    // `new URL(...).hostname` folds this to `spotify.com`, but the raw string
+    // persisted verbatim resolves to `evil.example` under a backslash-preserving
+    // parser — the guard must null it, not persist it under the Spotify button.
+    const resp = build({ spotify_url: 'https://spotify.com\\@evil.example/x' });
+    expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.spotify_url).toBeNull();
   });
 
   it('preserves a genuine Spotify URL', () => {
