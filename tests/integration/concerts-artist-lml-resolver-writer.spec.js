@@ -7,7 +7,9 @@
  * `jobs/concerts-artist-lml-resolver/targets.ts`:
  *   - candidate predicate: double-NULL id gate, tombstone + upcoming window,
  *     attempt-at marker TTL arms (NULL always eligible; stamped rows re-ask
- *     only past the TTL);
+ *     only past the TTL), and the tribute guard — tribute-context rows
+ *     (word-start "tribute" in title or raw, case-insensitive) never enter
+ *     the candidate set, while a name like "Tributaries" still does;
  *   - applyResolved: Discogs id + provenance + marker in one UPDATE, with
  *     the FK loop-close ONLY on a singleton `artists.discogs_artist_id`
  *     match — the FK-TIE case (two artists sharing the id) must land the
@@ -73,6 +75,8 @@ async function loadCandidates(sql, ttlDays = TTL_DAYS) {
      WHERE "headlining_artist_id" IS NULL
        AND "headlining_discogs_artist_id" IS NULL
        AND "headlining_artist_raw" IS NOT NULL
+       AND ("title" IS NULL OR "title" !~* '\\mtribute')
+       AND "headlining_artist_raw" !~* '\\mtribute'
        AND "removed_at" IS NULL
        AND "starts_on" >= (now() AT TIME ZONE 'America/New_York')::date
        AND ("artist_resolve_attempted_at" IS NULL
@@ -137,6 +141,7 @@ describe('concerts-artist-lml-resolver writer contract (BS#1614)', () => {
   const seedConcert = async (key, overrides = {}) => {
     const row = {
       starts_on: isoDate(10),
+      title: null,
       headlining_artist_raw: `${ARTIST_PREFIX} ${key}`,
       headlining_artist_id: null,
       headlining_discogs_artist_id: null,
@@ -147,17 +152,18 @@ describe('concerts-artist-lml-resolver writer contract (BS#1614)', () => {
     };
     const [inserted] = await sql.unsafe(
       `INSERT INTO "${SCHEMA}".concerts
-         (source, source_id, venue_id, starts_on, headlining_artist_raw,
+         (source, source_id, venue_id, starts_on, title, headlining_artist_raw,
           headlining_artist_id, headlining_discogs_artist_id,
           headlining_discogs_artist_id_source, artist_resolve_attempted_at,
           removed_at, status, supporting_artists_raw, raw_data, scraped_at)
-       VALUES ('triangle_shows', $1, $2, $3, $4, $5, $6, $7, $8, $9,
+       VALUES ('triangle_shows', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                'on_sale', '{}', '{}'::jsonb, now())
        RETURNING id`,
       [
         SOURCE_ID_PREFIX + key,
         venueId,
         row.starts_on,
+        row.title,
         row.headlining_artist_raw,
         row.headlining_artist_id,
         row.headlining_discogs_artist_id,
@@ -210,6 +216,7 @@ describe('concerts-artist-lml-resolver writer contract (BS#1614)', () => {
   describe('candidate predicate', () => {
     let freshId;
     let ttlExpiredId;
+    let tributariesId;
 
     beforeAll(async () => {
       freshId = await seedConcert('cand-fresh');
@@ -224,16 +231,27 @@ describe('concerts-artist-lml-resolver writer contract (BS#1614)', () => {
       ttlExpiredId = await seedConcert('cand-ttl-expired', {
         artist_resolve_attempted_at: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000),
       });
+      // Tribute guard, against real PG regex semantics. The raw-name arm is the
+      // Stanczyks incident verbatim (honoree-first billing that alias-resolved
+      // to the real R.E.M.); the title arm is upper-cased to prove !~* matches
+      // case-insensitively even when the raw name is clean; "Tributaries"
+      // pins the \m word-start — a name merely BEGINNING with "tribut" must
+      // stay in the candidate set.
+      await seedConcert('cand-tribute-raw', { headlining_artist_raw: 'REM Tribute to Lifes Rich Pageant' });
+      await seedConcert('cand-tribute-title', { title: 'AN ELECTRIFYING TRIBUTE TO BILLY JOEL' });
+      tributariesId = await seedConcert('cand-tributaries', {
+        headlining_artist_raw: `${ARTIST_PREFIX} Tributaries`,
+      });
     });
 
     afterAll(async () => {
       await sql.unsafe(`DELETE FROM "${SCHEMA}".concerts WHERE source_id LIKE $1`, [`${SOURCE_ID_PREFIX}cand-%`]);
     });
 
-    it('selects never-attempted and TTL-expired rows; excludes resolved / tombstoned / past / inside-TTL', async () => {
+    it('selects never-attempted and TTL-expired rows; excludes resolved / tombstoned / past / inside-TTL / tribute-context', async () => {
       const candidates = await loadCandidates(sql);
       const ids = candidates.map((c) => Number(c.id));
-      expect(ids).toEqual([Number(freshId), Number(ttlExpiredId)]);
+      expect(ids).toEqual([Number(freshId), Number(ttlExpiredId), Number(tributariesId)]);
     });
   });
 
