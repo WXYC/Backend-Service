@@ -228,18 +228,30 @@ const normalize = (s: string | null | undefined): string => (s ?? '').trim().nor
 const cacheKey = (artist: string, album: string | null | undefined, track: string | null | undefined): string =>
   normalize(artist) + '\0' + normalize(album) + '\0' + normalize(track);
 
+/** Service → column name, derived from SERVICE_CONFIGS (no per-service branch). */
+const COLUMN_BY_SERVICE: Record<UpgradeService, 'spotify_url' | 'bandcamp_url'> = Object.fromEntries(
+  SERVICE_CONFIGS.map((cfg) => [cfg.service, cfg.column])
+) as Record<UpgradeService, 'spotify_url' | 'bandcamp_url'>;
+
 /** Current value of a service's column on the candidate row. */
-const rowColumnValue = (row: CandidateRow, service: UpgradeService): string | null =>
-  service === 'spotify' ? row.spotify_url : row.bandcamp_url;
+const rowColumnValue = (row: CandidateRow, service: UpgradeService): string | null => {
+  const value = (row as Record<string, unknown>)[COLUMN_BY_SERVICE[service]];
+  return typeof value === 'string' ? value : null;
+};
 
 /**
- * The search-shaped OR predicate, built from SERVICE_CONFIGS so the SQL LIKE
- * clauses can never drift from the write-side guard. `alias` is the table
- * alias (`am` / `f`).
+ * The search-shaped OR predicate, built by iterating SERVICE_CONFIGS so the
+ * SQL LIKE clauses can never drift from the write-side guard OR silently omit
+ * a newly-appended service. `alias` is the table alias (`am` / `f`).
  */
-const searchShapedOr = (alias: 'am' | 'f') =>
-  sql`(${sql.raw(`${alias}."spotify_url"`)} LIKE ${SERVICE_CONFIGS[0].searchPrefix + '%'}
-    OR ${sql.raw(`${alias}."bandcamp_url"`)} LIKE ${SERVICE_CONFIGS[1].searchPrefix + '%'})`;
+const searchShapedOr = (alias: 'am' | 'f') => {
+  const [first, ...rest] = SERVICE_CONFIGS;
+  let clause = sql`${sql.raw(`${alias}."${first.column}"`)} LIKE ${first.searchPrefix + '%'}`;
+  for (const cfg of rest) {
+    clause = sql`${clause} OR ${sql.raw(`${alias}."${cfg.column}"`)} LIKE ${cfg.searchPrefix + '%'}`;
+  }
+  return sql`(${clause})`;
+};
 
 /**
  * Shared WHERE fragments so the phase-start COUNT and the batch SELECT can

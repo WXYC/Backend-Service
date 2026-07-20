@@ -41,8 +41,15 @@
  * YouTube Music (`youtube_music_url`) and SoundCloud (`soundcloud_url`) are
  * deliberately OUT of scope: the AC1 prod audit (2026-07-20) found zero
  * verified rows for either across 3.6M+ column-values, and only spotify +
- * bandcamp have a drain ticket. YouTube can be added here once LML#833 lands
- * (append a ServiceConfig); SoundCloud has no path to verified links.
+ * bandcamp have a drain ticket. YouTube can be added once LML#833 lands, but
+ * "append a ServiceConfig" is NOT the whole edit: extend `UpgradeService`,
+ * append to `SERVICE_CONFIGS` (both `isSearchShaped` and `extractStreamingUrls`
+ * derive from the list), and add the new column to orchestrate.ts's
+ * `CandidateRow` + both batch-SELECT column lists so its rows are fetched.
+ * The read/write column here is derived from `SERVICE_CONFIGS`, and the
+ * per-target guard-column maps below are `satisfies Record<UpgradeService, …>`
+ * so the compiler forces every new service to be wired in — no silent
+ * wrong-column write. SoundCloud has no path to verified links.
  */
 
 import { and, eq, like, sql } from 'drizzle-orm';
@@ -118,20 +125,31 @@ export const applyUpgrade = async (
   service: UpgradeService,
   url: string
 ): Promise<ApplyOutcome> => {
-  const pattern = CONFIG_BY_SERVICE[service].searchPrefix + '%';
+  const { column, searchPrefix } = CONFIG_BY_SERVICE[service];
+  const pattern = searchPrefix + '%';
+  // Column name is derived from SERVICE_CONFIGS so the write always targets
+  // the SAME column the guard checks — never a spotify-vs-else fall-through.
+  const set = { [column]: url } as Partial<Record<'spotify_url' | 'bandcamp_url', string>>;
 
   let updated: Array<{ id: number }>;
   if (target === 'album_metadata') {
-    const guardColumn = service === 'spotify' ? album_metadata.spotify_url : album_metadata.bandcamp_url;
-    const set = service === 'spotify' ? { spotify_url: url } : { bandcamp_url: url };
+    // `satisfies Record<UpgradeService, …>` makes the map exhaustive: a new
+    // service added to UpgradeService fails the build here until wired in.
+    const guardColumn = (
+      { spotify: album_metadata.spotify_url, bandcamp: album_metadata.bandcamp_url } satisfies Record<
+        UpgradeService,
+        unknown
+      >
+    )[service];
     updated = await db
       .update(album_metadata)
       .set({ ...set, updated_at: sql`NOW()` })
       .where(and(eq(album_metadata.album_id, id), like(guardColumn, pattern)))
       .returning({ id: album_metadata.album_id });
   } else {
-    const guardColumn = service === 'spotify' ? flowsheet.spotify_url : flowsheet.bandcamp_url;
-    const set = service === 'spotify' ? { spotify_url: url } : { bandcamp_url: url };
+    const guardColumn = (
+      { spotify: flowsheet.spotify_url, bandcamp: flowsheet.bandcamp_url } satisfies Record<UpgradeService, unknown>
+    )[service];
     updated = await db
       .update(flowsheet)
       .set(set)
