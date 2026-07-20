@@ -12,10 +12,19 @@
  *   headlining_artist_id IS NULL          -- SQL arm hasn't FK'd it
  *   AND headlining_discogs_artist_id IS NULL  -- this arm hasn't either
  *   AND headlining_artist_raw IS NOT NULL
+ *   AND (title IS NULL OR title !~* '\mtribute')  -- tribute guard (see below)
+ *   AND headlining_artist_raw !~* '\mtribute'     -- tribute guard (see below)
  *   AND removed_at IS NULL
  *   AND starts_on >= (now() AT TIME ZONE 'America/New_York')::date
  *   AND (artist_resolve_attempted_at IS NULL   -- never-asked / retryable
  *        OR artist_resolve_attempted_at < now() - TTL)  -- no-match re-ask
+ *
+ * The tribute guard mirrors the SQL lane (jobs/concerts-artist-resolver/
+ * query.ts): in a tribute-framed event the billed name belongs to — or
+ * aliases — the HONOREE, not the performer, so any identity either lane
+ * could mint for it is a mislabel by construction (the Stanczyks "REM
+ * Tribute to Lifes Rich Pageant" incident). Word-start match (\m) so a
+ * name like "Tributaries" doesn't trip it; the title arm is NULL-safe.
  *
  * The upcoming-only bound is the venue-local (Eastern) calendar date, not
  * server-clock `CURRENT_DATE`. `starts_on` is a venue-local date, so a UTC
@@ -90,6 +99,8 @@ export const loadHeadlinerCandidates = async (ttlDays: number): Promise<TargetCa
     WHERE "headlining_artist_id" IS NULL
       AND "headlining_discogs_artist_id" IS NULL
       AND "headlining_artist_raw" IS NOT NULL
+      AND ("title" IS NULL OR "title" !~* '\\mtribute')
+      AND "headlining_artist_raw" !~* '\\mtribute'
       AND "removed_at" IS NULL
       AND "starts_on" >= (now() AT TIME ZONE 'America/New_York')::date
       AND ("artist_resolve_attempted_at" IS NULL

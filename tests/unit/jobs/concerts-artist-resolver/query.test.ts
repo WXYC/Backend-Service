@@ -21,6 +21,7 @@
  */
 import { db } from '../../../mocks/database.mock';
 import {
+  loadCandidates,
   resolveArtistId,
   SYNONYM_ALIAS_SOURCES,
   RELATIONAL_ALIAS_SOURCES,
@@ -285,5 +286,40 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
       expect(db.execute).toHaveBeenCalledTimes(1);
       expect(result).toEqual({ kind: 'strict', artist_id: 7 });
     });
+  });
+});
+
+describe('loadCandidates — candidate predicate', () => {
+  beforeEach(() => {
+    db.execute.mockReset();
+  });
+
+  it('selects only unresolved rows that still carry a raw name', async () => {
+    db.execute.mockResolvedValueOnce([{ id: 4062, headlining_artist_raw: 'REM' }]);
+
+    const rows = await loadCandidates();
+
+    expect(rows).toEqual([{ id: 4062, headlining_artist_raw: 'REM' }]);
+    const text = renderSql(db.execute.mock.calls[0][0]);
+    expect(text).toContain('"headlining_artist_id" IS NULL');
+    expect(text).toContain('"headlining_artist_raw" IS NOT NULL');
+    expect(text).toContain('ORDER BY "id" ASC');
+  });
+
+  it('excludes tribute-context rows — a tribute billing must never drive an FK write', async () => {
+    // The Stanczyks mislabel: "REM Tribute to Lifes Rich Pageant" scraped a
+    // raw name of "REM", which the alias arm resolved to the real R.E.M. via
+    // a discogs_name_variation variant. In a tribute-framed event the billed
+    // name belongs to (or aliases) the HONOREE, not the performer, so rows
+    // whose title or raw name carries the word are not candidates at all.
+    // Word-start match (\m) so a name like "Tributaries" doesn't trip it;
+    // the title arm is NULL-safe because "title" is nullable.
+    db.execute.mockResolvedValueOnce([]);
+
+    await loadCandidates();
+
+    const text = renderSql(db.execute.mock.calls[0][0]);
+    expect(text).toContain(`("title" IS NULL OR "title" !~* '\\mtribute')`);
+    expect(text).toContain(`"headlining_artist_raw" !~* '\\mtribute'`);
   });
 });
