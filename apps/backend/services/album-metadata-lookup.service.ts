@@ -37,6 +37,7 @@
  */
 import { sql, eq, desc } from 'drizzle-orm';
 import { db, flowsheet, album_metadata, album_critic_reviews } from '@wxyc/database';
+import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import type { DiscogsResolvedToken, DiscogsTrackItem } from '@wxyc/lml-client';
 
 const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
@@ -185,34 +186,6 @@ export async function lookupAlbumMetadataById(albumId: number): Promise<Persiste
 }
 
 /**
- * Wire projection of one external critic-review snippet (album-critic-reviews
- * slice, ADR 0012). Only the six wire fields are surfaced; the internal columns
- * (`id`, `album_id`, `discogs_release_id`, `source_key`, timestamps) never
- * leave the service. `url` maps to the `source_url` column; `publishedDate`
- * maps to `published_at`. Optional fields are omitted from the response when
- * null so iOS `decodeIfPresent` and dj-site optional chaining stay
- * decode-compatible.
- *
- * SSOT: the canonical shape is the `CriticReviewItem` schema in wxyc-shared
- * `api.yaml` (contract WXYC/wxyc-shared#242, PR WXYC/wxyc-shared#243). That PR
- * must merge and `@wxyc/shared` must publish before this endpoint change ships
- * — the dependency is encoded as BS#1719 blocked-by wxyc-shared#242 so the
- * specs can't drift. This interface is a deliberate temporary hand-mirror kept
- * field-for-field in sync with that schema; once the generated type is
- * published, replace this declaration with an import of the generated
- * `CriticReviewItem` (this is the only local copy — the controller and seed
- * both consume it from here).
- */
-export interface CriticReviewItem {
-  source: string;
-  url: string;
-  snippet: string;
-  author?: string;
-  publishedDate?: string;
-  rating?: string;
-}
-
-/**
  * Cap on the number of snippets returned per album. The playcut detail view
  * shows a short list, and an unbounded array on this hot serve path is a
  * payload-size risk; a re-seed that somehow inserted dozens of rows for one
@@ -239,6 +212,15 @@ const CRITIC_REVIEWS_LIMIT = 5;
  * `CRITIC_REVIEWS_LIMIT`. `published_at` is a `date` column; drizzle returns
  * it as an ISO `YYYY-MM-DD` string, which is exactly the `publishedDate`
  * wire shape.
+ *
+ * The return type is the generated `CriticReviewItem` from `@wxyc/shared`
+ * (SSOT: the schema of the same name in wxyc-shared `api.yaml`, contract
+ * WXYC/wxyc-shared#242). Only the six wire fields are surfaced; the internal
+ * columns (`id`, `album_id`, `discogs_release_id`, `source_key`, timestamps)
+ * never leave the service. `url` projects from the `source_url` column and
+ * `publishedDate` from `published_at`; optional fields are omitted when null
+ * so iOS `decodeIfPresent` and dj-site optional chaining stay
+ * decode-compatible.
  */
 export async function lookupCriticReviewsByAlbumId(albumId: number): Promise<CriticReviewItem[]> {
   const rows = await db
