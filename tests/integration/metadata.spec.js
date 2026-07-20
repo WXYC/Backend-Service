@@ -334,8 +334,12 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
     artwork_url: 'https://bs897.example.com/artwork.jpg',
     discogs_url: 'https://bs897.example.com/discogs',
     release_year: 1979,
-    spotify_url: 'https://bs897.example.com/spotify',
-    apple_music_url: 'https://bs897.example.com/apple',
+    // BS#1714: the read-time serve-seam host guard (transformToIFSEntry) nulls a
+    // spotify_url whose host isn't Spotify (and apple_music_url off Apple), so
+    // these two sentinels must be genuine hosts to survive the projection —
+    // the other eight columns carry the arbitrary bs897.example.com host.
+    spotify_url: 'https://open.spotify.com/album/bs897sentinel',
+    apple_music_url: 'https://music.apple.com/us/album/bs897sentinel',
     youtube_music_url: 'https://bs897.example.com/youtube',
     bandcamp_url: 'https://bs897.example.com/bandcamp',
     soundcloud_url: 'https://bs897.example.com/soundcloud',
