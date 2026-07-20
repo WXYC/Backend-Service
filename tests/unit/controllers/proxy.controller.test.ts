@@ -1032,7 +1032,7 @@ describe('proxy.controller', () => {
         // id=1580). The host guard must not serve them under the hardwired iOS
         // "Spotify"/"Apple Music" button; not setting them lets the request-time
         // fallback synthesize a real open.spotify.com/search URL instead.
-        mockLookupAlbumMetadataByKey.mockResolvedValue({
+        mockLookupAlbumMetadataById.mockResolvedValue({
           artwork_url: 'https://i.discogs.com/cached.jpg',
           discogs_url: 'https://www.discogs.com/release/1580',
           release_year: 2024,
