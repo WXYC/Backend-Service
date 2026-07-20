@@ -1,7 +1,7 @@
 import { QueryParams } from '../../controllers/flowsheet.controller';
 import { db } from '@wxyc/database';
 import { user, flowsheet, shows, FSEntry, Show } from '@wxyc/database';
-import { asc, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { Request } from 'express';
 import { createBackendMirrorMiddleware, createHttpMirrorMiddleware } from './mirror.middleware.js';
 import { safeSql, safeSqlNum, toMs } from './utilities.mirror.js';
@@ -56,12 +56,25 @@ const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
     }
   }
 
-  // 2. Mirror the show_start announcement entry
+  // 2. Mirror the show_start announcement entry.
+  //
+  // BS#1705: target the `show_start` marker explicitly rather than the newest
+  // row by play_order. In normal operation the marker is the only (and newest)
+  // entry when this fires, so the old `ORDER BY play_order DESC LIMIT 1`
+  // happened to return it — but if the announcement mirror ever runs after a
+  // track already exists for the show, the DESC query returns the track and the
+  // actual marker is never mirrored, leaving the tubafrenzy show with no
+  // START_OF_SHOW (type 9) entry (prod: BS shows.id 1949437 / tubafrenzy
+  // 172277). `isNull(legacy_entry_id)` keeps a re-fire idempotent: once the
+  // marker has been mirrored we never re-POST it (mirrors addEntry's BS#908
+  // loop guard). `endShow` deliberately keeps the DESC query — there `show_end`
+  // genuinely is the newest row.
   const announcementEntry = await db
     .select()
     .from(flowsheet)
-    .where(eq(flowsheet.show_id, show.id))
-    .orderBy(desc(flowsheet.play_order))
+    .where(
+      and(eq(flowsheet.show_id, show.id), eq(flowsheet.entry_type, 'show_start'), isNull(flowsheet.legacy_entry_id))
+    )
     .limit(1);
 
   if (announcementEntry?.[0]) {
