@@ -22,7 +22,10 @@
  */
 
 const mockCaptureMirrorFailure = jest.fn();
-jest.mock('../../../../apps/backend/middleware/legacy/http.mirror', () => ({
+// BS#1707: the rotation-match probe moved to @wxyc/legacy-mirror and now imports
+// captureMirrorFailure from its sibling `./http-mirror.js`, so the mock must
+// target the shared source module, not the old apps/backend path.
+jest.mock('../../../../shared/legacy-mirror/src/http-mirror', () => ({
   captureMirrorFailure: mockCaptureMirrorFailure,
 }));
 
@@ -38,7 +41,7 @@ jest.mock('drizzle-orm', () => ({
   sql: jest.fn((_strings: TemplateStringsArray, ..._values: unknown[]) => ({})),
 }));
 
-import { isActiveRotationMatch } from '../../../../apps/backend/middleware/legacy/rotation-match.mirror';
+import { isActiveRotationMatch } from '@wxyc/legacy-mirror';
 
 beforeEach(() => {
   jest.clearAllMocks();
