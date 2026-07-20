@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/streaming-url-remediation",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "One-shot host remediation: rewrite album_metadata + flowsheet rows whose spotify_url is not a Spotify host (or apple_music_url is not an Apple host) so each column holds only a host-correct value — relocating a real link out of the wrong slot and nulling an unrecoverable foreign value so the read path synthesizes the search fallback. Pure local host arbitration, no LML. Batched UPDATE + ANALYZE per table. Dry-run by default; pass --execute to write. Depends on #1712 (ingestion guard). BS#1715.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_streaming_url_remediation:ci -f ../../Dockerfile.streaming-url-remediation ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.66.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

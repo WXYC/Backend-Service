@@ -1,0 +1,56 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /streaming-url-remediation-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./shared/lml-client ./shared/lml-client
+COPY ./jobs/streaming-url-remediation ./jobs/streaming-url-remediation
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/streaming-url-remediation
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /streaming-url-remediation
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/streaming-url-remediation/package* ./jobs/streaming-url-remediation/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
+
+# `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
+# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
+# .npmrc the prod stage's npm install 401s on @wxyc/shared.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./streaming-url-remediation-builder/jobs/streaming-url-remediation/dist ./jobs/streaming-url-remediation/dist
+COPY --from=builder ./streaming-url-remediation-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./streaming-url-remediation-builder/shared/lml-client/dist ./shared/lml-client/dist
+
+# The candidate SELECTs walk `flowsheet` (2.6M rows) with no covering
+# index; the API's tight 5s default statement timeout is too aggressive
+# for the batch scans as the cursor advances.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+
+# Async commit: the host-guard net makes any work lost to an RDS crash
+# naturally re-runnable (an unwritten row still has a foreign host and is
+# re-selected), so the RPO trade-off is safe.
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# Identifies the connection in pg_stat_activity during triage.
+ENV DB_APPLICATION_NAME=wxyc-streaming-url-remediation
+
+# ENTRYPOINT + empty CMD so docker-level args (`--execute`, `--dry-run`)
+# pass through to the job rather than replacing the launcher — the
+# Dockerfile.streaming-url-upgrade pattern. With `CMD ["npm", "start"]`,
+# `docker run <image> --execute` would REPLACE the CMD and npm would never
+# run.
+ENTRYPOINT ["node", "/streaming-url-remediation/jobs/streaming-url-remediation/dist/job.js"]
+CMD []

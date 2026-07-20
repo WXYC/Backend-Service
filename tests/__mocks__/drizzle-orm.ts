@@ -9,6 +9,7 @@ export const sql = Object.assign(
   })),
   {
     raw: jest.fn((s: string) => ({ raw: s })),
+    join: jest.fn((fragments: unknown[], separator?: unknown) => ({ join: fragments, sep: separator })),
   }
 );
 export const desc = jest.fn((col) => ({ desc: col }));
