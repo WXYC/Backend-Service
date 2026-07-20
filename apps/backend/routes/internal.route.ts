@@ -110,7 +110,8 @@ interface ResolvedShow {
    * (degraded `Start of show: ${time}` instead of leaking a real name).
    *
    * Null when the show has no resolvable name from either source
-   * (stub shows pre-ETL-fill; legacy rows with no primary_dj_id and no
+   * (stub shows created before the payload carried `djHandle` (BS#1723)
+   * and not yet ETL-filled; legacy rows with no primary_dj_id and no
    * legacy_dj_name).
    */
   dj_name: string | null;
@@ -118,15 +119,31 @@ interface ResolvedShow {
 
 /**
  * Look up a show by legacy_show_id, creating a stub if it doesn't exist.
- * Uses onConflictDoNothing + re-select for concurrent-insert safety.
+ * Uses an insert-or-fill upsert + re-select for concurrent-insert safety:
+ * DO NOTHING when no handle is carried, otherwise ON CONFLICT DO UPDATE
+ * fills `legacy_dj_name` so a lost concurrent-insert race can't drop it.
  *
  * Also resolves the show's display dj_name via a LEFT JOIN to auth_user on
  * `shows.primary_dj_id` — same query path, no extra round-trip. The webhook
  * INSERT writes this onto marker rows so the v2 wire honours the
  * FLOWSHEET_DJ_NAME_NON_NULL contract (BS#1371).
+ *
+ * `legacyDjHandle` is the optional `entry.djHandle` from sign-on/sign-off
+ * marker payloads (tubafrenzy#607, always DJ_HANDLE — never the real name).
+ * When present it names the stub at creation, and heals an existing show
+ * whose name resolves to null — the sign-on race where the BREAKPOINT
+ * delivery creates the stub before the START_OF_SHOW delivery carries the
+ * handle. Without it, `on_air` reports null (= confirmed automation,
+ * "AUTO DJ" on iOS) until the flowsheet ETL's next half-hourly tick (BS#1723).
+ * Normalized with the same `truncate(_, 128)` the ETL applies, so the next
+ * ETL `IS DISTINCT FROM` pass sees an identical byte sequence. A non-null
+ * resolved name always wins — the heal never overwrites (BS#1371/#1449
+ * convention), and `legacy_dj_name IS NULL` in the WHERE guards against a
+ * concurrent ETL write between the probe and the UPDATE.
  */
-async function resolveShow(legacyShowId: number): Promise<ResolvedShow | null> {
+async function resolveShow(legacyShowId: number, legacyDjHandle: string | null): Promise<ResolvedShow | null> {
   if (!legacyShowId) return null;
+  const handle = truncate(legacyDjHandle, 128);
 
   const selectShow = () =>
     db
@@ -140,10 +157,45 @@ async function resolveShow(legacyShowId: number): Promise<ResolvedShow | null> {
       .limit(1);
 
   const existing = await selectShow();
-  if (existing.length > 0) return { id: existing[0].id, dj_name: existing[0].dj_name };
+  if (existing.length > 0) {
+    if (existing[0].dj_name === null && handle !== null) {
+      await db
+        .update(shows)
+        .set({ legacy_dj_name: handle })
+        .where(and(eq(shows.id, existing[0].id), isNull(shows.legacy_dj_name)));
+      const [reread] = await selectShow();
+      return reread ? { id: reread.id, dj_name: reread.dj_name } : { id: existing[0].id, dj_name: existing[0].dj_name };
+    }
+    return { id: existing[0].id, dj_name: existing[0].dj_name };
+  }
 
   // Create a stub show — the ETL will fill in details (end_time, show_name) later.
-  await db.insert(shows).values({ legacy_show_id: legacyShowId, start_time: new Date() }).onConflictDoNothing();
+  //
+  // Conflict arm: the two sign-on deliveries can interleave so tightly that
+  // BOTH probes above see no row; if the handle-bearing delivery then loses
+  // the INSERT race to the nameless one, a bare DO NOTHING would discard the
+  // handle and re-open the BS#1723 window until the next ETL tick. When we
+  // carry a handle, fill legacy_dj_name atomically instead — same
+  // never-overwrite `IS NULL` guard as the heal above, same
+  // onConflictDoUpdate-on-legacy_show_id shape as the flowsheet ETL's shows
+  // upsert. With no handle there is nothing to fill; keep DO NOTHING.
+  const stubValues = {
+    legacy_show_id: legacyShowId,
+    start_time: new Date(),
+    ...(handle !== null && { legacy_dj_name: handle }),
+  };
+  if (handle !== null) {
+    await db
+      .insert(shows)
+      .values(stubValues)
+      .onConflictDoUpdate({
+        target: shows.legacy_show_id,
+        set: { legacy_dj_name: handle },
+        setWhere: isNull(shows.legacy_dj_name),
+      });
+  } else {
+    await db.insert(shows).values(stubValues).onConflictDoNothing();
+  }
 
   const [row] = await selectShow();
   return row ? { id: row.id, dj_name: row.dj_name } : null;
@@ -215,7 +267,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       const rawLibraryId = entry.libraryReleaseId ?? 0;
       const rawRotationId = entry.rotationReleaseId ?? 0;
       const [show, albumId, rotationId] = await Promise.all([
-        resolveShow(entry.radioShowId),
+        resolveShow(entry.radioShowId, typeof entry.djHandle === 'string' ? entry.djHandle : null),
         resolveAlbumId(rawLibraryId),
         resolveRotationId(rawRotationId),
       ]);
