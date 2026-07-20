@@ -1,0 +1,12 @@
+{
+  "extends": ["../../tsconfig.base.json"],
+  "references": [{ "path": "../../shared/database" }, { "path": "../../shared/legacy-mirror" }],
+  "include": ["."],
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "paths": {
+      "@/*": ["./*"]
+    }
+  }
+}

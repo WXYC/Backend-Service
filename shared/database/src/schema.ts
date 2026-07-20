@@ -877,7 +877,10 @@ export const flowsheet = wxyc_schema.table(
     //   2. Mirror loop-guard — apps/backend/middleware/legacy/flowsheet.mirror.ts
     //      reads `legacy_entry_id != null` as a boolean meaning "this row
     //      came from tubafrenzy, do not mirror back" (avoids an infinite
-    //      ETL → mirror → webhook → ETL loop).
+    //      ETL → mirror → webhook → ETL loop). The reconcile cron
+    //      (jobs/legacy-mirror-reconcile/orchestrate.ts, BS#1707) is a use-#2
+    //      sibling: it records the just-allocated tubafrenzy ID after a
+    //      successful re-driven mirrorCreateEntry, same as the live path.
     //   3. ETL incremental sync key — jobs/flowsheet-etl/job.ts uses the
     //      same `ON CONFLICT (legacy_entry_id)` shape as #1.
     // A future change that populates legacy_entry_id to a placeholder for

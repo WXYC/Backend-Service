@@ -76,6 +76,10 @@ export const ALLOWLIST = new Map([
     'jobs/flowsheet-etl/transform.ts',
     'use #3 (DTO): produces the row shape consumed by jobs/flowsheet-etl/job.ts insert.',
   ],
+  [
+    'jobs/legacy-mirror-reconcile/orchestrate.ts',
+    'use #2 sibling (BS#1707): records the just-allocated tubafrenzy ID via `.set({ legacy_entry_id })` AFTER a successful mirrorCreateEntry, exactly like the live mirror path in flowsheet.mirror.ts. Never a placeholder for a non-tubafrenzy row, so the loop-guard read stays sound.',
+  ],
   ['shared/database/src/schema.ts', 'column declaration.'],
   ['apps/backend/services/flowsheet.service.ts', 'READS only: selection + result mapping. No writes.'],
 ]);

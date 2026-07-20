@@ -99,6 +99,25 @@ Bounded ring-buffer reports written under `mirror-logs/`. Reports never include 
 - `MIRROR_REPORT_MAX_BYTES` (default `65536` / 64 KiB) — Per-file JSON cap. Oversize payloads are replaced with a `truncated: true` summary.
 - `MIRROR_PENDING_QUEUE_SUMMARIES_MAX` (default `20`) — Max number of pending-queue summaries embedded in a fatal report.
 
+### Legacy mirror reconciliation cron (`jobs/legacy-mirror-reconcile`)
+
+Recurring cron (BS#1707) that self-heals tubafrenzy mirror rows orphaned when the live mirror's one-shot `res.finish` attempt was skipped. Two DB-durable, all-or-nothing sweeps re-drive shows (`shows.legacy_show_id IS NULL`) then their entries + signoff (`flowsheet.legacy_entry_id IS NULL`); partially-mirrored shows are reported for manual remediation, never auto-appended. Schedule is static from `package.json`'s `cron-schedule` (`0 8 * * *` UTC ≈ 03:00 ET); there is no `BACKFILL_CRON_SCHEDULE`-style override.
+
+New knobs:
+
+- `RECONCILE_WINDOW_HOURS` (default `48`) — Bounded recent window. Only shows started within this many hours are candidates; older orphans are the historical-remediation class, deliberately out of scope for this recurring sweep. Positive integer; anything else throws at startup.
+- `RECONCILE_SETTLE_MINUTES` (default `15`) — Settle window for the show-create sweep only. Shows started within this many minutes are skipped so the sweep never races a still-in-flight live mirror (which persists `legacy_show_id` within the `res.finish` settling window). Non-negative integer; `0` disables the settle bound.
+- `RECONCILE_ALERT_THRESHOLD` (default `0`) — The detection signal escalates to a Sentry warning when `orphan_shows + orphan_entries + partial_shows` exceeds this value. The default `0` alerts whenever the sweep found anything to heal or report, so the accruing condition is visible before a user notices. Non-negative integer.
+
+Reuses the shared cooperative-pause names rather than a `RECONCILE_`-prefixed fork: `LIVE_ACTIVITY_LOOKBACK_SECONDS` (default `60`; `0` disables the probe) and `LIVE_ACTIVITY_PAUSE_MS` (default `30000`) — same semantics as `flowsheet-metadata-backfill`. The pause honors `WXYC_SCHEMA_NAME` via the shared `checkLiveActivity` probe.
+
+Runtime vars supplied at `docker run --env-file .env` (all four have historically been a missed step for per-cron images, so they are called out here):
+
+- `TUBAFRENZY_URL` (default `https://www.wxyc.info`) — Base URL of the tubafrenzy mirror API the reconcile POSTs to (read at module load by `@wxyc/legacy-mirror`'s `http-mirror.ts`, shared with the live mirror path).
+- `MIRROR_API_KEY` — Bearer token for the tubafrenzy mirror API. Must match tubafrenzy's mirror-API key. Same var the live mirror uses.
+- `POSTHOG_API_KEY` — Personal/project API key for the per-DJ `backend-mirror` flag gate. When unset the mirror is enabled by default (dev/E2E convention), exactly like the live path. The cron `shutdown()`s the `posthog-node` client in `finally` (posthog-node's background flush timers would otherwise hang a short-lived container on exit).
+- `SENTRY_DSN` — Sentry project DSN. The moved `http-mirror` client reports mirror-call failures to Sentry directly, and the reconcile's detection signal (orphan-count threshold + per-show partial-mirror report) emits `captureMessage` warnings. Without a DSN the SDK silently no-ops; provision it so the self-heal is observable.
+
 ## Metadata Services
 
 - `LIBRARY_METADATA_URL` — library-metadata-lookup base URL (e.g. `http://localhost:8001`). Required for proxy endpoints, metadata enrichment, and track search. All Discogs access is routed through LML. Do not include the `/api/v1` path prefix; the LML client adds it automatically.
