@@ -433,6 +433,54 @@ describe('lml.client', () => {
 
       expect(result).toEqual(lookupResponse);
     });
+
+    // BS#1710: the client sanitizes streaming URLs at the response boundary so
+    // no downstream writer persists a non-Spotify URL under the spotify_url
+    // slot (iOS binds it to a hardwired green "Spotify" button).
+    it('nulls a non-Spotify URL sitting in artwork.spotify_url (BS#1710)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [
+              {
+                library_item: { id: 1580 },
+                artwork: {
+                  spotify_url: 'https://www.deezer.com/album/254381182',
+                  apple_music_url: 'https://music.apple.com/us/album/foo/1',
+                },
+              },
+            ],
+            search_type: 'direct',
+            song_not_found: false,
+            found_on_compilation: false,
+          }),
+      } as unknown as globalThis.Response);
+
+      const result = await lookupMetadata('Kid 606', 'Down With The Scene');
+
+      expect(result.results[0].artwork?.spotify_url).toBeNull();
+      // A genuine Apple URL in its own slot is preserved.
+      expect(result.results[0].artwork?.apple_music_url).toBe('https://music.apple.com/us/album/foo/1');
+    });
+
+    it('preserves a genuine Spotify URL (BS#1710)', async () => {
+      const url = 'https://open.spotify.com/album/abc123';
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [{ library_item: { id: 1 }, artwork: { spotify_url: url } }],
+            search_type: 'direct',
+            song_not_found: false,
+            found_on_compilation: false,
+          }),
+      } as unknown as globalThis.Response);
+
+      const result = await lookupMetadata('Autechre', 'Confield');
+
+      expect(result.results[0].artwork?.spotify_url).toBe(url);
+    });
   });
 
   describe('lookupBySong', () => {
@@ -589,6 +637,38 @@ describe('lml.client', () => {
         [2, 'error'],
       ]);
       expect(result.results[2].message).toBe('TimeoutError');
+    });
+
+    // BS#1710: the bulk seam sanitizes each per-item verdict's nested
+    // LookupResponse — the album-level backfill (BS#1041) writes through here.
+    it('nulls a non-Spotify URL in a per-item verdict artwork.spotify_url (BS#1710)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [
+              {
+                index: 0,
+                status: 'match',
+                lookup: {
+                  results: [
+                    {
+                      library_item: { id: 1580 },
+                      artwork: { spotify_url: 'https://www.deezer.com/album/254381182' },
+                    },
+                  ],
+                },
+              },
+              { index: 1, status: 'error', lookup: null, message: 'TimeoutError' },
+            ],
+          }),
+      } as unknown as globalThis.Response);
+
+      const result = await bulkLookupMetadata([itemFor('Kid 606', 'x'), itemFor('y', 'z')]);
+
+      expect(result.results[0].lookup?.results[0].artwork?.spotify_url).toBeNull();
+      // A null `lookup` (status: error) is passed through untouched.
+      expect(result.results[1].lookup).toBeNull();
     });
 
     it('rejects empty items locally without hitting the wire', async () => {
