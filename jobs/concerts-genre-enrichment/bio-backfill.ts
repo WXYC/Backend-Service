@@ -12,10 +12,22 @@
  * UPDATE. Deliberately does NOT touch genres/styles on these rows (BS#1624
  * already populated them) and does NOT widen the nightly candidate anti-join.
  *
+ * Only a verdict carrying a real (non-empty) bio is written — that row then has
+ * `artist_bio IS NOT NULL` and drops out of the candidate set for good. Two
+ * verdict shapes are skipped and leave the row `NULL`-retryable: `source:
+ * 'unavailable'` (LML couldn't reach Discogs — transient) and a responded but
+ * blank/absent profile (Discogs genuinely has no bio). Writing the latter as
+ * NULL would achieve nothing (the candidate query keys on `artist_bio IS
+ * NULL`), so the skip avoids a pointless self-UPDATE. The consequence: a
+ * blank-profile artist is re-attempted on every re-run — this pass does NOT
+ * converge to a no-op re-run, which is acceptable for a one-time MANUAL job
+ * (bounded, rate-limited) but is why it must never be scheduled as a cron. True
+ * convergence would need a `bio_attempted_at` marker (deferred, out of scope).
+ *
  * Same page/fetch/skip-unavailable/stop-early control flow as `orchestrate.ts`
  * (kept as a sibling function rather than folded in, since the two write
  * completely different columns via different statements) — see that file for
- * the retry-vs-terminal rationale this mirrors.
+ * the breaker-open early-stop rationale this mirrors.
  *
  * Dep-injected so the unit suite drives the loop without PG or LML — see
  * tests/unit/jobs/concerts-genre-enrichment/bio-backfill.test.ts.
@@ -37,6 +49,8 @@ export type BioBackfillTotals = {
   updated: number;
   /** Of `fetched`, verdicts with `source: 'unavailable'` — skipped, left retryable. */
   unavailable_skipped: number;
+  /** Of `fetched`, responded verdicts with a blank/absent bio — skipped, left `NULL`-retryable. */
+  no_bio_skipped: number;
   /** Page-level transport failures (per artist) + write failures. */
   errors: number;
   /** Set when a whole page came back `unavailable` (breaker open) and the run stopped short. */
@@ -49,6 +63,7 @@ export const emptyBioBackfillTotals = (): BioBackfillTotals => ({
   fetched: 0,
   updated: 0,
   unavailable_skipped: 0,
+  no_bio_skipped: 0,
   errors: 0,
   stopped_early: false,
 });
@@ -129,16 +144,26 @@ export const runBioBackfill = async (
     for (let i = 0; i < page.length; i++) {
       const verdict = response.results[i];
       totals.fetched += 1;
-      // `unavailable` = LML couldn't reach Discogs. Skip the write so the row
-      // keeps `artist_bio IS NULL` and the candidate query re-selects it next
-      // run. A responded verdict (even a null bio — a blank Discogs profile is
-      // a real terminal answer) writes.
+      // `unavailable` = LML couldn't reach Discogs (transient). Skip the write so
+      // the row keeps `artist_bio IS NULL` and the candidate query re-selects it
+      // next run — and count it toward `pageUnavailable` so an all-unavailable
+      // page trips the breaker-open early stop below.
       if (verdict.source === 'unavailable') {
         totals.unavailable_skipped += 1;
         pageUnavailable += 1;
         continue;
       }
-      rows.push({ discogs_artist_id: page[i].discogs_artist_id, artist_bio: verdict.bio ?? null });
+      // Responded, but Discogs has no profile text. Writing NULL would be a
+      // pointless self-UPDATE (the candidate query keys on `artist_bio IS
+      // NULL`), so skip it — the row stays NULL-retryable, exactly like a
+      // populated-bio artist stays terminal. NOT a breaker signal, so this does
+      // NOT count toward `pageUnavailable`.
+      const bio = verdict.bio ?? null;
+      if (bio === null || bio === '') {
+        totals.no_bio_skipped += 1;
+        continue;
+      }
+      rows.push({ discogs_artist_id: page[i].discogs_artist_id, artist_bio: bio });
     }
 
     // A page that comes back entirely `unavailable` means LML's Discogs breaker

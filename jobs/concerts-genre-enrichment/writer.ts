@@ -65,6 +65,11 @@ export type BioBackfillRow = {
  * silently drops out of `setWhere` and `updated` reports its true count.
  * Mirrors the fill-null pattern in `jobs/flowsheet-linked-reenrichment` (the
  * structural donor for `album_metadata`).
+ *
+ * Callers pass ONLY verdicts carrying a real (non-empty) bio — `bio-backfill.ts`
+ * skips blank/absent and `unavailable` verdicts upstream, so this statement
+ * never writes a NULL bio (which would be a no-op self-UPDATE the `setWhere`
+ * would still count).
  */
 export const applyBioBackfill = async (rows: BioBackfillRow[]): Promise<{ updated: number }> => {
   if (rows.length === 0) return { updated: 0 };

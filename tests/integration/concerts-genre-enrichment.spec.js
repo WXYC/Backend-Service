@@ -47,6 +47,14 @@ const ARTIST_ENRICHED = 'Juana Molina'; // library artist, resolved + enriched
 const ARTIST_LIBRARY_UNENRICHED = 'Stereolab'; // library artist, resolved, not yet enriched
 const ARTIST_BIO = 'Argentine singer-songwriter known for genre-blurring electro-folk records.';
 
+// BS#1734 bio-backfill fixtures: genres-only artist_metadata rows with artist_bio NULL.
+const DISCOGS_BIO_NULL_LIB = 91624005; // library headliner (name via artists.artist_name), genres-only, bio NULL
+const DISCOGS_BIO_NULL_EXT = 91624006; // Discogs-only headliner (name via freshest non-removed concert), bio NULL
+const DISCOGS_BIO_FILL = 91624007; // dedicated mutable null-bio row for the fill test
+const ARTIST_BIO_NULL_LIB = 'Hermanos Gutiérrez';
+const ARTIST_BIO_FILL = 'Nilüfer Yanya';
+const BIO_EXT_ACTIVE_RAW = 'Csillagrablók'; // freshest ACTIVE billing for the Discogs-only headliner
+
 function makeSql() {
   return postgres({
     host: process.env.DB_HOST || 'localhost',
@@ -109,6 +117,49 @@ async function upsertArtistGenres(sql, rows) {
   `;
 }
 
+/**
+ * Bio-backfill candidate mirror of
+ * `jobs/concerts-genre-enrichment/query.ts#loadBioBackfillCandidates` (BS#1734),
+ * scoped to the test's synthetic ids so the shared CI schema's other null-bio
+ * rows can't perturb the assertions (the real query is unscoped). Exercises the
+ * `LATERAL … LIMIT 1` name resolution: freshest NON-removed concert billing.
+ */
+async function loadBioBackfillCandidates(sql, ids) {
+  return sql`
+    SELECT
+      am."discogs_artist_id" AS discogs_artist_id,
+      COALESCE(a."artist_name", c."headlining_artist_raw") AS artist_name
+    FROM ${sql(SCHEMA)}."artist_metadata" am
+    LEFT JOIN ${sql(SCHEMA)}."artists" a ON a."discogs_artist_id" = am."discogs_artist_id"
+    LEFT JOIN LATERAL (
+      SELECT cc."headlining_artist_raw"
+      FROM ${sql(SCHEMA)}."concerts" cc
+      WHERE (cc."headlining_discogs_artist_id" = am."discogs_artist_id"
+             OR cc."headlining_artist_id" = a."id")
+        AND cc."removed_at" IS NULL
+        AND cc."headlining_artist_raw" IS NOT NULL
+      ORDER BY cc."starts_on" DESC NULLS LAST, cc."id" DESC
+      LIMIT 1
+    ) c ON TRUE
+    WHERE am."artist_bio" IS NULL
+      AND COALESCE(a."artist_name", c."headlining_artist_raw") IS NOT NULL
+      AND am."discogs_artist_id" = ANY(${ids})
+    ORDER BY am."discogs_artist_id" ASC
+  `;
+}
+
+/** Fill-null bio UPDATE mirror of `writer.ts#applyBioBackfill` (BS#1734). */
+async function applyBioBackfill(sql, rows) {
+  if (rows.length === 0) return [];
+  return sql`
+    INSERT INTO ${sql(SCHEMA)}."artist_metadata" ${sql(rows, 'discogs_artist_id', 'genres', 'styles', 'artist_bio')}
+    ON CONFLICT ("discogs_artist_id") DO UPDATE
+      SET "artist_bio" = excluded."artist_bio", "updated_at" = NOW()
+      WHERE ${sql(SCHEMA)}."artist_metadata"."artist_bio" IS NULL
+    RETURNING "discogs_artist_id"
+  `;
+}
+
 describe('concerts genre enrichment (BS#1624)', () => {
   let auth;
   let sql;
@@ -143,7 +194,7 @@ describe('concerts genre enrichment (BS#1624)', () => {
     // delete hits those seed rows (library_artist_id_artists_id_fk violation).
     // The synthetic ids (9162400x) exist only in this test.
     await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE discogs_artist_id = ANY($1)`, [
-      [DISCOGS_ENRICHED, DISCOGS_LIBRARY_UNENRICHED],
+      [DISCOGS_ENRICHED, DISCOGS_LIBRARY_UNENRICHED, DISCOGS_BIO_NULL_LIB, DISCOGS_BIO_FILL],
     ]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".artist_metadata WHERE discogs_artist_id = ANY($1)`, [
       [
@@ -153,6 +204,9 @@ describe('concerts genre enrichment (BS#1624)', () => {
         DISCOGS_PAST,
         DISCOGS_UPSERT_A,
         DISCOGS_UPSERT_B,
+        DISCOGS_BIO_NULL_LIB,
+        DISCOGS_BIO_NULL_EXT,
+        DISCOGS_BIO_FILL,
       ],
     ]);
   };
@@ -239,6 +293,73 @@ describe('concerts genre enrichment (BS#1624)', () => {
       headlining_artist_raw: 'Long Gone Touring Act',
       headlining_discogs_artist_id: DISCOGS_PAST,
     });
+
+    // --- BS#1734 bio-backfill fixtures: genres-only rows with artist_bio NULL. ---
+
+    // Library headliner: has an artists row (name resolves via artists.artist_name)
+    // and an artist_metadata row WITH genres but a NULL bio.
+    const [a3] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters, discogs_artist_id)
+       VALUES ($1, $1, 'ZZ', $2) RETURNING id`,
+      [ARTIST_BIO_NULL_LIB, DISCOGS_BIO_NULL_LIB]
+    );
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles, artist_bio)
+       VALUES ($1, $2, $3, NULL)`,
+      [DISCOGS_BIO_NULL_LIB, ['Ambient'], []]
+    );
+    await seedConcert({
+      key: 'bio-null-lib',
+      venue_id: venueId,
+      starts_on: IN_15,
+      headlining_artist_raw: ARTIST_BIO_NULL_LIB,
+      headlining_artist_id: a3.id,
+    });
+
+    // Discogs-only headliner: NO artists row, genres-only artist_metadata row with
+    // NULL bio. Name must resolve to the freshest NON-removed concert billing —
+    // three concerts prove both the removed_at exclusion and the DESC ordering:
+    //   IN_20 REMOVED (latest date, but excluded), IN_15 ACTIVE (the winner),
+    //   IN_10 ACTIVE (older, loses the tie-break).
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles, artist_bio)
+       VALUES ($1, $2, $3, NULL)`,
+      [DISCOGS_BIO_NULL_EXT, [], []]
+    );
+    await seedConcert({
+      key: 'bio-ext-removed',
+      venue_id: venueId,
+      starts_on: IN_20,
+      headlining_artist_raw: 'Stale Removed Billing',
+      headlining_discogs_artist_id: DISCOGS_BIO_NULL_EXT,
+      removed_at: '2020-01-01T00:00:00Z',
+    });
+    await seedConcert({
+      key: 'bio-ext-active',
+      venue_id: venueId,
+      starts_on: IN_15,
+      headlining_artist_raw: BIO_EXT_ACTIVE_RAW,
+      headlining_discogs_artist_id: DISCOGS_BIO_NULL_EXT,
+    });
+    await seedConcert({
+      key: 'bio-ext-active-older',
+      venue_id: venueId,
+      starts_on: IN_10,
+      headlining_artist_raw: 'Older Active Billing',
+      headlining_discogs_artist_id: DISCOGS_BIO_NULL_EXT,
+    });
+
+    // Dedicated mutable null-bio row for the fill test (kept off the load-test ids).
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters, discogs_artist_id)
+       VALUES ($1, $1, 'ZZ', $2) RETURNING id`,
+      [ARTIST_BIO_FILL, DISCOGS_BIO_FILL]
+    );
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles, artist_bio)
+       VALUES ($1, $2, $3, NULL)`,
+      [DISCOGS_BIO_FILL, ['Jazz'], []]
+    );
   });
 
   afterAll(async () => {
@@ -352,6 +473,57 @@ describe('concerts genre enrichment (BS#1624)', () => {
       const unresolved = res.body.concerts.find((c) => c.headlining_artist_raw === 'Some Unresolved Billing & Another');
       expect(unresolved).toBeDefined();
       expect(unresolved.artist_bio).toBeNull();
+    });
+  });
+
+  describe('bio backfill (mirror of query.ts + writer.ts, BS#1734)', () => {
+    it('selects genres-only null-bio rows, resolves a deterministic non-removed name, excludes populated bios', async () => {
+      const rows = await loadBioBackfillCandidates(sql, [DISCOGS_ENRICHED, DISCOGS_BIO_NULL_LIB, DISCOGS_BIO_NULL_EXT]);
+      const byId = new Map(rows.map((r) => [Number(r.discogs_artist_id), r.artist_name]));
+
+      // A row that already carries a bio is not a candidate.
+      expect(byId.has(DISCOGS_ENRICHED)).toBe(false);
+      // Library headliner → canonical artists.artist_name.
+      expect(byId.get(DISCOGS_BIO_NULL_LIB)).toBe(ARTIST_BIO_NULL_LIB);
+      // Discogs-only headliner → freshest ACTIVE billing: not the later-dated but
+      // REMOVED concert (proves removed_at exclusion), not the older active one
+      // (proves the starts_on DESC tie-break).
+      expect(byId.get(DISCOGS_BIO_NULL_EXT)).toBe(BIO_EXT_ACTIVE_RAW);
+    });
+
+    it('fills a null bio, never overwrites a populated one, and a re-run over the filled row updates 0', async () => {
+      // Fill the dedicated null-bio row AND attempt to clobber the already-populated one.
+      const first = await applyBioBackfill(sql, [
+        { discogs_artist_id: DISCOGS_BIO_FILL, genres: [], styles: [], artist_bio: 'A freshly resolved bio.' },
+        { discogs_artist_id: DISCOGS_ENRICHED, genres: [], styles: [], artist_bio: 'MUST NOT overwrite.' },
+      ]);
+      const firstIds = first.map((r) => Number(r.discogs_artist_id));
+      // Only the NULL row is updated; the setWhere blocks the populated one.
+      expect(firstIds).toContain(DISCOGS_BIO_FILL);
+      expect(firstIds).not.toContain(DISCOGS_ENRICHED);
+
+      const [filled] = await sql.unsafe(
+        `SELECT artist_bio FROM "${SCHEMA}".artist_metadata WHERE discogs_artist_id = $1`,
+        [DISCOGS_BIO_FILL]
+      );
+      expect(filled.artist_bio).toBe('A freshly resolved bio.');
+      const [untouched] = await sql.unsafe(
+        `SELECT artist_bio FROM "${SCHEMA}".artist_metadata WHERE discogs_artist_id = $1`,
+        [DISCOGS_ENRICHED]
+      );
+      expect(untouched.artist_bio).toBe(ARTIST_BIO);
+
+      // Re-run over the now-filled row → 0 updates (setWhere excludes non-null),
+      // and the stored bio is unchanged.
+      const second = await applyBioBackfill(sql, [
+        { discogs_artist_id: DISCOGS_BIO_FILL, genres: [], styles: [], artist_bio: 'A different bio (v2).' },
+      ]);
+      expect(second).toHaveLength(0);
+      const [afterRerun] = await sql.unsafe(
+        `SELECT artist_bio FROM "${SCHEMA}".artist_metadata WHERE discogs_artist_id = $1`,
+        [DISCOGS_BIO_FILL]
+      );
+      expect(afterRerun.artist_bio).toBe('A freshly resolved bio.');
     });
   });
 });
