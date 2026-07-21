@@ -26,6 +26,18 @@ The other defenses in [Project #26 — Migration Deploy Hardening](https://githu
 
 **Practical rule of thumb**: when a PR that touches `shared/database/src/migrations/**` merges, verify the auto-deploy on that push succeeded within 24 hours. If it didn't, run `deploy-manual.yml` to clear the wedge before another migration PR merges on top. The rule is advisory — don't gate merges on cadence, since PR authors don't necessarily own deploys.
 
+## Build image caching
+
+<!-- @rule id=deploy-buildx-registry-cache enforced-by=none added=2026-07-21 incidents=#run-29874378612 -->
+
+`build` (in `deploy-base.yml`) uses `docker/build-push-action@v6` with a registry-backed buildx cache instead of a plain `docker build`: `cache-from`/`cache-to` point at a `:buildcache` tag in each target's own ECR repository (`type=registry`, `mode=max`). This matters because the matrix is Turbo-affected-scoped (`setup` → Detect Build Target, `TURBO_SCM_BASE=github.event.before`) and per-target version-skips a rebuild if its tag already exists in ECR (`Check if image exists in ECR`) — both guards make a **leaf** change (one app/job, or none) cheap regardless of caching. A change to a shared dependency (`shared/database`, `shared/authentication`, `shared/lml-client`, a `@wxyc/shared` bump, or `package-lock.json`) sits above every target in Turbo's graph, so all ~38 targets are marked affected and each gets a **new** version tag that can't hit the ECR-exists skip — every image rebuilds. The registry cache is what makes that full-fleet rebuild reuse unchanged layers instead of recomputing all of them from scratch, as happened in the ~23 min `f065761d` deploy ([run 29874378612](https://github.com/WXYC/Backend-Service/actions/runs/29874378612)).
+
+`cache-to` **must** set `image-manifest=true,oci-mediatypes=true` — ECR rejects the default BuildKit cache-manifest media type and only accepts a cache exported as an OCI image manifest; omitting these options makes the cache push fail. Don't switch to `type=gha`: GitHub Actions cache is capped at 10 GB per repo, and ~38 images' layer caches would thrash/evict each other well below that ceiling — ECR registry cache scales per-repo instead. The three-tag push contract (`:${DEPLOY_TAG}`, `:sha-${github.sha}`, conditional `:latest`) is unchanged, just moved from manual `docker tag`/`docker push` calls into the action's `tags:` list.
+
+The `npm ci` layer still busts on any `package-lock.json` change — exactly the fleet-wide shared-dep case — so per-target layer caching alone doesn't help the single most expensive layer; it's still recomputed once per target. Collapsing that into a single shared base image every `Dockerfile.<target>` builds `FROM` is a candidate follow-up if the registry cache alone doesn't cut wall-clock enough (BS#1738's suggested-approach step 2), not yet implemented.
+
+**ECR storage**: the `:buildcache` tag holds the live cache manifest per repo; `.github/ecr-lifecycle-policy.json` (applied via `Apply ECR Lifecycle Policy`, run every `build` invocation so a newly-created repository picks it up on its first build) expires untagged images (the dangling layers left behind each time `:buildcache` is retagged) after 1 day and caps `sha-*` tags at the 20 most recent per repo. The `buildcache` tag itself is never matched by either rule, since it's always tagged and never has the `sha-` prefix.
+
 ## CI workflow pin maintenance
 
 Three classes of pin in `.github/workflows/*.yml` exist for supply-chain reasons (mirrors WXYC/request-o-matic#124's free-tier hardening; see WXYC/wiki#67 for the org-wide rollout). They will bit-rot and need occasional bumps:
