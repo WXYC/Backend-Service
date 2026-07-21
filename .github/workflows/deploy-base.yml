@@ -267,7 +267,13 @@ jobs:
           aws ecr describe-repositories --repository-names $TARGET_APP --region $AWS_REGION 2>/dev/null || \
             aws ecr create-repository --repository-name $TARGET_APP --region $AWS_REGION
 
+      # Best-effort housekeeping, off the deploy critical path: a missing
+      # ecr:PutLifecyclePolicy permission or a transient API error must not
+      # block the build/deploy. If it fails the step goes yellow (visible)
+      # but the job continues; the only cost is untagged cache layers not
+      # being reaped until the next successful run.
       - name: Apply ECR Lifecycle Policy
+        continue-on-error: true
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -307,25 +313,35 @@ jobs:
           SHA_TAG="sha-${{ github.sha }}"
           IMAGE_URI="${{ secrets.AWS_ECR_URI }}/${TARGET_APP}"
 
-          TAGS="$IMAGE_URI:$DEPLOY_TAG
-          $IMAGE_URI:$SHA_TAG"
-
-          # Always push SHA tag for cache invalidation detection
+          # docker/build-push-action accepts a comma- or newline-separated
+          # tags list. Build it comma-separated on one line so no leading
+          # indentation leaks into a tag. Always include the SHA tag for
+          # cache-invalidation detection.
+          TAGS="$IMAGE_URI:$DEPLOY_TAG,$IMAGE_URI:$SHA_TAG"
           if [[ "${{ inputs.version }}" == "latest" || -z "${{ inputs.version }}" ]]; then
-            TAGS="$TAGS
-          $IMAGE_URI:latest"
+            TAGS="$TAGS,$IMAGE_URI:latest"
           fi
 
-          {
-            echo "tags<<EOF"
-            echo "$TAGS"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
 
       # image-manifest=true,oci-mediatypes=true is required — ECR rejects the
       # default BuildKit cache-manifest media type on cache-to. Don't switch
       # to type=gha: its 10GB-per-repo cap thrashes across ~38 images' caches;
       # ECR registry cache scales per-repo instead. See docs/deploy.md.
+      #
+      # provenance/sbom are disabled on purpose. buildx >=0.11 (which
+      # build-push-action defaults on) generates a provenance attestation when
+      # pushing — mode=max on a public repo like this one — which wraps the
+      # single linux/amd64 image in an OCI image index with an extra,
+      # *untagged* attestation manifest. The ECR lifecycle rule expiring
+      # untagged images after 1 day would then reap the child manifests of a
+      # tagged deploy image, breaking `docker pull :<version>` on a later
+      # rollback. Disabling both keeps the push a single manifest, identical
+      # in shape to the old `docker build`/`docker push`. See docs/deploy.md.
+      #
+      # cache-to uses ignore-error=true so a transient ECR cache-export
+      # failure degrades to a full build instead of failing the deploy;
+      # caching is an optimization, not on the deploy critical path.
       - name: Build and Push Image
         if: steps.check_image.outputs.image_exists == 'false'
         uses: docker/build-push-action@v6
@@ -334,11 +350,13 @@ jobs:
           file: Dockerfile.${{ matrix.target }}
           platforms: linux/amd64
           push: true
+          provenance: false
+          sbom: false
           build-args: |
             NPM_TOKEN=${{ secrets.NPM_TOKEN }}
           tags: ${{ steps.image_tags.outputs.tags }}
           cache-from: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache
-          cache-to: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+          cache-to: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
 
   migrate:
     needs: [handle-git-tags, setup]
