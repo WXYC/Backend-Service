@@ -267,6 +267,18 @@ jobs:
           aws ecr describe-repositories --repository-names $TARGET_APP --region $AWS_REGION 2>/dev/null || \
             aws ecr create-repository --repository-name $TARGET_APP --region $AWS_REGION
 
+      - name: Apply ECR Lifecycle Policy
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          TARGET_APP=${{ matrix.target }}
+          aws ecr put-lifecycle-policy \
+            --repository-name "$TARGET_APP" \
+            --region "$AWS_REGION" \
+            --lifecycle-policy-text file://.github/ecr-lifecycle-policy.json
+
       - name: Check if image exists in ECR
         id: check_image
         env:
@@ -286,39 +298,47 @@ jobs:
             echo "image_exists=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build Image
+      - name: Compute Image Tags
         if: steps.check_image.outputs.image_exists == 'false'
+        id: image_tags
         run: |
           TARGET_APP=${{ matrix.target }}
-
-          docker build --platform linux/amd64 --build-arg NPM_TOKEN=${{ secrets.NPM_TOKEN }} -f Dockerfile.${TARGET_APP} -t ${TARGET_APP}:ci .
-
-      - name: Tag and Push Image
-        if: steps.check_image.outputs.image_exists == 'false'
-        run: |
-          TARGET_APP=${{ matrix.target }}
-          TAG=${{ steps.determine_version.outputs.deploy_version }}
+          DEPLOY_TAG=${{ steps.determine_version.outputs.deploy_version }}
           SHA_TAG="sha-${{ github.sha }}"
-
           IMAGE_URI="${{ secrets.AWS_ECR_URI }}/${TARGET_APP}"
 
-          echo "Tagging Docker image..."
-          docker tag ${TARGET_APP}:ci $IMAGE_URI:$TAG
-
-          echo "Pushing Docker image to ECR..."
-          docker push $IMAGE_URI:$TAG
+          TAGS="$IMAGE_URI:$DEPLOY_TAG
+          $IMAGE_URI:$SHA_TAG"
 
           # Always push SHA tag for cache invalidation detection
-          echo "Tagging Docker image with SHA..."
-          docker tag ${TARGET_APP}:ci $IMAGE_URI:$SHA_TAG
-          docker push $IMAGE_URI:$SHA_TAG
-
           if [[ "${{ inputs.version }}" == "latest" || -z "${{ inputs.version }}" ]]; then
-          echo "Tagging Docker image with 'latest'..."
-          docker tag ${TARGET_APP}:ci $IMAGE_URI:latest
-          echo "Pushing Docker image to ECR with 'latest' tag..."
-          docker push $IMAGE_URI:latest
+            TAGS="$TAGS
+          $IMAGE_URI:latest"
           fi
+
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      # image-manifest=true,oci-mediatypes=true is required — ECR rejects the
+      # default BuildKit cache-manifest media type on cache-to. Don't switch
+      # to type=gha: its 10GB-per-repo cap thrashes across ~38 images' caches;
+      # ECR registry cache scales per-repo instead. See docs/deploy.md.
+      - name: Build and Push Image
+        if: steps.check_image.outputs.image_exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.target }}
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            NPM_TOKEN=${{ secrets.NPM_TOKEN }}
+          tags: ${{ steps.image_tags.outputs.tags }}
+          cache-from: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache
+          cache-to: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
   migrate:
     needs: [handle-git-tags, setup]

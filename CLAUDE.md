@@ -11,7 +11,7 @@ CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in
 - **[`docs/env-vars.md`](docs/env-vars.md)** — Full environment-variable reference (Backend, DB, Auth, Email, Sentry, Slack, ETL, mirror queue, cross-cache-identity flags)
 - **[`docs/replication.md`](docs/replication.md)** — Local PostgreSQL logical-replication setup and operation
 - **[`docs/cdc.md`](docs/cdc.md)** — CDC WebSocket endpoint, event format, reconciliation monitor
-- **[`docs/deploy.md`](docs/deploy.md)** — Deploy cadence, migration-chain risk, deploy-wedge anatomy, CI workflow pin maintenance (permissions, gha/v1 pins, caller-callee permissions trap from #857)
+- **[`docs/deploy.md`](docs/deploy.md)** — Deploy cadence, migration-chain risk, deploy-wedge anatomy, buildx registry layer caching (ECR manifest requirement, lifecycle policy), CI workflow pin maintenance (permissions, gha/v1 pins, caller-callee permissions trap from #857)
 - **[`docs/authentication.md`](docs/authentication.md)** — Roles, permissions matrix, JWT payload, `requirePermissions` middleware flow, `AUTH_BYPASS`, better-auth role-mismatch gotcha
 - **[`docs/testing.md`](docs/testing.md)** — Unit + integration + CI-mock test setup, jest configs, CI workflow job list
 - **[`docs/dev-db-fixture.md`](docs/dev-db-fixture.md)** — Dev DB seed pipeline (`seed_db.sql` + `seed-clone.sql`), `LOAD_CLONE_FIXTURE` gate, `predev` rebuild hook, `db:stop` volume drop
