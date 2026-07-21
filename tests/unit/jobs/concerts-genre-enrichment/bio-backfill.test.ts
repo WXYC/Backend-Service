@@ -4,9 +4,9 @@
  * Same dep-injected seam as orchestrate.test.ts (candidate loader, fake
  * `fetchGenres`, fake `applyBioBackfill`). This suite pins:
  *
- *   - candidates page through LML and a bio verdict updates the row;
- *   - a null-bio verdict still updates (a blank Discogs profile is a real
- *     terminal answer, not a retry signal);
+ *   - candidates page through LML and a real bio verdict updates the row;
+ *   - a responded-but-blank bio is skipped, not written (a NULL self-UPDATE
+ *     achieves nothing; the row stays NULL-retryable — no attempt marker);
  *   - `unavailable` verdicts are skipped (left retryable);
  *   - a whole-page `unavailable` stops the run early;
  *   - dry-run enumerates but never calls LML or the writer;
@@ -114,15 +114,28 @@ describe('runBioBackfill (BS#1734)', () => {
     expect(totals).toMatchObject({ candidates: 0, pages: 0, updated: 0 });
   });
 
-  it('updates a row with a null bio (a blank Discogs profile is terminal, not a retry signal)', async () => {
+  it('skips a responded-but-blank bio, leaving the row NULL-retryable (no attempt marker)', async () => {
     const { deps, writes } = makeDeps([candidate(300, 'Obscure Touring Act')], {
       fetchGenres: jest.fn<FetchGenresFn>().mockResolvedValue(genresResponse([{ bio: null }])),
     });
 
     const totals = await runBioBackfill(deps, options());
 
-    expect(writes).toEqual([{ discogs_artist_id: 300, artist_bio: null }]);
-    expect(totals).toMatchObject({ fetched: 1, updated: 1 });
+    // A blank profile is not written (a NULL self-UPDATE would achieve nothing);
+    // the row keeps `artist_bio IS NULL` and is re-selected on a future run.
+    expect(writes).toEqual([]);
+    expect(totals).toMatchObject({ fetched: 1, no_bio_skipped: 1, updated: 0 });
+  });
+
+  it('skips an empty-string bio the same way as a null bio', async () => {
+    const { deps, writes } = makeDeps([candidate(301, 'Blank Profile Act')], {
+      fetchGenres: jest.fn<FetchGenresFn>().mockResolvedValue(genresResponse([{ bio: '' }])),
+    });
+
+    const totals = await runBioBackfill(deps, options());
+
+    expect(writes).toEqual([]);
+    expect(totals).toMatchObject({ fetched: 1, no_bio_skipped: 1, updated: 0 });
   });
 
   it('skips `unavailable` verdicts (left retryable)', async () => {

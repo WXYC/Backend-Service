@@ -46,7 +46,7 @@ The nightly candidate query (and `--backfill`) only ever select artists with **n
 docker run --rm --env-file .env <image> --bio-backfill
 ```
 
-Selects `discogs_artist_id` from `artist_metadata WHERE artist_bio IS NULL`, re-queries the same LML bulk endpoint, and writes via a fill-null-only `INSERT ... ON CONFLICT DO UPDATE ... WHERE artist_bio IS NULL` (`writer.ts#applyBioBackfill`) — never touches `genres`/`styles`, never overwrites a bio already present. Idempotent; re-running only re-attempts rows still `NULL` (including artists LML genuinely has no Discogs profile text for — a responded `null` bio is written as a terminal answer, not left for retry; only a `source: 'unavailable'` verdict stays retryable).
+Selects `discogs_artist_id` from `artist_metadata WHERE artist_bio IS NULL`, re-queries the same LML bulk endpoint, and writes via a fill-null-only `INSERT ... ON CONFLICT DO UPDATE ... WHERE artist_bio IS NULL` (`writer.ts#applyBioBackfill`) — never touches `genres`/`styles`, never overwrites a bio already present. Only a verdict with a real (non-empty) bio is written; that row then has `artist_bio IS NOT NULL` and is terminal. Two verdict shapes leave the row `NULL`-retryable and are re-attempted on a re-run: `source: 'unavailable'` (LML couldn't reach Discogs — transient) and a responded-but-blank profile (Discogs genuinely has no bio — persistent). Because there is no attempt marker, a blank-profile artist stays in the candidate set indefinitely, so **this is a one-time manual pass, not a no-op-on-re-run cron** — re-running it re-queries every blank-profile artist (bounded and rate-limited, but not free). A `bio_attempted_at` marker would be required for a true no-op re-run; that is deferred as out of scope.
 
 ## Env
 

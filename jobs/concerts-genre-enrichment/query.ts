@@ -105,19 +105,37 @@ export const loadEnrichmentCandidates = async (backfill = false): Promise<Enrich
  * pass that fills them (`jobs/concerts-genre-enrichment/bio-backfill.ts`).
  *
  * Name resolution mirrors the candidate query's `eff` subquery: a library
- * artist's canonical `artists.artist_name`, or the raw headliner billing off
- * any concert row that resolved to this Discogs id (the `artist_metadata` row
- * only exists because some concert resolved to it, at either lane).
+ * artist's canonical `artists.artist_name`, or — for a Discogs-only touring
+ * artist with no `artists` row — the raw headliner billing from its most-recent
+ * NON-removed concert. That billing comes from a `LATERAL … ORDER BY starts_on
+ * DESC, id DESC LIMIT 1` rather than a bare OR-join, so the pick is
+ * deterministic (freshest billing wins a tie, not an arbitrary row) and the
+ * lookup returns exactly one concert per artist instead of fanning `am` out
+ * across every matching concert. `am.discogs_artist_id` is the PK, so the result
+ * is already one row per artist — no `DISTINCT ON` needed.
+ *
+ * A blank-profile artist that a prior run wrote NULL for stays a candidate:
+ * there is no attempt marker, so `--bio-backfill` does not converge to a true
+ * no-op re-run. That is acceptable for a one-time manual pass (see
+ * `bio-backfill.ts`); it must not be scheduled as a recurring cron.
  */
 export const loadBioBackfillCandidates = async (): Promise<EnrichmentCandidate[]> => {
   const result: unknown = await db.execute(sql`
-    SELECT DISTINCT ON (am."discogs_artist_id")
+    SELECT
       am."discogs_artist_id" AS discogs_artist_id,
       COALESCE("a"."artist_name", "c"."headlining_artist_raw") AS artist_name
     FROM ${ARTIST_METADATA_TABLE} am
     LEFT JOIN ${ARTISTS_TABLE} "a" ON "a"."discogs_artist_id" = am."discogs_artist_id"
-    LEFT JOIN ${CONCERTS_TABLE} "c" ON "c"."headlining_discogs_artist_id" = am."discogs_artist_id"
-      OR "c"."headlining_artist_id" = "a"."id"
+    LEFT JOIN LATERAL (
+      SELECT "cc"."headlining_artist_raw"
+      FROM ${CONCERTS_TABLE} "cc"
+      WHERE ("cc"."headlining_discogs_artist_id" = am."discogs_artist_id"
+             OR "cc"."headlining_artist_id" = "a"."id")
+        AND "cc"."removed_at" IS NULL
+        AND "cc"."headlining_artist_raw" IS NOT NULL
+      ORDER BY "cc"."starts_on" DESC NULLS LAST, "cc"."id" DESC
+      LIMIT 1
+    ) "c" ON TRUE
     WHERE am."artist_bio" IS NULL
       AND COALESCE("a"."artist_name", "c"."headlining_artist_raw") IS NOT NULL
     ORDER BY am."discogs_artist_id" ASC
