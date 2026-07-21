@@ -1,0 +1,21 @@
+-- 0127 artist_metadata.artist_bio (BS#1734, On Tour R3 "About the Artist").
+--
+-- Adds the raw Discogs artist bio/profile text alongside the BS#1624
+-- genres/styles columns on `artist_metadata`, so `GET /concerts` can project
+-- `Concert.artist_bio` (wxyc-shared#247) via the same null-safe LEFT JOIN
+-- `genres` already uses. Stored RAW — no `cleanDiscogsBio` — matching
+-- `album_metadata.artist_bio` / `flowsheet.artist_bio` precedent; cleaning (if
+-- any) is a read-time-only concern, and iOS's `DiscogsMarkupParser` renders
+-- the raw markup as tappable links.
+--
+-- Population: `jobs/concerts-genre-enrichment/` threads `bio` from the same
+-- LML bulk artist-genres endpoint (LML#889) into NET-NEW `artist_metadata`
+-- rows going forward. Pre-existing genres-only rows (created by BS#1624
+-- before this column shipped) are NOT touched by the nightly run — the
+-- candidate anti-join only selects artists with no row at all — and need the
+-- one-time `--bio-backfill` pass (see jobs/concerts-genre-enrichment/README.md).
+--
+-- Lock behavior: additive nullable column, no rows rewritten (DDL-only).
+-- No precondition guard required: NULL trivially satisfies every existing row
+-- (-- @no-precondition-needed).
+ALTER TABLE "wxyc_schema"."artist_metadata" ADD COLUMN "artist_bio" text;

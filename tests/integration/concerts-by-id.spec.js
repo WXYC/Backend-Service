@@ -35,6 +35,7 @@ const ARTIST_NAME = 'BS#1694 Probe Headliner';
 // colliding with any real artists/artist_metadata row in the CI clone.
 const ARTIST_DISCOGS_ID = 91694001;
 const ARTIST_GENRES = ['Folk, World, & Country'];
+const ARTIST_BIO = 'BS#1694 probe headliner biography text.';
 
 function makeSql() {
   return postgres({
@@ -146,13 +147,13 @@ describe('GET /concerts/:id (BS#1694)', () => {
     );
     artistId = artist.id;
 
-    // Genre enrichment for the resolved headliner (BS#1624 projection) — the
-    // parity test below proves the by-id read carries the same enrichment
-    // fields as the list.
+    // Genre + bio enrichment for the resolved headliner (BS#1624 / BS#1734
+    // projections) — the parity test below proves the by-id read carries the
+    // same enrichment fields as the list.
     await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles)
-       VALUES ($1, $2, $3)`,
-      [ARTIST_DISCOGS_ID, ARTIST_GENRES, []]
+      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles, artist_bio)
+       VALUES ($1, $2, $3, $4)`,
+      [ARTIST_DISCOGS_ID, ARTIST_GENRES, [], ARTIST_BIO]
     );
 
     // Upcoming, fully-populated, resolved headliner: the serialization-parity
@@ -224,8 +225,9 @@ describe('GET /concerts/:id (BS#1694)', () => {
       const reference = list.body.concerts.find((c) => c.id === upcomingId);
       expect(reference).toBeDefined();
       // Sanity that the reference row exercises the full shape, enrichment
-      // included (genres via the BS#1624 LEFT JOIN).
+      // included (genres via the BS#1624 LEFT JOIN, artist_bio via BS#1734).
       expect(reference.genres).toEqual(ARTIST_GENRES);
+      expect(reference.artist_bio).toBe(ARTIST_BIO);
 
       const byId = await request.get(`/concerts/${upcomingId}`);
       expect(byId.status).toBe(200);

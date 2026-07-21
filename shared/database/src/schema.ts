@@ -1396,12 +1396,16 @@ export const album_metadata = wxyc_schema.table('album_metadata', {
  * `artist_metadata` row, calls LML's bulk artist-genres endpoint (LML#781),
  * and UPSERTs `ON CONFLICT DO NOTHING` — never overwriting a collected row.
  * Both `genres` and `styles` are nullable `text[]` (LML may resolve one and
- * not the other).
+ * not the other). `artist_bio` (BS#1734) rides the same endpoint (LML#889)
+ * and is stored RAW — no `cleanDiscogsBio` at write time, matching
+ * `album_metadata.artist_bio` / `flowsheet.artist_bio` precedent; cleaning is
+ * a read-time-only concern.
  */
 export const artist_metadata = wxyc_schema.table('artist_metadata', {
   discogs_artist_id: integer('discogs_artist_id').primaryKey().notNull(),
   genres: text('genres').array(),
   styles: text('styles').array(),
+  artist_bio: text('artist_bio'),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
 

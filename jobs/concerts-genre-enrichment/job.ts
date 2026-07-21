@@ -1,13 +1,14 @@
 /**
  * Nightly cron: enrich resolved concert headliners with artist-level Discogs
- * genres via LML's bulk artist-genres endpoint (BS#1624, LML#781).
+ * genres + bio via LML's bulk artist-genres endpoint (BS#1624, LML#781;
+ * `bio` added BS#1734, LML#889).
  *
  * Chained after the concert artist resolvers (05:15 UTC strict/alias, 05:35 UTC
  * LML) so it only ever sees headliners those passes have resolved. For each
  * resolved headliner lacking an `artist_metadata` row it calls
- * `POST /api/v1/artists/genres/bulk` and persists `genres`/`styles` keyed on the
- * Discogs artist id — the key `GET /concerts` projects onto `Concert.genres`.
- * Default schedule `45 5 * * *` UTC.
+ * `POST /api/v1/artists/genres/bulk` and persists `genres`/`styles`/`artist_bio`
+ * keyed on the Discogs artist id — the key `GET /concerts` projects onto
+ * `Concert.genres`/`Concert.artist_bio`. Default schedule `45 5 * * *` UTC.
  *
  * Modes:
  *   - default (nightly): upcoming-only candidate window (venue-local Eastern
@@ -15,7 +16,12 @@
  *   - `--backfill`: drop the window and front-fill every existing resolved
  *     headliner — the one-time deploy backfill. Idempotent: the candidate
  *     anti-join + `ON CONFLICT DO NOTHING` make a re-run a no-op.
- *   - `--dry-run`: enumerate + log the plan; no LML calls, no writes.
+ *   - `--bio-backfill` (BS#1734, mutually exclusive with the above): a SEPARATE
+ *     one-time pass over pre-existing genres-only `artist_metadata` rows (the
+ *     nightly anti-join never revisits a row that already exists, so these
+ *     rows would otherwise never pick up a bio). See `bio-backfill.ts`.
+ *   - `--dry-run`: enumerate + log the plan; no LML calls, no writes. Applies
+ *     to whichever mode is selected.
  *
  * Enrichment runs nightly server-to-server with the LML API key (merged at the
  * `@wxyc/lml-client` chokepoint from `LML_API_KEY`); it is never on any
@@ -34,9 +40,10 @@ import { sql } from 'drizzle-orm';
 import { closeDatabaseConnection, db, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
 import { ARTIST_GENRES_BATCH_CAP, fetchArtistGenresBulk } from '@wxyc/lml-client';
 import { defaultLmlLimiter } from './lml-limiter.js';
-import { loadEnrichmentCandidates } from './query.js';
+import { loadBioBackfillCandidates, loadEnrichmentCandidates } from './query.js';
 import { runEnrichment, type Totals } from './orchestrate.js';
-import { upsertArtistGenres } from './writer.js';
+import { runBioBackfill, type BioBackfillTotals } from './bio-backfill.js';
+import { applyBioBackfill, upsertArtistGenres } from './writer.js';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'concerts-genre-enrichment';
@@ -59,6 +66,7 @@ export interface EnrichJobOptions {
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
   backfill: boolean;
+  bioBackfill: boolean;
   dryRun: boolean;
 }
 
@@ -75,6 +83,14 @@ export const enrichJobOptions = (
       `[${JOB_NAME}] ${PAGE_SIZE_ENV}=${pageSize} exceeds the LML per-request cap of ${ARTIST_GENRES_BATCH_CAP}.`
     );
   }
+  const backfill = args.includes('--backfill');
+  const bioBackfill = args.includes('--bio-backfill');
+  if (backfill && bioBackfill) {
+    // Two different one-time modes over two different candidate sets and two
+    // different writers — running both in one invocation would conflate their
+    // totals/logging. Run them as separate invocations instead.
+    throw new Error(`[${JOB_NAME}] --backfill and --bio-backfill are mutually exclusive; run them separately.`);
+  }
   return {
     pageSize,
     liveActivityLookbackSeconds: requireNonNegativeInt(
@@ -84,7 +100,8 @@ export const enrichJobOptions = (
       { ...ctx, note: 'Use 0 to disable the live-activity probe.' }
     ),
     liveActivityPauseMs: LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
-    backfill: args.includes('--backfill'),
+    backfill,
+    bioBackfill,
     dryRun: args.includes('--dry-run'),
   };
 };
@@ -143,12 +160,34 @@ export const runJob = async (options: EnrichJobOptions): Promise<Totals> => {
   );
 };
 
+/** `--bio-backfill` mode (BS#1734) — see `bio-backfill.ts` module docblock. */
+export const runBioBackfillJob = async (options: EnrichJobOptions): Promise<BioBackfillTotals> => {
+  log('info', 'bio_backfill_started', `${JOB_NAME} bio backfill starting`, {
+    page_size: options.pageSize,
+    live_activity_lookback_seconds: options.liveActivityLookbackSeconds,
+    dry_run: options.dryRun,
+  });
+
+  return await runBioBackfill(
+    {
+      loadCandidates: loadBioBackfillCandidates,
+      fetchGenres: (items) => fetchArtistGenresBulk(items, { limiter: defaultLmlLimiter, caller: JOB_NAME }),
+      applyBioBackfill,
+      awaitQuiet: () => awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs),
+    },
+    {
+      pageSize: options.pageSize,
+      dryRun: options.dryRun,
+    }
+  );
+};
+
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
 
   try {
     const options = enrichJobOptions();
-    const totals = await runJob(options);
+    const totals = options.bioBackfill ? await runBioBackfillJob(options) : await runJob(options);
     log('info', 'finished', `${JOB_NAME} done`, { ...totals });
   } catch (err) {
     captureError(err, 'main');

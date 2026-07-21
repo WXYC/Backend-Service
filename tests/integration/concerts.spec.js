@@ -35,6 +35,7 @@ const ARTIST_NAME = 'BS#1603 Touring Probe Artist';
 const ARTIST_DISCOGS_ID = 91624001;
 const ARTIST_GENRES = ['Rock', 'Electronic'];
 const ARTIST_STYLES = ['Indie Rock'];
+const ARTIST_BIO = 'A touring probe artist known for genre-blending live sets.';
 
 function makeSql() {
   return postgres({
@@ -142,14 +143,15 @@ describe('GET /concerts (BS#1603)', () => {
     );
     artistId = artist.id;
 
-    // Enrichment output for the resolved headliner: the BS#1624 genres
-    // projection LEFT JOINs artist_metadata on COALESCE(headlining_discogs_
-    // artist_id, artists.discogs_artist_id). Seeding a row here proves genres
-    // surface on the wire; the un-enriched rows below prove the null-safe miss.
+    // Enrichment output for the resolved headliner: the BS#1624 genres /
+    // BS#1734 artist_bio projection LEFT JOINs artist_metadata on
+    // COALESCE(headlining_discogs_artist_id, artists.discogs_artist_id).
+    // Seeding a row here proves genres/artist_bio surface on the wire; the
+    // un-enriched rows below prove the null-safe miss.
     await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles)
-       VALUES ($1, $2, $3)`,
-      [ARTIST_DISCOGS_ID, ARTIST_GENRES, ARTIST_STYLES]
+      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles, artist_bio)
+       VALUES ($1, $2, $3, $4)`,
+      [ARTIST_DISCOGS_ID, ARTIST_GENRES, ARTIST_STYLES, ARTIST_BIO]
     );
 
     // Past row — excluded by the default "today forward" window.
@@ -311,6 +313,22 @@ describe('GET /concerts (BS#1603)', () => {
       const unenriched = rows.find((c) => c.headlining_artist_raw === 'Date-Only Billing');
       expect(unenriched).toBeDefined();
       expect(unenriched.genres).toBeNull();
+    });
+  });
+
+  describe('artist_bio projection (BS#1734)', () => {
+    it('surfaces artist_metadata.artist_bio on a resolved headliner and leaves un-enriched rows null', async () => {
+      const res = await auth.get('/concerts').query({ limit: 100 });
+      expect(res.status).toBe(200);
+      const rows = seeded(res.body);
+
+      const enriched = rows.find((c) => c.headlining_artist_raw === ARTIST_NAME);
+      expect(enriched).toBeDefined();
+      expect(enriched.artist_bio).toBe(ARTIST_BIO);
+
+      const unenriched = rows.find((c) => c.headlining_artist_raw === 'Date-Only Billing');
+      expect(unenriched).toBeDefined();
+      expect(unenriched.artist_bio).toBeNull();
     });
   });
 

@@ -31,8 +31,9 @@ import {
 
 /**
  * Compile-time pin: `ConcertDTO` must match the SSOT `Concert` schema in
- * `wxyc-shared/api.yaml` v1.17.0 (event_url added in 1.17.0 / BS#1609). The published `@wxyc/shared` at this
- * worktree's pin (`^1.15.0`) does not yet export a `Concert` DTO, so we
+ * `wxyc-shared/api.yaml` v1.20.0 (artist_bio added in 1.20.0 / BS#1734,
+ * wxyc-shared#247). The published `@wxyc/shared` at this worktree's pin
+ * (`^2.3.0`) does not yet export a `Concert` DTO, so we
  * assert against a hand-mirrored shape derived from the api.yaml operation.
  * When `@wxyc/shared` publishes `Concert`, replace `ApiYamlConcert` below
  * with `import type { Concert } from '@wxyc/shared/dtos'` — the two-way
@@ -69,6 +70,9 @@ type ApiYamlConcert = {
   // BS#1624 / wxyc-shared#221: nullable AND optional (not in the api.yaml
   // `required` set), so `genres?: string[] | null`.
   genres?: string[] | null;
+  // BS#1734 / wxyc-shared#247: raw Discogs artist bio, same optional +
+  // nullable discipline as `genres`.
+  artist_bio?: string | null;
   // BS#1626 / wxyc-shared#222: the `SimilarArtist` schema (`{ artist_id, weight }`)
   // as an optional + nullable array, same discipline as `genres`.
   similar_artists?: { artist_id: number; weight: number }[] | null;
@@ -119,6 +123,9 @@ const timedRow: ConcertJoinRow = {
   // Resolved + enriched headliner: the LEFT JOIN to `artist_metadata` produced
   // a genres array (BS#1624).
   genres: ['Rock', 'Electronic'],
+  // Resolved + enriched headliner: the same LEFT JOIN produced a raw Discogs
+  // bio (BS#1734).
+  artist_bio: 'Nilüfer Yanya is a British singer-songwriter and guitarist from London.',
   // Resolved + enriched headliner: the LEFT JOIN to `artist_similar_artists`
   // produced an affinity-neighbor array (BS#1626).
   similar_artists: [
@@ -149,8 +156,10 @@ const dateOnlyRow: ConcertJoinRow = {
   age_restriction: null,
   venue_address: null,
   // Unresolved headliner (headlining_artist_id null): the LEFT JOINs miss, so
-  // the projection yields NULL genres, similar_artists, and station_plays.
+  // the projection yields NULL genres, artist_bio, similar_artists, and
+  // station_plays.
   genres: null,
+  artist_bio: null,
   similar_artists: null,
   station_plays: null,
   // Unresolved headliner: the EXISTS correlation never matches → false (BS#1731).
@@ -242,6 +251,25 @@ describe('toConcertDTO', () => {
     expect(dto.genres).toBeNull();
   });
 
+  // BS#1734 — artist_bio comes from the same LEFT JOIN to artist_metadata as
+  // genres. Present for a resolved + enriched headliner; null when unresolved
+  // or the enrichment hasn't run.
+  it('passes the joined artist_bio through for a resolved, enriched headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.artist_bio).toBe('Nilüfer Yanya is a British singer-songwriter and guitarist from London.');
+  });
+
+  it('emits null artist_bio for an unresolved headliner (LEFT JOIN miss)', () => {
+    expect(toConcertDTO(dateOnlyRow).artist_bio).toBeNull();
+  });
+
+  it('coalesces an undefined row.artist_bio (projection without the join) to null', () => {
+    const { artist_bio: _drop, ...withoutBio } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(withoutBio);
+    expect(dto.artist_bio).toBeNull();
+  });
+
   // BS#1626 — similar_artists come from the LEFT JOIN to artist_similar_artists.
   // Present for a resolved + enriched headliner; null when unresolved or the
   // enrichment hasn't run; null when the embed projection omits the join.
@@ -326,6 +354,7 @@ describe('toConcertDTO', () => {
         'age_restriction',
         'status',
         'genres',
+        'artist_bio',
         'similar_artists',
         'station_plays',
         'station_recommended',
@@ -437,11 +466,12 @@ describe('getConcertById', () => {
     for (const internal of INTERNAL_COLUMNS) {
       expect(selectedColumns).not.toContain(internal);
     }
-    // Parity pin: the by-id projection carries the BS#1624 genres, BS#1702
-    // station_plays, and BS#1731 station_recommended fields, so a by-id read
-    // can never lag the list's enrichment fields (the BS#1694 lockstep-join
-    // invariant).
+    // Parity pin: the by-id projection carries the BS#1624 genres, BS#1734
+    // artist_bio, BS#1702 station_plays, and BS#1731 station_recommended
+    // fields, so a by-id read can never lag the list's enrichment fields (the
+    // BS#1694 lockstep-join invariant).
     expect(Object.keys(projection)).toContain('genres');
+    expect(Object.keys(projection)).toContain('artist_bio');
     expect(Object.keys(projection)).toContain('station_plays');
     expect(Object.keys(projection)).toContain('station_recommended');
   });

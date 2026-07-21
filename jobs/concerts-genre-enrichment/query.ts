@@ -95,3 +95,32 @@ export const loadEnrichmentCandidates = async (backfill = false): Promise<Enrich
   `);
   return unwrapRows<EnrichmentCandidate>(result);
 };
+
+/**
+ * Bio-backfill candidates (BS#1734): existing `artist_metadata` rows the
+ * nightly genres enrichment (BS#1624) created BEFORE the `artist_bio` column
+ * shipped, so `artist_bio IS NULL` on a row that already has genres/styles.
+ * The anti-join in `loadEnrichmentCandidates` above never revisits these rows
+ * — it only selects artists with NO row at all — so this is the one-time
+ * pass that fills them (`jobs/concerts-genre-enrichment/bio-backfill.ts`).
+ *
+ * Name resolution mirrors the candidate query's `eff` subquery: a library
+ * artist's canonical `artists.artist_name`, or the raw headliner billing off
+ * any concert row that resolved to this Discogs id (the `artist_metadata` row
+ * only exists because some concert resolved to it, at either lane).
+ */
+export const loadBioBackfillCandidates = async (): Promise<EnrichmentCandidate[]> => {
+  const result: unknown = await db.execute(sql`
+    SELECT DISTINCT ON (am."discogs_artist_id")
+      am."discogs_artist_id" AS discogs_artist_id,
+      COALESCE("a"."artist_name", "c"."headlining_artist_raw") AS artist_name
+    FROM ${ARTIST_METADATA_TABLE} am
+    LEFT JOIN ${ARTISTS_TABLE} "a" ON "a"."discogs_artist_id" = am."discogs_artist_id"
+    LEFT JOIN ${CONCERTS_TABLE} "c" ON "c"."headlining_discogs_artist_id" = am."discogs_artist_id"
+      OR "c"."headlining_artist_id" = "a"."id"
+    WHERE am."artist_bio" IS NULL
+      AND COALESCE("a"."artist_name", "c"."headlining_artist_raw") IS NOT NULL
+    ORDER BY am."discogs_artist_id" ASC
+  `);
+  return unwrapRows<EnrichmentCandidate>(result);
+};

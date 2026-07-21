@@ -77,6 +77,13 @@ export type ConcertDTO = {
   // compatibly; mirrored here as `genres?` to keep the compile-time
   // `Equal<ConcertDTO, ApiYamlConcert>` pin in concerts.service.test.ts honest.
   genres?: string[] | null;
+  // Raw Discogs artist bio/profile text for the resolved headlining artist
+  // (BS#1734, On Tour R3 "About the Artist"), sourced from `artist_metadata`
+  // via the same null-safe LEFT JOIN as `genres`. Stored and served RAW — no
+  // `cleanDiscogsBio` — matching `album_metadata.artist_bio` /
+  // `flowsheet.artist_bio` precedent (iOS's `DiscogsMarkupParser` renders the
+  // raw markup). Same optional-and-nullable discipline as `genres`.
+  artist_bio?: string | null;
   // Top-K affinity neighbors of the resolved headlining artist (BS#1626, On Tour
   // R3b; extended BS#1701), COALESCEd from the two enrichment lanes: the library
   // lane (`artist_similar_artists`, keyed on `headlining_artist_id`) and the
@@ -146,6 +153,11 @@ export type ConcertJoinRow = {
   // and selects this. The `getUpcomingShowsMaps` projection omits it, so its
   // rows leave it undefined and `toConcertDTO` coalesces to null.
   genres?: string[] | null;
+  // Optional: only the `getConcertsPage` projection LEFT-joins `artist_metadata`
+  // and selects this (BS#1734, same join as `genres`). The `getUpcomingShowsMaps`
+  // projection omits it, so its rows leave it undefined and `toConcertDTO`
+  // coalesces to null.
+  artist_bio?: string | null;
   // Optional: only the `getConcertsPage` projection LEFT-joins the two
   // similar-artists lanes and selects the COALESCEd value. The
   // `getUpcomingShowsMaps` embed omits it (the #1616 hot-path guard), so its rows
@@ -228,6 +240,9 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
   // `upcoming_show` embed) leaves `genres` undefined → null on the wire; a
   // resolved-but-unenriched headliner surfaces as null too (no joined row).
   genres: row.genres ?? null,
+  // Same null-safe discipline (BS#1734): undefined on the embed projection,
+  // null for a headliner in neither lane or with no enrichment row.
+  artist_bio: row.artist_bio ?? null,
   // Same null-safe discipline (BS#1626 + BS#1701): undefined on the embed
   // projection, null for a headliner in neither lane or with no enrichment row.
   similar_artists: row.similar_artists ?? null,
@@ -296,6 +311,7 @@ const effectiveHeadlinerDiscogsId = sql`COALESCE(${concerts.headlining_discogs_a
 const concertPageFields = {
   ...concertJoinFields,
   genres: artist_metadata.genres,
+  artist_bio: artist_metadata.artist_bio,
   similar_artists: sql<
     SimilarArtistNeighbor[] | null
   >`COALESCE(${artist_similar_artists.neighbors}, ${discogs_artist_similar_artists.neighbors})`,

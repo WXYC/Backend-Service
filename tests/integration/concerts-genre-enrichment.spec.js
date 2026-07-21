@@ -45,6 +45,7 @@ const DISCOGS_UPSERT_B = 91624902;
 
 const ARTIST_ENRICHED = 'Juana Molina'; // library artist, resolved + enriched
 const ARTIST_LIBRARY_UNENRICHED = 'Stereolab'; // library artist, resolved, not yet enriched
+const ARTIST_BIO = 'Argentine singer-songwriter known for genre-blurring electro-folk records.';
 
 function makeSql() {
   return postgres({
@@ -102,7 +103,7 @@ async function loadCandidates(sql, { backfill = false } = {}) {
 async function upsertArtistGenres(sql, rows) {
   if (rows.length === 0) return [];
   return sql`
-    INSERT INTO ${sql(SCHEMA)}."artist_metadata" ${sql(rows, 'discogs_artist_id', 'genres', 'styles')}
+    INSERT INTO ${sql(SCHEMA)}."artist_metadata" ${sql(rows, 'discogs_artist_id', 'genres', 'styles', 'artist_bio')}
     ON CONFLICT ("discogs_artist_id") DO NOTHING
     RETURNING "discogs_artist_id"
   `;
@@ -184,11 +185,11 @@ describe('concerts genre enrichment (BS#1624)', () => {
     );
     libraryUnenrichedArtistId = a2.id;
 
-    // The enriched artist's persisted genres (what GET /concerts should surface).
+    // The enriched artist's persisted genres + bio (what GET /concerts should surface).
     await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles)
-       VALUES ($1, $2, $3)`,
-      [DISCOGS_ENRICHED, ['Rock', 'Electronic'], ['Folktronica']]
+      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles, artist_bio)
+       VALUES ($1, $2, $3, $4)`,
+      [DISCOGS_ENRICHED, ['Rock', 'Electronic'], ['Folktronica'], ARTIST_BIO]
     );
 
     // Lane A, resolved + enriched, upcoming.
@@ -278,8 +279,13 @@ describe('concerts genre enrichment (BS#1624)', () => {
   describe('UPSERT idempotency (mirror of writer.ts)', () => {
     it('inserts new rows, and a re-run inserts 0 without overwriting a collected row', async () => {
       const rows = [
-        { discogs_artist_id: DISCOGS_UPSERT_A, genres: ['Jazz'], styles: ['Big Band'] },
-        { discogs_artist_id: DISCOGS_UPSERT_B, genres: [], styles: [] },
+        {
+          discogs_artist_id: DISCOGS_UPSERT_A,
+          genres: ['Jazz'],
+          styles: ['Big Band'],
+          artist_bio: 'A big band jazz outfit.',
+        },
+        { discogs_artist_id: DISCOGS_UPSERT_B, genres: [], styles: [], artist_bio: null },
       ];
 
       const firstRun = await upsertArtistGenres(sql, rows);
@@ -289,14 +295,17 @@ describe('concerts genre enrichment (BS#1624)', () => {
       const secondRun = await upsertArtistGenres(sql, rows);
       expect(secondRun).toHaveLength(0);
 
-      // A conflicting re-run with DIFFERENT genres must NOT overwrite the row.
-      await upsertArtistGenres(sql, [{ discogs_artist_id: DISCOGS_UPSERT_A, genres: ['Pop'], styles: ['Synth-pop'] }]);
+      // A conflicting re-run with DIFFERENT genres/bio must NOT overwrite the row.
+      await upsertArtistGenres(sql, [
+        { discogs_artist_id: DISCOGS_UPSERT_A, genres: ['Pop'], styles: ['Synth-pop'], artist_bio: 'A different bio.' },
+      ]);
       const [persisted] = await sql.unsafe(
-        `SELECT genres, styles FROM "${SCHEMA}".artist_metadata WHERE discogs_artist_id = $1`,
+        `SELECT genres, styles, artist_bio FROM "${SCHEMA}".artist_metadata WHERE discogs_artist_id = $1`,
         [DISCOGS_UPSERT_A]
       );
       expect(persisted.genres).toEqual(['Jazz']);
       expect(persisted.styles).toEqual(['Big Band']);
+      expect(persisted.artist_bio).toBe('A big band jazz outfit.');
     });
   });
 
@@ -320,6 +329,29 @@ describe('concerts genre enrichment (BS#1624)', () => {
       const unresolved = res.body.concerts.find((c) => c.headlining_artist_raw === 'Some Unresolved Billing & Another');
       expect(unresolved).toBeDefined();
       expect(unresolved.genres).toBeNull();
+    });
+  });
+
+  describe('GET /concerts artist_bio projection (BS#1734)', () => {
+    it('emits the joined artist_bio for a resolved + enriched headliner', async () => {
+      const res = await auth.get(`/concerts?from=${IN_10}&to=${IN_10}`).expect(200);
+      const enriched = res.body.concerts.find((c) => c.headlining_artist_raw === ARTIST_ENRICHED);
+      expect(enriched).toBeDefined();
+      expect(enriched.artist_bio).toBe(ARTIST_BIO);
+    });
+
+    it('emits null artist_bio for a resolved-but-unenriched headliner', async () => {
+      const res = await auth.get(`/concerts?from=${IN_10}&to=${IN_10}`).expect(200);
+      const unenriched = res.body.concerts.find((c) => c.headlining_artist_raw === ARTIST_LIBRARY_UNENRICHED);
+      expect(unenriched).toBeDefined();
+      expect(unenriched.artist_bio).toBeNull();
+    });
+
+    it('emits null artist_bio for an unresolved headliner', async () => {
+      const res = await auth.get(`/concerts?from=${IN_10}&to=${IN_10}`).expect(200);
+      const unresolved = res.body.concerts.find((c) => c.headlining_artist_raw === 'Some Unresolved Billing & Another');
+      expect(unresolved).toBeDefined();
+      expect(unresolved.artist_bio).toBeNull();
     });
   });
 });
