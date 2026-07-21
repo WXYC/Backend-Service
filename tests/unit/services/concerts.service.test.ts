@@ -75,6 +75,10 @@ type ApiYamlConcert = {
   // BS#1702: the station-affinity play count as an optional + nullable integer,
   // same discipline as `genres`/`similar_artists`.
   station_plays?: number | null;
+  // BS#1731 (wxyc-shared#244): rotation-membership signal for the "For You"
+  // station-affinity tier. Optional, NOT nullable — the page/by-id projection's
+  // EXISTS always yields a concrete boolean; only the embed omits the key.
+  station_recommended?: boolean;
 };
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -124,6 +128,8 @@ const timedRow: ConcertJoinRow = {
   // Resolved + enriched headliner: the LEFT JOIN to `artist_station_plays`
   // produced an all-time play count (BS#1702).
   station_plays: 312,
+  // Resolved headliner with a rotation-linked library release (BS#1731).
+  station_recommended: true,
 };
 
 const dateOnlyRow: ConcertJoinRow = {
@@ -147,6 +153,8 @@ const dateOnlyRow: ConcertJoinRow = {
   genres: null,
   similar_artists: null,
   station_plays: null,
+  // Unresolved headliner: the EXISTS correlation never matches → false (BS#1731).
+  station_recommended: false,
 };
 
 describe('ConcertDTO structural pin', () => {
@@ -275,6 +283,28 @@ describe('toConcertDTO', () => {
     expect(dto.station_plays).toBeNull();
   });
 
+  // BS#1731 — station_recommended comes from the EXISTS(rotation ⋈ library)
+  // subquery in the page/by-id projection: true for a rotation-linked resolved
+  // headliner, false for an unrotated or unresolved one, and OMITTED (not
+  // coalesced to false) when the embed projection doesn't select it.
+  it('passes station_recommended: true through for a rotation-linked headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.station_recommended).toBe(true);
+  });
+
+  it('passes station_recommended: false through for an unrotated/unresolved headliner', () => {
+    const dto = toConcertDTO(dateOnlyRow);
+    expect(dto.station_recommended).toBe(false);
+  });
+
+  it('omits station_recommended (not false) when the row lacks the key (embed projection)', () => {
+    const { station_recommended: _drop, ...without } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(without);
+    expect(dto.station_recommended).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(dto))).not.toHaveProperty('station_recommended');
+  });
+
   it('emits exactly the Concert wire keys — no internal ingestion columns', () => {
     const dto = toConcertDTO(timedRow);
     expect(Object.keys(dto).sort()).toEqual(
@@ -298,6 +328,7 @@ describe('toConcertDTO', () => {
         'genres',
         'similar_artists',
         'station_plays',
+        'station_recommended',
       ].sort()
     );
     for (const internal of INTERNAL_COLUMNS) {
@@ -325,6 +356,9 @@ describe('getConcertsPage', () => {
     for (const internal of INTERNAL_COLUMNS) {
       expect(selectedColumns).not.toContain(internal);
     }
+    // BS#1731 — the station_recommended EXISTS is part of the shared page
+    // projection, so it must always be selected here.
+    expect(Object.keys(projection)).toContain('station_recommended');
   });
 });
 
@@ -403,11 +437,13 @@ describe('getConcertById', () => {
     for (const internal of INTERNAL_COLUMNS) {
       expect(selectedColumns).not.toContain(internal);
     }
-    // Parity pin: the by-id projection carries the BS#1624 genres and BS#1702
-    // station_plays joins, so a by-id read can never lag the list's enrichment
-    // fields (the BS#1694 lockstep-join invariant).
+    // Parity pin: the by-id projection carries the BS#1624 genres, BS#1702
+    // station_plays, and BS#1731 station_recommended fields, so a by-id read
+    // can never lag the list's enrichment fields (the BS#1694 lockstep-join
+    // invariant).
     expect(Object.keys(projection)).toContain('genres');
     expect(Object.keys(projection)).toContain('station_plays');
+    expect(Object.keys(projection)).toContain('station_recommended');
   });
 });
 

@@ -7,7 +7,9 @@ import {
   concerts,
   db,
   discogs_artist_similar_artists,
+  library,
   normalizeFreetextArtist,
+  rotation,
   type SimilarArtistNeighbor,
   venues,
 } from '@wxyc/database';
@@ -93,6 +95,16 @@ export type ConcertDTO = {
   // id OR the nightly enrichment hasn't run. Same optional-and-nullable discipline
   // as `genres`/`similar_artists` (not in the api.yaml `required` set).
   station_plays?: number | null;
+  // True when the resolved headliner (`headlining_artist_id`) has at least one
+  // WXYC library release that has been in rotation, any rotation row past or
+  // present (BS#1731, On Tour "For You" tier redesign — supersedes the
+  // `station_plays` play-count signal per wxyc-ios-64#576). Sourced from an
+  // EXISTS over `rotation` JOIN `library`, computed in every page/by-id read
+  // (never null there). Discogs-only headliners (`headlining_artist_id IS
+  // NULL`) always read false. Optional (not in the api.yaml `required` set,
+  // wxyc-shared#244) so the `upcoming_show` embed can omit it — see
+  // `station_plays` for the identical discipline.
+  station_recommended?: boolean;
 };
 
 export type ConcertsQueryFilters = {
@@ -144,6 +156,11 @@ export type ConcertJoinRow = {
   // omits it (the #1616 embed boundary), so its rows leave it undefined and
   // `toConcertDTO` coalesces to null.
   station_plays?: number | null;
+  // Optional: only the `getConcertsPage` / `getConcertById` projection selects the
+  // `station_recommended` EXISTS subquery. The `getUpcomingShowsMaps` embed omits
+  // it, so its rows leave it undefined and `toConcertDTO` passes that through
+  // (the field is omitted on the wire there, not coalesced to false).
+  station_recommended?: boolean;
 };
 
 // Explicit select list — the projection is the leak barrier: internal
@@ -217,6 +234,11 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
   // Same null-safe discipline (BS#1702): undefined on the embed projection, null
   // for a headliner with no in-library id or no station-plays enrichment row.
   station_plays: row.station_plays ?? null,
+  // NOT coalesced (BS#1731): the page/by-id projection's EXISTS always supplies a
+  // concrete boolean, so `?? false` would never fire there anyway; on the embed
+  // projection `row.station_recommended` is `undefined` and must stay that way so
+  // `JSON.stringify` omits the key rather than asserting "not recommended".
+  station_recommended: row.station_recommended,
 });
 
 /**
@@ -259,10 +281,11 @@ const buildWhere = ({ from, to, curated }: ConcertsQueryFilters) => {
 const effectiveHeadlinerDiscogsId = sql`COALESCE(${concerts.headlining_discogs_artist_id}, ${artists.discogs_artist_id})`;
 
 // Page projection: the shared concerts⋈venues fields plus the LEFT-joined
-// artist-level genres (BS#1624), affinity neighbors (BS#1626 + BS#1701), and
-// station plays (BS#1702). Kept separate from `concertJoinFields` so the
-// `getUpcomingShowsMaps` / count paths (which don't join the enrichment tables)
-// can't accidentally reference those tables' columns.
+// artist-level genres (BS#1624), affinity neighbors (BS#1626 + BS#1701),
+// station plays (BS#1702), and the station-recommended EXISTS (BS#1731). Kept
+// separate from `concertJoinFields` so the `getUpcomingShowsMaps` / count paths
+// (which don't join the enrichment tables) can't accidentally reference those
+// tables' columns.
 //
 // `similar_artists` COALESCEs the two enrichment lanes (BS#1701): the library
 // lane (`artist_similar_artists`, keyed on `headlining_artist_id`) wins over the
@@ -277,6 +300,17 @@ const concertPageFields = {
     SimilarArtistNeighbor[] | null
   >`COALESCE(${artist_similar_artists.neighbors}, ${discogs_artist_similar_artists.neighbors})`,
   station_plays: artist_station_plays.plays,
+  // Station-recommended (BS#1731): a scalar EXISTS, not a joined table, so it
+  // lands in both `getConcertsPage` and `getConcertById` automatically without
+  // a `.leftJoin` (and so cannot trigger the BS#1694 "table … is not part of
+  // the query" hazard). Always a real boolean — never null — since EXISTS
+  // itself never returns NULL; a NULL `headlining_artist_id` (Discogs-only
+  // headliner) simply never correlates a match, so it reads false.
+  station_recommended: sql<boolean>`EXISTS (
+    SELECT 1 FROM ${rotation}
+    JOIN ${library} ON ${library.id} = ${rotation.album_id}
+    WHERE ${library.artist_id} = ${concerts.headlining_artist_id}
+  )`,
 };
 
 /**

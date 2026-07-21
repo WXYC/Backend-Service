@@ -74,6 +74,7 @@ export const user_activity = {};
 export const labels = {};
 export const library = {
   id: 'id',
+  artist_id: 'artist_id',
   legacy_release_id: 'legacy_release_id',
   on_streaming: 'on_streaming',
   artwork_url: 'artwork_url',
