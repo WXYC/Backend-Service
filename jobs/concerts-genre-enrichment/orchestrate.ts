@@ -145,7 +145,12 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
       const genres = verdict.genres ?? [];
       const styles = verdict.styles ?? [];
       if (genres.length > 0) totals.with_genres += 1;
-      rows.push({ discogs_artist_id: page[i].discogs_artist_id, genres, styles });
+      rows.push({
+        discogs_artist_id: page[i].discogs_artist_id,
+        genres,
+        styles,
+        artist_bio: verdict.bio ?? null,
+      });
     }
 
     // A page that comes back entirely `unavailable` means LML's Discogs breaker

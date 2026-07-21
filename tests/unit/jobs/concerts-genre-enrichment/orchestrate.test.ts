@@ -38,14 +38,20 @@ const candidate = (discogs_artist_id: number, artist_name: string): EnrichmentCa
 });
 
 /**
- * An LML response echoing one `{ genres, styles, source }` verdict per input
- * item. `source` defaults to `'cache'` so genre-content fixtures needn't spell
- * it out; the source-routing tests pass it explicitly.
+ * An LML response echoing one `{ genres, styles, source, bio }` verdict per
+ * input item. `source` defaults to `'cache'` so genre-content fixtures needn't
+ * spell it out; the source-routing tests pass it explicitly. `bio` defaults to
+ * `null` so pre-BS#1734 fixtures don't need updating.
  */
 const genresResponse = (
-  verdicts: Array<{ genres: string[]; styles: string[]; source?: ArtistGenresSource }>
+  verdicts: Array<{ genres: string[]; styles: string[]; source?: ArtistGenresSource; bio?: string | null }>
 ): ArtistGenresBulkResponse => ({
-  results: verdicts.map((v) => ({ genres: v.genres, styles: v.styles, source: v.source ?? 'cache' })),
+  results: verdicts.map((v) => ({
+    genres: v.genres,
+    styles: v.styles,
+    source: v.source ?? 'cache',
+    bio: v.bio ?? null,
+  })),
 });
 
 const makeDeps = (
@@ -103,10 +109,28 @@ describe('runEnrichment (BS#1624)', () => {
     ]);
     expect(upsert).toHaveBeenCalledTimes(1);
     expect(writes).toEqual([
-      { discogs_artist_id: 100, genres: ['Rock'], styles: ['Indie Rock'] },
-      { discogs_artist_id: 200, genres: ['Rock'], styles: ['Indie Rock'] },
+      { discogs_artist_id: 100, genres: ['Rock'], styles: ['Indie Rock'], artist_bio: null },
+      { discogs_artist_id: 200, genres: ['Rock'], styles: ['Indie Rock'], artist_bio: null },
     ]);
     expect(totals).toMatchObject({ candidates: 2, pages: 1, fetched: 2, with_genres: 2, enriched: 2, errors: 0 });
+  });
+
+  it('threads the LML bio verdict through to the persisted row (BS#1734)', async () => {
+    const { deps, writes } = makeDeps([candidate(100, 'Juana Molina'), candidate(200, 'Jessica Pratt')], {
+      fetchGenres: jest.fn<FetchGenresFn>().mockResolvedValue(
+        genresResponse([
+          { genres: ['Rock'], styles: [], bio: 'Argentine singer-songwriter.' },
+          { genres: ['Rock'], styles: [] }, // no bio on this verdict → null
+        ])
+      ),
+    });
+
+    await runEnrichment(deps, options());
+
+    expect(writes).toEqual([
+      { discogs_artist_id: 100, genres: ['Rock'], styles: [], artist_bio: 'Argentine singer-songwriter.' },
+      { discogs_artist_id: 200, genres: ['Rock'], styles: [], artist_bio: null },
+    ]);
   });
 
   it('makes zero LML calls when no candidate needs enrichment (anti-join drained)', async () => {
@@ -139,9 +163,9 @@ describe('runEnrichment (BS#1624)', () => {
 
     expect(fetchGenres).toHaveBeenCalledTimes(2);
     expect(writes).toEqual([
-      { discogs_artist_id: 1, genres: ['Electronic'], styles: [] },
-      { discogs_artist_id: 2, genres: ['Rock'], styles: [] },
-      { discogs_artist_id: 3, genres: ['Jazz'], styles: ['Big Band'] },
+      { discogs_artist_id: 1, genres: ['Electronic'], styles: [], artist_bio: null },
+      { discogs_artist_id: 2, genres: ['Rock'], styles: [], artist_bio: null },
+      { discogs_artist_id: 3, genres: ['Jazz'], styles: ['Big Band'], artist_bio: null },
     ]);
     expect(totals).toMatchObject({ candidates: 3, pages: 2, fetched: 3, enriched: 3 });
   });
@@ -153,7 +177,7 @@ describe('runEnrichment (BS#1624)', () => {
 
     const totals = await runEnrichment(deps, options());
 
-    expect(writes).toEqual([{ discogs_artist_id: 300, genres: [], styles: [] }]);
+    expect(writes).toEqual([{ discogs_artist_id: 300, genres: [], styles: [], artist_bio: null }]);
     expect(totals).toMatchObject({ fetched: 1, with_genres: 0, enriched: 1 });
   });
 
@@ -179,8 +203,8 @@ describe('runEnrichment (BS#1624)', () => {
 
     // Only the cache + not_found artists are written; the unavailable one is not.
     expect(writes).toEqual([
-      { discogs_artist_id: 1, genres: ['Rock'], styles: [] },
-      { discogs_artist_id: 3, genres: [], styles: [] },
+      { discogs_artist_id: 1, genres: ['Rock'], styles: [], artist_bio: null },
+      { discogs_artist_id: 3, genres: [], styles: [], artist_bio: null },
     ]);
     expect(writes.some((w) => w.discogs_artist_id === 2)).toBe(false);
     expect(totals).toMatchObject({ fetched: 3, unavailable_skipped: 1, with_genres: 1, enriched: 2 });
@@ -264,7 +288,7 @@ describe('runEnrichment (BS#1624)', () => {
     // Page 1 (2 artists) threw → counted as 2 errors, nothing written; page 2
     // (1 artist) succeeded.
     expect(totals).toMatchObject({ candidates: 3, pages: 1, fetched: 1, enriched: 1, errors: 2 });
-    expect(writes).toEqual([{ discogs_artist_id: 3, genres: ['Rock'], styles: [] }]);
+    expect(writes).toEqual([{ discogs_artist_id: 3, genres: ['Rock'], styles: [], artist_bio: null }]);
     expect(upsert).toHaveBeenCalledTimes(1);
   });
 

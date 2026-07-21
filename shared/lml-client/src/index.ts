@@ -1329,6 +1329,13 @@ export interface ArtistGenresResultItem {
    * for LML to echo.
    */
   discogs_artist_id?: number;
+  /**
+   * The Discogs artist `profile` text, raw (BS#1734 / LML#889). Null for
+   * name-only inputs, uncached ids, blank profiles, and not-found tombstones;
+   * independent of `source` — a `cache`/`not_found` verdict may still carry a
+   * real bio.
+   */
+  bio?: string | null;
 }
 
 export interface ArtistGenresBulkRequest {
