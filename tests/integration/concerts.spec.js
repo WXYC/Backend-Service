@@ -391,6 +391,7 @@ describe('GET /concerts station_recommended (BS#1731)', () => {
   const VENUE_SLUG = 'bs1731-probe-room';
   const SOURCE_ID_PREFIX = 'bs1731:';
   const ROTATED_ARTIST_NAME = 'BS#1731 Rotation-Backed Probe Artist';
+  const KILLED_ROTATION_ARTIST_NAME = 'BS#1731 Killed-Rotation Probe Artist';
   const UNROTATED_ARTIST_NAME = 'BS#1731 Unrotated Probe Artist';
   const DISCOGS_ONLY_ARTIST_RAW = 'BS#1731 Discogs-Only Probe Artist';
   const DISCOGS_ONLY_ARTIST_DISCOGS_ID = 91731001;
@@ -453,16 +454,18 @@ describe('GET /concerts station_recommended (BS#1731)', () => {
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".concerts WHERE source_id LIKE $1`, [`${SOURCE_ID_PREFIX}%`]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".venues WHERE slug = $1`, [VENUE_SLUG]);
+    // Both library-bearing artists (the active-rotation and killed-rotation probes).
     await sql.unsafe(
-      `DELETE FROM "${SCHEMA}".rotation WHERE album_id IN (SELECT id FROM "${SCHEMA}".library WHERE artist_id IN (SELECT id FROM "${SCHEMA}".artists WHERE artist_name = $1))`,
-      [ROTATED_ARTIST_NAME]
+      `DELETE FROM "${SCHEMA}".rotation WHERE album_id IN (SELECT id FROM "${SCHEMA}".library WHERE artist_id IN (SELECT id FROM "${SCHEMA}".artists WHERE artist_name IN ($1, $2)))`,
+      [ROTATED_ARTIST_NAME, KILLED_ROTATION_ARTIST_NAME]
     );
     await sql.unsafe(
-      `DELETE FROM "${SCHEMA}".library WHERE artist_id IN (SELECT id FROM "${SCHEMA}".artists WHERE artist_name = $1)`,
-      [ROTATED_ARTIST_NAME]
+      `DELETE FROM "${SCHEMA}".library WHERE artist_id IN (SELECT id FROM "${SCHEMA}".artists WHERE artist_name IN ($1, $2))`,
+      [ROTATED_ARTIST_NAME, KILLED_ROTATION_ARTIST_NAME]
     );
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name IN ($1, $2)`, [
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name IN ($1, $2, $3)`, [
       ROTATED_ARTIST_NAME,
+      KILLED_ROTATION_ARTIST_NAME,
       UNROTATED_ARTIST_NAME,
     ]);
   };
@@ -501,9 +504,54 @@ describe('GET /concerts station_recommended (BS#1731)', () => {
     libraryId = libraryRow.id;
     await sql.unsafe(`INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H')`, [libraryId]);
 
+    // Fan-out guard (BS#1731): a second rotation row on the same release AND a
+    // second rotation-linked release for the same artist. `station_recommended`
+    // is a scalar EXISTS, not a JOIN into the outer query, so these extra rows
+    // must NOT duplicate the rotated concert in the page — pinned below. A
+    // regression that turned the EXISTS into a join would multiply this row.
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'M')`, [libraryId]);
+    const [rotatedSecondRelease] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".library (artist_id, genre_id, format_id, album_title, code_number)
+       VALUES ($1, (SELECT id FROM "${SCHEMA}".genres LIMIT 1), (SELECT id FROM "${SCHEMA}".format LIMIT 1), $2, 2)
+       RETURNING id`,
+      [rotatedArtist.id, `${ROTATED_ARTIST_NAME} EP`]
+    );
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'L')`, [
+      rotatedSecondRelease.id,
+    ]);
+
+    // Killed-rotation artist: its only release left rotation long ago (past
+    // kill_date). The EXISTS deliberately does NOT filter kill_date, so this is
+    // still "ever in rotation" → true. This is the one behavior that distinguishes
+    // station_recommended from the repo's active-only rotation predicates
+    // (isActiveRotationMatch, rotation_library_view); without this fixture a
+    // regression adding a `kill_date IS NULL` filter would pass the whole suite.
+    const [killedRotationArtist] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters)
+       VALUES ($1, $1, 'ZZ') RETURNING id`,
+      [KILLED_ROTATION_ARTIST_NAME]
+    );
+    const [killedLibraryRow] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".library (artist_id, genre_id, format_id, album_title, code_number)
+       VALUES ($1, (SELECT id FROM "${SCHEMA}".genres LIMIT 1), (SELECT id FROM "${SCHEMA}".format LIMIT 1), $2, 1)
+       RETURNING id`,
+      [killedRotationArtist.id, `${KILLED_ROTATION_ARTIST_NAME} LP`]
+    );
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin, add_date, kill_date)
+       VALUES ($1, 'H', '2005-01-01', '2005-06-01')`,
+      [killedLibraryRow.id]
+    );
+
     await insertConcert(venueId, 'rotated', {
       headlining_artist_raw: ROTATED_ARTIST_NAME,
       headlining_artist_id: rotatedArtist.id,
+    });
+    // Resolved headliner whose sole rotation ended years ago (past kill_date):
+    // still "ever in rotation" → true (BS#1731 semantics).
+    await insertConcert(venueId, 'killed-rotation', {
+      headlining_artist_raw: KILLED_ROTATION_ARTIST_NAME,
+      headlining_artist_id: killedRotationArtist.id,
     });
     // Resolved headliner with no library/rotation row at all: the false case.
     await insertConcert(venueId, 'unrotated', {
@@ -550,11 +598,51 @@ describe('GET /concerts station_recommended (BS#1731)', () => {
     expect(concert.station_recommended === false || concert.station_recommended === undefined).toBe(true);
   });
 
+  it('emits true for a headliner whose only rotation row is long killed (ever-in-rotation semantics)', async () => {
+    const res = await auth.get('/concerts').query({ from: STARTS_ON, to: STARTS_ON, limit: 100 });
+    expect(res.status).toBe(200);
+    const concert = findByRaw(res.body, KILLED_ROTATION_ARTIST_NAME);
+    expect(concert).toBeDefined();
+    // Deliberate: BS#1731 counts past rotations. If the EXISTS ever gains a
+    // `kill_date IS NULL`/`> now()` filter (the active-rotation convention),
+    // this flips to false and fails here.
+    expect(concert.station_recommended).toBe(true);
+  });
+
+  it('returns the rotated headliner exactly once despite multiple rotation/library rows (scalar EXISTS, no fan-out)', async () => {
+    const res = await auth.get('/concerts').query({ from: STARTS_ON, to: STARTS_ON, limit: 100 });
+    expect(res.status).toBe(200);
+    const matches = res.body.concerts.filter((c) => c.headlining_artist_raw === ROTATED_ARTIST_NAME);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].station_recommended).toBe(true);
+  });
+
   it('agrees between GET /concerts and GET /concerts/:id for the rotated headliner', async () => {
     const res = await auth.get('/concerts').query({ from: STARTS_ON, to: STARTS_ON, limit: 100 });
     const concert = findByRaw(res.body, ROTATED_ARTIST_NAME);
     const byId = await auth.get(`/concerts/${concert.id}`);
     expect(byId.status).toBe(200);
     expect(byId.body.station_recommended).toBe(true);
+  });
+
+  it('agrees between GET /concerts and GET /concerts/:id for the false and Discogs-only headliners', async () => {
+    const res = await auth.get('/concerts').query({ from: STARTS_ON, to: STARTS_ON, limit: 100 });
+    expect(res.status).toBe(200);
+
+    // Unrotated resolved headliner: false on the page → false by-id.
+    const unrotated = findByRaw(res.body, UNROTATED_ARTIST_NAME);
+    expect(unrotated).toBeDefined();
+    const unrotatedById = await auth.get(`/concerts/${unrotated.id}`);
+    expect(unrotatedById.status).toBe(200);
+    expect(unrotatedById.body.station_recommended).toBe(false);
+
+    // Discogs-only headliner: the by-id projection also selects the EXISTS, so
+    // it likewise yields a concrete false (never null) — the EXISTS can't
+    // correlate a NULL headlining_artist_id.
+    const discogsOnly = findByRaw(res.body, DISCOGS_ONLY_ARTIST_RAW);
+    expect(discogsOnly).toBeDefined();
+    const discogsOnlyById = await auth.get(`/concerts/${discogsOnly.id}`);
+    expect(discogsOnlyById.status).toBe(200);
+    expect(discogsOnlyById.body.station_recommended).toBe(false);
   });
 });
