@@ -60,6 +60,7 @@ import { EMPTY_OUTCOME_FINGERPRINT, classifyEmptyCause, isEmptyOutcome } from '.
 // the BS#1311 volume-control decision is co-located with the call site.
 const SUPPRESSED_EMPTY_CAUSES: ReadonlySet<ReturnType<typeof classifyEmptyCause>> = new Set(['lml_no_match']);
 import { finalizeRow, type FinalizeOutcome } from './enrich.js';
+import { finalizeFromCachedMetadata, hasLoadBearingAlbumMetadata } from './precheck.js';
 
 /**
  * Budget for the CDC consumer's lookup. Tracks the shared client's 30 s
@@ -184,6 +185,22 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
         const claim = await claimRowForEnrichment(candidate.id);
         if (!claim.claimed) {
           span.setAttribute('enrichment.outcome', 'claim_lost');
+          return;
+        }
+
+        // B1 (BS#1747): cache-first. Only linked rows (album_id non-null)
+        // have an album_metadata row to consult. Skip the LML call only when
+        // a load-bearing field (artwork_url / discogs_url) is already
+        // non-null — a real, persisted Discogs match. Null and
+        // search-URL-only shells fall through and still call LML, so a false
+        // no-match written during a cold-cache degradation window self-heals
+        // (BS#1089 negative-cache-poisoning guard — see precheck.ts). This is
+        // the largest LML call-count cut in the latency plan: it kills the
+        // 50×/album amplifier where a release played 50× paid 50 cold lookups.
+        if (candidate.album_id !== null && (await hasLoadBearingAlbumMetadata(candidate.album_id))) {
+          const cacheOutcome = await finalizeFromCachedMetadata(candidate);
+          span.setAttribute('enrichment.outcome', cacheOutcome);
+          span.setAttribute('enrichment.lml_skipped', true);
           return;
         }
 
