@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/concerts-poster-enrichment",
+  "cron-schedule": "05 6 * * *",
+  "version": "1.0.0",
+  "description": "WXYC nightly cron (BS#1743): enrich concert rows missing a poster (concerts.image_url IS NULL) with the resolved headliner's Discogs artist image via LML's getArtistDetails. Runs after the artist resolvers and the genre/similar-artists enrichment siblings; --backfill front-fills existing resolved unenriched headliners once (idempotent); cooperative pause defers when DJs are active. Depends on BS#1742 (preserve-on-null COALESCE) being deployed first.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_concerts_poster_enrichment:ci -f ../../Dockerfile.concerts-poster-enrichment ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.66.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
