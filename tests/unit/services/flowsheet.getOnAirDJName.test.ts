@@ -17,7 +17,7 @@
 import { jest } from '@jest/globals';
 
 import { db } from '@wxyc/database';
-import { getOnAirDJName } from '../../../apps/backend/services/flowsheet.service';
+import { ANONYMOUS_ON_AIR_NAME, getOnAirDJName } from '../../../apps/backend/services/flowsheet.service';
 
 const mockDb = db as unknown as { _chain: Record<string, jest.Mock> };
 const chain = mockDb._chain;
@@ -46,10 +46,21 @@ describe('getOnAirDJName', () => {
     expect(await getOnAirDJName()).toBe('DJ HOUNDSTOOTH');
   });
 
-  it('returns null for an open show with no resolvable DJ name', async () => {
+  it('returns the WXYC station brand for an open show with no resolvable DJ name — an anonymous human at the controls', async () => {
+    // A tubafrenzy sign-on with a blank djHandle leaves legacy_dj_name null. A
+    // human is still live, so the banner must read "WXYC", not falsely claim
+    // automation (which is what a null return renders as "AUTO DJ" downstream).
     queueLimit([{ id: 3, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: null }]);
 
-    expect(await getOnAirDJName()).toBeNull();
+    expect(await getOnAirDJName()).toBe(ANONYMOUS_ON_AIR_NAME);
+  });
+
+  it('returns the WXYC station brand for an open show whose legacy_dj_name is blank/whitespace', async () => {
+    // resolveDjNameForShow can return an empty or whitespace legacy_dj_name
+    // verbatim; that is still an anonymous human, not automation.
+    queueLimit([{ id: 6, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: '   ' }]);
+
+    expect(await getOnAirDJName()).toBe(ANONYMOUS_ON_AIR_NAME);
   });
 
   it('returns null when the latest show has already ended (end_time set) — automation', async () => {
