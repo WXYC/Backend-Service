@@ -583,6 +583,16 @@ export interface BulkLookupItem {
   album?: string;
   song?: string;
   raw_message: string;
+  /**
+   * Surfaces the 8 extended-only `DiscogsMatchResult` fields (genres/styles/
+   * tracklist/label/full_release_date/discogs_artist_id/artist_image_url/
+   * profile_tokens) on the item's top-1 artwork block. Honored per-item on the
+   * bulk path (LML#685), where it is CACHE-ONLY — it reads from data the
+   * per-item lookup already fetched, adding zero incremental Discogs calls. The
+   * CDC enrichment worker (BS#1749) sets this so its BS#1336 album_metadata
+   * columns survive the batch, matching the per-row `lookupMetadata` path.
+   */
+  extended?: boolean;
 }
 
 /**

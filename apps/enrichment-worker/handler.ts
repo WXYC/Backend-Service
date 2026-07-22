@@ -50,7 +50,6 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { lookupMetadata, envInt } from '@wxyc/lml-client';
 import type { CdcEvent } from '@wxyc/database';
 
 import { claimRowForEnrichment } from './claim.js';
@@ -60,15 +59,8 @@ import { EMPTY_OUTCOME_FINGERPRINT, classifyEmptyCause, isEmptyOutcome } from '.
 // the BS#1311 volume-control decision is co-located with the call site.
 const SUPPRESSED_EMPTY_CAUSES: ReadonlySet<ReturnType<typeof classifyEmptyCause>> = new Set(['lml_no_match']);
 import { finalizeRow, type FinalizeOutcome } from './enrich.js';
+import { enrichmentBulkLookup } from './lookup-batcher.js';
 import { finalizeFromCachedMetadata, hasLoadBearingAlbumMetadata } from './precheck.js';
-
-/**
- * Budget for the CDC consumer's lookup. Tracks the shared client's 30 s
- * fetch timeout with 1 s of slack so LML cuts off just before the
- * `AbortController` would — frees the row's `enriching` claim for C6 sweep
- * recovery (#895) sooner. See `LookupOptions.budgetMs` for mechanics.
- */
-const ENRICHMENT_LML_BUDGET_MS = envInt('ENRICHMENT_LML_BUDGET_MS', 29000);
 
 /**
  * Registry of in-flight `handleCandidate` invocations, used by the worker's
@@ -207,19 +199,19 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
         let outcome: FinalizeOutcome;
         let emptyCause: ReturnType<typeof classifyEmptyCause> | null = null;
         try {
-          const response = await lookupMetadata(
-            candidate.artist_name,
-            candidate.album_title ?? undefined,
-            candidate.track_title ?? undefined,
-            // `extended: true` surfaces the 8 LML-only fields (genres/styles/
-            // tracklist/label/full_release_date/discogs_artist_id/
-            // artist_image_url/profile_tokens) on the top-1 artwork block so
-            // finalizeRow can persist them into album_metadata (BS#1336).
-            // LML "already fetches these during enrichment but normally
-            // discards" them, so the marginal cost on this background path is
-            // low; the worker's ~29s budget absorbs it.
-            { budgetMs: ENRICHMENT_LML_BUDGET_MS, caller: 'enrichment-worker', extended: true }
-          );
+          // B3 (BS#1749): coalesce this row's lookup into a burst-batched
+          // `bulkLookupMetadata` call instead of a per-row `lookupMetadata`
+          // round-trip. `enrichmentBulkLookup` buffers concurrent CDC ticks,
+          // flushes them through one bulk call (chunked at LML's 100-item cap),
+          // and resolves this caller with its own per-index `LookupResponse` —
+          // drop-in with the per-row contract (resolves on match/no-match,
+          // rejects into the catch arm below on a per-item error or a failed
+          // bulk call). It sets `extended: true` on every item so the 8
+          // LML-only fields (genres/styles/tracklist/label/full_release_date/
+          // discogs_artist_id/artist_image_url/profile_tokens) still land in
+          // album_metadata (BS#1336) — cache-only on the bulk path (LML#685),
+          // so no incremental Discogs cost.
+          const response = await enrichmentBulkLookup(candidate);
           outcome = await finalizeRow(candidate, response);
           // G7 (BS#969): defer the captureMessage until after the
           // span.setAttribute below, but compute the classification while the
