@@ -27,7 +27,7 @@
  * triangle-shows' seed.
  */
 
-import { db, venues, concerts, headliningArtistIdConflictClear } from '@wxyc/database';
+import { db, venues, concerts, headliningArtistIdConflictClear, imageUrlConflictCoalesce } from '@wxyc/database';
 import { eq, sql } from 'drizzle-orm';
 
 import { clampCodePoints, type MappedEvent } from './map.js';
@@ -177,13 +177,11 @@ export const upsertConcert = async (
         title: values.title,
         supporting_artists_raw: values.supporting_artists_raw,
         ticket_url: values.ticket_url,
-        // Incoming-first COALESCE (BS#1742): a fresh scrape's image wins
-        // when present, falling back to the stored value only when the
-        // scrape came back null — a later image-less pass must never
-        // clobber a poster a previous pass captured. Argument order is the
-        // OPPOSITE of `jobs/flowsheet-linked-reenrichment/job.ts`'s
-        // keep-existing-first `album_metadata.artwork_url` COALESCE.
-        image_url: sql`COALESCE(excluded."image_url", ${concerts.image_url})`,
+        // Incoming-first COALESCE (BS#1742) — a fresh scrape's image wins,
+        // falling back to the stored value only when this pass came back
+        // null. Shared with the RHP writer; see the fragment's docstring in
+        // shared/database/src/concerts-sql.ts.
+        image_url: imageUrlConflictCoalesce(),
         event_url: values.event_url,
         price_min: values.price_min,
         price_max: values.price_max,

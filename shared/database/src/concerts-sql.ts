@@ -31,3 +31,16 @@ import { concerts } from './schema.js';
  */
 export const headliningArtistIdConflictClear = (): SQL =>
   sql`CASE WHEN ${concerts.headlining_artist_raw} IS DISTINCT FROM excluded."headlining_artist_raw" THEN NULL ELSE ${concerts.headlining_artist_id} END`;
+
+/**
+ * ON CONFLICT `set` entry for `image_url`: keep the incoming scrape's image
+ * when it has one, but fall back to the stored value when the scrape came
+ * back null — a later image-less pass must never clobber a poster a previous
+ * pass captured (BS#1742). Incoming-first (`excluded` before the stored
+ * column) so a fresh non-null poster still wins; this is the OPPOSITE of
+ * `jobs/flowsheet-linked-reenrichment/job.ts`'s keep-existing-first
+ * `album_metadata.artwork_url` COALESCE, which treats the table as the
+ * authority once populated. As with the fragment above, table-qualified refs
+ * read the EXISTING row and `excluded` reads the proposed insert.
+ */
+export const imageUrlConflictCoalesce = (): SQL => sql`COALESCE(excluded."image_url", ${concerts.image_url})`;

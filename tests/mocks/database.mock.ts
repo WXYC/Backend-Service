@@ -426,6 +426,11 @@ export const headliningArtistIdConflictClear = (): { sql: readonly string[]; val
   values: ['<concerts.headlining_artist_raw>', '<concerts.headlining_artist_id>'],
 });
 
+export const imageUrlConflictCoalesce = (): { sql: readonly string[]; values: unknown[] } => ({
+  sql: ['COALESCE(excluded."image_url", ', ')'],
+  values: ['<concerts.image_url>'],
+});
+
 // Mock types
 export type AnonymousDevice = {
   id: number;
