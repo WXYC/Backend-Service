@@ -254,7 +254,13 @@ export const upsertConcert = async (
         headlining_artist_id: headliningArtistIdConflictClear(),
         supporting_artists_raw: values.supporting_artists_raw,
         ticket_url: values.ticket_url,
-        image_url: values.image_url,
+        // Incoming-first COALESCE (BS#1742): a fresh scrape's image wins
+        // when present, falling back to the stored value only when the
+        // scrape came back null — a later image-less pass must never
+        // clobber a poster a previous pass captured. Argument order is the
+        // OPPOSITE of `jobs/flowsheet-linked-reenrichment/job.ts`'s
+        // keep-existing-first `album_metadata.artwork_url` COALESCE.
+        image_url: sql`COALESCE(excluded."image_url", ${concerts.image_url})`,
         event_url: values.event_url,
         raw_data: values.raw_data,
         scraped_at: values.scraped_at,
