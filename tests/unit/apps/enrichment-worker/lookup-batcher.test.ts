@@ -166,6 +166,31 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
     }
   });
 
+  it('routes each caller to its OWN verdict across chunk boundaries (no row dropped, no cross-chunk mismatch)', async () => {
+    // The chunking risk the BS#1749 acceptance criteria calls out: LML indexes
+    // each bulk call from 0, so the batcher must map verdicts by the
+    // PER-CHUNK index, not a global buffer offset. A regression to global
+    // indexing would leave every caller past the first chunk (index >= 100)
+    // with no matching verdict and reject it — silently stranding those rows.
+    // The size-only chunk test above cannot catch that; this pins parity for a
+    // caller landing in the 2nd chunk.
+    mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
+
+    const artists = Array.from({ length: 150 }, (_, i) => `Artist ${i}`);
+    const promises = artists.map((a) => enrichmentBulkLookup(makeInput(a)));
+
+    await flushWindow();
+    const responses = await Promise.all(promises);
+
+    // Exhaustive: every one of the 150 callers resolved with its OWN verdict —
+    // including the chunk boundaries (caller 99 = last of chunk 1, caller 100 =
+    // first of chunk 2 at chunk-local index 0, caller 149 = last of chunk 2).
+    // A global-index regression would strand every caller past index 99.
+    responses.forEach((response, i) => {
+      expect(response.results[0].artwork.artwork_url).toBe(`https://i.discogs.com/Artist ${i}.jpg`);
+    });
+  });
+
   it('lands each per-row result with its own caller (parity with per-call path)', async () => {
     mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
 
