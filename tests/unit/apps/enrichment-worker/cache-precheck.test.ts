@@ -35,10 +35,12 @@ jest.mock('@sentry/node', () => ({
   captureMessage: jest.fn(),
 }));
 
-const mockLookupMetadata = jest.fn<(...args: unknown[]) => Promise<unknown>>();
-jest.mock('@wxyc/lml-client', () => ({
-  lookupMetadata: mockLookupMetadata,
-  envInt: (_name: string, fallback: number) => fallback,
+// B3 (BS#1749): the handler's LML call now goes through the burst batcher.
+// Mock that seam; the pre-check assertions only care whether an LML call is
+// issued at all, which the batcher stands in for here.
+const mockEnrichmentBulkLookup = jest.fn<(...args: unknown[]) => Promise<unknown>>();
+jest.mock('../../../../apps/enrichment-worker/lookup-batcher.js', () => ({
+  enrichmentBulkLookup: mockEnrichmentBulkLookup,
 }));
 
 const mockClaimRowForEnrichment =
@@ -124,7 +126,7 @@ describe('enrichment-worker cache-first pre-check (B1 / BS#1747)', () => {
     const span = await driveOneTick(makeCandidate({ album_id: 7 }));
 
     expect(mockHasLoadBearingAlbumMetadata).toHaveBeenCalledWith(7);
-    expect(mockLookupMetadata).not.toHaveBeenCalled();
+    expect(mockEnrichmentBulkLookup).not.toHaveBeenCalled();
     expect(mockFinalizeFromCachedMetadata).toHaveBeenCalledTimes(1);
     expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'cache_hit');
     expect(span.setAttribute).toHaveBeenCalledWith('enrichment.lml_skipped', true);
@@ -135,24 +137,24 @@ describe('enrichment-worker cache-first pre-check (B1 / BS#1747)', () => {
     // must NOT freeze a false no-match. The pre-check returns false, so the
     // worker re-calls LML.
     mockHasLoadBearingAlbumMetadata.mockResolvedValueOnce(false);
-    mockLookupMetadata.mockResolvedValueOnce(matchResponse);
+    mockEnrichmentBulkLookup.mockResolvedValueOnce(matchResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_match');
 
     const span = await driveOneTick(makeCandidate({ album_id: 7 }));
 
     expect(mockHasLoadBearingAlbumMetadata).toHaveBeenCalledWith(7);
-    expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+    expect(mockEnrichmentBulkLookup).toHaveBeenCalledTimes(1);
     expect(mockFinalizeFromCachedMetadata).not.toHaveBeenCalled();
     expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'enriched_match');
   });
 
   it('does not consult the pre-check for unlinked rows (album_id null) and always calls LML', async () => {
-    mockLookupMetadata.mockResolvedValueOnce(matchResponse);
+    mockEnrichmentBulkLookup.mockResolvedValueOnce(matchResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_match');
 
     await driveOneTick(makeCandidate({ album_id: null }));
 
     expect(mockHasLoadBearingAlbumMetadata).not.toHaveBeenCalled();
-    expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+    expect(mockEnrichmentBulkLookup).toHaveBeenCalledTimes(1);
   });
 });

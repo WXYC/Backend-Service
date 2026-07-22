@@ -34,10 +34,13 @@ jest.mock('@sentry/node', () => ({
   captureMessage: jest.fn(),
 }));
 
-const mockLookupMetadata = jest.fn<(...args: unknown[]) => Promise<unknown>>();
-jest.mock('@wxyc/lml-client', () => ({
-  lookupMetadata: mockLookupMetadata,
-  envInt: (_name: string, fallback: number) => fallback,
+// B3 (BS#1749): the handler's LML lookup now runs through the burst batcher.
+// Mock that seam so a never-resolving / rejecting return value simulates a
+// pending / hung / failed LML call, exactly as the pre-B3 lookupMetadata mock
+// did.
+const mockEnrichmentBulkLookup = jest.fn<(...args: unknown[]) => Promise<unknown>>();
+jest.mock('../../../../apps/enrichment-worker/lookup-batcher.js', () => ({
+  enrichmentBulkLookup: mockEnrichmentBulkLookup,
 }));
 
 const mockClaimRowForEnrichment =
@@ -120,7 +123,7 @@ describe('enrichment-worker in-flight drain (BS#1108)', () => {
 
     it('registers an in-flight candidate while the LML lookup is pending', async () => {
       // Never-resolving lookup so the promise stays in-flight for assertion.
-      mockLookupMetadata.mockReturnValueOnce(new Promise(() => undefined));
+      mockEnrichmentBulkLookup.mockReturnValueOnce(new Promise(() => undefined));
 
       dispatchTick(1);
       // Yield once so the dispatched `void handleCandidate(...)` reaches
@@ -132,7 +135,7 @@ describe('enrichment-worker in-flight drain (BS#1108)', () => {
     });
 
     it('unregisters the candidate after a successful tick (settle on resolve)', async () => {
-      mockLookupMetadata.mockResolvedValueOnce({ results: [] });
+      mockEnrichmentBulkLookup.mockResolvedValueOnce({ results: [] });
       mockFinalizeRow.mockResolvedValueOnce('enriched_no_match');
 
       dispatchTick(2);
@@ -149,7 +152,7 @@ describe('enrichment-worker in-flight drain (BS#1108)', () => {
       // .finally must still fire and the registry must reach 0. Without
       // the unregister side, a slow stream of LML errors would slow-leak
       // the registry and inflate the shutdown-time "dropped" count.
-      mockLookupMetadata.mockRejectedValueOnce(new Error('LML timeout'));
+      mockEnrichmentBulkLookup.mockRejectedValueOnce(new Error('LML timeout'));
 
       dispatchTick(3);
       await new Promise((resolve) => setImmediate(resolve));
@@ -209,7 +212,7 @@ describe('enrichment-worker in-flight drain (BS#1108)', () => {
 
     it('awaits in-flight promises and returns 0 when they settle inside the deadline', async () => {
       let resolveLookup: (value: unknown) => void = () => undefined;
-      mockLookupMetadata.mockReturnValueOnce(
+      mockEnrichmentBulkLookup.mockReturnValueOnce(
         new Promise((resolve) => {
           resolveLookup = resolve;
         })
@@ -234,8 +237,8 @@ describe('enrichment-worker in-flight drain (BS#1108)', () => {
       // Two never-resolving lookups simulate hung LML calls during deploy.
       // The drain must NOT hang the SIGTERM — it returns the count of
       // promises still pending after `deadlineMs`.
-      mockLookupMetadata.mockReturnValueOnce(new Promise(() => undefined));
-      mockLookupMetadata.mockReturnValueOnce(new Promise(() => undefined));
+      mockEnrichmentBulkLookup.mockReturnValueOnce(new Promise(() => undefined));
+      mockEnrichmentBulkLookup.mockReturnValueOnce(new Promise(() => undefined));
 
       dispatchTick(5);
       dispatchTick(6);
@@ -258,7 +261,7 @@ describe('enrichment-worker in-flight drain (BS#1108)', () => {
       // into resolved promises; this case pins that the wrapper's
       // .finally chain doesn't reintroduce an unhandled rejection that
       // would crash the shutdown path.
-      mockLookupMetadata.mockRejectedValueOnce(new Error('LML timeout'));
+      mockEnrichmentBulkLookup.mockRejectedValueOnce(new Error('LML timeout'));
 
       dispatchTick(7);
       // Don't yield yet — the rejection happens inside the drain.

@@ -36,13 +36,14 @@ jest.mock('@sentry/node', () => ({
   captureMessage: jest.fn(),
 }));
 
-// Mock @wxyc/lml-client so we control the response shape and don't take a
-// network dependency. envInt is re-exported from the package; provide a
-// passthrough so the ENRICHMENT_LML_BUDGET_MS module-init read works.
-const mockLookupMetadata = jest.fn<(...args: unknown[]) => Promise<unknown>>();
-jest.mock('@wxyc/lml-client', () => ({
-  lookupMetadata: mockLookupMetadata,
-  envInt: (_name: string, fallback: number) => fallback,
+// B3 (BS#1749): the handler no longer calls `lookupMetadata` directly — it
+// coalesces the lookup through `enrichmentBulkLookup` (lookup-batcher.ts). Mock
+// that seam so we control the per-row response shape and don't take a network
+// dependency. The batcher's own coalescing/chunking/parity is covered by
+// lookup-batcher.test.ts.
+const mockEnrichmentBulkLookup = jest.fn<(...args: unknown[]) => Promise<unknown>>();
+jest.mock('../../../../apps/enrichment-worker/lookup-batcher.js', () => ({
+  enrichmentBulkLookup: mockEnrichmentBulkLookup,
 }));
 
 // Mock the sibling enrichment-worker modules so the test only exercises the
@@ -134,7 +135,7 @@ const noMatchResponse = { results: [] };
 
 describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => {
   it('fires captureMessage on lml_degraded — the dominant BS#969 class', async () => {
-    mockLookupMetadata.mockResolvedValueOnce(degradedResponse);
+    mockEnrichmentBulkLookup.mockResolvedValueOnce(degradedResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_match');
 
     const span = await driveOneTick();
@@ -154,7 +155,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     // A sibling worker / C6 sweep won the finalize race; the user-visible
     // state was written by them. This worker's captureMessage would inflate
     // the BS#969 rate against the true degradation rate.
-    mockLookupMetadata.mockResolvedValueOnce(degradedResponse);
+    mockEnrichmentBulkLookup.mockResolvedValueOnce(degradedResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_match_raced');
 
     const span = await driveOneTick();
@@ -164,7 +165,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
   });
 
   it('does NOT fire captureMessage when outcome ends in _raced (enriched_no_match_raced)', async () => {
-    mockLookupMetadata.mockResolvedValueOnce(noMatchResponse);
+    mockEnrichmentBulkLookup.mockResolvedValueOnce(noMatchResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_no_match_raced');
 
     const span = await driveOneTick();
@@ -176,7 +177,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
   it('does NOT fire captureMessage when cause is lml_no_match (by-design Discogs miss)', async () => {
     // Dashboard aggregation of the no-match rate uses the
     // `enrichment.outcome` span attribute, not per-event Sentry issues.
-    mockLookupMetadata.mockResolvedValueOnce(noMatchResponse);
+    mockEnrichmentBulkLookup.mockResolvedValueOnce(noMatchResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_no_match');
 
     const span = await driveOneTick();
@@ -185,29 +186,31 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });
 
-  it('requests extended LML fields so finalizeRow can persist the BS#1336 columns', async () => {
-    // The worker is the canonical album_metadata writer (Epic C). Without
-    // `extended: true` the top-1 artwork block omits genres/styles/tracklist/
-    // label/full_release_date/discogs_artist_id/artist_image_url/profile_tokens
-    // and finalizeRow would persist nulls — silently re-opening the BS#1331
-    // cache-hit shape gap this ticket closes.
-    mockLookupMetadata.mockResolvedValueOnce(matchResponseWithArtwork);
+  it('routes the row through the burst batcher (one call per candidate)', async () => {
+    // B3 (BS#1749): the handler hands the candidate to `enrichmentBulkLookup`,
+    // which owns the extended-fields flag and the ≤100-item coalescing. The
+    // handler's only contract here is that it forwards the candidate once —
+    // the `extended: true` guarantee that keeps the BS#1336 album_metadata
+    // columns populated is pinned in lookup-batcher.test.ts.
+    mockEnrichmentBulkLookup.mockResolvedValueOnce(matchResponseWithArtwork);
     mockFinalizeRow.mockResolvedValueOnce('enriched_match');
 
     await driveOneTick();
 
-    expect(mockLookupMetadata).toHaveBeenCalledWith(
-      'Juana Molina',
-      'DOGA',
-      'la paradoja',
-      expect.objectContaining({ extended: true, caller: 'enrichment-worker' })
+    expect(mockEnrichmentBulkLookup).toHaveBeenCalledTimes(1);
+    expect(mockEnrichmentBulkLookup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+      })
     );
   });
 
   it('does NOT fire captureMessage on lml_match (artwork_url present)', async () => {
     // Sanity: the happy path stays silent. extractArtwork sees a populated
     // artwork_url so isEmptyOutcome returns false.
-    mockLookupMetadata.mockResolvedValueOnce(matchResponseWithArtwork);
+    mockEnrichmentBulkLookup.mockResolvedValueOnce(matchResponseWithArtwork);
     mockFinalizeRow.mockResolvedValueOnce('enriched_match');
 
     await driveOneTick();
@@ -220,7 +223,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     // every LML throw — two quota slots per timeout. captureException is the
     // source-of-truth for the stack trace; the catch-arm captureMessage was
     // redundant and BS#1311 drops it.
-    mockLookupMetadata.mockRejectedValueOnce(new Error('LML timeout'));
+    mockEnrichmentBulkLookup.mockRejectedValueOnce(new Error('LML timeout'));
 
     const span = await driveOneTick();
 
